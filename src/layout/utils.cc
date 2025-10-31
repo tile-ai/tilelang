@@ -93,7 +93,9 @@ Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
     if (j == splits.size()) {
       ICHECK(lowest != splits.size());
       ICHECK(CanProveDivisible(splits[lowest]->lower_factor,
-                               expected_lower_factor));
+                               expected_lower_factor))
+          << " Cannot prove divisible for " << splits[lowest]->lower_factor
+          << " and " << expected_lower_factor;
       results.emplace_back(
           mark, expected_lower_factor,
           FloorDiv(splits[lowest]->lower_factor, expected_lower_factor), 1);
@@ -134,7 +136,7 @@ Array<IterSplitExpr> DivideUnusedIterators(const Array<PrimExpr> &exprs,
   for (const IterVar &iter : input_iters) {
     IterMark iv_mark;
     for (const IterMark &mark : collector.visited_) {
-      if (mark->source.as<Var>()->same_as(iter->var)) {
+      if (mark->source.as<Var>()->same_as(iter->var)) { // NOLINT(*)
         iv_mark = mark;
         break;
       }
@@ -187,7 +189,7 @@ public:
 
   IterMark Mutate(const IterMark &mark) {
     if (auto *op = mark->source.as<IterSumExprNode>()) {
-      return IterMark(Mutate(GetRef<IterSumExpr>(op)), mark->extent);
+      return IterMark(Mutate(tvm::ffi::GetRef<IterSumExpr>(op)), mark->extent);
     } else {
       return mark;
     }

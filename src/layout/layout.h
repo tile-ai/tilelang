@@ -7,6 +7,11 @@
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/arith/iter_affine_map.h>
+#include <tvm/ffi/object.h>
+#include <utility>
+
+#include "../support/ffi_aliases.h"
 
 namespace tvm {
 namespace tl {
@@ -36,16 +41,16 @@ public:
   virtual Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const;
 
   virtual Layout Inverse() const;
+  virtual std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const;
 
   virtual std::string DebugOutput() const;
 
   virtual bool IsEqual(const LayoutNode *other, bool skip_index = false) const;
 
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr const char *_type_key = "tl.Layout";
-  bool SEqualReduce(const LayoutNode *other, SEqualReducer equal) const;
   static void RegisterReflection();
-  TVM_DECLARE_BASE_OBJECT_INFO(LayoutNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.Layout", LayoutNode, Object);
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
 
 protected:
   virtual Map<Var, Range> getVarMap() const;
@@ -62,7 +67,7 @@ public:
   TVM_DLL Layout(Array<IterVar> forward_var, Array<PrimExpr> forward_index);
   TVM_DLL Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index);
 
-  TVM_DEFINE_OBJECT_REF_METHODS(Layout, ObjectRef, LayoutNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Layout, ObjectRef, LayoutNode);
 };
 
 class FragmentNode : public LayoutNode {
@@ -76,6 +81,7 @@ public:
   Array<PrimExpr> GetForwardVars() const final;
 
   Layout Inverse() const final;
+  std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const final;
 
   PrimExpr ThreadExtent() const;
 
@@ -105,9 +111,9 @@ public:
 
   static void RegisterReflection();
 
-  bool SEqualReduce(const FragmentNode *other, SEqualReducer equal) const;
-  static constexpr const char *_type_key = "tl.Fragment";
-  TVM_DECLARE_FINAL_OBJECT_INFO(FragmentNode, LayoutNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Fragment", FragmentNode, LayoutNode);
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
 
 protected:
   Map<Var, Range> getVarMap() const final;
@@ -128,7 +134,7 @@ public:
                    PrimExpr forward_thread, PrimExpr replicate_size,
                    Optional<Var> replicate_var);
 
-  TVM_DEFINE_OBJECT_REF_METHODS(Fragment, Layout, FragmentNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fragment, Layout, FragmentNode);
 };
 
 Var InputPlaceholder(size_t idx);

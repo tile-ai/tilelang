@@ -19,6 +19,71 @@ namespace tl {
 
 using namespace tir;
 
+struct TCGEN5MMAMeta {
+  int atom_m, atom_n, atom_k;
+};
+
+// Return {is_success, meta}
+static inline std::pair<bool, TCGEN5MMAMeta>
+GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
+// TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
+#define FAIL                                                                   \
+  return { false, TCGEN5MMAMeta{0, 0, 0} }
+#define SUCCESS(atom_m, atom_n, atom_k)                                        \
+  return {                                                                     \
+    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
+  }
+  std::vector<int> ws_valid_atom_ns = {256, 128, 64};
+  if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
+      (c_dtype.is_float() && c_dtype.bits() == 32)) {
+    if (K % 16 != 0)
+      FAIL;
+    if (M % 128 == 0) {
+      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 16);
+      FAIL;
+    } else if (M % 64 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(64, atom_n, 16);
+      FAIL;
+    } else if (M % 32 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(32, atom_n, 16);
+      FAIL;
+    } else {
+      FAIL;
+    }
+  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e5m2()) &&
+             (c_dtype.is_float() && c_dtype.bits() == 32)) {
+    if (K % 32 != 0)
+      FAIL;
+    if (M % 128 == 0) {
+      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 32);
+      FAIL;
+    } else if (M % 64 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(64, atom_n, 32);
+      FAIL;
+    } else if (M % 32 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(32, atom_n, 32);
+      FAIL;
+    } else {
+      FAIL;
+    }
+  }
+  FAIL;
+#undef FAIL
+#undef SUCCESS
+}
+
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
  * map.
@@ -48,7 +113,7 @@ using namespace tir;
  *       performed here.
  */
 Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+  ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
 
   node->Aptr = args[0];
   node->Bptr = args[1];
@@ -96,7 +161,7 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A Gemm operator that owns a copy of this node.
  */
 TileOperator GemmNode::Clone() const {
-  auto op = make_object<GemmNode>(*this);
+  auto op = tvm::ffi::make_object<GemmNode>(*this);
   return Gemm(op);
 }
 
@@ -128,9 +193,7 @@ GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
-  } else if (TargetIsVolta(target) || TargetIsAmpere(target) ||
-             TargetIsTuring(target) || TargetIsHopper(target) ||
-             TargetIsSm100(target)) {
+  } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target;
@@ -414,8 +477,8 @@ bool GemmNode::CheckWGMMA() const {
  */
 static int GetArchInt(Target target) {
   int arch_int = 0;
-  auto s = target->GetAttr<String>("arch");
-  ICHECK(s.defined());
+  auto s = target->GetAttr<tvm::ffi::String>("arch");
+  ICHECK(s.has_value());
   std::string arch = s.value();
   if (arch.rfind("sm_", 0) == 0) {
     arch_int = std::stoi(arch.substr(3));
@@ -814,7 +877,7 @@ TIR_REGISTER_TL_OP(Gemm, gemm)
 TVM_REGISTER_OP("tl.GemmWarpPolicy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   GemmNode::RegisterReflection();
   GemmWarpPolicyNode::RegisterReflection();
   namespace refl = tvm::ffi::reflection;
@@ -823,9 +886,8 @@ TVM_FFI_STATIC_INIT_BLOCK({
                            Target target, GemmInst gemm_inst) {
                           policy->ComputeWarpPartition(M, N, block_size, target,
                                                        gemm_inst);
-                          return;
                         });
-});
+}
 
 } // namespace tl
 } // namespace tvm

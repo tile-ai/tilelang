@@ -1,4 +1,5 @@
-from typing import Literal, Dict
+from __future__ import annotations
+from typing import Literal
 
 # Implementation asm for fp4 to bf16, using twiddling
 # Reference: https://github.com/triton-lang/triton/blob/main/python/triton_kernels/triton_kernels/tensor_details/layout_details/hopper_value.py#L11-L18
@@ -54,7 +55,7 @@ def get_mxfp_intrin_group(
     source_bit: int = 4,
     storage_dtype: Literal["int32", "int8", "uint8"] = "uint8",
     use_twiddling: bool = False,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """
     Return metadata for an MXFP decoding intrinsic: function name and C source string.
 

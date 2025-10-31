@@ -1,17 +1,38 @@
+from __future__ import annotations
 from tilelang import tvm as tvm
 import tilelang.language as T
-from typing import Tuple
 from tvm import DataType
-from tvm.tir import PrimExpr
+from tvm.tir import PrimExpr, IndexMap, Buffer, Var
 from tvm.runtime import convert
-from typing import Optional
 from .utils import (
     mfma_store_index_map,)
+from typing import Literal, Callable
+
+from tilelang.utils import is_fragment
+
+from .mfma_layout import (
+    shared_16x4_to_local_64x1_layout_A,
+    shared_4x16_to_local_64x1_layout_B,
+    shared_16x16_to_local_64x4_layout_A,
+    shared_16x16_to_local_64x4_layout_B,
+    shared_16x32_to_local_64x8_layout_A,
+    shared_16x32_to_local_64x8_layout_B,
+    shared_16x64_to_local_64x16_layout_A,
+    shared_16x64_to_local_64x16_layout_B,
+    thread_id_shared_access_64x1_to_16x4_layout_A,
+    thread_id_shared_access_64x1_to_4x16_layout_B,
+    thread_id_shared_access_64x4_to_16x16_layout_A,
+    thread_id_shared_access_64x4_to_16x16_layout_B,
+    thread_id_shared_access_64x8_to_16x32_layout_A,
+    thread_id_shared_access_64x8_to_16x32_layout_B,
+    thread_id_shared_access_64x16_to_16x64_layout_A,
+    thread_id_shared_access_64x16_to_16x64_layout_B,
+)
 
 lift = convert
 
 
-class MatrixCoreIntrinEmitter(object):
+class MatrixCoreIntrinEmitter:
     """
     To eliminate Python syntax within TIR Macro.
     """
@@ -51,9 +72,10 @@ class MatrixCoreIntrinEmitter(object):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        k_pack: Optional[int] = None,
-        is_m_first: Optional[bool] = False,
-        b_preshuffle: Optional[bool] = False,
+        k_pack: int | None = None,
+        is_m_first: bool | None = False,
+        b_preshuffle: bool | None = False,
+        thread_var: Var | None = None,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -80,6 +102,7 @@ class MatrixCoreIntrinEmitter(object):
         self.reduce_k = reduce_k
         self.threads = (self.WARP_SIZE * (block_row_warps * block_col_warps) * reduce_k)
         self.num_elems_per_byte = num_elems_per_byte
+        self.thread_var = thread_var
 
     def _initialize_k_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):
@@ -135,37 +158,19 @@ class MatrixCoreIntrinEmitter(object):
         self.micro_size_y = n_dim
         self.micro_size_k = k_dim
 
-    def _initialize_k_pack(self, k_pack: Optional[int] = None):
+    def _initialize_k_pack(self, k_pack: int | None = None):
         if k_pack is not None:
             self.k_pack = k_pack
 
-    def _initialize_is_m_first(self, is_m_first: Optional[bool] = False):
+    def _initialize_is_m_first(self, is_m_first: bool | None = False):
         if is_m_first is not None:
             self.is_m_first = is_m_first
 
-    def _initialize_b_preshuffle(self, b_preshuffle: Optional[bool] = False):
+    def _initialize_b_preshuffle(self, b_preshuffle: bool | None = False):
         if b_preshuffle is not None:
             self.b_preshuffle = b_preshuffle
 
     def get_ldmatrix_index_map(self, is_b=False):
-        from .mfma_layout import (
-            shared_16x4_to_local_64x1_layout_A,
-            shared_4x16_to_local_64x1_layout_B,
-            shared_16x16_to_local_64x4_layout_A,
-            shared_16x16_to_local_64x4_layout_B,
-            shared_16x32_to_local_64x8_layout_A,
-            shared_16x32_to_local_64x8_layout_B,
-            shared_16x64_to_local_64x16_layout_A,
-            shared_16x64_to_local_64x16_layout_B,
-            thread_id_shared_access_64x1_to_16x4_layout_A,
-            thread_id_shared_access_64x1_to_4x16_layout_B,
-            thread_id_shared_access_64x4_to_16x16_layout_A,
-            thread_id_shared_access_64x4_to_16x16_layout_B,
-            thread_id_shared_access_64x8_to_16x32_layout_A,
-            thread_id_shared_access_64x8_to_16x32_layout_B,
-            thread_id_shared_access_64x16_to_16x64_layout_A,
-            thread_id_shared_access_64x16_to_16x64_layout_B,
-        )
 
         k_dim = self.k_dim * self.k_pack
         transposed = self.a_transposed if not is_b else self.b_transposed
@@ -201,9 +206,25 @@ class MatrixCoreIntrinEmitter(object):
 
         return index_map, reverse_index_map
 
+    def get_store_index_map(self, inverse: bool = False) -> IndexMap:
+        warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
+        index_map = IndexMap.from_func(mfma_store_index_map, index_dtype="int32")
+        if not inverse:
+            return index_map
+        inverse_index_map = index_map.inverse([warp_size, local_size_c])
+        return inverse_index_map
+
+    def get_thread_binding(self):
+        if self.thread_var is None:
+            current_frame = T.KernelLaunchFrame.Current()
+            assert current_frame is not None, "Must be called in a T.Kernel Frame"
+            return current_frame.get_thread_binding()
+        else:
+            return self.thread_var
+
     def extract_thread_binding(self,
                                thread_id,
-                               is_m_first=None) -> Tuple[PrimExpr, PrimExpr, PrimExpr]:
+                               is_m_first=None) -> tuple[PrimExpr, PrimExpr, PrimExpr]:
         '''
             is_m_first: True if the thread binding is in the form of (tx, warp_n, warp_m)
             which represents [warp_size, block_row_warps (split n), block_col_warps (split m)]
@@ -239,8 +260,7 @@ class MatrixCoreIntrinEmitter(object):
         local_size_a = self.local_size_a
         k_pack = self.k_pack
         is_transposed = self.a_transposed
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=False)
 
         @T.macro
@@ -280,8 +300,7 @@ class MatrixCoreIntrinEmitter(object):
         local_size_b = self.local_size_b
         k_pack = self.k_pack
         is_transposed = self.b_transposed
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=True)
 
         @T.macro
@@ -317,7 +336,11 @@ class MatrixCoreIntrinEmitter(object):
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
-    def mfma(self, A_local_buf, B_local_buf, C_local_buf):
+    def mfma(self,
+             A_local_buf: Buffer,
+             B_local_buf: Buffer,
+             C_local_buf: Buffer,
+             k_inner: PrimExpr | None = 0):
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
@@ -330,8 +353,15 @@ class MatrixCoreIntrinEmitter(object):
         compute_b_dtype = b_dtype if local_size_b == 1 else f"{b_dtype}x{local_size_b}"
         compute_out_dtype = out_dtype if local_size_out == 1 else f"{out_dtype}x{local_size_out}"
 
+        a_is_fragment = is_fragment(A_local_buf)
+        b_is_fragment = is_fragment(B_local_buf)
+        a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
+        b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0
+
+        print(a_local_stride, b_local_stride)
+
         @T.macro
-        def _warp_mma(A_local_buf, B_local_buf, C_local_buf):
+        def _warp_mfma(A_local_buf, B_local_buf, C_local_buf):
             for kp, i, j in T.grid(k_pack, warp_rows, warp_cols):
                 T.tvm_mfma(
                     mfma_suffix,
@@ -341,15 +371,15 @@ class MatrixCoreIntrinEmitter(object):
                     compute_b_dtype,
                     compute_out_dtype,
                     B_local_buf.data,
-                    ((j * k_pack + kp) * local_size_b) // local_size_b,
+                    (b_local_stride + (j * k_pack + kp) * local_size_b) // local_size_b,
                     A_local_buf.data,
-                    ((i * k_pack + kp) * local_size_a) // local_size_a,
+                    (a_local_stride + (i * k_pack + kp) * local_size_a) // local_size_a,
                     C_local_buf.data,
                     (i * warp_cols * local_size_out + j * local_size_out) // local_size_out,
                     dtype=compute_out_dtype,
                 )
 
-        return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
+        return _warp_mfma(A_local_buf, B_local_buf, C_local_buf)
 
     def stmatrix(self, C_local_buf, C_buf, pid_m=None, pid_n=None):
         block_row_warps = self.block_row_warps
@@ -357,8 +387,7 @@ class MatrixCoreIntrinEmitter(object):
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_out = self.local_size_out
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
         is_global = pid_m is not None and pid_n is not None
         BLOCK_M = block_row_warps * warp_rows
         BLOCK_N = block_col_warps * warp_cols
@@ -367,7 +396,7 @@ class MatrixCoreIntrinEmitter(object):
         assert C_buf_dims in {2, 4}, "C_buf should be 2D or 4D"
 
         # STS
-        # MMA Store must be in simulated instead of TVM Intrins
+        # MFMA Store must be in simulated instead of TVM Intrins
         # As TVM Intrins is like a hack that the threadIdx.x should be always
         # equal to the warp_size
         @T.macro
@@ -401,6 +430,217 @@ class MatrixCoreIntrinEmitter(object):
                                      thread_binding) if is_global else _warp_stmatrix_shared(
                                          C_local_buf, C_buf, thread_binding)
 
+    def make_mfma_load_layout(self,
+                              local_buf: Buffer,
+                              matrix: Literal["A", "B"] = "A") -> T.Fragment:
+        """
+        Create a layout function for storing MFMA results into a fragment buffer.
+
+        Parameters
+        ----------
+        local_buf : tir.Buffer
+            The local buffer representing a fragment of a matrix.
+
+        Returns
+        -------
+        T.Fragment
+            A fragment object that describes how threads and indices
+            in `local_buf` are laid out.
+
+        Raises
+        ------
+        AssertionError
+            If `local_buf` is not detected to be a fragment buffer.
+        """
+        from tilelang.utils import is_fragment
+        assert matrix in ["A", "B"], "matrix should be either A or B"
+        matrix_is_a: bool = matrix == "A"
+        matrix_is_b: bool = matrix == "B"
+        transposed = self.a_transposed if matrix_is_a else self.b_transposed
+
+        # s represents spatial axis
+        # r represents reduction axis
+        # sr represents the two dims are spatial + reduction
+        # rs represents the two dims are reduction + spatial
+        # sr also can represent a non-transposed basic layout
+        # then rs also can represent a transposed basic layout
+        transform_func_sr_a: Callable = None
+        transform_func_sr_b: Callable = None
+
+        k_dim = self.k_dim * self.k_pack
+
+        if k_dim == 4:
+            transform_func_sr_a = shared_16x4_to_local_64x1_layout_A
+            transform_func_sr_b = shared_16x4_to_local_64x1_layout_A
+        elif k_dim == 16:
+            transform_func_sr_a = shared_16x16_to_local_64x4_layout_A
+            transform_func_sr_b = shared_16x16_to_local_64x4_layout_A
+        elif k_dim == 32:
+            transform_func_sr_a = shared_16x32_to_local_64x8_layout_A
+            transform_func_sr_b = shared_16x32_to_local_64x8_layout_A
+        elif k_dim == 64:
+            transform_func_sr_a = shared_16x64_to_local_64x16_layout_A
+            transform_func_sr_b = shared_16x64_to_local_64x16_layout_A
+        else:
+            raise ValueError("k_dim must be 4 or 16 or 32 or 64 currently")
+
+        is_sr_conditions = [False]
+        is_sr_conditions.append(matrix_is_a and not transposed)
+        is_sr_conditions.append(matrix_is_b and transposed)
+        is_sr_axis_order = any(is_sr_conditions)
+
+        transform_func: Callable = None
+        if matrix_is_a:
+            transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
+                j, i)
+        elif matrix_is_b:
+            transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(
+                j, i)
+        else:
+            raise ValueError(f"Unsupported matrix {matrix}")
+
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
+
+        if matrix_is_a:
+            micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
+        else:
+            micro_size_r, micro_size_s = self.micro_size_k, self.micro_size_y
+
+        block_row_warps, block_col_warps = (
+            self.block_row_warps,
+            self.block_col_warps,
+        )
+
+        inverse_mfma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+
+        def forward_thread(i: int, j: int) -> int:
+            """
+            Given the row index `i` and column index `j` in the fragment,
+            """
+            lane_id, _ = inverse_mfma_load_layout.map_indices([i, j])
+            return lane_id
+
+        def forward_index(i: int, j: int) -> int:
+            """
+            Given the row index `i` and column index `j` in the fragment,
+            """
+            _, local_id = inverse_mfma_load_layout.map_indices([i, j])
+            return local_id
+
+        base_fragment = T.Fragment(
+            [micro_size_s, micro_size_r] if is_sr_axis_order else [micro_size_r, micro_size_s],
+            forward_thread_fn=forward_thread,
+            forward_index_fn=forward_index,
+        )
+
+        warp_rows, warp_cols = self.warp_rows, self.warp_cols
+        chunk = self.chunk
+
+        warp_s = warp_rows if matrix_is_a else warp_cols
+        warp_r = chunk // micro_size_r
+        block_s = block_row_warps if matrix_is_a else block_col_warps
+        replicate = block_col_warps if matrix_is_a else block_row_warps
+
+        if is_sr_axis_order:
+            warp_fragment = base_fragment.repeat([warp_s, warp_r],
+                                                 repeat_on_thread=False,
+                                                 lower_dim_first=False)
+            if matrix_is_a:
+                block_fragment = warp_fragment.repeat([block_s, 1],
+                                                      repeat_on_thread=True,
+                                                      lower_dim_first=True).replicate(replicate)
+            elif matrix_is_b:
+                block_fragment = warp_fragment.replicate(replicate).repeat([block_s, 1],
+                                                                           repeat_on_thread=True,
+                                                                           lower_dim_first=True)
+            else:
+                raise ValueError(f"Unsupported matrix type {matrix}")
+        else:
+            warp_fragment = base_fragment.repeat([warp_r, warp_s],
+                                                 repeat_on_thread=False,
+                                                 lower_dim_first=True)
+            if matrix_is_a:
+                block_fragment = warp_fragment.repeat([1, block_s],
+                                                      repeat_on_thread=True,
+                                                      lower_dim_first=True).replicate(replicate)
+            elif matrix_is_b:
+                block_fragment = warp_fragment.replicate(replicate).repeat([1, block_s],
+                                                                           repeat_on_thread=True,
+                                                                           lower_dim_first=True)
+            else:
+                raise ValueError(f"Unsupported matrix type {matrix}")
+
+        return block_fragment
+
+    def make_mfma_store_layout(self, local_buf: Buffer) -> T.Fragment:
+        """
+        Create a layout function for storing MFMA results into a fragment buffer.
+
+        Parameters
+        ----------
+        local_buf : tir.Buffer
+            The local buffer representing a fragment of a matrix.
+
+        Returns
+        -------
+        T.Fragment
+            A fragment object that describes how threads and indices
+            in `local_buf` are laid out.
+
+        Raises
+        ------
+        AssertionError
+            If `local_buf` is not detected to be a fragment buffer.
+        """
+        from tilelang.utils import is_fragment
+
+        shape = local_buf.shape
+        inverse_mfma_store_layout = self.get_store_index_map(inverse=True)
+        assert is_fragment(local_buf), "local_buf must be a fragment"
+        micro_size_x, micro_size_y = self.micro_size_x, self.micro_size_y
+        local_size_out = self.local_size_out
+        block_row_warps, block_col_warps = self.block_row_warps, self.block_col_warps
+        warp_rows, warp_cols = self.warp_rows, self.warp_cols
+        warp_size = self.WARP_SIZE
+        is_m_first = self.is_m_first
+
+        def forward_thread(i: int, j: int) -> int:
+            """
+            Given the row index `i` and column index `j` in the fragment,
+            map them to a thread index according to `inverse_mfma_store_layout`.
+            """
+            # the upper bounds of i and j are block_row_warps * warp_rows * micro_size_x and block_col_warps * warp_cols * micro_size_y
+            # the upper bounds of block_row_warps and block_col_warps are warp_rows and warp_cols
+            block_i, block_j = (i // micro_size_x) // warp_rows, (j // micro_size_y) // warp_cols
+            # upper bounds of mfma_i and mfma_j are micro_size_x and micro_size_y
+            mfma_i, mfma_j = i % micro_size_x, j % micro_size_y
+            lane_id, _ = inverse_mfma_store_layout.map_indices([mfma_i, mfma_j])
+            if is_m_first:
+                thread_id = block_i * (block_col_warps * warp_cols) + block_j * warp_size + lane_id
+            else:
+                thread_id = block_j * (block_row_warps * warp_size) + block_i * warp_size + lane_id
+            return thread_id
+
+        def forward_index(i: int, j: int) -> int:
+            """
+            Given the row index `i` and column index `j` in the fragment,
+            map them to a local index in a single thread according
+            to `inverse_mfma_store_layout`.
+            """
+            # the upper bounds of i and j are block_row_warps * warp_rows * micro_size_x and block_col_warps * warp_cols * micro_size_y
+            # the upper bounds of warp_i and warp_j are warp_rows and warp_cols
+            warp_i, warp_j = (i // micro_size_x) % warp_rows, (j // micro_size_y) % warp_cols
+            # upper bounds of mfma_i and mfma_j are micro_size_x and micro_size_y
+            mfma_i, mfma_j = i % micro_size_x, j % micro_size_y
+            _, local_id = inverse_mfma_store_layout.map_indices([mfma_i, mfma_j])
+            return warp_i * (warp_cols * local_size_out) + warp_j * local_size_out + local_id
+
+        return T.Fragment(
+            shape,
+            forward_thread_fn=forward_thread,
+            forward_index_fn=forward_index,
+        )
+
 
 class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
 
@@ -418,10 +658,10 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        k_pack: Optional[int] = None,
-        is_m_first: Optional[bool] = False,
-        a_preshuffle: Optional[bool] = False,
-        b_preshuffle: Optional[bool] = False,
+        k_pack: int | None = None,
+        is_m_first: bool | None = False,
+        a_preshuffle: bool | None = False,
+        b_preshuffle: bool | None = False,
     ):
 
         self.a_dtype = a_dtype

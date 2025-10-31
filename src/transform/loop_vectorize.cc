@@ -94,7 +94,7 @@ public:
 private:
   void VisitStmt_(const ForNode *node) final {
     inner_for_ = node;
-    auto extent_ptr = as_const_int(node->extent);
+    auto extent_ptr = as_const_int(analyzer_.Simplify(node->extent));
     // Here I disable dynamic shape completely,
     //   In order to do it, the Planner should accept an analyzer with
     //   arithmetic info outside to prove the dividiblity of vector size
@@ -240,8 +240,9 @@ int GetVectorizeSize(const For &loop) { return VectorizePlanner().Plan(loop); }
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer) {
   // 1. if var doesn't exist, it is independent
-  bool used_var = UsesVar(
-      expr, [&](const VarNode *v) { return GetRef<Var>(v).same_as(var); });
+  bool used_var = UsesVar(expr, [&](const VarNode *v) {
+    return tvm::ffi::GetRef<Var>(v).same_as(var);
+  });
   if (!used_var) {
     return true;
   }
@@ -262,24 +263,32 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
     return true;
 
   // Extent must be divisible
-  if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_vectorized_size),
+  PrimExpr target_size_for_iter =
+      make_const(iter_var_size.dtype(), target_vectorized_size);
+  PrimExpr target_size_for_expr =
+      make_const(expr.dtype(), target_vectorized_size);
+  PrimExpr target_size_for_var =
+      make_const(var.dtype(), target_vectorized_size);
+  PrimExpr zero = make_const(var.dtype(), 0);
+
+  if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_size_for_iter),
                                0))
     return false;
 
   // The base offset must be divisible
   if (!analyzer->CanProveEqual(
-          FloorMod(Substitute(expr, {{var, 0}}), target_vectorized_size), 0)) {
+          FloorMod(Substitute(expr, {{var, zero}}), target_size_for_expr), 0)) {
     return false;
   }
 
   // Bind thread range
-  Var v0("v0"), v1("v1");
-  analyzer->Bind(v0, Range(0, target_vectorized_size));
-  analyzer->Bind(v1, Range(0, analyzer->Simplify(FloorDiv(
-                                  iter_var_size, target_vectorized_size))));
+  Var v0("v0", var.dtype()), v1("v1", var.dtype());
+  analyzer->Bind(v0, Range(zero, target_size_for_var));
+  analyzer->Bind(v1, Range(zero, analyzer->Simplify(FloorDiv(
+                                     iter_var_size, target_size_for_iter))));
   PrimExpr expr_transformed = analyzer->Simplify(
-      Substitute(expr, {{var, v0 + v1 * target_vectorized_size}}));
-  Vectorizer vectorizer(v0, IntImm(v0->dtype, target_vectorized_size));
+      Substitute(expr, {{var, v0 + v1 * target_size_for_var}}));
+  Vectorizer vectorizer(v0, target_size_for_var);
   PrimExpr expr_vectorized = vectorizer.VisitExpr(expr_transformed);
 
   // This simplify is necessary for thread region specified

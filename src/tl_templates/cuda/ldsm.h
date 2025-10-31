@@ -4,8 +4,8 @@
 
 namespace tl {
 
-TL_DEVICE_NOINLINE void ptx_ldmatrix_x1(void const *const smem_ptr,
-                                        void *const local_ptr) {
+TL_DEVICE void ptx_ldmatrix_x1(void const *const smem_ptr,
+                               void *const local_ptr) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   int32_t *value = reinterpret_cast<int32_t *>(local_ptr);
   asm volatile("ldmatrix.sync.aligned.x1.m8n8.shared.b16 {%0}, [%1];\n"
@@ -13,8 +13,8 @@ TL_DEVICE_NOINLINE void ptx_ldmatrix_x1(void const *const smem_ptr,
                : "r"(smem_int_ptr));
 }
 
-TL_DEVICE_NOINLINE void ptx_ldmatrix_x2(void const *const smem_ptr,
-                                        void *const local_ptr) {
+TL_DEVICE void ptx_ldmatrix_x2(void const *const smem_ptr,
+                               void *const local_ptr) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   int32_t *value = reinterpret_cast<int32_t *>(local_ptr);
   asm volatile("ldmatrix.sync.aligned.x2.m8n8.shared.b16 {%0, %1}, [%2];\n"
@@ -22,8 +22,8 @@ TL_DEVICE_NOINLINE void ptx_ldmatrix_x2(void const *const smem_ptr,
                : "r"(smem_int_ptr));
 }
 
-TL_DEVICE_NOINLINE void ptx_ldmatrix_x4(void const *const smem_ptr,
-                                        void *const local_ptr) {
+TL_DEVICE void ptx_ldmatrix_x4(void const *const smem_ptr,
+                               void *const local_ptr) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   int32_t *value = reinterpret_cast<int32_t *>(local_ptr);
   asm volatile(
@@ -32,8 +32,8 @@ TL_DEVICE_NOINLINE void ptx_ldmatrix_x4(void const *const smem_ptr,
       : "r"(smem_int_ptr));
 }
 
-TL_DEVICE_NOINLINE void ptx_ldmatrix_x1_trans(void const *const smem_ptr,
-                                              void *const local_ptr) {
+TL_DEVICE void ptx_ldmatrix_x1_trans(void const *const smem_ptr,
+                                     void *const local_ptr) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   int32_t *value = reinterpret_cast<int32_t *>(local_ptr);
   asm volatile("ldmatrix.sync.aligned.x1.trans.m8n8.shared.b16 {%0}, [%1];\n"
@@ -41,8 +41,8 @@ TL_DEVICE_NOINLINE void ptx_ldmatrix_x1_trans(void const *const smem_ptr,
                : "r"(smem_int_ptr));
 }
 
-TL_DEVICE_NOINLINE void ptx_ldmatrix_x2_trans(void const *const smem_ptr,
-                                              void *const local_ptr) {
+TL_DEVICE void ptx_ldmatrix_x2_trans(void const *const smem_ptr,
+                                     void *const local_ptr) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   int32_t *value = reinterpret_cast<int32_t *>(local_ptr);
   asm volatile(
@@ -51,8 +51,8 @@ TL_DEVICE_NOINLINE void ptx_ldmatrix_x2_trans(void const *const smem_ptr,
       : "r"(smem_int_ptr));
 }
 
-TL_DEVICE_NOINLINE void ptx_ldmatrix_x4_trans(void const *const smem_ptr,
-                                              void *const local_ptr) {
+TL_DEVICE void ptx_ldmatrix_x4_trans(void const *const smem_ptr,
+                                     void *const local_ptr) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   int32_t *value = reinterpret_cast<int32_t *>(local_ptr);
   asm volatile(

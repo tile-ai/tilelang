@@ -1,13 +1,13 @@
+from __future__ import annotations
 from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
 from tilelang.contrib.nvcc import have_tma, is_hopper
-from typing import Optional
 
 
-def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
-                           target: Optional[Target] = None) -> bool:
+def allow_warp_specialized(pass_ctx: PassContext | None = None,
+                           target: Target | None = None) -> bool:
     # avoid circular import
     from tilelang.jit.adapter.utils import is_cuda_target
 
@@ -19,8 +19,8 @@ def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
     return not disable_warp_specialized
 
 
-def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
-                                   target: Optional[Target] = None) -> bool:
+def allow_tma_and_warp_specialized(pass_ctx: PassContext | None = None,
+                                   target: Target | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     if not have_tma(target):
@@ -29,26 +29,26 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
     return not disable_tma_lower and allow_warp_specialized(pass_ctx=pass_ctx, target=target)
 
 
-def allow_fence_proxy(target: Optional[Target] = None) -> bool:
+def allow_fence_proxy(target: Target | None = None) -> bool:
     return have_tma(target)
 
 
-def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
+def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     disable_vectorize = pass_ctx.config.get("tir.disable_vectorize", False)
     return not disable_vectorize
 
 
-def allow_global_thread_synchronization(pass_ctx: Optional[PassContext] = None) -> bool:
+def allow_global_thread_synchronization(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     enable_global_thread_sync = pass_ctx.config.get("tir.detect_global_barrier", False)
     return enable_global_thread_sync
 
 
-def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
-                                   target: Optional[Target] = None) -> bool:
+def should_enable_aggressive_merge(pass_ctx: PassContext | None = None,
+                                   target: Target | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     enable_aggressive_merge = bool(
@@ -61,7 +61,7 @@ def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
     return enable_aggressive_merge
 
 
-def should_force_let_inline(pass_ctx: Optional[PassContext] = None) -> bool:
+def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
@@ -135,7 +135,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
         mod = tilelang.transform.InjectTmaBarrier()(mod)
-        mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
         # if tma is not enabled, we can also do pipeline planning
         # to get better performance with async copy
         mod = tilelang.transform.PipelinePlanning()(mod)
@@ -206,6 +205,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
+    if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
+        mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
 

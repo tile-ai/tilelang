@@ -2,7 +2,7 @@ from __future__ import annotations
 """The profiler and convert to torch utils"""
 from enum import Enum
 import torch
-from tvm.runtime import ndarray
+from tvm import runtime
 from tvm import tir
 from torch.utils.dlpack import to_dlpack
 import numpy as np
@@ -49,9 +49,9 @@ def adapt_torch2tvm(arg):
         if arg.dtype in {
                 torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz
         }:
-            return ndarray.from_dlpack(to_dlpack(arg.view(torch.int8)))._create_view(
+            return runtime.from_dlpack(to_dlpack(arg.view(torch.int8)))._create_view(
                 shape=arg.shape, dtype=float8_dtype_map[arg.dtype])
-        return ndarray.from_dlpack(to_dlpack(arg))
+        return runtime.from_dlpack(to_dlpack(arg))
     return arg
 
 

@@ -1,8 +1,9 @@
 """Profiler and benchmarking utilities for PyTorch functions."""
+from __future__ import annotations
 
 import os
 import sys
-from typing import Callable, List, Literal, Optional, Union
+from typing import Callable, Literal
 
 import torch
 
@@ -65,11 +66,11 @@ def do_bench(
     rep: float = 100,
     _n_warmup: int = 0,
     _n_repeat: int = 0,
-    quantiles: Optional[List[float]] = None,
+    quantiles: list[float] | None = None,
     fast_flush: bool = True,
     backend: Literal["event", "cupti"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
-) -> Union[float, List[float]]:
+) -> float | list[float]:
     """Benchmark the runtime of a PyTorch function with L2 cache management.
 
     This function provides accurate GPU kernel timing by:
@@ -97,7 +98,7 @@ def do_bench(
 
     # Initial function call and synchronization
     fn()
-    torch.accelerator.synchronize()
+    torch.cuda.synchronize()
 
     # Create L2 cache flush buffer (256 MB)
     # Fast flush uses int32 (4 bytes), regular uses int8 (1 byte)
@@ -138,9 +139,9 @@ def _bench_with_cuda_events(
     fn: Callable,
     cache: torch.Tensor,
     n_repeat: int,
-    quantiles: Optional[List[float]],
+    quantiles: list[float] | None,
     return_mode: str,
-) -> Union[float, List[float]]:
+) -> float | list[float]:
     """Benchmark using CUDA events for timing."""
     # Create timing events
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]

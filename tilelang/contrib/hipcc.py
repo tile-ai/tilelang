@@ -9,7 +9,7 @@ from __future__ import absolute_import as _abs
 
 import subprocess
 
-import tvm.ffi
+import tvm_ffi
 
 from tvm.contrib import utils
 from tvm.base import py_str
@@ -54,7 +54,7 @@ def compile_hip(code,
     if target_format not in ["hsaco"]:
         raise ValueError("target_format must be hsaco")
     temp_code = temp.relpath("my_kernel.cc")
-    temp_target = temp.relpath("my_kernel.%s" % target_format)
+    temp_target = temp.relpath(f"my_kernel.{target_format}")
 
     with open(temp_code, "w") as out_file:
         out_file.write(code)
@@ -96,7 +96,7 @@ def compile_hip(code,
         return data
 
 
-@tvm.ffi.register_func("tilelang_callback_hip_compile", override=True)
+@tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
     """use hipcc to generate fatbin code for better optimization"""
     hsaco = compile_hip(code, target_format="hsaco")

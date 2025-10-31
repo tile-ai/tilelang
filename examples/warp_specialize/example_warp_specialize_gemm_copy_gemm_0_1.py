@@ -1,8 +1,6 @@
 import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit

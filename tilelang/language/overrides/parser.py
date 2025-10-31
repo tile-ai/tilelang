@@ -1,7 +1,7 @@
 """TVMScript parser overrides tailored for TileLang."""
+from __future__ import annotations
 
 from functools import partial
-from typing import Tuple
 
 from tvm.script.ir_builder import tir as T
 from tvm.script.parser._core import dispatch, doc
@@ -10,9 +10,62 @@ from tvm.tir import BufferLoad, Var
 from tvm.script.parser.tir import parser as tvm_tir_parser
 
 
-def _get_node_span(node: doc.AST) -> Tuple[int, int, int, int]:
+def _get_node_span(node: doc.AST) -> tuple[int, int, int, int]:
     """Return the span (lineno, col, end_lineno, end_col) for a doc node."""
     return (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset)
+
+
+# Original implementation located at
+# 3rdparty/tvm/python/tvm/script/parser/tir/parser.py (visit_assign).
+@dispatch.register(token="tir", type_name="Assign")
+def tilelang_visit_assign(self, node: doc.Assign) -> None:  # pylint: disable=unused-argument
+    """Override `Assign` to support chained writes and `local.var` buffers."""
+    if not node.targets:
+        self.report_error(node, "Assignment must have at least one target.")
+
+    if isinstance(node.value, doc.Subscript):
+        check_slices = []
+        if isinstance(node.value.slice, doc.Slice):
+            check_slices = [node.value.slice]
+        elif isinstance(node.value.slice, doc.Tuple):
+            for part in node.value.slice.elts:
+                if isinstance(part, doc.Slice):
+                    check_slices.append(part)
+        for slice_node in check_slices:
+            if not slice_node.step and slice_node.upper and slice_node.lower:
+                slice_node.step = doc.Constant(
+                    1,
+                    None,
+                    1,
+                    1,
+                    slice_node.upper.lineno,
+                    slice_node.upper.end_col_offset + 1,
+                    slice_node.upper.lineno,
+                    slice_node.upper.end_col_offset + 2,
+                )
+
+    rhs = self.eval_expr(node.value)
+    for lhs in node.targets:
+        if isinstance(lhs, doc.Subscript):
+            if isinstance(lhs.slice, doc.Tuple):
+                indices = [self.eval_expr(index) for index in lhs.slice.elts]
+            else:
+                indices = self.eval_expr(lhs.slice)
+            T.buffer_store(self.eval_expr(lhs.value), rhs, indices)
+            continue
+
+        if isinstance(lhs, doc.Name) and lhs.id in self.var_table.get():
+            load_ctx = doc.Load()
+            store_ctx = doc.Store()
+            lhs.ctx = load_ctx
+            lhs_value = self.eval_expr(lhs)
+            lhs.ctx = store_ctx
+            if (isinstance(lhs_value, BufferLoad) and lhs_value.buffer.scope() == "local.var" and
+                    len(lhs_value.indices) == 1 and lhs_value.indices[0] == 0):
+                T.buffer_store(lhs_value.buffer, rhs, indices=[0])
+                continue
+
+        self.eval_assign(target=lhs, source=rhs, bind_value=tvm_tir_parser.bind_assign_value)
 
 
 # Original implementation located at

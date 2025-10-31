@@ -252,6 +252,16 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
                : "memory");
 }
 
+TL_DEVICE void tma_store_add(float *const smem_ptr, float *gmem_ptr,
+                             int32_t const &store_bytes) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32 "
+               "[%0], [%1], %2;\n"
+               :
+               : "l"(gmem_ptr), "r"(smem_int_ptr), "r"(store_bytes)
+               : "memory");
+}
+
 TL_DEVICE void prefetch_tma_descriptor(const CUtensorMap &descriptor) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   asm volatile("prefetch.tensormap [%0];" : : "l"(gmem_int_desc) : "memory");

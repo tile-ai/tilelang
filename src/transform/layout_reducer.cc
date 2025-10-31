@@ -209,7 +209,7 @@ private:
 
         auto opt_buffer = var_to_buffer_.Get(reducer_var);
         ICHECK(opt_buffer);
-        auto buffer = opt_buffer.value();
+        const auto &buffer = opt_buffer.value();
         Fragment f;
         if (info->rep == ReducerRepType::ALL) {
           f = Fragment(buffer->shape, {}, ReplicationPlaceholder(),
@@ -362,10 +362,10 @@ tvm::transform::Pass LayoutReducer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutReducer", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LayoutReducer", LayoutReducer);
-});
+}
 
 } // namespace tl
 } // namespace tvm

@@ -1,17 +1,11 @@
 """The profiler and convert to torch utils"""
+from __future__ import annotations
 
 import ctypes
-import fcntl
-import hashlib
 import logging
-import site
-import sys
-import sysconfig
 import torch
-import os
-from pathlib import Path
 
-from typing import List, Optional, Union, Callable, Dict, Tuple, Any
+from typing import Callable, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
@@ -25,155 +19,20 @@ from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_tar
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.tensor import map_torch_type
-from tilelang.contrib.cc import get_cplus_compiler, is_darwin
 
 logger = logging.getLogger(__name__)
 
+try:
+    from tilelang_cython_wrapper import CythonKernelWrapper
+except ImportError:
+    raise
 
-def get_cython_compiler() -> Optional[str]:
-    """Return the path to the Cython compiler.
 
-    Returns
-    -------
-    out: Optional[str]
-        The path to the Cython compiler, or None if none was found.
+def is_symbolic_expr(expr) -> bool:
+    """Check if the expression is a symbolic expression.
+    A symbolic expression can be a simple tvm.Var, or an tvm.PrimExpr containing tvm.Var.
     """
-
-    cython_names = ["cython", "cython3"]
-
-    # Check system PATH
-    dirs_in_path = list(os.get_exec_path())
-
-    # Add user site-packages bin directory
-    user_base = site.getuserbase()
-    if user_base:
-        user_bin = os.path.join(user_base, "bin")
-        if os.path.exists(user_bin):
-            dirs_in_path = [user_bin] + dirs_in_path
-
-    # If in a virtual environment, add its bin directory
-    if sys.prefix != sys.base_prefix:
-        venv_bin = os.path.join(sys.prefix, "bin")
-        if os.path.exists(venv_bin):
-            dirs_in_path = [venv_bin] + dirs_in_path
-
-    for cython_name in cython_names:
-        for d in dirs_in_path:
-            cython_path = os.path.join(d, cython_name)
-            if os.path.isfile(cython_path) and os.access(cython_path, os.X_OK):
-                return cython_path
-    return None
-
-
-# Add cache management functions at module level
-def get_cache_dir() -> Path:
-    """Get the cache directory for the current Python version."""
-    py_version = f"py{sys.version_info.major}{sys.version_info.minor}"
-    # current directory
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    cache_dir = Path(current_dir) / ".cycache" / py_version
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
-
-
-def get_cached_lib(source_code: str) -> Tuple[Optional[ctypes.CDLL], Path]:
-    """Try to load cached library or return None if not found."""
-    code_hash = hashlib.sha256(source_code.encode()).hexdigest()
-    cache_path = get_cache_dir() / f"{code_hash}.so"
-    lock_file = cache_path.with_suffix('.lock')
-    with open(lock_file, 'w') as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            if cache_path.exists():
-                try:
-                    if cache_path.stat().st_size > 1024:
-                        return ctypes.CDLL(str(cache_path)), cache_path
-                    else:
-                        cache_path.unlink()  # remove the incomplete file
-                except Exception as e:
-                    logger.error(f"Failed to load cached library: {e}")
-                    return None, cache_path
-            return None, cache_path
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-
-
-# read the cython_wrapper.pyx file
-current_dir = os.path.dirname(os.path.abspath(__file__))
-cython_wrapper_path = os.path.join(current_dir, "cython_wrapper.pyx")
-
-with open(cython_wrapper_path, "r") as f:
-    cython_wrapper_code = f.read()
-    cache_dir = get_cache_dir()
-    source_path = cache_dir / "cython_wrapper.cpp"
-    library_path = cache_dir / "cython_wrapper.so"
-    md5_path = cache_dir / "md5.txt"
-    code_hash = hashlib.sha256(cython_wrapper_code.encode()).hexdigest()
-    cache_path = cache_dir / f"{code_hash}.so"
-    lock_file = cache_path.with_suffix('.lock')
-
-    # Check if cached version exists and is valid
-    need_compile = True
-    if md5_path.exists() and library_path.exists():
-        with open(md5_path, "r") as f:
-            cached_hash = f.read().strip()
-            if cached_hash == code_hash:
-                logger.debug("Cython JIT adapter is up to date, no need to compile...")
-                need_compile = False
-            else:
-                logger.info("Cython JIT adapter is out of date, need to recompile...")
-    else:
-        logger.info("No cached version found for Cython JIT adapter, need to compile...")
-
-    if need_compile:
-        logger.info("Waiting for lock to compile Cython JIT adapter...")
-        with open(lock_file, 'w') as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                # After acquiring the lock, check again if the file has been compiled by another process
-                if md5_path.exists() and library_path.exists():
-                    with open(md5_path, "r") as f:
-                        cached_hash = f.read().strip()
-                        if cached_hash == code_hash:
-                            logger.info(
-                                "Another process has already compiled the file, using it...")
-                            need_compile = False
-
-                if need_compile:
-                    logger.info("Compiling Cython JIT adapter...")
-                    temp_path = cache_dir / f"temp_{code_hash}.so"
-
-                    with open(md5_path, "w") as f:
-                        f.write(code_hash)
-
-                    # compile the cython_wrapper.pyx file into .cpp
-                    cython = get_cython_compiler()
-                    if cython is None:
-                        raise Exception("Cython is not installed, please install it first.")
-                    os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
-                    python_include_path = sysconfig.get_path("include")
-                    cc = get_cplus_compiler()
-                    dynamic_flag = '-Wl,-undefined,dynamic_lookup' if is_darwin(
-                    ) else '-Wl,--unresolved-symbols=ignore-all'
-                    command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing {dynamic_flag} -I{python_include_path} {source_path} -o {temp_path}"
-                    os.system(command)
-
-                    # rename the temp file to the library file
-                    temp_path.rename(library_path)
-            except Exception as e:
-                if 'temp_path' in locals() and temp_path.exists():
-                    temp_path.unlink()
-                raise Exception(f"Failed to compile Cython JIT adapter: {e}") from e
-            finally:
-                if lock_file.exists():
-                    lock_file.unlink()
-
-    # add the .so file to the sys.path
-    cache_dir_str = str(cache_dir)
-    if cache_dir_str not in sys.path:
-        sys.path.append(cache_dir_str)
-
-from cython_wrapper import CythonKernelWrapper
+    return not isinstance(expr, tir.IntImm) and isinstance(expr, tir.PrimExpr)
 
 
 class CythonKernelAdapter(BaseKernelAdapter):
@@ -186,43 +45,43 @@ class CythonKernelAdapter(BaseKernelAdapter):
     """
 
     # Class attributes to store compiled kernel information
-    target: Union[str, Target] = "cuda"
-    ir_module: Optional[tvm.IRModule] = None
+    target: str | Target = "cuda"
+    ir_module: tvm.IRModule | None = None
     # The global source code of the kernel -> global means the source code of the kernel
     # that is not wrapped by the wrapper code
-    kernel_global_source: Optional[str] = None
-    lib: Optional[ctypes.CDLL] = None  # Compiled library handle
-    wrapped_source: Optional[str] = None  # Generated C++ wrapper code
+    kernel_global_source: str | None = None
+    lib: ctypes.CDLL | None = None  # Compiled library handle
+    wrapped_source: str | None = None  # Generated C++ wrapper code
     # Maps symbolic variables to their corresponding buffer and shape indices
-    dynamic_symbolic_map: Optional[Dict[tir.Var, Tuple[int, int]]] = None
+    dynamic_symbolic_map: dict[tir.Var, tuple[int, int]] | None = None
     # Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
-    ptr_map: Optional[Dict[int, str]] = None
+    ptr_map: dict[int, str] | None = None
     # Maps buffer variables to their corresponding dtypes
-    buffer_dtype_map: Optional[Dict[tir.Var, Tuple[int, torch.dtype]]] = None
+    buffer_dtype_map: dict[tir.Var, tuple[int, torch.dtype]] | None = None
     # Maps buffer variables to their corresponding static shapes and strides,
     # e.g., {
     #     "A": [(0, 16), (1, 16)] -> represents A.shape/strides = (16, 16)
     # }
-    static_shape_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
-    static_strides_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
+    static_shape_map: dict[tir.Var, tuple[int, list[tuple[int, int]]]] | None = None
+    static_strides_map: dict[tir.Var, tuple[int, list[tuple[int, int]]]] | None = None
     # Contains contiguous buffers
-    static_contiguous_list: Optional[List[tir.Var]] = None
+    static_contiguous_list: list[tir.Var] | None = None
     # Maps buffer variables to their corresponding devices
-    buffer_device_map: Optional[Dict[tir.Var, Tuple[int, torch.device]]] = None
+    buffer_device_map: dict[tir.Var, tuple[int, torch.device]] | None = None
     # Pass configs for the compiler
-    pass_configs: Optional[Dict[str, Any]] = None
+    pass_configs: dict[str, Any] | None = None
 
     def __init__(self,
-                 params: List[KernelParam],
-                 result_idx: List[int],
-                 target: Union[str, Target],
-                 func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 host_mod: Optional[tvm.IRModule] = None,
-                 device_mod: Optional[tvm.IRModule] = None,
-                 kernel_global_source: Optional[str] = None,
+                 params: list[KernelParam],
+                 result_idx: list[int],
+                 target: str | Target,
+                 func_or_mod: tir.PrimFunc | tvm.IRModule,
+                 host_mod: tvm.IRModule | None = None,
+                 device_mod: tvm.IRModule | None = None,
+                 kernel_global_source: str | None = None,
                  verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None,
-                 compile_flags: Optional[List[str]] = None):
+                 pass_configs: dict[str, Any] | None = None,
+                 compile_flags: list[str] | None = None):
         """Initialize the adapter with the given TIR function or module.
 
         Args:
@@ -288,15 +147,15 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     @classmethod
     def from_database(cls,
-                      params: List[TensorType],
-                      result_idx: List[int],
+                      params: list[TensorType],
+                      result_idx: list[int],
                       target: str,
-                      func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                      func_or_mod: tir.PrimFunc | tvm.IRModule,
                       kernel_global_source: str,
                       kernel_lib_path: str,
                       verbose: bool = False,
-                      pass_configs: Optional[Dict[str, Any]] = None,
-                      compile_flags: Optional[List[str]] = None):
+                      pass_configs: dict[str, Any] | None = None,
+                      compile_flags: list[str] | None = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -347,7 +206,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int, int]]:
+    def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
 
         Maps symbolic variables to their corresponding (id, buffer_index, dimension)
@@ -374,7 +233,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
-    def _process_buffer_dtype(self) -> Dict[tir.Var, Tuple[int, torch.dtype]]:
+    def _process_buffer_dtype(self) -> dict[tir.Var, tuple[int, torch.dtype]]:
         """Extract information about buffer dtypes from the TIR function.
 
         Maps buffer variables to their corresponding dtypes.
@@ -390,7 +249,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 buffer_dtype_map[name] = (i, map_torch_type(dtype))
         return buffer_dtype_map
 
-    def _process_ptr_map(self) -> Dict[int, str]:
+    def _process_ptr_map(self) -> dict[int, str]:
         """Extract information about pointer arguments from the TIR function.
 
         Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
@@ -405,9 +264,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         return ptr_map
 
     def _process_static_buffer_infos(self) -> \
-            Tuple[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]],
-                  Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]],
-                  List[Tuple[tir.Var]]]:
+            tuple[dict[tir.Var, tuple[int, list[tuple[int, int]]]],
+                  dict[tir.Var, tuple[int, list[tuple[int, int]]]],
+                  list[tuple[tir.Var]]]:
         """Extract information about static shapes from the TIR function.
 
         Maps buffer variables to their corresponding static shapes.
@@ -425,6 +284,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 for j, s in enumerate(buffer.shape):
                     if isinstance(s, tir.IntImm):
                         static_shape.append((j, s.value))
+                    elif is_symbolic_expr(s):
+                        static_shape.append((j, -1))  # -1 for symbolic
+                    else:
+                        raise ValueError(f"Unsupported shape type: {type(s)}")
                 for j, s in enumerate(buffer.strides):
                     if isinstance(s, tir.IntImm):
                         static_strides.append((j, s.value))
@@ -438,7 +301,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                     static_contiguous_list.append((i, buffer.name))
         return static_shape_map, static_strides_map, static_contiguous_list
 
-    def _process_buffer_device(self) -> Dict[tir.Var, Tuple[int, torch.device]]:
+    def _process_buffer_device(self) -> dict[tir.Var, tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.
 
         Maps buffer variables to their corresponding devices.
@@ -464,7 +327,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 buffer_device_map[name] = (i, device)
         return buffer_device_map
 
-    def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
+    def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
         """Low-level function to call the compiled CUDA kernel.
 
         Converts PyTorch tensor pointers to C void pointers for ctypes interface.

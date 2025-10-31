@@ -4,20 +4,23 @@ TileLang is a domain-specific language designed to simplify the process of writi
 
 ## Table of Contents
 
-1. [Getting Started](#getting-started)  
-2. [Simple GEMM Example](#simple-gemm-example)  
-   - [Code Walkthrough](#code-walkthrough)
-   - [Compiling and Profiling](#compiling-and-profiling)
-3. [Advanced GEMM Features](#advanced-gemm-features)  
-   - [Custom Memory Layout / Swizzling](#custom-memory-layout--swizzling)
-   - [Parallel Copy and Auto-Pipelining](#parallel-copy-and-auto-pipelining)
-   - [Rasterization for L2 Cache Locality](#rasterization-for-l2-cache-locality)
-4. [Enhanced GEMM Example with Annotations](#enhanced-gemm-example-with-annotations)
-5. [Verifying Correctness](#verifying-correctness)
-6. [Fine-grained MMA Computations](#fine-grained-mma-computations)  
-   - [Example Workflow](#example-workflow)
-   - [Summary](#summary)
-7. [References](#references)
+- [Table of Contents](#table-of-contents)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+- [Simple GEMM Example](#simple-gemm-example)
+  - [Code Walkthrough](#code-walkthrough)
+  - [Compiling and Profiling](#compiling-and-profiling)
+- [Advanced GEMM Features](#advanced-gemm-features)
+  - [Custom Memory Layout / Swizzling](#custom-memory-layout--swizzling)
+  - [Parallel Copy and Auto-Pipelining](#parallel-copy-and-auto-pipelining)
+  - [Rasterization for L2 Cache Locality](#rasterization-for-l2-cache-locality)
+- [Enhanced GEMM Example with Annotations](#enhanced-gemm-example-with-annotations)
+- [Verifying Correctness](#verifying-correctness)
+- [Fine-grained MMA Computations](#fine-grained-mma-computations)
+  - [Example Workflow](#example-workflow)
+  - [Summary](#summary)
+- [References](#references)
 
 ---
 
@@ -25,10 +28,10 @@ TileLang is a domain-specific language designed to simplify the process of writi
 
 ### Prerequisites
 
-- **Python 3.8+**  
-- **NVIDIA GPU** with a recent CUDA toolkit installed  
+- **Python 3.8+**
+- **NVIDIA GPU** with a recent CUDA toolkit installed
 - **PyTorch** (optional, for easy correctness verification)
-- **tilelang**  
+- **tilelang**
 - **bitblas** (optional; used for swizzle layout utilities in the advanced examples)
 
 ### Installation
@@ -87,26 +90,26 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
 ### Code Walkthrough
 
-1. **Define the Kernel Launch Configuration:**  
+1. **Define the Kernel Launch Configuration:**
    ```python
    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
    ```
    This creates a grid of blocks (ceildiv(N, block_N) in x-dimension, ceildiv(M, block_M) in y-dimension), each with 128 threads.
 
-2. **Shared Memory Allocation:**  
+2. **Shared Memory Allocation:**
    ```python
    A_shared = T.alloc_shared((block_M, block_K), dtype)
    B_shared = T.alloc_shared((block_K, block_N), dtype)
    ```
    Tiles of \(A\) and \(B\) are loaded into these shared memory buffers for faster access.
 
-3. **Local Fragment Accumulation:**  
+3. **Local Fragment Accumulation:**
    ```python
    C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
    ```
    Partial results are stored in registers (or local memory) to reduce writes to global memory.
 
-4. **Pipelined Loading and GEMM:**  
+4. **Pipelined Loading and GEMM:**
    ```python
    for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
        T.copy(...)
@@ -114,7 +117,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
    ```
    Loads blocks of \(A\) and \(B\) in a pipelined fashion (up to 3 stages). This exploits overlap of data transfer and computation.
 
-5. **Copy Out the Results:**  
+5. **Copy Out the Results:**
    ```python
    T.copy(C_local, C[by * block_M, bx * block_N])
    ```
@@ -216,10 +219,10 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
     return main
 ```
 
-**Key Differences vs. Basic Example**  
-1. **`T.annotate_layout(...)`**: Annotates how data should be organized in shared memory (swizzling).  
-2. **`T.use_swizzle(...)`**: Enables swizzle-based rasterization.  
-3. **Parallel Copy Loop** with `T.Parallel(...)`: Distributes global-to-shared copy across all threads, potentially vectorizing load/store instructions.  
+**Key Differences vs. Basic Example**
+1. **`T.annotate_layout(...)`**: Annotates how data should be organized in shared memory (swizzling).
+2. **`T.use_swizzle(...)`**: Enables swizzle-based rasterization.
+3. **Parallel Copy Loop** with `T.Parallel(...)`: Distributes global-to-shared copy across all threads, potentially vectorizing load/store instructions.
 
 ---
 
@@ -247,7 +250,7 @@ print("Results match!")
 
 ## Fine-grained MMA Computations
 
-For advanced users who require full control over warp-level matrix multiplication operations, TileLang allows you to specify fine-grained MMA (Matrix Multiply-Accumulate) computations in a manner similar to writing raw CUDA. While higher-level abstractions like `T.gemm(...)` or automatic MMA emitters are sufficient for many use cases, specialized workloads (for example, dequantize gemm may require fine-grained layout transformation on shared to register stage) may benefit from explicitly controlling each MMA instruction, the data layout, and the synchronization points. 
+For advanced users who require full control over warp-level matrix multiplication operations, TileLang allows you to specify fine-grained MMA (Matrix Multiply-Accumulate) computations in a manner similar to writing raw CUDA. While higher-level abstractions like `T.gemm(...)` or automatic MMA emitters are sufficient for many use cases, specialized workloads (for example, dequantize gemm may require fine-grained layout transformation on shared to register stage) may benefit from explicitly controlling each MMA instruction, the data layout, and the synchronization points.
 
 ### Example Workflow
 
@@ -394,10 +397,10 @@ def tl_matmul(
                 ]
 ```
 
-1. **Set Up Tile Sizes and Thread Bindings**  
+1. **Set Up Tile Sizes and Thread Bindings**
    Just like in CUDA, you will typically start by defining how many warps or threads per block you want and how your matrix is subdivided. In TileLang, this is done via `T.Kernel(...)` and `T.thread_binding(...),` which ensure that the correct number of threads are active, and each thread is bound to a specific role (e.g., warp ID or lane ID).
 
-2. **Allocate Warp-local Fragments**  
+2. **Allocate Warp-local Fragments**
    Instead of using a single shared buffer for partial sums, you allocate local buffers (register fragments) to hold sub-blocks of matrices \(A\) and \(B\). In TileLang, this is done with something like:
    ```python
    A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
@@ -406,7 +409,7 @@ def tl_matmul(
    ```
    Each of these `local` allocations represents a region of per-thread storage, which collectively forms the warp’s register tiles.
 
-3. **Load Data via `ldmatrix`**  
+3. **Load Data via `ldmatrix`**
    Fine-grained loading instructions allow you to specify exactly how data moves from shared memory to the warp-level fragments. In the example below, `mma_emitter.ldmatrix_a()` and `.ldmatrix_b()` are higher-level wrappers around warp-synchronous intrinsics. You can write your own load logic as well:
    ```python
    for ki in T.serial(0, (block_K // micro_size_k)):
@@ -418,7 +421,7 @@ def tl_matmul(
    ```
    Internally, these calls orchestrate how each thread in the warp issues the correct load instructions, performs address calculations, and stores the data into registers.
 
-4. **Perform the MMA Instruction**  
+4. **Perform the MMA Instruction**
    After loading sub-tiles (fragments), the warp executes the `mma` instruction. This operation is essentially:
    \[
      C_{\text{local}} \;+=\; A_{\text{local}} \;\times\; B_{\text{local}}
@@ -429,7 +432,7 @@ def tl_matmul(
    ```
    Under the hood, this translates into Tensor Core instructions (e.g., `wmma.mma.sync` in PTX), which process multiple data elements per warp in parallel.
 
-5. **Store Results via `stmatrix`**  
+5. **Store Results via `stmatrix`**
    Finally, you write the results from the warp-level fragments back to shared memory or global memory. This step might happen multiple times in a loop or just once at the end. The code snippet:
    ```python
    mma_emitter.stmatrix(C_local, C_shared)
@@ -444,6 +447,6 @@ By combining warp-synchronous intrinsics (`ldmatrix`, `mma`, `stmatrix`) with ma
 
 ## References
 
-- [NVIDIA CUTLASS Library](https://github.com/NVIDIA/cutlass): A collection of high-performance CUDA C++ template abstractions for GEMM.  
-- [NVIDIA CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html): Official documentation for CUDA.  
+- [NVIDIA CUTLASS Library](https://github.com/NVIDIA/cutlass): A collection of high-performance CUDA C++ template abstractions for GEMM.
+- [NVIDIA CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html): Official documentation for CUDA.
 - [PyTorch Documentation](https://pytorch.org/docs): For verifying correctness via CPU or GPU-based matmul.

@@ -5023,12 +5023,12 @@ typedef struct CUgraphNodeParams_st {
 /**
  * Device that represents the CPU
  */
-#define CU_DEVICE_CPU ((CUdevice)-1)
+#define CU_DEVICE_CPU ((CUdevice) - 1)
 
 /**
  * Device that represents an invalid device
  */
-#define CU_DEVICE_INVALID ((CUdevice)-2)
+#define CU_DEVICE_INVALID ((CUdevice) - 2)
 
 /**
  * Bitmasks for ::CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_FLUSH_WRITES_OPTIONS

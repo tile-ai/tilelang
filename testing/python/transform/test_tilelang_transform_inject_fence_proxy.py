@@ -31,7 +31,8 @@ def test_lower_fence_proxy():
             C_local = T.decl_buffer((32,), scope="local")
             for i in T.unroll(16):
                 C_local[i * 2:i * 2 + 2] = T.Broadcast(T.float32(0), 2)
-            T.call_extern("handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+            T.call_intrin("handle", tir.op.Op.get("tl.tl_gemm"),
+                          "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
                           T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
                           T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
                           T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3))
@@ -45,7 +46,8 @@ def test_lower_fence_proxy():
             for i in T.unroll(16):
                 C_local[i * 2:i * 2 + 2] = T.Broadcast(T.float32(0), 2)
             T.fence_proxy_async()
-            T.call_extern("handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+            T.call_intrin("handle", tir.op.Op.get("tl.tl_gemm"),
+                          "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
                           T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
                           T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
                           T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3))
@@ -169,7 +171,6 @@ def test_wgmma_marked_async():
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tir.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.InjectFenceProxy()(mod)
-
     order = []
 
     def visit(node):

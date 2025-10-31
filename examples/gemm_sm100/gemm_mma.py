@@ -41,7 +41,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
     return main
 
 
-M = 128  # M = T.symbolic("m") if you want to use dynamic shape
+M = 128  # M = T.dynamic("m") if you want to use dynamic shape
 N = 128
 K = 32
 block_M = 128

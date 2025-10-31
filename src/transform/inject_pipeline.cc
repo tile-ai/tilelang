@@ -37,7 +37,7 @@
 namespace tvm {
 namespace tl {
 using namespace tir;
-
+using namespace ffi;
 namespace software_pipeline {
 
 /*!
@@ -459,7 +459,8 @@ private:
    * \return The resized buffer.
    */
   Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
-    ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
+    ObjectPtr<BufferNode> new_buffer =
+        tvm::ffi::make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
     if (!new_buffer->strides.empty()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
@@ -865,7 +866,7 @@ private:
     const SeqStmtNode *pipeline_body_seq = nullptr;
     std::vector<std::function<Stmt(Stmt)>> rewrap_fns;
     auto append_attr_wrapper = [&rewrap_fns](const AttrStmtNode *attr) {
-      ObjectRef node = attr->node;
+      Any node = attr->node;
       String attr_key = attr->attr_key;
       PrimExpr value = attr->value;
       Span span = attr->span;
@@ -981,7 +982,7 @@ private:
 
     // Step 4: Rewrite the pipeline body.
     Stmt pipeline = PipelineRewriter(buffer_data_to_buffer_, pipeline_allocs,
-                                     GetRef<For>(op), pipeline_info)
+                                     tvm::ffi::GetRef<For>(op), pipeline_info)
                         .BuildPipeline();
     auto apply_wrappers = [&](Stmt stmt) {
       for (auto it = rewrap_fns.rbegin(); it != rewrap_fns.rend(); ++it) {
@@ -1072,11 +1073,11 @@ tir::transform::Pass InjectSoftwarePipeline() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectSoftwarePipeline", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.InjectSoftwarePipeline",
                         InjectSoftwarePipeline);
-});
+}
 
 } // namespace tl
 } // namespace tvm

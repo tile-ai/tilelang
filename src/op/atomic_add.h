@@ -20,11 +20,13 @@ public:
   Buffer src, dst; ///< Source and destination buffers
   Array<Range> src_range,
       dst_range;          ///< Access ranges for source and destination
+  IntImm use_tma;         ///< Whether to use TMA for memory operations
   IntImm coalesced_width; ///< Width for memory coalescing optimization
+  IntImm memory_order;    ///< Memory order for atomic operations
 
   mutable ParallelOp par_op_; ///< Associated parallel operation
-  static constexpr const char *_type_key = "tl.AtomicAdd";
-  TVM_DECLARE_FINAL_OBJECT_INFO(AtomicAddNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicAdd", AtomicAddNode,
+                                    TileOperatorNode);
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
@@ -39,26 +41,10 @@ public:
         .def_ro("dst", &AtomicAddNode::dst)
         .def_ro("src_range", &AtomicAddNode::src_range)
         .def_ro("dst_range", &AtomicAddNode::dst_range)
-        .def_ro("coalesced_width", &AtomicAddNode::coalesced_width);
+        .def_ro("use_tma", &AtomicAddNode::use_tma)
+        .def_ro("coalesced_width", &AtomicAddNode::coalesced_width)
+        .def_ro("memory_order", &AtomicAddNode::memory_order);
   }
-
-  bool SEqualReduce(const AtomicAddNode *other, SEqualReducer equal) const {
-    return equal(src, other->src) && equal(dst, other->dst) &&
-           equal(src_range, other->src_range) &&
-           equal(dst_range, other->dst_range) &&
-           equal(coalesced_width, other->coalesced_width);
-  }
-
-  void SHashReduce(SHashReducer hash_reduce) const {
-    hash_reduce(src);
-    hash_reduce(dst);
-    hash_reduce(src_range);
-    hash_reduce(dst_range);
-    hash_reduce(coalesced_width);
-  }
-
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr bool _type_has_method_shash_reduce = true;
 
 protected:
   /// Create SIMT-style parallel loop structure
@@ -67,6 +53,8 @@ protected:
   Array<IterVar> MakeIterVars() const;
   /// Generate buffer indices from iteration variables
   Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
+  /// Return buffer indices and size
+  std::pair<Array<PrimExpr>, PrimExpr> ReturnIndicesAndSize(int src_dst) const;
   /// Create boundary predicate for memory safety
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
@@ -75,7 +63,8 @@ protected:
 /// Wrapper class for atomic addition operations
 class AtomicAdd : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(AtomicAdd, TileOperator, AtomicAddNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicAdd, TileOperator,
+                                             AtomicAddNode);
   TVM_DLL AtomicAdd(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };

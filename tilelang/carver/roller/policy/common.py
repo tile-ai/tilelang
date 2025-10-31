@@ -1,8 +1,8 @@
-from typing import List
+from __future__ import annotations
 import numpy as np
 
 
-def get_all_factors(n: int) -> List[int]:
+def get_all_factors(n: int) -> list[int]:
     # Calculate the square root of n and round it up to the nearest integer
     n0 = int(np.ceil(np.sqrt(n)))
 
@@ -16,7 +16,7 @@ def get_all_factors(n: int) -> List[int]:
     return [int(x) for x in np.concatenate([val, mid, n // val[::-1]])]
 
 
-def factorize(n: int) -> List[int]:
+def factorize(n: int) -> list[int]:
     i = 2  # Start with the smallest prime number
     result = []
 
@@ -30,7 +30,7 @@ def factorize(n: int) -> List[int]:
     return result
 
 
-def coalesced_factor(subtensor: List[int], tensor: List[int]) -> int:
+def coalesced_factor(subtensor: list[int], tensor: list[int]) -> int:
     # If the last dimension of the subtensor and tensor differ, or subtensor has only one dimension
     if subtensor[-1] != tensor[-1] or len(subtensor) == 1:
         return subtensor[-1]
@@ -39,7 +39,7 @@ def coalesced_factor(subtensor: List[int], tensor: List[int]) -> int:
         return subtensor[-1] * coalesced_factor(subtensor[:-1], tensor[:-1])
 
 
-def coalesced_tensor_shape(subtensor: List[int], tensor: List[int], transaction_size: int) -> int:
+def coalesced_tensor_shape(subtensor: list[int], tensor: list[int], transaction_size: int) -> int:
     # Calculate the total number of elements in the subtensor
     bytes = int(np.prod(subtensor))
 

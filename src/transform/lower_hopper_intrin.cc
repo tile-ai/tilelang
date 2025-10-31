@@ -83,6 +83,16 @@ public:
                                   stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
           stmt_seq.push_back(stmt_);
           if (!init_mbarrier_calls_.empty()) {
+            // Note from FlashAttention:
+            // Helps with visibility of barrier init operations across warps /
+            // cta / cluster Available as a separate function so as to batch
+            // inits across barriers and fence once Note : It must be composed
+            // with an appropriate sync instruction with the right scope to
+            // ensure visibility eg. __syncthreads() or a cluster_arrive() +
+            // cluster_wait()
+            Stmt mem_fence = Evaluate(Call(
+                DataType::Handle(), tvm::tl::ptx_fence_barrier_init(), {}));
+            stmt_seq.push_back(mem_fence);
             Stmt mem_sync =
                 Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                               {StringImm("shared")}));
@@ -103,14 +113,14 @@ public:
     if (call->op.same_as(create_tma_descriptor()) ||
         call->op.same_as(create_tma_im2col_descriptor())) {
       Var var;
-      auto iter = desc_map_.find(GetRef<Call>(call));
+      auto iter = desc_map_.find(tvm::ffi::GetRef<Call>(call));
       if (iter != desc_map_.end()) {
         var = iter->second;
       } else {
         String name = call->args[2].as<Var>().value()->name_hint;
         var = Var(name + "_desc",
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
-        desc_map_[GetRef<Call>(call)] = var;
+        desc_map_[tvm::ffi::GetRef<Call>(call)] = var;
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
@@ -151,10 +161,10 @@ tvm::transform::Pass LowerHopperIntrin() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerHopperIntrin", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerHopperIntrin", LowerHopperIntrin);
-});
+}
 #endif // (CUDA_MAJOR_VERSION >= 12)
 
 } // namespace tl

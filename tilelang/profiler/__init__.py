@@ -1,6 +1,7 @@
 """The profiler and convert to torch utils"""
+from __future__ import annotations
 
-from typing import List, Optional, Callable, Any, Literal
+from typing import Callable, Any, Literal
 from functools import partial
 import torch
 from contextlib import suppress
@@ -28,17 +29,17 @@ class Profiler:
         adapter: Optional kernel adapter for interfacing with different backends
     """
 
-    params: List[KernelParam]
-    result_idx: List[int]
+    params: list[KernelParam]
+    result_idx: list[int]
     supply_type: TensorSupplyType
-    adapter: Optional[BaseKernelAdapter] = None
+    adapter: BaseKernelAdapter | None = None
 
     def __post_init__(self):
         """Initialize tensor supply after dataclass initialization"""
         self.result_idx = self._legalize_result_idx(self.result_idx)
         self.supply = get_tensor_supply(self.supply_type)
 
-    def _legalize_result_idx(self, result_idx: Optional[List[int]] = None) -> List[int]:
+    def _legalize_result_idx(self, result_idx: list[int] | None = None) -> list[int]:
         params = self.params
         # result_idx is a list of indices of the output tensors
         if result_idx is None:
@@ -55,7 +56,7 @@ class Profiler:
 
         return result_idx
 
-    def with_default_adapter(self, adapter: BaseKernelAdapter) -> "Profiler":
+    def with_default_adapter(self, adapter: BaseKernelAdapter) -> Profiler:
         self.adapter = adapter
         return self
 
@@ -76,7 +77,7 @@ class Profiler:
     def assert_allclose(
         self,
         reference_program: Callable,
-        input_tensors: Optional[List[torch.Tensor]] = None,
+        input_tensors: list[torch.Tensor] | None = None,
         atol: float = 1e-2,
         rtol: float = 1e-2,
         max_mismatched_ratio=0.01,
@@ -147,7 +148,7 @@ class Profiler:
     def manual_assert_close(
         self,
         reference_program: Callable,
-        input_tensors: Optional[List[torch.Tensor]] = None,
+        input_tensors: list[torch.Tensor] | None = None,
         manual_check_prog: Callable = None,
     ):
         """Validates kernel output against a reference implementation.
@@ -194,13 +195,13 @@ class Profiler:
                     rhs,
                 ]
 
-    def run_once(self, func: Optional[Callable] = None):
+    def run_once(self, func: Callable | None = None):
         ins = self._get_inputs()
         if not func:
             func = self.__call__
         return func(*ins)
 
-    def determine_profiler(self, func: Optional[Callable] = None):
+    def determine_profiler(self, func: Callable | None = None):
         """Determines which profiler backend to use based on function type.
 
         Args:
@@ -217,14 +218,14 @@ class Profiler:
 
     def do_bench(
         self,
-        func: Optional[Callable] = None,
+        func: Callable | None = None,
         warmup: int = 25,
         rep: int = 100,
         n_warmup: int = 1,
         n_repeat: int = 1,
-        input_tensors: List[torch.Tensor] = None,
+        input_tensors: list[torch.Tensor] = None,
         backend: Literal["event", "cupti"] = "event",
-        quantiles: Optional[List[float]] = None,
+        quantiles: list[float] | None = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
     ) -> float:
         """Benchmarks the execution time of a given function.

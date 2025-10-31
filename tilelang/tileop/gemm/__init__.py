@@ -4,21 +4,22 @@ from tvm import tir
 from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.runtime import Scriptable
-import tvm.ffi
+import tvm_ffi
 from tilelang.ir import GemmWarpPolicy
 from .gemm_mma import GemmMMA
 from .gemm_wgmma import GemmWGMMA
 from .gemm_tcgen05 import GemmTCGEN5
+from .gemm_mfma import GemmMFMA
 from tilelang import _ffi_api
 
 
-@tvm.ffi.register_func("tl.gemm_py.infer_layout")
+@tvm_ffi.register_global_func("tl.gemm_py.infer_layout")
 def gemm_py_infer_layout(gemm_py, target, thread_bounds):
     thread_nums = thread_bounds.extent
     return gemm_py.infer_layout(target, thread_nums)
 
 
-@tvm.ffi.register_func("tl.gemm_py.lower")
+@tvm_ffi.register_global_func("tl.gemm_py.lower")
 def gemm_py_lower(gemm_py, layout_map, target, thread_bounds, thread_var):
     thread_nums = thread_bounds.extent
     stmt = gemm_py.lower(layout_map, target, thread_nums, thread_var)
@@ -29,7 +30,7 @@ def gemm_py_lower(gemm_py, layout_map, target, thread_bounds, thread_var):
 # same definition with src/op/gemm_py.h
 class GemmInst(IntEnum):
     MMA = 0
-    WGMMMA = 1
+    WGMMA = 1
     TCGEN5MMA = 2
     MFMA = 3
 
@@ -37,7 +38,10 @@ class GemmInst(IntEnum):
         return self == GemmInst.MMA
 
     def is_wgmma(self) -> bool:
-        return self == GemmInst.WGMMMA
+        return self == GemmInst.WGMMA
+
+    def is_tcgen5mma(self) -> bool:
+        return self == GemmInst.TCGEN5MMA
 
     def is_tcgen5mma(self) -> bool:
         return self == GemmInst.TCGEN5MMA
@@ -49,7 +53,7 @@ class GemmInst(IntEnum):
         return self.name
 
 
-@tvm.ffi.register_object("tl.GemmPy")
+@tvm_ffi.register_object("tl.GemmPy")
 class GemmPy(Node, Scriptable):
     A: tir.Buffer
     B: tir.Buffer
@@ -125,6 +129,8 @@ class GemmPy(Node, Scriptable):
         elif gemm_inst.is_tcgen5mma():
             return GemmTCGEN5
         elif gemm_inst.is_mfma():
-            raise NotImplementedError("MFMA is not implemented")
+            return GemmMFMA
+        elif gemm_inst.is_tcgen5mma():
+            raise NotImplementedError("TCGEN5MMA is not implemented")
         else:
             raise ValueError(f"Unsupported GEMM instruction: {gemm_inst}")

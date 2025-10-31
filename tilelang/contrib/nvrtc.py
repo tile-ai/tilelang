@@ -1,10 +1,11 @@
+from __future__ import annotations
 import cuda.bindings.nvrtc as nvrtc
-from typing import Literal, Union, List, Optional, Tuple
+from typing import Literal
 from tvm.target import Target
 from .nvcc import get_target_compute_version, parse_compute_version
 
 
-def get_nvrtc_version() -> Tuple[int, int]:
+def get_nvrtc_version() -> tuple[int, int]:
     result, major, minor = nvrtc.nvrtcVersion()
     assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get NVRTC version: {result}"
     return (major, minor)
@@ -12,8 +13,8 @@ def get_nvrtc_version() -> Tuple[int, int]:
 
 def compile_cuda(code: str,
                  target_format: Literal["ptx", "cubin"] = "ptx",
-                 arch: Optional[int] = None,
-                 options: Optional[Union[str, List[str]]] = None,
+                 arch: int | None = None,
+                 options: str | list[str] | None = None,
                  verbose: bool = False) -> bytearray:
     """Compile cuda code with NVRTC.
 
