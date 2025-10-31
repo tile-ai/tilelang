@@ -578,13 +578,15 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (A.scope() == "local.fragment") {
     ICHECK(B.scope() != "local.fragment");
-    op_name = "tl::gemm_rs";
+    op_name = "gemm_rs";
   } else if (B.scope() == "local.fragment") {
-    op_name = "tl::gemm_sr";
+    op_name = "gemm_sr";
   } else {
-    op_name = "tl::gemm_ss";
+    op_name = "gemm_ss";
   }
   ICHECK(C.scope() == "local.fragment");
+
+  op_name = "tl::" + GemmInstPrefixMap.at(gemm_inst) + "_" + op_name;
 
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
@@ -600,8 +602,6 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (TargetIsCDNA(T.target)) {
     // for cdna gemm, we need to specify kPack
     ss << ", " << kPack;
-  } else if (TargetIsHopper(T.target)) {
-    ss << ", " << (gemm_inst == GemmInst::kWGMMA ? "true" : "false");
   }
 
   // Emit wg_wait if necessary

@@ -24,6 +24,14 @@ enum class GemmWarpPolicyType : uint8_t {
 
 // Target GEMM instruction
 enum class GemmInst : uint8_t { kMMA, kWGMMA, kTCGEN5MMA, kMFMA };
+const std::unordered_map<GemmInst, std::string> GemmInstPrefixMap = {
+    {GemmInst::kMMA, "mma"},
+    {GemmInst::kWGMMA, "wgmma"},
+    {GemmInst::kTCGEN5MMA, "tcgen5"},
+    {GemmInst::kMFMA, "mfma"}
+};
+
+
 class GemmWarpPolicyNode : public Object {
 public:
   mutable int m_warp{0};

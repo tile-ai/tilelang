@@ -146,12 +146,13 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   bool maybe_wgmma = TargetIsHopper(T.target) && (this->M >= 64) &&
                      (block_size / warp_size % 4 == 0);
+  GemmInst gemm_inst = maybe_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA;
 
   auto [warp_m, warp_n] = policy->ComputeWarpPartition(
       M, N, block_size, T.target, maybe_wgmma, A->dtype.bits());
 
   std::stringstream ss;
-  std::string op_name = "tl::gemm_sp_ss";
+  std::string op_name = "tl::" + GemmInstPrefixMap.at(gemm_inst) + "_gemm_sp_ss";
   ICHECK((A.scope() == "shared" || A.scope() == "shared.dyn") &&
          (B.scope() == "shared" || B.scope() == "shared.dyn"))
       << "Only support shared.dyn scope for A and B, but received " << A.scope()
@@ -160,13 +161,11 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       << "Only support shared.dyn scope for E as copy from smem to rmem are "
          "delegated to cute implementation, found "
       << E.scope();
+
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
   ss << ", " << clear_accum;
-  if (TargetIsHopper(T.target)) {
-    ss << ", " << (maybe_wgmma ? "true" : "false");
-  }
   if (wg_wait != 0) {
     ss << ", " << wg_wait;
   }
