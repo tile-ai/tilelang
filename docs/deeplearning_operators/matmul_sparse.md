@@ -18,7 +18,7 @@ It's suggested to go through `docs/deeplearning_operators/matmul.md` first.
 Example code can be found at `examples/gemm_sp`.
 :::
 
-# Structured sparsity in the NVIDIA Ampere architecture
+## Structured sparsity in the NVIDIA Ampere architecture
 
 Since the Ampere architecture (sm80 and above), sparsity support has been integrated into Tensor Cores. This allows a 2:4 (or 1:2 for 32-bit data types) semi-structured matrix to be compressed into its non-zero values along with associated metadata, which can then be fed into the Tensor Core. This enables up to **2x throughput** compared to the equivalent dense computation.
 
@@ -56,7 +56,7 @@ For more information, see **A note on `gemm_sp` and `gemm_sp_v2`**.
 
 :::{warning}
 
-    It is **strongly recommended** to use T.gemm_sp_v2 due to its **greater flexibility** and **faster compilation time**.
+It is strongly recommended to use T.gemm_sp_v2 due to its greater flexibility and faster compilation time.
 
 :::
 
@@ -138,21 +138,22 @@ The metadata is stored in a `(u)int8`/`(u)int16`/`(u)int32` tensor, where **each
 
 Suppose we have the following row vector:
 ```python
-t = tensor([[0, 7, 0, 3], [1, 5, 0, 0], [0, 0, 2, 4], [9, 0, 9, 0]]).flatten()
+t = tensor([[0, 7, 0, 3], [1, 5, 0, 0], [0, 0, 2, 4], [9, 0, 9, 0]], dtype=torch.float16).flatten()
 ```
 
 The non-zero elements and their corresponding indices are:
 
 ```python
-t_sp = tensor([[7, 3], [1, 5], [2, 4], [9, 9]]).flatten()
-indices = tensor([[1, 3], [0, 1], [2, 3], [0, 2]]).flatten()
+t_sp = tensor([[7, 3], [1, 5], [2, 4], [9, 9]], dtype=torch.float16).flatten()
+indices = tensor([[1, 3], [0, 1], [2, 3], [0, 2]], dtype=torch.float16).flatten()
 ```
 
 The corresponding uint16 metadata is:
 ```python
 # metadata_bits = tensor([0b1101, 0b0100, 0b1110, 0b1000])
-# Stored as two's complement: tensor(twos_compl(0b1000111001001101), dtype=torch.int16)
-# Note: storage uses little-endian order
+# Note: storage uses little-endian order: tensor(0b1000111001001101, dtype=torch.int16)
+# Note: the above code is not runnable in python as the interpretor won't take the binary
+#       as 2's complement
 metadata_int16 = tensor(-29107)
 ```
 
