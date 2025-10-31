@@ -1,4 +1,3 @@
-from tilelang.layout.gemm_sp import make_metadata_layout
 from .gemm_sp_base import GemmSPBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
