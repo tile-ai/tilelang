@@ -379,3 +379,92 @@ namespace cutlass {
 TL_DEVICE
 bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
 } // namespace cutlass
+
+//
+// Type-safe warp shuffle helpers for 16-bit float types
+// These wrappers avoid relying on implicit conversions that may be disallowed
+// (e.g., converting float -> cutlass::bfloat16_t) by explicitly promoting to
+// float for the shuffle and then down-converting.
+//
+namespace tl {
+
+// Generic passthroughs
+template <typename T>
+TL_DEVICE T shfl_xor_sync(unsigned mask, T val, int laneMask) {
+  return __shfl_xor_sync(mask, val, laneMask);
+}
+
+template <typename T>
+TL_DEVICE T shfl_down_sync(unsigned mask, T val, int delta) {
+  return __shfl_down_sync(mask, val, delta);
+}
+
+template <typename T>
+TL_DEVICE T shfl_up_sync(unsigned mask, T val, int delta) {
+  return __shfl_up_sync(mask, val, delta);
+}
+
+template <typename T>
+TL_DEVICE T shfl_sync(unsigned mask, T val, int srcLane) {
+  return __shfl_sync(mask, val, srcLane);
+}
+
+// Specializations for cutlass::half_t
+template <>
+TL_DEVICE half_t shfl_xor_sync(unsigned mask, half_t val, int laneMask) {
+  float f = static_cast<float>(val);
+  float r = __shfl_xor_sync(mask, f, laneMask);
+  return half_t(r);
+}
+
+template <>
+TL_DEVICE half_t shfl_down_sync(unsigned mask, half_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_down_sync(mask, f, delta);
+  return half_t(r);
+}
+
+template <>
+TL_DEVICE half_t shfl_up_sync(unsigned mask, half_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_up_sync(mask, f, delta);
+  return half_t(r);
+}
+
+template <>
+TL_DEVICE half_t shfl_sync(unsigned mask, half_t val, int srcLane) {
+  float f = static_cast<float>(val);
+  float r = __shfl_sync(mask, f, srcLane);
+  return half_t(r);
+}
+
+// Specializations for cutlass::bfloat16_t
+template <>
+TL_DEVICE bfloat16_t shfl_xor_sync(unsigned mask, bfloat16_t val, int laneMask) {
+  float f = static_cast<float>(val);
+  float r = __shfl_xor_sync(mask, f, laneMask);
+  return bfloat16_t(r);
+}
+
+template <>
+TL_DEVICE bfloat16_t shfl_down_sync(unsigned mask, bfloat16_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_down_sync(mask, f, delta);
+  return bfloat16_t(r);
+}
+
+template <>
+TL_DEVICE bfloat16_t shfl_up_sync(unsigned mask, bfloat16_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_up_sync(mask, f, delta);
+  return bfloat16_t(r);
+}
+
+template <>
+TL_DEVICE bfloat16_t shfl_sync(unsigned mask, bfloat16_t val, int srcLane) {
+  float f = static_cast<float>(val);
+  float r = __shfl_sync(mask, f, srcLane);
+  return bfloat16_t(r);
+}
+
+} // namespace tl
