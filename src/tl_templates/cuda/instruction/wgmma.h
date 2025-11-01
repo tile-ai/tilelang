@@ -1,516 +1,457 @@
 #pragma once
+
 #include "../common.h"
-#include "cute/arch/mma_sm90_gmma.hpp"
+#include <cute/arch/mma_sm90_gmma.hpp>
+#include <cute/arch/mma_sm90_gmma_ext.hpp>
+
+#include <type_traits>
+#include <utility>
 
 namespace tl {
 
+#ifndef TL_ALWAYS_FALSE_V_DEFINED
+#define TL_ALWAYS_FALSE_V_DEFINED
 template <class> inline constexpr bool always_false_v = false;
+#endif
 
-// 主类模板 - 移除默认参数，因为特化不能有默认参数
+namespace detail {
+
+template <bool IsMnMajor> struct MajorValue {
+  static constexpr auto value =
+      IsMnMajor ? cute::SM90::GMMA::Major::MN : cute::SM90::GMMA::Major::K;
+};
+
+template <int Scale> struct ScaleInValue {
+  static_assert(Scale == 1 || Scale == -1,
+                "tl::wgmma requires scale factors of +1 or -1.");
+  static constexpr auto value = Scale == 1 ? cute::SM90::GMMA::ScaleIn::One
+                                           : cute::SM90::GMMA::ScaleIn::Neg;
+};
+
+template <int Scale>
+inline constexpr bool IsValidScale = (Scale == 1 || Scale == -1);
+
+template <class Impl> struct CallWgmmaSS {
+  using CReg = std::remove_extent_t<typename Impl::CRegisters>;
+  static constexpr int kCRegs = std::extent_v<typename Impl::CRegisters>;
+  static_assert(sizeof(CReg) == sizeof(uint32_t),
+                "tl::wgmma_ss expects 32-bit accumulator registers.");
+
+  template <size_t... Idx>
+  TL_DEVICE static void Run(uint64_t desc_a, uint64_t desc_b, CReg *c,
+                            cute::SM90::GMMA::ScaleOut scale,
+                            std::index_sequence<Idx...>) {
+    Impl::fma(desc_a, desc_b, c[Idx]..., scale);
+  }
+
+  TL_DEVICE static void exec(uint64_t desc_a, uint64_t desc_b, uint32_t *c_raw,
+                             bool scale_out) {
+    auto scale = scale_out ? cute::SM90::GMMA::ScaleOut::One
+                           : cute::SM90::GMMA::ScaleOut::Zero;
+    auto c = reinterpret_cast<CReg *>(c_raw);
+    Run(desc_a, desc_b, c, scale, std::make_index_sequence<kCRegs>{});
+  }
+};
+
+template <class Impl> struct CallWgmmaRS {
+  using AReg = std::remove_extent_t<typename Impl::ARegisters>;
+  using CReg = std::remove_extent_t<typename Impl::CRegisters>;
+  static constexpr int kARegs = std::extent_v<typename Impl::ARegisters>;
+  static constexpr int kCRegs = std::extent_v<typename Impl::CRegisters>;
+  static_assert(sizeof(AReg) == sizeof(uint32_t),
+                "tl::wgmma_rs expects 32-bit register operands for A.");
+  static_assert(sizeof(CReg) == sizeof(uint32_t) ||
+                    sizeof(CReg) == sizeof(float),
+                "tl::wgmma_rs expects 32-bit accumulator registers.");
+
+  template <size_t... AIdx, size_t... CIdx>
+  TL_DEVICE static void
+  Run(const AReg *a, uint64_t desc_b, CReg *c, cute::SM90::GMMA::ScaleOut scale,
+      std::index_sequence<AIdx...>, std::index_sequence<CIdx...>) {
+    Impl::fma(a[AIdx]..., desc_b, c[CIdx]..., scale);
+  }
+
+  TL_DEVICE static void exec(const uint32_t *a_raw, uint64_t desc_b,
+                             uint32_t *c_raw, bool scale_out) {
+    auto scale = scale_out ? cute::SM90::GMMA::ScaleOut::One
+                           : cute::SM90::GMMA::ScaleOut::Zero;
+    auto a = reinterpret_cast<const AReg *>(a_raw);
+    auto c = reinterpret_cast<CReg *>(c_raw);
+    Run(a, desc_b, c, scale, std::make_index_sequence<kARegs>{},
+        std::make_index_sequence<kCRegs>{});
+  }
+};
+
+} // namespace detail
+
 template <DataType A_type, DataType B_type, DataType C_type, int M, int N,
           int K, bool tnspA, bool tnspB, int scaleA, int scaleB>
 struct WgmmaSSImpl {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    printf("DEBUG: WgmmaSSImpl fallback - A_type=%d (kFloat16=%d), B_type=%d, "
-           "C_type=%d, M=%d, N=%d, K=%d, tnspA=%d, tnspB=%d, scaleA=%d, "
-           "scaleB=%d\n",
-           (int)A_type, (int)DataType::kFloat16, (int)B_type, (int)C_type, M, N,
-           K, (int)tnspA, (int)tnspB, scaleA, scaleB);
-    // 暂时注释掉 static_assert 来看调试输出
-    // static_assert(always_false_v<decltype(c)>,
-    //     "wgmma_ss: No specialization available for given template
-    //     parameters!");
+  static_assert(detail::IsValidScale<scaleA>, "tl::wgmma_ss: invalid scaleA");
+  static_assert(detail::IsValidScale<scaleB>, "tl::wgmma_ss: invalid scaleB");
+  TL_DEVICE static void execute(uint64_t, uint64_t, uint32_t *, bool) {
+    static_assert(always_false_v<std::integral_constant<int, M>>,
+                  "tl::wgmma_ss: unsupported configuration");
+  }
+};
+
+template <DataType A_type, DataType B_type, DataType C_type, int M, int N,
+          int K, bool tnspA, bool tnspB, int scaleA, int scaleB>
+struct WgmmaRSImpl {
+  static_assert(detail::IsValidScale<scaleA>, "tl::wgmma_rs: invalid scaleA");
+  static_assert(detail::IsValidScale<scaleB>, "tl::wgmma_rs: invalid scaleB");
+  TL_DEVICE static void execute(const uint32_t *, uint64_t, uint32_t *, bool) {
+    static_assert(always_false_v<std::integral_constant<int, M>>,
+                  "tl::wgmma_rs: unsupported configuration");
+  }
+};
+
+#define TL_WGMMA_DEFINE_SS_GENERAL(AType, BType, CType, M, N, K, ImplName)     \
+  template <bool tnspA, bool tnspB, int scaleA, int scaleB>                    \
+  struct WgmmaSSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
+                     K, tnspA, tnspB, scaleA, scaleB> {                        \
+    static_assert(detail::IsValidScale<scaleA>,                                \
+                  "tl::wgmma_ss: invalid scaleA");                             \
+    static_assert(detail::IsValidScale<scaleB>,                                \
+                  "tl::wgmma_ss: invalid scaleB");                             \
+    using Impl =                                                               \
+        cute::SM90::GMMA::ImplName<detail::MajorValue<tnspA>::value,           \
+                                   detail::MajorValue<tnspB>::value,           \
+                                   detail::ScaleInValue<scaleA>::value,        \
+                                   detail::ScaleInValue<scaleB>::value>;       \
+    TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b,            \
+                                  uint32_t *c, bool scale_out) {               \
+      detail::CallWgmmaSS<Impl>::exec(desc_a, desc_b, c, scale_out);           \
+    }                                                                          \
   };
-};
 
-// ================================= F16 x F16 -> F16
-// =================================
+#define TL_WGMMA_DEFINE_SS_TN(AType, BType, CType, M, N, K, ImplName)          \
+  template <int scaleA, int scaleB>                                            \
+  struct WgmmaSSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
+                     K, false, false, scaleA, scaleB> {                        \
+    static_assert(detail::IsValidScale<scaleA>,                                \
+                  "tl::wgmma_ss: invalid scaleA");                             \
+    static_assert(detail::IsValidScale<scaleB>,                                \
+                  "tl::wgmma_ss: invalid scaleB");                             \
+    using Impl =                                                               \
+        cute::SM90::GMMA::ImplName<detail::ScaleInValue<scaleA>::value,        \
+                                   detail::ScaleInValue<scaleB>::value>;       \
+    TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b,            \
+                                  uint32_t *c, bool scale_out) {               \
+      detail::CallWgmmaSS<Impl>::exec(desc_a, desc_b, c, scale_out);           \
+    }                                                                          \
+  };
 
-// M64N8K16 F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
-                   64, 8, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %4, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k16.f16.f16.f16 "
-                 "{%0, %1}, %2, %3, p, %5, %6, %7, %8;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_DEFINE_SS_TN_FIXED_SCALE(AType, BType, CType, M, N, K,        \
+                                          ImplName)                            \
+  template <int scaleA, int scaleB>                                            \
+  struct WgmmaSSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
+                     K, false, false, scaleA, scaleB> {                        \
+    static_assert(detail::IsValidScale<scaleA>,                                \
+                  "tl::wgmma_ss: invalid scaleA");                             \
+    static_assert(detail::IsValidScale<scaleB>,                                \
+                  "tl::wgmma_ss: invalid scaleB");                             \
+    static_assert(scaleA == 1 && scaleB == 1,                                  \
+                  "tl::wgmma_ss: only +1 scaling supported for this WGMMA");   \
+    using Impl = cute::SM90::GMMA::ImplName;                                   \
+    TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b,            \
+                                  uint32_t *c, bool scale_out) {               \
+      detail::CallWgmmaSS<Impl>::exec(desc_a, desc_b, c, scale_out);           \
+    }                                                                          \
+  };
 
-// M64N16K16 F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
-                   64, 16, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %6, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n16k16.f16.f16.f16 "
-                 "{%0, %1, %2, %3}, %4, %5, p, %7, %8, %9, %10;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_DEFINE_RS_GENERAL(AType, BType, CType, M, N, K, ImplName)     \
+  template <bool tnspA, bool tnspB, int scaleA, int scaleB>                    \
+  struct WgmmaRSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
+                     K, tnspA, tnspB, scaleA, scaleB> {                        \
+    static_assert(!tnspA, "tl::wgmma_rs: operand A must be K-major");          \
+    static_assert(detail::IsValidScale<scaleA>,                                \
+                  "tl::wgmma_rs: invalid scaleA");                             \
+    static_assert(detail::IsValidScale<scaleB>,                                \
+                  "tl::wgmma_rs: invalid scaleB");                             \
+    using Impl =                                                               \
+        cute::SM90::GMMA::ImplName<detail::MajorValue<tnspA>::value,           \
+                                   detail::MajorValue<tnspB>::value,           \
+                                   detail::ScaleInValue<scaleA>::value,        \
+                                   detail::ScaleInValue<scaleB>::value>;       \
+    TL_DEVICE static void execute(const uint32_t *a, uint64_t desc_b,          \
+                                  uint32_t *c, bool scale_out) {               \
+      detail::CallWgmmaRS<Impl>::exec(a, desc_b, c, scale_out);                \
+    }                                                                          \
+  };
 
-// M64N32K16 F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
-                   64, 32, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile(
-        "{\n"
-        ".reg .pred p;\n"
-        "setp.ne.b32 p, %10, 0;\n"
-        "wgmma.mma_async.sync.aligned.m64n32k16.f16.f16.f16 "
-        "{%0, %1, %2, %3, %4, %5, %6, %7}, %8, %9, p, %11, %12, %13, %14;\n"
-        "}\n"
-        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-          "+r"(c[5]), "+r"(c[6]), "+r"(c[7])
-        : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-          "n"(int32_t(scaleA)), "n"(int32_t(scaleB)), "n"(int32_t(tnspA)),
-          "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_DEFINE_RS_TN(AType, BType, CType, M, N, K, ImplName)          \
+  template <int scaleA, int scaleB>                                            \
+  struct WgmmaRSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
+                     K, false, false, scaleA, scaleB> {                        \
+    static_assert(detail::IsValidScale<scaleA>,                                \
+                  "tl::wgmma_rs: invalid scaleA");                             \
+    static_assert(detail::IsValidScale<scaleB>,                                \
+                  "tl::wgmma_rs: invalid scaleB");                             \
+    using Impl =                                                               \
+        cute::SM90::GMMA::ImplName<detail::ScaleInValue<scaleA>::value,        \
+                                   detail::ScaleInValue<scaleB>::value>;       \
+    TL_DEVICE static void execute(const uint32_t *a, uint64_t desc_b,          \
+                                  uint32_t *c, bool scale_out) {               \
+      detail::CallWgmmaRS<Impl>::exec(a, desc_b, c, scale_out);                \
+    }                                                                          \
+  };
 
-// M64N64K16 F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
-                   64, 64, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %18, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n64k16.f16.f16.f16 "
-                 "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-                 "%8,  %9, %10, %11, %12, %13, %14, %15},"
-                 " %16, %17, p, %19, %20, %21, %22;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-                   "+r"(c[5]), "+r"(c[6]), "+r"(c[7]), "+r"(c[8]), "+r"(c[9]),
-                   "+r"(c[10]), "+r"(c[11]), "+r"(c[12]), "+r"(c[13]),
-                   "+r"(c[14]), "+r"(c[15])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_DEFINE_RS_TN_FIXED_SCALE(AType, BType, CType, M, N, K,        \
+                                          ImplName)                            \
+  template <int scaleA, int scaleB>                                            \
+  struct WgmmaRSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
+                     K, false, false, scaleA, scaleB> {                        \
+    static_assert(detail::IsValidScale<scaleA>,                                \
+                  "tl::wgmma_rs: invalid scaleA");                             \
+    static_assert(detail::IsValidScale<scaleB>,                                \
+                  "tl::wgmma_rs: invalid scaleB");                             \
+    static_assert(scaleA == 1 && scaleB == 1,                                  \
+                  "tl::wgmma_rs: only +1 scaling supported for this WGMMA");   \
+    using Impl = cute::SM90::GMMA::ImplName;                                   \
+    TL_DEVICE static void execute(const uint32_t *a, uint64_t desc_b,          \
+                                  uint32_t *c, bool scale_out) {               \
+      detail::CallWgmmaRS<Impl>::exec(a, desc_b, c, scale_out);                \
+    }                                                                          \
+  };
 
-// M64N96K16 F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
-                   64, 96, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %26, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n96k16.f16.f16.f16 "
-                 "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-                 "%8,  %9, %10, %11, %12, %13, %14, %15, "
-                 "%16, %17, %18, %19, %20, %21, %22, %23}, "
-                 "%24, %25, p, %27, %28, %29, %30;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-                   "+r"(c[5]), "+r"(c[6]), "+r"(c[7]), "+r"(c[8]), "+r"(c[9]),
-                   "+r"(c[10]), "+r"(c[11]), "+r"(c[12]), "+r"(c[13]),
-                   "+r"(c[14]), "+r"(c[15]), "+r"(c[16]), "+r"(c[17]),
-                   "+r"(c[18]), "+r"(c[19]), "+r"(c[20]), "+r"(c[21]),
-                   "+r"(c[22]), "+r"(c[23])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_FOREACH_N_FLOAT_MUL8(OP)                                      \
+  OP(8)                                                                        \
+  OP(16)                                                                       \
+  OP(24)                                                                       \
+  OP(32)                                                                       \
+  OP(40)                                                                       \
+  OP(48)                                                                       \
+  OP(56)                                                                       \
+  OP(64)                                                                       \
+  OP(72)                                                                       \
+  OP(80)                                                                       \
+  OP(88)                                                                       \
+  OP(96)                                                                       \
+  OP(104)                                                                      \
+  OP(112)                                                                      \
+  OP(120)                                                                      \
+  OP(128)                                                                      \
+  OP(136)                                                                      \
+  OP(144)                                                                      \
+  OP(152)                                                                      \
+  OP(160)                                                                      \
+  OP(168)                                                                      \
+  OP(176)                                                                      \
+  OP(184)                                                                      \
+  OP(192)                                                                      \
+  OP(200)                                                                      \
+  OP(208)                                                                      \
+  OP(216)                                                                      \
+  OP(224)                                                                      \
+  OP(232)                                                                      \
+  OP(240)                                                                      \
+  OP(248)                                                                      \
+  OP(256)
 
-// M64N128K16 F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
-                   64, 128, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %34, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n128k16.f16.f16.f16 "
-                 "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-                 "%8,  %9, %10, %11, %12, %13, %14, %15, "
-                 "%16, %17, %18, %19, %20, %21, %22, %23, "
-                 "%24, %25, %26, %27, %28, %29, %30, %31}, "
-                 "%32, %33, p, %35, %36, %37, %38;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-                   "+r"(c[5]), "+r"(c[6]), "+r"(c[7]), "+r"(c[8]), "+r"(c[9]),
-                   "+r"(c[10]), "+r"(c[11]), "+r"(c[12]), "+r"(c[13]),
-                   "+r"(c[14]), "+r"(c[15]), "+r"(c[16]), "+r"(c[17]),
-                   "+r"(c[18]), "+r"(c[19]), "+r"(c[20]), "+r"(c[21]),
-                   "+r"(c[22]), "+r"(c[23]), "+r"(c[24]), "+r"(c[25]),
-                   "+r"(c[26]), "+r"(c[27]), "+r"(c[28]), "+r"(c[29]),
-                   "+r"(c[30]), "+r"(c[31])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_FOREACH_N_INT32_MUL8(OP)                                      \
+  OP(8)                                                                        \
+  OP(16)                                                                       \
+  OP(24)                                                                       \
+  OP(32)                                                                       \
+  OP(48)                                                                       \
+  OP(64)                                                                       \
+  OP(80)                                                                       \
+  OP(96)                                                                       \
+  OP(112)                                                                      \
+  OP(128)                                                                      \
+  OP(144)                                                                      \
+  OP(160)                                                                      \
+  OP(176)                                                                      \
+  OP(192)                                                                      \
+  OP(208)                                                                      \
+  OP(224)                                                                      \
+  OP(240)                                                                      \
+  OP(256)
 
-// M64N192K16 F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
-                   64, 192, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile(
-        "{\n"
-        ".reg .pred p;\n"
-        "setp.ne.b32 p, %50, 0;\n"
-        "wgmma.mma_async.sync.aligned.m64n192k16.f16.f16.f16 "
-        "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-        "%8,  %9, %10, %11, %12, %13, %14, %15, "
-        "%16, %17, %18, %19, %20, %21, %22, %23, "
-        "%24, %25, %26, %27, %28, %29, %30, %31, "
-        "%32, %33, %34, %35, %36, %37, %38, %39, "
-        "%40, %41, %42, %43, %44, %45, %46, %47}, "
-        "%48, %49, p, %51, %52, %53, %54;\n"
-        "}\n"
-        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-          "+r"(c[5]), "+r"(c[6]), "+r"(c[7]), "+r"(c[8]), "+r"(c[9]),
-          "+r"(c[10]), "+r"(c[11]), "+r"(c[12]), "+r"(c[13]), "+r"(c[14]),
-          "+r"(c[15]), "+r"(c[16]), "+r"(c[17]), "+r"(c[18]), "+r"(c[19]),
-          "+r"(c[20]), "+r"(c[21]), "+r"(c[22]), "+r"(c[23]), "+r"(c[24]),
-          "+r"(c[25]), "+r"(c[26]), "+r"(c[27]), "+r"(c[28]), "+r"(c[29]),
-          "+r"(c[30]), "+r"(c[31]), "+r"(c[32]), "+r"(c[33]), "+r"(c[34]),
-          "+r"(c[35]), "+r"(c[36]), "+r"(c[37]), "+r"(c[38]), "+r"(c[39]),
-          "+r"(c[40]), "+r"(c[41]), "+r"(c[42]), "+r"(c[43]), "+r"(c[44]),
-          "+r"(c[45]), "+r"(c[46]), "+r"(c[47])
-        : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-          "n"(int32_t(scaleA)), "n"(int32_t(scaleB)), "n"(int32_t(tnspA)),
-          "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_DEFINE_F16_F16_F16_SS(N)                                      \
+  TL_WGMMA_DEFINE_SS_GENERAL(kFloat16, kFloat16, kFloat16, 64, N, 16,          \
+                             MMA_64x##N##x16_F16F16F16_SS)
+#define TL_WGMMA_DEFINE_F16_F16_F32_SS(N)                                      \
+  TL_WGMMA_DEFINE_SS_GENERAL(kFloat16, kFloat16, kFloat32, 64, N, 16,          \
+                             MMA_64x##N##x16_F32F16F16_SS)
+#define TL_WGMMA_DEFINE_BF16_BF16_F32_SS(N)                                    \
+  TL_WGMMA_DEFINE_SS_GENERAL(kBFloat16, kBFloat16, kFloat32, 64, N, 16,        \
+                             MMA_64x##N##x16_F32BF16BF16_SS)
 
-// M64N256K16 F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
-                   64, 256, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile(
-        "{\n"
-        ".reg .pred p;\n"
-        "setp.ne.b32 p, %66, 0;\n"
-        "wgmma.mma_async.sync.aligned.m64n256k16.f16.f16.f16 "
-        "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-        "%8,  %9, %10, %11, %12, %13, %14, %15, "
-        "%16, %17, %18, %19, %20, %21, %22, %23, "
-        "%24, %25, %26, %27, %28, %29, %30, %31, "
-        "%32, %33, %34, %35, %36, %37, %38, %39, "
-        "%40, %41, %42, %43, %44, %45, %46, %47, "
-        "%48, %49, %50, %51, %52, %53, %54, %55, "
-        "%56, %57, %58, %59, %60, %61, %62, %63}, "
-        "%64, %65, p, %67, %68, %69, %70;\n"
-        "}\n"
-        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-          "+r"(c[5]), "+r"(c[6]), "+r"(c[7]), "+r"(c[8]), "+r"(c[9]),
-          "+r"(c[10]), "+r"(c[11]), "+r"(c[12]), "+r"(c[13]), "+r"(c[14]),
-          "+r"(c[15]), "+r"(c[16]), "+r"(c[17]), "+r"(c[18]), "+r"(c[19]),
-          "+r"(c[20]), "+r"(c[21]), "+r"(c[22]), "+r"(c[23]), "+r"(c[24]),
-          "+r"(c[25]), "+r"(c[26]), "+r"(c[27]), "+r"(c[28]), "+r"(c[29]),
-          "+r"(c[30]), "+r"(c[31]), "+r"(c[32]), "+r"(c[33]), "+r"(c[34]),
-          "+r"(c[35]), "+r"(c[36]), "+r"(c[37]), "+r"(c[38]), "+r"(c[39]),
-          "+r"(c[40]), "+r"(c[41]), "+r"(c[42]), "+r"(c[43]), "+r"(c[44]),
-          "+r"(c[45]), "+r"(c[46]), "+r"(c[47]), "+r"(c[48]), "+r"(c[49]),
-          "+r"(c[50]), "+r"(c[51]), "+r"(c[52]), "+r"(c[53]), "+r"(c[54]),
-          "+r"(c[55]), "+r"(c[56]), "+r"(c[57]), "+r"(c[58]), "+r"(c[59]),
-          "+r"(c[60]), "+r"(c[61]), "+r"(c[62]), "+r"(c[63])
-        : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-          "n"(int32_t(scaleA)), "n"(int32_t(scaleB)), "n"(int32_t(tnspA)),
-          "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_DEFINE_F32_TF32_SS_TN(N)                                      \
+  TL_WGMMA_DEFINE_SS_TN(kTensorFloat32, kTensorFloat32, kFloat32, 64, N, 8,    \
+                        MMA_64x##N##x8_F32TF32TF32_SS_TN)
 
-// ================================= F16 x F16 -> F32
-// =================================
+#define TL_WGMMA_DEFINE_S32_S8S8_SS_TN(N)                                      \
+  TL_WGMMA_DEFINE_SS_TN_FIXED_SCALE(kInt8, kInt8, kInt32, 64, N, 32,           \
+                                    MMA_64x##N##x32_S32S8S8_SS_TN)
+#define TL_WGMMA_DEFINE_S32_S8U8_SS_TN(N)                                      \
+  TL_WGMMA_DEFINE_SS_TN_FIXED_SCALE(kInt8, kUInt8, kInt32, 64, N, 32,          \
+                                    MMA_64x##N##x32_S32S8U8_SS_TN)
+#define TL_WGMMA_DEFINE_S32_U8S8_SS_TN(N)                                      \
+  TL_WGMMA_DEFINE_SS_TN_FIXED_SCALE(kUInt8, kInt8, kInt32, 64, N, 32,          \
+                                    MMA_64x##N##x32_S32U8S8_SS_TN)
+#define TL_WGMMA_DEFINE_S32_U8U8_SS_TN(N)                                      \
+  TL_WGMMA_DEFINE_SS_TN_FIXED_SCALE(kUInt8, kUInt8, kInt32, 64, N, 32,         \
+                                    MMA_64x##N##x32_S32U8U8_SS_TN)
 
-// M64N8K16 F16->F32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat32,
-                   64, 8, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %6, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k16.f32.f16.f16 "
-                 "{%0, %1, %2, %3}, %4, %5, p, %7, %8, %9, %10;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_DEFINE_F16_E4M3E4M3_SS_TN(N)                                  \
+  TL_WGMMA_DEFINE_SS_TN(kFloat8_e4m3, kFloat8_e4m3, kFloat16, 64, N, 32,       \
+                        MMA_64x##N##x32_F16E4M3E4M3_SS_TN)
+#define TL_WGMMA_DEFINE_F32_E4M3E4M3_SS_TN(N)                                  \
+  TL_WGMMA_DEFINE_SS_TN(kFloat8_e4m3, kFloat8_e4m3, kFloat32, 64, N, 32,       \
+                        MMA_64x##N##x32_F32E4M3E4M3_SS_TN)
+#define TL_WGMMA_DEFINE_F16_E4M3E5M2_SS_TN(N)                                  \
+  TL_WGMMA_DEFINE_SS_TN(kFloat8_e4m3, kFloat8_e5m2, kFloat16, 64, N, 32,       \
+                        MMA_64x##N##x32_F16E4M3E5M2_SS_TN)
+#define TL_WGMMA_DEFINE_F32_E4M3E5M2_SS_TN(N)                                  \
+  TL_WGMMA_DEFINE_SS_TN(kFloat8_e4m3, kFloat8_e5m2, kFloat32, 64, N, 32,       \
+                        MMA_64x##N##x32_F32E4M3E5M2_SS_TN)
+#define TL_WGMMA_DEFINE_F16_E5M2E4M3_SS_TN(N)                                  \
+  TL_WGMMA_DEFINE_SS_TN(kFloat8_e5m2, kFloat8_e4m3, kFloat16, 64, N, 32,       \
+                        MMA_64x##N##x32_F16E5M2E4M3_SS_TN)
+#define TL_WGMMA_DEFINE_F32_E5M2E4M3_SS_TN(N)                                  \
+  TL_WGMMA_DEFINE_SS_TN(kFloat8_e5m2, kFloat8_e4m3, kFloat32, 64, N, 32,       \
+                        MMA_64x##N##x32_F32E5M2E4M3_SS_TN)
+#define TL_WGMMA_DEFINE_F16_E5M2E5M2_SS_TN(N)                                  \
+  TL_WGMMA_DEFINE_SS_TN(kFloat8_e5m2, kFloat8_e5m2, kFloat16, 64, N, 32,       \
+                        MMA_64x##N##x32_F16E5M2E5M2_SS_TN)
+#define TL_WGMMA_DEFINE_F32_E5M2E5M2_SS_TN(N)                                  \
+  TL_WGMMA_DEFINE_SS_TN(kFloat8_e5m2, kFloat8_e5m2, kFloat32, 64, N, 32,       \
+                        MMA_64x##N##x32_F32E5M2E5M2_SS_TN)
 
-// M64N16K16 F16->F32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat32,
-                   64, 16, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile(
-        "{\n"
-        ".reg .pred p;\n"
-        "setp.ne.b32 p, %10, 0;\n"
-        "wgmma.mma_async.sync.aligned.m64n16k16.f32.f16.f16 "
-        "{%0, %1, %2, %3, %4, %5, %6, %7}, %8, %9, p, %11, %12, %13, %14;\n"
-        "}\n"
-        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-          "+r"(c[5]), "+r"(c[6]), "+r"(c[7])
-        : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-          "n"(int32_t(scaleA)), "n"(int32_t(scaleB)), "n"(int32_t(tnspA)),
-          "n"(int32_t(tnspB)));
-  }
-};
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_F16_F16_SS);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_F16_F32_SS);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_BF16_BF16_F32_SS);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_TF32_SS_TN);
 
-// M64N32K16 F16->F32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat32,
-                   64, 32, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %18, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n32k16.f32.f16.f16 "
-                 "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-                 "%8,  %9, %10, %11, %12, %13, %14, %15}, "
-                 "%16, %17, p, %19, %20, %21, %22;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-                   "+r"(c[5]), "+r"(c[6]), "+r"(c[7]), "+r"(c[8]), "+r"(c[9]),
-                   "+r"(c[10]), "+r"(c[11]), "+r"(c[12]), "+r"(c[13]),
-                   "+r"(c[14]), "+r"(c[15])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+TL_WGMMA_FOREACH_N_INT32_MUL8(TL_WGMMA_DEFINE_S32_S8S8_SS_TN);
+TL_WGMMA_FOREACH_N_INT32_MUL8(TL_WGMMA_DEFINE_S32_S8U8_SS_TN);
+TL_WGMMA_FOREACH_N_INT32_MUL8(TL_WGMMA_DEFINE_S32_U8S8_SS_TN);
+TL_WGMMA_FOREACH_N_INT32_MUL8(TL_WGMMA_DEFINE_S32_U8U8_SS_TN);
 
-// M64N64K16 F16->F32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat32,
-                   64, 64, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %34, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 "
-                 "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-                 "%8,  %9, %10, %11, %12, %13, %14, %15, "
-                 "%16, %17, %18, %19, %20, %21, %22, %23, "
-                 "%24, %25, %26, %27, %28, %29, %30, %31}, "
-                 "%32, %33, p, %35, %36, %37, %38;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-                   "+r"(c[5]), "+r"(c[6]), "+r"(c[7]), "+r"(c[8]), "+r"(c[9]),
-                   "+r"(c[10]), "+r"(c[11]), "+r"(c[12]), "+r"(c[13]),
-                   "+r"(c[14]), "+r"(c[15]), "+r"(c[16]), "+r"(c[17]),
-                   "+r"(c[18]), "+r"(c[19]), "+r"(c[20]), "+r"(c[21]),
-                   "+r"(c[22]), "+r"(c[23]), "+r"(c[24]), "+r"(c[25]),
-                   "+r"(c[26]), "+r"(c[27]), "+r"(c[28]), "+r"(c[29]),
-                   "+r"(c[30]), "+r"(c[31])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_E4M3E4M3_SS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_E4M3E4M3_SS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_E4M3E5M2_SS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_E4M3E5M2_SS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_E5M2E4M3_SS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_E5M2E4M3_SS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_E5M2E5M2_SS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_E5M2E5M2_SS_TN);
 
-// ================================= BF16 x BF16 -> F32
-// =================================
+#define TL_WGMMA_DEFINE_F16_F16_F16_RS(N)                                      \
+  TL_WGMMA_DEFINE_RS_GENERAL(kFloat16, kFloat16, kFloat16, 64, N, 16,          \
+                             MMA_64x##N##x16_F16F16F16_RS)
+#define TL_WGMMA_DEFINE_F16_F16_F32_RS(N)                                      \
+  TL_WGMMA_DEFINE_RS_GENERAL(kFloat16, kFloat16, kFloat32, 64, N, 16,          \
+                             MMA_64x##N##x16_F32F16F16_RS)
+#define TL_WGMMA_DEFINE_BF16_BF16_F32_RS(N)                                    \
+  TL_WGMMA_DEFINE_RS_GENERAL(kBFloat16, kBFloat16, kFloat32, 64, N, 16,        \
+                             MMA_64x##N##x16_F32BF16BF16_RS)
 
-// M64N8K16 BF16->F32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kBFloat16, DataType::kBFloat16, DataType::kFloat32,
-                   64, 8, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %6, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k16.f32.bf16.bf16 "
-                 "{%0, %1, %2, %3}, %4, %5, p, %7, %8, %9, %10;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_DEFINE_F32_TF32_RS_TN(N)                                      \
+  TL_WGMMA_DEFINE_RS_TN(kTensorFloat32, kTensorFloat32, kFloat32, 64, N, 8,    \
+                        MMA_64x##N##x8_F32TF32TF32_RS_TN)
 
-// M64N16K16 BF16->F32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kBFloat16, DataType::kBFloat16, DataType::kFloat32,
-                   64, 16, 16, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile(
-        "{\n"
-        ".reg .pred p;\n"
-        "setp.ne.b32 p, %10, 0;\n"
-        "wgmma.mma_async.sync.aligned.m64n16k16.f32.bf16.bf16 "
-        "{%0, %1, %2, %3, %4, %5, %6, %7}, %8, %9, p, %11, %12, %13, %14;\n"
-        "}\n"
-        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-          "+r"(c[5]), "+r"(c[6]), "+r"(c[7])
-        : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-          "n"(int32_t(scaleA)), "n"(int32_t(scaleB)), "n"(int32_t(tnspA)),
-          "n"(int32_t(tnspB)));
-  }
-};
+#define TL_WGMMA_DEFINE_S32_S8S8_RS_TN(N)                                      \
+  TL_WGMMA_DEFINE_RS_TN_FIXED_SCALE(kInt8, kInt8, kInt32, 64, N, 32,           \
+                                    MMA_64x##N##x32_S32S8S8_RS_TN)
+#define TL_WGMMA_DEFINE_S32_S8U8_RS_TN(N)                                      \
+  TL_WGMMA_DEFINE_RS_TN_FIXED_SCALE(kInt8, kUInt8, kInt32, 64, N, 32,          \
+                                    MMA_64x##N##x32_S32S8U8_RS_TN)
+#define TL_WGMMA_DEFINE_S32_U8S8_RS_TN(N)                                      \
+  TL_WGMMA_DEFINE_RS_TN_FIXED_SCALE(kUInt8, kInt8, kInt32, 64, N, 32,          \
+                                    MMA_64x##N##x32_S32U8S8_RS_TN)
+#define TL_WGMMA_DEFINE_S32_U8U8_RS_TN(N)                                      \
+  TL_WGMMA_DEFINE_RS_TN_FIXED_SCALE(kUInt8, kUInt8, kInt32, 64, N, 32,         \
+                                    MMA_64x##N##x32_S32U8U8_RS_TN)
 
-// ================================= TF32 x TF32 -> F32
-// =================================
+#define TL_WGMMA_DEFINE_F16_E4M3E4M3_RS_TN(N)                                  \
+  TL_WGMMA_DEFINE_RS_TN(kFloat8_e4m3, kFloat8_e4m3, kFloat16, 64, N, 32,       \
+                        MMA_64x##N##x32_F16E4M3E4M3_RS_TN)
+#define TL_WGMMA_DEFINE_F32_E4M3E4M3_RS_TN(N)                                  \
+  TL_WGMMA_DEFINE_RS_TN(kFloat8_e4m3, kFloat8_e4m3, kFloat32, 64, N, 32,       \
+                        MMA_64x##N##x32_F32E4M3E4M3_RS_TN)
+#define TL_WGMMA_DEFINE_F16_E4M3E5M2_RS_TN(N)                                  \
+  TL_WGMMA_DEFINE_RS_TN(kFloat8_e4m3, kFloat8_e5m2, kFloat16, 64, N, 32,       \
+                        MMA_64x##N##x32_F16E4M3E5M2_RS_TN)
+#define TL_WGMMA_DEFINE_F32_E4M3E5M2_RS_TN(N)                                  \
+  TL_WGMMA_DEFINE_RS_TN(kFloat8_e4m3, kFloat8_e5m2, kFloat32, 64, N, 32,       \
+                        MMA_64x##N##x32_F32E4M3E5M2_RS_TN)
+#define TL_WGMMA_DEFINE_F16_E5M2E4M3_RS_TN(N)                                  \
+  TL_WGMMA_DEFINE_RS_TN(kFloat8_e5m2, kFloat8_e4m3, kFloat16, 64, N, 32,       \
+                        MMA_64x##N##x32_F16E5M2E4M3_RS_TN)
+#define TL_WGMMA_DEFINE_F32_E5M2E4M3_RS_TN(N)                                  \
+  TL_WGMMA_DEFINE_RS_TN(kFloat8_e5m2, kFloat8_e4m3, kFloat32, 64, N, 32,       \
+                        MMA_64x##N##x32_F32E5M2E4M3_RS_TN)
+#define TL_WGMMA_DEFINE_F16_E5M2E5M2_RS_TN(N)                                  \
+  TL_WGMMA_DEFINE_RS_TN(kFloat8_e5m2, kFloat8_e5m2, kFloat16, 64, N, 32,       \
+                        MMA_64x##N##x32_F16E5M2E5M2_RS_TN)
+#define TL_WGMMA_DEFINE_F32_E5M2E5M2_RS_TN(N)                                  \
+  TL_WGMMA_DEFINE_RS_TN(kFloat8_e5m2, kFloat8_e5m2, kFloat32, 64, N, 32,       \
+                        MMA_64x##N##x32_F32E5M2E5M2_RS_TN)
 
-// M64N8K8 TF32->F32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kTensorFloat32, DataType::kTensorFloat32,
-                   DataType::kFloat32, 64, 8, 8, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %6, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k8.f32.tf32.tf32 "
-                 "{%0, %1, %2, %3}, %4, %5, p, %7, %8, %9, %10;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_F16_F16_RS);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_F16_F32_RS);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_BF16_BF16_F32_RS);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_TF32_RS_TN);
 
-// M64N16K8 TF32->F32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kTensorFloat32, DataType::kTensorFloat32,
-                   DataType::kFloat32, 64, 16, 8, tnspA, tnspB, scaleA,
-                   scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile(
-        "{\n"
-        ".reg .pred p;\n"
-        "setp.ne.b32 p, %10, 0;\n"
-        "wgmma.mma_async.sync.aligned.m64n16k8.f32.tf32.tf32 "
-        "{%0, %1, %2, %3, %4, %5, %6, %7}, %8, %9, p, %11, %12, %13, %14;\n"
-        "}\n"
-        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]), "+r"(c[4]),
-          "+r"(c[5]), "+r"(c[6]), "+r"(c[7])
-        : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-          "n"(int32_t(scaleA)), "n"(int32_t(scaleB)), "n"(int32_t(tnspA)),
-          "n"(int32_t(tnspB)));
-  }
-};
+TL_WGMMA_FOREACH_N_INT32_MUL8(TL_WGMMA_DEFINE_S32_S8S8_RS_TN);
+TL_WGMMA_FOREACH_N_INT32_MUL8(TL_WGMMA_DEFINE_S32_S8U8_RS_TN);
+TL_WGMMA_FOREACH_N_INT32_MUL8(TL_WGMMA_DEFINE_S32_U8S8_RS_TN);
+TL_WGMMA_FOREACH_N_INT32_MUL8(TL_WGMMA_DEFINE_S32_U8U8_RS_TN);
 
-// ================================= INT8 x INT8 -> INT32
-// =================================
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_E4M3E4M3_RS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_E4M3E4M3_RS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_E4M3E5M2_RS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_E4M3E5M2_RS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_E5M2E4M3_RS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_E5M2E4M3_RS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F16_E5M2E5M2_RS_TN);
+TL_WGMMA_FOREACH_N_FLOAT_MUL8(TL_WGMMA_DEFINE_F32_E5M2E5M2_RS_TN);
 
-// M64N8K32 S8->S32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kInt8, DataType::kInt8, DataType::kInt32, 64, 8,
-                   32, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %4, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k32.s32.s8.s8 "
-                 "{%0, %1}, %2, %3, p, %5, %6, %7, %8;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
+#undef TL_WGMMA_DEFINE_F16_F16_F16_SS
+#undef TL_WGMMA_DEFINE_F16_F16_F32_SS
+#undef TL_WGMMA_DEFINE_BF16_BF16_F32_SS
+#undef TL_WGMMA_DEFINE_F32_TF32_SS_TN
+#undef TL_WGMMA_DEFINE_S32_S8S8_SS_TN
+#undef TL_WGMMA_DEFINE_S32_S8U8_SS_TN
+#undef TL_WGMMA_DEFINE_S32_U8S8_SS_TN
+#undef TL_WGMMA_DEFINE_S32_U8U8_SS_TN
+#undef TL_WGMMA_DEFINE_F16_E4M3E4M3_SS_TN
+#undef TL_WGMMA_DEFINE_F32_E4M3E4M3_SS_TN
+#undef TL_WGMMA_DEFINE_F16_E4M3E5M2_SS_TN
+#undef TL_WGMMA_DEFINE_F32_E4M3E5M2_SS_TN
+#undef TL_WGMMA_DEFINE_F16_E5M2E4M3_SS_TN
+#undef TL_WGMMA_DEFINE_F32_E5M2E4M3_SS_TN
+#undef TL_WGMMA_DEFINE_F16_E5M2E5M2_SS_TN
+#undef TL_WGMMA_DEFINE_F32_E5M2E5M2_SS_TN
+#undef TL_WGMMA_DEFINE_F16_F16_F16_RS
+#undef TL_WGMMA_DEFINE_F16_F16_F32_RS
+#undef TL_WGMMA_DEFINE_BF16_BF16_F32_RS
+#undef TL_WGMMA_DEFINE_F32_TF32_RS_TN
+#undef TL_WGMMA_DEFINE_S32_S8S8_RS_TN
+#undef TL_WGMMA_DEFINE_S32_S8U8_RS_TN
+#undef TL_WGMMA_DEFINE_S32_U8S8_RS_TN
+#undef TL_WGMMA_DEFINE_S32_U8U8_RS_TN
+#undef TL_WGMMA_DEFINE_F16_E4M3E4M3_RS_TN
+#undef TL_WGMMA_DEFINE_F32_E4M3E4M3_RS_TN
+#undef TL_WGMMA_DEFINE_F16_E4M3E5M2_RS_TN
+#undef TL_WGMMA_DEFINE_F32_E4M3E5M2_RS_TN
+#undef TL_WGMMA_DEFINE_F16_E5M2E4M3_RS_TN
+#undef TL_WGMMA_DEFINE_F32_E5M2E4M3_RS_TN
+#undef TL_WGMMA_DEFINE_F16_E5M2E5M2_RS_TN
+#undef TL_WGMMA_DEFINE_F32_E5M2E5M2_RS_TN
+#undef TL_WGMMA_FOREACH_N_FLOAT_MUL8
+#undef TL_WGMMA_FOREACH_N_INT32_MUL8
+#undef TL_WGMMA_DEFINE_SS_TN_FIXED_SCALE
+#undef TL_WGMMA_DEFINE_SS_GENERAL
+#undef TL_WGMMA_DEFINE_SS_TN
+#undef TL_WGMMA_DEFINE_RS_TN_FIXED_SCALE
+#undef TL_WGMMA_DEFINE_RS_GENERAL
+#undef TL_WGMMA_DEFINE_RS_TN
 
-// M64N16K32 S8->S32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kInt8, DataType::kInt8, DataType::kInt32, 64, 16,
-                   32, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %6, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n16k32.s32.s8.s8 "
-                 "{%0, %1, %2, %3}, %4, %5, p, %7, %8, %9, %10;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
-
-// ================================= FP8 x FP8 -> F16/F32
-// =================================
-
-// M64N8K32 E4M3->F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
-                   DataType::kFloat16, 64, 8, 32, tnspA, tnspB, scaleA,
-                   scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %4, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k32.f16.e4m3.e4m3 "
-                 "{%0, %1}, %2, %3, p, %5, %6, %7, %8;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
-
-// M64N8K32 E4M3->F32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
-                   DataType::kFloat32, 64, 8, 32, tnspA, tnspB, scaleA,
-                   scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %6, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k32.f32.e4m3.e4m3 "
-                 "{%0, %1, %2, %3}, %4, %5, p, %7, %8, %9, %10;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
-
-// 函数模板委托给类模板
 template <DataType A_type, DataType B_type, DataType C_type, int M, int N,
           int K, bool tnspA, bool tnspB, int scaleA = 1, int scaleB = 1>
 TL_DEVICE void wgmma_ss(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
@@ -519,129 +460,12 @@ TL_DEVICE void wgmma_ss(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
               scaleB>::execute(desc_a, desc_b, c, scale_out);
 }
 
-// ================================= Mixed Precision Support
-// =================================
-
-// Mixed precision: S8 x U8 -> S32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kInt8, DataType::kUInt8, DataType::kInt32, 64, 8,
-                   32, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %4, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k32.s32.s8.u8 "
-                 "{%0, %1}, %2, %3, p, %5, %6, %7, %8;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
-
-// Mixed precision: U8 x S8 -> S32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kUInt8, DataType::kInt8, DataType::kInt32, 64, 8,
-                   32, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %4, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k32.s32.u8.s8 "
-                 "{%0, %1}, %2, %3, p, %5, %6, %7, %8;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
-
-// Mixed precision: U8 x U8 -> S32
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kUInt8, DataType::kUInt8, DataType::kInt32, 64, 8,
-                   32, tnspA, tnspB, scaleA, scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %4, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k32.s32.u8.u8 "
-                 "{%0, %1}, %2, %3, p, %5, %6, %7, %8;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
-
-// Mixed precision FP8: E4M3 x E5M2 -> F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat8_e4m3, DataType::kFloat8_e5m2,
-                   DataType::kFloat16, 64, 8, 32, tnspA, tnspB, scaleA,
-                   scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %4, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k32.f16.e4m3.e5m2 "
-                 "{%0, %1}, %2, %3, p, %5, %6, %7, %8;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
-
-// Mixed precision FP8: E5M2 x E4M3 -> F16
-template <bool tnspA, bool tnspB, int scaleA, int scaleB>
-struct WgmmaSSImpl<DataType::kFloat8_e5m2, DataType::kFloat8_e4m3,
-                   DataType::kFloat16, 64, 8, 32, tnspA, tnspB, scaleA,
-                   scaleB> {
-  TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b, uint32_t *c,
-                                bool scale_out) {
-    asm volatile("{\n"
-                 ".reg .pred p;\n"
-                 "setp.ne.b32 p, %4, 0;\n"
-                 "wgmma.mma_async.sync.aligned.m64n8k32.f16.e5m2.e4m3 "
-                 "{%0, %1}, %2, %3, p, %5, %6, %7, %8;\n"
-                 "}\n"
-                 : "+r"(c[0]), "+r"(c[1])
-                 : "l"(desc_a), "l"(desc_b), "r"(int32_t(scale_out)),
-                   "n"(int32_t(scaleA)), "n"(int32_t(scaleB)),
-                   "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
-  }
-};
-
-// ================================= Convenience Templates
-// =================================
-
-// Type trait to determine the number of output registers needed
-template <DataType C_type, int M, int N> struct WgmmaOutputRegs {
-  static constexpr int value =
-      (M * N * (C_type == DataType::kFloat32 ? 32 : 16)) / (32 * 8);
-};
-
-// Type trait to get element size in bits
-template <DataType dtype> struct ElementBits {
-  static constexpr int value =
-      (dtype == DataType::kFloat32 || dtype == DataType::kTensorFloat32 ||
-       dtype == DataType::kInt32)
-          ? 32
-      : (dtype == DataType::kFloat16 || dtype == DataType::kBFloat16 ||
-         dtype == DataType::kInt16 || dtype == DataType::kUInt16)
-          ? 16
-      : (dtype == DataType::kInt8 || dtype == DataType::kUInt8 ||
-         dtype == DataType::kFloat8_e4m3 || dtype == DataType::kFloat8_e5m2)
-          ? 8
-      : (dtype == DataType::kInt4 || dtype == DataType::kUInt4) ? 4
-                                                                : 8;
-};
+template <DataType A_type, DataType B_type, DataType C_type, int M, int N,
+          int K, bool tnspA, bool tnspB, int scaleA = 1, int scaleB = 1>
+TL_DEVICE void wgmma_rs(const uint32_t *a, uint64_t desc_b, uint32_t *c,
+                        bool scale_out) {
+  WgmmaRSImpl<A_type, B_type, C_type, M, N, K, tnspA, tnspB, scaleA,
+              scaleB>::execute(a, desc_b, c, scale_out);
+}
 
 } // namespace tl

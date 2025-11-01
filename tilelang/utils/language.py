@@ -52,6 +52,19 @@ def is_shared_dynamic(buffer: Buffer) -> bool:
     return buffer.scope() == "shared.dyn"
 
 
+def is_tensor_memory(buffer: Buffer) -> bool:
+    """
+    Check if the buffer is in tensor memory scope (e.g., shared.tmem).
+
+    Args:
+        buffer (Buffer): The TVM buffer to check.
+
+    Returns:
+        bool: True if the buffer is in tensor memory, False otherwise.
+    """
+    return buffer.scope().startswith("shared.tmem")
+
+
 def is_local(buffer: Buffer) -> bool:
     """
     Check if the buffer is in the local memory scope.

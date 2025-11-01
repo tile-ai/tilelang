@@ -17,7 +17,7 @@ The pass is conservative: unknown extern calls are treated as async so that the 
 ### Timeline View
 
 ```
-generic initialize_descriptor → generic shared-store → async wgmma
+generic initialize_wgmma_descriptor → generic shared-store → async wgmma
              │                           │                   │
              └─ generic proxy            ┴─ generic proxy    ┴─ async proxy
                          │        fence inserted here   ↑
@@ -53,7 +53,7 @@ def kernel():
     with T.Kernel(1):
         desc = T.decl_buffer((1,), "uint64", scope="local.descriptor")
         smem = T.decl_buffer((128,), "float16", scope="shared")
-        T.initialize_descriptor(desc, T.uint64(0), 2, 1, 32)
+        T.initialize_wgmma_descriptor(desc, T.uint64(0), 2, 1, 32)
         smem[0] = T.float16(0)
         T.ptx_wgmma_ss(
             "float16",
@@ -83,7 +83,7 @@ def kernel():
     with T.Kernel(1):
         desc = T.decl_buffer((1,), "uint64", scope="local.descriptor")
         smem = T.decl_buffer((128,), "float16", scope="shared")
-        T.initialize_descriptor(desc, T.uint64(0), 2, 1, 32)
+        T.initialize_wgmma_descriptor(desc, T.uint64(0), 2, 1, 32)
         smem[0] = T.float16(0)
         T.fence_proxy_async()
         T.ptx_wgmma_ss(

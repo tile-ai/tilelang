@@ -19,6 +19,8 @@ using namespace tir;
 class GemmPyNode : public TileOperatorNode {
 public:
   bool CheckWGMMA() const;
+  bool AllowTCGEN5MMA(Target target) const;
+  bool AllowWGMMA(int block_size, Target target) const;
   tir::Buffer A, B, C;
   // pointer to the A, B, C
   PrimExpr Aptr, Bptr, Cptr;
@@ -27,6 +29,8 @@ public:
   int stride_A, stride_B;
   int offset_A, offset_B;
   PrimExpr clear_accum = const_false();
+  PrimExpr mbarptr;
+  Array<PrimExpr> C_coords;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
@@ -54,6 +58,8 @@ public:
         .def_ro("offset_A", &GemmPyNode::offset_A)
         .def_ro("offset_B", &GemmPyNode::offset_B)
         .def_ro("clear_accum", &GemmPyNode::clear_accum)
+        .def_ro("mbarptr", &GemmPyNode::mbarptr)
+        .def_ro("C_coords", &GemmPyNode::C_coords)
         .def_ro("kPack", &GemmPyNode::kPack)
         .def_ro("wg_wait", &GemmPyNode::wg_wait)
         .def_ro("policy", &GemmPyNode::policy);

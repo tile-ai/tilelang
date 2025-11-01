@@ -74,9 +74,9 @@ DataType DTypeFromString(const std::string str) {
     return DataType::kInt64;
   } else if (str == "uint64" || str == ".u64") {
     return DataType::kUInt64;
-  } else if (str == "e4m3" || str == ".e4m3") {
+  } else if (str == "float8_e4m3" || str == "e4m3" || str == ".e4m3") {
     return DataType::kFloat8_e4m3;
-  } else if (str == "e5m2" || str == ".e5m2") {
+  } else if (str == "float8_e5m2" || str == "e5m2" || str == ".e5m2") {
     return DataType::kFloat8_e5m2;
   } else if (str == "float16" || str == "fp16" || str == ".f16") {
     return DataType::kFloat16;
@@ -1527,6 +1527,21 @@ std::string PrintWaitBarrierAsm(const std::string &barrier) {
   replacer.register_rule("{barrier}", "&" + barrier);
   predicated_asm_code = replacer.rewrite(predicated_asm_code);
   return predicated_asm_code;
+}
+
+std::string GetMMARegisterType(const ptx::DataType &dtype) {
+  switch (dtype) {
+  case ptx::DataType::kInt32:
+    return "unsigned";
+  case ptx::DataType::kUInt32:
+    return "unsigned";
+  case ptx::DataType::kFloat32:
+    return "float";
+  case ptx::DataType::kFloat64:
+    return "double";
+  default:
+    return "unsigned";
+  }
 }
 
 } // namespace codegen

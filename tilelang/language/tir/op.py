@@ -1107,7 +1107,6 @@ def ptx_wgmma_ss(
 def ptx_wgmma_rs(
     dtype,
     wgmma_prefix,
-    a_is_k_major,
     b_is_k_major,
     a_dtype_abbrv,
     b_dtype_abbrv,
@@ -1127,7 +1126,6 @@ def ptx_wgmma_rs(
         dtype,
         _tvm_op.Op.get("tl.ptx_wgmma_rs"),
         wgmma_prefix,
-        a_is_k_major,
         b_is_k_major,
         a_dtype_abbrv,
         b_dtype_abbrv,
@@ -1141,6 +1139,48 @@ def ptx_wgmma_rs(
         scale_out,
         scale_in_a,
         scale_in_b,
+    )
+
+
+def ptx_tcgen05_mma_ss(
+    a_dtype,
+    b_dtype,
+    c_dtype,
+    desc_a,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    desc_val,
+    scale_out,
+    mask0,
+    mask1,
+    mask2,
+    mask3,
+):
+    """TVM intrinsic for tcgen05.mma shared-memory × shared-memory instructions.
+
+    Expects exactly 14 positional arguments:
+    (a_dtype, b_dtype, c_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr,
+    desc_val, scale_out, mask0, mask1, mask2, mask3).
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ss"),
+        a_dtype,
+        b_dtype,
+        c_dtype,
+        desc_a,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        desc_val,
+        scale_out,
+        mask0,
+        mask1,
+        mask2,
+        mask3,
     )
 
 
