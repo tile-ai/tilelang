@@ -34,11 +34,11 @@ def ref_program(Q, K, V, is_causal, groups=1):
 def get_fwd_configs():
     block_M = [32, 64, 128, 256]
     block_N = [32, 64, 128, 256]
-    threads = [128, 256, 512]
+    threads = [128, 256, 512, 1024]
     num_split_q = [64, 128, 256]
     num_stages = [0, 1]
     enable_rasterization = [True]
-    k_pack = [2]
+    k_pack = [1, 2]
     panel_size = [7, 8, 9, 10]
     qk_coalesced_width = [8]
     v_coalesced_width = [4]
@@ -231,10 +231,11 @@ def get_bwd_configs():
     num_stages = [0, 1, 2]
     enable_rasterization = [True]
     panel_size = [7, 8, 9, 10]
+    k_pack = [1, 2]
 
     configs = []
-    for m, n, stages, t, r, p in itertools.product(block_M, block_N, num_stages, threads,
-                                                   enable_rasterization, panel_size):
+    for m, n, stages, t, r, p, k in itertools.product(block_M, block_N, num_stages, threads,
+                                                   enable_rasterization, panel_size, k_pack):
         configs.append({
             "block_M": m,
             "block_N": n,
@@ -242,6 +243,7 @@ def get_bwd_configs():
             "threads": t,
             "enable_rasterization": r,
             "panel_size": p,
+            "k_pack": k,
         })
 
     return configs
@@ -277,7 +279,8 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 @tilelang.autotune(configs=get_bwd_configs(), cache_input_tensors=True)
 @tilelang.jit
 def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, block_N: int,
-                  num_stages: int, threads: int, enable_rasterization: bool, panel_size: int):
+                  num_stages: int, threads: int, enable_rasterization: bool, panel_size: int,
+                  k_pack: int):
     sm_scale = (1.0 / dim)**0.5
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
@@ -328,7 +331,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                 T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q_shared)
                 T.clear(qkT)
 
-                T.gemm(K_shared, q_shared, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(K_shared, q_shared, qkT, transpose_B=True, k_pack=k_pack, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(lse[bz, bx, k * block_N:(k + 1) * block_N], lse_shared)
 
@@ -357,7 +360,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
 
                 T.copy(p_cast, ds_shared)
                 T.clear(dq)
-                T.gemm(ds_shared, K_shared, dq, transpose_A=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(ds_shared, K_shared, dq, transpose_A=True, k_pack=k_pack, policy=T.GemmWarpPolicy.FullRow)
                 for i, j in T.Parallel(block_N, dim):
                     T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
 
