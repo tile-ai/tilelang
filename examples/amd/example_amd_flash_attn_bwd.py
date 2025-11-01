@@ -8,6 +8,7 @@ import argparse
 from functools import partial
 import numpy as np
 import time
+from datetime import datetime
 
 
 def ref_program(Q, K, V, is_causal, groups=1):
@@ -228,10 +229,10 @@ def get_bwd_configs():
     block_M = [16, 32, 64, 128, 256]
     block_N = [16, 32, 64, 128, 256]
     threads = [64, 128, 256, 512, 1024]
-    num_stages = [0, 1, 2]
+    num_stages = [1]
     enable_rasterization = [True]
-    panel_size = [7, 8, 9, 10]
-    k_pack = [1, 2]
+    panel_size = [7, 8, 9]
+    k_pack = [1]
 
     configs = []
     for m, n, stages, t, r, p, k in itertools.product(block_M, block_N, num_stages, threads,
@@ -300,8 +301,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bx, by, bz):
             T.use_swizzle(panel_size, enable=enable_rasterization)
 
-            # V in register; K, Q, QT, dO, dOT in LDS as per DY's specification
-            # Note: K kept in LDS due to multiple usage patterns causing layout conflicts
             K_shared = T.alloc_shared([block_M, dim], dtype)
             V_register = T.alloc_fragment([block_M, dim], dtype)
             q_shared = T.alloc_shared([block_N, dim], dtype)
@@ -309,6 +308,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
             lse_shared = T.alloc_shared([block_N], accum_dtype)
             delta_shared = T.alloc_shared([block_N], accum_dtype)
             ds_shared = T.alloc_shared([block_M, block_N], dtype)
+            ds_cast = T.alloc_fragment([block_M, block_N], dtype)
 
             p_cast = T.alloc_fragment([block_M, block_N], dtype)
             qkT = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -318,6 +318,8 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
             dv = T.alloc_fragment([block_M, dim], accum_dtype)
             dk = T.alloc_fragment([block_M, dim], accum_dtype)
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
+            dv_shared = T.alloc_shared([block_M, dim], dtype)
+            dk_shared = T.alloc_shared([block_M, dim], dtype)
 
             T.copy(K[bz, by * block_M:(by + 1) * block_M, bx // groups, :], K_shared)
             T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_register)
@@ -353,20 +355,23 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
 
                 T.copy(Delta[bz, bx, k * block_N:(k + 1) * block_N], delta_shared)
 
+                # Compute ds = P * (dP - delta) * sm_scale for dk and dq computation
+                # First compute in fragment, then copy to shared memory (following standard implementation pattern)
                 for i, j in T.Parallel(block_M, block_N):
-                    p_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
+                    ds_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
 
-                T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(ds_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
 
-                T.copy(p_cast, ds_shared)
+                T.copy(ds_cast, ds_shared)
                 T.clear(dq)
-                T.gemm(ds_shared, K_shared, dq, transpose_A=True, k_pack=k_pack, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(ds_shared, K_shared, dq, transpose_A=True, policy=T.GemmWarpPolicy.FullRow)
                 for i, j in T.Parallel(block_N, dim):
                     T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
 
-            for i, j in T.Parallel(block_M, dim):
-                T.atomic_add(dV[bz, by * block_M + i, bx // groups, j], dv[i, j])
-                T.atomic_add(dK[bz, by * block_M + i, bx // groups, j], dk[i, j])
+            T.copy(dv, dv_shared)
+            T.copy(dk, dk_shared)
+            T.copy(dv_shared, dV[bz, by * block_M:(by + 1) * block_M, bx // groups, :])
+            T.copy(dk_shared, dK[bz, by * block_M:(by + 1) * block_M, bx // groups, :])
 
     return flash_bwd_kernel
 
@@ -406,9 +411,15 @@ def debug_tensor_comparison(tensor1, tensor2, name, rtol=1e-3, atol=1e-3):
 
     if max_diff > atol:
         max_idx = torch.argmax(diff)
-        max_idx = np.unravel_index(max_idx.cpu().numpy(), tensor1.shape)
-        print(f"Max difference position: {max_idx}")
-        print(f"Value1: {tensor1[max_idx].item():.6f}, Value2: {tensor2[max_idx].item():.6f}")
+        max_idx_cpu = max_idx.cpu().numpy()
+        # Check if max_idx_cpu is a scalar before unraveling
+        if max_idx_cpu.ndim == 0:
+            max_idx = np.unravel_index(max_idx_cpu, tensor1.shape)
+            print(f"Max difference position: {max_idx}")
+            print(f"Value1: {tensor1[max_idx].item():.6f}, Value2: {tensor2[max_idx].item():.6f}")
+        else:
+            print(f"Could not determine single max difference position.")
+
 
     nan_count1 = torch.isnan(tensor1).sum().item()
     nan_count2 = torch.isnan(tensor2).sum().item()
@@ -418,7 +429,8 @@ def debug_tensor_comparison(tensor1, tensor2, name, rtol=1e-3, atol=1e-3):
     print(f"NaN count: {nan_count1} vs {nan_count2}")
     print(f"Inf count: {inf_count1} vs {inf_count2}")
 
-    relative_diff = diff / (torch.abs(tensor2) + 1e-8)
+    # Use float32 for relative difference calculation to avoid overflow/underflow
+    relative_diff = diff.float() / (torch.abs(tensor2.float()) + 1e-8)
     max_relative_diff = relative_diff.max().item()
     mean_relative_diff = relative_diff.mean().item()
 
@@ -510,6 +522,96 @@ def main(batch: int = 1,
 
     bwd_kernel(q, k, v, dO, lse_tl, delta_tl, dQ_accum, dK_tl, dV_tl)
 
+    # Dump HIP code after running the backward kernel
+    print("\n=== Dumping HIP Code (Runtime) ===")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    hip_output_file = f"flash_attention_bwd_hip_code_runtime_{timestamp}.hip"
+    
+    try:
+        hip_code = ""
+        
+        # Get prep kernel source
+        try:
+            prep_source = None
+            if hasattr(bwd_prep, 'get_kernel_source'):
+                prep_source = bwd_prep.get_kernel_source()
+            elif hasattr(bwd_prep, 'adapter') and hasattr(bwd_prep.adapter, 'get_kernel_source'):
+                prep_source = bwd_prep.adapter.get_kernel_source()
+            
+            if prep_source:
+                hip_code += "// ==========================================\n"
+                hip_code += "// 1. Backward Preprocess Kernel (Runtime Dump)\n"
+                hip_code += "// Generated from example_amd_flash_attn_bwd.py\n"
+                hip_code += f"// Parameters: batch={batch}, heads={heads}, seq_len={seq_len}, dim={dim}, groups={groups}\n"
+                hip_code += f"// Dumped at runtime: {timestamp}\n"
+                hip_code += "// ==========================================\n\n"
+                hip_code += prep_source
+                hip_code += "\n\n"
+        except Exception as e:
+            print(f"Warning: Could not get prep kernel source: {e}")
+        
+        # Get main backward kernel source
+        try:
+            bwd_source = None
+            if hasattr(bwd_kernel, 'get_kernel_source'):
+                bwd_source = bwd_kernel.get_kernel_source()
+            elif hasattr(bwd_kernel, 'adapter') and hasattr(bwd_kernel.adapter, 'get_kernel_source'):
+                bwd_source = bwd_kernel.adapter.get_kernel_source()
+            
+            if bwd_source:
+                hip_code += "// ==========================================\n"
+                hip_code += "// 2. Main Backward Kernel (Runtime Dump)\n"
+                hip_code += "// Generated from example_amd_flash_attn_bwd.py\n"
+                hip_code += f"// Parameters: batch={batch}, heads={heads}, seq_len={seq_len}, dim={dim}, groups={groups}\n"
+                hip_code += f"// Configuration: {bwd_kernel.config if hasattr(bwd_kernel, 'config') else 'N/A'}\n"
+                hip_code += f"// Dumped at runtime: {timestamp}\n"
+                hip_code += "// ==========================================\n\n"
+                hip_code += bwd_source
+                hip_code += "\n\n"
+        except Exception as e:
+            print(f"Warning: Could not get backward kernel source: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Get post kernel source
+        try:
+            post_kernel_temp = flashattn_bwd_postprocess(batch, heads, seq_len, dim)
+            post_source = None
+            if hasattr(post_kernel_temp, 'get_kernel_source'):
+                post_source = post_kernel_temp.get_kernel_source()
+            elif hasattr(post_kernel_temp, 'adapter') and hasattr(post_kernel_temp.adapter, 'get_kernel_source'):
+                post_source = post_kernel_temp.adapter.get_kernel_source()
+            
+            if post_source:
+                hip_code += "// ==========================================\n"
+                hip_code += "// 3. Backward Postprocess Kernel (Runtime Dump)\n"
+                hip_code += "// Generated from example_amd_flash_attn_bwd.py\n"
+                hip_code += f"// Parameters: batch={batch}, heads={heads}, seq_len={seq_len}, dim={dim}, groups={groups}\n"
+                hip_code += f"// Dumped at runtime: {timestamp}\n"
+                hip_code += "// ==========================================\n\n"
+                hip_code += post_source
+                hip_code += "\n\n"
+        except Exception as e:
+            print(f"Warning: Could not get post kernel source: {e}")
+        
+        # Write to file
+        if hip_code:
+            with open(hip_output_file, 'w') as f:
+                f.write(hip_code)
+            print(f"✓ HIP code dumped to: {hip_output_file}")
+            print(f"  Total size: {len(hip_code)} characters")
+        else:
+            print("⚠ Warning: No HIP code collected")
+            # Try alternative methods
+            print("\nTrying alternative methods to get kernel source...")
+            print(f"bwd_kernel type: {type(bwd_kernel)}")
+            print(f"bwd_kernel attributes: {[attr for attr in dir(bwd_kernel) if not attr.startswith('_')]}")
+            
+    except Exception as e:
+        print(f"⚠ Warning: Failed to dump HIP code: {e}")
+        import traceback
+        traceback.print_exc()
+
     post_kernel = flashattn_bwd_postprocess(batch, heads, seq_len, dim)
     dQ_tl = post_kernel(dQ_accum)
 
@@ -521,22 +623,26 @@ def main(batch: int = 1,
     o_ref.backward(dO)
 
     print("Verifying backward pass correctness...")
+    # Using slightly higher tolerance for fp16 comparisons
+    rtol_val = 0.05
+    atol_val = 0.05
+    
     dq_close, dq_max_diff, dq_mean_diff = debug_tensor_comparison(
-        dQ_tl, q_ref.grad, "dQ", rtol=0.05, atol=0.05)
+        dQ_tl, q_ref.grad, "dQ", rtol=rtol_val, atol=atol_val)
     if dq_close:
         print("dQ is correct.")
     else:
         print("dQ mismatch detected.")
 
     dk_close, dk_max_diff, dk_mean_diff = debug_tensor_comparison(
-        dK_tl.to(torch.float16), k_ref.grad, "dK", rtol=0.05, atol=0.05)
+        dK_tl.to(torch.float16), k_ref.grad, "dK", rtol=rtol_val, atol=atol_val)
     if dk_close:
         print("dK is correct.")
     else:
         print("dK mismatch detected.")
 
     dv_close, dv_max_diff, dv_mean_diff = debug_tensor_comparison(
-        dV_tl.to(torch.float16), v_ref.grad, "dV", rtol=0.05, atol=0.05)
+        dV_tl.to(torch.float16), v_ref.grad, "dV", rtol=rtol_val, atol=atol_val)
     if dv_close:
         print("dV is correct.")
     else:
