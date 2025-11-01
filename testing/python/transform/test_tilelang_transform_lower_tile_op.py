@@ -15,8 +15,7 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
     N = tvm.te.var("n")
     K = tvm.te.var("k")
 
-    @tvm.script.ir.ir_module
-    class Before:
+    def before():
 
         @T.prim_func
         def main(B: T.Tensor((K, N), dtype),):
@@ -25,8 +24,9 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
                     T.copy(B[k * block_K, bx * block_N], B_shared)
 
-    @tvm.script.ir.ir_module
-    class After:
+        return tvm.IRModule({'main': main})
+
+    def after():
 
         @T.prim_func
         def main(B: T.Tensor((K, N), dtype),):
@@ -64,11 +64,13 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                                                bx * block_N + t % (block_N // vec_load_b) *
                                                (block_N // vec_load_b) + vec], T.float16(0))
 
+        return tvm.IRModule({'main': main})
+
     with tvm.transform.PassContext():
-        mod = tvm.tir.transform.BindTarget(auto_target)(Before)
+        mod = tvm.tir.transform.BindTarget(auto_target)(before())
         mod = tl.transform.LowerTileOp()(mod)
         mod = tvm.tir.transform.Simplify()(mod)
-    ref_mod = tvm.tir.transform.BindTarget(auto_target)(After)
+    ref_mod = tvm.tir.transform.BindTarget(auto_target)(after())
     ref_mod = tvm.tir.transform.Simplify()(ref_mod)
     # Note(tzj): The structures are equal except the argument in "T.reads" function.
     # The difference is just between the first index and the indices range, which is totally equivalent
