@@ -56,13 +56,7 @@ def test_example_mha_bwd_bhsd():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_example_mha_bwd_wgmma_pipelined():
-    example_mha_bwd_wgmma_pipelined.main(
-        BATCH=1,
-        H=16,
-        N_CTX=512,
-        D_HEAD=64,
-        causal=False,
-    )
+    example_mha_bwd_wgmma_pipelined.main(BATCH=1)
 
 
 @tilelang.testing.requires_cuda
