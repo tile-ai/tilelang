@@ -42,7 +42,7 @@ using namespace tir;
  * - The constructed node is stored in this->data_.
  */
 AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<AtomicAddNode> node = make_object<AtomicAddNode>();
+  ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
   for (int i = 0; i < 2; i++) {
@@ -58,8 +58,12 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
   if (args.size() >= 3) {
     node->use_tma = Downcast<IntImm>(args[2]);
   }
+  node->memory_order = IntImm(0);
   if (args.size() >= 4) {
-    node->coalesced_width = Downcast<IntImm>(args[3]);
+    node->memory_order = Downcast<IntImm>(args[3]);
+  }
+  if (args.size() >= 5) {
+    node->coalesced_width = Downcast<IntImm>(args[4]);
   }
   data_ = std::move(node);
 }
@@ -74,7 +78,7 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A TileOperator owning the cloned AtomicAddNode.
  */
 TileOperator AtomicAddNode::Clone() const {
-  auto op = make_object<AtomicAddNode>(*this);
+  auto op = tvm::ffi::make_object<AtomicAddNode>(*this);
   if (par_op_.defined()) {
     op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
   }
@@ -272,7 +276,6 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
 
   Array<PrimExpr> new_args;
-  new_args.push_back(StringImm("AtomicAdd"));
 
   PrimExpr src_value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
@@ -286,9 +289,10 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
   new_args.push_back(dst_value);
   new_args.push_back(src_value);
+  new_args.push_back(memory_order);
 
   Call atomicadd_call =
-      tvm::tir::Call(dst->dtype, builtin::call_extern(), new_args);
+      tvm::tir::Call(dst->dtype, atomicadd_elem_op(), new_args);
 
   Stmt body = tvm::tir::Evaluate(atomicadd_call);
 
@@ -325,10 +329,6 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  */
 LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
                                      InferLevel level) const {
-  if (!par_op_.defined()) {
-    arith::Analyzer analyzer;
-    par_op_ = ParallelOp(MakeSIMTLoop(&analyzer));
-  }
   if (T.layout_map.count(src) && T.layout_map.count(dst)) {
     if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
       const FragmentNode *src_layout = T.layout_map[src].as<FragmentNode>();
@@ -342,7 +342,7 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
       }
     }
   }
-  return par_op_->InferLayout(T, level);
+  return {};
 }
 
 /**
@@ -549,7 +549,7 @@ TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ AtomicAddNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { AtomicAddNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

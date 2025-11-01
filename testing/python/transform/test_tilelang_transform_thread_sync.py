@@ -188,5 +188,41 @@ def test_sync_let_stmt():
     tvm.ir.assert_structural_equal(mod["main"], expected)
 
 
+@tilelang.testing.requires_cuda
+def test_sync_shared_dyn_stmatrix_loop_hoist():
+
+    @T.prim_func
+    def func():
+        buf_dyn_shmem = T.alloc_buffer((98304,), "uint8", scope="shared.dyn")
+        tx = T.launch_thread("threadIdx.x", 384)
+        for i in T.unroll(8):
+            off = (
+                i // 4 * 8192 + tx // 32 * 1024 + tx % 16 * 64 +
+                (tx % 8 // 4 + i % 4 // 2) % 2 * 32 + (tx % 4 // 2 + i % 2) % 2 * 16 +
+                (tx % 32 // 16 + tx % 2) % 2 * 8)
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    tvm.tir.op.Op.get("tl.ptx_stmatrix"),
+                    T.int32(0),
+                    T.int32(4),
+                    T.tvm_access_ptr(
+                        T.type_annotation("uint8"),
+                        buf_dyn_shmem.data,
+                        off,
+                        98304 - off,
+                        2,
+                    ),
+                    T.int32(2),
+                ))
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    s = str(mod)
+    assert 'T.tvm_storage_sync("shared.dyn")' in s
+    # Ensure the sync appears before the unrolled loop
+    assert s.index('T.tvm_storage_sync("shared.dyn")') < s.index("for i in T.unroll(8)")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

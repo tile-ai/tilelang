@@ -64,13 +64,12 @@ Layout::Layout(Array<IterVar> forward_var, Array<PrimExpr> forward_index) {
   }
   forward_index =
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
-
-  auto n = make_object<LayoutNode>(input_size, forward_index);
+  auto n = tvm::ffi::make_object<LayoutNode>(input_size, forward_index);
   data_ = std::move(n);
 }
 
 Layout::Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index) {
-  auto n = make_object<LayoutNode>(input_size, forward_index);
+  auto n = tvm::ffi::make_object<LayoutNode>(input_size, forward_index);
   data_ = std::move(n);
 }
 
@@ -130,7 +129,6 @@ Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
 
   Array<PrimExpr> transformed = forward_index_.Map(
       [&](const PrimExpr &e) { return Substitute(e, vmap); });
-
   // Concatenate with the remaining elements from vars
   Array<PrimExpr> result;
   for (size_t i = 0; i < vars.size() - InputDim(); i++) {
@@ -212,7 +210,7 @@ Fragment FragmentNode::DeReplicate() const {
     factor = arith::ZeroAwareGCD(*rep_size, *idx_size);
   }
   if (factor == 1)
-    return GetRef<Fragment>(this);
+    return tvm::ffi::GetRef<Fragment>(this);
 
   Map<Var, PrimExpr> vmap;
   vmap.Set(ReplicationPlaceholder(), ReplicationPlaceholder() * factor +
@@ -224,16 +222,39 @@ Fragment FragmentNode::DeReplicate() const {
 }
 
 Fragment FragmentNode::BindThreadRange(Range thread_range) const {
-  auto n = make_object<FragmentNode>(*this);
+  auto n = tvm::ffi::make_object<FragmentNode>(*this);
   n->thread_range_ = thread_range;
   return Fragment(n);
 }
 
-Layout LayoutNode::Inverse() const {
+std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   arith::Analyzer analyzer;
+  auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
+    Array<PrimExpr> symbolic_dims;
+    for (const auto &dim : shape) {
+      if (!as_const_int(dim)) {
+        symbolic_dims.push_back(dim);
+      }
+    }
+    return symbolic_dims;
+  };
+  Array<PrimExpr> symbolic_dims = collect_symbolic(input_size_);
+  Array<PrimExpr> output_shape = OutputShape();
+  symbolic_dims.insert(symbolic_dims.end(), output_shape.begin(),
+                       output_shape.end());
+  symbolic_dims = collect_symbolic(symbolic_dims);
+  bool is_static_shape = symbolic_dims.empty();
+  auto level = is_static_shape ? arith::IterMapLevel::Bijective
+                               : arith::IterMapLevel::NoCheck;
+  if (!is_static_shape) {
+    // Runtime guards keep dynamic tails safe, so we allow NoCheck here and
+    // warn.
+    LOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
+                    "NoCheck; symbolic dims: "
+                 << symbolic_dims;
+  }
   arith::IterMapResult res =
-      arith::DetectIterMap(forward_index_, getVarMap(), 1,
-                           arith::IterMapLevel::Bijective, &analyzer);
+      arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
   ICHECK(res->errors.empty())
       << "Layout " << DebugOutput() << " has errors: " << res->errors;
 
@@ -254,9 +275,13 @@ Layout LayoutNode::Inverse() const {
     }
   }
 
-  return Layout(outputs_shape, backward_index);
+  return {Layout(outputs_shape, backward_index), level};
 }
 
+Layout LayoutNode::Inverse() const {
+  auto inverse_result = InverseWithLevel();
+  return std::move(inverse_result.first);
+}
 PrimExpr infer_fragment_index(const Map<Var, Range> &input_iters,
                               const PrimExpr &forward_thread,
                               arith::Analyzer *analyzer) {
@@ -309,8 +334,8 @@ Fragment::Fragment(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
   forward_thread = Substitute(forward_thread, vmap);
 
-  auto n = make_object<FragmentNode>(input_size, forward_index, forward_thread,
-                                     replicate_size);
+  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index,
+                                               forward_thread, replicate_size);
   data_ = std::move(n);
 }
 
@@ -321,8 +346,8 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
     forward_thread = Substitute(
         forward_thread, {{replicate_var.value(), ReplicationPlaceholder()}});
   }
-  auto n = make_object<FragmentNode>(input_size, forward_index, forward_thread,
-                                     replicate_size);
+  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index,
+                                               forward_thread, replicate_size);
   data_ = std::move(n);
 }
 
@@ -366,6 +391,11 @@ PrimExpr FragmentNode::ForwardThread(const Array<PrimExpr> &vars,
 }
 
 Layout FragmentNode::Inverse() const {
+  auto result = InverseWithLevel();
+  return std::move(result.first);
+}
+
+std::pair<Layout, arith::IterMapLevel> FragmentNode::InverseWithLevel() const {
   auto input_size_copy = input_size_;
   input_size_copy.push_back(ReplicateExtent());
   auto forward_index_copy = forward_index_;
@@ -373,8 +403,7 @@ Layout FragmentNode::Inverse() const {
       Substitute(forward_thread_,
                  {{ReplicationPlaceholder(), InputPlaceholder(InputDim())}}));
   auto fwd = Layout(input_size_copy, forward_index_copy);
-  auto bwd = fwd->Inverse();
-  return bwd;
+  return fwd->InverseWithLevel();
 }
 
 Fragment FragmentNode::CondenseReplicateVar() const {
@@ -409,21 +438,6 @@ std::string FragmentNode::DebugOutput() const {
   }
   ss << ")";
   return ss.str();
-}
-
-bool LayoutNode::SEqualReduce(const LayoutNode *other,
-                              SEqualReducer equal) const {
-  return equal(this->InputShape(), other->InputShape()) &&
-         equal(this->forward_index_, other->forward_index_);
-}
-
-bool FragmentNode::SEqualReduce(const FragmentNode *other,
-                                SEqualReducer equal) const {
-  return equal(this->ReplicateExtent(), other->ReplicateExtent()) &&
-         equal(this->InputShape(), other->InputShape()) &&
-         equal(this->ThreadExtent(), other->ThreadExtent()) &&
-         equal(this->forward_index_, other->forward_index_) &&
-         equal(this->forward_thread_, other->forward_thread_);
 }
 
 bool LayoutNode::IsEqual(const LayoutNode *other, bool skip_index) const {
@@ -464,10 +478,7 @@ void FragmentNode::RegisterReflection() {
       .def_ro("replicate_size", &FragmentNode::replicate_size_);
 }
 
-TVM_REGISTER_NODE_TYPE(LayoutNode);
-TVM_REGISTER_NODE_TYPE(FragmentNode);
-
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def_packed("tl.Layout",
@@ -551,13 +562,13 @@ TVM_FFI_STATIC_INIT_BLOCK({
       .def("tl.make_linear_layout", [](int stride, int continuous) {
         return makeGemmLayoutLinear(stride, continuous);
       });
-});
+}
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   LayoutNode::RegisterReflection();
   FragmentNode::RegisterReflection();
-});
+}
 
 } // namespace tl
 } // namespace tvm

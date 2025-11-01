@@ -1,3 +1,4 @@
+from __future__ import annotations
 import sys
 import os
 import pathlib
@@ -5,7 +6,6 @@ import logging
 import shutil
 import glob
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expe
 TVM_LIBRARY_NOT_FOUND_MESSAGE = ("TVM is not installed or found in the expected path")
 
 TL_ROOT = os.path.dirname(os.path.abspath(__file__))
-TL_LIBS = [os.path.join(i, 'lib') for i in [TL_ROOT]]
+TL_LIBS = [TL_ROOT, os.path.join(TL_ROOT, 'lib')]
 TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
 
 DEV = False
@@ -36,6 +36,10 @@ if not os.path.exists(THIRD_PARTY_ROOT):
 
 assert TL_LIBS and all(
     os.path.exists(i) for i in TL_LIBS), f'tilelang lib root do not exists: {TL_LIBS}'
+
+for lib in TL_LIBS:
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
 
 
 def _find_cuda_home() -> str:
@@ -166,7 +170,7 @@ class EnvVar:
 
     key: str  # Environment variable name (e.g. "TILELANG_PRINT_ON_COMPILATION")
     default: str  # Default value if the environment variable is not set
-    _forced_value: Optional[str] = None  # Temporary runtime override (mainly for tests/debugging)
+    _forced_value: str | None = None  # Temporary runtime override (mainly for tests/debugging)
 
     def get(self):
         if self._forced_value is not None:

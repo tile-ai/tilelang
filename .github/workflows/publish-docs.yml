@@ -13,8 +13,15 @@ jobs:
   docs:
     name: Build and Publish Docs
     if: |
-      (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main') ||
-      github.event_name == 'workflow_dispatch'
+      github.repository_owner == 'tile-ai' &&
+      (
+        (
+          github.event_name == 'pull_request_target' &&
+          github.event.pull_request.merged == true &&
+          github.event.pull_request.base.ref == 'main'
+        ) ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: [self-hosted, nvidia]
     steps:
       - name: Checkout repository
@@ -23,7 +30,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.10"

@@ -89,7 +89,7 @@ def elementwise_add(
 In the compilation process above, a fixed shape was used. However, in practical usage, we often want the kernel to support dynamic shapes. So, how can we compile a kernel in TileLang to handle dynamic shapes? In TileLang, we can replace the target size with a dynamic symbolic value, making the dimension dynamic. The following example illustrates this:
 
 ```python
-program = elementwise_add(T.symbolic("N"), threads=256, dtype="bfloat16")
+program = elementwise_add(T.dynamic("N"), threads=256, dtype="bfloat16")
 kernel = tilelang.compile(program, out_idx=-1, target="cuda", execution_backend="cython")
 ```
 

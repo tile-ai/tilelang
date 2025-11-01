@@ -10,6 +10,9 @@
 #include <cutlass/numeric_types.h>
 #include <math_constants.h>
 
+#include <cutlass/bfloat16.h>
+#include <cutlass/float8.h>
+
 using cutlass::bfloat16_t;
 using cutlass::half_t;
 using cutlass::tfloat32_t;
@@ -93,10 +96,20 @@ TL_DEVICE unsigned __pack_nv_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
-// Pack four char values
+// Pack four char values.
 TL_DEVICE int make_int(signed char x0, signed char x1, signed char x2,
                        signed char x3) {
   return (x3 << 24) | (x2 << 16) | (x1 << 8) | x0;
+}
+
+// Pack eight char values.
+TL_DEVICE int2 make_int2(signed char x0, signed char x1, signed char x2,
+                         signed char x3, signed char y0, signed char y1,
+                         signed char y2, signed char y3) {
+  int2 result;
+  result.x = make_int(x0, x1, x2, x3);
+  result.y = make_int(y0, y1, y2, y3);
+  return result;
 }
 
 // Pack sixteen char values.
@@ -111,6 +124,17 @@ TL_DEVICE int4_t make_int4(signed char x0, signed char x1, signed char x2,
   result.y = make_int(y0, y1, y2, y3);
   result.z = make_int(z0, z1, z2, z3);
   result.w = make_int(w0, w1, w2, w3);
+  return result;
+}
+
+// Pack eight int values.
+TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
+                                   int z1, int w0, int w1) {
+  longlong4 result;
+  *((int2 *)&result.x) = make_int2(x0, x1);
+  *((int2 *)&result.y) = make_int2(y0, y1);
+  *((int2 *)&result.z) = make_int2(z0, z1);
+  *((int2 *)&result.w) = make_int2(w0, w1);
   return result;
 }
 
@@ -244,8 +268,8 @@ union GmmaDescriptor {
     uint16_t stride_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
     // base_offset, bit [49,52)
     // Valid only for SWIZZLE_128B and SWIZZLE_64B
-    uint8_t : 1,
-        base_offset_ : 3, : 4; // 1 bit unused, 3 bits [1,4), 4 bits unused
+    uint8_t : 1, base_offset_ : 3,
+        : 4; // 1 bit unused, 3 bits [1,4), 4 bits unused
     // layout type, bit [62,64)
     // SWIZZLE_NONE = 0, SWIZZLE_32B = 3, SWIZZLE_64B = 2, SWIZZLE_128B = 1
     uint8_t : 6, layout_type_ : 2; // 6 bits unused, 2 bits [6,8)
@@ -318,9 +342,128 @@ TL_DEVICE void increase_descriptor_offset(GmmaDescriptor &descriptor,
   descriptor.reg32_[0] += (offset >> 4);
 }
 
+// and add the desired implicit conversion from bfloat16_t.
+struct float_e4m3_t : public cute::float_e4m3_t {
+  using cute::float_e4m3_t::float_e4m3_t;
+  CUTLASS_HOST_DEVICE
+  float_e4m3_t() = default;
+
+  CUTLASS_HOST_DEVICE
+  explicit float_e4m3_t(__nv_bfloat16 x)
+      : float_e4m3_t(static_cast<float>(x)) {}
+};
+
+struct float_e5m2_t : public cute::float_e5m2_t {
+  using cute::float_e5m2_t::float_e5m2_t;
+  CUTLASS_HOST_DEVICE
+  float_e5m2_t() = default;
+
+  CUTLASS_HOST_DEVICE
+  explicit float_e5m2_t(__nv_bfloat16 x)
+      : float_e5m2_t(static_cast<float>(x)) {}
+};
+
+template <typename T> struct to_cute_type {
+  using type = T;
+};
+template <> struct to_cute_type<tl::float_e4m3_t> {
+  using type = cute::float_e4m3_t;
+};
+template <> struct to_cute_type<tl::float_e5m2_t> {
+  using type = cute::float_e5m2_t;
+};
+
 } // namespace tl
 
 namespace cutlass {
 TL_DEVICE
 bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
 } // namespace cutlass
+
+//
+// Type-safe warp shuffle helpers for 16-bit float types
+// These wrappers avoid relying on implicit conversions that may be disallowed
+// (e.g., converting float -> cutlass::bfloat16_t) by explicitly promoting to
+// float for the shuffle and then down-converting.
+//
+namespace tl {
+
+// Generic passthroughs
+template <typename T>
+TL_DEVICE T shfl_xor_sync(unsigned mask, T val, int laneMask) {
+  return __shfl_xor_sync(mask, val, laneMask);
+}
+
+template <typename T>
+TL_DEVICE T shfl_down_sync(unsigned mask, T val, int delta) {
+  return __shfl_down_sync(mask, val, delta);
+}
+
+template <typename T>
+TL_DEVICE T shfl_up_sync(unsigned mask, T val, int delta) {
+  return __shfl_up_sync(mask, val, delta);
+}
+
+template <typename T> TL_DEVICE T shfl_sync(unsigned mask, T val, int srcLane) {
+  return __shfl_sync(mask, val, srcLane);
+}
+
+// Specializations for cutlass::half_t
+template <>
+TL_DEVICE half_t shfl_xor_sync(unsigned mask, half_t val, int laneMask) {
+  float f = static_cast<float>(val);
+  float r = __shfl_xor_sync(mask, f, laneMask);
+  return half_t(r);
+}
+
+template <>
+TL_DEVICE half_t shfl_down_sync(unsigned mask, half_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_down_sync(mask, f, delta);
+  return half_t(r);
+}
+
+template <>
+TL_DEVICE half_t shfl_up_sync(unsigned mask, half_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_up_sync(mask, f, delta);
+  return half_t(r);
+}
+
+template <> TL_DEVICE half_t shfl_sync(unsigned mask, half_t val, int srcLane) {
+  float f = static_cast<float>(val);
+  float r = __shfl_sync(mask, f, srcLane);
+  return half_t(r);
+}
+
+// Specializations for cutlass::bfloat16_t
+template <>
+TL_DEVICE bfloat16_t shfl_xor_sync(unsigned mask, bfloat16_t val,
+                                   int laneMask) {
+  float f = static_cast<float>(val);
+  float r = __shfl_xor_sync(mask, f, laneMask);
+  return bfloat16_t(r);
+}
+
+template <>
+TL_DEVICE bfloat16_t shfl_down_sync(unsigned mask, bfloat16_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_down_sync(mask, f, delta);
+  return bfloat16_t(r);
+}
+
+template <>
+TL_DEVICE bfloat16_t shfl_up_sync(unsigned mask, bfloat16_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_up_sync(mask, f, delta);
+  return bfloat16_t(r);
+}
+
+template <>
+TL_DEVICE bfloat16_t shfl_sync(unsigned mask, bfloat16_t val, int srcLane) {
+  float f = static_cast<float>(val);
+  float r = __shfl_sync(mask, f, srcLane);
+  return bfloat16_t(r);
+}
+
+} // namespace tl

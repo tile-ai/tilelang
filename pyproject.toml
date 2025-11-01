@@ -1,57 +1,51 @@
 [project]
 name = "tilelang"
-authors = [{name = "Tile-AI"}]
-maintainers = [{name = "Lei Wang", email = "leiwang1999@outlook.com"}]
 description = "A tile level programming language to generate high performance code."
-readme.file = "README.md"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "TileLang Contributors" }, { name = "Tile-AI" }]
+maintainers = [{ name = "Lei Wang", email = "leiwang1999@outlook.com" }]
 license = "MIT"
 keywords = ["BLAS", "CUDA", "HIP", "Code Generation", "TVM"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Environment :: GPU",
     "Operating System :: POSIX :: Linux",
-    "Operating System :: OS Independent",
     "Operating System :: MacOS",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-
-readme.content-type = "text/markdown"
-requires-python = ">=3.8"
-
 dynamic = ["version"]
-
-# Somehow this does not work, hard-code for now
-# dynamic = ["version", "dependencies"]
-# [tool.setuptools.dynamic]
-# dependencies = {file = ["requirements.txt"]}
 dependencies = [
-    "numpy>=1.23.5",
-    "tqdm>=4.62.3",
-    "typing_extensions>=4.10.0",
+    "apache-tvm-ffi~=0.1.0",
     "cloudpickle",
-    "ml_dtypes",
+    "ml-dtypes",
+    "numpy>=1.23.5",
     "psutil",
     "torch",
-    "torch>=2.7; platform_system == 'Darwin'"
+    "torch>=2.7; platform_system == 'Darwin'",
+    "tqdm>=4.62.3",
+    "typing-extensions>=4.10.0",
 ]
 
 [project.optional-dependencies]
 # mldtypes should be greater than 0.5.1
 # if you want to enable fp4
-fp4 = ["ml_dtypes>=0.5.1"]
+fp4 = ["ml-dtypes>=0.5.1"]
 
 [build-system]
-requires = [
-    "setuptools>=63",
-    "Cython>=3.0.0",
-    "scikit-build-core",
-]
+requires = ["cython>=3.0.0", "scikit-build-core"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -66,15 +60,48 @@ metadata.version.provider = "version_provider"
 metadata.version.provider-path = "."
 experimental = true
 
+[tool.scikit-build.sdist]
+# See MANIFEST.in for details
+include = [
+    "VERSION",
+    "LICENSE",
+    "THIRDPARTYNOTICES.txt",
+    "version_provider.py",
+    "requirements*.txt",
+    "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+    "CMakeLists.txt",
+    "src/**",
+    "cmake/**",
+    "3rdparty/**",
+    "testing/**",
+    "examples/**",
+]
+exclude = [
+    ".git",
+    ".github",
+    "**/.git",
+    "**/.github",
+    "3rdparty/clang**",
+    "3rdparty/llvm**",
+    "build",
+]
+
 [tool.scikit-build.wheel.packages]
 tilelang = "tilelang"
 "tilelang/src" = "src"
-"tilelang/3rdparty" = "3rdparty"
-
-# TODO: we might want to not include these in wheel?
-"tilelang/benchmark" = "benchmark"
-"tilelang/examples" = "examples"
-"tilelang/testing" = "testing"
+# NOTE: The mapping below places the contents of '3rdparty' inside 'tilelang/3rdparty' in the wheel.
+# This is necessary to find TVM shared libraries at runtime.
+# Restrict 3rdparty contents in wheel to the same allowlist as sdist
+# TVM
+"tilelang/3rdparty/tvm/src" = "3rdparty/tvm/src"
+"tilelang/3rdparty/tvm/python" = "3rdparty/tvm/python"
+"tilelang/3rdparty/tvm/version.py" = "3rdparty/tvm/version.py"
+# CUTLASS
+"tilelang/3rdparty/cutlass/include" = "3rdparty/cutlass/include"
+"tilelang/3rdparty/cutlass/tools" = "3rdparty/cutlass/tools"
+# Composable Kernel
+"tilelang/3rdparty/composable_kernel/include" = "3rdparty/composable_kernel/include"
+"tilelang/3rdparty/composable_kernel/library" = "3rdparty/composable_kernel/library"
 
 [tool.yapf]
 based_on_style = "yapf"
@@ -82,7 +109,6 @@ column_limit = 100
 indent_width = 4
 
 [tool.codespell]
-builtin = "clear,rare,en-GB_to_en-US"
 ignore-words = "docs/spelling_wordlist.txt"
 skip = [
     "build",
@@ -96,6 +122,17 @@ target-version = "py38"
 line-length = 100
 output-format = "full"
 
+exclude = [
+    "3rdparty",
+    "examples/deepseek_v32/inference",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Do not upgrade type hint in testing and examples.
+# See https://github.com/tile-ai/tilelang/issues/1079 for more information.
+"testing/**.py" = ["UP", "FA"]
+"examples/**.py" = ["UP", "FA"]
+
 [tool.ruff.lint]
 select = [
     # pycodestyle
@@ -103,7 +140,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    # "UP",
+    "UP", "FA",
     # flake8-bugbear
     "B",
     # flake8-simplify
@@ -124,6 +161,8 @@ ignore = [
     "SIM108",
     # key in dict.keys()
     "SIM118",
+    # open file w.o. ctx manager
+    "SIM115",
     # memory leaks
     "B019",
     # zip without explicit strict
@@ -131,53 +170,79 @@ ignore = [
     # No such file or directory
     "E902",
 ]
-[tool.ruff.lint.per-file-ignores]
-"3rdparty/**/*" = ["ALL"]
-"examples/deepseek_v32/inference/**/*" = ["ALL"]
+
+[tool.pytest.ini_options]
+verbosity_assertions = 3
+filterwarnings = ["always"]
 
 [tool.cibuildwheel]
 archs = ["auto64"]
-# wait for tvm fix
-build = "cp38-*"
-
-[tool.cibuildwheel.macos]
-archs = ["arm64"]
-
-[tool.cibuildwheel.linux]
-# Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
-manylinux-x86_64-image = "manylinux2014"
-manylinux-aarch64-image = "manylinux_2_28"
-skip = "*-musllinux*"
-environment-pass = ["CUDA_VERSION"]
-repair-wheel-command = [
-  "auditwheel repair --exclude libcuda.so.1 --exclude /usr/local/cuda\\* -w {dest_dir} {wheel}",
-  "pipx run abi3audit --strict --report {wheel}",
+skip = "*musllinux*"
+build-frontend = "build"
+environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1" }
+environment-pass = [
+    "CUDA_VERSION",
+    "NO_VERSION_LABEL",
+    "NO_TOOLCHAIN_VERSION",
+    "NO_GIT_VERSION",
+    "COLUMNS",
+    "CMAKE_GENERATOR",
+    "CMAKE_BUILD_PARALLEL_LEVEL",
+    "FORCE_COLOR",
+    "CLICOLOR_FORCE",
+]
+before-build = "env -0 | sort -z | tr '\\0' '\\n'"
+windows.before-build = "set"
+test-command = [
+    "python -c 'import tilelang; print(tilelang.__version__)'",
 ]
 
+[tool.cibuildwheel.linux]
+environment.PYTHONDEVMODE = "1"
+environment.PYTHONUNBUFFERED = "1"
+environment.PATH = "/usr/local/cuda/bin:$PATH"
+environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
+# Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
+manylinux-x86_64-image = "manylinux2014"   # CentOS 7
+manylinux-aarch64-image = "manylinux_2_28" # AlmaLinux 8
 # Install CUDA runtime and stub driver library
 # manylinux_2_28 uses gcc 14, which needs CUDA 12.8
 before-all = """
 set -eux
 
+cat /etc/*-release
+uname -a
+
 case "$(uname -m)" in
-"x86_64")
-    yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
-    ;;
-"aarch64")
-    dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
-    ;;
-*)
-    exit 1
-    ;;
+    "x86_64")
+        yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+        ;;
+    "aarch64")
+        dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
+        ;;
+    *)
+        exit 1
+        ;;
 esac
 
-# Assume CUDA_VERSION=xx.y
-v=${CUDA_VERSION:-12.4}
-v=${v:0:4}
-v=${v/./-}
-yum install -y cuda-minimal-build-${v} cuda-driver-devel-${v} cuda-nvrtc-devel-${v}
+cudaver="$(echo "${CUDA_VERSION:-"12.4"}" | cut -d '.' -f-2)"
+v="${cudaver//./-}"
+yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}" nvidia-driver-cuda-libs
 """
+repair-wheel-command = [
+    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
+    "pipx run abi3audit --verbose --strict {wheel}",
+]
 
-[tool.cibuildwheel.linux.environment]
-# Equlivant to `source /opt/rh/gcc-toolset-12/enable`, safe when gcc-toolset-12 is not installed
-PATH = "/usr/local/cuda/bin:$PATH"
+[tool.cibuildwheel.macos]
+repair-wheel-command = [
+    "delocate-wheel --verbose --ignore-missing-dependencies --no-sanitize-rpaths --require-archs {delocate_archs} -w {dest_dir} -v {wheel}",
+    "pipx run abi3audit --verbose --strict {wheel}",
+]
+
+[[tool.cibuildwheel.overrides]]
+select = "*linux*x86_64*"
+# CentOS 7 is too old to run import test. Do wheel installation test only.
+test-command = [
+    "echo 'Wheel is installed successfully'",
+]

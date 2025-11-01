@@ -71,7 +71,12 @@ def get_configs():
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
-@tilelang.jit(out_idx=[7])
+@tilelang.jit(
+    out_idx=[7],
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
 def chunk_scan_fwd(batch,
                    seqlen,
                    chunk_size,
@@ -91,13 +96,16 @@ def chunk_scan_fwd(batch,
     p = 1.44269504
 
     @T.prim_func
-    def main(cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype), x: T.Tensor(
-        (batch, seqlen, nheads, headdim), dtype), dt: T.Tensor(
-            (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Tensor(
-                (batch, nheads, nchunks, chunk_size), dtype),
-             C: T.Tensor((batch, seqlen, ngroups, dstate), dtype), prev_states: T.Tensor(
-                 (batch, nchunks, nheads, headdim, dstate), dtype), D: T.Tensor(
-                     (nheads), dtype), Output: T.Tensor((batch, seqlen, nheads, headdim), dtype)):
+    def main(
+            cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype),  # type: ignore
+            x: T.Tensor((batch, seqlen, nheads, headdim), dtype),  # type: ignore
+            dt: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),  # type: ignore
+            dA_cumsum: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),  # type: ignore
+            C: T.Tensor((batch, seqlen, ngroups, dstate), dtype),  # type: ignore
+            prev_states: T.Tensor((batch, nchunks, nheads, headdim, dstate), dtype),  # type: ignore
+            D: T.Tensor((nheads), dtype),  # type: ignore
+            Output: T.Tensor((batch, seqlen, nheads, headdim), dtype)  # type: ignore
+    ):
         with T.Kernel(
                 nheads,
                 T.ceildiv(chunk_size, block_M) * T.ceildiv(headdim, block_N),
@@ -133,6 +141,8 @@ def chunk_scan_fwd(batch,
                 cb_shared: tilelang.layout.make_swizzled_layout(cb_shared),
                 x_residual_shared: tilelang.layout.make_swizzled_layout(x_residual_shared)
             })
+
+            T.no_set_max_nreg()
 
             T.copy(dA_cumsum[batch_idx, bz, chunk_idx, m_idx * block_M:(m_idx + 1) * block_M],
                    dA_cs_m_shared)

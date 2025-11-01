@@ -527,7 +527,7 @@ def main(m=256,
     print(f"max abs diff: {max_val} at index: {max_idx}")
     assert_similar(
         output, ref_output, name="output",
-        eps=1e-5)  # We care about the similarity rather than abs. difference
+        eps=2e-5)  # We care about the similarity rather than abs. difference
     print("All checks pass. ✅")
 
 

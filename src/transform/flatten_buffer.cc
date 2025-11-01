@@ -25,12 +25,15 @@
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/attrs.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/data_type_rewriter.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
 #include <utility>
+
+#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -46,6 +49,10 @@ public:
   static PrimFunc Flatten(PrimFunc func) {
     arith::Analyzer ana;
     auto pass = BufferFlattener(&ana);
+    if (auto init_map =
+            func->attrs.GetAttr<Map<Var, PrimExpr>>(tl::attr::kLocalVarInit)) {
+      pass.local_var_init_map_ = init_map.value();
+    }
     auto writer = func.CopyOnWrite();
     pass.MarkBufferMapShapes(func);
     writer->body = pass.VisitStmt(func->body);
@@ -68,23 +75,23 @@ private:
 
     PrimExpr VisitExpr_(const VarNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
-        return cast(DataType::Int(64), GetRef<Var>(op));
+        return cast(DataType::Int(64), tvm::ffi::GetRef<Var>(op));
       }
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const IntImmNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return IntImm(DataType::Int(64), op->value);
       }
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const CastNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return cast(DataType::Int(64), op->value);
       }
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
     Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -108,7 +115,7 @@ private:
         << "All MatchBufferRegion should be removed in "
            "tir.transform.LowerMatchBuffer.";
 
-    Block block = GetRef<Block>(op);
+    Block block = tvm::ffi::GetRef<Block>(op);
 
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     alloc_buffers.MutateByApply(
@@ -197,6 +204,13 @@ private:
 
     if (!new_extents.same_as(alloc->extents)) {
       alloc.CopyOnWrite()->extents = new_extents;
+    }
+    if (!local_var_init_map_.empty()) {
+      auto init_it = local_var_init_map_.find(alloc->buffer_var);
+      if (init_it != local_var_init_map_.end()) {
+        const PrimExpr &init = (*init_it).second;
+        alloc.CopyOnWrite()->annotations.Set(tl::attr::kLocalVarInit, init);
+      }
     }
 
     return std::move(alloc);
@@ -354,6 +368,9 @@ private:
 
   /*! \brief The updated external buffer map. */
   Map<Var, Buffer> updated_extern_buffer_map_;
+
+  /*! \brief Local var initializers preserved from block annotations. */
+  Map<Var, PrimExpr> local_var_init_map_;
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
@@ -368,10 +385,10 @@ tvm::transform::Pass FlattenBuffer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.FlattenBuffer", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.FlattenBuffer", FlattenBuffer);
-});
+}
 
 } // namespace tl
 } // namespace tvm

@@ -85,7 +85,7 @@ def run_gemm(
 
     stramp = "&*(XS)"
 
-    @tvm.register_func("tilelang_callback_cuda_postproc", override=True)
+    @tvm.register_global_func("tilelang_callback_cuda_postproc", override=True)
     def tilelang_callback_cuda_postproc(code, _):
         code = f"// {stramp}\n" + code
         return code
@@ -404,14 +404,14 @@ def run_cython_dynamic_shape(M,
 
 def test_cython_dynamic_shape():
     run_cython_dynamic_shape(
-        T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+        T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
     run_cython_dynamic_shape(
-        T.symbolic("m"), T.symbolic("n"), 768, False, False, "float16", "float16", "float16", 128,
+        T.dynamic("m"), T.dynamic("n"), 768, False, False, "float16", "float16", "float16", 128,
         256, 32, 2)
 
     run_cython_dynamic_shape(
-        T.symbolic("m"), T.symbolic("n"), T.symbolic("k"), False, False, "float16", "float16",
+        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16",
         "float16", 128, 256, 32, 2)
 
 
@@ -473,7 +473,7 @@ def run_cython_dynamic_shape_with_out_idx(M,
 
 def test_cython_dynamic_shape_with_out_idx():
     run_cython_dynamic_shape_with_out_idx(
-        T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+        T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
 
 def matmul_int_variable(

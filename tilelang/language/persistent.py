@@ -1,15 +1,15 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
-from typing import List, Optional
 from tvm import tir
 from tilelang import _ffi_api
 
 
 def Persistent(
-    domain: List[tir.PrimExpr],
+    domain: list[tir.PrimExpr],
     wave_size: tir.PrimExpr,
     index: tir.PrimExpr,
-    group_size: Optional[tir.PrimExpr] = 8,
+    group_size: tir.PrimExpr | None = 8,
 ):
     """Tools to construct persistent for loop.
 
