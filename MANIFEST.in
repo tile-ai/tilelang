@@ -16,6 +16,17 @@ graft src
 graft cmake
 graft 3rdparty
 
+# TVM
+graft 3rdparty/tvm/src
+graft 3rdparty/tvm/python
+graft 3rdparty/tvm/version.py
+# CUTLASS
+graft 3rdparty/cutlass/include
+graft 3rdparty/cutlass/tools
+# Composable Kernel
+graft 3rdparty/composable_kernel/include
+graft 3rdparty/composable_kernel/library
+
 # Include test suites in SDist
 graft testing
 graft examples

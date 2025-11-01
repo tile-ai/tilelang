@@ -72,7 +72,13 @@ include = [
     "CMakeLists.txt",
     "src/**",
     "cmake/**",
-    "3rdparty/**",
+    "3rdparty/tvm/src",
+    "3rdparty/tvm/python",
+    "3rdparty/tvm/version.py",
+    "3rdparty/cutlass/include",
+    "3rdparty/cutlass/tools",
+    "3rdparty/composable_kernel/include",
+    "3rdparty/composable_kernel/library",
     "testing/**",
     "examples/**",
 ]
@@ -81,8 +87,7 @@ exclude = [
     ".github",
     "**/.git",
     "**/.github",
-    "3rdparty/clang**",
-    "3rdparty/llvm**",
+    "3rdparty/**",
     "build",
 ]
 
@@ -215,9 +220,11 @@ uname -a
 
 case "$(uname -m)" in
     "x86_64")
+        DEFAULT_CUDA_VERSION="12.1"
         yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
         ;;
     "aarch64")
+        DEFAULT_CUDA_VERSION="12.8"
         dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
         ;;
     *)
@@ -225,7 +232,7 @@ case "$(uname -m)" in
         ;;
 esac
 
-cudaver="$(echo "${CUDA_VERSION:-"12.4"}" | cut -d '.' -f-2)"
+cudaver="$(echo "${CUDA_VERSION:-$DEFAULT_CUDA_VERSION}" | cut -d '.' -f-2)"
 v="${cudaver//./-}"
 yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}" nvidia-driver-cuda-libs
 """
