@@ -1,14 +1,18 @@
+FROM quay.io/pypa/manylinux2014_x86_64 AS builder_amd64
+
+RUN yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+
+ARG CUDA_VERSION=12.1
+ENV CUDA_VERSION=${CUDA_VERSION}
+
+FROM quay.io/pypa/manylinux_2_28_aarch64 AS builder_arm64
+
+RUN dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
+
+ARG CUDA_VERSION=12.8
+ENV CUDA_VERSION=${CUDA_VERSION}
+
 ARG TARGETARCH
-FROM pytorch/manylinux2_28-builder:cuda12.1 AS builder_amd64
-ENV CUDA_VERSION=12.1 \
-    AUDITWHEEL_PLAT=manylinux_2_28_x86_64
-RUN pip3 install uv
-
-FROM pytorch/manylinuxaarch64-builder:cuda12.8 AS builder_arm64
-ENV CUDA_VERSION=12.8 \
-    AUDITWHEEL_PLAT=manylinux_2_28_aarch64
-RUN /opt/python/cp312-cp312/bin/pip install uv
-
 FROM builder_${TARGETARCH}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -19,12 +23,7 @@ ENV PATH="/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 
 RUN set -eux; \
-    uv venv -p 3.12 --seed /venv; \
+    pipx install cibuildwheel; \
     git config --global --add safe.directory '/tilelang'
-
-ENV PATH="/venv/bin:$PATH" \
-    VIRTUAL_ENV=/venv
-
-RUN uv pip install build wheel
 
 WORKDIR /tilelang
