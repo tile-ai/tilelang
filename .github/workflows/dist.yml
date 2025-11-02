@@ -89,7 +89,7 @@ jobs:
 
       - name: Upload SDist
         # Not PR to save artifact storage, as SDist is only needed for releases.
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
         uses: actions/upload-artifact@v4
         with:
           name: sdist
@@ -157,7 +157,7 @@ jobs:
 
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
         uses: actions/upload-artifact@v5
         with:
           name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
@@ -167,7 +167,7 @@ jobs:
   list-artifacts:
     name: List artifacts
     # Not PR to save artifact storage, as artifacts are only needed for releases.
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
     runs-on: ubuntu-latest
     needs: [build-sdist, build-wheels]
     timeout-minutes: 15
