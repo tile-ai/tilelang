@@ -1290,11 +1290,7 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     scope = GetPtrStorageScope(buffer->data);
   }
   if (scope == "local.var" || scope.find("local.descriptor") == 0) {
-    if (scope == "local.descriptor.tcgen05_instr") {
-      os << vid << ".desc_";
-    } else {
-      os << vid;
-    }
+    os << vid;
     return os.str();
   }
   std::string index_str = PrintExpr(index);

@@ -208,5 +208,4 @@ def test_shuffle_elect_block_leader():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_get_lane_idx_custom()
+    tilelang.testing.main()
