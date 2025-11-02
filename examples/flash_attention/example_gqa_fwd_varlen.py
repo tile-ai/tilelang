@@ -8,7 +8,6 @@ from einops import rearrange, repeat
 from tilelang.profiler import do_bench
 from varlen_utils import generate_random_padding_mask, generate_qkv
 
-tilelang.disable_cache()
 
 def attention_ref(
         q,
@@ -27,12 +26,12 @@ def attention_ref(
         q, k, v = q.float(), k.float(), v.float()
     b, T, Hq, D = q.shape
     S = k.shape[1]
-    scale = (1.0 / D) ** 0.5
+    scale = (1.0 / D)**0.5
     k = repeat(k, "b s h d -> b s (h g) d", g=Hq // k.shape[2])
     v = repeat(v, "b s h d -> b s (h g) d", g=Hq // v.shape[2])
     scores = torch.einsum("bthd,bshd->bhts", q, k)
     left, right = window_size
-    left  = S if left  is None or left  < 0 else int(left)
+    left = S if left is None or left < 0 else int(left)
     right = S if right is None or right < 0 else int(right)
     t_idx = torch.arange(T, device=scores.device)[:, None]
     s_idx = torch.arange(S, device=scores.device)[None, :]
@@ -102,7 +101,7 @@ def flashattn(batch_size,
             scores_scale = T.alloc_fragment([block_M], accum_dtype)
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
-            
+
             T.annotate_layout({
                 O_shared: tilelang.layout.make_swizzled_layout(O_shared),
                 Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
@@ -118,7 +117,7 @@ def flashattn(batch_size,
             k_end_idx = cu_seqlens_k[batch_idx + 1]
 
             q_current_seqlen = q_end_idx - q_start_idx
-            k_current_seqlen = k_end_idx - kv_start_idx
+            kv_current_seqlen = k_end_idx - kv_start_idx
 
             T.copy(
                 Q_unpad[q_start_idx + bx * block_M:q_start_idx + (bx + 1) * block_M, head_idx, :],
@@ -128,10 +127,11 @@ def flashattn(batch_size,
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
-            # loop_range = T.ceildiv(k_current_seqlen, block_N)
             loop_range = (
-                T.min(T.ceildiv(q_current_seqlen + (bx + 1) * block_M, block_N), T.ceildiv(k_current_seqlen, block_N))
-                if is_causal else T.ceildiv(k_current_seqlen, block_N))
+                T.min(
+                    T.ceildiv(q_current_seqlen +
+                              (bx + 1) * block_M, block_N), T.ceildiv(kv_current_seqlen, block_N))
+                if is_causal else T.ceildiv(kv_current_seqlen, block_N))
 
             for k in T.Pipelined(loop_range, num_stages=num_stages):
                 T.copy(
@@ -140,22 +140,22 @@ def flashattn(batch_size,
 
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else((bx * block_M + i < k * block_N + j) or
-                                                     (bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen),
-                                                     -1e9, 0)
+                        acc_s[i,
+                              j] = T.if_then_else((bx * block_M + i < k * block_N + j) or
+                                                  (bx * block_M + i >= q_current_seqlen or
+                                                   k * block_N + j >= kv_current_seqlen), -1e9, 0)
                 else:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen),
-                                                     -1e9, 0)
+                                                      k * block_N + j >= kv_current_seqlen), -1e9,
+                                                     0)
 
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-                
+
                 for i in T.Parallel(block_M):
                     scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
 
@@ -265,7 +265,9 @@ def main(batch: int = 1,
     torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
     print("All checks passed.✅")
     latency = do_bench(
-        lambda: kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q), _n_warmup=5, _n_repeat=5)
+        lambda: kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q),
+        _n_warmup=5,
+        _n_repeat=5)
     print("Tile-lang: {:.2f} ms".format(latency))
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
