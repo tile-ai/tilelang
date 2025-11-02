@@ -71,8 +71,7 @@ def _compile_and_check(
 
     print(kernel.get_kernel_source())
 
-    profiler = kernel.get_profiler(
-        tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
     def ref_program(A, B):
         import torch
@@ -82,8 +81,8 @@ def _compile_and_check(
         if trans_B:
             B = B.T
         if in_dtype == "float32":
-            A = ((A.view(torch.int32) - 0x1000)).view(torch.float32)
-            B = ((B.view(torch.int32) - 0x1000)).view(torch.float32)
+            A = (A.view(torch.int32) - 0x1000).view(torch.float32)
+            B = (B.view(torch.int32) - 0x1000).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -383,51 +382,42 @@ def run_gemm_rr(
 
     _compile_and_check(program, trans_A, trans_B, in_dtype, out_dtype)
 
+
 M_VALUES = [64, 128, 256]
 N_VALUES = [16, 32, 64, 128]
 K_VALUES = [16, 32, 64, 128]
 K_VALUES_8Bit = [32, 64, 128]
-FALSE_TRUE_CASES = (
-    [
-        pytest.param(
-            k,
-            "float16",
-            "float16",
-            "float16",
-            id=f"K{k}-float16-float16-float16",
-        )
-        for k in K_VALUES
-    ]
-    + [
-        pytest.param(
-            k,
-            "int8",
-            "int32",
-            "int32",
-            id="K32-int8-int32-int32",
-        ) for k in K_VALUES_8Bit
-    ]
-    + [
-        pytest.param(
-            k,
-            "float8_e5m2",
-            "float32",
-            "float32",
-            id="K32-float8_e5m2-float32-float32",
-        )
-        for k in K_VALUES_8Bit
-    ]
-    +
-    [pytest.param(
-            k,
-            "float8_e4m3",
-            "float32",
-            "float32",
-            id="K32-float8_e4m3-float32-float32",
-        )
-    for k in K_VALUES_8Bit
-    ]
-)
+FALSE_TRUE_CASES = ([
+    pytest.param(
+        k,
+        "float16",
+        "float16",
+        "float16",
+        id=f"K{k}-float16-float16-float16",
+    ) for k in K_VALUES
+] + [pytest.param(
+    k,
+    "int8",
+    "int32",
+    "int32",
+    id="K32-int8-int32-int32",
+) for k in K_VALUES_8Bit] + [
+    pytest.param(
+        k,
+        "float8_e5m2",
+        "float32",
+        "float32",
+        id="K32-float8_e5m2-float32-float32",
+    ) for k in K_VALUES_8Bit
+] + [
+    pytest.param(
+        k,
+        "float8_e4m3",
+        "float32",
+        "float32",
+        id="K32-float8_e4m3-float32-float32",
+    ) for k in K_VALUES_8Bit
+])
 
 
 def _ensure_torch_dtypes(*dtype_names):
@@ -484,6 +474,7 @@ def run_gemm_rr_true_false(m, n, k):
 
 def run_gemm_rr_true_true(m, n, k):
     run_gemm_rr(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k, 2, 128)
+
 
 TRANS_CASES = [
     pytest.param(False, False, id="nn"),
@@ -699,7 +690,7 @@ if __name__ == "__main__":
     #             print(f"======================= Test {m} {n} {k} False True =============================")
     #             run_gemm(m, n, k * 3, False, True, "float16", "float16", "float16", m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
-    
+
     # # Test Pass
     # for m in [64, 128, 256]:
     #     for n in [16, 32, 64, 128]:
@@ -717,7 +708,6 @@ if __name__ == "__main__":
     #             print(f"Test {m}, {n} {k} Pass")
     #         print(f"Test {n} Pass")
 
-
     # # Test Pass
     # for m in [64, 128, 256]:
     #     for n in [16, 32, 64, 128]:
@@ -726,7 +716,6 @@ if __name__ == "__main__":
     #             run_gemm(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k, 2, 128)
     #             print(f"Test {m}, {n} {k} Pass")
     #         print(f"Test {n} Pass")
-
 
     # Test Pass
     # for m in [64, 128, 256]:
