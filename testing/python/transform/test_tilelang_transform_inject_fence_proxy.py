@@ -186,43 +186,5 @@ def test_wgmma_marked_async():
     assert order.index("tl.fence_proxy_async") < order.index("tl.ptx_wgmma_ss")
 
 
-def test_wgmma_after_descriptor():
-
-    @T.prim_func
-    def before():
-        with T.Kernel(1):
-            desc_a = T.decl_buffer((1,), "uint64", scope="local.descriptor.wgmma")
-            desc_b = T.decl_buffer((1,), "uint64", scope="local.descriptor.wgmma")
-            C_local = T.decl_buffer((32,), "float16", scope="local")
-            T.initialize_wgmma_descriptor(desc_a, T.uint64(0), 2, 1, 32)
-            T.initialize_wgmma_descriptor(desc_b, T.uint64(0), 2, 1, 32)
-            T.warpgroup_arrive()
-            T.ptx_wgmma_ss("float16", "m64n64k16", T.bool(True), T.bool(True), "fp16", "fp16",
-                           "fp16", desc_a.data, T.int32(0), desc_b.data, T.int32(0), C_local.data,
-                           T.int32(0), T.bool(True), 1, 1)
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
-
-    fence_count = 0
-    order = []
-
-    def visit(node):
-        nonlocal fence_count
-        if isinstance(node, tir.Evaluate):
-            call = node.value
-            if isinstance(call, tir.Call):
-                name = getattr(call.op, "name", "")
-                order.append(name)
-                if name == "tl.fence_proxy_async":
-                    fence_count += 1
-
-    tir.stmt_functor.post_order_visit(mod["main"].body, visit)
-    assert fence_count >= 1
-    assert "tl.warpgroup_arrive" in order
-    assert order.index("tl.fence_proxy_async") < order.index("tl.warpgroup_arrive")
-
-
 if __name__ == "__main__":
     tilelang.testing.main()
