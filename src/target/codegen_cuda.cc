@@ -1749,10 +1749,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "reinterpret_cast<const (ARegType)*>((A_ptr) + (A_offset)), "
         "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)));\n";
     tl::codegen::Replacer replacer;
+    std::string AType = tl::codegen::ptx::DTypeEnumToString(dtype_a_enum);
+    if (AType == "tl::DataType::kFloat32") {
+      AType = "tl::DataType::kTensorFloat32";
+    }
+    std::string BType = tl::codegen::ptx::DTypeEnumToString(dtype_b_enum);
+    if (BType == "tl::DataType::kFloat32") {
+      BType = "tl::DataType::kTensorFloat32";
+    }
+
     replacer.register_rule("(AType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_a_enum));
+                           tl::codegen::ptx::DTypeEnumToString(AType));
     replacer.register_rule("(BType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_b_enum));
+                           tl::codegen::ptx::DTypeEnumToString(BType));
     replacer.register_rule("(CType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
     replacer.register_rule("(M)", std::to_string(m));
@@ -1852,10 +1861,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "uint64_t((desc_b) + (B_offset)), ((uint32_t*)((C))), (scale_out));\n";
     // replace patterns
     tl::codegen::Replacer replacer;
-    replacer.register_rule("(AType)",
-                           tl::codegen::ptx::DTypeEnumToString(A_dtype));
-    replacer.register_rule("(BType)",
-                           tl::codegen::ptx::DTypeEnumToString(B_dtype));
+
+    std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
+    if (AType == "tl::DataType::kFloat32") {
+      AType = "tl::DataType::kTensorFloat32";
+    }
+    std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
+    if (BType == "tl::DataType::kFloat32") {
+      BType = "tl::DataType::kTensorFloat32";
+    }
+
+    replacer.register_rule("(AType)", AType);
+    replacer.register_rule("(BType)", BType);
     replacer.register_rule("(CType)",
                            tl::codegen::ptx::DTypeEnumToString(C_dtype));
     replacer.register_rule("(M)", std::to_string(m));
@@ -1920,10 +1937,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "(scale_out));\n";
 
     tl::codegen::Replacer replacer;
-    replacer.register_rule("(AType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_a_enum));
-    replacer.register_rule("(BType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_b_enum));
+    std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
+    if (AType == "tl::DataType::kFloat32") {
+      AType = "tl::DataType::kTensorFloat32";
+    }
+    std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
+    if (BType == "tl::DataType::kFloat32") {
+      BType = "tl::DataType::kTensorFloat32";
+    }
+
+    replacer.register_rule("(AType)", AType);
+    replacer.register_rule("(BType)", BType);
     replacer.register_rule("(CType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
     replacer.register_rule("(M)", std::to_string(m));

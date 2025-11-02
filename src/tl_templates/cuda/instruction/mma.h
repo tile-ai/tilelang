@@ -127,6 +127,15 @@ TL_DEFINE_MMA_DISPATCHER(kFloat8_e5m2, kFloat8_e5m2, kFloat16, 16, 8, 32, false,
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e5m2, kFloat8_e5m2, kFloat32, 16, 8, 32, false,
                          true, false, cute::SM89_16x8x32_F32E5M2E5M2F32_TN)
 
+// TF32 inputs (FP32 math on Tensor Cores)
+// Support both k=4 and k=8 variants on SM80
+TL_DEFINE_MMA_DISPATCHER(kTensorFloat32, kTensorFloat32, kFloat32, 16, 8, 4,
+                         false, true, false,
+                         cute::SM80_16x8x4_F32TF32TF32F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kTensorFloat32, kTensorFloat32, kFloat32, 16, 8, 8,
+                         false, true, false,
+                         cute::SM80_16x8x8_F32TF32TF32F32_TN)
+
 #undef TL_DEFINE_MMA_DISPATCHER
 
 } // namespace detail
