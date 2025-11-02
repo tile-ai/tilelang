@@ -164,7 +164,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
         wgmma_prefix = self.wgmma_prefix
-        scale_out = ~clear_accum
         scale_in_a = 1
         scale_in_b = 1
 
@@ -256,6 +255,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
             for ki in T.serial(0, (k_dim // micro_size_k)):
+                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
                 for i in T.serial(m_dim // 64):
                     A_offset = (ki % ak_atom_size) * micro_size_k + i * 64 * a_swizzle_atom_elems + (
                         ki // ak_atom_size
@@ -291,7 +291,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
         wgmma_prefix = self.wgmma_prefix
-        scale_out = ~clear_accum
         scale_in_a = 1
         scale_in_b = 1
 
@@ -345,6 +344,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
             for ki in T.serial(0, (k_dim // micro_size_k)):
+                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
                 for i in T.serial(m_dim // 64):
                     A_offset = ki * warp_rows * local_size_a + i * local_size_a
                     B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
