@@ -16,7 +16,7 @@ def test_let_vectorize_load():
 
     mod = tvm.IRModule({"main": main})
     mod = tvm.compile(mod, target="cuda")
-    assert "float4 b" in mod.mod.imported_modules[0].get_source()
+    assert "float4 b" in mod.mod.imports[0].inspect_source()
 
 
 if __name__ == "__main__":
