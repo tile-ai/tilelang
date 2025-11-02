@@ -296,6 +296,140 @@ def warpgroup_wait(num_mma: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_wait"), num_mma)
 
 
+def get_lane_idx(warp_size: int | PrimExpr | None = None,) -> PrimExpr:
+    """Return the logical lane index of the calling thread within a warp.
+
+    Parameters
+    ----------
+    warp_size : Optional[int, PrimExpr]
+        Logical warp (or wavefront) size. Defaults to 32 on NVIDIA and 64 on AMD.
+
+    Example
+    -------
+    >>> lane = T.get_lane_idx()
+    >>> custom_lane = T.get_lane_idx(64)  # override warp size explicitly
+
+    Implementation Notes
+    --------------------
+    Lowers to the CUDA helper `tl::get_lane_idx(warp_size)` defined in
+    `src/tl_templates/cuda/intrin.h`, which computes the lane index from the
+    linear thread id using the provided `warp_size`.
+    """
+    warp_size_expr = _normalize_index_arg(warp_size)
+    if warp_size_expr is None:
+        return tir.call_intrin("int32", tir.op.Op.get("tl.get_lane_idx"))
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_lane_idx"), warp_size_expr)
+
+
+def get_warp_idx_sync(warp_size: int | PrimExpr | None = None,) -> PrimExpr:
+    """Return the canonical warp index, assuming the warp's threads are converged.
+
+    Parameters
+    ----------
+    warp_size : Optional[int, PrimExpr]
+        Logical warp size used for the index calculation.
+
+    Example
+    -------
+    >>> warp = T.get_warp_idx_sync()
+    >>> custom_warp = T.get_warp_idx_sync(64)
+
+    Implementation Notes
+    --------------------
+    Emits `tl::get_warp_idx_sync(warp_size)` which divides the block-linear
+    thread id by `warp_size`, matching the semantics of CUTLASS' canonical helpers.
+    """
+    warp_size_expr = _normalize_index_arg(warp_size)
+    if warp_size_expr is None:
+        return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx_sync"))
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx_sync"), warp_size_expr)
+
+
+def get_warp_idx(warp_size: int | PrimExpr | None = None,) -> PrimExpr:
+    """Return the canonical warp index without synchronizing the warp.
+
+    Parameters
+    ----------
+    warp_size : Optional[int, PrimExpr]
+        Logical warp size used for the index calculation.
+
+    Example
+    -------
+    >>> warp = T.get_warp_idx()
+    >>> custom_warp = T.get_warp_idx(64)
+
+    Implementation Notes
+    --------------------
+    Lowers to `tl::get_warp_idx(warp_size)` which divides the block-linear
+    thread id by the provided `warp_size` without requiring warp convergence.
+    """
+    warp_size_expr = _normalize_index_arg(warp_size)
+    if warp_size_expr is None:
+        return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx"))
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx"), warp_size_expr)
+
+
+def get_warp_group_idx(
+    warp_size: int | PrimExpr | None = None,
+    warps_per_group: int | PrimExpr | None = None,
+) -> PrimExpr:
+    """Return the canonical warp group index for the calling thread.
+
+    Parameters
+    ----------
+    warp_size : Optional[int, PrimExpr]
+        Logical warp size to use (defaults to 32 on NVIDIA / 64 on AMD).
+    warps_per_group : Optional[int, PrimExpr]
+        Number of warps per warp-group. Defaults to 4 on NVIDIA architectures.
+
+    Example
+    -------
+    >>> group = T.get_warp_group_idx()
+    >>> custom_group = T.get_warp_group_idx(32, 6)  # treat 6 warps as a group
+
+    Implementation Notes
+    --------------------
+    Generates `tl::get_warp_group_idx(warp_size, warps_per_group)` which
+    divides the block-linear thread id by `warp_size * warps_per_group`,
+    matching the canonical ordering while allowing architecture-specific overrides.
+    """
+    warp_size_expr = _normalize_index_arg(warp_size)
+    warps_per_group_expr = _normalize_index_arg(warps_per_group)
+    args = []
+    if warp_size_expr is not None:
+        args.append(warp_size_expr)
+    if warps_per_group_expr is not None:
+        if warp_size_expr is None:
+            raise ValueError("get_warp_group_idx expects `warp_size` when specifying "
+                             "`warps_per_group`.")
+        args.append(warps_per_group_expr)
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_group_idx"), *args)
+
+
+def shuffle_elect(thread_extent: int) -> PrimExpr:
+    """Elect exactly one lane within a logical thread group.
+
+    Parameters
+    ----------
+    thread_extent : int
+        Size (in threads) of the group in which a single lane should be elected.
+        Passing 0 elects a single lane in the entire thread block.
+
+    Example
+    -------
+    >>> is_leader = T.shuffle_elect(64)
+    >>> T.if_then_else(is_leader, do_leader_work(), T.evaluate(0))
+
+    Implementation Notes
+    --------------------
+    Lowered to the CUDA helper `tl::tl_shuffle_elect<thread_extent>()` defined in
+    `src/tl_templates/cuda/intrin.h`, which relies on
+    `cutlass::canonical_warp_idx_sync()` and `cute::elect_one_sync()` (or
+    `__shfl_sync`) to pick one lane per group.
+    """
+    return tir.call_intrin("bool", tir.op.Op.get("tl.tl_shuffle_elect"), thread_extent)
+
+
 def warpgroup_fence_operand(buffer_or_ptr: Buffer | PrimExpr,
                             offset: int | PrimExpr = 0,
                             num_regs: int | PrimExpr | None = None,
@@ -563,3 +697,14 @@ def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)
+
+
+def tcgen05_mma_arrive(mbar_ptr):
+    """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
+
+    Parameters
+    ----------
+    mbar_ptr : PrimExpr
+        Pointer to the mbarrier object in shared memory (e.g., Barrier*).
+    """
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar_ptr)
