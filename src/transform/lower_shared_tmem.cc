@@ -88,7 +88,8 @@ private:
     Array<Var> new_data_vars;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
-      if (var_remap_.count(data)) continue;
+      if (var_remap_.count(data))
+        continue;
       auto new_data =
           Var(data->name_hint, PointerType(PrimType(tmem_dtype_), "shared"));
       var_remap_.Set(data, new_data);

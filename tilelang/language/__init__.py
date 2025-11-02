@@ -46,6 +46,9 @@ from .allocate import (
     alloc_tmem,  # noqa: F401
     alloc_reducer,  # noqa: F401
     alloc_descriptor,  # noqa: F401
+    alloc_wgmma_desc,  # noqa: F401
+    alloc_tcgen05_smem_desc,  # noqa: F401
+    alloc_tcgen05_instr_desc,  # noqa: F401
 )
 from .copy import copy, c2d_im2col  # noqa: F401
 from .gemm import GemmWarpPolicy, gemm, gemm_v2  # noqa: F401

@@ -1,10 +1,9 @@
+from __future__ import annotations
 from enum import IntEnum
-from typing import Optional, Callable
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var, IndexMap
-import tvm
+from tvm.tir import PrimExpr, Buffer, Var
 from tilelang import _ffi_api
 from tilelang.utils import is_tensor_memory
 from tilelang.layout import (
@@ -15,9 +14,6 @@ from tilelang.layout import (
     make_linear_layout,
 )
 from tvm.runtime import convert
-from tilelang.intrinsics.mma_layout import (shared_16x8_to_mma_32x4_layout_sr_a,
-                                            shared_16x16_to_mma_32x8_layout_sr_a,
-                                            shared_16x32_to_mma_32x16_layout_sr_a)
 
 lift = convert
 
@@ -25,9 +21,9 @@ lift = convert
 class SwizzleMode(IntEnum):
     # SWIZZLE_NONE = 0, SWIZZLE_32B = 3, SWIZZLE_64B = 2, SWIZZLE_128B = 1
     NONE = 0
-    SWIZZLE_128B = 1
-    SWIZZLE_64B = 2
-    SWIZZLE_32B = 3
+    SWIZZLE_128B = 2
+    SWIZZLE_64B = 4
+    SWIZZLE_32B = 6
 
     def is_none(self) -> bool:
         return self == SwizzleMode.NONE
@@ -88,13 +84,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        is_m_first: Optional[bool] = False,
-        thread_var: Optional[Var] = None,
+        is_m_first: bool = False,
+        thread_var: Var | None = None,
     ):
         super().__init__(a_dtype, b_dtype, accum_dtype, a_transposed, b_transposed, block_row_warps,
                          block_col_warps, warp_row_tiles, warp_col_tiles, chunk, reduce_k,
                          num_elems_per_byte, is_m_first, thread_var)
-        self._initialize_tcgen05_prefix(self.n_dim)
 
     def _assign_a_shared_layout(self, layout: Layout):
         self.a_shared_layout = layout
@@ -103,12 +98,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def _assign_b_shared_layout(self, layout: Layout):
         self.b_shared_layout = layout
         return self
-
-    def _initialize_tcgen05_prefix(self, n_dim: int = 16):
-        inst_m, inst_n = 64, self.block_col_warps * self.warp_col_tiles
-        # 256 bits per instruction
-        inst_k = 256 // DataType(self.a_dtype).bits
-        self.tcgen05_prefix = f"m{inst_m}n{inst_n}k{inst_k}"
 
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
         warp_row_tiles = self.warp_row_tiles
@@ -147,22 +136,19 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             raise ValueError(f"Unsupported swizzle mode: {layout}")
 
     def tcgen05mma(self,
-              A_buf: Buffer,
-              B_buf: Buffer,
-              C_local_buf: Buffer,
-              mbar,
-              clear_accum: PrimExpr = False):
+                   A_buf: Buffer,
+                   B_buf: Buffer,
+                   C_local_buf: Buffer,
+                   mbar,
+                   clear_accum: PrimExpr = False):
 
         if is_tensor_memory(A_buf):
             return self.tcgen05mma_rs(A_buf, B_buf, C_local_buf, clear_accum)
 
-        local_size_out = self.local_size_out
         accum_dtype = self.accum_dtype
         m_dim = self.block_row_warps * self.warp_row_tiles
-        warp_cols = self.warp_cols
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
-        scale_out = ~clear_accum
         scale_in_a = 1
         scale_in_b = 1
 
@@ -178,8 +164,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none(
         ) else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        accum_bits = DataType(accum_dtype).bits
-        accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
+        accum_dtype_in_bits = DataType(accum_dtype).bits
+
+        meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
+        if len(meta) != 3:
+            raise ValueError(
+                f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
+                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}")
+        atom_m, atom_n, atom_k = (int(x) for x in meta)
+        enable_ws = atom_m != 128
+
         # by default, we utilize non-swizzle layout offset
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim *
                                                                                elems_in_bytes)
@@ -200,8 +194,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 if a_m_axis_atoms <= 1:
                     a_leading_byte_offset = 0
                 else:
-                    a_leading_byte_offset = 8 * a_swizzle_mode.swizzle_atom_size() * (
-                        a_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                    a_leading_byte_offset = k_dim * a_swizzle_mode.swizzle_byte_size()
 
                 if a_m_axis_atoms <= 1:
                     a_stride_byte_offset = 8 * elems_in_bytes * m_dim
@@ -238,91 +231,84 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
 
-        meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
-        if len(meta) != 3:
-            raise ValueError(
-                f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
-                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
-            )
-        atom_m, atom_n, atom_k = (int(x) for x in meta)
-        layout_mode = "ss" if atom_m == 128 else "ws"
-        a_dtype_abbrv = self.a_dtype_abbrv
-        b_dtype_abbrv = self.b_dtype_abbrv
-
-        print("Before get get_tcgen5_instr_desc")
-        instr_desc = T.Cast(
-            "uint32",
-            self.get_tcgen5_instr_desc(
-                atom_m,
-                atom_n,
-                atom_k,
-                a_is_k_major,
-                b_is_k_major,
-                scale_in_a,
-                scale_in_b,
-            ),
+        instr_desc = self.get_tcgen5_instr_desc(
+            atom_m,
+            atom_n,
+            atom_k,
+            a_is_k_major,
+            b_is_k_major,
+            scale_in_a,
+            scale_in_b,
         )
-        print("instr_desc, ", instr_desc)
-        mask_full = T.Cast("int32", -1)
+        # Allocate an instruction descriptor wrapper and initialize it
+        a_dtype_abbrv = self.a_dtype_abbrv
         mask_zero = T.Cast("int32", 0)
-        mask0 = mask1 = mask2 = mask3 = mask_full if layout_mode == "ss" else mask_zero
+        mask0 = mask1 = mask2 = mask3 = mask_zero
 
         @T.macro
-        def _warp_mma(A_buf, B_buf, C_local_buf):
-            desc_a = T.alloc_descriptor()
-            desc_b = T.alloc_descriptor()
+        def _warp_mma(A_buf, B_buf, C_local_buf, mbar):
+            # Allocate SMEM descriptors for A and B
+            desc_a = T.alloc_tcgen05_smem_desc()
+            desc_b = T.alloc_tcgen05_smem_desc()
+            A_ptr = A_buf.access_ptr("r")
+            B_ptr = B_buf.access_ptr("r")
+
+            T.initialize_tcgen05_descriptor(
+                desc_a,
+                A_ptr,
+                int(a_leading_byte_offset >> 4),
+                int(a_stride_byte_offset >> 4),
+                0,
+                False,
+                int(a_swizzle_mode),
+            )
+            T.initialize_tcgen05_descriptor(
+                desc_b,
+                B_ptr,
+                int(b_leading_byte_offset >> 4),
+                int(b_stride_byte_offset >> 4),
+                0,
+                False,
+                int(b_swizzle_mode),
+            )
 
             for ki in T.serial(0, (k_dim // micro_size_k)):
-                for i in T.serial(m_dim // 64):
-                    A_elem_offset = (ki % ak_atom_size) * micro_size_k + i * 64 * a_swizzle_atom_elems + (
+                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
+                for i in T.serial(m_dim // atom_m):
+                    A_elem_offset = (
+                        ki % ak_atom_size
+                    ) * micro_size_k + i * atom_m * a_swizzle_atom_elems + (
                         ki // ak_atom_size
-                    ) * m_dim * a_swizzle_atom_elems if a_is_k_major else i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                    ) * m_dim * a_swizzle_atom_elems if a_is_k_major else i * atom_m * k_dim + ki * a_swizzle_atom_elems * micro_size_k
                     B_elem_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
                         ki % bk_atom_size
                     ) * micro_size_k if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k
                     A_byte_offset = A_elem_offset * elems_in_bytes
                     B_byte_offset = B_elem_offset * elems_in_bytes
-                    A_ptr = A_buf.access_ptr("r")
-                    B_ptr = B_buf.access_ptr("r")
-                    T.initialize_tcgen05_descriptor(
-                        desc_a,
-                        A_ptr,
-                        int(a_leading_byte_offset >> 4),
-                        int(a_stride_byte_offset >> 4),
-                        0,
-                        False,
-                        int(a_swizzle_mode),
-                    )
-                    T.initialize_tcgen05_descriptor(
-                        desc_b,
-                        B_ptr,
-                        int(b_leading_byte_offset >> 4),
-                        int(b_stride_byte_offset >> 4),
-                        0,
-                        False,
-                        int(b_swizzle_mode),
-                    )
+                    C_offset = i * atom_n * accum_dtype_in_bits // 32  # 32 bits per tmem bank
+
                     T.ptx_tcgen05_mma_ss(
-                        a_dtype_abbrv,
-                        b_dtype_abbrv,
                         a_dtype_abbrv,
                         desc_a.data,
                         A_byte_offset,
                         desc_b.data,
                         B_byte_offset,
                         C_local_buf.data,
+                        C_offset,
                         instr_desc,
                         scale_out,
                         mask0,
                         mask1,
                         mask2,
                         mask3,
+                        enable_ws,
                     )
+            T.tcgen05_mma_arrive(mbar)
 
-        return _warp_mma(A_buf, B_buf, C_local_buf)
+        return _warp_mma(A_buf, B_buf, C_local_buf, mbar)
 
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
-       raise NotImplementedError
+        raise NotImplementedError
 
     def make_mma_store_layout(self, tmem_buf: Buffer) -> Layout:
         """
@@ -347,8 +333,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert is_tensor_memory(tmem_buf), "tmem_buf must reside in tensor memory (shared.tmem)"
         if len(tmem_buf.shape) != 2:
             raise ValueError(
-                f"TCGEN5MMA expects a 2-D tensor-memory buffer, got shape {tmem_buf.shape}"
-            )
+                f"TCGEN5MMA expects a 2-D tensor-memory buffer, got shape {tmem_buf.shape}")
 
         m = int(tmem_buf.shape[0])
         n = int(tmem_buf.shape[1])
@@ -356,10 +341,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         meta = self.get_tcgen5_mma_meta(m, n, k)
         if len(meta) != 3:
-            raise ValueError(
-                f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, "
-                f"A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
-            )
+            raise ValueError(f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, "
+                             f"A dtype={self.a_dtype}, accum dtype={self.accum_dtype}")
         atom_m, atom_n, _ = (int(x) for x in meta)
 
         if m % atom_m != 0 or n % atom_n != 0:
@@ -396,19 +379,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             raise ValueError(f"Unsupported TCGEN5 atom_m={atom_m}")
 
         return Layout([m, n], forward)
-    
-    
-    def get_tcgen5_mma_meta(self, m: int, n: int, k: int):
-        return _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype))
 
-    def get_tcgen5_instr_desc(self,
-                              atom_m: int,
-                              atom_n: int,
-                              atom_k: int,
-                              a_is_k_major: bool,
-                              b_is_k_major: bool,
-                              scale_in_a: int,
-                              scale_in_b: int) -> PrimExpr:
+    def get_tcgen5_mma_meta(self, m: int, n: int, k: int):
+        return _ffi_api.get_tcgen5_mma_meta(
+            int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype))
+
+    def get_tcgen5_instr_desc(self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool,
+                              b_is_k_major: bool, scale_in_a: int, scale_in_b: int) -> PrimExpr:
         desc = _ffi_api.get_tcgen5_instr_desc(
             atom_m,
             atom_n,

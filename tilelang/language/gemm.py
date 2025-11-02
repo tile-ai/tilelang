@@ -222,7 +222,7 @@ def gemm_v2(
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-    mbar: Optional[tir.Buffer] = None,
+    mbar: tir.Buffer | None = None,
 ):
     """Perform a General Matrix Multiplication (GEMM) operation.
 

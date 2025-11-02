@@ -7,7 +7,7 @@ from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
-from typing import Union, Any
+from typing import Any
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
 _IS_HIP_AVAILABLE = check_hip_availability()
@@ -296,24 +296,24 @@ def warpgroup_wait(num_mma: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_wait"), num_mma)
 
 
-def warpgroup_fence_operand(buffer_or_ptr: Union[Buffer, PrimExpr],
-                            offset: Union[int, PrimExpr] = 0,
-                            num_regs: Union[int, PrimExpr, None] = None,
-                            dtype: Union[str, None] = None):
+def warpgroup_fence_operand(buffer_or_ptr: Buffer | PrimExpr,
+                            offset: int | PrimExpr = 0,
+                            num_regs: int | PrimExpr | None = None,
+                            dtype: str | None = None):
     """Insert a warpgroup fence for the destination accumulator registers.
 
     This prevents NVCC from sinking uses of accumulator fragments past the corresponding
     WGMMA operations by issuing an empty inline assembly barrier on every register.
 
     Args:
-        buffer_or_ptr: Union[Buffer, PrimExpr]
+        buffer_or_ptr: Buffer | PrimExpr
             Either a buffer representing the accumulator fragment or a pointer expression.
-        offset: Union[int, PrimExpr]
+        offset: int | PrimExpr
             Element offset from the start of the accumulator fragment.
-        num_regs: Union[int, PrimExpr, None]
+        num_regs: int | PrimExpr | None
             Number of 32-bit registers to fence. If None and a Buffer is provided, it will be
             derived from the buffer shape and dtype.
-        dtype: Optional[str]
+        dtype: str | None
             Data type string of the accumulator elements. Required when passing a pointer.
 
     Returns:

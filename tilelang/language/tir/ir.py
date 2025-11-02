@@ -4,6 +4,7 @@ from tvm.script.ir_builder.tir import frame
 from tvm.tir import PrimExpr
 from typing import Any
 import tilelang.language.tir.op as _tir_op
+import tvm.tir.op as _tvm_tir_op
 import functools
 
 
@@ -295,6 +296,7 @@ ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
 ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
 ptx_tcgen05_mma_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_ss)
+ptx_tcgen05_mma_ts = _dtype_forward(_tir_op.ptx_tcgen05_mma_ts)
 ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
 ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)
@@ -307,3 +309,19 @@ tvm_mfma = _dtype_forward(_tir_op.tvm_mfma)
 tvm_mfma_store = _dtype_forward(_tir_op.tvm_mfma_store)
 tvm_rdna_wmma = _dtype_forward(_tir_op.tvm_rdna_wmma)
 tvm_rdna_wmma_store = _dtype_forward(_tir_op.tvm_rdna_wmma_store)
+
+
+# Convenience wrapper for TL shuffle elect; returns a boolean PrimExpr
+def tl_shuffle_elect(thread_extent: PrimExpr | int = 0):
+    return _tir_op.call_intrin("bool", _tvm_tir_op.Op.get("tl.tl_shuffle_elect"), thread_extent)
+
+
+def tcgen05_mma_arrive(mbar_ptr):
+    """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
+
+    Parameters
+    ----------
+    mbar_ptr : PrimExpr
+        Pointer to the mbarrier object in shared memory (e.g., Barrier*).
+    """
+    return call_intrin("void", _tvm_tir_op.Op.get("tl.tcgen05_mma_arrive"), mbar_ptr)

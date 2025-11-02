@@ -267,7 +267,10 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
   }
   if (need_tcgen05mma_instruction_h_) {
-    decl_stream << "#include <tl_templates/cuda/instruction/tcgen05gmma.h>\n";
+    decl_stream << "#include <tl_templates/cuda/instruction/tcgen05mma.h>\n";
+  }
+  if (need_tcgen05_common_h_) {
+    decl_stream << "#include <tl_templates/cuda/tcgen_05.h>\n";
   }
   if (enable_fp8_) {
     decl_stream << "#include <tl_templates/cuda/cuda_fp8.h>\n";
@@ -1286,8 +1289,12 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   if (scope.empty()) {
     scope = GetPtrStorageScope(buffer->data);
   }
-  if (scope == "local.var" || scope == "local.descriptor") {
-    os << vid;
+  if (scope == "local.var" || scope.find("local.descriptor") == 0) {
+    if (scope == "local.descriptor.tcgen05_instr") {
+      os << vid << ".desc_";
+    } else {
+      os << vid;
+    }
     return os.str();
   }
   std::string index_str = PrintExpr(index);
@@ -1944,58 +1951,45 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     wgmma_call = replacer.rewrite(wgmma_call);
     this->stream << wgmma_call;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
-    ICHECK_EQ(op->args.size(), 14U) << "ptx_tcgen05_mma_ss args is "
-                                    << op->args;
-    std::string A_dtype = Downcast<StringImm>(op->args[0])->value;
-    std::string B_dtype = Downcast<StringImm>(op->args[1])->value;
-    std::string C_dtype = Downcast<StringImm>(op->args[2])->value;
-    std::string a_desc = this->PrintExpr(op->args[3]);
-    std::string A_offset = this->PrintExpr(op->args[4]);
-    std::string b_desc = this->PrintExpr(op->args[5]);
-    std::string B_offset = this->PrintExpr(op->args[6]);
-    std::string c_ref = this->PrintExpr(op->args[7]);
-    PrimExpr desc_expr = op->args[8];
-    bool scale_out = Downcast<Bool>(op->args[9])->value;
-    std::string mask0 = this->PrintExpr(op->args[10]);
-    std::string mask1 = this->PrintExpr(op->args[11]);
-    std::string mask2 = this->PrintExpr(op->args[12]);
-    std::string mask3 = this->PrintExpr(op->args[13]);
+    ICHECK_EQ(op->args.size(), 14U)
+        << "ptx_tcgen05_mma_ss args is " << op->args;
+    std::string C_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string a_desc = this->PrintExpr(op->args[1]);
+    std::string A_offset = this->PrintExpr(op->args[2]);
+    std::string b_desc = this->PrintExpr(op->args[3]);
+    std::string B_offset = this->PrintExpr(op->args[4]);
+    std::string c_ref = this->PrintExpr(op->args[5]);
+    std::string c_offset = this->PrintExpr(op->args[6]);
+    PrimExpr desc_expr = op->args[7];
+    std::string scale_out = this->PrintExpr(op->args[8]);
+    std::string mask0 = this->PrintExpr(op->args[9]);
+    std::string mask1 = this->PrintExpr(op->args[10]);
+    std::string mask2 = this->PrintExpr(op->args[11]);
+    std::string mask3 = this->PrintExpr(op->args[12]);
+    bool enable_ws = Downcast<Bool>(op->args[13])->value;
 
-    auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
-    auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
     auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
-    // uint32_t instr_desc = get_const_uint32(desc_expr);
-    // auto decoded = decode_instr_desc(instr_desc, dtype_a_enum);
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::tcgen05mma_ss<(AType), (BType), (CType), (M), (N), (K), "
-        "(tnspA), (tnspB), (scaleA), (scaleB)>(uint64_t((desc_a) + "
-        "(A_offset)), uint64_t((desc_b) + (B_offset)), "
-        "reinterpret_cast<uint32_t*>((C)), (scale_out), "
-        "static_cast<uint32_t>((desc_val)), (mask0), (mask1), (mask2), "
-        "(mask3));\n";
+        "tl::(tcgen05_name)<(CType)>(uint64_t((desc_a) + (A_offset)), "
+        "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
+        "+ (C_offset), "
+        "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
+        "(mask2), (mask3));\n";
     tl::codegen::Replacer replacer;
-    replacer.register_rule("(AType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_a_enum));
-    replacer.register_rule("(BType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_b_enum));
     replacer.register_rule("(CType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
-    // replacer.register_rule("(M)", std::to_string(decoded.m));
-    // replacer.register_rule("(N)", std::to_string(decoded.n));
-    // replacer.register_rule("(K)", std::to_string(decoded.k));
-    // replacer.register_rule("(tnspA)", decoded.a_is_k_major ? "false" : "true");
-    // replacer.register_rule("(tnspB)", decoded.b_is_k_major ? "false" : "true");
-    // replacer.register_rule("(scaleA)", decoded.scale_in_a_pos ? "1" : "-1");
-    // replacer.register_rule("(scaleB)", decoded.scale_in_b_pos ? "1" : "-1");
     replacer.register_rule("(desc_a)", a_desc);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
     replacer.register_rule("(B_offset)", B_offset);
     replacer.register_rule("(C)", c_ref);
-    replacer.register_rule("(scale_out)", scale_out ? "true" : "false");
+    replacer.register_rule("(C_offset)", c_offset);
+    replacer.register_rule("(tcgen05_name)",
+                           enable_ws ? "tcgen05mma_ws_ss" : "tcgen05mma_ss");
+    replacer.register_rule("(scale_out)", scale_out);
     replacer.register_rule("(desc_val)", this->PrintExpr(desc_expr));
     replacer.register_rule("(mask0)", mask0);
     replacer.register_rule("(mask1)", mask1);
@@ -2003,6 +1997,58 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(mask3)", mask3);
     tcgen05_call = replacer.rewrite(tcgen05_call);
     this->stream << tcgen05_call;
+  } else if (op->op.same_as(tl::ptx_tcgen05_mma_ts())) {
+    // TS: A from TMEM, B from SMEM (desc)
+    ICHECK_EQ(op->args.size(), 13U)
+        << "ptx_tcgen05_mma_ts args is " << op->args;
+    std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string a_ref = this->PrintExpr(op->args[1]);
+    std::string A_offset = this->PrintExpr(op->args[2]);
+    std::string b_desc = this->PrintExpr(op->args[3]);
+    std::string B_offset = this->PrintExpr(op->args[4]);
+    std::string c_ref = this->PrintExpr(op->args[5]);
+    std::string c_offset = this->PrintExpr(op->args[6]);
+    PrimExpr desc_expr = op->args[7];
+    std::string scale_out = this->PrintExpr(op->args[8]);
+    std::string mask0 = this->PrintExpr(op->args[9]);
+    std::string mask1 = this->PrintExpr(op->args[10]);
+    std::string mask2 = this->PrintExpr(op->args[11]);
+    std::string mask3 = this->PrintExpr(op->args[12]);
+
+    auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
+
+    need_tcgen05mma_instruction_h_ = true;
+    this->PrintIndent();
+    std::string tcgen05_call =
+        "tl::tcgen05mma_ts<(CType)>( (*reinterpret_cast<uint32_t*>((A))) + "
+        "(A_offset), "
+        "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
+        "+ (C_offset), "
+        "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
+        "(mask2), (mask3));\n";
+    tl::codegen::Replacer replacer;
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_enum));
+    replacer.register_rule("(A)", a_ref);
+    replacer.register_rule("(A_offset)", A_offset);
+    replacer.register_rule("(desc_b)", b_desc);
+    replacer.register_rule("(B_offset)", B_offset);
+    replacer.register_rule("(C)", c_ref);
+    replacer.register_rule("(C_offset)", c_offset);
+    replacer.register_rule("(scale_out)", scale_out);
+    replacer.register_rule("(desc_val)", this->PrintExpr(desc_expr));
+    replacer.register_rule("(mask0)", mask0);
+    replacer.register_rule("(mask1)", mask1);
+    replacer.register_rule("(mask2)", mask2);
+    replacer.register_rule("(mask3)", mask3);
+    tcgen05_call = replacer.rewrite(tcgen05_call);
+    this->stream << tcgen05_call;
+  } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
+    need_tcgen05_common_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::tcgen05_mma_arrive(" << this->PrintExpr(op->args[0])
+                 << ");\n";
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
@@ -2541,8 +2587,12 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
           << "Accumulator only support half, float and int type for now";
     }
     PrintWmmaScope(scope, op->dtype, buffer, stream);
-  } else if (scope == "local.descriptor") {
+  } else if (scope == "local.descriptor.wgmma") {
     stream << "tl::GmmaDescriptor " << vid << ";\n";
+  } else if (scope == "local.descriptor.tcgen05_smem") {
+    stream << "tl::Tcgen05SMemDescriptor " << vid << ";\n";
+  } else if (scope == "local.descriptor.tcgen05_instr") {
+    stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
     PrintStorageScope(scope, stream);
     PrintType(op->dtype, stream);
@@ -2584,7 +2634,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
         init = user_init;
       }
       stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
-    } else if (scope != "local.descriptor") {
+    } else if (scope.find("local.descriptor") != 0) {
       ICHECK(false) << "Unsupported scope: " << scope;
     }
   }

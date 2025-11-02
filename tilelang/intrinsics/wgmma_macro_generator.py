@@ -245,12 +245,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
-            desc_a = T.alloc_descriptor()
-            desc_b = T.alloc_descriptor()
+            desc_a = T.alloc_wgmma_desc()
+            desc_b = T.alloc_wgmma_desc()
             T.initialize_wgmma_descriptor(desc_a, A_buf.access_ptr("r"), a_swizzle_mode,
-                                    int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
+                                          int(a_leading_byte_offset >> 4),
+                                          int(a_stride_byte_offset >> 4))
             T.initialize_wgmma_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
-                                    int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+                                          int(b_leading_byte_offset >> 4),
+                                          int(b_stride_byte_offset >> 4))
             T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
             for ki in T.serial(0, (k_dim // micro_size_k)):
@@ -335,9 +337,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
-            desc_b = T.alloc_descriptor()
+            desc_b = T.alloc_wgmma_desc()
             T.initialize_wgmma_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
-                                    int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+                                          int(b_leading_byte_offset >> 4),
+                                          int(b_stride_byte_offset >> 4))
             T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
             T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
             T.warpgroup_arrive()

@@ -1,5 +1,3 @@
-from typing import Tuple
-
 from .gemm_base import GemmBase
 from tilelang.layout import make_tcgen05mma_swizzled_layout
 from tilelang.intrinsics.tcgen05_macro_generator import (
@@ -7,9 +5,7 @@ from tilelang.intrinsics.tcgen05_macro_generator import (
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from tvm import tir
-from tvm.tir import analysis
 from tvm.target import Target
-
 
 _FLOAT8_DTYPES = {
     "float8_e4m3",
@@ -20,11 +16,12 @@ _FLOAT8_DTYPES = {
     "float8_e5m2fnuz",
 }
 
+
 class GemmTCGEN5(GemmBase):
 
     def infer_layout(self, target: Target, thread_nums: int):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                        True)
+                                                            True)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -63,7 +60,7 @@ class GemmTCGEN5(GemmBase):
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                        True)
+                                                            True)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -78,13 +75,17 @@ class GemmTCGEN5(GemmBase):
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
         )
-        if not self.is_gemm_ss():
-            raise ValueError(
-                f"TCGEN5MMA currently only supports gemm_ss, got "
-                f"A scope {self.A.scope()}, B scope {self.B.scope()}")
 
-        atom_m, atom_n, atom_k = mma_emitter.get_tcgen5_mma_meta(
-            self.M, self.N, self.K)
+        if self.A in layout_map:
+            mma_emitter._assign_a_shared_layout(layout_map[self.A])
+        if self.B in layout_map:
+            mma_emitter._assign_b_shared_layout(layout_map[self.B])
+
+        if not self.is_gemm_ss():
+            raise ValueError(f"TCGEN5MMA currently only supports gemm_ss, got "
+                             f"A scope {self.A.scope()}, B scope {self.B.scope()}")
+
+        atom_m, atom_n, atom_k = mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K)
 
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
             raise ValueError(f"Unsupported A scope for TCGEN5MMA: {self.A.scope()}")
@@ -105,17 +106,17 @@ class GemmTCGEN5(GemmBase):
 
         accum_dtype = str(self.C.dtype)
         if accum_dtype != "float32":
-            raise ValueError(
-                f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
-        
+            raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
+
         A_shared = self.A
         B_shared = self.B
         C_local = self.C
         clear_accum = self.clear_accum
         mbar = self.mbarptr
-        
+
         @T.prim_func
         def _gemm_ss() -> None:
-            mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbar, clear_accum)
+            if thread_var // 32 == 0:
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbar, clear_accum)
 
         return _Simplify(_gemm_ss, inline_let=True)

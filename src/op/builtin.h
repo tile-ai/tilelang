@@ -249,10 +249,15 @@ TVM_DLL const Op &ptx_wgmma_ss();
  */
 TVM_DLL const Op &ptx_wgmma_rs();
 
-/*! 
+/*!
  * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.
  */
 TVM_DLL const Op &ptx_tcgen05_mma_ss();
+
+/*!
+ * \brief tvm intrinsic for tcgen05 mma tensor-shared instructions.
+ */
+TVM_DLL const Op &ptx_tcgen05_mma_ts();
 
 /*!
  * \brief tvm intrinsics for initializing tensor memory
@@ -509,11 +514,19 @@ TVM_DLL const Op &tl_shuffle_elect();
  */
 TVM_DLL const Op &initialize_wgmma_descriptor();
 
-/*! 
+/*!
  * \brief tilelang intrinsic for initializing a descriptor buffer for
  * tcgen05 mma.
  */
 TVM_DLL const Op &initialize_tcgen05_descriptor();
+
+/*!
+ * \brief tilelang intrinsic for committing UMMA (TCGEN05) barrier arrive.
+ *
+ *  This op wraps the device-side arrive used to signal completion of MMA work
+ *  to a shared-memory mbarrier. It mirrors CUTLASS's umma_arrive.
+ */
+TVM_DLL const Op &tcgen05_mma_arrive();
 
 /*!
  * \brief tilelang intrinsic for setting the start address of a descriptor

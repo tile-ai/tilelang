@@ -257,7 +257,7 @@ class TLCUDASourceWrapper:
     def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
         return pythonic_expr(expr, self._TYPE_MAP)
 
-    def _lookup_type(self, dtype: Union[str, Any]) -> str:
+    def _lookup_type(self, dtype: str | Any) -> str:
         key = dtype if isinstance(dtype, str) else str(dtype)
         result = self._TYPE_MAP.get(key)
         assert result is not None, f"Unsupported dtype {dtype}"
@@ -1022,7 +1022,7 @@ class TLCPUSourceWrapper:
         self.libpath: str | None = None
         self.lib_code: str | None = self.update_lib_code(source)
 
-    def _lookup_type(self, dtype: Union[str, Any]) -> str:
+    def _lookup_type(self, dtype: str | Any) -> str:
         key = dtype if isinstance(dtype, str) else str(dtype)
         result = self._TYPE_MAP.get(key)
         assert result is not None, f"Unsupported dtype {dtype}"

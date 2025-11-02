@@ -156,6 +156,11 @@ TIR_DEFINE_TL_BUILTIN(ptx_wgmma_rs)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_ss)
+    .set_num_inputs(14)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_ts)
     .set_num_inputs(13)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -323,6 +328,11 @@ TIR_DEFINE_TL_BUILTIN(device_assert)
 
 TIR_DEFINE_TL_BUILTIN(device_assert_with_msg)
     .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_mma_arrive)
+    .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

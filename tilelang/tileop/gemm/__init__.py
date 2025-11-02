@@ -43,9 +43,6 @@ class GemmInst(IntEnum):
     def is_tcgen5mma(self) -> bool:
         return self == GemmInst.TCGEN5MMA
 
-    def is_tcgen5mma(self) -> bool:
-        return self == GemmInst.TCGEN5MMA
-
     def is_mfma(self) -> bool:
         return self == GemmInst.MFMA
 

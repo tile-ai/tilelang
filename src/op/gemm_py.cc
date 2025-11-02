@@ -13,8 +13,8 @@
 
 #include "../support/ffi_aliases.h"
 #include "../target/utils.h"
-#include "tvm/ffi/string.h"
 #include "tcgen5_meta.h"
+#include "tvm/ffi/string.h"
 
 namespace tvm {
 namespace tl {
@@ -51,7 +51,6 @@ using namespace tir;
  */
 GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<GemmPyNode> node = tvm::ffi::make_object<GemmPyNode>();
-
   node->Aptr = args[0];
   node->Bptr = args[1];
   node->Cptr = args[2];
@@ -86,8 +85,7 @@ GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
   if (args.size() > 18) {
     node->C_coords = Array<PrimExpr>({args[17], args[18]});
   } else if (args.size() > 17) {
-    node->C_coords =
-        Array<PrimExpr>({args[17], IntImm(DataType::Int(32), 0)});
+    node->C_coords = Array<PrimExpr>({args[17], IntImm(DataType::Int(32), 0)});
   } else {
     node->C_coords = Array<PrimExpr>(
         {IntImm(DataType::Int(32), 0), IntImm(DataType::Int(32), 0)});
@@ -327,7 +325,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         });
 }
 
-TVM_FFI_STATIC_INIT_BLOCK(){
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def(
       "tl.get_tcgen5_mma_meta",
@@ -344,8 +342,8 @@ TVM_FFI_STATIC_INIT_BLOCK(){
   refl::GlobalDef().def(
       "tl.get_tcgen5_instr_desc",
       [](int atom_m, int atom_n, int atom_k, DataType ab_dtype,
-         DataType c_dtype, bool a_is_k_major, bool b_is_k_major,
-         int scale_in_a, int scale_in_b) {
+         DataType c_dtype, bool a_is_k_major, bool b_is_k_major, int scale_in_a,
+         int scale_in_b) {
         uint32_t desc = GetTCGEN5InstrDesc(atom_m, atom_n, atom_k, ab_dtype,
                                            c_dtype, a_is_k_major, b_is_k_major,
                                            scale_in_a, scale_in_b);

@@ -21,9 +21,7 @@ inline std::pair<bool, TCGEN5MMAMeta>
 GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
 #define FAIL                                                                   \
-  return {                                                                     \
-    false, TCGEN5MMAMeta { 0, 0, 0 }                                           \
-  }
+  return { false, TCGEN5MMAMeta{0, 0, 0} }
 #define SUCCESS(atom_m, atom_n, atom_k)                                        \
   return {                                                                     \
     true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
@@ -100,8 +98,7 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
     } else if (dtype.is_float8_e4m3fn() || dtype.is_float8_e4m3fnuz() ||
                dtype.is_float8_e4m3()) {
       return static_cast<uint32_t>(0);
-    } else if (dtype.is_float8_e5m2fnuz() ||
-               dtype.is_float8_e5m2()) {
+    } else if (dtype.is_float8_e5m2fnuz() || dtype.is_float8_e5m2()) {
       return static_cast<uint32_t>(1);
     }
     LOG(FATAL) << "Unsupported dtype for TCGEN5MMA descriptor: " << dtype;

@@ -679,7 +679,7 @@ private:
     return !scope.tag.empty() && scope.tag != ".dyn" &&
            scope.tag != ".barrier" && scope.tag != ".workspace" &&
            scope.tag != ".vtcm" && scope.tag != ".var" &&
-           scope.tag != ".descriptor";
+           scope.tag.find(".descriptor") != 0;
   }
 
   // Allocate entry of node.
@@ -865,7 +865,7 @@ private:
     ICHECK_NE(e->const_nbits, 0U);
     MemoryInfo info;
     if (e->scope.tag != ".barrier" && e->scope.tag != ".var" &&
-        e->scope.tag != ".descriptor") {
+        e->scope.tag.find(".descriptor") != 0) {
       info = GetMemoryInfo(e->scope.to_string());
     }
     uint64_t total_bits = e->const_nbits;

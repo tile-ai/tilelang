@@ -114,6 +114,8 @@ private:
   bool need_wgmma_instruction_h_{false};
   // whether need tl tcgen05mma instruction header
   bool need_tcgen05mma_instruction_h_{false};
+  // whether need tcgen_05 common header
+  bool need_tcgen05_common_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
   // whether need cooperative_groups.h
