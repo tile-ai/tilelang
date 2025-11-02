@@ -7,7 +7,7 @@ from tvm import tir
 from tilelang.utils.language import get_buffer_region_from_load
 
 
-def gemm(
+def gemm_v1(
     A: tir.Buffer | tir.Var,
     B: tir.Buffer | tir.Var,
     C: tir.Buffer | tir.Var,
@@ -432,3 +432,6 @@ def gemm_v2(
         C_coords[0],
         C_coords[1],
     )
+
+
+gemm = gemm_v1
