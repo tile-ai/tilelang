@@ -1,6 +1,7 @@
 from __future__ import annotations
 import ast
-from typing import Callable, ContextManager, Iterable, Any, Literal, ParamSpec, TypeVar
+from dataclasses import dataclass
+from typing import Callable, ContextManager, Generic, Iterable, Any, Literal, ParamSpec, TypeVar
 import inspect
 # from .utils import get_ast, get_compiled_object
 from . import utils
@@ -527,11 +528,41 @@ class DSLMutator(ast.NodeTransformer):
 _P = ParamSpec('_P')
 
 
-def mutate(func: Callable[_P, _T]) -> Callable[[BaseBuilder], Callable[_P, _T]]:
+@dataclass
+class IRGenerator(Generic[_P, _T]):
+    gen: Callable[[BaseBuilder], Callable[_P, _T]]
+    source: str
+
+
+def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
+    """
+    Transform a Python function into an IR (Intermediate Representation) generator.
+    This function takes a regular Python function and performs AST (Abstract Syntax Tree)
+    transformation to create an IRGenerator that can be used for code generation purposes.
+    Args:
+        func (Callable[_P, _T]): The Python function to be transformed. This should be a
+            callable that will be analyzed and mutated at the AST level. The function's
+            signature is preserved through generic type parameters _P (parameters) and
+            _T (return type).
+    Returns:
+        IRGenerator[_P, _T]: An IRGenerator instance wrapping the transformed function.
+            The generator contains:
+            - gen: The compiled and mutated version of the original function
+            - source: The unparsed source code of the transformed AST as a string
+    Example:
+        >>> @mutate
+        ... def my_function(x: int) -> int:
+        ...     return x * 2
+        >>> # my_function is now an IRGenerator that can be used for code generation
+    Note:
+        - The original function's closure variables and captured context are preserved
+        - The transformation is performed at compile-time through AST manipulation
+        - The returned IRGenerator maintains type information from the original function
+    """
+
     tree = utils.get_ast(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
     tree = DSLMutator().visit(tree)
     fn = utils.get_compiled_object(tree, func.__name__, filename,
                                    utils.inspect_function_capture(func))
-    fn.__source__ = ast.unparse(tree)
-    return fn
+    return IRGenerator(gen=fn, source=ast.unparse(tree))
