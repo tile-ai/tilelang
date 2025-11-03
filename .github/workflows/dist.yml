@@ -173,7 +173,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download built SDist
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           # unpacks default artifact into dist/
           # if `name: artifact` is omitted, the action will create extra parent dir
