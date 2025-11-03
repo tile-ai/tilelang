@@ -70,6 +70,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     # should be rewritten to support dynamic k_dim
     wgmma_prefix: str
+
+    # wgmma instruction M dimension
+    wgmma_inst_m: int
     # wgmma instruction N dimension
     wgmma_inst_n: int
 
@@ -107,7 +110,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return self
 
     def _initialize_wgmma_prefix(self, n_dim: int = 16):
-        inst_m, inst_n = 64, gcd(self.block_col_warps * self.warp_col_tiles, 256)
+        inst_m, inst_n = 64, gcd(self.warp_col_tiles, 256)
         assert inst_n % 8 == 0, (
             f"inst_n must be a multiple of 8, got {inst_n} "
             f"(block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles})")
@@ -117,7 +120,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             f"(block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles})")
         # 256 bits per instruction
         inst_k = 256 // DataType(self.a_dtype).bits
-
+        self.wgmma_inst_m = inst_m
         self.wgmma_inst_n = inst_n
         self.wgmma_prefix = f"m{inst_m}n{inst_n}k{inst_k}"
 
@@ -254,11 +257,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         # where max specially handles the case when n_dim is 8.
         ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
-        wgmma_inst_n = self.wgmma_inst_n
-        num_inst_n = n_dim // wgmma_inst_n
+        wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
+        num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
+        num_inst_n = self.warp_col_tiles // wgmma_inst_n
+
+        thread_binding = self.get_thread_binding()
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+
             desc_a = T.alloc_wgmma_desc()
             desc_b = T.alloc_wgmma_desc()
             T.initialize_wgmma_descriptor(desc_a, A_buf.access_ptr("r"), a_swizzle_mode,
@@ -269,18 +277,20 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                                           int(b_stride_byte_offset >> 4))
             T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
-            for ki in T.serial(0, (k_dim // micro_size_k)):
-                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
-                for i in T.serial(m_dim // 64):
-                    for j in T.serial(0, num_inst_n):
+            for j in T.serial(num_inst_n):
+                for i in T.serial(num_inst_m):
+                    for ki in T.serial(k_dim // micro_size_k):
+                        warp_i = (warp_m // 4) * num_inst_m + i
+                        warp_j = warp_n * num_inst_n + j
+                        scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
                         A_offset = (
                             ki % ak_atom_size
-                        ) * micro_size_k + i * 64 * a_swizzle_atom_elems + (
+                        ) * micro_size_k + warp_i * 64 * a_swizzle_atom_elems + (
                             ki // ak_atom_size
-                        ) * m_dim * a_swizzle_atom_elems if a_is_k_major else i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                        ) * m_dim * a_swizzle_atom_elems if a_is_k_major else warp_i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
                         B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
                             ki % bk_atom_size
-                        ) * micro_size_k + j * wgmma_inst_n * b_swizzle_atom_elems if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k + j * k_dim * wgmma_inst_n
+                        ) * micro_size_k + warp_j * wgmma_inst_n * b_swizzle_atom_elems if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k + warp_j * k_dim * wgmma_inst_n
                         C_offset = i * warp_cols * local_size_out + j * warp_cols * local_size_out // num_inst_n  # 4 warps as an unit
                         T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, a_is_k_major, b_is_k_major,
                                        a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv, desc_a.data,
@@ -353,11 +363,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                     b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
 
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
-        wgmma_inst_n = self.wgmma_inst_n
-        num_inst_n = n_dim // wgmma_inst_n
+        wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
+        num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
+        num_inst_n = self.warp_col_tiles // wgmma_inst_n
+
+        thread_binding = self.get_thread_binding()
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+
             desc_b = T.alloc_wgmma_desc()
             T.initialize_wgmma_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
                                           int(b_leading_byte_offset >> 4),
@@ -365,14 +380,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
             T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
-            for ki in T.serial(0, (k_dim // micro_size_k)):
-                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
-                for i in T.serial(m_dim // 64):
-                    for j in T.serial(0, num_inst_n):
+
+            for j in T.serial(0, num_inst_n):
+                for i in T.serial(num_inst_m):
+                    for ki in T.serial(0, (k_dim // micro_size_k)):
+                        warp_j = warp_n * num_inst_n + j
+                        scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
                         A_offset = ki * warp_rows * local_size_a + i * local_size_a
-                        B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
+                        B_offset = (
+                            ki // bk_atom_size
+                        ) * n_dim * b_swizzle_atom_elems + warp_j * wgmma_inst_n * b_swizzle_atom_elems + (
                             ki % bk_atom_size
-                        ) * micro_size_k + j * wgmma_inst_n * b_swizzle_atom_elems if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k + j * k_dim * wgmma_inst_n
+                        ) * micro_size_k if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k + warp_j * k_dim * wgmma_inst_n
                         C_offset = i * warp_cols * local_size_out + j * warp_cols * local_size_out // num_inst_n  # 4 warps as an unit
                         T.ptx_wgmma_rs(
                             accum_dtype,
