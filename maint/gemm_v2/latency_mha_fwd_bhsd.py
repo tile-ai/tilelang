@@ -21,6 +21,7 @@ args = parser.parse_args()
 
 use_v2 = args.use_v2
 
+
 def get_configs():
     iter_params = dict(block_M=[128], block_N=[128], num_stages=[2], threads=[256])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
@@ -73,7 +74,7 @@ def flashattn(batch,
             T.gemm_v2(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
         else:
             T.gemm_v1(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-            
+
     @T.macro
     def MMA1(
         V: T.Tensor(kv_shape, dtype),
@@ -224,11 +225,11 @@ def main(
         profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
         print("All checks pass.")
         latency = profiler.do_bench(ref_program_processed, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Ref: {latency:.2f} ms")
+        print(f"Ref: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Tile-lang: {latency:.2f} ms")
+        print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")
     else:
         kernel = flashattn(batch, heads, seq_q, seq_kv, dim, is_causal)
         best_latency = kernel.latency
