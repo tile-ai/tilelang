@@ -33,18 +33,30 @@ def test_example_gqa_bwd_wgmma_pipelined():
 
 @tilelang.testing.requires_cuda
 def test_example_mha_bwd():
-    example_mha_bwd.main(BATCH=1)
+    example_mha_bwd.main(
+        BATCH=1,
+        H=16,
+        N_CTX=512,
+        D_HEAD=64,
+        causal=False,
+    )
 
 
 @tilelang.testing.requires_cuda
 def test_example_mha_bwd_bhsd():
-    example_mha_bwd_bhsd.main(BATCH=1)
+    example_mha_bwd_bhsd.main(
+        BATCH=1,
+        H=16,
+        N_CTX=512,
+        D_HEAD=64,
+        causal=False,
+    )
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_example_mha_bwd_wgmma_pipelined():
-    example_mha_bwd_wgmma_pipelined.main(BATCH=1)
+    example_mha_bwd_wgmma_pipelined.main(BATCH=1, H=32, N_CTX=256, D_HEAD=64, causal=False)
 
 
 @tilelang.testing.requires_cuda
@@ -84,7 +96,7 @@ def test_example_mha_fwd_bshd():
 
 @tilelang.testing.requires_cuda
 def test_example_mha_fwd_varlen():
-    example_mha_fwd_varlen.main()
+    example_mha_fwd_varlen.main(batch=4, heads=16, seq_len=512, dim=64)
 
 
 if __name__ == "__main__":

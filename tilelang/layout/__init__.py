@@ -6,6 +6,7 @@ from .fragment import Fragment  # noqa: F401
 from .swizzle import (
     make_swizzled_layout,  # noqa: F401
     make_wgmma_swizzled_layout,  # noqa: F401
+    make_tcgen05mma_swizzled_layout,  # noqa: F401
     make_full_bank_swizzled_layout,  # noqa: F401
     make_half_bank_swizzled_layout,  # noqa: F401
     make_quarter_bank_swizzled_layout,  # noqa: F401

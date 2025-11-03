@@ -15,7 +15,7 @@ with the appropriate memory scope.
 """
 
 from __future__ import annotations
-from typing import overload
+from typing import overload, Literal
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
@@ -218,10 +218,40 @@ def alloc_reducer(shape, dtype, op="sum", replication=None):
     return reducer
 
 
-def alloc_descriptor(dtype="uint64", scope="local.descriptor"):
-    """Allocate a descriptor buffer for wgmma and utcmma.
+DescKind = Literal["wgmma", "tcgen05_smem", "tcgen05_instr"]
+
+
+def alloc_descriptor(
+    kind: DescKind = "wgmma",
+    dtype: str = "uint64",
+):
+    """Allocate a descriptor buffer for WGMMA and TCGEN5.MMA.
+
+    Args:
+        kind: The descriptor kind, one of "wgmma", "tcgen05" ("utcmma" as alias).
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a descriptor
     """
+
+    scope = "local.descriptor." + kind
+    # Buffer naming via `name` is not supported by this TVM builder signature;
+    # keep parameter for forward-compat, but do not pass it.
     return T.alloc_buffer([1], dtype, scope=scope)
+
+
+def alloc_wgmma_desc(dtype: str = "uint64"):
+    return alloc_descriptor("wgmma", dtype=dtype)
+
+
+def alloc_tcgen05_smem_desc(dtype: str = "uint64"):
+    return alloc_descriptor("tcgen05_smem", dtype=dtype)
+
+
+def alloc_tcgen05_instruction_desc(dtype: str = "uint32"):
+    return alloc_descriptor("tcgen05_instr", dtype=dtype)
+
+
+# Alias: short name consistent with imports
+def alloc_tcgen05_instr_desc(dtype: str = "uint32"):
+    return alloc_tcgen05_instruction_desc(dtype)

@@ -5,7 +5,8 @@ from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
-from tvm import tir
+from tvm import DataType, tir
+from tvm.runtime import convert
 from typing import Any
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
@@ -429,6 +430,66 @@ def shuffle_elect(thread_extent: int) -> PrimExpr:
     return tir.call_intrin("bool", tir.op.Op.get("tl.tl_shuffle_elect"), thread_extent)
 
 
+def warpgroup_fence_operand(buffer_or_ptr: Buffer | PrimExpr,
+                            offset: int | PrimExpr = 0,
+                            num_regs: int | PrimExpr | None = None,
+                            dtype: str | None = None):
+    """Insert a warpgroup fence for the destination accumulator registers.
+
+    This prevents NVCC from sinking uses of accumulator fragments past the corresponding
+    WGMMA operations by issuing an empty inline assembly barrier on every register.
+
+    Args:
+        buffer_or_ptr: Buffer | PrimExpr
+            Either a buffer representing the accumulator fragment or a pointer expression.
+        offset: int | PrimExpr
+            Element offset from the start of the accumulator fragment.
+        num_regs: int | PrimExpr | None
+            Number of 32-bit registers to fence. If None and a Buffer is provided, it will be
+            derived from the buffer shape and dtype.
+        dtype: str | None
+            Data type string of the accumulator elements. Required when passing a pointer.
+
+    Returns:
+        tir.Call: A handle to the warpgroup fence operation.
+    """
+    if isinstance(buffer_or_ptr, BufferLoad):
+        raise TypeError("Expected a buffer handle or pointer expression, got BufferLoad.")
+
+    if isinstance(buffer_or_ptr, Buffer):
+        data_ptr = buffer_or_ptr.data
+        inferred_dtype = buffer_or_ptr.dtype
+        if dtype is not None and dtype != inferred_dtype:
+            raise ValueError(f"dtype mismatch: provided {dtype}, buffer uses {inferred_dtype}.")
+        dtype = inferred_dtype
+        if num_regs is None:
+            total_elems = 1
+            for dim in buffer_or_ptr.shape:
+                if isinstance(dim, tir.IntImm):
+                    total_elems *= int(dim)
+                else:
+                    raise ValueError(
+                        "warpgroup_fence_operand requires num_regs when buffer shape is symbolic.")
+            bits_per_elem = DataType(dtype).bits
+            num_regs = (total_elems * bits_per_elem + 31) // 32
+    else:
+        data_ptr = buffer_or_ptr
+        if dtype is None:
+            raise ValueError("dtype must be provided when passing a pointer expression.")
+        if num_regs is None:
+            raise ValueError("num_regs must be provided when passing a pointer expression.")
+
+    return evaluate(
+        tir.call_intrin(
+            "handle",
+            tir.op.Op.get("tl.warpgroup_fence_operand"),
+            dtype,
+            data_ptr,
+            convert(offset),
+            convert(num_regs),
+        ))
+
+
 def wait_wgmma(id: int):
     """Wait for WGMMA (Warp Group Matrix Multiply-Accumulate) operations to complete.
 
@@ -537,38 +598,68 @@ def sync_grid():
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
 
 
-def initialize_descriptor(descriptor: Buffer,
-                          start_address: PrimExpr,
-                          layout_type_: int = 0,
-                          leading_byte_offset: int = 0,
-                          stride_byte_offset: int = 0) -> PrimExpr:
-    """
-    Initialize a memory descriptor with the given parameters.
-
-    Parameters:
-        descriptor (Buffer): The memory descriptor to initialize.
-        start_address (PrimExpr): The starting address of the memory region.
-        layout_type_ (int, optional): Layout type identifier. Defaults to 0.
-        leading_byte_offset (int, optional): Leading byte offset. Defaults to 0.
-        stride_byte_offset (int, optional): Stride byte offset. Defaults to 0.
-
-    Returns:
-        PrimExpr: A handle representing the initialized descriptor.
-    """
+def initialize_wgmma_descriptor(
+    descriptor: Buffer,
+    start_address: PrimExpr,
+    layout_type_: int = 0,
+    leading_byte_offset: int = 0,
+    stride_byte_offset: int = 0,
+) -> PrimExpr:
+    """Initialize a WGMMA/UTCMMA shared-memory descriptor."""
 
     if not isinstance(descriptor, (BufferLoad, Buffer)):
         raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
 
-    if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
+    if isinstance(descriptor, Buffer) and (len(descriptor.shape) != 1 or descriptor.shape[0] != 1):
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
     descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
         descriptor, [0])
 
     return evaluate(
-        tir.call_intrin("handle", tir.op.Op.get("tl.initialize_descriptor"), descriptor,
-                        start_address, layout_type_, int(leading_byte_offset),
-                        int(stride_byte_offset)))
+        tir.call_intrin(
+            "handle",
+            tir.op.Op.get("tl.initialize_wgmma_descriptor"),
+            descriptor,
+            start_address,
+            layout_type_,
+            int(leading_byte_offset),
+            int(stride_byte_offset),
+        ))
+
+
+def initialize_tcgen05_descriptor(
+    descriptor: Buffer,
+    start_address: PrimExpr,
+    leading_byte_offset: int,
+    stride_byte_offset: int,
+    base_offset: int = 0,
+    leading_is_absolute: bool = False,
+    swizzle_mode: int = 0,
+) -> PrimExpr:
+    """Initialize a TCGEN05 shared-memory descriptor."""
+
+    if not isinstance(descriptor, (BufferLoad, Buffer)):
+        raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
+
+    if isinstance(descriptor, Buffer) and (len(descriptor.shape) != 1 or descriptor.shape[0] != 1):
+        raise ValueError("Descriptor must be a 1D buffer of size 1.")
+
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
+
+    return evaluate(
+        tir.call_intrin(
+            "handle",
+            tir.op.Op.get("tl.initialize_tcgen05_descriptor"),
+            descriptor,
+            start_address,
+            int(leading_byte_offset),
+            int(stride_byte_offset),
+            int(base_offset),
+            tir.IntImm("int32", 1 if leading_is_absolute else 0),
+            int(swizzle_mode),
+        ))
 
 
 def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:
@@ -606,3 +697,14 @@ def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)
+
+
+def tcgen05_mma_arrive(mbar_ptr):
+    """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
+
+    Parameters
+    ----------
+    mbar_ptr : PrimExpr
+        Pointer to the mbarrier object in shared memory (e.g., Barrier*).
+    """
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar_ptr)

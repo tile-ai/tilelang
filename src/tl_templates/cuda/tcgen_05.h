@@ -6,6 +6,7 @@
 #endif
 
 #include "common.h"
+#include <cute/arch/cluster_sm90.hpp>
 
 namespace tl {
 
@@ -59,12 +60,15 @@ inline void __device__ amma_fp16bf16_ss(uint64_t const desc_a,
                  "r"(mask[0]), "r"(mask[1]), "r"(mask[2]), "r"(mask[3]));
 }
 
-inline __device__ void amma_commit(uint64_t const *smem_ptr) {
+// Wrapper for CUTLASS umma_arrive: elect one lane, then arrive the mbarrier
+TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr) {
   uint32_t bar_intptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
-               "cluster.b64 [%0];"
-               :
-               : "r"(bar_intptr));
+  if (cute::elect_one_sync()) {
+    asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
+                 "cluster.b64 [%0];"
+                 :
+                 : "r"(bar_intptr));
+  }
 }
 
 } // namespace tl

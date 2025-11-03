@@ -288,6 +288,138 @@ union GmmaDescriptor {
   }
 };
 
+union Tcgen05SMemDescriptor {
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor() noexcept : desc_(0) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor(uint64_t desc) noexcept
+      : desc_(desc) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor(
+      Tcgen05SMemDescriptor const &t) noexcept
+      : desc_(t.desc_) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor(
+      Tcgen05SMemDescriptor &&t) noexcept
+      : desc_(t.desc_) {}
+
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor &
+  operator=(Tcgen05SMemDescriptor const &t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor &
+  operator=(Tcgen05SMemDescriptor &&t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  uint64_t desc_;
+  uint32_t reg32_[2];
+
+  // Bitfield implementation avoids the need for shifts in assignment
+  struct {
+    // start_address, bit [0,14), 4LSB not included
+    uint16_t start_address_ : 14, : 2; // 14 bits [0,14), 2 bits unused
+    // leading dimension byte offset, bit [16,30), 4LSB not included
+    uint16_t leading_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
+    // stride dimension byte offset, bit [32,46), 4LSB not included
+    uint16_t stride_byte_offset_ : 14,
+        version_ : 2; // 14 bits [0,14), 2 bits [14,16)
+    // base_offset, bit [49,52). leading_byte_offset_mode, bit [52,53).
+    uint8_t : 1, base_offset_ : 3, lbo_mode_ : 1,
+        : 3; // 1 bit unused, 3 bits [1,4), 1 bit [4,5), 3 bits unused
+    // layout type, bit [61,64), SWIZZLE_NONE matrix descriptor = 0,
+    // SWIZZLE_128B matrix descriptor = 2, SWIZZLE_64B descriptor = 4,
+    // SWIZZLE_32B descriptor = 6, SWIZZLE_128B_BASE32B = 1, N/A = 3, N/A = 5,
+    // N/A = 7
+    uint8_t : 5, layout_type_ : 3; // 6 bits unused, 3 bits [5,8)
+  } bitfield;
+  // Separate the field, as we may only update one part of desc
+  struct {
+    uint32_t lo;
+    uint32_t hi;
+  } words;
+
+  CUTE_HOST_DEVICE constexpr operator uint64_t() const noexcept {
+    return desc_;
+  }
+  template <typename T>
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor
+  operator+(const T &offset) const {
+    Tcgen05SMemDescriptor ret;
+    // Address addition is in units of 16 bytes (4 LSB not encoded)
+    ret.reg32_[0] = reg32_[0] + (uint32_t(offset) >> 4);
+    ret.reg32_[1] = reg32_[1];
+    return ret;
+  }
+};
+
+//
+// Tcgen05 instruction descriptor (wraps cute::UMMA::InstrDescriptor layout)
+//
+union Tcgen05InstrDescriptor {
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor() noexcept : desc_(0) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor(uint32_t desc) noexcept
+      : desc_(desc) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor(
+      Tcgen05InstrDescriptor const &t) noexcept
+      : desc_(t.desc_) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor(
+      Tcgen05InstrDescriptor &&t) noexcept
+      : desc_(t.desc_) {}
+
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor &
+  operator=(Tcgen05InstrDescriptor const &t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor &
+  operator=(Tcgen05InstrDescriptor &&t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  uint32_t desc_;
+  uint16_t reg16_[2];
+
+  // Bitfield implementation mirrors cute::UMMA::InstrDescriptor
+  struct {
+    // bit [ 0, 2) : Sparse meta data id2
+    uint16_t sparse_id2_ : 2,
+        // bit [ 2, 3) : 0 = dense. 1 = sparse. Only valid for
+        // F32F16/S8/MXF8F6F4
+        sparse_flag_ : 1,
+        // bit [ 3, 4) : 0 = no saturate. 1 = saturate. Only valid for S8
+        saturate_ : 1,
+        // bit [ 4, 6) : 0 = F16. 1 = F32, 2 = S32
+        c_format_ : 2,
+        // padding
+        : 1,
+        // bit [ 7,10) : see UMMA format encoding
+        a_format_ : 3,
+        // bit [10,13) : see UMMA format encoding
+        b_format_ : 3,
+        // bit [13,14) : 0 = no negate. 1 = negate
+        a_negate_ : 1,
+        // bit [14,15) : 0 = no negate. 1 = negate
+        b_negate_ : 1,
+        // bit [15,16) : 0 = K-major. 1 = MN-major
+        a_major_ : 1;
+
+    // Upper 16 bits
+    uint16_t b_major_ : 1, // bit [16,17)
+        n_dim_ : 6,        // bit [17,23) : 3 LSBs not included
+        : 1,               // padding
+        m_dim_ : 5,        // bit [24,29) : 4 LSBs not included
+        : 1,               // padding
+        max_shift_ : 2;    // bit [30,32)
+  } bitfield;
+
+  // Decay to a uint32_t
+  CUTE_HOST_DEVICE constexpr explicit operator uint32_t() const noexcept {
+    return desc_;
+  }
+};
+
 // Any
 template <typename T> TL_DEVICE bool Any(T *a, int size) {
   for (int i = 0; i < size; i++) {
@@ -326,14 +458,31 @@ TL_DEVICE void __sync_thread_partial() {
 
 template <int layout_type = 0, int leading_byte_offset = 0,
           int stride_byte_offset = 0, typename T>
-TL_DEVICE void initialize_descriptor(GmmaDescriptor &descriptor,
-                                     T *start_address) {
+TL_DEVICE void initialize_wgmma_descriptor(GmmaDescriptor &descriptor,
+                                           T *start_address) {
   descriptor.bitfield.start_address_ =
       cute::cast_smem_ptr_to_uint(start_address) >> 4;
   descriptor.bitfield.layout_type_ = layout_type;
   descriptor.bitfield.base_offset_ = 0;
   descriptor.bitfield.leading_byte_offset_ = leading_byte_offset;
   descriptor.bitfield.stride_byte_offset_ = stride_byte_offset;
+}
+
+template <typename T>
+TL_DEVICE void
+initialize_tcgen05_descriptor(Tcgen05SMemDescriptor &descriptor,
+                              T *start_address, int leading_byte_offset,
+                              int stride_byte_offset, int base_offset,
+                              bool leading_is_absolute, int swizzle_mode) {
+
+  descriptor.bitfield.start_address_ =
+      static_cast<uint16_t>(cast_smem_ptr_to_uint(start_address) >> 4);
+  descriptor.bitfield.leading_byte_offset_ = leading_byte_offset;
+  descriptor.bitfield.stride_byte_offset_ = stride_byte_offset;
+  descriptor.bitfield.version_ = 1;
+  descriptor.bitfield.base_offset_ = base_offset & 0x7;
+  descriptor.bitfield.lbo_mode_ = leading_is_absolute ? 1 : 0;
+  descriptor.bitfield.layout_type_ = swizzle_mode & 0x7;
 }
 
 template <typename T>

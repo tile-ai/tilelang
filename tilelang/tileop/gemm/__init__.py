@@ -8,6 +8,7 @@ import tvm_ffi
 from tilelang.ir import GemmWarpPolicy
 from .gemm_mma import GemmMMA
 from .gemm_wgmma import GemmWGMMA
+from .gemm_tcgen05 import GemmTCGEN5
 from .gemm_mfma import GemmMFMA
 from tilelang import _ffi_api
 
@@ -44,6 +45,9 @@ class GemmInst(IntEnum):
 
     def is_mfma(self) -> bool:
         return self == GemmInst.MFMA
+
+    def __repr__(self) -> str:
+        return self.name
 
 
 @tvm_ffi.register_object("tl.GemmPy")
@@ -119,6 +123,8 @@ class GemmPy(Node, Scriptable):
             return GemmMMA
         elif gemm_inst.is_wgmma():
             return GemmWGMMA
+        elif gemm_inst.is_tcgen5mma():
+            return GemmTCGEN5
         elif gemm_inst.is_mfma():
             return GemmMFMA
         elif gemm_inst.is_tcgen5mma():
