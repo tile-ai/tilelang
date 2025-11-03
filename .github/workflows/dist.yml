@@ -90,7 +90,7 @@ jobs:
       - name: Upload SDist
         # Not PR to save artifact storage, as SDist is only needed for releases.
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: sdist
           path: dist/*.tar.gz
