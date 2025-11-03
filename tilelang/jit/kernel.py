@@ -471,7 +471,6 @@ class JITKernel:
     def libpath(self) -> str:
         assert self.adapter is not None
         assert hasattr(self.adapter, 'libpath')
-        print(f'{self.adapter.libpath=}')
         return self.adapter.libpath
 
     def export_library(self, kernel_file: str) -> None:
