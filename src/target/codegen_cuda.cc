@@ -1759,9 +1759,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
 
     replacer.register_rule("(AType)",
-                           tl::codegen::ptx::DTypeEnumToString(AType));
+                           AType);
     replacer.register_rule("(BType)",
-                           tl::codegen::ptx::DTypeEnumToString(BType));
+                           BType);
     replacer.register_rule("(CType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
     replacer.register_rule("(M)", std::to_string(m));
