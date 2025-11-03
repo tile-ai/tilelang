@@ -254,7 +254,9 @@ def tilelang_chunk_o_bwd_dqkwg(
                     # for i_kv in T.Parallel(block_DK * block_DV):
                     #     dg_last_fragment[i_kv] = h_shared[i_kv // block_DV, i_kv % block_DV] * dh_shared[i_kv // block_DV, i_kv % block_DV]
                     for i_kv in T.Parallel(block_DK * block_DV):
-                        dg_last_fragment[i_kv] = h_shared[i_kv // block_DV, i_kv % block_DV] * dh_shared[i_kv // block_DV, i_kv % block_DV]
+                        dg_last_fragment[i_kv] = h_shared[i_kv // block_DV, i_kv %
+                                                          block_DV] * dh_shared[i_kv // block_DV,
+                                                                                i_kv % block_DV]
                     T.reduce_sum(dg_last_fragment, dg_last_fragment_scalar, dim=-1, clear=False)
                     dg_last_local[0] += dg_last_fragment_scalar[0]
 
