@@ -7,7 +7,6 @@ from tilelang.utils import deprecated
 __all__ = ["dynamic", "symbolic"]
 
 
-@deprecated("T.dynamic(...)", "tir.Var(...)", "v0.1.9")
 def dynamic(name: str, dtype: str = "int32"):
     """
     Create a TIR dynamic symbolic variable.
@@ -22,7 +21,7 @@ def dynamic(name: str, dtype: str = "int32"):
     return tir.Var(name, dtype)
 
 
-@deprecated("T.symbolic(...)", "T.dynamic(...)")
+@deprecated("T.symbolic(...)", "T.dynamic(...)", "v0.1.9")
 def symbolic(name: str, dtype: str = "int32"):
     """Deprecated alias for `T.dynamic`."""
     return tir.Var(name, dtype)

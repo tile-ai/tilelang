@@ -4,7 +4,7 @@ import ctypes
 
 import logging
 import warnings
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from importlib.metadata import PackageNotFoundError, version
 
