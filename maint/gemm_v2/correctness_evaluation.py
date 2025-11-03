@@ -1,4 +1,4 @@
-# pytest gemm_ss_wgmma.py -n 32
+# pytest correctness_evaluation.py -n 32
 import pytest
 from tilelang import tvm as tvm
 import tilelang.testing
@@ -384,7 +384,7 @@ def run_gemm_rr(
 
 
 M_VALUES = [64, 128, 256]
-N_VALUES = [16, 32, 64, 128]
+N_VALUES = [16, 32, 64, 128, 256, 512]
 K_VALUES = [16, 32, 64, 128]
 K_VALUES_8Bit = [32, 64, 128]
 FALSE_TRUE_CASES = ([
@@ -681,7 +681,7 @@ def test_gemm_rr_true_true(m, n, k):
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
 
     # # Test Pass
     # for m in [64, 128, 256]:
@@ -724,3 +724,30 @@ if __name__ == "__main__":
     #             print(f"======================= Test {m} {n} {k} False True =============================")
     #             run_gemm_rs(m, n, k * 3, False, True, "float16", "float16", "float16", m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
+
+    tilelang.disable_cache()
+    # run_gemm_rs(64, 512, 16, False, True, "float16", "float16", "float16", 64, 512, 16, 0, 128)
+    # run_gemm_rs(256, 512, 128 * 3, False, True, "float16", "float16", "float16", 256, 512, 128, 0, 128)
+    # run_gemm(256, 512, 128 * 3, False, True, "float16", "float16", "float16", 256, 512, 128, 0, 128)
+    # run_gemm(64, 256, 128, False, True, "float16", "float16", "float16", 64, 256, 128, 0, 128)
+    # run_gemm(64, 512, 128, False, True, "float16", "float16", "float16", 64, 512, 128, 0, 128)
+    # run_gemm(64, 512, 16, False, True, "float16", "float16", "float16", 64, 512, 16, 0, 128)
+    # run_gemm(64, 512, 64, False, True, "float16", "float16", "float16", 64, 512, 64, 0, 128)
+    # run_gemm(64, 512, 16, False, True, "float16", "float16", "float16", 64, 512, 16, 0, 128)
+    # run_gemm(64, 512, 32, False, True, "float16", "float16", "float16", 64, 512, 32, 0, 128)
+    # run_gemm(64, 512, 64, False, True, "float16", "float16", "float16", 64, 512, 64, 0, 128)
+    # run_gemm(64, 512, 128, False, True, "float16", "float16", "float16", 64, 512, 128, 0, 128)
+
+    # run_gemm_rs(64, 512, 16, False, True, "float16", "float16", "float16", 64, 512, 16, 0, 128)
+    # run_gemm_rs(64, 256, 16, False, True, "float16", "float16", "float16", 64, 256, 16, 0, 128)
+    # run_gemm_rs(64, 512, 32, False, True, "float16", "float16", "float16", 64, 512, 32, 0, 128)
+    # run_gemm_rs(64, 512, 64, False, True, "float16", "float16", "float16", 64, 512, 64, 0, 128)
+    # run_gemm_rs(64, 512, 128, False, True, "float16", "float16", "float16", 64, 512, 128, 0, 128)
+
+    # run_gemm_rs(64, 512, 128, False, False, "float16", "float16", "float16", 64, 512, 128, 0, 128)
+    # run_gemm(64, 512, 128, False, False, "float16", "float16", "float16", 64, 512, 128, 0, 128)
+
+    run_gemm_rs(64, 256, 16, False, False, "float16", "float16", "float16", 64, 256, 16, 0, 128)
+    run_gemm_rs(64, 512, 32, False, False, "float16", "float16", "float16", 64, 512, 32, 0, 128)
+    run_gemm_rs(64, 512, 64, False, False, "float16", "float16", "float16", 64, 512, 64, 0, 128)
+    run_gemm_rs(64, 512, 128, False, False, "float16", "float16", "float16", 64, 512, 128, 0, 128)
