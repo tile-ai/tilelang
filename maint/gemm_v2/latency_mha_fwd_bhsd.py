@@ -30,8 +30,6 @@ def get_configs():
 @tilelang.jit(
     out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     })
 def flashattn(batch,
               heads,
