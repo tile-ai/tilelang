@@ -4,6 +4,7 @@ import tilelang.language as T
 
 
 def test_int64_address():
+
     @tilelang.jit
     def set_cache_kernel(
         S,
@@ -11,16 +12,23 @@ def test_int64_address():
         pos_ty='int64',
         dtype="float32",
     ):
+
         @T.prim_func
         def main(
-            pos: T.Tensor([S,], pos_ty),  # type: ignore  `TypeError: Check failed: (a.dtype() == b.dtype()) is false: mismatched types. int64 vs. int32`
-            value: T.Tensor([S, D], dtype),  # type: ignore
-            cache: T.Tensor([S, D], dtype),  # type: ignore
+                pos: T
+            .Tensor(
+                [
+                    S,
+                ], pos_ty
+            ),  # type: ignore  `TypeError: Check failed: (a.dtype() == b.dtype()) is false: mismatched types. int64 vs. int32`
+                value: T.Tensor([S, D], dtype),  # type: ignore
+                cache: T.Tensor([S, D], dtype),  # type: ignore
         ):
             with T.Kernel(S, threads=128) as bx:
                 slot = pos[bx]
                 for i in T.Parallel(D):
                     cache[slot, i] = value[bx, i]
+
         return main
 
     D = 2
