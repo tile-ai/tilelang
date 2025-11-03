@@ -1758,10 +1758,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       BType = "tl::DataType::kTensorFloat32";
     }
 
-    replacer.register_rule("(AType)",
-                           AType);
-    replacer.register_rule("(BType)",
-                           BType);
+    replacer.register_rule("(AType)", AType);
+    replacer.register_rule("(BType)", BType);
     replacer.register_rule("(CType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
     replacer.register_rule("(M)", std::to_string(m));
