@@ -220,6 +220,7 @@ def test_var_assign():
 
 
 def test_marco_return():
+
     @T.macro
     def macro_return_constant():
         return 0
@@ -254,20 +255,22 @@ def test_marco_return():
 
 
 def test_prim_func_generator():
+
     @T.prim_func(generator=True)
     def prim_func_gen(
-        A=T.Tensor((128,), T.float32),
-        B=T.Tensor((128,), T.float32),
+            A=T.Tensor((128,), T.float32),  # noqa: B008
+            B=T.Tensor((128,), T.float32),  # noqa: B008
     ):
         with T.Kernel(128) as (tx,):
             T.copy(A[tx], B[tx])
-    pf = prim_func_gen()
+
+    prim_func_gen()
 
     @T.prim_func
     def foo() -> T.Tensor((128,), T.float32):
         pass
-    assert isinstance(foo, T.PrimFunc)
 
+    assert isinstance(foo, T.PrimFunc)
 
 
 if __name__ == '__main__':
