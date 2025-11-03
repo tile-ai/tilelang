@@ -7,6 +7,7 @@ import inspect
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm_ffi.container import Map
 from tvm.ir.base import Span
+from tvm.tir.op import ceildiv
 from .ast import BaseBuilder, IRGenerator, eval_op, mutate
 import tvm
 from tvm.tir import Buffer
@@ -93,6 +94,14 @@ class ContinueFrame(Frame):
 
 class BreakFrame(Frame):
     ...
+
+
+@dataclass
+class SteppedSerial(Frame):
+    start: tir.PrimExpr
+    stop: tir.PrimExpr = None
+    step: tir.PrimExpr = None
+    annotations: dict[str, Any] | None = None
 
 
 ContinueOrBreak = ContinueFrame | BreakFrame
@@ -236,12 +245,18 @@ class Builder(BaseBuilder):
     def ctx_for(self, it):
         self.check_continue_break()
         it = unwrap_expr(it)
-        if not isinstance(it, tir.frame.ForFrame):
-            raise TypeError(
-                f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
-                "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding")
-        with self.with_frame(it) as v:
-            yield v
+        if isinstance(it, SteppedSerial):
+            real_stop = ceildiv(it.stop - it.start, it.step)
+            frame = tir.serial(real_stop, annotations=it.annotations)
+            with self.with_frame(frame) as v:
+                yield it.start + v * it.step
+        else:
+            if not isinstance(it, tir.frame.ForFrame):
+                raise TypeError(
+                    f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
+                    "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding")
+            with self.with_frame(it) as v:
+                yield v
 
     def ctx_continue(self):
         self.check_continue_break()
@@ -449,8 +464,9 @@ class Builder(BaseBuilder):
                 f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
 
     def override(self, name: str):
+        import tilelang.language as T
         if name == 'range':
-            return tir.serial
+            return T.serial
         raise ValueError(f'Unknown override: {name}')
 
 
