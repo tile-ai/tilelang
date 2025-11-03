@@ -14,7 +14,7 @@ base_version = (ROOT / 'VERSION').read_text().strip()
 # so pip will complain when we install `tilelang-0.1.6.post2+gitxxxx.tar.gz`.
 # To workaround that, when building sdist,
 # we do not add version label and use a file to store the git hash instead.
-git_pin = ROOT / '_git_commit.txt'
+git_pin = ROOT / '.git_commit.txt'
 
 
 def _read_cmake_bool(i: str | None, default=False):
