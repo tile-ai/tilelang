@@ -105,9 +105,15 @@ class TensorCoreIntrinEmitter:
         self.local_size_out = (m_dim * n_dim) // warp_size
 
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
-        self.a_dtype_abbrv = self.dtype_abbrv[a_dtype]
-        self.b_dtype_abbrv = self.dtype_abbrv[b_dtype]
-        self.accum_dtype_abbrv = self.dtype_abbrv[accum_dtype]
+        self.a_dtype_abbrv = self._get_dtype_abbrv(a_dtype)
+        self.b_dtype_abbrv = self._get_dtype_abbrv(b_dtype)
+        self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
+
+    def _get_dtype_abbrv(self, dtype: str) -> str:
+        try:
+            return self.dtype_abbrv[dtype]
+        except KeyError as err:
+            raise ValueError(f"Unsupported dtype: {dtype}") from err
 
     def _initialize_mma_prefix(self, k_dim: int = 16):
         if k_dim == 8:

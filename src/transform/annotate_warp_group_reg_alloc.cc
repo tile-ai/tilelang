@@ -124,7 +124,9 @@ private:
       }
       auto producer_body = if_then_else->then_case;
       Optional<Stmt> consumer_body = if_then_else->else_case;
-      ICHECK(consumer_body.defined()) << "Consumer body is undefined";
+      // In some degenerate warp-specialized patterns (e.g., producer-only),
+      // the consumer body may be absent. Handle gracefully by only annotating
+      // the producer side when consumer is missing.
 
       auto dec_reg = nreg_[0].as<IntImmNode>()->value;
       auto inc_reg = nreg_[1].as<IntImmNode>()->value;
@@ -150,15 +152,20 @@ private:
       producer_stmts.push_back(producer_body);
       auto new_producer_body = SeqStmt(producer_stmts);
 
-      Array<Stmt> consumer_stmts;
-      consumer_stmts.push_back(inc_reg_stmt);
-      consumer_stmts.push_back(consumer_body.value());
-      auto new_consumer_body = SeqStmt(consumer_stmts);
+      Stmt new_if_stmt;
+      if (consumer_body.defined()) {
+        Array<Stmt> consumer_stmts;
+        consumer_stmts.push_back(inc_reg_stmt);
+        consumer_stmts.push_back(consumer_body.value());
+        auto new_consumer_body = SeqStmt(consumer_stmts);
+        new_if_stmt = IfThenElse(if_then_else->condition, new_producer_body,
+                                 new_consumer_body);
+      } else {
+        // No consumer branch; keep the if-then form.
+        new_if_stmt = IfThenElse(if_then_else->condition, new_producer_body);
+      }
 
-      auto new_if_stmt = IfThenElse(if_then_else->condition, new_producer_body,
-                                    new_consumer_body);
       auto new_attr = AttrStmt(op->node, op->attr_key, op->value, new_if_stmt);
-
       return new_attr;
     } else {
       return StmtExprMutator::VisitStmt_(op);

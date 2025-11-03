@@ -1107,7 +1107,6 @@ def ptx_wgmma_ss(
 def ptx_wgmma_rs(
     dtype,
     wgmma_prefix,
-    a_is_k_major,
     b_is_k_major,
     a_dtype_abbrv,
     b_dtype_abbrv,
@@ -1127,7 +1126,6 @@ def ptx_wgmma_rs(
         dtype,
         _tvm_op.Op.get("tl.ptx_wgmma_rs"),
         wgmma_prefix,
-        a_is_k_major,
         b_is_k_major,
         a_dtype_abbrv,
         b_dtype_abbrv,
@@ -1141,6 +1139,115 @@ def ptx_wgmma_rs(
         scale_out,
         scale_in_a,
         scale_in_b,
+    )
+
+
+def ptx_tcgen05_mma_ss(
+    kind_dtype,
+    desc_a,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    C_offset,
+    desc_val,
+    scale_out,
+    mask0,
+    mask1,
+    mask2,
+    mask3,
+    enable_ws=False,
+    ws=None,
+    warp_specialized=None,
+    variant=None,
+):
+    """TVM intrinsic for tcgen05.mma shared-memory × shared-memory instructions.
+
+    Expects 13 or 14 positional arguments:
+    (kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
+     desc_val, scale_out, mask0, mask1, mask2, mask3[, enable_ws]).
+    Aliases: you can also pass `ws` or `warp_specialized` (booleans) instead of `enable_ws`.
+    Alternatively, use `variant="ws"` (or "default").
+    - kind_dtype: instruction kind selector (e.g., "float16" for kind::f16,
+      "tf32" for kind::tf32, "int8" for kind::i8, "float8_e4m3" for kind::f8f6f4).
+    """
+    # Aliases precedence: if either `ws` or `warp_specialized` is provided, they override enable_ws
+    if ws is not None:
+        enable_ws = bool(ws)
+    if warp_specialized is not None:
+        enable_ws = bool(warp_specialized)
+    if variant is not None:
+        if isinstance(variant, str):
+            v = variant.lower()
+            if v in ("ws", "warp_specialized", "warp-specialized"):
+                enable_ws = True
+            elif v in ("default", "std", "ss"):
+                enable_ws = False
+            else:
+                raise ValueError(f"ptx_tcgen05_mma_ss: unknown variant: {variant}")
+        else:
+            # Treat non-string as truthy flag
+            enable_ws = bool(variant)
+
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ss"),
+        kind_dtype,
+        desc_a,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        C_offset,
+        desc_val,
+        scale_out,
+        mask0,
+        mask1,
+        mask2,
+        mask3,
+        enable_ws,
+    )
+
+
+def ptx_tcgen05_mma_ts(
+    kind_dtype,
+    A_ptr,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    C_offset,
+    desc_val,
+    scale_out,
+    mask0,
+    mask1,
+    mask2,
+    mask3,
+):
+    """TVM intrinsic for tcgen05.mma tensor-memory × shared-memory instructions.
+
+    Expects 13 positional arguments:
+    (kind_dtype, A_ptr, A_offset, desc_b, B_offset, C_ptr, C_offset,
+     desc_val, scale_out, mask0, mask1, mask2, mask3).
+    - kind_dtype: instruction kind selector (e.g., "float16" for kind::f16,
+      "tf32" for kind::tf32, "int8" for kind::i8, "float8_e4m3" for kind::f8f6f4).
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ts"),
+        kind_dtype,
+        A_ptr,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        C_offset,
+        desc_val,
+        scale_out,
+        mask0,
+        mask1,
+        mask2,
+        mask3,
     )
 
 

@@ -209,4 +209,3 @@ def test_shuffle_elect_block_leader():
 
 if __name__ == "__main__":
     tilelang.testing.main()
-    # run_get_lane_id()

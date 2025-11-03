@@ -546,6 +546,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              return makeGemmABLayoutHopper(stride, mat_continuous, continuity,
                                            element_size, k_inner);
            })
+      .def("tl.make_tcgen05mma_swizzled_layout",
+           [](int stride, int mat_continuous, int continuity, int element_size,
+              bool k_inner) {
+             return makeGemmABLayoutSm100(stride, mat_continuous, continuity,
+                                          element_size, k_inner);
+           })
       .def("tl.make_full_bank_swizzled_layout",
            [](int stride, int continuous, int element_size) {
              return makeFullBankSwizzleLayout(stride, continuous, element_size);

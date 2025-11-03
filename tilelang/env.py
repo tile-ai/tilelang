@@ -297,12 +297,11 @@ def prepend_pythonpath(path):
 if env.TVM_IMPORT_PYTHON_PATH is not None:
     prepend_pythonpath(env.TVM_IMPORT_PYTHON_PATH)
 else:
-    tvm_path = os.path.join(THIRD_PARTY_ROOT, "tvm")
+    tvm_path = os.path.join(THIRD_PARTY_ROOT, 'tvm', 'python')
     assert os.path.exists(tvm_path), tvm_path
     if tvm_path not in sys.path:
-        tvm_python_binding = os.path.join(tvm_path, 'python')
-        prepend_pythonpath(tvm_python_binding)
-        env.TVM_IMPORT_PYTHON_PATH = tvm_python_binding
+        prepend_pythonpath(tvm_path)
+        env.TVM_IMPORT_PYTHON_PATH = tvm_path
 
     if os.environ.get("TVM_LIBRARY_PATH") is None:
         os.environ['TVM_LIBRARY_PATH'] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
