@@ -98,6 +98,8 @@ class LibraryGenerator:
                 src.name,
                 "-lcuda",
                 "-gencode",
+                f"arch=compute_{target_arch},code=compute_{target_arch}",
+                "-gencode",
                 f"arch=compute_{target_arch},code=sm_{target_arch}",
             ]
             if enable_fast_math:

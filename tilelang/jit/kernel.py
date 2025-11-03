@@ -14,6 +14,8 @@ from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, Cython
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 import logging
+import subprocess
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -465,6 +467,13 @@ class JITKernel:
     def host_source(self) -> str:
         return str(self.artifact.host_mod) if self.artifact else ""
 
+    @property
+    def libpath(self) -> str:
+        assert self.adapter is not None
+        assert hasattr(self.adapter, 'libpath')
+        print(f'{self.adapter.libpath=}')
+        return self.adapter.libpath
+
     def export_library(self, kernel_file: str) -> None:
         """
         Exports the compiled kernel function to a shared library file.
@@ -483,3 +492,78 @@ class JITKernel:
 
         # Export the compiled kernel function to a shared library file.
         self.rt_module.export_library(kernel_file)
+
+    def get_ptx(self) -> str | None:
+        """
+        Extracts and returns the PTX code of the compiled kernel function.
+        
+        Returns
+        -------
+        str | None
+            The PTX code as a string, or None if extraction failed
+        """
+        # Only get PTX for CUDA targets
+        if self.target.kind.name != "cuda":
+            logger.debug(f"Skipping PTX extraction for non-CUDA target: {self.target.kind.name}")
+            return None
+        
+        libpath = self.libpath
+        if not os.path.exists(libpath):
+            logger.warning(f"Cannot extract PTX: library file not found at {libpath}")
+            return None
+        
+        # Try to extract PTX using cuobjdump
+        ptx_code = None
+        try:
+            result = subprocess.run(
+                ['cuobjdump', '--dump-ptx', libpath],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0 and result.stdout:
+                ptx_code = result.stdout
+        except FileNotFoundError:
+            logger.warning("cuobjdump not found. Install CUDA Toolkit to extract PTX code.")
+        except subprocess.SubprocessError as e:
+            logger.debug(f"Could not extract PTX with cuobjdump: {e}")
+        
+        if ptx_code is None:
+            logger.warning("Could not extract PTX code")
+        
+        return ptx_code
+
+    def get_sass(self) -> str | None:
+        """
+        Extracts and returns the SASS code of the compiled kernel function.
+        """
+        # Only get SASS for CUDA targets
+        if self.target.kind.name != "cuda":
+            logger.debug(f"Skipping SASS extraction for non-CUDA target: {self.target.kind.name}")
+            return None
+        
+        libpath = self.libpath
+        if not os.path.exists(libpath):
+            logger.warning(f"Cannot extract SASS: library file not found at {libpath}")
+            return None
+        
+        # Try to extract SASS using cuobjdump
+        sass_code = None
+        try:
+            result = subprocess.run(
+                ['cuobjdump', '--dump-sass', libpath],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0 and result.stdout:
+                sass_code = result.stdout
+        except FileNotFoundError:
+            logger.warning("cuobjdump not found. Install CUDA Toolkit to extract SASS code.")
+        except subprocess.SubprocessError as e:
+            logger.debug(f"Could not extract SASS with cuobjdump: {e}")
+        
+        if sass_code is None:
+            logger.warning("Could not extract SASS code")
+        
+        return sass_code

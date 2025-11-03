@@ -22,6 +22,7 @@ from tilelang.cache import cached
 from os import path, makedirs
 from logging import getLogger
 import functools
+from tilelang.env import is_dump_ptx_enabled, is_dump_sass_enabled
 from tilelang.jit.param import Kernel, _P, _RProg
 
 logger = getLogger(__name__)
@@ -222,6 +223,22 @@ class _JitImplementation:
                         print(kernel_result.get_kernel_source(), file=f)
                     with open(path.join(self.debug_root_path, program_file), 'w') as f:
                         print(program_result.script(), file=f)
+                    
+                    # Extract and save PTX code
+                    if is_dump_ptx_enabled():
+                        ptx_code = kernel_result.get_ptx()
+                        if ptx_code is not None:
+                            ptx_file = f'tilelang_jit_kernel_{func_name}.ptx'
+                            with open(path.join(self.debug_root_path, ptx_file), 'w') as f:
+                                print(ptx_code, file=f)
+
+                    # Extract and save SASS code
+                    if is_dump_sass_enabled():
+                        sass_code = kernel_result.get_sass()
+                        if sass_code is not None:
+                            sass_file = f'tilelang_jit_kernel_{func_name}.sass'
+                            with open(path.join(self.debug_root_path, sass_file), 'w') as f:
+                                print(sass_code, file=f)
 
                 self._kernel_cache[key] = kernel_result
 
