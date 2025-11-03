@@ -223,7 +223,7 @@ class _JitImplementation:
                         print(kernel_result.get_kernel_source(), file=f)
                     with open(path.join(self.debug_root_path, program_file), 'w') as f:
                         print(program_result.script(), file=f)
-                    
+
                     # Extract and save PTX code
                     if is_dump_ptx_enabled():
                         ptx_code = kernel_result.get_ptx()

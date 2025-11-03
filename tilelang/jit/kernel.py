@@ -496,7 +496,7 @@ class JITKernel:
     def get_ptx(self) -> str | None:
         """
         Extracts and returns the PTX code of the compiled kernel function.
-        
+
         Returns
         -------
         str | None
@@ -506,31 +506,29 @@ class JITKernel:
         if self.target.kind.name != "cuda":
             logger.debug(f"Skipping PTX extraction for non-CUDA target: {self.target.kind.name}")
             return None
-        
+
         libpath = self.libpath
         if not os.path.exists(libpath):
             logger.warning(f"Cannot extract PTX: library file not found at {libpath}")
             return None
-        
+
         # Try to extract PTX using cuobjdump
         ptx_code = None
         try:
-            result = subprocess.run(
-                ['cuobjdump', '--dump-ptx', libpath],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
+            result = subprocess.run(['cuobjdump', '--dump-ptx', libpath],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30)
             if result.returncode == 0 and result.stdout:
                 ptx_code = result.stdout
         except FileNotFoundError:
             logger.warning("cuobjdump not found. Install CUDA Toolkit to extract PTX code.")
         except subprocess.SubprocessError as e:
             logger.debug(f"Could not extract PTX with cuobjdump: {e}")
-        
+
         if ptx_code is None:
             logger.warning("Could not extract PTX code")
-        
+
         return ptx_code
 
     def get_sass(self) -> str | None:
@@ -541,29 +539,27 @@ class JITKernel:
         if self.target.kind.name != "cuda":
             logger.debug(f"Skipping SASS extraction for non-CUDA target: {self.target.kind.name}")
             return None
-        
+
         libpath = self.libpath
         if not os.path.exists(libpath):
             logger.warning(f"Cannot extract SASS: library file not found at {libpath}")
             return None
-        
+
         # Try to extract SASS using cuobjdump
         sass_code = None
         try:
-            result = subprocess.run(
-                ['cuobjdump', '--dump-sass', libpath],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
+            result = subprocess.run(['cuobjdump', '--dump-sass', libpath],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30)
             if result.returncode == 0 and result.stdout:
                 sass_code = result.stdout
         except FileNotFoundError:
             logger.warning("cuobjdump not found. Install CUDA Toolkit to extract SASS code.")
         except subprocess.SubprocessError as e:
             logger.debug(f"Could not extract SASS with cuobjdump: {e}")
-        
+
         if sass_code is None:
             logger.warning("Could not extract SASS code")
-        
+
         return sass_code

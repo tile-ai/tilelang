@@ -335,9 +335,11 @@ CUTLASS_INCLUDE_DIR = env.CUTLASS_INCLUDE_DIR
 COMPOSABLE_KERNEL_INCLUDE_DIR = env.COMPOSABLE_KERNEL_INCLUDE_DIR
 TILELANG_TEMPLATE_PATH = env.TILELANG_TEMPLATE_PATH
 
+
 # Whether to extract PTX and SASS code when debug_root_path is set
 def is_dump_ptx_enabled() -> bool:
     return os.environ.get("TL_DUMP_PTX", "0").lower() in ("1", "true", "yes", "on")
+
 
 def is_dump_sass_enabled() -> bool:
     return os.environ.get("TL_DUMP_SASS", "0").lower() in ("1", "true", "yes", "on")
