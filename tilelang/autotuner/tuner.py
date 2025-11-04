@@ -14,7 +14,12 @@ from tvm.tir import PrimFunc, Var
 from tvm.target import Target
 import inspect
 from functools import partial
-from typing import (Callable, Generic, Literal, Any, ParamSpec, TypeVar)
+from typing import (Callable, Generic, Literal, Any, TypeVar)
+# Python 3.9 compatibility for ParamSpec
+try:
+    from typing import ParamSpec
+except ImportError:  # Python < 3.10
+    from typing_extensions import ParamSpec
 from tqdm.auto import tqdm
 import logging
 import concurrent.futures

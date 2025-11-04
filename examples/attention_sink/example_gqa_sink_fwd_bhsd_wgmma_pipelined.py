@@ -272,7 +272,7 @@ def main(
     seq_kv: int = 256,
     dim: int = 128,
     groups: int = 8,
-    window_size: int | None = None,
+    window_size: Optional[int] = None,
     dtype: str = "float16",
     tune: bool = False,
 ):

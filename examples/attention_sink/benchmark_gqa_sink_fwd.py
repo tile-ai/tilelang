@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
 from example_gqa_sink_fwd_bhsd_wgmma_pipelined import flashattn, ref_program, gen_inputs
+from typing import Optional
 
 
 @triton.jit
@@ -94,7 +95,7 @@ def triton_kernel(
     Out.store([off_z, off_h, start_m * BLOCK_M, 0], acc)
 
 
-def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tensor:
+def triton_program(Q, K, V, Sinks, window_size: Optional[int] = None) -> torch.Tensor:
     bs, n_heads, seq_q, head_dim = Q.shape
     _, n_heads_kv, seq_kv, _ = K.shape
     BLOCK_M = 64
@@ -130,7 +131,7 @@ def main(
     seq_kv: int = 256,
     dim: int = 128,
     groups: int = 8,
-    window_size: int | None = None,
+    window_size: Optional[int] = None,
     dtype: str = "float16",
     tune: bool = False,
 ):
