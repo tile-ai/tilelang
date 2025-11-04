@@ -1,6 +1,5 @@
 from tilelang import tvm
 from tvm import ir
-import tvm_ffi
 import torch
 import ctypes
 from typing import TYPE_CHECKING
@@ -99,7 +98,10 @@ def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var
                         f"calling failed on `tvm.script.ir_builder.tir._ffi_api.{val}`")
     return call(expr, is_size_var)
 
+
 __orig_dtype_new = dtype.__new__
+
+
 def __dtype_new__(cls, value: AnyDType) -> dtype:
     if isinstance(value, str):
         return __orig_dtype_new(cls, value)
