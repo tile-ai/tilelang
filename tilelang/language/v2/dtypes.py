@@ -1,6 +1,5 @@
 from tilelang import tvm
 from tvm import ir
-import tvm_ffi
 import torch
 import ctypes
 from typing import TYPE_CHECKING
@@ -100,16 +99,17 @@ def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var
     return call(expr, is_size_var)
 
 
+__orig_dtype_new = dtype.__new__
+
+
 def __dtype_new__(cls, value: AnyDType) -> dtype:
     if isinstance(value, str):
-        val = str.__new__(cls, value)
+        return __orig_dtype_new(cls, value)
     elif value in _dtype_py2tvmstr:
-        val = str.__new__(cls, _dtype_py2tvmstr[value])
+        return __orig_dtype_new(cls, _dtype_py2tvmstr[value])
     else:
         expected = set(list(_dtype_py2tvmstr.keys()) + list(_dtype_tvmstr2fficall.values()))
         raise TypeError(f"Invalid DataType {value}({type(value)}), expect one of {expected}")
-    val.__tvm_ffi_dtype__ = tvm_ffi.core.DataType(val)
-    return val
 
 
 dtype.__eq__ = __dtype_eq__
