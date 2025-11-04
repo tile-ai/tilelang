@@ -560,7 +560,8 @@ def get_type_hints(func):
                 except Exception:
                     pass
             value = ForwardRef(value, is_argument=True, is_class=False)
-        hints[name] = _eval_type(value, globalns=globalns, localns=localns) #, type_params=type_params)
+        hints[name] = _eval_type(
+            value, globalns=globalns, localns=localns)  #, type_params=type_params)
     return hints
 
 
