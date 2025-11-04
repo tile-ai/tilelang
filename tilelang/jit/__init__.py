@@ -11,11 +11,11 @@ from typing import (
     Any,
     Callable,
     Generic,
-    Iterable,
     TypeVar,
     overload,
     Literal,
 )
+from collections.abc import Iterable
 # Python 3.9 compatibility for ParamSpec
 try:
     from typing import ParamSpec

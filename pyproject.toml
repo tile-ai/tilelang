@@ -2,7 +2,7 @@
 name = "tilelang"
 description = "A tile level programming language to generate high performance code."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 authors = [{ name = "TileLang Contributors" }, { name = "Tile-AI" }]
 maintainers = [{ name = "Lei Wang", email = "leiwang1999@outlook.com" }]
 license = "MIT"
@@ -14,7 +14,6 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -118,7 +117,7 @@ skip = [
 ]
 
 [tool.ruff]
-target-version = "py38"
+target-version = "py39"
 line-length = 100
 output-format = "full"
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
 
@@ -12,7 +12,7 @@ import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
-from typing import TYPE_CHECKING, Callable, ContextManager, Any, Generic, TypeVar, ForwardRef, Union
+from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
 # Python 3.9 compatibility for ParamSpec and Self
 try:
     from typing import ParamSpec, Self
@@ -167,7 +167,7 @@ class Builder(BaseBuilder):
             if isinstance(f, frame):
                 return idx
 
-    def enter_frame(self, frame: ContextManager):
+    def enter_frame(self, frame: AbstractContextManager[Any]):
         self.frames.append(frame)
         return frame.__enter__()
 
@@ -180,7 +180,7 @@ class Builder(BaseBuilder):
                 stacklevel=3)
 
     @contextmanager
-    def with_frame(self, frame: ContextManager | None):
+    def with_frame(self, frame: AbstractContextManager[Any] | None):
         pop_idx = len(self.frames)
         yield self.enter_frame(frame)
         while len(self.frames) > pop_idx:

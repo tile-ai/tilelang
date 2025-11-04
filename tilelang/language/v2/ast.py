@@ -1,7 +1,9 @@
 from __future__ import annotations
 import ast
 from dataclasses import dataclass
-from typing import Callable, ContextManager, Generic, Iterable, Any, Literal, TypeVar
+from typing import Callable, Generic, Any, Literal, TypeVar
+from contextlib import AbstractContextManager
+from collections.abc import Iterable
 # Python 3.9 compatibility for ParamSpec
 try:
     from typing import ParamSpec
@@ -228,7 +230,7 @@ class BaseBuilder:
     def ret(self, value: Any) -> Any:
         return value
 
-    def ctx_with(self, ctx: ContextManager[Any]) -> ContextManager[Any]:
+    def ctx_with(self, ctx: AbstractContextManager[Any]) -> AbstractContextManager[Any]:
         return ctx
 
     def assert_expr(self, cond: Any, msg: Any):
