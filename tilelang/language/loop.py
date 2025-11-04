@@ -99,7 +99,10 @@ def serial(start: tir.PrimExpr,
            step: tir.PrimExpr | None = None,
            *,
            annotations: dict[str, Any] | None = None):
-    if step is None or step == 1:
+    step_is_one = False
+    step_is_one |= isinstance(step, int) and step == 1
+    step_is_one |= isinstance(step, IntImm) and step.value == 1
+    if step is None or step_is_one:
         return tb_tir.serial(start, stop, annotations=annotations)
     else:
         if stop is None:

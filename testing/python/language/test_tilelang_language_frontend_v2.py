@@ -3,6 +3,8 @@ import tilelang.language as T
 import torch
 import tilelang.testing
 import tvm
+from tvm.script.ir_builder.base import IRBuilderFrame
+from tvm.tir.expr import IntImm, Var
 
 
 def test_argument():
@@ -303,6 +305,11 @@ def test_serial_for_with_step():
     res = ker()
     ref = torch.tensor([10, 9, 8, 7, 6, 5, 4, 3, 2, 1], dtype=torch.int32, device='cuda')
     assert torch.all(res == ref), f"Expected {ref}, but got {res}"
+
+    assert isinstance(T.serial(1, 10, 1), IRBuilderFrame)
+    assert isinstance(T.serial(1, 10, IntImm('int32', 1)), IRBuilderFrame)
+    assert not isinstance(T.serial(1, 10, Var('tmp', 'int32')), IRBuilderFrame)
+    assert not isinstance(T.serial(10, -1, -1), IRBuilderFrame)
 
 
 if __name__ == '__main__':
