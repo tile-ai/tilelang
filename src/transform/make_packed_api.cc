@@ -433,7 +433,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       auto shape_vectorize_expr = [&]() -> PrimExpr {
         PrimExpr result = IntImm(kv.second->DefaultIndexType(), 1);
         result = result * vectorize_dim;
-        result = FloorMod(result, dynamic_alignment);
+        result = FloorMod(result, IntImm(result->dtype, dynamic_alignment));
         return result;
       }();
       shape_checks.emplace_back(AssertStmt(

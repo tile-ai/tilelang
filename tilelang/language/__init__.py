@@ -8,9 +8,9 @@ from __future__ import annotations
 # upstream tir script is fully compatible
 from tvm.script.parser.tir import *
 from . import overrides as _overrides  # noqa: F401
-from .tir import (
-    prim_func,  # noqa: F401
-)
+
+# from .tir import prim_func, macro,  # noqa: F401
+from .v2 import *  # noqa: F401
 from .tir.ir import *  # noqa: F401
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .proxy import (
