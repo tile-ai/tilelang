@@ -5,6 +5,7 @@ import tilelang.language as T
 
 @tilelang.jit(out_idx=-1)
 def get_inf_kernel(dtype: str):
+
     @T.prim_func
     def main(A: T.Tensor((32,), dtype)):
         with T.Kernel(1, threads=32):
