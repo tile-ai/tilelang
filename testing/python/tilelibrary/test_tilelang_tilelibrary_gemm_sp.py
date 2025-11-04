@@ -8,7 +8,7 @@ from tilelang.utils.tensor import torch_assert_close, map_torch_type
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
 torch.backends.cuda.matmul.allow_tf32 = False
-torch.manual_seed(42)
+# torch.manual_seed(42)  # only enable when debugging
 
 
 def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):

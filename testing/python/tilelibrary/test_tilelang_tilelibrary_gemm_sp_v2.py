@@ -155,6 +155,7 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
 def test_gemm_ss():
     # More test case can be found in kernel/test_tilelang_kernel_gemm.py
     # GEMM tests for float16
+    # TODO: support transposed A compressor
     run_gemm_ss(512, 1024, 768, False, True, "float16", "float16", "float", 128, 128, 32, 2)
     run_gemm_ss(512, 1024, 768, False, False, "float16", "float16", "float", 128, 128, 32, 2)
     ## run_gemm_ss(512, 1024, 768, True, False, "float16", "float16", "float", 128, 128, 32, 2)
