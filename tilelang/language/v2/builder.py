@@ -12,7 +12,12 @@ import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
-from typing import TYPE_CHECKING, Callable, ContextManager, Any, Generic, ParamSpec, Self, TypeVar, ForwardRef
+from typing import TYPE_CHECKING, Callable, ContextManager, Any, Generic, TypeVar, ForwardRef, Union
+# Python 3.9 compatibility for ParamSpec and Self
+try:
+    from typing import ParamSpec, Self
+except ImportError:  # Python < 3.11 for Self, < 3.10 for ParamSpec
+    from typing_extensions import ParamSpec, Self
 from . import dtypes as dt
 import threading
 import logging
@@ -95,8 +100,10 @@ class BreakFrame(Frame):
     ...
 
 
-ContinueOrBreak = ContinueFrame | BreakFrame
-AnyFrame = tir.frame.IRBuilderFrame | Frame
+# Python 3.9 compatibility: avoid PEP 604 unions at runtime
+# Use tuple for isinstance checks and typing.Union for annotations/aliases
+ContinueOrBreak = (ContinueFrame, BreakFrame)
+AnyFrame = Union[tir.frame.IRBuilderFrame, Frame]
 
 TIR_CONTROL_FRAME = (
     tir.frame.WhileFrame,

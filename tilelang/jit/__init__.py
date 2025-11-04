@@ -12,11 +12,15 @@ from typing import (
     Callable,
     Generic,
     Iterable,
-    ParamSpec,
     TypeVar,
     overload,
     Literal,
 )
+# Python 3.9 compatibility for ParamSpec
+try:
+    from typing import ParamSpec
+except ImportError:  # Python < 3.10
+    from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
 from tilelang.language.v2 import PrimFunc
 from tilelang.jit.adapter.utils import is_metal_target

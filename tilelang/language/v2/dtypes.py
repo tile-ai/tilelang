@@ -2,12 +2,13 @@ from tilelang import tvm
 from tvm import ir
 import torch
 import ctypes
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 from tvm import tir
 import tvm.script.ir_builder.tir._ffi_api as tb_ffi
 
 dtype = tvm.DataType
-AnyDType = ir.Type | str | type | torch.dtype | dtype
+# Python 3.9 compatibility: avoid PEP 604 unions at runtime
+AnyDType = Union[ir.Type, str, type, torch.dtype, dtype]
 
 _dtype_cvt = [
     (None, 'handle', ctypes.c_long, 'long', None),  # use long to repr void*

@@ -1,7 +1,12 @@
 from __future__ import annotations
 import ast
 from dataclasses import dataclass
-from typing import Callable, ContextManager, Generic, Iterable, Any, Literal, ParamSpec, TypeVar
+from typing import Callable, ContextManager, Generic, Iterable, Any, Literal, TypeVar
+# Python 3.9 compatibility for ParamSpec
+try:
+    from typing import ParamSpec
+except ImportError:  # Python < 3.10
+    from typing_extensions import ParamSpec
 import inspect
 # from .utils import get_ast, get_compiled_object
 from . import utils
