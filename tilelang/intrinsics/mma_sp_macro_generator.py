@@ -11,10 +11,14 @@ from .utils import (
 from tilelang.utils import is_fragment
 
 from tilelang.intrinsics.mma_sp_layout import (
-    shared_32x16_to_mma_sp_layout_sr_a,
-    shared_32x16_to_mma_sp_layout_rs_a,
+    shared_16x16_to_mma_sp_layout_sr_a,
+    shared_16x16_to_mma_sp_layout_sr_b,
+    shared_16x32_to_mma_sp_layout_sr_a,
+    shared_16x32_to_mma_sp_layout_rs_a,
     shared_16x32_to_mma_sp_layout_rs_b,
     shared_16x32_to_mma_sp_layout_sr_b,
+    shared_16x64_to_mma_sp_layout_sr_a,
+    shared_16x64_to_mma_sp_layout_sr_b,
     mma_sp_load_a_32x4_to_shared_16x16_layout,
     mma_sp_load_a_32x8_to_shared_16x32_layout,
     mma_sp_load_a_32x16_to_shared_16x64_layout,
@@ -691,14 +695,14 @@ class SparseTensorCoreIntrinEmitter(object):
         transform_func_sr_a: Callable = None
         transform_func_sr_b: Callable = None
         if dtype_bits == 32:
-            transform_func_sr_a = shared_16x8_to_mma_32x4_layout_sr_a
-            transform_func_sr_b = shared_16x8_to_mma_32x4_layout_sr_b
+            transform_func_sr_a = shared_16x16_to_mma_sp_layout_sr_a
+            transform_func_sr_b = shared_16x16_to_mma_sp_layout_sr_b
         elif dtype_bits == 16:
-            transform_func_sr_a = shared_32x16_to_mma_sp_layout_sr_a
-            transform_func_sr_b = shared_32x16_to_mma_sp_layout_sr_b
+            transform_func_sr_a = shared_16x32_to_mma_sp_layout_sr_a
+            transform_func_sr_b = shared_16x32_to_mma_sp_layout_sr_b
         elif dtype_bits == 8:
-            transform_func_sr_a = shared_16x32_to_mma_32x16_layout_sr_a
-            transform_func_sr_b = shared_16x32_to_mma_32x16_layout_sr_b
+            transform_func_sr_a = shared_16x64_to_mma_sp_layout_sr_a
+            transform_func_sr_b = shared_16x64_to_mma_sp_layout_sr_b
         else:
             raise ValueError(f"Unsupported dtype {dtype}")
 

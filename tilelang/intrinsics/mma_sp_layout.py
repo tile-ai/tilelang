@@ -6,23 +6,40 @@ from tilelang.intrinsics.mma_layout import (
     mma_load_a_32x4_to_shared_16x8_layout,
     mma_load_a_32x16_to_shared_16x32_layout,
     mma_load_a_32x8_to_shared_16x16_layout,
+    shared_16x8_to_mma_32x4_layout_sr_a,
+    shared_16x8_to_mma_32x4_layout_sr_b,
     shared_16x16_to_mma_32x8_layout_sr_a,
     shared_16x16_to_mma_32x8_layout_rs_a,
     shared_16x16_to_mma_32x8_layout_rs_b,
     shared_16x16_to_mma_32x8_layout_sr_b,
+    shared_16x32_to_mma_32x16_layout_sr_a,
+    shared_16x32_to_mma_32x16_layout_sr_b,
+    
 )
 
-def shared_32x16_to_mma_sp_layout_sr_a(i, j):
+def shared_16x16_to_mma_sp_layout_sr_a(i, j):
+    return shared_16x8_to_mma_32x4_layout_sr_a(i, j)
+
+def shared_16x16_to_mma_sp_layout_sr_b(i, j):
+    return shared_16x8_to_mma_32x4_layout_sr_b(i, j)
+
+def shared_16x32_to_mma_sp_layout_sr_a(i, j):
     return shared_16x16_to_mma_32x8_layout_sr_a(i, j)
 
-def shared_32x16_to_mma_sp_layout_rs_a(i, j):
+def shared_16x32_to_mma_sp_layout_rs_a(i, j):
     return shared_16x16_to_mma_32x8_layout_rs_a(i, j)
 
-def shared_32x16_to_mma_sp_layout_rs_b(i, j):
+def shared_16x32_to_mma_sp_layout_rs_b(i, j):
     return shared_16x16_to_mma_32x8_layout_rs_b(i, j)
 
-def shared_32x16_to_mma_sp_layout_sr_b(i, j):
+def shared_16x32_to_mma_sp_layout_sr_b(i, j):
     return shared_16x16_to_mma_32x8_layout_sr_b(j, i)
+
+def shared_16x64_to_mma_sp_layout_sr_a(i, j):
+    return shared_16x32_to_mma_32x16_layout_sr_a(i, j)
+
+def shared_16x64_to_mma_sp_layout_sr_b(i, j):
+    return shared_16x32_to_mma_32x16_layout_sr_b(i, j)
 
 def mma_sp_load_a_32x4_to_shared_16x16_layout(thread_id, local_id):
     return mma_load_a_32x4_to_shared_16x8_layout(thread_id, local_id)

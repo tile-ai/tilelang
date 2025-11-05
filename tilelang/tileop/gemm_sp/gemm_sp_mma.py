@@ -127,10 +127,6 @@ class GemmSPMMA(GemmSPBase):
                         ki,
                     )
 
-                    # T.print(A_local, f"A_local", thread_binding=mma_emitter.extract_thread_binding(mma_emitter.get_thread_binding()))
-                    # T.print(E_local, f"E_local", thread_binding=mma_emitter.extract_thread_binding(mma_emitter.get_thread_binding()))
-                    # T.print(B_local, f"B_local", thread_binding=mma_emitter.extract_thread_binding(mma_emitter.get_thread_binding()))
-
                     # Perform Matrix Multiplication
                     mma_emitter.mma_sp(A_local, E_local, B_local, C_local, ki)
 
