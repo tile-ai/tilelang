@@ -68,7 +68,7 @@ class SparseTensorCoreIntrinEmitter(object):
             "uint16": 8,
         },
         "float16": {
-            "int8": 8,  # TODO: refactor values to make it tidy after debugging
+            "int8": 8,
             "uint8": 8,
             "int16": 16,
             "uint16": 16,
@@ -192,8 +192,6 @@ class SparseTensorCoreIntrinEmitter(object):
         self.local_size_b = (n_dim * k_dim) // warp_size
         self.local_size_out = (m_dim * n_dim) // warp_size
 
-        print(f"{self.local_size_a=}, {self.local_size_e=}, {self.local_size_b=}, {self.local_size_out=}, {self.e_factor=} {n_dim=} {k_dim=}")
-
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
         self.a_dtype_abbrv = self.dtype_abbrv[a_dtype]
         self.b_dtype_abbrv = self.dtype_abbrv[b_dtype]
@@ -235,8 +233,6 @@ class SparseTensorCoreIntrinEmitter(object):
         self.micro_size_x = m_dim
         # NOTE: k_dim here represents the logical shape of the MMA operation.
         self.micro_size_k = k_dim
-
-        print(f"{self.warp_rows=}, {self.warp_cols=}, {self.n_dim=}, {self.micro_size_x=}, {self.micro_size_y=}, {self.micro_size_k=}, {self.warp_row_tiles=}, {self.warp_col_tiles=}")
 
     def _initialize_is_m_first(self, is_m_first: Optional[bool] = False):
         if is_m_first is not None:
@@ -547,9 +543,6 @@ class SparseTensorCoreIntrinEmitter(object):
         a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
         e_local_stride: PrimExpr = k_inner * warp_rows * local_size_e if e_is_fragment else 0
         b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0
-
-        thread_binding = self.extract_thread_binding(self.get_thread_binding())
-        print(f"{e_local_stride=}")
 
         @T.macro
         def _warp_mma_sp(A_local_buf, E_local_buf, B_local_buf, C_local_buf):

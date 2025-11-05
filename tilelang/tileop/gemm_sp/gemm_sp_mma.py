@@ -32,7 +32,7 @@ class GemmSPMMA(GemmSPBase):
         if self.is_gemm_ss():
             return {
                 self.A: make_swizzled_layout(self.A),
-                self.B: make_swizzled_layout(self.B),  # TODO: verify B layout
+                self.B: make_swizzled_layout(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_sr():
