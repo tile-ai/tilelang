@@ -80,6 +80,17 @@ def FrontendLegalize():
     return _ffi_api.FrontendLegalize()  # type: ignore
 
 
+def LegalizeNegativeIndex():
+    """Legalize negative indices in buffer loads.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LegalizeNegativeIndex()  # type: ignore
+
+
 def InjectAssumes():
     """Inject Assumes
 
