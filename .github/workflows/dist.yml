@@ -75,12 +75,11 @@ jobs:
           create-symlink: true
           evict-old-files: "7d"
           append-timestamp: false
-          key: ccache-sdist-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+          key: sdist-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
           restore-keys: |
-            ccache-sdist-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
-            ccache-sdist-${{ runner.os }}-${{ runner.arch }}
-            ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
-            ccache-${{ runner.os }}-${{ runner.arch }}
+            sdist-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+            sdist-${{ runner.os }}-${{ runner.arch }}
+            ${{ runner.os }}-${{ runner.arch }}
 
       - name: Test SDist buildable
         run: |
@@ -135,12 +134,13 @@ jobs:
           create-symlink: true
           evict-old-files: "7d"
           append-timestamp: false
-          key: ccache-wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}-${{ hashFiles('**/*.cc') }}
           restore-keys: |
-            ccache-wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
-            ccache-wheel-${{ runner.os }}-${{ runner.arch }}
-            ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
-            ccache-${{ runner.os }}-${{ runner.arch }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}-${{ hashFiles('**/*.cc') }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+            wheel-${{ runner.os }}-${{ runner.arch }}
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+            ${{ runner.os }}-${{ runner.arch }}
 
       - name: Set CIBW_BUILD
         run: |

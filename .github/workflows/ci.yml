@@ -139,10 +139,9 @@ jobs:
           create-symlink: true
           evict-old-files: "7d"
           append-timestamp: false
-          # Workaround a stuck status issue when testing this, -v2 is not necessary.
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-v2
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/*.cc') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-v2
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/*.cc') }}
             ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}
             ${{ runner.os }}-${{ runner.arch }}
 
