@@ -311,6 +311,7 @@ def test_serial_for_with_step():
     assert not isinstance(T.serial(1, 10, Var('tmp', 'int32')), IRBuilderFrame)
     assert not isinstance(T.serial(10, -1, -1), IRBuilderFrame)
 
+
 def test_swap_logic():
 
     @tilelang.jit
