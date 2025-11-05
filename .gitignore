@@ -2,6 +2,7 @@
 *.slo
 *.lo
 *.o
+*.so
 *.obj
 *.pyc
 
@@ -18,7 +19,8 @@
 
 debug/
 build/
-dist/
+*dist/
+dist*/
 wheelhouse/
 __pycache__
 nnfusion.tar.gz
@@ -26,7 +28,14 @@ nnfusion.tar.gz
 # makeenv and test intermediate files
 tmp/
 
+.env
+.envrc
+.venv
+env/
 venv/
+ENV/
+env.bak/
+venv.bak/
 .vscode/
 .vs/
 
@@ -75,17 +84,11 @@ models/frozenmodels/
 # .ruff_cache
 .ruff_cache
 
-# build sdist
-build_sdist/
-
 # exclude debug testing folder
 !testing/python/debug
 
 # ignore lib with develop mode
 tilelang/lib
-
-# tox
-.tox/
 
 # cython
 tilelang/jit/adapter/cython/.cycache
@@ -95,3 +98,7 @@ tilelang/jit/adapter/cython/.cycache
 
 # claude
 **/.claude
+
+# CMake
+cmake-build/
+cmake-build-*/

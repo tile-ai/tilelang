@@ -1,6 +1,6 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
-from typing import Union, List, Tuple, Optional
 from collections import deque
 from tvm import tir
 from tvm.tir import Var
@@ -8,6 +8,18 @@ from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
 from tvm.ffi import register_object
 from tilelang import _ffi_api
 import threading
+
+# Ensure single-dimension kernel bindings can be unpacked like iterables.
+# especially for issue https://github.com/tile-ai/tilelang/issues/830
+if not hasattr(Var, "__iter__"):
+
+    def _var_iter(self):
+        yield self
+
+    Var.__iter__ = _var_iter  # type: ignore[attr-defined]
+
+if not hasattr(Var, "__len__"):
+    Var.__len__ = lambda self: 1  # type: ignore[attr-defined]
 
 
 class FrameStack:
@@ -68,6 +80,17 @@ def _get_current_stack() -> FrameStack:
     return _local.kernel_launch_frame_stack
 
 
+def _normalize_bindings(bindings: list[Var]) -> Var | list[Var]:
+    """
+    Return a bare Var when we only have a single binding so that users may write either
+    `with T.Kernel(...) as pid:` or `with T.Kernel(...) as (pid,)`.
+    Otherwise, keep the list semantics for multi-dimensional launches.
+    """
+    if len(bindings) == 1:
+        return bindings[0]
+    return bindings
+
+
 @register_object("tl.KernelLaunchFrame")
 class KernelLaunchFrame(TIRFrame):
     """
@@ -75,7 +98,7 @@ class KernelLaunchFrame(TIRFrame):
     and handles the entry and exit of the kernel launch scope.
     """
 
-    def __enter__(self) -> Union[Var, List[Var]]:
+    def __enter__(self) -> Var | list[Var]:
         """
         Enters the KernelLaunchFrame scope and pushes this frame onto the stack.
         Returns one Var if we detect exactly 5 frames (meaning there is a single
@@ -83,9 +106,6 @@ class KernelLaunchFrame(TIRFrame):
         """
         super().__enter__()
         _get_current_stack().push(self)
-        # If we have exactly 5 frames, return the single iter_var.var.
-        if len(self.frames) == 5:
-            return self.frames[0].iter_var.var
 
         last_block_frame = self.frames[-1]
         assert isinstance(last_block_frame,
@@ -95,11 +115,11 @@ class KernelLaunchFrame(TIRFrame):
 
         if maybe_cpu:
             # CPU kernel frame, return a list of for frame items.
-            return [frame.vars[0] for frame in self.frames[0:-1]]
+            return _normalize_bindings([frame.vars[0] for frame in self.frames[0:-1]])
         else:
             # Otherwise, return a list of iter_var.var objects (excluding the last 4 frames).
             # As 4 frames for threadIdx.x, threadIdx.y, threadIdx.z and block frame with attributes
-            return [frame.iter_var.var for frame in self.frames[0:-4]]
+            return _normalize_bindings([frame.iter_var.var for frame in self.frames[0:-4]])
 
     def __exit__(self, ptype, value, trace):
         """
@@ -112,7 +132,7 @@ class KernelLaunchFrame(TIRFrame):
         super().__exit__(ptype, value, trace)
 
     @classmethod
-    def Current(cls) -> Optional["KernelLaunchFrame"]:
+    def Current(cls) -> KernelLaunchFrame | None:
         """
         Returns the topmost (current) KernelLaunchFrame from the stack if it exists,
         or None if the stack is empty.
@@ -128,7 +148,7 @@ class KernelLaunchFrame(TIRFrame):
         iter_var = self.frames[dim].iter_var
         return int(iter_var.dom.extent)
 
-    def get_block_extents(self) -> List[int]:
+    def get_block_extents(self) -> list[int]:
         """
         Returns the block extents for all three dimensions.
         """
@@ -142,7 +162,7 @@ class KernelLaunchFrame(TIRFrame):
         iter_var = self.frames[-4 + dim].iter_var
         return int(iter_var.dom.extent)
 
-    def get_thread_extents(self) -> List[int]:
+    def get_thread_extents(self) -> list[int]:
         """
         Returns the thread extents for all three dimensions.
         """
@@ -155,7 +175,7 @@ class KernelLaunchFrame(TIRFrame):
         """
         return self.frames[-4 + dim].iter_var.var
 
-    def get_thread_bindings(self) -> List[Var]:
+    def get_thread_bindings(self) -> list[Var]:
         """
         Returns the thread binding for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
@@ -178,21 +198,21 @@ class KernelLaunchFrame(TIRFrame):
         """
         return self.frames[dim].iter_var.var
 
-    def get_block_bindings(self) -> List[Var]:
+    def get_block_bindings(self) -> list[Var]:
         """
         Returns all three block bindings.
         """
         return [frame.iter_var.var for frame in self.frames[0:-4]]
 
     @property
-    def blocks(self) -> List[Var]:
+    def blocks(self) -> list[Var]:
         """
         Returns the block indices from the topmost frame.
         """
         return [frame.iter_var.var for frame in self.frames[0:-4]]
 
     @property
-    def threads(self) -> List[Var]:
+    def threads(self) -> list[Var]:
         """
         Returns the thread indices from the topmost frame.
         """
@@ -207,10 +227,10 @@ class KernelLaunchFrame(TIRFrame):
 
 
 def Kernel(
-    *blocks: List[tir.PrimExpr],
-    threads: Optional[Union[int, List[int], Tuple]] = None,
+    *blocks: list[tir.PrimExpr],
+    threads: int | list[int] | tuple | None = None,
     is_cpu: bool = False,
-    prelude: Optional[str] = None,
+    prelude: str | None = None,
 ):
     """Tools to quickly construct a GPU kernel launch frame.
 
@@ -234,6 +254,31 @@ def Kernel(
     -------
     res : Tuple[frame.LaunchThreadFrame]
         The result LaunchThreadFrame.
+
+    Examples
+    --------
+    Create a 1-D CUDA kernel launch and unpack the single block index:
+
+    .. code-block:: python
+
+        with T.Kernel(T.ceildiv(N, 128), threads=128) as bx:
+            # bx is the blockIdx.x binding (also iterable as (bx,))
+            ...
+
+    Launch a 2-D grid while requesting two thread dimensions:
+
+    .. code-block:: python
+
+        with T.Kernel(grid_x, grid_y, threads=(64, 2)) as (bx, by):
+            tx, ty = T.get_thread_bindings()
+            ...
+
+    Emit a CPU kernel where thread bindings are skipped:
+
+    .. code-block:: python
+
+        with T.Kernel(loop_extent, is_cpu=True) as (i,):
+            ...
     """
     attrs: dict = {}
 
@@ -265,7 +310,7 @@ def get_thread_binding(dim: int = 0) -> Var:
     return KernelLaunchFrame.Current().get_thread_binding(dim)
 
 
-def get_thread_bindings() -> List[Var]:
+def get_thread_bindings() -> list[Var]:
     """Returns all three thread bindings.
     """
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
@@ -279,7 +324,7 @@ def get_block_binding(dim: int = 0) -> Var:
     return KernelLaunchFrame.Current().get_block_binding(dim)
 
 
-def get_block_bindings() -> List[Var]:
+def get_block_bindings() -> list[Var]:
     """Returns all three block bindings.
     """
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
@@ -293,7 +338,7 @@ def get_thread_extent(dim: int = 0) -> int:
     return KernelLaunchFrame.Current().get_thread_extent(dim)
 
 
-def get_thread_extents() -> List[int]:
+def get_thread_extents() -> list[int]:
     """Returns all three thread extents.
     """
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
@@ -307,7 +352,7 @@ def get_block_extent(dim: int = 0) -> int:
     return KernelLaunchFrame.Current().get_block_extent(dim)
 
 
-def get_block_extents() -> List[int]:
+def get_block_extents() -> list[int]:
     """Returns all three block extents.
     """
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"

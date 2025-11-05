@@ -18,8 +18,6 @@ except ImportError:
 
 import torch
 
-tilelang.disable_cache()
-
 
 @tilelang.jit(
     out_idx=[-1],

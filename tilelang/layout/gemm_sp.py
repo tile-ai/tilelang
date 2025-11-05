@@ -1,17 +1,16 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
+from __future__ import annotations
 
-from typing import Optional
 import tvm
 import tilelang.language as T
 import warnings
 
 from tilelang.contrib import nvcc
-from typing import List
 from math import prod
 
 
-def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
+def decompose_col_major(index_1d: int, basis: list[int]) -> list[int]:
     res = []
     for x in basis:
         res.append(index_1d % x)

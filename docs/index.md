@@ -14,6 +14,7 @@ low-level optimizations necessary for state-of-the-art performance.
 
 get_started/Installation
 get_started/overview
+get_started/targets
 :::
 
 
@@ -34,6 +35,14 @@ deeplearning_operators/gemv
 deeplearning_operators/matmul
 deeplearning_operators/matmul_sparse
 deeplearning_operators/deepseek_mla
+:::
+
+:::{toctree}
+:maxdepth: 1
+:caption: COMPILER INTERNALS
+
+compiler_internals/letstmt_inline
+compiler_internals/inject_fence_proxy
 :::
 
 :::{toctree}

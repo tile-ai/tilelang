@@ -1,4 +1,5 @@
-from typing import Any, Optional
+from __future__ import annotations
+from typing import Any
 import tvm
 from tvm.ir import PrimExpr
 from tvm.ir.base import Span
@@ -1061,6 +1062,195 @@ def ptx_mma_sp(
     )
 
 
+def ptx_wgmma_ss(
+    dtype,
+    wgmma_prefix,
+    a_is_k_major,
+    b_is_k_major,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_desc,
+    A_offset,
+    B_desc,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+):
+    """TVM intrinsic for ptx tensor core wmma instructions
+    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-for-wmma
+    """
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma_ss"),
+        wgmma_prefix,
+        a_is_k_major,
+        b_is_k_major,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_desc,
+        A_offset,
+        B_desc,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
+    )
+
+
+def ptx_wgmma_rs(
+    dtype,
+    wgmma_prefix,
+    b_is_k_major,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_buf,
+    A_offset,
+    B_desc,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+):
+
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma_rs"),
+        wgmma_prefix,
+        b_is_k_major,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_buf,
+        A_offset,
+        B_desc,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
+    )
+
+
+def ptx_tcgen05_mma_ss(
+    kind_dtype,
+    desc_a,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    C_offset,
+    desc_val,
+    scale_out,
+    mask0,
+    mask1,
+    mask2,
+    mask3,
+    enable_ws=False,
+    ws=None,
+    warp_specialized=None,
+    variant=None,
+):
+    """TVM intrinsic for tcgen05.mma shared-memory × shared-memory instructions.
+
+    Expects 13 or 14 positional arguments:
+    (kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
+     desc_val, scale_out, mask0, mask1, mask2, mask3[, enable_ws]).
+    Aliases: you can also pass `ws` or `warp_specialized` (booleans) instead of `enable_ws`.
+    Alternatively, use `variant="ws"` (or "default").
+    - kind_dtype: instruction kind selector (e.g., "float16" for kind::f16,
+      "tf32" for kind::tf32, "int8" for kind::i8, "float8_e4m3" for kind::f8f6f4).
+    """
+    # Aliases precedence: if either `ws` or `warp_specialized` is provided, they override enable_ws
+    if ws is not None:
+        enable_ws = bool(ws)
+    if warp_specialized is not None:
+        enable_ws = bool(warp_specialized)
+    if variant is not None:
+        if isinstance(variant, str):
+            v = variant.lower()
+            if v in ("ws", "warp_specialized", "warp-specialized"):
+                enable_ws = True
+            elif v in ("default", "std", "ss"):
+                enable_ws = False
+            else:
+                raise ValueError(f"ptx_tcgen05_mma_ss: unknown variant: {variant}")
+        else:
+            # Treat non-string as truthy flag
+            enable_ws = bool(variant)
+
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ss"),
+        kind_dtype,
+        desc_a,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        C_offset,
+        desc_val,
+        scale_out,
+        mask0,
+        mask1,
+        mask2,
+        mask3,
+        enable_ws,
+    )
+
+
+def ptx_tcgen05_mma_ts(
+    kind_dtype,
+    A_ptr,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    C_offset,
+    desc_val,
+    scale_out,
+    mask0,
+    mask1,
+    mask2,
+    mask3,
+):
+    """TVM intrinsic for tcgen05.mma tensor-memory × shared-memory instructions.
+
+    Expects 13 positional arguments:
+    (kind_dtype, A_ptr, A_offset, desc_b, B_offset, C_ptr, C_offset,
+     desc_val, scale_out, mask0, mask1, mask2, mask3).
+    - kind_dtype: instruction kind selector (e.g., "float16" for kind::f16,
+      "tf32" for kind::tf32, "int8" for kind::i8, "float8_e4m3" for kind::f8f6f4).
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ts"),
+        kind_dtype,
+        A_ptr,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        C_offset,
+        desc_val,
+        scale_out,
+        mask0,
+        mask1,
+        mask2,
+        mask3,
+    )
+
+
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 
@@ -1775,7 +1965,7 @@ def min_value(dtype, span=None):
     return _tvm_op.min_value(dtype, span)
 
 
-def max_value(dtype: str, span: Optional[Span] = None) -> Any:
+def max_value(dtype: str, span: Span | None = None) -> Any:
     """maximum value of dtype
 
     Parameters
@@ -1794,7 +1984,7 @@ def max_value(dtype: str, span: Optional[Span] = None) -> Any:
     return _tvm_op.max_value(dtype, span)
 
 
-def infinity(dtype: str, span: Optional[Span] = None) -> Any:
+def infinity(dtype: str, span: Span | None = None) -> Any:
     """infinity value of dtype
 
     Parameters
@@ -1813,7 +2003,7 @@ def infinity(dtype: str, span: Optional[Span] = None) -> Any:
     return _tvm_op.infinity(dtype, span)
 
 
-def reinterpret(dtype, value, span: Optional[Span] = None) -> Any:
+def reinterpret(dtype, value, span: Span | None = None) -> Any:
     """infinity value of dtype
 
     Parameters

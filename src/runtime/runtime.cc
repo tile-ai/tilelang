@@ -20,7 +20,7 @@ template <typename T> static std::string ArrayToStr(const T *ptr, size_t n) {
   for (size_t i = 0; i < n; i++) {
     if (i > 0)
       ss << ", ";
-    ss << ptr[i];
+    ss << ptr[i]; // NOLINT(clang-analyzer-security.ArrayBound)
   }
   ss << "]";
   return ss.str();
@@ -89,7 +89,7 @@ struct TensorMapArgs {
 };
 
 // set device api
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def_packed("tvm_tensormap_create_tiled", [](PackedArgs args,
                                                                 Any *ret) {
@@ -104,7 +104,7 @@ TVM_FFI_STATIC_INIT_BLOCK({
     }
     *ret = static_cast<int>(result);
   });
-});
+}
 
 struct TensorMapIm2ColArgs {
   CUtensorMap *map;
@@ -180,7 +180,7 @@ struct TensorMapIm2ColArgs {
   }
 };
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def_packed(
       "tvm_tensormap_create_im2col", [](PackedArgs args, Any *ret) {
@@ -197,7 +197,7 @@ TVM_FFI_STATIC_INIT_BLOCK({
         }
         *ret = static_cast<int>(result);
       });
-});
+}
 
 #endif // (CUDA_MAJOR_VERSION >= 12)
 

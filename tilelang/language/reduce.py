@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tvm import tir
-from typing import Optional
 from tilelang.language import copy, macro, alloc_shared
 
 
@@ -139,6 +139,51 @@ def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
     return reduce(buffer, out, "absmax", dim, clear)
 
 
+def reduce_bitand(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
+    """Perform reduce bitwise-and on input buffer, store the result to output buffer.
+
+    Args:
+        buffer (tir.Buffer): The input buffer
+        out (tir.Buffer): The output buffer
+        dim (int): The dimension to perform reduce on
+
+    Returns:
+        tir.Call: Handle to the reduction operation
+    """
+    dim = _legalize_dim(buffer, dim)
+    return reduce(buffer, out, "bitand", dim, clear)
+
+
+def reduce_bitor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
+    """Perform reduce bitwise-or on input buffer, store the result to output buffer.
+
+    Args:
+        buffer (tir.Buffer): The input buffer
+        out (tir.Buffer): The output buffer
+        dim (int): The dimension to perform reduce on
+
+    Returns:
+        tir.Call: Handle to the reduction operation
+    """
+    dim = _legalize_dim(buffer, dim)
+    return reduce(buffer, out, "bitor", dim, clear)
+
+
+def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
+    """Perform reduce bitwise-xor on input buffer, store the result to output buffer.
+
+    Args:
+        buffer (tir.Buffer): The input buffer
+        out (tir.Buffer): The output buffer
+        dim (int): The dimension to perform reduce on
+
+    Returns:
+        tir.Call: Handle to the reduction operation
+    """
+    dim = _legalize_dim(buffer, dim)
+    return reduce(buffer, out, "bitxor", dim, clear)
+
+
 @macro
 def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -> tir.PrimExpr:
     cumsum_smem = alloc_shared(src.shape, src.dtype, "shared.dyn")
@@ -154,11 +199,34 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     copy(cumsum_smem, dst)
 
 
-def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reverse: bool = False):
+def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse: bool = False):
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
     Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src.scope() == "local.fragment"`, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
+
+    Examples:
+        A 1D inclusive scan that writes the result into a separate shared-memory buffer:
+
+        >>> import tilelang.language as T
+        >>> @T.prim_func
+        ... def kernel(A: T.Tensor((128,), "float32"), B: T.Tensor((128,), "float32")):
+        ...     with T.Kernel(1, threads=128):
+        ...         A_shared = T.alloc_shared((128,), "float32")
+        ...         T.copy(A, A_shared)
+        ...         T.cumsum(src=A_shared, dst=A_shared, dim=0)
+        ...         T.copy(A_shared, B)
+
+        A 2D prefix sum along the last dimension with reverse accumulation:
+
+        >>> import tilelang.language as T
+        >>> @T.prim_func
+        ... def kernel2d(A: T.Tensor((64, 64), "float16"), B: T.Tensor((64, 64), "float16")):
+        ...     with T.Kernel(1, 1, threads=256):
+        ...         tile = T.alloc_shared((64, 64), "float16")
+        ...         T.copy(A, tile)
+        ...         T.cumsum(src=tile, dim=1, reverse=True)
+        ...         T.copy(tile, B)
 
     Returns:
         tir.Call: A handle to the emitted cumulative-sum operation.

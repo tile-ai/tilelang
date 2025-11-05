@@ -1,5 +1,6 @@
+from __future__ import annotations
 import logging
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable
 
 import torch
 from tvm import tir
@@ -11,20 +12,14 @@ from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.jit.adapter.libgen import PyLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.target import determine_target
-
-from ..base import BaseKernelAdapter
+from tilelang.jit.adapter.base import BaseKernelAdapter
+from tilelang.jit.adapter.nvrtc import is_nvrtc_available, check_nvrtc_available
 
 logger = logging.getLogger(__name__)
 
-is_nvrtc_available = False
-NVRTC_UNAVAILABLE_WARNING = "cuda-python is not available, nvrtc backend cannot be used. " \
-                            "Please install cuda-python via `pip install cuda-python` " \
-                            "if you want to use the nvrtc backend."
-try:
+# Import cuda bindings if available
+if is_nvrtc_available:
     import cuda.bindings.driver as cuda
-    is_nvrtc_available = True
-except ImportError:
-    pass
 
 
 class NVRTCKernelAdapter(BaseKernelAdapter):
@@ -32,19 +27,18 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
     kernels = {}
 
     def __init__(self,
-                 params: List[KernelParam],
-                 result_idx: List[int],
-                 target: Union[str, Target],
-                 func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 host_mod: Optional[tvm.IRModule] = None,
-                 device_mod: Optional[tvm.IRModule] = None,
-                 kernel_global_source: Optional[str] = None,
+                 params: list[KernelParam],
+                 result_idx: list[int],
+                 target: str | Target,
+                 func_or_mod: tir.PrimFunc | tvm.IRModule,
+                 host_mod: tvm.IRModule | None = None,
+                 device_mod: tvm.IRModule | None = None,
+                 kernel_global_source: str | None = None,
                  verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None,
-                 compile_flags: Optional[List[str]] = None):
+                 pass_configs: dict[str, Any] | None = None,
+                 compile_flags: list[str] | None = None):
 
-        if not is_nvrtc_available:
-            raise ImportError(NVRTC_UNAVAILABLE_WARNING)
+        check_nvrtc_available()
 
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
@@ -98,15 +92,15 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
     @classmethod
     def from_database(cls,
-                      params: List[KernelParam],
-                      result_idx: List[int],
+                      params: list[KernelParam],
+                      result_idx: list[int],
                       target: str,
-                      func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                      func_or_mod: tir.PrimFunc | tvm.IRModule,
                       kernel_global_source: str,
                       kernel_lib_path: str,
                       verbose: bool = False,
-                      pass_configs: Optional[Dict[str, Any]] = None,
-                      compile_flags: Optional[List[str]] = None):
+                      pass_configs: dict[str, Any] | None = None,
+                      compile_flags: list[str] | None = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -150,11 +144,16 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self):
+    def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int]]:
         """Extract information about dynamic shapes from the TIR function.
 
         Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
         for runtime shape resolution.
+
+        Returns
+        -------
+        Dict[tir.Var, Tuple[int, int]]
+            Mapping from symbolic variable to (buffer_index, shape_dimension)
         """
         func = self.prim_func
         params = func.params
@@ -167,17 +166,22 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                     dynamic_symbolic_map[shape] = (i, j)
         return dynamic_symbolic_map
 
-    def get_kernel_source(self):
+    def get_kernel_source(self) -> str | None:
+        """Get the CUDA kernel source code.
+
+        Returns
+        -------
+        Optional[str]
+            The kernel source code, or None if not available
+        """
         return self.kernel_global_source
 
-    def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
+    def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
         """Low-level function to call the compiled CUDA kernel.
         """
         return self.pymodule.call(self.kernels, *args, stream=stream)
 
-    def _wrap_forward_from_prebuild_lib(self,
-                                        *ins: List[torch.Tensor],
-                                        stream: Optional[int] = None):
+    def _wrap_forward_from_prebuild_lib(self, *ins: list[torch.Tensor], stream: int | None = None):
         """High-level wrapper for kernel execution.
 
         Handles:
@@ -237,7 +241,14 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         else:
             return [args[i] for i in self.result_idx]
 
-    def _convert_torch_func(self) -> Callable:
+    def _convert_torch_func(self) -> Callable[..., torch.Tensor | list[torch.Tensor]]:
+        """Convert to a PyTorch-compatible function.
+
+        Returns
+        -------
+        Callable[..., Union[torch.Tensor, List[torch.Tensor]]]
+            A callable function that takes tensors and returns tensor(s)
+        """
         return self._wrap_forward_from_prebuild_lib
 
     @property

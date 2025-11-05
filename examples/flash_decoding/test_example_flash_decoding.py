@@ -12,7 +12,7 @@ def test_example_example_gqa_decode():
 
 
 def test_example_example_mha_inference():
-    example_mha_inference.main()
+    example_mha_inference.main(BATCH=1, H=32, Q_CTX=128, KV_CTX=2048, D_HEAD=128, causal=False)
 
 
 if __name__ == "__main__":

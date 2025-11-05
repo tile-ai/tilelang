@@ -63,15 +63,9 @@ def ref_program(x):
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-12)
 
 
-def test_rms_norm():
-    M, N, blk_m = 8192, 8192, 1
+def test_rms_norm(M=1024, N=1024, blk_m=1):
     program = rms_norm(M, N, blk_m)
-    kernel = tilelang.compile(
-        program,
-        out_idx=-1,
-        target="cuda",
-        execution_backend="cython",
-        pass_configs={"tl.disable_tma_lower": True})
+    kernel = tilelang.compile(program, out_idx=-1, pass_configs={"tl.disable_tma_lower": True})
     profiler = kernel.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
 

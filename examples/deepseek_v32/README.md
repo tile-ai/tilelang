@@ -6,6 +6,7 @@ deepseek_v32/
 ├── figures/                            # Figures and diagrams
 ├── inference/                          # Inference implementation folder
 ├── fp8_lighting_indexer.py             # FP8 lighting indexer
+├── sparse_mla_bwd.py                   # Sparse MLA backward implementation
 ├── sparse_mla_fwd.py                   # Sparse MLA forward implementation
 ├── sparse_mla_fwd_pipelined.py         # Pipelined implementation of sparse MLA forward pass
 ├── topk_selector.py                    # Top-k selector implementation
@@ -21,7 +22,7 @@ The architecture diagram above highlights three key components (shown in green) 
 
 1. **Lightning Indexer** (`fp8_lighting_indexer.py`) - Efficiently indexes and processes sparse attention patterns using FP8 precision
 2. **Top-k Selector** (`topk_selector.py`) - Selects the top-k most relevant tokens for sparse attention computation
-3. **Multi-Query Attention** (`sparse_mla_fwd.py` and `sparse_mla_fwd_pipelined.py`) - Core attention mechanism implementation with sparse MLA (Multi-Latent Attention) forward pass
+3. **Multi-Query Attention** (`sparse_mla_fwd.py`, `sparse_mla_fwd_pipelined.py`, and `sparse_mla_bwd.py`) - Core attention mechanism implementation with sparse MLA (Multi-Latent Attention) forward and backward passes
 
 ### Lightning Indexer
 
@@ -166,3 +167,57 @@ for i_i in T.serial(T.ceildiv(NI, 2)):
 ```
 
 Consumer threads wait on barriers and process buffers as they become ready. This manual orchestration hides memory latency behind compute, which is why it outperforms the simpler auto-pipelined version. The output dimension is also split in half so that the two consumer groups can work in parallel on different parts of the matmul.
+
+### Sparse MLA Backward
+
+The Sparse MLA backward kernel (`sparse_mla_bwd.py`) computes gradients with respect to queries (dQ) and key-values (dKV) for the sparse attention mechanism. Like the forward pass, it processes only the selected top-k indices, maintaining O(seq_len * topk) complexity.
+
+The backward pass consists of three main stages:
+
+**1. Preprocessing**: Computes delta values (row-wise dot products of output and output gradient):
+
+```python
+for k in T.Pipelined(T.ceildiv(D, block_ND), num_stages=num_stages):
+    T.copy(O[bz, by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND], o)
+    T.copy(dO[bz, by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND], do)
+    for i, j in T.Parallel(block_ND, block_ND):
+        acc[i, j] += o[i, j] * do[i, j]
+T.reduce_sum(acc, delta, 1)
+```
+
+**2. Main Backward Computation**: Computes gradients through sparse attention:
+
+```python
+# Sparse MLA backward: iterate over selected indices only
+for i_i in T.Pipelined(NI, num_stages=num_stages):
+    # Load KV data for selected indices
+    for bi_i, d_i in T.Parallel(BI, D):
+        KV_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz, i_i * BI + bi_i], bz, d_i]
+    
+    # Recompute attention scores for backward
+    T.gemm(Q_shared, KV_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+    
+    # Apply softmax gradient: dP = P * (dP_raw - Delta)
+    for h_i, bi_i in T.Parallel(padded_H, BI):
+        acc_dp[h_i, bi_i] = acc_p[h_i, bi_i] * (acc_dp[h_i, bi_i] - Delta[by, s_i, bz * padded_H + h_i]) * sm_scale
+```
+
+The key gradient computations are:
+- **dQ = dP @ K** (query gradients)
+- **dK = dP^T @ Q** (key gradients) 
+- **dV = P^T @ dO** (value gradients)
+
+**3. Atomic Sparse Updates**: Uses atomic operations for dKV accumulation:
+
+```python
+# Atomically update dKV at selected indices
+for bi_i, d_i in T.Parallel(BI // split_store, D // 4):
+    T.atomic_addx4(dKV[by, Indices[by, s_i, bz, i_i * BI + bi_i + s * (BI // split_store)], bz, d_i * 4], 
+                   acc_dkv_shared[bi_i, d_i * 4])
+```
+
+**Performance**: The sparse MLA backward achieves excellent performance:
+- **H800 SXM**: ~100 TFlops
+- **H200 SXM**: ~115 TFlops
+
+The implementation efficiently handles the irregular memory access patterns inherent in sparse attention while maintaining high compute utilization through careful memory management and atomic update strategies. Note that this is a relatively naive implementation that requires further optimization.

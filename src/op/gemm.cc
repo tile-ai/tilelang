@@ -12,78 +12,12 @@
 #include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
+#include "tcgen5_meta.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-struct TCGEN5MMAMeta {
-  int atom_m, atom_n, atom_k;
-};
-
-// Return {is_success, meta}
-static inline std::pair<bool, TCGEN5MMAMeta>
-GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-// TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
-#define FAIL                                                                   \
-  return {                                                                     \
-    false, TCGEN5MMAMeta { 0, 0, 0 }                                           \
-  }
-#define SUCCESS(atom_m, atom_n, atom_k)                                        \
-  return {                                                                     \
-    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
-  }
-  std::vector<int> ws_valid_atom_ns = {256, 128, 64};
-  if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
-      (c_dtype.is_float() && c_dtype.bits() == 32)) {
-    if (K % 16 != 0)
-      FAIL;
-    if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 16);
-      FAIL;
-    } else if (M % 64 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 16);
-      FAIL;
-    } else if (M % 32 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 16);
-      FAIL;
-    } else {
-      FAIL;
-    }
-  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e5m2()) &&
-             (c_dtype.is_float() && c_dtype.bits() == 32)) {
-    if (K % 32 != 0)
-      FAIL;
-    if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32);
-      FAIL;
-    } else if (M % 64 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 32);
-      FAIL;
-    } else if (M % 32 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 32);
-      FAIL;
-    } else {
-      FAIL;
-    }
-  }
-  FAIL;
-#undef FAIL
-#undef SUCCESS
-}
 
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
@@ -109,12 +43,12 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
  * @param vmap Mapping from access pointer vars to Buffer objects used to
  *   resolve the Buffer corresponding to each pointer argument.
  *
- * @note If `kPack` is provided it must be 1 or 2; otherwise the constructor
+ * @note If `kPack` is provided it must be 1; otherwise the constructor
  *       fails with an ICHECK (runtime assertion). No other validation is
  *       performed here.
  */
 Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+  ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
 
   node->Aptr = args[0];
   node->Bptr = args[1];
@@ -162,7 +96,7 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A Gemm operator that owns a copy of this node.
  */
 TileOperator GemmNode::Clone() const {
-  auto op = make_object<GemmNode>(*this);
+  auto op = tvm::ffi::make_object<GemmNode>(*this);
   return Gemm(op);
 }
 
@@ -194,12 +128,10 @@ GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
-  } else if (TargetIsVolta(target) || TargetIsAmpere(target) ||
-             TargetIsTuring(target) || TargetIsHopper(target) ||
-             TargetIsSm100(target)) {
+  } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else {
-    ICHECK(0) << "Unsupported target for gemm: " << target->str();
+    ICHECK(0) << "Unsupported target for gemm: " << target;
   }
 }
 
@@ -286,7 +218,8 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
     }
 
     ICHECK(m_warp * n_warp == num_warps)
-        << "m_warp * n_warp must equal num_warps";
+        << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
+        << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
 
     // Store the computed values in the object's member variables
     this->m_warp = m_warp;
@@ -370,6 +303,10 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
+  ICHECK(m_warp * n_warp == num_warps)
+      << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
+      << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
+
   // Store the computed values in the object's member variables
   this->m_warp = m_warp;
   this->n_warp = n_warp;
@@ -475,8 +412,8 @@ bool GemmNode::CheckWGMMA() const {
  */
 static int GetArchInt(Target target) {
   int arch_int = 0;
-  auto s = target->GetAttr<String>("arch");
-  ICHECK(s.defined());
+  auto s = target->GetAttr<tvm::ffi::String>("arch");
+  ICHECK(s.has_value());
   std::string arch = s.value();
   if (arch.rfind("sm_", 0) == 0) {
     arch_int = std::stoi(arch.substr(3));
@@ -577,6 +514,8 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (A.scope() == "local.fragment") {
     ICHECK(B.scope() != "local.fragment");
+    ICHECK(!trans_A)
+        << "gemm_rs requires the A operand to be in non-transposed layout.";
     op_name = "tl::gemm_rs";
   } else if (B.scope() == "local.fragment") {
     op_name = "tl::gemm_sr";
@@ -665,7 +604,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = A->shape.size();
       results.Set(A, makeGemmVoltaABLayout(*as_const_int(A->shape[dim_A - 2]),
                                            *as_const_int(A->shape[dim_A - 1]),
-                                           true, trans_A ? 1 : 2));
+                                           true, !trans_A));
     } else if (A.scope() == "local.fragment") {
       ICHECK(trans_A == false);
       auto fragment = makeGemmVoltaFragmentA(M, N, K, M / warp_m, N / warp_n);
@@ -678,7 +617,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     int dim_B = B->shape.size();
     results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[dim_B - 2]),
                                          *as_const_int(B->shape[dim_B - 1]),
-                                         false, trans_B ? 2 : 1));
+                                         false, trans_B));
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) ||
              TargetIsSM120(T.target) ||
              (TargetIsSm100(T.target) && gemm_inst == GemmInst::kMMA)) {
@@ -695,7 +634,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       results.Set(A,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   A->dtype.bits(), trans_A ? 1 : 2));
+                                   A->dtype.bits(), !trans_A));
     } else if (A.scope() == "local.fragment") {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
                                         A->dtype.bits(), trans_A);
@@ -709,7 +648,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       results.Set(B,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   B->dtype.bits(), trans_B ? 2 : 1));
+                                   B->dtype.bits(), trans_B));
     } else if (B.scope() == "local.fragment") {
       auto fragment =
           makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
@@ -736,9 +675,9 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       A->dtype.bits(), trans_A ? 1 : 2)
+                                       A->dtype.bits(), !trans_A)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 A->dtype.bits(), trans_A ? 1 : 2);
+                                 A->dtype.bits(), !trans_A);
       results.Set(A, ABLayout);
     } else {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
@@ -751,12 +690,13 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
+
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       B->dtype.bits(), trans_B ? 2 : 1)
+                                       B->dtype.bits(), trans_B)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 B->dtype.bits(), trans_B ? 2 : 1);
+                                 B->dtype.bits(), trans_B);
       results.Set(B, ABLayout);
     } else {
       auto fragment =
@@ -872,7 +812,7 @@ TIR_REGISTER_TL_OP(Gemm, gemm)
 TVM_REGISTER_OP("tl.GemmWarpPolicy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   GemmNode::RegisterReflection();
   GemmWarpPolicyNode::RegisterReflection();
   namespace refl = tvm::ffi::reflection;
@@ -881,9 +821,8 @@ TVM_FFI_STATIC_INIT_BLOCK({
                            Target target, GemmInst gemm_inst) {
                           policy->ComputeWarpPartition(M, N, block_size, target,
                                                        gemm_inst);
-                          return;
                         });
-});
+}
 
 } // namespace tl
 } // namespace tvm

@@ -39,6 +39,7 @@
 namespace tvm {
 namespace tl {
 using namespace tir;
+using namespace ffi;
 
 using runtime::StorageRank;
 using runtime::StorageScope;
@@ -496,8 +497,9 @@ private:
       if (reduce_extent == 1) {
         // special case, no reduction is needed.
         std::vector<Stmt> stores;
+        stores.reserve(size);
         for (size_t i = 0; i < size; ++i) {
-          stores.push_back(BufferStore(buffers[i], values[i], {0}));
+          stores.emplace_back(BufferStore(buffers[i], values[i], {0}));
         }
         return SeqStmt::Flatten(stores);
       }
@@ -604,7 +606,7 @@ private:
       // Load reduction values, no synchronization needed.
       Array<PrimExpr> a, b;
       for (int i = 0; i < n_buffers; ++i) {
-        Buffer shared_buf = shared_bufs[i];
+        const Buffer &shared_buf = shared_bufs[i];
         BufferLoad val(shared_buf, zero_indices);
         ICHECK_EQ(val->dtype, dtypes[i]);
         a.push_back(val);
@@ -623,7 +625,7 @@ private:
         // branch with a warp sync call inside.
         PrimExpr other = WarpShuffle(builtin::tvm_warp_shuffle_down(),
                                      mask_buffer, val, offset);
-        Buffer local_buf = local_bufs[i];
+        const Buffer &local_buf = local_bufs[i];
         Stmt s = BufferStore(local_buf, other, zero_indices);
         seq->push_back(s);
 
@@ -639,7 +641,7 @@ private:
       std::vector<Stmt> stores;
       stores.reserve(n_buffers);
       for (int i = 0; i < n_buffers; ++i) {
-        Buffer buf = shared_bufs[i];
+        const Buffer &buf = shared_bufs[i];
         stores.push_back(BufferStore(buf, ret[i], zero_indices));
       }
 
@@ -943,11 +945,11 @@ tvm::transform::Pass LowerThreadAllreduce() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerThreadAllreduce", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerThreadAllreduce",
                         LowerThreadAllreduce);
-});
+}
 
 } // namespace transform
 } // namespace tl

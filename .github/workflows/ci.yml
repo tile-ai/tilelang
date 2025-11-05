@@ -1,121 +1,407 @@
 name: CI
-on: [pull_request]
+on:
+  pull_request:
+    types:
+      - labeled
+      - unlabeled
+      - opened
+      - synchronize
+      - reopened
+  # Allow to trigger the workflow manually
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  PYTHON_VERSION: '3.12'
-  VENV_DIR: tilelang_ci
+  CLANG_TIDY_CMAKE_OPTIONS: "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" # to be updated
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  PYTHONPATH: "" # explicit cleanup
+  PIP_USER: "" # explicit cleanup
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+  UV_INDEX_STRATEGY: "unsafe-best-match"
+  UV_HTTP_TIMEOUT: "600"
+  XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
+  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
+  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
+  PRE_COMMIT_HOME: "${{ github.workspace }}/.cache/pip/.pre-commit" # to be updated
 
 jobs:
-  format-check:
-    runs-on: [self-hosted, nvidia]
+  lint:
+    name: Quick Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
-    permissions:
-      contents: write 
+      - name: Setup Python 3.8
+        id: setup-pylowest
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.8" # use lowest supported version for linting
+          update-environment: false
+
+      - name: Check AST with Python 3.8
+        run: |
+          "${{ steps.setup-pylowest.outputs.python-path }}" -m compileall -q -f tilelang
+
+      - name: Setup Python 3.9
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+          update-environment: true
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+            .pre-commit-config.yaml
+
+      - name: Pre-commit Lint
+        run: |
+          if ! pipx run pre-commit run --all-files --color=always --show-diff-on-failure; then
+            echo "::error::Pre-commit checks failed. Please run 'pre-commit install' and 'pre-commit run --all-files' locally to see the issues."
+            exit 1
+          fi
+
+  tests:
+    name: Test for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }} (on ${{ matrix.runner.name }})
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    needs: [lint]
+    runs-on: ${{ matrix.runner.tags }}
+    strategy:
+      matrix:
+        runner:
+          - tags: [self-hosted, nvidia]
+            name: self-hosted-nvidia
+            # Format: [Nightly-]CUDA-<major>.<minor>[.<patch>]. E.g., "CUDA-12.8" or "Nightly-CUDA-13.0".
+            # Use "Nightly-" prefix to use torch nightly builds.
+            toolkit: CUDA-12.8
+          - tags: [self-hosted, amd, gpu]
+            name: self-hosted-amd
+            # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
+            # Use "Nightly-" prefix to use torch nightly builds.
+            toolkit: ROCm-6.3
+          - tags: [macos-latest]
+            name: macos-latest
+            toolkit: Metal # or Nightly-Metal
+        python-version:
+          - "3.12"
+      fail-fast: false
+    timeout-minutes: 120
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
-    - name: Set up Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set environment (self-hosted runners)
+        if: startsWith(matrix.runner.name, 'self-hosted')
+        run: |
+          # Hide sensitive data in logs for self-hosted runners
+          if [[ -n "${{ secrets.SECRET_PATH_PREFIXES }}" ]]; then
+            echo "::add-mask::${{ secrets.SECRET_PATH_PREFIXES }}"
+            # Colon separated list of secrets to mask
+            for secret in $(echo "${{ secrets.SECRET_PATH_PREFIXES }}" | tr ':' '\n'); do
+              echo "::add-mask::${secret}"
+            done
+          fi
 
-    - name: Ensure venv (local & persistent)
-      run: |
-        set -e
-        REQS_HASH=$(sha256sum requirements-test.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
-        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
+          # Use runner tool_cache as cache root for self-hosted runners to avoid internet connection
+          # issues and to share cache between jobs.
+          export XDG_CACHE_HOME="${{ runner.tool_cache }}/.ci-cache-${{ github.workflow }}"
+          echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" | tee -a "${GITHUB_ENV}"
+          echo "PIP_CACHE_DIR=${XDG_CACHE_HOME}/pip" | tee -a "${GITHUB_ENV}"
+          echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
+          echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
 
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          # shellcheck source=/dev/null
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          pip install flash_attn==2.5.8 --no-user --no-build-isolation
-          touch "$MARKER"
-        fi
+      - name: Set environment (GitHub-hosted runners)
+        if: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
+        run: |
+          # Enable ccache on GitHub-hosted runners to speed up builds
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" | tee -a "${GITHUB_ENV}"
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" | tee -a "${GITHUB_ENV}"
 
-    - name: Run format check
-      run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        git submodule update --init --recursive
-        mkdir -p build
-        # run cmake to create the build directory with compile_commands.json
-        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_CUDA=ON; cd ..
-        if ! output=$(./format.sh 2>&1); then
-          echo "------------------------------------"
-          echo "message:"
-          echo "$output"
-          printf '%s\n' "$output" | grep "Please review and stage the changes."
-          echo "------------------------------------"
-          exit 1
-        fi
-        rm -rf build
+      # Do not use ccache on self-hosted runners, as it will download/upload caches which is slow.
+      # Self-hosted runners usually have more CPU power to compile without ccache.
+      - name: Setup ccache (GitHub-hosted runners)
+        id: setup-ccache
+        if: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          create-symlink: true
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}
+          evict-old-files: "7d"
 
-  build-test-nvidia:
-    runs-on: [self-hosted, nvidia]
-    needs: format-check
-    permissions:
-      contents: read
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        repository: ${{ github.event.pull_request.head.repo.full_name }}
-        ref: ${{ github.event.pull_request.head.ref }}
+      - name: Set environment (CUDA)
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          TOOLKIT="${{ matrix.runner.toolkit }}"
+          CUDA_VERSION="${TOOLKIT##*-}"
+          CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
+          CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          else
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          fi
+          export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
+          export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_CUDA=ON"
 
-    - name: Set up Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+          echo "USE_CUDA=ON" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_VERSION_MAJMIN=${CUDA_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+          echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+          echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
 
-    - name: Ensure venv (local & persistent)
-      run: |
-        set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
-        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
+          if [[ ! -x "$(command -v nvcc)" ]]; then
+            export PATH="/usr/local/cuda/bin:${PATH}"
+            export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
+          fi
+          if [[ -x "$(command -v nvcc)" ]]; then
+            echo "\$ $(command -v nvcc) --version" && nvcc --version
+          else
+            echo "::warning::nvcc not found in PATH!"
+          fi
 
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          # flash attention usually requires no isolation build
-          pip install flash_attn==2.5.8 --no-user --no-build-isolation
-          pip install . --no-user
-          touch "$MARKER"
-        fi
+      - name: Set environment (ROCm)
+        if: contains(matrix.runner.toolkit, 'ROCm')
+        run: |
+          TOOLKIT="${{ matrix.runner.toolkit }}"
+          ROCM_VERSION="${TOOLKIT##*-}"
+          ROCM_VERSION_MAJMIN="$(echo ${ROCM_VERSION} | cut -d '.' -f-2)"
+          ROCM_VERSION_MAJMIN_NODOT="${ROCM_VERSION_MAJMIN//./}"
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/rocm${ROCM_VERSION_MAJMIN}"
+          else
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/rocm${ROCM_VERSION_MAJMIN}"
+          fi
+          export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
+          export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_ROCM=ON"
 
-    - name: Install project (wheel form)
-      run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        pip install . --no-user -v
+          echo "USE_ROCM=ON" | tee -a "${GITHUB_ENV}"
+          echo "ROCM_VERSION=${ROCM_VERSION}" | tee -a "${GITHUB_ENV}"
+          echo "ROCM_VERSION_MAJMIN=${ROCM_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
+          echo "ROCM_VERSION_MAJMIN_NODOT=${ROCM_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+          echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+          echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
 
-    - name: Run examples
-      run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        cd examples
-        unset PYTHONPATH
-        python -m pytest -n 4 **/test*.py -v -r fE --durations=0
+          if [[ ! -x "$(command -v hipcc)" ]]; then
+            export PATH="/opt/rocm/bin:${PATH}"
+            export LD_LIBRARY_PATH="/opt/rocm/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
+          fi
+          if [[ -x "$(command -v hipcc)" ]]; then
+            echo "\$ $(command -v hipcc) --version" && hipcc --version
+          else
+            echo "::warning::hipcc not found in PATH!"
+          fi
 
-    - name: Run tests
-      run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        cd testing/python
-        unset PYTHONPATH
-        python -m pytest -n 4 -v -r fE --durations=0 --timeout=3600
+      - name: Set environment (Metal)
+        if: contains(matrix.runner.toolkit, 'Metal')
+        run: |
+          if [[ "${{ matrix.runner.toolkit }}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/cpu"
+            export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
+            echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+            echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          fi
+          export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_METAL=ON"
+
+          echo "USE_METAL=ON" | tee -a "${GITHUB_ENV}"
+          echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          # Do not use cache for self-hosted runners, as it will download/upload caches which is slow.
+          enable-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
+          prune-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
+          # Use runner tool_cache for self-hosted runners
+          cache-local-path: ${{ env.UV_CACHE_DIR }}
+          ignore-nothing-to-cache: true
+          # Extra cache key to upload/download caches on GitHub-hosted runners
+          cache-suffix: uv-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}
+          cache-dependency-glob: |
+            pyproject.toml
+            requirements*.txt
+            .pre-commit-config.yaml
+
+      - name: Setup venv
+        id: setup-venv
+        run: |
+          set -o pipefail
+
+          uv pip install --upgrade pip setuptools wheel
+          if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
+            uv pip install --prerelease=allow -v torch
+          fi
+          uv pip install -v -r requirements-test.txt
+          echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
+          if [[ "${{ matrix.runner.toolkit }}" == *"CUDA"* ]]; then
+            uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt
+            echo "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')" | uv run --no-project --script -
+          elif [[ "${{ matrix.runner.toolkit }}" == *"ROCm"* ]]; then
+            uv pip install -v -r requirements-test-rocm.txt
+          elif [[ "${{ matrix.runner.toolkit }}" == *"Metal"* ]]; then
+            uv pip install -v -r requirements-test-metal.txt
+          else
+            echo "::error::Unknown toolkit: ${{ matrix.runner.toolkit }}"
+            exit 1
+          fi
+          echo "::group::torch.utils.collect_env"
+          uv run --no-project -m -- torch.utils.collect_env
+          echo "::endgroup::"
+
+      - name: Clear uv cache for self-hosted runners (if setup failed)
+        if: >-
+          ${{
+            failure() &&
+            startsWith(matrix.runner.name, 'self-hosted') &&
+            (steps.setup-uv.conclusion == 'failure' || steps.setup-venv.conclusion == 'failure')
+          }}
+        run: |
+          echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
+          uv cache clean
+
+      - name: Run clang-tidy
+        id: clang-tidy
+        if: runner.os == 'Linux'
+        run: |
+          echo "\$ $(command -v clang-tidy) --version" && clang-tidy --version
+
+          if [[ -x "$(command -v run-clang-tidy)" ]]; then
+            echo "Using run-clang-tidy from $(command -v run-clang-tidy)"
+            CLANG_TIDY=(run-clang-tidy)
+          else
+            RCT_URL=https://raw.githubusercontent.com/llvm/llvm-project/refs/heads/release/21.x/clang-tools-extra/clang-tidy/tool/run-clang-tidy.py
+            echo "Downloading run-clang-tidy script from ${RCT_URL}"
+            echo "import urllib.request; url = '${RCT_URL}'.rstrip('/'); urllib.request.urlretrieve(url, url.split('/')[-1])" | uv run --no-project --script -
+            CLANG_TIDY=(uv run --no-project --script -- run-clang-tidy.py)
+          fi
+          if [[ -x "$(command -v clang-apply-replacements)" ]]; then
+            echo "Using clang-apply-replacements from $(command -v clang-apply-replacements)"
+            CLANG_TIDY+=(-fix -clang-apply-replacements-binary="$(command -v clang-apply-replacements)")
+          else
+            echo "::warning::clang-apply-replacements not found in PATH, automatic fixing disabled."
+          fi
+
+          # Run cmake to create the build directory with compile_commands.json
+          cmake -S . -B cmake-build --fresh ${CLANG_TIDY_CMAKE_OPTIONS}  # no quotes here
+
+          CXX_FILES=$(find src -type f -iname "*.[ch]pp" -o -iname "*.cc" -o -iname "*.c" -o -iname "*.h")
+          rc=0
+          "${CLANG_TIDY[@]}" -clang-tidy-binary="$(command -v clang-tidy)" \
+            -p="cmake-build" ${CXX_FILES} || rc="$?"
+          rm -rf cmake-build run-clang-tidy.py
+          if (( rc != 0 )); then
+            echo "::error::clang-tidy found issues (exit code: ${rc}). Please run 'clang-tidy --fix' locally to fix them."
+            git diff --color=always || true
+            exit "${rc}"
+          fi
+
+      - name: Enable core dump generation (Linux / GitHub-hosted runners)
+        if: ${{ runner.os == 'Linux' && !startsWith(matrix.runner.name, 'self-hosted') }}
+        run: |
+          sudo sysctl -w kernel.core_pattern="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
+          sudo sysctl -w kernel.core_uses_pid=0
+          sudo sysctl -w fs.suid_dumpable=1
+          sysctl kernel.core_pattern kernel.core_uses_pid fs.suid_dumpable
+
+      - name: Enable core dump generation (macOS / GitHub-hosted runners)
+        if: ${{ runner.os == 'macOS' && !startsWith(matrix.runner.name, 'self-hosted') }}
+        run: |
+          sudo sysctl -w kern.corefile="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
+          sudo sysctl -w kern.coredump=1
+          sudo sysctl -w kern.sugid_coredump=1
+          sysctl kern.corefile kern.coredump kern.sugid_coredump
+
+      - name: Install project (wheel form)
+        run: |
+          uv pip install -v .
+
+      - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+            ../examples
+
+      # NVIDIA CUDA tests
+      - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        id: cuda-tests
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+            ./python
+
+      # AMD ROCm tests
+      - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        id: rocm-tests
+        if: contains(matrix.runner.toolkit, 'ROCm')
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+            ./python/amd/test_tilelang_test_amd.py
+
+      # Apple Metal tests
+      - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        id: metal-tests
+        if: contains(matrix.runner.toolkit, 'Metal')
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+            -k metal \
+            ./python
+
+      - name: List generated files
+        if: ${{ !cancelled() }}
+        run: |
+          find . -type f -name '*.py[co]' -delete
+          find . -depth -type d -name "__pycache__" -exec rm -r "{}" +
+          if git status --ignored --porcelain | grep -qvE '/$'; then
+            ls -alh $(git status --ignored --porcelain | grep -vE '/$' | grep -oE '\S+$')
+          fi

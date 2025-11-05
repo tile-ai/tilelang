@@ -399,14 +399,15 @@ def ref_sparse_mla_fwd_interface(q,
 
 def test_sparse_mla_fwd_pipelined(B=1,
                                   S=4096,
-                                  SKV=4096,
+                                  SKV=8192,
                                   H=128,
                                   HKV=1,
                                   DQK=576,
                                   DV=512,
                                   topk=2048,
                                   dtype=torch.bfloat16,
-                                  q_start_s_index=1024):
+                                  q_start_s_index=1024,
+                                  check_correctness=True):
     KV_stride = 1
 
     torch.random.manual_seed(0)
@@ -456,8 +457,8 @@ if __name__ == "__main__":
     parser.add_argument("--test_correctness", action="store_true")
     args = parser.parse_args()
     if args.test_correctness:
-        B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 1024, 2048, 128, 1, 576, 512, 2048, torch.bfloat16
+        B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 1024, 8192, 128, 1, 576, 512, 2048, torch.bfloat16
     else:
         B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 4096, 8192, 128, 1, 576, 512, 2048, torch.bfloat16
-    test_sparse_mla_fwd(B, S, SKV, H, HKV, DQK, DV, topk, dtype)
-    test_sparse_mla_fwd(B, S, SKV, H, HKV, DQK, DV, topk, dtype)
+    test_sparse_mla_fwd_pipelined(
+        B, S, SKV, H, HKV, DQK, DV, topk, dtype, check_correctness=args.test_correctness)

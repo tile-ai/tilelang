@@ -22,11 +22,12 @@ namespace tvm {
 namespace tl {
 
 namespace attr {
-static constexpr const char *kPaddingMap = "padding_map";
+static constexpr const char *kSafeValueMap = "safe_value_map";
 static constexpr const char *kWarpSpecializationScope =
     "kWarpSpecializationScope";
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
+static constexpr const char *kLocalVarInit = "tl.local_var_init";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
@@ -48,6 +49,8 @@ static constexpr const char *kEnablePTXASVerboseOutput =
 static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
+static constexpr const char *kStorageRewriteDetectInplace =
+    "tl.storage_rewrite_detect_inplace";
 /*!
  * \brief Whether to disable dynamic tail split
  *
@@ -70,6 +73,14 @@ static constexpr const char *kDisableDynamicTailSplit =
  */
 static constexpr const char *kDisableThreadStorageSync =
     "tl.disable_thread_storage_sync";
+
+/*!
+ * \brief Force inline Let bindings during simplification.
+ *
+ * kForceLetInline = "tl.force_let_inline"
+ *
+ */
+static constexpr const char *kForceLetInline = "tl.force_let_inline";
 
 /*!
  * \brief The size of the vectorized dimension in buffer, designed by user
@@ -217,12 +228,44 @@ TVM_DLL const Op &mbarrier_wait_parity();
 TVM_DLL const Op &mbarrier_expect_tx();
 
 /*!
+ * \brief tvm intrinsic for ptx tensor core wgmma instructions.
+ *
+ *  void ptx_wgmma_ss(StringImm accum_dtype, StringImm wgmma_prefix, bool
+ * a_is_k_major, bool b_is_k_major, StringImm a_dtype_abbrv, StringImm
+ * b_dtype_abbrv, StringImm accum_dtype_abbrv, Var A_descriptor, PrimExpr
+ * A_offset, Var B_descriptor, Var B_offset, Var C_data, Var C_offset, bool
+ * scale_out, bool scale_in_a, bool scale_in_b);
+ */
+TVM_DLL const Op &ptx_wgmma_ss();
+
+/*!
+ * \brief tvm intrinsics for ptx tensor core wgmma instructions.
+ *
+ *  void ptx_wgmma_rs(StringImm accum_dtype, StringImm wgmma_prefix,
+ * bool b_is_k_major, StringImm a_dtype_abbrv, StringImm b_dtype_abbrv,
+ * StringImm accum_dtype_abbrv, Var A_descriptor, PrimExpr A_offset, Var
+ * B_descriptor, Var B_offset, Var C_data, Var C_offset, bool scale_out,
+ * bool scale_in_a, bool scale_in_b);
+ */
+TVM_DLL const Op &ptx_wgmma_rs();
+
+/*!
+ * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.
+ */
+TVM_DLL const Op &ptx_tcgen05_mma_ss();
+
+/*!
+ * \brief tvm intrinsic for tcgen05 mma tensor-shared instructions.
+ */
+TVM_DLL const Op &ptx_tcgen05_mma_ts();
+
+/*!
  * \brief tvm intrinsics for initializing tensor memory
  *
  * ptx_init_tensor_memory(tmem_buffer, num_cols)
  *
  */
-const Op &ptx_init_tensor_memory();
+TVM_DLL const Op &ptx_init_tensor_memory();
 
 /*!
  * \brief tvm intrinsics for deallocating tensor memory
@@ -230,7 +273,7 @@ const Op &ptx_init_tensor_memory();
  * tmem_deallocate(tmem_buffer)
  *
  */
-const Op &ptx_deallocate_tensor_memory();
+TVM_DLL const Op &ptx_deallocate_tensor_memory();
 
 /*!
  * \brief tvm intrinsics for ldmatrix
@@ -303,6 +346,70 @@ TVM_DLL const Op &set_max_nreg();
  *
  */
 TVM_DLL const Op &no_set_max_nreg();
+
+/*!
+ * \brief Arrive at a warpgroup fence for WGMMA sequences
+ *
+ * warpgroup_arrive()
+ *
+ */
+TVM_DLL const Op &warpgroup_arrive();
+
+/*!
+ * \brief Commit the current warpgroup batch for WGMMA sequences
+ *
+ * warpgroup_commit_batch()
+ *
+ */
+TVM_DLL const Op &warpgroup_commit_batch();
+
+/*!
+ * \brief Wait for the warpgroup batch identified by num_mma
+ *
+ * warpgroup_wait(num_mma)
+ *
+ */
+TVM_DLL const Op &warpgroup_wait();
+
+/*!
+ * \brief Fence accumulator operand registers for upcoming WGMMA operations
+ *
+ * warpgroup_fence_operand(dtype, ptr, offset, num_regs)
+ *
+ */
+TVM_DLL const Op &warpgroup_fence_operand();
+
+/*!
+ * \brief Return the canonical lane index for the calling thread.
+ *
+ * get_lane_idx([warp_size])
+ *
+ */
+TVM_DLL const Op &get_lane_idx();
+
+/*!
+ * \brief Return the canonical warp index, assuming converged threads.
+ *
+ * get_warp_idx_sync([warp_size])
+ *
+ */
+TVM_DLL const Op &get_warp_idx_sync();
+
+/*!
+ * \brief Return the canonical warp index without synchronizing the warp.
+ *
+ * get_warp_idx([warp_size])
+ *
+ */
+TVM_DLL const Op &get_warp_idx();
+
+/*!
+ * \brief Return the canonical warp group index for converged threads.
+ *
+ * get_warp_group_idx([warp_size, warps_per_group])
+ *
+ */
+TVM_DLL const Op &get_warp_group_idx();
 
 /*!
  * \brief Wait the previous wgmma to finish
@@ -397,6 +504,61 @@ TVM_DLL const Op &tl_gemm_sp();
  *  This op is used to represent a shuffle elect operation in tilelang.
  */
 TVM_DLL const Op &tl_shuffle_elect();
+
+/*!
+ * \brief tilelang intrinsic for initializing a descriptor buffer for
+ * wgmma/utcmma.
+ *
+ *  This op is used to represent a descriptor initialization operation in
+ * tilelang.
+ */
+TVM_DLL const Op &initialize_wgmma_descriptor();
+
+/*!
+ * \brief tilelang intrinsic for initializing a descriptor buffer for
+ * tcgen05 mma.
+ */
+TVM_DLL const Op &initialize_tcgen05_descriptor();
+
+/*!
+ * \brief tilelang intrinsic for committing UMMA (TCGEN05) barrier arrive.
+ *
+ *  This op wraps the device-side arrive used to signal completion of MMA work
+ *  to a shared-memory mbarrier. It mirrors CUTLASS's umma_arrive.
+ */
+TVM_DLL const Op &tcgen05_mma_arrive();
+
+/*!
+ * \brief tilelang intrinsic for setting the start address of a descriptor
+ * buffer for wgmma/utcmma.
+ *
+ *  This op is used to represent a descriptor start address setting operation in
+ * tilelang.
+ */
+
+TVM_DLL const Op &increase_descriptor_offset();
+
+/*!
+ * \brief tilelang intrinsic for element-wise atomic addition.
+ *
+ *  This op is used to represent an element-wise atomic add operation in
+ * tilelang.
+ */
+TVM_DLL const Op &atomicadd_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for assert on device.
+ *
+ *  This op is used to represent an assert on device
+ */
+TVM_DLL const Op &device_assert();
+
+/*!
+ * \brief tilelang intrinsic for assert on device with additional message.
+ *
+ *  This op is used to represent an assert on device with additional message.
+ */
+TVM_DLL const Op &device_assert_with_msg();
 
 } // namespace tl
 } // namespace tvm

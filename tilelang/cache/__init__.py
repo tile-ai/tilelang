@@ -1,6 +1,7 @@
 """The cache utils with class and database persistence - Init file"""
+from __future__ import annotations
 
-from typing import List, Union, Literal, Optional
+from typing import Literal
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
@@ -13,14 +14,14 @@ _kernel_cache_instance = KernelCache()
 
 def cached(
     func: PrimFunc = None,
-    out_idx: List[int] = None,
+    out_idx: list[int] = None,
     *args,
-    target: Union[str, Target] = "auto",
-    target_host: Union[str, Target] = None,
-    execution_backend: Optional[Literal["dlpack", "ctypes", "cython", "nvrtc"]] = "cython",
-    verbose: Optional[bool] = False,
-    pass_configs: Optional[dict] = None,
-    compile_flags: Optional[Union[List[str], str]] = None,
+    target: str | Target = "auto",
+    target_host: str | Target = None,
+    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] | None = "cython",
+    verbose: bool | None = False,
+    pass_configs: dict | None = None,
+    compile_flags: list[str] | str | None = None,
 ) -> JITKernel:
     """
     Caches and reuses compiled kernels (using KernelCache class).
@@ -39,9 +40,15 @@ def cached(
 
 def clear_cache():
     """
-    Clears the entire kernel cache (using KernelCache class).
+    Disabled helper that previously removed the entire kernel cache.
+
+    Raises:
+        RuntimeError: Always raised to warn users to clear the cache manually.
     """
-    _kernel_cache_instance.clear_cache()
+    cache_dir = env.TILELANG_CACHE_DIR
+    raise RuntimeError("tilelang.clear_cache() is disabled because deleting the cache directory "
+                       "is dangerous. If you accept the risk, remove it manually with "
+                       f"`rm -rf '{cache_dir}'`.")
 
 
 if env.TILELANG_CLEAR_CACHE.lower() in ("1", "true", "yes", "on"):

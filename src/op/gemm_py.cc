@@ -11,7 +11,9 @@
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/transform.h>
 
+#include "../support/ffi_aliases.h"
 #include "../target/utils.h"
+#include "tcgen5_meta.h"
 #include "tvm/ffi/string.h"
 
 namespace tvm {
@@ -48,8 +50,7 @@ using namespace tir;
  *       performed here.
  */
 GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<GemmPyNode> node = make_object<GemmPyNode>();
-
+  ObjectPtr<GemmPyNode> node = tvm::ffi::make_object<GemmPyNode>();
   node->Aptr = args[0];
   node->Bptr = args[1];
   node->Cptr = args[2];
@@ -76,6 +77,19 @@ GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
   if (args.size() > 15) {
     node->wg_wait = args[15].as<IntImm>().value()->value;
   }
+  if (args.size() > 16) {
+    node->mbarptr = args[16];
+  } else {
+    node->mbarptr = IntImm(DataType::UInt(32), 0);
+  }
+  if (args.size() > 18) {
+    node->C_coords = Array<PrimExpr>({args[17], args[18]});
+  } else if (args.size() > 17) {
+    node->C_coords = Array<PrimExpr>({args[17], IntImm(DataType::Int(32), 0)});
+  } else {
+    node->C_coords = Array<PrimExpr>(
+        {IntImm(DataType::Int(32), 0), IntImm(DataType::Int(32), 0)});
+  }
   data_ = std::move(node);
 }
 
@@ -88,23 +102,46 @@ GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A Gemm operator that owns a copy of this node.
  */
 TileOperator GemmPyNode::Clone() const {
-  auto op = make_object<GemmPyNode>(*this);
+  auto op = tvm::ffi::make_object<GemmPyNode>(*this);
   return GemmPy(op);
 }
 
-GemmInst GemmPyNode::GetGemmInst(int block_size, Target target) const {
+bool GemmPyNode::AllowTCGEN5MMA(Target target) const {
+  return TargetIsSm100(target) &&
+         ((A.scope() == "shared.dyn" || A.scope() == "shared" ||
+           A.scope() == "shared.tmem") &&
+          (B.scope() == "shared.dyn" || B.scope() == "shared") &&
+          C.scope() == "shared.tmem") &&
+         GetTCGEN5MMAMeta(M, N, K, A->dtype, C->dtype).first;
+}
+
+bool GemmPyNode::AllowWGMMA(int block_size, Target target) const {
+  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
-  bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
-                     (num_warps % 4 == 0) && CheckWGMMA();
-  if (allow_wgmma) {
+  return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
+         TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0) &&
+         CheckWGMMA();
+}
+
+GemmInst GemmPyNode::GetGemmInst(int block_size, Target target) const {
+  bool allow_tcgen5mma = AllowTCGEN5MMA(target);
+  bool allow_wgmma = AllowWGMMA(block_size, target);
+  if (allow_tcgen5mma) {
+    return GemmInst::kTCGEN5MMA;
+  } else if (allow_wgmma) {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
-  } else if (TargetIsCuda(target)) {
+  } else if (TargetIsVolta(target) || TargetIsAmpere(target) ||
+             TargetIsTuring(target) || TargetIsHopper(target) ||
+             TargetIsSm100(target)) {
     return GemmInst::kMMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
+    return GemmInst::kMMA; // This line will never be reached due to ICHECK, but
+                           // satisfies compiler
   }
 }
 
@@ -206,8 +243,8 @@ bool GemmPyNode::CheckWGMMA() const {
  */
 static int GetArchInt(Target target) {
   int arch_int = 0;
-  auto s = target->GetAttr<String>("arch");
-  ICHECK(s.defined());
+  auto s = target->GetAttr<tvm::ffi::String>("arch");
+  ICHECK(s.has_value());
   std::string arch = s.value();
   if (arch.rfind("sm_", 0) == 0) {
     arch_int = std::stoi(arch.substr(3));
@@ -225,11 +262,13 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
-    auto prim_func = Downcast<PrimFunc>(
-        (*f)(GetRef<GemmPy>(this), T.target, T.thread_bounds, T.thread_var));
+    auto prim_func =
+        Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmPy>(this), T.layout_map,
+                                T.target, T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
-    auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
-    ICHECK(global_symbol.defined());
+    auto global_symbol =
+        prim_func->attrs.GetAttr<tvm::ffi::String>("global_symbol");
+    ICHECK(global_symbol.has_value());
     if (prim_func->body.as<BlockRealizeNode>()) {
       BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
       auto block = block_realize->block;
@@ -249,6 +288,8 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
               /*name_hint=*/global_symbol.value(), prim_func->body));
   } else {
     LOG(FATAL) << "No lower function found for gemm_py";
+    return Stmt(); // This line will never be reached due to LOG(FATAL), but
+                   // satisfies compiler
   }
 }
 
@@ -260,7 +301,7 @@ LayoutMap GemmPyNode::InferLayout(const LayoutInferArgs &T,
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.infer_layout")) {
     results = Downcast<LayoutMap>(
-        (*f)(GetRef<GemmPy>(this), T.target, T.thread_bounds));
+        (*f)(tvm::ffi::GetRef<GemmPy>(this), T.target, T.thread_bounds));
   } else {
     LOG(FATAL) << "No infer layout function found for gemm_py";
   }
@@ -274,6 +315,41 @@ TIR_REGISTER_TL_OP(GemmPy, gemm_py)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ GemmPyNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { GemmPyNode::RegisterReflection(); }
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.GemmPyGemmInst",
+                        [](GemmPy gemm_py, int block_size, Target target) {
+                          return gemm_py->GetGemmInst(block_size, target);
+                        });
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def(
+      "tl.get_tcgen5_mma_meta",
+      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
+        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype);
+        Array<Integer> result;
+        if (success) {
+          result.push_back(Integer(meta.atom_m));
+          result.push_back(Integer(meta.atom_n));
+          result.push_back(Integer(meta.atom_k));
+        }
+        return result;
+      });
+  refl::GlobalDef().def(
+      "tl.get_tcgen5_instr_desc",
+      [](int atom_m, int atom_n, int atom_k, DataType ab_dtype,
+         DataType c_dtype, bool a_is_k_major, bool b_is_k_major, int scale_in_a,
+         int scale_in_b) {
+        uint32_t desc = GetTCGEN5InstrDesc(atom_m, atom_n, atom_k, ab_dtype,
+                                           c_dtype, a_is_k_major, b_is_k_major,
+                                           scale_in_a, scale_in_b);
+        return Integer(static_cast<int64_t>(desc));
+      });
+}
+
 } // namespace tl
 } // namespace tvm

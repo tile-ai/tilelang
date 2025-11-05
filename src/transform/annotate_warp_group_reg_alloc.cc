@@ -59,6 +59,27 @@ private:
   bool warp_specialized_ = false;
 };
 
+class SimtCopyDetector : public StmtExprVisitor {
+public:
+  static bool Detect(const Stmt &stmt) {
+    SimtCopyDetector detector;
+    detector.VisitStmt(stmt);
+    return detector.has_simt_copy_;
+  }
+
+private:
+  void VisitStmt_(const BufferStoreNode *op) final {
+    auto scope =
+        runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    if (scope.to_string() != "global") {
+      has_simt_copy_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool has_simt_copy_{false};
+};
+
 class SetMaxNRegInjector : public StmtExprMutator {
 public:
   static PrimFunc Inject(PrimFunc f) {
@@ -74,8 +95,7 @@ public:
 private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(set_max_nreg()) ||
-          call->op.same_as(no_set_max_nreg())) {
+      if (call->op.same_as(no_set_max_nreg())) {
         // Remove the original set_max_nreg calls as they will be re-inserted
         // at appropriate locations
         return Evaluate(0);
@@ -104,7 +124,9 @@ private:
       }
       auto producer_body = if_then_else->then_case;
       Optional<Stmt> consumer_body = if_then_else->else_case;
-      ICHECK(consumer_body.defined()) << "Consumer body is undefined";
+      // In some degenerate warp-specialized patterns (e.g., producer-only),
+      // the consumer body may be absent. Handle gracefully by only annotating
+      // the producer side when consumer is missing.
 
       auto dec_reg = nreg_[0].as<IntImmNode>()->value;
       auto inc_reg = nreg_[1].as<IntImmNode>()->value;
@@ -113,15 +135,11 @@ private:
       auto dec_reg_stmt = Evaluate(0);
 
       // Only inject if we have valid register hints and no SIMT copy
-      // For now, we assume no SIMT copy detection is available here
-      // TODO: Add SIMT copy detection if needed
-      bool has_simt_copy = false; // Placeholder
+      bool has_simt_copy = SimtCopyDetector::Detect(producer_body);
 
-      if (dec_reg >= 0 && inc_reg >= 0 && !has_simt_copy) {
-        auto inc_reg_num =
-            IntImm(DataType::Int(32), inc_reg == 0 ? 240 : inc_reg);
-        auto dec_reg_num =
-            IntImm(DataType::Int(32), dec_reg == 0 ? 24 : dec_reg);
+      if (dec_reg == 0 && inc_reg == 0 && !has_simt_copy) {
+        auto inc_reg_num = IntImm(DataType::Int(32), 240);
+        auto dec_reg_num = IntImm(DataType::Int(32), 24);
         inc_reg_stmt = Evaluate(
             Call(DataType::Handle(), set_max_nreg(), {inc_reg_num, 1}));
         dec_reg_stmt = Evaluate(
@@ -134,15 +152,20 @@ private:
       producer_stmts.push_back(producer_body);
       auto new_producer_body = SeqStmt(producer_stmts);
 
-      Array<Stmt> consumer_stmts;
-      consumer_stmts.push_back(inc_reg_stmt);
-      consumer_stmts.push_back(consumer_body.value());
-      auto new_consumer_body = SeqStmt(consumer_stmts);
+      Stmt new_if_stmt;
+      if (consumer_body.defined()) {
+        Array<Stmt> consumer_stmts;
+        consumer_stmts.push_back(inc_reg_stmt);
+        consumer_stmts.push_back(consumer_body.value());
+        auto new_consumer_body = SeqStmt(consumer_stmts);
+        new_if_stmt = IfThenElse(if_then_else->condition, new_producer_body,
+                                 new_consumer_body);
+      } else {
+        // No consumer branch; keep the if-then form.
+        new_if_stmt = IfThenElse(if_then_else->condition, new_producer_body);
+      }
 
-      auto new_if_stmt = IfThenElse(if_then_else->condition, new_producer_body,
-                                    new_consumer_body);
       auto new_attr = AttrStmt(op->node, op->attr_key, op->value, new_if_stmt);
-
       return new_attr;
     } else {
       return StmtExprMutator::VisitStmt_(op);
@@ -165,11 +188,11 @@ tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
   return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateWarpGroupRegAlloc", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.AnnotateWarpGroupRegAlloc",
                         AnnotateWarpGroupRegAlloc);
-});
+}
 
 } // namespace tl
 } // namespace tvm

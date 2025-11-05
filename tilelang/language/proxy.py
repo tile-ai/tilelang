@@ -1,7 +1,8 @@
 """The language interface for tl programs."""
 
 from __future__ import annotations
-from typing import Any, Optional, Sequence, SupportsIndex, TYPE_CHECKING, Tuple, Union
+from typing import Any, SupportsIndex, TYPE_CHECKING
+from collections.abc import Sequence
 from typing_extensions import Self
 
 from tvm import tir
@@ -143,7 +144,7 @@ class TensorProxy(BaseTensorProxy):
     """
 
     @staticmethod
-    def _construct_strides(shape: Tuple[Any]):
+    def _construct_strides(shape: tuple[Any]):
         s, strides = 1, [1]
         for dim in shape[:0:-1]:
             s *= dim
@@ -151,7 +152,7 @@ class TensorProxy(BaseTensorProxy):
         return tuple(reversed(strides))
 
     def __call__(self,
-                 shape: Union[Tuple[Any], PrimExpr, int],
+                 shape: tuple[Any] | PrimExpr | int,
                  dtype: str = "float32",
                  data=None,
                  scope=None) -> tir.Buffer:
@@ -172,15 +173,12 @@ class StridedTensorProxy(BaseTensorProxy):
     """
 
     def __call__(self,
-                 shape: Tuple[Any],
-                 strides: Tuple[Any],
+                 shape: tuple[Any],
+                 strides: tuple[Any],
                  dtype: str = "float32",
                  scope=None) -> tir.Buffer:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
-        if not bool(strides[-1] == 1):
-            # TODO(chenggang): shall we support non-contiguous even for the last dimension?
-            raise ValueError("The stride of the last dimension must be 1 (contiguous)")
         return super().__call__(shape, dtype=dtype, strides=strides, scope=scope)
 
 
@@ -273,7 +271,7 @@ else:
     LocalBuffer = LocalBufferProxy()  # pylint: disable=invalid-name
 
 
-def ptr(dtype: Optional[str] = None,
+def ptr(dtype: str | None = None,
         storage_scope: str = "global",
         *,
         is_size_var: bool = False) -> Var:

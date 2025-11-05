@@ -25,6 +25,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/attrs.h>
 #include <tvm/ir/type.h>
 #include <tvm/target/target_info.h>
 #include <tvm/tir/analysis.h>
@@ -38,6 +39,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "arith/int_operator.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/ir/buffer_common.h"
@@ -467,8 +469,10 @@ public:
   using AllocEntry = LinearAccessPatternFinder::AllocEntry;
 
   Stmt Rewrite(Stmt stmt, bool detect_inplace, bool enable_reuse,
-               bool reuse_require_exact_matched_dtype) {
+               bool reuse_require_exact_matched_dtype,
+               Map<Var, PrimExpr> local_var_init_map = {}) {
     detect_inplace_ = detect_inplace;
+    local_var_init_map_ = std::move(local_var_init_map);
     // plan the rewrite
     LinearAccessPatternFinder finder;
     finder(stmt);
@@ -540,7 +544,7 @@ public:
       }
       return it->second->alloc_var;
     } else {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
   }
   PrimExpr VisitExpr_(const CallNode *op) final {
@@ -674,7 +678,8 @@ private:
   bool IsSpecialTaggedMemory(const StorageScope &scope) {
     return !scope.tag.empty() && scope.tag != ".dyn" &&
            scope.tag != ".barrier" && scope.tag != ".workspace" &&
-           scope.tag != ".vtcm" && scope.tag != ".var";
+           scope.tag != ".vtcm" && scope.tag != ".var" &&
+           scope.tag.find(".descriptor") != 0;
   }
 
   // Allocate entry of node.
@@ -691,6 +696,17 @@ private:
       body = MergeNest((*it)->alloc_nest, body);
     }
     return body;
+  }
+  Map<String, ffi::Any> MakeAllocateAnnotations(const Var &buffer_var) const {
+    Map<String, ffi::Any> annotations;
+    if (local_var_init_map_.defined()) {
+      auto it = local_var_init_map_.find(buffer_var);
+      if (it != local_var_init_map_.end()) {
+        const PrimExpr &init = (*it).second;
+        annotations.Set(tl::attr::kLocalVarInit, init);
+      }
+    }
+    return annotations;
   }
   // Remap the index
   PrimExpr RemapIndex(DataType dtype, PrimExpr index, StorageEntry *e) {
@@ -764,9 +780,11 @@ private:
 
         if (all_allocs_identical) {
           // simply use the original allocation.
-          e->alloc_nest.push_back(
-              Allocate(e->alloc_var, alloc_type, e->allocs[0]->extents,
-                       e->allocs[0]->condition, Evaluate(0)));
+          Map<String, ffi::Any> annotations =
+              MakeAllocateAnnotations(e->alloc_var);
+          e->alloc_nest.push_back(Allocate(
+              e->alloc_var, alloc_type, e->allocs[0]->extents,
+              e->allocs[0]->condition, Evaluate(0), std::move(annotations)));
           if (auto ptr = e->allocs[0]->body.as<DeclBufferNode>()) {
             e->alloc_nest.push_back(DeclBuffer(
                 RemapBuffer(ptr->buffer, e->alloc_var), Evaluate(0)));
@@ -822,9 +840,11 @@ private:
             combo_size = combo_size + make_const(DataType::Int(32), 1);
           }
           combo_size = analyzer_.Simplify(combo_size);
-          e->alloc_nest.push_back(Allocate(e->alloc_var, alloc_type,
-                                           {combo_size}, const_true(),
-                                           Evaluate(0)));
+          Map<String, ffi::Any> annotations =
+              MakeAllocateAnnotations(e->alloc_var);
+          e->alloc_nest.push_back(
+              Allocate(e->alloc_var, alloc_type, {combo_size}, const_true(),
+                       Evaluate(0), std::move(annotations)));
           if (IsSpecialTaggedMemory(e->scope)) {
             MemoryInfo info = GetMemoryInfo(e->scope.to_string());
             if (info.defined()) {
@@ -844,7 +864,8 @@ private:
     // allocate with element type.
     ICHECK_NE(e->const_nbits, 0U);
     MemoryInfo info;
-    if (e->scope.tag != ".barrier" && e->scope.tag != ".var") {
+    if (e->scope.tag != ".barrier" && e->scope.tag != ".var" &&
+        e->scope.tag.find(".descriptor") != 0) {
       info = GetMemoryInfo(e->scope.to_string());
     }
     uint64_t total_bits = e->const_nbits;
@@ -872,8 +893,10 @@ private:
     uint64_t type_bits = e->elem_type.bits() * e->elem_type.lanes();
     PrimExpr alloc_size = make_const(e->allocs[0]->extents[0].dtype(),
                                      (total_bits + type_bits - 1) / type_bits);
+    Map<String, ffi::Any> annotations = MakeAllocateAnnotations(e->alloc_var);
     e->alloc_nest.push_back(Allocate(e->alloc_var, e->elem_type, {alloc_size},
-                                     const_true(), Evaluate(0)));
+                                     const_true(), Evaluate(0),
+                                     std::move(annotations)));
     if (info.defined()) {
       ICHECK_LE(total_bits, info->max_num_bits)
           << "Allocation exceed bound of memory tag " << e->scope.to_string();
@@ -955,8 +978,8 @@ private:
           ICHECK(alloc_info.count(var));
           const AllocEntry &entry = alloc_info.at(var);
           const AllocateNode *alloc = entry.alloc;
-          auto storage_scope =
-              StorageScope::Create(GetPtrStorageScope(GetRef<Var>(var)));
+          auto storage_scope = StorageScope::Create(
+              GetPtrStorageScope(tvm::ffi::GetRef<Var>(var)));
           StorageEntry *dst_entry = nullptr;
           // inplace detection
           if (detect_inplace) {
@@ -1175,6 +1198,8 @@ private:
   // Any buffers that is accessed at some point.  DeclBuffer instances
   // that do not appear in this list may be removed.
   std::unordered_set<const BufferNode *> all_buffers_accessed_;
+  // Initial values for local variable buffers.
+  Map<Var, PrimExpr> local_var_init_map_;
   // analyzer
   arith::Analyzer analyzer_;
 };
@@ -1707,7 +1732,7 @@ public:
     Var var = (it == rewrite_map_.end()) ? op->var : it->second.new_buffer_var;
     if (var.same_as(op->var) && value.same_as(op->value) &&
         body.same_as(op->body)) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     }
     return LetStmt(var, value, body);
   }
@@ -1792,7 +1817,7 @@ public:
     DLOG(INFO) << "Allocate with " << new_buffer_var << " and "
                << info.new_element_dtype << " extents: " << extents;
     return Allocate(new_buffer_var, info.new_element_dtype, extents,
-                    op->condition, op->body);
+                    op->condition, op->body, op->annotations);
   }
 
   Stmt VisitStmt_(const AllocateConstNode *op) final {
@@ -1912,6 +1937,8 @@ using namespace tir::transform;
 namespace transform {
 Pass StorageRewrite() {
   auto pass_func = [](PrimFunc f, const IRModule &m, PassContext ctx) {
+    bool detect_inplace =
+        ctx->GetConfig<Bool>(kStorageRewriteDetectInplace, Bool(false)).value();
     bool enable_reuse = true;
     bool reuse_require_exact_matched_dtype = false;
     bool merge_static_smem =
@@ -1936,10 +1963,16 @@ Pass StorageRewrite() {
       // Require exactly same-dtype matching in smem reuse for Vulkan and WebGPU
       reuse_require_exact_matched_dtype = true;
     }
+    Map<Var, PrimExpr> local_var_init_map;
+    if (auto init_map =
+            f->attrs.GetAttr<Map<Var, PrimExpr>>(tl::attr::kLocalVarInit)) {
+      local_var_init_map = init_map.value();
+    }
     auto *n = f.CopyOnWrite();
-    n->body =
-        StoragePlanRewriter().Rewrite(std::move(n->body), true, enable_reuse,
-                                      reuse_require_exact_matched_dtype);
+    StoragePlanRewriter plan_rewriter;
+    n->body = plan_rewriter.Rewrite(
+        std::move(n->body), detect_inplace, enable_reuse,
+        reuse_require_exact_matched_dtype, std::move(local_var_init_map));
     // Parameters may not be rewritten, but internal allocations may.
     // Vectorization of AllocateConst is currently disabled, as it has
     // indexing issues for types that include padding (e.g. int8x3
@@ -1952,10 +1985,10 @@ Pass StorageRewrite() {
   return CreatePrimFuncPass(pass_func, 0, "tir.StorageRewrite", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.StorageRewrite", StorageRewrite);
-});
+}
 
 Pass PointerValueTypeRewrite() {
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
@@ -1964,11 +1997,11 @@ Pass PointerValueTypeRewrite() {
   return CreatePrimFuncPass(pass_func, 0, "tl.PointerValueTypeRewrite", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.PointerValueTypeRewrite",
                         PointerValueTypeRewrite);
-});
+}
 
 } // namespace transform
 } // namespace tl

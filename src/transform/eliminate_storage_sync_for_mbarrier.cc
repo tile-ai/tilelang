@@ -35,9 +35,7 @@ public:
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == "thread_extent") {
-      const VarNode *var = nullptr;
-      if (op->node->IsInstance<VarNode>()) {
-        var = op->node.as<VarNode>();
+      if (const auto *var = op->node.as<VarNode>()) {
         if (var->name_hint == "threadIdx.x") {
           thread_extent_ = op;
         }
@@ -82,7 +80,7 @@ public:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
-    PostOrderVisit(GetRef<For>(op), [&](const ObjectRef &node) {
+    PostOrderVisit(tvm::ffi::GetRef<For>(op), [&](const ObjectRef &node) {
       if (const auto *call = node.as<CallNode>()) {
         if (call->op.same_as(create_list_of_mbarrier()) ||
             call->op.same_as(mbarrier_wait_parity()) ||
@@ -116,11 +114,11 @@ tvm::transform::Pass EliminateStorageSyncForMBarrier() {
                             {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.EliminateStorageSyncForMBarrier",
                         EliminateStorageSyncForMBarrier);
-});
+}
 
 } // namespace transform
 } // namespace tl

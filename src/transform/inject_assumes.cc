@@ -33,8 +33,8 @@ private:
     };
     tvm::StructuralHash sh;
     tvm::StructuralEqual se;
-    // grouped by expr, since the amount of varidic shape symbols is usualy much
-    // smaller than buffer
+    // grouped by expr, since the amount of variadic shape symbols is usually
+    // much smaller than buffer
     std::vector<Item> items;
     // hash => index in items
     std::unordered_map<size_t, std::vector<size_t>> buckets;
@@ -156,9 +156,9 @@ tvm::transform::Pass InjectAssumes() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectAssumes", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.InjectAssumes", InjectAssumes);
-});
+}
 
 } // namespace tvm::tl

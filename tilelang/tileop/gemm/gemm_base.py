@@ -5,10 +5,11 @@ from tvm import tir
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang.ir import GemmWarpPolicy
 from tvm.ir.base import Node
+from tvm.ir import PrimExpr
 
 
 @dataclass
-class GemmBase(object):
+class GemmBase:
     gemm_node: Node
 
     def infer_layout(self, target: Target, thread_nums: int):
@@ -103,7 +104,7 @@ class GemmBase(object):
         return self.gemm_node.offset_B
 
     @property
-    def clear_accum(self) -> bool:
+    def clear_accum(self) -> PrimExpr:
         return self.gemm_node.clear_accum
 
     @property
@@ -117,3 +118,15 @@ class GemmBase(object):
     @property
     def policy(self) -> GemmWarpPolicy:
         return self.gemm_node.policy
+
+    @property
+    def mbarptr(self) -> PrimExpr:
+        return getattr(self.gemm_node, "mbarptr", tvm.tir.const(0, "uint32"))
+
+    @property
+    def C_coords(self):
+        coords = getattr(self.gemm_node, "C_coords", None)
+        if coords is None or len(coords) == 0:
+            zero = tvm.tir.const(0, "int32")
+            return [zero, zero]
+        return [coords[i] for i in range(len(coords))]

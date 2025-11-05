@@ -19,8 +19,6 @@ import torch
 
 torch.random.manual_seed(1)
 
-tilelang.disable_cache()
-
 
 def prepare_input(
     B,

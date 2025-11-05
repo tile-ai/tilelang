@@ -103,8 +103,8 @@ def mqa_attn_return_logits(
     accum_dtype = "float"
     index_dtype = "int32"
 
-    seq_len = T.symbolic("seq_len")
-    seq_len_kv = T.symbolic("seq_len_kv")
+    seq_len = T.dynamic("seq_len")
+    seq_len_kv = T.dynamic("seq_len_kv")
 
     index_q_shape = [seq_len * heads, index_dim]
     index_k_shape = [seq_len_kv, index_dim]
@@ -135,8 +135,6 @@ def mqa_attn_return_logits(
 
             cu_k_s_min = T.alloc_local([1], index_dtype)
             cu_k_e_max = T.alloc_local([1], index_dtype)
-
-            T.no_set_max_nreg()
 
             cu_k_s_min[0] = 2147483647
             cu_k_e_max[0] = -2147483648
@@ -184,8 +182,8 @@ def clean_logits_(
     threads: int = 512,
     block_K: int = 4096,
 ):
-    seq_len = T.symbolic("seq_len")
-    seq_len_kv = T.symbolic("seq_len_kv")
+    seq_len = T.dynamic("seq_len")
+    seq_len_kv = T.dynamic("seq_len_kv")
 
     dtype = "float"
     indices_dtype = "int32"
@@ -258,6 +256,7 @@ def ref_fp8_mqa_logits(q: torch.Tensor, kv: torch.Tensor, weights: torch.Tensor,
     cost = mask.sum()
     return logits, cost
 
+
 def test_fp8_lighting_indexer(S=4096, SKV=8192, H=32, HKV=1, D=64, kv_stride=1):
     q = torch.randn(S, H, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
     kv = torch.randn(SKV, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
@@ -301,6 +300,7 @@ def test_fp8_lighting_indexer(S=4096, SKV=8192, H=32, HKV=1, D=64, kv_stride=1):
     logits_tflops = logits_flops / (logits_ms * 1e-3) / 1e12
     print(f"logits_tflops: {logits_tflops}, logits_ms: {logits_ms}")
     print(f"cost_ref: {cost_ref}")
+
 
 if __name__ == "__main__":
     test_fp8_lighting_indexer()

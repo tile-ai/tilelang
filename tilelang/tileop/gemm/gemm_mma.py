@@ -57,7 +57,7 @@ class GemmMMA(GemmBase):
             raise ValueError(
                 f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
+    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
                                                             False)
         warp_row_tiles = int(self.M // m_warp)
@@ -86,6 +86,8 @@ class GemmMMA(GemmBase):
         A_shared = self.A
         B_shared = self.B
         C_local = self.C
+
+        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
 
         if self.is_gemm_ss():
 

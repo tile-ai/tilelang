@@ -37,18 +37,19 @@ ExtractFuncInfo(const IRModule &mod) {
       }
       info.arg_types.push_back(f->params[i].dtype());
     }
-    if (auto opt = f->GetAttr<Array<String>>(tir::attr::kKernelLaunchParams)) {
+    if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(
+            tir::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
         info.launch_param_tags.push_back(tag);
       }
     }
-    auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
+    auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
     fmap[static_cast<std::string>(global_symbol.value())] = info;
   }
   return fmap;
 }
 
-runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
+ffi::Module BuildTileLangHIP(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
@@ -84,7 +85,7 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   return ROCMModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code, std::string());
 }
 
-runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
+ffi::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
@@ -110,13 +111,13 @@ runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
                           std::string());
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("target.build.tilelang_hip", BuildTileLangHIP)
       .def("target.build.tilelang_hip_without_compile",
            BuildTileLangHIPWithoutCompile);
-});
+}
 
 } // namespace codegen
 } // namespace tvm
