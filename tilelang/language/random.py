@@ -1,11 +1,12 @@
 from tvm import tir
-from typing import Any
 import tilelang.language as T
 from tilelang.language.utils import index_to_coordinates
+
 
 @T.macro
 def umulhi_uint32(a, b):
     return T.Cast("uint32", (T.Cast('uint64', a) * T.Cast('uint64', b)) >> tir.const(32, "uint64"))
+
 
 @T.macro
 def philox_impl(c0, c1, c2, c3, k0, k1, n_rounds):
@@ -20,7 +21,7 @@ def philox_impl(c0, c1, c2, c3, k0, k1, n_rounds):
     c3_var = T.alloc_var("uint32", init=c3)
     k0_var = T.alloc_var("uint32", init=k0)
     k1_var = T.alloc_var("uint32", init=k1)
-    
+
     for _ in T.serial(n_rounds):
         _c0 = c0_var
         _c2 = c2_var
@@ -34,6 +35,7 @@ def philox_impl(c0, c1, c2, c3, k0, k1, n_rounds):
         k1_var = T.Cast("uint32", T.Cast("uint64", k1_var) + PHILOX_KEY_B)
     return c0_var, c1_var, c2_var, c3_var
 
+
 @T.macro
 def uint32_to_uniform_float(x: tir.PrimExpr) -> tir.PrimExpr:
     assert x.dtype == 'uint32' or x.dtype == "int32", f"x.dtype {x.dtype} is not supported"
@@ -44,6 +46,7 @@ def uint32_to_uniform_float(x: tir.PrimExpr) -> tir.PrimExpr:
 
     return T.Cast("float32", x_abs) * scale
 
+
 @T.macro
 def _rand_parallel_impl(buffer: T.Buffer, seed_lo, seed_hi, total_elems, n_rounds):
     for i in T.Parallel(total_elems):
@@ -52,8 +55,8 @@ def _rand_parallel_impl(buffer: T.Buffer, seed_lo, seed_hi, total_elems, n_round
         offset_lo = offset
         offset_hi = tir.const(0, "uint32")
 
-        c0, c1, c2, c3 = philox_impl(offset_lo, offset_hi, tir.const(0, "uint32"), tir.const(0, "uint32"),
-        seed_lo, seed_hi, n_rounds)
+        c0, c1, c2, c3 = philox_impl(offset_lo, offset_hi, tir.const(0, "uint32"),
+                                     tir.const(0, "uint32"), seed_lo, seed_hi, n_rounds)
 
         rand_float = uint32_to_uniform_float(c0)
         buffer[coords] = rand_float
@@ -63,10 +66,9 @@ def rand(buffer: T.Buffer, seed, n_rounds: int = 10):
     seed = T.Cast("uint64", seed)
     seed_lo = T.Cast("uint32", seed & tir.const(0xffffffff, "uint64"))
     seed_hi = T.Cast("uint32", (seed >> 32) & tir.const(0xffffffff, "uint64"))
-    
+
     total_elems = 1
     for dim in buffer.shape:
         total_elems *= dim
-    
-    _rand_parallel_impl(buffer, seed_lo, seed_hi, total_elems, n_rounds)
 
+    _rand_parallel_impl(buffer, seed_lo, seed_hi, total_elems, n_rounds)

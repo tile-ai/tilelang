@@ -94,6 +94,7 @@ from .annotations import (  # noqa: F401
 
 from .random import rand  # noqa: F401
 
+
 def import_source(source: str | None = None):
     # source is the source code to be imported
     return block_attr({"pragma_import_c": source}) if source is not None else None
