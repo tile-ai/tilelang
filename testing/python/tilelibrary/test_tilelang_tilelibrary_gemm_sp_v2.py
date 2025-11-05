@@ -108,7 +108,7 @@ def run_gemm_ss(
         })
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
 
-    A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
+    A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
     C_sp = kernel(A_sparse, E, B)
 
     def _matmul(A, B):
@@ -298,7 +298,7 @@ def run_gemm_rs(
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
-    A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
+    A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
     C_sp = kernel(A_sparse, E, B)
 
     def _matmul(A, B):
@@ -452,7 +452,7 @@ def run_gemm_sr(
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
-    A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
+    A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
     C_sp = kernel(A_sparse, E, B)
 
     def _matmul(A, B):
@@ -610,7 +610,7 @@ def run_gemm_rr(
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
-    A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
+    A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
     C_sp = kernel(A_sparse, E, B)
 
     def _matmul(A, B):
