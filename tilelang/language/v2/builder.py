@@ -252,15 +252,20 @@ class Builder(BaseBuilder):
         self.check_continue_break()
         it = unwrap_expr(it)
         if isinstance(it, SerialForWithStep):
-            real_stop = tir.ceildiv(it.stop - it.start, it.step)
+            # Validate and compute the trip count before constructing the frame
             if isinstance(it.step, (int, IntImm)):
-                value = it.step if isinstance(it.step, int) else it.step.value
-                if value < 0:
-                    real_stop = tir.ceildiv(it.start - it.stop, -it.step)
+                step_value = it.step if isinstance(it.step, int) else it.step.value
+                if step_value == 0:
+                    raise ValueError('Invalid stepped serial: step must be non-zero')
+                if step_value > 0:
+                    real_stop = tir.ceildiv(it.stop - it.start, step_value)
+                else:
+                    real_stop = tir.ceildiv(it.start - it.stop, -step_value)
             else:
                 logger.warning(
                     f'Using a non-constant step `{it.step}` in stepped serial may lead to undefined behavior in tilelang'
                 )
+                real_stop = tir.ceildiv(it.stop - it.start, it.step)
             real_frame = tir.serial(real_stop, annotations=it.annotations)
             with self.with_frame(real_frame) as v:
                 IRBuilder.name('_tmp', v)
