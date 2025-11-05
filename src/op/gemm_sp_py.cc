@@ -48,7 +48,7 @@ using namespace tir;
  *       performed here.
  */
 GemmSPPy::GemmSPPy(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<GemmSPPyNode> node = make_object<GemmSPPyNode>();
+  ObjectPtr<GemmSPPyNode> node = tvm::ffi::make_object<GemmSPPyNode>();
 
   node->Aptr = args[0];
   node->Eptr = args[1];
@@ -85,12 +85,12 @@ GemmSPPy::GemmSPPy(Array<PrimExpr> args, BufferMap vmap) {
  * @brief Create a copy of this GemmSPPyNode as a TileOperator.
  *
  * Constructs a new GemmSPPyNode by copying the current node state and returns it
- * wrapped in a Gemm TileOperator.
+ * wrapped in a GemmSPPy TileOperator.
  *
- * @return TileOperator A Gemm operator that owns a copy of this node.
+ * @return TileOperator A GemmSPPy operator that owns a copy of this node.
  */
 TileOperator GemmSPPyNode::Clone() const {
-  auto op = make_object<GemmSPPyNode>(*this);
+  auto op = tvm::ffi::make_object<GemmSPPyNode>(*this);
   return GemmSPPy(op);
 }
 
@@ -141,55 +141,56 @@ GemmInst GemmSPPyNode::GetGemmInst(int block_size, Target target) const {
  *         transpose/shape constraints; false otherwise.
  */
 bool GemmSPPyNode::CheckWGMMA() const {
-  if (B.scope() != "shared.dyn" && B.scope() != "shared") {
-    return false;
-  }
+  return false; // not supported yet
+  // if (B.scope() != "shared.dyn" && B.scope() != "shared") {
+  //   return false;
+  // }
 
-  if (C->dtype == DataType::Float(16)) {
-    if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
-      return K % 16 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else
-      return false;
-  } else if (C->dtype == DataType::Float(32)) {
-    if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
-      return K % 16 == 0;
-    else if (A->dtype == DataType::BFloat(16) &&
-             B->dtype == DataType::BFloat(16))
-      return K % 16 == 0;
-    else if (A->dtype == DataType::Float(32) && B->dtype == DataType::Float(32))
-      return (!trans_A) && trans_B && K % 8 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else
-      return false;
-  } else if (C->dtype == DataType::Int(32)) {
-    if (A->dtype == DataType::Int(8) && B->dtype == DataType::Int(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::Int(8) && B->dtype == DataType::UInt(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::Int(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::UInt(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else
-      return false;
-  } else {
-    return false;
-  }
+  // if (C->dtype == DataType::Float(16)) {
+  //   if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
+  //     return K % 16 == 0;
+  //   else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else
+  //     return false;
+  // } else if (C->dtype == DataType::Float(32)) {
+  //   if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
+  //     return K % 16 == 0;
+  //   else if (A->dtype == DataType::BFloat(16) &&
+  //            B->dtype == DataType::BFloat(16))
+  //     return K % 16 == 0;
+  //   else if (A->dtype == DataType::Float(32) && B->dtype == DataType::Float(32))
+  //     return (!trans_A) && trans_B && K % 8 == 0;
+  //   else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else
+  //     return false;
+  // } else if (C->dtype == DataType::Int(32)) {
+  //   if (A->dtype == DataType::Int(8) && B->dtype == DataType::Int(8))
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else if (A->dtype == DataType::Int(8) && B->dtype == DataType::UInt(8))
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::Int(8))
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::UInt(8))
+  //     return (!trans_A) && trans_B && K % 32 == 0;
+  //   else
+  //     return false;
+  // } else {
+  //   return false;
+  // }
 }
 
 /**
@@ -209,7 +210,7 @@ bool GemmSPPyNode::CheckWGMMA() const {
 static int GetArchInt(Target target) {
   int arch_int = 0;
   auto s = target->GetAttr<String>("arch");
-  ICHECK(s.defined());
+  ICHECK(s.has_value());
   std::string arch = s.value();
   if (arch.rfind("sm_", 0) == 0) {
     arch_int = std::stoi(arch.substr(3));
@@ -228,10 +229,10 @@ Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp_py.lower")) {
     auto prim_func = Downcast<PrimFunc>(
-        (*f)(GetRef<GemmSPPy>(this), T.target, T.thread_bounds, T.thread_var));
+        (*f)(tvm::ffi::GetRef<GemmSPPy>(this), T.target, T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
-    ICHECK(global_symbol.defined());
+    ICHECK(global_symbol.has_value());
     if (prim_func->body.as<BlockRealizeNode>()) {
       BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
       auto block = block_realize->block;
@@ -262,7 +263,7 @@ LayoutMap GemmSPPyNode::InferLayout(const LayoutInferArgs &T,
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp_py.infer_layout")) {
     results = Downcast<LayoutMap>(
-        (*f)(GetRef<GemmSPPy>(this), T.target, T.thread_bounds));
+        (*f)(tvm::ffi::GetRef<GemmSPPy>(this), T.target, T.thread_bounds));
   } else {
     LOG(FATAL) << "No infer layout function found for gemm_sp_py";
   }
@@ -276,6 +277,6 @@ TIR_REGISTER_TL_OP(GemmSPPy, gemm_sp_py)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ GemmSPPyNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { GemmSPPyNode::RegisterReflection(); }
 } // namespace tl
 } // namespace tvm

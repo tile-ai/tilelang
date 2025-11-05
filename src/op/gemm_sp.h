@@ -18,14 +18,19 @@ using namespace tir;
 
 class GemmSPWarpPolicyNode : public GemmWarpPolicyNode {
 public:
-  static constexpr const char *_type_key = "tl.GemmSPWarpPolicy";
-  TVM_DECLARE_FINAL_OBJECT_INFO(GemmSPWarpPolicyNode, GemmWarpPolicyNode);
-
   std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
                                            Target target, bool use_wgmma,
                                            int bits) const;
   TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmSPWarpPolicy", GemmSPWarpPolicyNode,
                               GemmWarpPolicyNode);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<GemmSPWarpPolicyNode>()
+        .def_ro("policy_type", &GemmSPWarpPolicyNode::policy_type)
+        .def_ro("m_warp", &GemmSPWarpPolicyNode::m_warp)
+        .def_ro("n_warp", &GemmSPWarpPolicyNode::n_warp);
+  }
 };
 
 class GemmSPWarpPolicy : public ObjectRef {

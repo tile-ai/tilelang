@@ -38,7 +38,7 @@ class GemmWarpPolicy(Node, Scriptable):
                                                     is_wgmma)
         return self.m_warp, self.n_warp
 
-@tvm.ffi.register_object("tl.GemmSPWarpPolicy")
+@tvm_ffi.register_object("tl.GemmSPWarpPolicy")
 class GemmSPWarpPolicy(Node, Scriptable):
     policy_type: int
     m_warp: int

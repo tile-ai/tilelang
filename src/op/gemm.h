@@ -30,7 +30,7 @@ public:
   mutable int n_warp{0};
   int policy_type;
 
-  TVM_DECLARE_BASE_OBJECT_INFO("tl.GemmWarpPolicy", GemmWarpPolicyNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmWarpPolicy", GemmWarpPolicyNode, Object);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;

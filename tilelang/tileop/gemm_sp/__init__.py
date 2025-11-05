@@ -6,22 +6,22 @@ from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
-import tvm.ffi
+import tvm_ffi
 from tilelang.ir import GemmWarpPolicy
 from .gemm_sp_mma import GemmSPMMA
 
-@tvm.ffi.register_func("tl.gemm_sp_py.infer_layout")
+@tvm_ffi.register_global_func("tl.gemm_sp_py.infer_layout")
 def gemm_sp_py_infer_layout(gemm_sp_py: GemmSPMMA, target: Target, thread_bounds: Range):
     thread_nums = thread_bounds.extent
     return gemm_sp_py.infer_layout(target, thread_nums)
 
-@tvm.ffi.register_func("tl.gemm_sp_py.lower")
+@tvm_ffi.register_global_func("tl.gemm_sp_py.lower")
 def gemm_sp_py_lower(gemm_sp_py: GemmSPMMA, target: Target, thread_bounds: Range, thread_var: tir.Var):
     thread_nums = thread_bounds.extent
     stmt = gemm_sp_py.lower(target, thread_nums, thread_var)
     return stmt
 
-@tvm.ffi.register_object("tl.GemmSPPy")
+@tvm_ffi.register_object("tl.GemmSPPy")
 class GemmSPPy(Node, Scriptable):
     A: tir.Buffer
     E: tir.Buffer

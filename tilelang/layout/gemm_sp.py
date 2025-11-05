@@ -8,6 +8,7 @@ import warnings
 
 from tilelang.contrib import nvcc
 from math import prod
+from typing import Optional
 
 
 def decompose_col_major(index_1d: int, basis: list[int]) -> list[int]:
