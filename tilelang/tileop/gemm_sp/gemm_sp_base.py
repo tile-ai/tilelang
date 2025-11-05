@@ -8,7 +8,7 @@ from tvm.ir.base import Node
 
 
 @dataclass
-class GemmSPBase(object):
+class GemmSPBase:
     gemm_sp_node: Node
 
     def infer_layout(self, target: Target, thread_nums: int):

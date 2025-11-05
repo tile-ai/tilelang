@@ -35,7 +35,8 @@ public:
   int wg_wait = 0;
   mutable GemmWarpPolicy policy;
 
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmSPPy", GemmSPPyNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmSPPy", GemmSPPyNode,
+                                    TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -78,7 +79,8 @@ private:
 
 class GemmSPPy : public TileOperator {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSPPy, TileOperator, GemmSPPyNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSPPy, TileOperator,
+                                             GemmSPPyNode);
   TVM_DLL GemmSPPy(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };

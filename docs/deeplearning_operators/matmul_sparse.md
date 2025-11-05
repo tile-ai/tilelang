@@ -152,7 +152,7 @@ The corresponding uint16 metadata is:
 ```python
 # metadata_bits = tensor([0b1101, 0b0100, 0b1110, 0b1000])
 # Note: storage uses little-endian order: tensor(0b1000111001001101, dtype=torch.int16)
-# Note: the above code is not runnable in python as the interpretor won't take the binary
+# Note: the above code is not runnable in python as the interpreter won't take the binary
 #       as 2's complement
 metadata_int16 = tensor(-29107)
 ```

@@ -127,6 +127,7 @@ def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transp
         tensor = tensor.t().contiguous()
     return tensor.to(dtype)  # dtype like float8 might not have randn kernel
 
+
 def randint_semi_sparse(M: int,
                         K: int,
                         low: int,
@@ -137,7 +138,7 @@ def randint_semi_sparse(M: int,
     """
     Generate a random semi-sparse integer tensor. The generated tensor will have 2:4 sparsity along the K dimension.
     Args:
-        M (int): Number of rows 
+        M (int): Number of rows
         K (int): Number of columns
         low (int): Lower bound of the random integers
         high (int): Upper bound of the random integers
@@ -155,6 +156,7 @@ def randint_semi_sparse(M: int,
     if transposed:
         tensor = tensor.t().contiguous()
     return tensor
+
 
 def arange_semi_sparse(M: int,
                        K: int,

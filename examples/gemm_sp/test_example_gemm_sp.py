@@ -3,6 +3,7 @@ import tilelang.testing
 import example_custom_compress
 import example_gemm_sp
 
+
 def test_example_custom_compress():
     example_custom_compress.main()
 

@@ -20,11 +20,25 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
             low, high = (0, 4) if is_unsigned else (-2, 2)
         else:
             low, high = (0, 128) if is_unsigned else (-64, 64)
-        A = randint_semi_sparse(M, K, low=low, high=high, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
-        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=map_torch_type(in_dtype), device='cuda')
+        A = randint_semi_sparse(
+            M,
+            K,
+            low=low,
+            high=high,
+            dtype=map_torch_type(in_dtype),
+            device='cuda',
+            transposed=trans_A)
+        B = torch.randint(
+            size=(N, K) if trans_B else (K, N),
+            low=low,
+            high=high,
+            dtype=map_torch_type(in_dtype),
+            device='cuda')
     else:
-        A = randn_semi_sparse(M, K, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
-        B = torch.randn((N, K) if trans_B else (K, N), device='cuda', dtype=map_torch_type(in_dtype))
+        A = randn_semi_sparse(
+            M, K, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
+        B = torch.randn(
+            (N, K) if trans_B else (K, N), device='cuda', dtype=map_torch_type(in_dtype))
     return A, B
 
 
@@ -69,10 +83,7 @@ def matmul_sp_sm90(
                         E, mma_dtype="float16", arch="9.0", block_k=block_K),
                 E_shared:
                     make_cutlass_metadata_layout(
-                        E_shared,
-                        mma_dtype="float16",
-                        arch="9.0",
-                        block_k=block_K),
+                        E_shared, mma_dtype="float16", arch="9.0", block_k=block_K),
             })
             T.disable_warp_group_reg_alloc()
             T.clear(C_frag)
@@ -130,11 +141,8 @@ def matmul_sp_sm80(
             E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
-                E:
-                    make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
-                E_shared:
-                    make_cutlass_metadata_layout(
-                        E_shared, mma_dtype=in_dtype, arch="8.0"),
+                E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
+                E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
             })
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):

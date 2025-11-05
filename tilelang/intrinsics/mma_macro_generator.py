@@ -267,7 +267,10 @@ class TensorCoreIntrinEmitter:
                 else:
                     for j in T.serial(local_size_a):
                         mi, mk = mma_load_layout(tx, j)
-                        A_local_buf[i * local_size_a + j] = A_shared_buf[wk + mk, wi + mi] if trans else A_shared_buf[wi + mi, wk + mk]
+                        A_local_buf[i * local_size_a +
+                                    j] = A_shared_buf[wk + mk,
+                                                      wi + mi] if trans else A_shared_buf[wi + mi,
+                                                                                          wk + mk]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -341,7 +344,10 @@ class TensorCoreIntrinEmitter:
                     # must be transposed.
                     for j in T.serial(local_size_b):
                         mi, mk = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = B_shared_buf[wi + mi, wk + mk] if b_transposed else B_shared_buf[wk + mk, wi + mi]
+                        B_local_buf[i * local_size_b +
+                                    j] = B_shared_buf[wi + mi, wk +
+                                                      mk] if b_transposed else B_shared_buf[wk + mk,
+                                                                                            wi + mi]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 

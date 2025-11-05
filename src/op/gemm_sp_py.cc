@@ -1,6 +1,7 @@
 /*!
  * \file tl/op/gemm_sp_py.cc
- * \brief Implementation of Sparse General Matrix Multiplication (GEMM_SP) operators
+ * \brief Implementation of Sparse General Matrix Multiplication (GEMM_SP)
+ * operators
  */
 
 #include "gemm_sp_py.h"
@@ -84,8 +85,8 @@ GemmSPPy::GemmSPPy(Array<PrimExpr> args, BufferMap vmap) {
 /**
  * @brief Create a copy of this GemmSPPyNode as a TileOperator.
  *
- * Constructs a new GemmSPPyNode by copying the current node state and returns it
- * wrapped in a GemmSPPy TileOperator.
+ * Constructs a new GemmSPPyNode by copying the current node state and returns
+ * it wrapped in a GemmSPPy TileOperator.
  *
  * @return TileOperator A GemmSPPy operator that owns a copy of this node.
  */
@@ -165,7 +166,8 @@ bool GemmSPPyNode::CheckWGMMA() const {
   //   else if (A->dtype == DataType::BFloat(16) &&
   //            B->dtype == DataType::BFloat(16))
   //     return K % 16 == 0;
-  //   else if (A->dtype == DataType::Float(32) && B->dtype == DataType::Float(32))
+  //   else if (A->dtype == DataType::Float(32) && B->dtype ==
+  //   DataType::Float(32))
   //     return (!trans_A) && trans_B && K % 8 == 0;
   //   else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
   //     return (!trans_A) && trans_B && K % 32 == 0;
@@ -228,8 +230,9 @@ Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp_py.lower")) {
-    auto prim_func = Downcast<PrimFunc>(
-        (*f)(tvm::ffi::GetRef<GemmSPPy>(this), T.target, T.thread_bounds, T.thread_var));
+    auto prim_func =
+        Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmSPPy>(this), T.target,
+                                T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
@@ -256,7 +259,7 @@ Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 }
 
 LayoutMap GemmSPPyNode::InferLayout(const LayoutInferArgs &T,
-                                  InferLevel level) const {
+                                    InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;

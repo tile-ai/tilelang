@@ -38,6 +38,7 @@ class GemmWarpPolicy(Node, Scriptable):
                                                     is_wgmma)
         return self.m_warp, self.n_warp
 
+
 @tvm_ffi.register_object("tl.GemmSPWarpPolicy")
 class GemmSPWarpPolicy(Node, Scriptable):
     policy_type: int
@@ -47,8 +48,9 @@ class GemmSPWarpPolicy(Node, Scriptable):
     def compute_warp_partition(self, M: int, N: int, block_size: int, target: Target,
                                is_wgmma: bool, bits: int):
         _ffi_api.GemmSPWarpPolicyComputeWarpPartition(self, int(M), int(N), int(block_size), target,
-                                                    is_wgmma, bits)
+                                                      is_wgmma, bits)
         return self.m_warp, self.n_warp
+
 
 @tvm_ffi.register_object("tl.Gemm")
 class Gemm(Node, Scriptable):

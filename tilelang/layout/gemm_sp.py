@@ -8,7 +8,6 @@ import warnings
 
 from tilelang.contrib import nvcc
 from math import prod
-from typing import Optional
 
 
 def decompose_col_major(index_1d: int, basis: list[int]) -> list[int]:
@@ -135,17 +134,16 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tir.Buffer, mma_dtype: str):
 
 
 def make_cutlass_metadata_layout(buffer: tvm.tir.Buffer,
-                         mma_dtype: str = "float16",
-                         arch: Optional[str] = None,
-                         **extra_args):
+                                 mma_dtype: str = "float16",
+                                 arch: str | None = None,
+                                 **extra_args):
     if arch is None:
         arch = nvcc.get_target_compute_version()
 
     compute_version = nvcc.parse_compute_version(arch)
 
     if compute_version >= (9, 0):
-        return make_cutlass_metadata_layout_sm90(
-            buffer=buffer, mma_dtype=mma_dtype, **extra_args)
+        return make_cutlass_metadata_layout_sm90(buffer=buffer, mma_dtype=mma_dtype, **extra_args)
     elif compute_version >= (8, 0):
         return make_cutlass_metadata_layout_sm8x(buffer=buffer, mma_dtype=mma_dtype)
     else:

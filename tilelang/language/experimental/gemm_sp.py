@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from tilelang.primitives.gemm.base import GemmWarpPolicy
+from tilelang.utils.language import get_buffer_region_from_load
 import tilelang.language as T
 from tvm import tir
-from typing import Union, List
+from typing import list
 
 
 def gemm_sp(
@@ -86,12 +87,13 @@ def gemm_sp(
         wg_wait,
     )
 
+
 # experimental currently, for fast compilation
 def gemm_sp_v2(
-    A_sparse: Union[tir.Buffer, tir.Var],
-    E: Union[tir.Buffer, tir.Var],
-    B: Union[tir.Buffer, tir.Var],
-    C: Union[tir.Buffer, tir.Var],
+    A_sparse: tir.Buffer | tir.Var,
+    E: tir.Buffer | tir.Var,
+    B: tir.Buffer | tir.Var,
+    C: tir.Buffer | tir.Var,
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
@@ -123,7 +125,7 @@ def gemm_sp_v2(
         AssertionError: If the K dimensions of matrices A and B don't match
     """
 
-    def legalize_arguments(arg: Union[tir.Buffer, tir.Var]):
+    def legalize_arguments(arg: tir.Buffer | tir.Var):
         """Convert let-bound variables to their corresponding buffers.
 
         Args:
@@ -141,7 +143,7 @@ def gemm_sp_v2(
     B = legalize_arguments(B)
     C = legalize_arguments(C)
 
-    def retrieve_shape(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
+    def retrieve_shape(object: tir.Buffer | tir.BufferRegion) -> list[int]:
         if isinstance(object, tir.Buffer):
             return object.shape
         elif isinstance(object, tir.BufferRegion):
@@ -160,7 +162,7 @@ def gemm_sp_v2(
             raise ValueError(
                 f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
 
-    def retrieve_stride(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
+    def retrieve_stride(object: tir.Buffer | tir.BufferRegion) -> list[int]:
         if isinstance(object, tir.Buffer):
             strides = []
             stride = 1
@@ -189,7 +191,6 @@ def gemm_sp_v2(
                 f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
 
     A_shape = retrieve_shape(A_sparse)
-    E_shape = retrieve_shape(E)
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
 
@@ -216,8 +217,7 @@ def gemm_sp_v2(
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
 
-    def retrieve_ptr(object: Union[tir.Buffer, tir.BufferRegion],
-                     access_type: str = "r") -> tir.PrimExpr:
+    def retrieve_ptr(object: tir.Buffer | tir.BufferRegion, access_type: str = "r") -> tir.PrimExpr:
         if isinstance(object, tir.Buffer):
             return object.access_ptr(access_type)
         elif isinstance(object, tir.BufferRegion):
@@ -254,7 +254,7 @@ def gemm_sp_v2(
             raise ValueError(
                 f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
 
-    def retrieve_offset(object: Union[tir.Buffer, tir.BufferRegion]) -> tir.PrimExpr:
+    def retrieve_offset(object: tir.Buffer | tir.BufferRegion) -> tir.PrimExpr:
         """Retrieve the offset of the buffer or buffer region."""
         if isinstance(object, tir.Buffer):
             return [0] * len(object.shape)

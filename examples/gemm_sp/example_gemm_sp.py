@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {  # take best config from autotune script
 
 ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
 
+
 @tilelang.jit(out_idx=[-1])
 def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy,
                    enable_rasterization):
@@ -87,10 +88,7 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
                         E, mma_dtype="float16", block_k=block_K, arch=arch),
                 E_shared:
                     make_cutlass_metadata_layout(
-                        E_shared,
-                        mma_dtype="float16",
-                        block_k=block_K,
-                        arch=arch),
+                        E_shared, mma_dtype="float16", block_k=block_K, arch=arch),
             })
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
