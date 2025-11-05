@@ -11,6 +11,10 @@ from .utils import (
 from tilelang.utils import is_fragment
 
 from tilelang.intrinsics.mma_sp_layout import (
+    shared_32x16_to_mma_sp_layout_sr_a,
+    shared_32x16_to_mma_sp_layout_rs_a,
+    shared_16x32_to_mma_sp_layout_rs_b,
+    shared_16x32_to_mma_sp_layout_sr_b,
     mma_sp_load_a_32x4_to_shared_16x16_layout,
     mma_sp_load_a_32x8_to_shared_16x32_layout,
     mma_sp_load_a_32x16_to_shared_16x64_layout,
@@ -53,6 +57,10 @@ class SparseTensorCoreIntrinEmitter(object):
     }
 
     E_FACTOR_MAP = {  # e_kdim = mma_kdim // e_factor
+        "float": {
+            "int16": 8,
+            "uint16": 8,
+        },
         "float32": {
             "int16": 8,
             "uint16": 8,
@@ -686,8 +694,8 @@ class SparseTensorCoreIntrinEmitter(object):
             transform_func_sr_a = shared_16x8_to_mma_32x4_layout_sr_a
             transform_func_sr_b = shared_16x8_to_mma_32x4_layout_sr_b
         elif dtype_bits == 16:
-            transform_func_sr_a = shared_16x16_to_mma_32x8_layout_sr_a
-            transform_func_sr_b = shared_16x16_to_mma_32x8_layout_sr_b
+            transform_func_sr_a = shared_32x16_to_mma_sp_layout_sr_a
+            transform_func_sr_b = shared_32x16_to_mma_sp_layout_sr_b
         elif dtype_bits == 8:
             transform_func_sr_a = shared_16x32_to_mma_32x16_layout_sr_a
             transform_func_sr_b = shared_16x32_to_mma_32x16_layout_sr_b
@@ -741,13 +749,13 @@ class SparseTensorCoreIntrinEmitter(object):
             return local_id
 
         base_fragment = T.Fragment(
-            [micro_size_s, micro_size_r] if is_sr_axis_order else [micro_size_r, micro_size_s],
+            [micro_size_s, micro_size_r // 2 if matrix_is_a else micro_size_r] if is_sr_axis_order else [micro_size_r // 2 if matrix_is_a else micro_size_r, micro_size_s],
             forward_thread_fn=forward_thread,
             forward_index_fn=forward_index,
         )
 
         warp_rows, warp_cols = self.warp_rows, self.warp_cols
-        chunk = self.chunk
+        chunk = self.warp_k
 
         warp_s = warp_rows if matrix_is_a else warp_cols
         warp_r = chunk // micro_size_r
