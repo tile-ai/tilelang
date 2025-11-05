@@ -17,6 +17,7 @@ def make_swizzled_layout(buffer: tvm.tir.Buffer, k_major: bool = True, allow_pad
         allow_pad,
     )
 
+
 # for Volta Intrinsics
 def make_volta_swizzled_layout(buffer: tvm.tir.Buffer, is_a: bool = True, k_inner: bool = True):
     assert len(buffer.shape) == 2
@@ -26,6 +27,7 @@ def make_volta_swizzled_layout(buffer: tvm.tir.Buffer, is_a: bool = True, k_inne
         is_a,
         k_inner,
     )
+
 
 # for WGMMA Intrinsics
 def make_wgmma_swizzled_layout(buffer: tvm.tir.Buffer,

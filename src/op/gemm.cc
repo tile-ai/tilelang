@@ -144,7 +144,7 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
 
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
-  int kNPerWarp = 8;  // Columns processed by a single warp
+  int kNPerWarp = 8;            // Columns processed by a single warp
   if (TargetIsVolta(target)) {
     kNPerWarp = 16;
   }

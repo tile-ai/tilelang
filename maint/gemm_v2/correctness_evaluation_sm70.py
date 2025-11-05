@@ -221,13 +221,15 @@ FALSE_TRUE_CASES = ([
         "float16",
         id=f"K{k}-float16-float16-float16",
     ) for k in K_VALUES
-] + [pytest.param(
+] + [
+    pytest.param(
         k,
         "float16",
         "float16",
         "float32",
         id=f"K{k}-float16-float16-float32",
-    ) for k in K_VALUES])
+    ) for k in K_VALUES
+])
 
 
 def _ensure_torch_dtypes(*dtype_names):

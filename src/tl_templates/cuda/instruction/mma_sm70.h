@@ -15,16 +15,17 @@ template <class> inline constexpr bool always_false_v = false;
 namespace detail {
 
 // SM70 MMA Instruction Traits and Implementations
-// SM70 supports m16n16k4 (m8n8k4 instruction at warp level) with FP16/FP32 accumulation
+// SM70 supports m16n16k4 (m8n8k4 instruction at warp level) with FP16/FP32
+// accumulation
 
 // Base template for SM70 MMA implementation
-template <DataType AType, DataType BType, DataType CType,
-          bool TransA, bool TransB>
+template <DataType AType, DataType BType, DataType CType, bool TransA,
+          bool TransB>
 struct MmaSm70Impl {
   // Default: unsupported configuration
   static constexpr bool kSupported = false;
 
-  static TL_DEVICE void exec(void*, const void*, const void*, const void*) {
+  static TL_DEVICE void exec(void *, const void *, const void *, const void *) {
     static_assert(always_false_v<std::integral_constant<bool, TransA>>,
                   "tl::mma_sync_sm70: unsupported configuration");
   }
@@ -41,14 +42,15 @@ struct MmaSm70Impl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
 
   static constexpr bool kSupported = true;
 
-  static TL_DEVICE void fma(unsigned& d0, unsigned& d1, unsigned& d2, unsigned& d3,
-                            unsigned a0, unsigned a1,
-                            unsigned b0, unsigned b1,
-                            unsigned c0, unsigned c1, unsigned c2, unsigned c3) {
-    asm volatile("mma.sync.aligned.m8n8k4.col.col.f16.f16.f16.f16 {%0,%1,%2,%3}, {%4,%5}, {%6,%7}, {%8,%9,%10,%11};\n"
-      : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
-      : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(c0), "r"(c1), "r"(c2), "r"(c3)
-    );
+  static TL_DEVICE void fma(unsigned &d0, unsigned &d1, unsigned &d2,
+                            unsigned &d3, unsigned a0, unsigned a1, unsigned b0,
+                            unsigned b1, unsigned c0, unsigned c1, unsigned c2,
+                            unsigned c3) {
+    asm volatile("mma.sync.aligned.m8n8k4.col.col.f16.f16.f16.f16 "
+                 "{%0,%1,%2,%3}, {%4,%5}, {%6,%7}, {%8,%9,%10,%11};\n"
+                 : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(c0), "r"(c1),
+                   "r"(c2), "r"(c3));
   }
 };
 
@@ -63,14 +65,15 @@ struct MmaSm70Impl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
 
   static constexpr bool kSupported = true;
 
-  static TL_DEVICE void fma(unsigned& d0, unsigned& d1, unsigned& d2, unsigned& d3,
-                            unsigned a0, unsigned a1,
-                            unsigned b0, unsigned b1,
-                            unsigned c0, unsigned c1, unsigned c2, unsigned c3) {
-    asm volatile("mma.sync.aligned.m8n8k4.col.row.f16.f16.f16.f16 {%0,%1,%2,%3}, {%4,%5}, {%6,%7}, {%8,%9,%10,%11};\n"
-      : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
-      : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(c0), "r"(c1), "r"(c2), "r"(c3)
-    );
+  static TL_DEVICE void fma(unsigned &d0, unsigned &d1, unsigned &d2,
+                            unsigned &d3, unsigned a0, unsigned a1, unsigned b0,
+                            unsigned b1, unsigned c0, unsigned c1, unsigned c2,
+                            unsigned c3) {
+    asm volatile("mma.sync.aligned.m8n8k4.col.row.f16.f16.f16.f16 "
+                 "{%0,%1,%2,%3}, {%4,%5}, {%6,%7}, {%8,%9,%10,%11};\n"
+                 : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(c0), "r"(c1),
+                   "r"(c2), "r"(c3));
   }
 };
 
@@ -85,14 +88,15 @@ struct MmaSm70Impl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
 
   static constexpr bool kSupported = true;
 
-  static TL_DEVICE void fma(unsigned& d0, unsigned& d1, unsigned& d2, unsigned& d3,
-                            unsigned a0, unsigned a1,
-                            unsigned b0, unsigned b1,
-                            unsigned c0, unsigned c1, unsigned c2, unsigned c3) {
-    asm volatile("mma.sync.aligned.m8n8k4.row.col.f16.f16.f16.f16 {%0,%1,%2,%3}, {%4,%5}, {%6,%7}, {%8,%9,%10,%11};\n"
-      : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
-      : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(c0), "r"(c1), "r"(c2), "r"(c3)
-    );
+  static TL_DEVICE void fma(unsigned &d0, unsigned &d1, unsigned &d2,
+                            unsigned &d3, unsigned a0, unsigned a1, unsigned b0,
+                            unsigned b1, unsigned c0, unsigned c1, unsigned c2,
+                            unsigned c3) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.col.f16.f16.f16.f16 "
+                 "{%0,%1,%2,%3}, {%4,%5}, {%6,%7}, {%8,%9,%10,%11};\n"
+                 : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(c0), "r"(c1),
+                   "r"(c2), "r"(c3));
   }
 };
 
@@ -107,14 +111,15 @@ struct MmaSm70Impl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat16,
 
   static constexpr bool kSupported = true;
 
-  static TL_DEVICE void fma(unsigned& d0, unsigned& d1, unsigned& d2, unsigned& d3,
-                            unsigned a0, unsigned a1,
-                            unsigned b0, unsigned b1,
-                            unsigned c0, unsigned c1, unsigned c2, unsigned c3) {
-    asm volatile("mma.sync.aligned.m8n8k4.row.row.f16.f16.f16.f16 {%0,%1,%2,%3}, {%4,%5}, {%6,%7}, {%8,%9,%10,%11};\n"
-      : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
-      : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(c0), "r"(c1), "r"(c2), "r"(c3)
-    );
+  static TL_DEVICE void fma(unsigned &d0, unsigned &d1, unsigned &d2,
+                            unsigned &d3, unsigned a0, unsigned a1, unsigned b0,
+                            unsigned b1, unsigned c0, unsigned c1, unsigned c2,
+                            unsigned c3) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.row.f16.f16.f16.f16 "
+                 "{%0,%1,%2,%3}, {%4,%5}, {%6,%7}, {%8,%9,%10,%11};\n"
+                 : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "r"(c0), "r"(c1),
+                   "r"(c2), "r"(c3));
   }
 };
 
@@ -129,16 +134,18 @@ struct MmaSm70Impl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat32,
 
   static constexpr bool kSupported = true;
 
-  static TL_DEVICE void fma(float& d0, float& d1, float& d2, float& d3,
-                            float& d4, float& d5, float& d6, float& d7,
-                            unsigned a0, unsigned a1,
-                            unsigned b0, unsigned b1,
-                            float c0, float c1, float c2, float c3,
-                            float c4, float c5, float c6, float c7) {
-    asm volatile("mma.sync.aligned.m8n8k4.col.col.f32.f16.f16.f32 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9}, {%10,%11}, {%12,%13,%14,%15,%16,%17,%18,%19};\n"
-      : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3), "=f"(d4), "=f"(d5), "=f"(d6), "=f"(d7)
-      : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "f"(c0), "f"(c1), "f"(c2), "f"(c3), "f"(c4), "f"(c5), "f"(c6), "f"(c7)
-    );
+  static TL_DEVICE void fma(float &d0, float &d1, float &d2, float &d3,
+                            float &d4, float &d5, float &d6, float &d7,
+                            unsigned a0, unsigned a1, unsigned b0, unsigned b1,
+                            float c0, float c1, float c2, float c3, float c4,
+                            float c5, float c6, float c7) {
+    asm volatile("mma.sync.aligned.m8n8k4.col.col.f32.f16.f16.f32 "
+                 "{%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9}, {%10,%11}, "
+                 "{%12,%13,%14,%15,%16,%17,%18,%19};\n"
+                 : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3), "=f"(d4), "=f"(d5),
+                   "=f"(d6), "=f"(d7)
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "f"(c0), "f"(c1),
+                   "f"(c2), "f"(c3), "f"(c4), "f"(c5), "f"(c6), "f"(c7));
   }
 };
 
@@ -153,16 +160,18 @@ struct MmaSm70Impl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat32,
 
   static constexpr bool kSupported = true;
 
-  static TL_DEVICE void fma(float& d0, float& d1, float& d2, float& d3,
-                            float& d4, float& d5, float& d6, float& d7,
-                            unsigned a0, unsigned a1,
-                            unsigned b0, unsigned b1,
-                            float c0, float c1, float c2, float c3,
-                            float c4, float c5, float c6, float c7) {
-    asm volatile("mma.sync.aligned.m8n8k4.col.row.f32.f16.f16.f32 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9}, {%10,%11}, {%12,%13,%14,%15,%16,%17,%18,%19};\n"
-      : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3), "=f"(d4), "=f"(d5), "=f"(d6), "=f"(d7)
-      : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "f"(c0), "f"(c1), "f"(c2), "f"(c3), "f"(c4), "f"(c5), "f"(c6), "f"(c7)
-    );
+  static TL_DEVICE void fma(float &d0, float &d1, float &d2, float &d3,
+                            float &d4, float &d5, float &d6, float &d7,
+                            unsigned a0, unsigned a1, unsigned b0, unsigned b1,
+                            float c0, float c1, float c2, float c3, float c4,
+                            float c5, float c6, float c7) {
+    asm volatile("mma.sync.aligned.m8n8k4.col.row.f32.f16.f16.f32 "
+                 "{%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9}, {%10,%11}, "
+                 "{%12,%13,%14,%15,%16,%17,%18,%19};\n"
+                 : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3), "=f"(d4), "=f"(d5),
+                   "=f"(d6), "=f"(d7)
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "f"(c0), "f"(c1),
+                   "f"(c2), "f"(c3), "f"(c4), "f"(c5), "f"(c6), "f"(c7));
   }
 };
 
@@ -177,16 +186,18 @@ struct MmaSm70Impl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat32,
 
   static constexpr bool kSupported = true;
 
-  static TL_DEVICE void fma(float& d0, float& d1, float& d2, float& d3,
-                            float& d4, float& d5, float& d6, float& d7,
-                            unsigned a0, unsigned a1,
-                            unsigned b0, unsigned b1,
-                            float c0, float c1, float c2, float c3,
-                            float c4, float c5, float c6, float c7) {
-    asm volatile("mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9}, {%10,%11}, {%12,%13,%14,%15,%16,%17,%18,%19};\n"
-      : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3), "=f"(d4), "=f"(d5), "=f"(d6), "=f"(d7)
-      : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "f"(c0), "f"(c1), "f"(c2), "f"(c3), "f"(c4), "f"(c5), "f"(c6), "f"(c7)
-    );
+  static TL_DEVICE void fma(float &d0, float &d1, float &d2, float &d3,
+                            float &d4, float &d5, float &d6, float &d7,
+                            unsigned a0, unsigned a1, unsigned b0, unsigned b1,
+                            float c0, float c1, float c2, float c3, float c4,
+                            float c5, float c6, float c7) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "
+                 "{%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9}, {%10,%11}, "
+                 "{%12,%13,%14,%15,%16,%17,%18,%19};\n"
+                 : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3), "=f"(d4), "=f"(d5),
+                   "=f"(d6), "=f"(d7)
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "f"(c0), "f"(c1),
+                   "f"(c2), "f"(c3), "f"(c4), "f"(c5), "f"(c6), "f"(c7));
   }
 };
 
@@ -201,16 +212,18 @@ struct MmaSm70Impl<DataType::kFloat16, DataType::kFloat16, DataType::kFloat32,
 
   static constexpr bool kSupported = true;
 
-  static TL_DEVICE void fma(float& d0, float& d1, float& d2, float& d3,
-                            float& d4, float& d5, float& d6, float& d7,
-                            unsigned a0, unsigned a1,
-                            unsigned b0, unsigned b1,
-                            float c0, float c1, float c2, float c3,
-                            float c4, float c5, float c6, float c7) {
-    asm volatile("mma.sync.aligned.m8n8k4.row.row.f32.f16.f16.f32 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9}, {%10,%11}, {%12,%13,%14,%15,%16,%17,%18,%19};\n"
-      : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3), "=f"(d4), "=f"(d5), "=f"(d6), "=f"(d7)
-      : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "f"(c0), "f"(c1), "f"(c2), "f"(c3), "f"(c4), "f"(c5), "f"(c6), "f"(c7)
-    );
+  static TL_DEVICE void fma(float &d0, float &d1, float &d2, float &d3,
+                            float &d4, float &d5, float &d6, float &d7,
+                            unsigned a0, unsigned a1, unsigned b0, unsigned b1,
+                            float c0, float c1, float c2, float c3, float c4,
+                            float c5, float c6, float c7) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.row.f32.f16.f16.f32 "
+                 "{%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9}, {%10,%11}, "
+                 "{%12,%13,%14,%15,%16,%17,%18,%19};\n"
+                 : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3), "=f"(d4), "=f"(d5),
+                   "=f"(d6), "=f"(d7)
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1), "f"(c0), "f"(c1),
+                   "f"(c2), "f"(c3), "f"(c4), "f"(c5), "f"(c6), "f"(c7));
   }
 };
 
@@ -235,34 +248,35 @@ struct MmaSm70Dispatcher {
   using ARegType = void;
   using BRegType = void;
 
-  static TL_DEVICE void exec(CRegType*, const ARegType*, const BRegType*,
-                             const CRegType*) {
+  static TL_DEVICE void exec(CRegType *, const ARegType *, const BRegType *,
+                             const CRegType *) {
     static_assert(always_false_v<std::integral_constant<int, M>>,
                   "tl::mma_sync_sm70: unsupported configuration. "
-                  "SM70 only supports m16n16k4 with FP16 inputs and FP16/FP32 accumulation.");
+                  "SM70 only supports m16n16k4 with FP16 inputs and FP16/FP32 "
+                  "accumulation.");
   }
 };
 
 // Helper to call fma with unpacked register arrays
-template <class Impl, size_t... DIdx, size_t... AIdx, size_t... BIdx, size_t... CIdx>
-TL_DEVICE void call_fma_impl_sm70(
-    typename MmaSm70ImplTraits<Impl>::DReg* d,
-    const typename MmaSm70ImplTraits<Impl>::AReg* a,
-    const typename MmaSm70ImplTraits<Impl>::BReg* b,
-    const typename MmaSm70ImplTraits<Impl>::CReg* c,
-    std::index_sequence<DIdx...>, std::index_sequence<AIdx...>,
-    std::index_sequence<BIdx...>, std::index_sequence<CIdx...>) {
+template <class Impl, size_t... DIdx, size_t... AIdx, size_t... BIdx,
+          size_t... CIdx>
+TL_DEVICE void
+call_fma_impl_sm70(typename MmaSm70ImplTraits<Impl>::DReg *d,
+                   const typename MmaSm70ImplTraits<Impl>::AReg *a,
+                   const typename MmaSm70ImplTraits<Impl>::BReg *b,
+                   const typename MmaSm70ImplTraits<Impl>::CReg *c,
+                   std::index_sequence<DIdx...>, std::index_sequence<AIdx...>,
+                   std::index_sequence<BIdx...>, std::index_sequence<CIdx...>) {
   Impl::fma(d[DIdx]..., a[AIdx]..., b[BIdx]..., c[CIdx]...);
 }
 
 template <class Impl>
-TL_DEVICE void call_fma_sm70(typename MmaSm70ImplTraits<Impl>::DReg* d,
-                              const typename MmaSm70ImplTraits<Impl>::AReg* a,
-                              const typename MmaSm70ImplTraits<Impl>::BReg* b,
-                              const typename MmaSm70ImplTraits<Impl>::CReg* c) {
+TL_DEVICE void call_fma_sm70(typename MmaSm70ImplTraits<Impl>::DReg *d,
+                             const typename MmaSm70ImplTraits<Impl>::AReg *a,
+                             const typename MmaSm70ImplTraits<Impl>::BReg *b,
+                             const typename MmaSm70ImplTraits<Impl>::CReg *c) {
   call_fma_impl_sm70<Impl>(
-      d, a, b, c,
-      std::make_index_sequence<MmaSm70ImplTraits<Impl>::kDRegs>{},
+      d, a, b, c, std::make_index_sequence<MmaSm70ImplTraits<Impl>::kDRegs>{},
       std::make_index_sequence<MmaSm70ImplTraits<Impl>::kARegs>{},
       std::make_index_sequence<MmaSm70ImplTraits<Impl>::kBRegs>{},
       std::make_index_sequence<MmaSm70ImplTraits<Impl>::kCRegs>{});
@@ -274,8 +288,8 @@ TL_DEVICE void call_fma_sm70(typename MmaSm70ImplTraits<Impl>::DReg* d,
                                       TransAValue, TransBValue)                \
   template <>                                                                  \
   struct MmaSm70Dispatcher<DataType::ATypeEnum, DataType::BTypeEnum,           \
-                           DataType::CTypeEnum, 16, 16, 4,                     \
-                           TransAValue, TransBValue> {                         \
+                           DataType::CTypeEnum, 16, 16, 4, TransAValue,        \
+                           TransBValue> {                                      \
     using Impl = MmaSm70Impl<DataType::ATypeEnum, DataType::BTypeEnum,         \
                              DataType::CTypeEnum, TransAValue, TransBValue>;   \
     using Traits = MmaSm70ImplTraits<Impl>;                                    \
@@ -285,8 +299,8 @@ TL_DEVICE void call_fma_sm70(typename MmaSm70ImplTraits<Impl>::DReg* d,
     static_assert(                                                             \
         std::is_same_v<typename Traits::DReg, typename Traits::CReg>,          \
         "tl::mma_sync_sm70 requires matching accumulator/output regs");        \
-    static TL_DEVICE void exec(CRegType* d, const ARegType* a,                 \
-                               const BRegType* b, const CRegType* c) {         \
+    static TL_DEVICE void exec(CRegType *d, const ARegType *a,                 \
+                               const BRegType *b, const CRegType *c) {         \
       call_fma_sm70<Impl>(d, a, b, c);                                         \
     }                                                                          \
   };
@@ -308,7 +322,8 @@ TL_DEFINE_MMA_SM70_DISPATCHER(kFloat16, kFloat16, kFloat32, false, false)
 } // namespace detail
 
 /// SM70 MMA synchronous instruction wrapper
-/// Supports m16n16k4 shape (m8n8k4 instruction at warp level) with FP16 inputs and FP16/FP32 accumulation
+/// Supports m16n16k4 shape (m8n8k4 instruction at warp level) with FP16 inputs
+/// and FP16/FP32 accumulation
 ///
 /// @tparam AType Input A data type (kFloat16)
 /// @tparam BType Input B data type (kFloat16)
@@ -322,13 +337,13 @@ template <DataType AType, DataType BType, DataType CType, int M, int N, int K,
           bool TransA, bool TransB>
 TL_DEVICE void mma_sync_sm70(
     typename detail::MmaSm70Dispatcher<AType, BType, CType, M, N, K, TransA,
-                                       TransB>::CRegType* c,
+                                       TransB>::CRegType *c,
     const typename detail::MmaSm70Dispatcher<AType, BType, CType, M, N, K,
-                                             TransA, TransB>::ARegType* a,
+                                             TransA, TransB>::ARegType *a,
     const typename detail::MmaSm70Dispatcher<AType, BType, CType, M, N, K,
-                                             TransA, TransB>::BRegType* b) {
-  using Dispatcher = detail::MmaSm70Dispatcher<AType, BType, CType, M, N, K,
-                                               TransA, TransB>;
+                                             TransA, TransB>::BRegType *b) {
+  using Dispatcher =
+      detail::MmaSm70Dispatcher<AType, BType, CType, M, N, K, TransA, TransB>;
   static_assert(!std::is_void_v<typename Dispatcher::CRegType>,
                 "tl::mma_sync_sm70: unsupported configuration. "
                 "SM70 only supports m16n16k4 with FP16 inputs.");

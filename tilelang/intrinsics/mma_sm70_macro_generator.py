@@ -1,7 +1,6 @@
 from __future__ import annotations
 import tilelang.language as T
 from typing import Literal, Callable
-from tilelang.common import TransformKind
 from tvm import DataType
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var
 from tvm.runtime import convert
@@ -146,10 +145,13 @@ class TensorCoreIntrinEmitter:
 
     def get_store_index_map(self, inverse: bool = False) -> IndexMap:
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
-        index_map = IndexMap.from_func(mma_32x8_to_shared_16x16_layout_fp32 if self.accum_dtype == "float32" else mma_32x8_to_shared_16x16_layout_fp16, index_dtype="int32")
+        index_map = IndexMap.from_func(
+            mma_32x8_to_shared_16x16_layout_fp32
+            if self.accum_dtype == "float32" else mma_32x8_to_shared_16x16_layout_fp16,
+            index_dtype="int32")
         if not inverse:
             return index_map
-        inverse_index_map = index_map.inverse([warp_size, local_size_c] )
+        inverse_index_map = index_map.inverse([warp_size, local_size_c])
         return inverse_index_map
 
     def extract_thread_binding(
@@ -195,9 +197,8 @@ class TensorCoreIntrinEmitter:
         micro_size_x = self.micro_size_x
         micro_size_k = self.micro_size_k
         local_size_a = self.local_size_a
-        a_dtype = self.a_dtype
         a_transposed = self.a_transposed
-        
+
         thread_binding = self.get_thread_binding()
 
         assert not a_transposed, "A must be not transposed"
@@ -234,10 +235,9 @@ class TensorCoreIntrinEmitter:
         micro_size_y = self.micro_size_y
         micro_size_k = self.micro_size_k
         local_size_b = self.local_size_b
-        b_dtype = self.b_dtype
         b_transposed = self.b_transposed
-        thread_binding = self.get_thread_binding()        
-        
+        thread_binding = self.get_thread_binding()
+
         mma_load_layout = mma_load_b_32x4_to_shared_16x4_layout_trans if b_transposed else mma_load_b_32x4_to_shared_4x16_layout
 
         @T.macro
@@ -248,9 +248,7 @@ class TensorCoreIntrinEmitter:
             thread_binding,
             rk=0,
         ):
-            stride = B_shared_buf.shape[-1]
             tx, warp_n, _ = self.extract_thread_binding(thread_binding)
-            trans = not b_transposed
 
             for i in T.serial(warp_cols):
                 # Assign B_shared_elem
@@ -282,16 +280,14 @@ class TensorCoreIntrinEmitter:
         local_size_out = self.local_size_out
         a_dtype_abbrv = self.a_dtype_abbrv
         b_dtype_abbrv = self.b_dtype_abbrv
-        accum_dtype = self.accum_dtype
         accum_dtype_abbrv = self.accum_dtype_abbrv
         mma_prefix = self.mma_prefix
-        replicate_b = (self.n_dim == 16)
 
         a_is_fragment = is_fragment(A_local_buf)
         b_is_fragment = is_fragment(B_local_buf)
         a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
         b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0
-        
+
         a_major = "col" if self.a_transposed else "row"
         b_major = "col" if self.b_transposed else "row"
 
@@ -404,8 +400,7 @@ class TensorCoreIntrinEmitter:
         base_fragment = T.Fragment(
             [micro_size_s, micro_size_r] if is_sr_axis_order else [micro_size_r, micro_size_s],
             forward_fn=forward,
-            replicate=2
-        )
+            replicate=2)
 
         warp_rows, warp_cols = self.warp_rows, self.warp_cols
         chunk = self.chunk
@@ -516,4 +511,3 @@ class TensorCoreIntrinEmitter:
             forward_thread_fn=forward_thread,
             forward_index_fn=forward_index,
         )
-
