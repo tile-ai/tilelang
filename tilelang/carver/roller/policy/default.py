@@ -3,7 +3,7 @@ from __future__ import annotations
 import functools
 import math
 from queue import PriorityQueue
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 import tvm

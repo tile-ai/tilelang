@@ -1,5 +1,10 @@
 from __future__ import annotations
-from typing import Any, Callable, Generic, Literal, ParamSpec, TypeVar
+from typing import Any, Callable, Generic, Literal, TypeVar
+# Python 3.9 compatibility for ParamSpec
+try:
+    from typing import ParamSpec
+except ImportError:  # Python < 3.10
+    from typing_extensions import ParamSpec
 
 from tilelang.jit.adapter.utils import is_metal_target
 from tvm.target import Target

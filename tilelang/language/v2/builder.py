@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
 
@@ -12,7 +12,12 @@ import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
-from typing import TYPE_CHECKING, Callable, ContextManager, Any, Generic, ParamSpec, Self, TypeVar, ForwardRef
+from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
+# Python 3.9 compatibility for ParamSpec and Self
+try:
+    from typing import ParamSpec, Self
+except ImportError:  # Python < 3.11 for Self, < 3.10 for ParamSpec
+    from typing_extensions import ParamSpec, Self
 from . import dtypes as dt
 import threading
 import logging
@@ -103,8 +108,10 @@ class SerialForWithStep:
     annotations: dict[str, Any] | None = None
 
 
-ContinueOrBreak = ContinueFrame | BreakFrame
-AnyFrame = tir.frame.IRBuilderFrame | Frame
+# Python 3.9 compatibility: avoid PEP 604 unions at runtime
+# Use tuple for isinstance checks and typing.Union for annotations/aliases
+ContinueOrBreak = (ContinueFrame, BreakFrame)
+AnyFrame = Union[tir.frame.IRBuilderFrame, Frame]
 
 TIR_CONTROL_FRAME = (
     tir.frame.WhileFrame,
@@ -168,7 +175,7 @@ class Builder(BaseBuilder):
             if isinstance(f, frame):
                 return idx
 
-    def enter_frame(self, frame: ContextManager):
+    def enter_frame(self, frame: AbstractContextManager[Any]):
         self.frames.append(frame)
         return frame.__enter__()
 
@@ -181,7 +188,7 @@ class Builder(BaseBuilder):
                 stacklevel=3)
 
     @contextmanager
-    def with_frame(self, frame: ContextManager | None):
+    def with_frame(self, frame: AbstractContextManager[Any] | None):
         pop_idx = len(self.frames)
         yield self.enter_frame(frame)
         while len(self.frames) > pop_idx:
@@ -336,6 +343,9 @@ class Builder(BaseBuilder):
             return value
 
     def bind_immutable(self, name, value):
+        if name == '_':
+            # use _tmp to make the generated tir more readable
+            name = "_tmp"
         if isinstance(value, tir.meta_var):
             return value.value
         elif isinstance(value, tir.frame.IRBuilderFrame):
@@ -560,7 +570,8 @@ def get_type_hints(func):
     if annot is None:
         raise TypeError(f'Failed to get function type hints, {func} is not a function')
     hints = {}
-    type_params = getattr(func, "__type_params__", ())
+    # type params are not used currently, it is support since python 3.12.4
+    # type_params = getattr(func, "__type_params__", ())
     globalns = getattr(func, '__globals__', {})
     localns = globalns
     for name, value in annot.items():
@@ -583,7 +594,8 @@ def get_type_hints(func):
                 except Exception:
                     pass
             value = ForwardRef(value, is_argument=True, is_class=False)
-        hints[name] = _eval_type(value, globalns=globalns, localns=localns, type_params=type_params)
+        hints[name] = _eval_type(
+            value, globalns=globalns, localns=localns)  #, type_params=type_params)
     return hints
 
 

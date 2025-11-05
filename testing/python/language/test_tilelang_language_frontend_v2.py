@@ -311,6 +311,35 @@ def test_serial_for_with_step():
     assert not isinstance(T.serial(1, 10, Var('tmp', 'int32')), IRBuilderFrame)
     assert not isinstance(T.serial(10, -1, -1), IRBuilderFrame)
 
+def test_swap_logic():
+
+    @tilelang.jit
+    @T.prim_func
+    def swap_var(A: T.Tensor[(2,), T.float32]):
+        with T.Kernel(1, threads=1) as _:
+            a = T.alloc_var(T.float32, A[0])
+            b = T.alloc_var(T.float32, A[1])
+            a, b = b, a
+            A[0], A[1] = a, b
+
+    @tilelang.jit
+    @T.prim_func
+    def swap_idx(A: T.Tensor[(2,), T.float32]):
+        with T.Kernel(1, threads=1) as _:
+            A[0], A[1] = A[1], A[0]
+
+    k_swap_var = swap_var()
+    data = torch.tensor([1.0, 2.0], dtype=torch.float32).cuda()
+    k_swap_var(data)
+    ref = torch.tensor([2.0, 1.0], dtype=torch.float32).cuda()
+    torch.testing.assert_close(data, ref)
+
+    k_swap_idx = swap_idx()
+    data = torch.tensor([1.0, 2.0], dtype=torch.float32).cuda()
+    k_swap_idx(data)
+    ref = torch.tensor([2.0, 1.0], dtype=torch.float32).cuda()
+    torch.testing.assert_close(data, ref)
+
 
 if __name__ == '__main__':
     tilelang.testing.main()

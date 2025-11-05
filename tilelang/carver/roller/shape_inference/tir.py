@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Mapping
+from collections.abc import Mapping
 from tvm.tir.schedule.schedule import BlockRV
 from tvm.ir import structural_equal
 from tvm import arith, tir

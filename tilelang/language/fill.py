@@ -4,9 +4,14 @@ from __future__ import annotations
 from tvm import tir
 from tilelang.language import has_let_value, get_let_value
 from tilelang.utils.language import get_buffer_region_from_load
+from tilelang.language.utils import (
+    buffer_to_tile_region,
+    buffer_region_to_tile_region,
+    buffer_load_to_tile_region,
+)
 
 
-def fill(buffer: tir.Buffer | tir.BufferRegion, value: tir.PrimExpr):
+def fill(buffer: tir.Buffer | tir.BufferRegion | tir.BufferLoad, value: tir.PrimExpr):
     """Fill a buffer or buffer region with a specified value.
 
     Args:
@@ -16,9 +21,30 @@ def fill(buffer: tir.Buffer | tir.BufferRegion, value: tir.PrimExpr):
     Returns:
         A TVM intrinsic call that performs the fill operation
     """
+    # Normalize Var with let value to its underlying object
+    if isinstance(buffer, tir.Var) and has_let_value(buffer):
+        buffer = get_let_value(buffer)
+
+    # Convert to a tl.region descriptor (PrimExpr) with write access
+    region_call = None
     if isinstance(buffer, tir.Buffer):
-        buffer = buffer.access_ptr("w")  # Get write pointer if input is a Buffer
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fill"), buffer, value)
+        region_call = buffer_to_tile_region(buffer, "w")
+    elif isinstance(buffer, tir.BufferRegion):
+        extents = [r.extent for r in buffer.region]
+        region_call = buffer_region_to_tile_region(buffer, "w", extents)
+    elif isinstance(buffer, tir.BufferLoad):
+        region = get_buffer_region_from_load(buffer)
+        if region is not None:
+            extents = [r.extent for r in region.region]
+            region_call = buffer_region_to_tile_region(region, "w", extents)
+        else:
+            # Fallback: treat element access as 1-extent per dim
+            region_call = buffer_load_to_tile_region(buffer, "w", [1] * len(buffer.indices))
+    else:
+        # As-is fallback (rare): pass through for downstream handling
+        region_call = buffer
+
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fill"), region_call, value)
 
 
 def clear(buffer: tir.Buffer | tir.Var):

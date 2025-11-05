@@ -440,7 +440,7 @@ def main(BATCH: int = 1,
          H: int = 1,
          N_CTX: int = 512,
          D_HEAD: int = 128,
-         window_size: int | None = None,
+         window_size: Optional[int] = None,
          dtype: str = "float16"):
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:
