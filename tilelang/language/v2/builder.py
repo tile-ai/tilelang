@@ -320,6 +320,9 @@ class Builder(BaseBuilder):
             return value
 
     def bind_immutable(self, name, value):
+        if name == '_':
+            # use _tmp to make the generated tir more readable
+            name = "_tmp"
         if isinstance(value, tir.meta_var):
             return value.value
         elif isinstance(value, tir.frame.IRBuilderFrame):

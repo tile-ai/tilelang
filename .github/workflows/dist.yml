@@ -44,12 +44,11 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     env:
-      NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
-      # NO_GIT_VERSION disables embedding the git commit hash in version metadata.
+      # NO_VERSION_LABEL disables embedding the toolchain / git commit hash in version metadata.
       # Otherwise, the version of the SDist has a git hash suffix (e.g., 0.1.0+gitabcdef12),
       # but the package built from the SDist has no way to get the git hash (it is not a git repo),
       # leading to inconsistent versions between SDist and built packages (+gitabcdef12 vs. +gitunknown).
-      NO_GIT_VERSION: "ON"
+      NO_VERSION_LABEL: 'OFF'
 
     steps:
       - name: Checkout repository
@@ -89,7 +88,7 @@ jobs:
 
       - name: Upload SDist
         # Not PR to save artifact storage, as SDist is only needed for releases.
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
         uses: actions/upload-artifact@v5
         with:
           name: sdist
@@ -157,7 +156,7 @@ jobs:
 
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
         uses: actions/upload-artifact@v5
         with:
           name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
@@ -167,7 +166,7 @@ jobs:
   list-artifacts:
     name: List artifacts
     # Not PR to save artifact storage, as artifacts are only needed for releases.
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
     runs-on: ubuntu-latest
     needs: [build-sdist, build-wheels]
     timeout-minutes: 15
