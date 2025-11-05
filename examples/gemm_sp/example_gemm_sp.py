@@ -115,7 +115,7 @@ def main():
         default="float",
         choices=["float", "float16"],
         help="Accumulation datatype")
-    parser.add_argument("--cfg", type=str, choices=["4090", "h20"], required=True)
+    parser.add_argument("--cfg", type=str, choices=["4090", "h20"], default="4090")
     args = parser.parse_args()
     kernel = matmul_sp_fp16(args.m, args.n, args.k, args.accum_dtype,
                             **DEFAULT_CONFIG[args.cfg][args.accum_dtype])

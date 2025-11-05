@@ -89,13 +89,17 @@ def compress(A: torch.Tensor,
     if compute_version >= (9, 0):
         return compress_sm90(A, transposed=transposed, **kwargs)
     elif compute_version >= (8, 0):
+        if transposed:
+            A = A.t().contiguous()
         origin_dtype = A.dtype
         if is_float8(origin_dtype):
             fp8_remove_negative_zeros_(A)
             A = A.view(torch.int8)
-        A_sp, E = compress_sm80(A, transposed=transposed)
+        A_sp, E = compress_sm80(A, transposed=False)
         if is_float8(origin_dtype):
             A_sp = A_sp.view(origin_dtype)
+        if transposed:
+            A_sp = A_sp.t().contiguous()
         return A_sp, E
     else:
         raise ValueError(f"Unsupported CUDA compute version: {compute_version}. "
