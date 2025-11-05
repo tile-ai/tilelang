@@ -1,4 +1,4 @@
-# pytest gemm_ss_wgmma.py -n 32
+# pytest maint/gemm_v2/correctness_evaluation_sm70.py -n 32
 import pytest
 from tilelang import tvm as tvm
 import tilelang.testing
