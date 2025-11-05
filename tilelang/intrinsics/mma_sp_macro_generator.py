@@ -14,8 +14,6 @@ from tilelang.intrinsics.mma_sp_layout import (
     shared_16x16_to_mma_sp_layout_sr_a,
     shared_16x16_to_mma_sp_layout_sr_b,
     shared_16x32_to_mma_sp_layout_sr_a,
-    shared_16x32_to_mma_sp_layout_rs_a,
-    shared_16x32_to_mma_sp_layout_rs_b,
     shared_16x32_to_mma_sp_layout_sr_b,
     shared_16x64_to_mma_sp_layout_sr_a,
     shared_16x64_to_mma_sp_layout_sr_b,

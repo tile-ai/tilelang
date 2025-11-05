@@ -36,13 +36,11 @@ class GemmSPMMA(GemmSPBase):
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_sr():
-            raise ValueError(
-                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
-            # return {
-            #     self.A: make_swizzled_layout(self.A),
-            #     self.B: mma_emitter.make_mma_load_layout(self.B, matrix="B"),
-            #     self.C: mma_emitter.make_mma_store_layout(self.C),
-            # }
+            return {
+                self.A: make_swizzled_layout(self.A),
+                self.B: mma_emitter.make_mma_load_layout(self.B, matrix="B"),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
+            }
         elif self.is_gemm_rs():
             return {
                 self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
@@ -134,36 +132,42 @@ class GemmSPMMA(GemmSPBase):
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_ssr, inline_let=True)
         elif self.is_gemm_sr():
-            raise ValueError(
-                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
-            # B_local = self.B
+            B_local = self.B
 
-            # @T.prim_func
-            # def _gemm_srr() -> None:
-            #     """
-            #     The inner macro that loads data from shared buffers A_shared and
-            #     B_shared into local fragments, then issues Tensor Core mma ops,
-            #     accumulating into C_local.
-            #     """
-            #     A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+            @T.prim_func
+            def _gemm_srr() -> None:
+                """
+                The inner macro that loads data from shared buffers A_shared and
+                B_shared into local fragments, then issues Tensor Core mma ops,
+                accumulating into C_local.
+                """
+                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
 
-            #     for ki in T.serial(0, (block_K // micro_size_k)):
+                for ki in T.serial(0, (self.K // micro_size_k)):
 
-            #         # Load A into fragment
-            #         mma_emitter.ldmatrix_a(
-            #             A_local,
-            #             A_shared,
-            #             ki,
-            #         )
+                    # Load A into fragment
+                    mma_emitter.ldmatrix_a(
+                        A_local,
+                        A_shared,
+                        ki,
+                    )
 
-            #         # Perform Matrix Multiplication
-            #         mma_emitter.mma(A_local, B_local, C_local, ki)
+                    # Load E into fragment
+                    mma_emitter.ldmatrix_e(
+                        E_local,
+                        E_shared,
+                        ki,
+                    )
 
-            # # Simplify to optimize the index computing
-            # # Must inline let statements to simplify the analysis
-            # # alloc_buffers body
-            # # insert into parent block
-            # return _Simplify(_gemm_srr, inline_let=True)
+                    # Perform Matrix Multiplication
+                    mma_emitter.mma_sp(A_local, E_local, B_local, C_local, ki)
+
+            # Simplify to optimize the index computing
+            # Must inline let statements to simplify the analysis
+            # alloc_buffers body
+            # insert into parent block
+            return _Simplify(_gemm_srr, inline_let=True)
         elif self.is_gemm_rs():
             A_local = self.A
 
