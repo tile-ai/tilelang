@@ -59,11 +59,14 @@ metadata.version.provider = "version_provider"
 metadata.version.provider-path = "."
 experimental = true
 
+# build.verbose = true
+# logging.level = "DEBUG"
+
 [tool.scikit-build.sdist]
-# See MANIFEST.in for details
 include = [
-    "VERSION",
-    "LICENSE",
+    "./VERSION",
+    ".git_commit.txt",
+    "./LICENSE",
     "THIRDPARTYNOTICES.txt",
     "version_provider.py",
     "requirements*.txt",
@@ -71,7 +74,15 @@ include = [
     "CMakeLists.txt",
     "src/**",
     "cmake/**",
-    "3rdparty/**",
+    # The vendored 3rdparty contents in sdist should be same as wheel.
+    # Need full TVM to build from source.
+    "3rdparty/tvm",
+    # CUTLASS
+    "3rdparty/cutlass/include",
+    "3rdparty/cutlass/tools",
+    # Composable Kernel
+    "3rdparty/composable_kernel/include",
+    "3rdparty/composable_kernel/library",
     "testing/**",
     "examples/**",
 ]
@@ -80,8 +91,7 @@ exclude = [
     ".github",
     "**/.git",
     "**/.github",
-    "3rdparty/clang**",
-    "3rdparty/llvm**",
+    "3rdparty/**",
     "build",
 ]
 
@@ -90,7 +100,7 @@ tilelang = "tilelang"
 "tilelang/src" = "src"
 # NOTE: The mapping below places the contents of '3rdparty' inside 'tilelang/3rdparty' in the wheel.
 # This is necessary to find TVM shared libraries at runtime.
-# Restrict 3rdparty contents in wheel to the same allowlist as sdist
+# The vendored 3rdparty contents in wheel should be same as sdist.
 # TVM
 "tilelang/3rdparty/tvm/src" = "3rdparty/tvm/src"
 "tilelang/3rdparty/tvm/python" = "3rdparty/tvm/python"
@@ -202,6 +212,7 @@ environment.PYTHONUNBUFFERED = "1"
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
 # Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
+# TODO: upgrade to manylinux_2_28 at some time
 manylinux-x86_64-image = "manylinux2014"   # CentOS 7
 manylinux-aarch64-image = "manylinux_2_28" # AlmaLinux 8
 # Install CUDA runtime and stub driver library
@@ -214,9 +225,11 @@ uname -a
 
 case "$(uname -m)" in
     "x86_64")
+        DEFAULT_CUDA_VERSION="12.1"
         yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
         ;;
     "aarch64")
+        DEFAULT_CUDA_VERSION="12.8"
         dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
         ;;
     *)
@@ -224,7 +237,7 @@ case "$(uname -m)" in
         ;;
 esac
 
-cudaver="$(echo "${CUDA_VERSION:-"12.4"}" | cut -d '.' -f-2)"
+cudaver="$(echo "${CUDA_VERSION:-$DEFAULT_CUDA_VERSION}" | cut -d '.' -f-2)"
 v="${cudaver//./-}"
 yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}" nvidia-driver-cuda-libs
 """

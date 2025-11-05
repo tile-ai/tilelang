@@ -1,4 +1,4 @@
-# pytest gemm_ss_wgmma.py -n 32
+# pytest correctness_evaluation.py -n 32
 import pytest
 from tilelang import tvm as tvm
 import tilelang.testing
@@ -384,7 +384,7 @@ def run_gemm_rr(
 
 
 M_VALUES = [64, 128, 256]
-N_VALUES = [16, 32, 64, 128]
+N_VALUES = [16, 32, 64, 128, 256, 512]
 K_VALUES = [16, 32, 64, 128]
 K_VALUES_8Bit = [32, 64, 128]
 FALSE_TRUE_CASES = ([

@@ -353,6 +353,8 @@ class DSLMutator(ast.NodeTransformer):
                     span=target,
                 )
         else:
+
+            # flatten nested tuple into a list of (tmp_name, target)
             unpacked = []
 
             def _visit_target(target: ast.expr) -> str:
@@ -367,6 +369,9 @@ class DSLMutator(ast.NodeTransformer):
                     res = ast.Tuple(elts=elts, ctx=target.ctx)
                     ast_set_span(res, ast_get_span(target))
                     return res
+                else:
+                    s = ast.unparse(target)
+                    raise NotImplementedError(f'Attribute assignment not supported yet, `{s}`')
 
             unpack_stmt = ast.Assign(
                 targets=[_visit_target(target)],
@@ -383,6 +388,26 @@ class DSLMutator(ast.NodeTransformer):
                     bind_lvals.clear()
                     bind_rvals.clear()
 
+            # the following code generate two phase binding to support swap like semantics
+            # for example:
+            #       a, b = b, a
+            # 1 phase:
+            #    _tmp_0, _tmp_1 = b, a
+            #    => _tmp_0: T.int32 = b
+            #    => _tmp_1: T.int32 = a
+            # 2 phase:
+            #    a, b = _tmp_0, _tmp_1
+            #    => a = _tmp_0 => a[0] = _tmp_0
+            #    => b = _tmp_1 => b[0] = _tmp_1
+
+            # 1 phase: _tmp_0, _tmp_1 = __tb.bind('_', a), __tb.bind('_', b)
+            for tmp, _target in unpacked:
+                bind_lvals.append(tmp)
+                bind_rvals.append(f'__tb.bind("_", {tmp})')
+
+            flush_binds()
+
+            # 2 phase: a, b = __tb.bind('a', _tmp_0), __tb.bind('b', _tmp_1)
             for tmp, target in unpacked:
                 if isinstance(target, ast.Name):
                     bind_lvals.append(target.id)

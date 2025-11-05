@@ -91,6 +91,7 @@ class GemmWGMMA(GemmBase):
         B_shared = self.B
         C_local = self.C
         clear_accum = self.clear_accum
+        wg_wait = self.wg_wait
 
         if self.is_gemm_ss():
 
@@ -102,7 +103,7 @@ class GemmWGMMA(GemmBase):
                 accumulating into C_local.
                 """
                 # Perform Matrix Multiplication
-                mma_emitter.wgmma(A_shared, B_shared, C_local, clear_accum)
+                mma_emitter.wgmma(A_shared, B_shared, C_local, clear_accum, wg_wait)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -117,7 +118,7 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                mma_emitter.wgmma(A_local, B_shared, C_local, clear_accum)
+                mma_emitter.wgmma(A_local, B_shared, C_local, clear_accum, wg_wait)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
