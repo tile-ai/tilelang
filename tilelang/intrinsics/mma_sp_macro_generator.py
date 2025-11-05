@@ -382,7 +382,7 @@ class SparseTensorCoreIntrinEmitter:
             elif DataType(e_dtype).bits == 16:
                 if DataType(a_dtype).bits == 8:
                     mma_load_layout = metadata_16bit_load_32x2_to_shared_16x4_layout_8bit
-                if DataType(a_dtype).bits == 16:
+                elif DataType(a_dtype).bits == 16:
                     mma_load_layout = metadata_16bit_load_32x2_to_shared_16x2_layout_16bit
                 elif DataType(a_dtype).bits == 32:
                     mma_load_layout = metadata_16bit_load_32x2_to_shared_16x2_layout_32bit
@@ -537,7 +537,7 @@ class SparseTensorCoreIntrinEmitter:
         a_is_fragment = is_fragment(A_local_buf)
         e_is_fragment = is_fragment(E_local_buf)
         b_is_fragment = is_fragment(B_local_buf)
-        assert not e_is_fragment, f"currently E_local_buf must be a fragment buffer, found {E_local_buf.scope()}"
+        assert not e_is_fragment, f"currently E_local_buf must be a local allocation, found {E_local_buf.scope()}"
         a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
         e_local_stride: PrimExpr = k_inner * warp_rows * local_size_e if e_is_fragment else 0
         b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0

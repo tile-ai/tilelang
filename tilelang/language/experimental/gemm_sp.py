@@ -5,7 +5,6 @@ from tilelang.primitives.gemm.base import GemmWarpPolicy
 from tilelang.utils.language import get_buffer_region_from_load
 import tilelang.language as T
 from tvm import tir
-from typing import list
 
 
 def gemm_sp(

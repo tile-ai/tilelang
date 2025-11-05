@@ -47,7 +47,7 @@ A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
 
 Here, `A_sparse` contains all the non-zero elements of `A`, while `E` stores the corresponding metadata (indexing information) required to reconstruct the original sparse pattern.
 
-> NOTE: When using CUTLASS compressor, there is no naive position correspondence between the positions in `A_sparse`/`A` and `E`. (i.e. the 4-elment group at [n, k] doesn't match the 4-bit metadata at [n, k] if you consider metadata as int4 tensor)
+> NOTE: When using CUTLASS compressor, there is no naive position correspondence between the positions in `A_sparse`/`A` and `E`. (i.e. the 4-element group at [n, k] doesn't match the 4-bit metadata at [n, k] if you consider metadata as int4 tensor)
 The metadata is reordered internally to optimize memory access patterns (e.g., for ldsm instructions and vectorized loads).
 For more information, see **A note on `gemm_sp` and `gemm_sp_v2`**.
 
@@ -134,7 +134,7 @@ To migrate to `gemm_sp_v2`, simply replace occurrences of `gemm_sp`.
 
 Unlike `gemm_sp`, `gemm_sp_v2` can operate without `T.annotate_layout`, and it also supports user-defined layouts and compressors.
 
-The metadata is stored in a `(u)int8`/`(u)int16`/`(u)int32` tensor, where **each 4-bit chunk represents two 2-bit indcies** of non-zero elements within four consecutive elements. Here, we start with an `int16` example, which is the **default dtype** for `bf16` and `fp16` on Ampere GPUs.
+The metadata is stored in a `(u)int8`/`(u)int16`/`(u)int32` tensor, where **each 4-bit chunk represents two 2-bit indices** of non-zero elements within four consecutive elements. Here, we start with an `int16` example, which is the **default dtype** for `bf16` and `fp16` on Ampere GPUs.
 
 Suppose we have the following row vector:
 ```python

@@ -206,7 +206,7 @@ class GemmSPMMA(GemmSPBase):
             B_local = self.B
 
             @T.prim_func
-            def _gemm_rsr() -> None:
+            def _gemm_rrr() -> None:
                 """
                 The inner macro that loads data from shared buffers A_shared and
                 B_shared into local fragments, then issues Tensor Core mma ops,
@@ -227,7 +227,7 @@ class GemmSPMMA(GemmSPBase):
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
-            return _Simplify(_gemm_rsr, inline_let=True)
+            return _Simplify(_gemm_rrr, inline_let=True)
         else:
             raise ValueError(
                 f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
