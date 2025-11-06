@@ -3,6 +3,8 @@ import tilelang.language as T
 import torch
 import tilelang.testing
 import tvm
+from tvm.script.ir_builder.base import IRBuilderFrame
+from tvm.tir.expr import IntImm, Var
 
 
 def test_argument():
@@ -271,6 +273,43 @@ def test_prim_func_generator():
         pass
 
     assert isinstance(foo, T.PrimFunc)
+
+
+def test_serial_for_with_step():
+
+    @tilelang.jit(out_idx=-1)
+    @T.prim_func
+    def test_stepped_serial(A: T.Tensor((10,), T.int32)):
+        with T.Kernel(1) as _:
+            for i in range(0, 10, 2):
+                T.device_assert(0 <= i < 10 and i % 2 == 0, "i out of range")
+                A[i] = 1.0
+            for i in range(1, 10, 2):
+                T.device_assert(1 <= i < 10 and i % 2 == 1, "i out of range")
+                A[i] = 2.0
+
+    ker = test_stepped_serial()
+    res = ker()
+    ref = torch.tensor([1, 2, 1, 2, 1, 2, 1, 2, 1, 2], dtype=torch.int32, device='cuda')
+    assert torch.all(res == ref), f"Expected {ref}, but got {res}"
+
+    @tilelang.jit(out_idx=-1)
+    @T.prim_func
+    def test_serial_step_neg(A: T.Tensor((10,), T.int32)):
+        with T.Kernel(1) as _:
+            for i in range(10, 0, -1):
+                T.device_assert(0 < i <= 10, "i out of range")
+                A[10 - i] = i
+
+    ker = test_serial_step_neg()
+    res = ker()
+    ref = torch.tensor([10, 9, 8, 7, 6, 5, 4, 3, 2, 1], dtype=torch.int32, device='cuda')
+    assert torch.all(res == ref), f"Expected {ref}, but got {res}"
+
+    assert isinstance(T.serial(1, 10, 1), IRBuilderFrame)
+    assert isinstance(T.serial(1, 10, IntImm('int32', 1)), IRBuilderFrame)
+    assert not isinstance(T.serial(1, 10, Var('tmp', 'int32')), IRBuilderFrame)
+    assert not isinstance(T.serial(10, -1, -1), IRBuilderFrame)
 
 
 def test_swap_logic():
