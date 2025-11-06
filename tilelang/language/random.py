@@ -1,6 +1,7 @@
 import tilelang.language as T
 import tvm.tir as tir
 
+
 @T.macro
 def _rand_parallel_impl(buffer: T.Buffer, seed, total_elems, n_rounds, dtype="float32"):
     T.call_intrin(
