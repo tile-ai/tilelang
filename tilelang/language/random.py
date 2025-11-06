@@ -1,74 +1,97 @@
-from tvm import tir
 import tilelang.language as T
-from tilelang.language.utils import index_to_coordinates
+
+PHILOX_CUDA_DEVICE_CODE = """
+#include <cuda_runtime.h>
+#include <stdint.h>
+#include <assert.h>
+
+__device__ inline uint32_t umulhi_uint32(uint32_t a, uint32_t b) {
+    uint32_t result;
+    asm("mul.hi.u32 %0, %1, %2;" : "=r"(result) : "r"(a), "r"(b));
+    return result;
+}
+
+__device__ void philox_impl_device(
+    uint32_t* c0, uint32_t* c1, uint32_t* c2, uint32_t* c3,
+    uint32_t k0, uint32_t k1, int n_rounds
+) {
+    const uint32_t PHILOX_KEY_A = 0x9E3779B9U;
+    const uint32_t PHILOX_KEY_B = 0xBB67AE85U;
+    const uint32_t PHILOX_ROUND_A = 0xD2511F53U;
+    const uint32_t PHILOX_ROUND_B = 0xCD9E8D57U;
+    uint32_t c0_val = *c0;
+    uint32_t c1_val = *c1;
+    uint32_t c2_val = *c2;
+    uint32_t c3_val = *c3;
+    uint32_t k0_val = k0;
+    uint32_t k1_val = k1;
+    for (int round = 0; round < n_rounds; round++) {
+        uint32_t _c0 = c0_val;
+        uint32_t _c2 = c2_val;
+        uint32_t A = PHILOX_ROUND_A;
+        uint32_t B = PHILOX_ROUND_B;
+        c0_val = umulhi_uint32(B, _c2) ^ c1_val ^ k0_val;
+        c2_val = umulhi_uint32(A, _c0) ^ c3_val ^ k1_val;
+        c1_val = (uint32_t)((uint64_t)B * (uint64_t)_c2);
+        c3_val = (uint32_t)((uint64_t)A * (uint64_t)_c0);
+        k0_val = (uint32_t)((uint64_t)k0_val + PHILOX_KEY_A);
+        k1_val = (uint32_t)((uint64_t)k1_val + PHILOX_KEY_B);
+    }
+    *c0 = c0_val;
+    *c1 = c1_val;
+    *c2 = c2_val;
+    *c3 = c3_val;
+}
+
+
+__device__ float uint32_to_uniform_float_device(uint32_t x) {
+    const float scale = 4.6566127342e-10f;
+    int32_t x_int32;
+    memcpy(&x_int32, &x, sizeof(uint32_t));
+    int32_t x_abs = (x_int32 < 0) ? (-x_int32 - 1) : x_int32;
+    return (float)x_abs * scale;
+}
+
+
+__device__ void philox_rand_kernel(
+    float* output,
+    int total_elems,
+    uint64_t seed,
+    int n_rounds
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_elems) return;
+
+    uint32_t seed_lo = (uint32_t)(seed & 0xFFFFFFFFULL);
+    uint32_t seed_hi = (uint32_t)((seed >> 32) & 0xFFFFFFFFULL);
+    uint32_t offset_lo = (uint32_t)idx;
+    uint32_t offset_hi = 0U;
+    uint32_t c0 = offset_lo;
+    uint32_t c1 = offset_hi;
+    uint32_t c2 = 0U;
+    uint32_t c3 = 0U;
+    philox_impl_device(&c0, &c1, &c2, &c3, seed_lo, seed_hi, n_rounds);
+    output[idx] = uint32_to_uniform_float_device(c0);
+}
+"""
 
 
 @T.macro
-def umulhi_uint32(a, b):
-    return T.Cast("uint32", (T.Cast('uint64', a) * T.Cast('uint64', b)) >> tir.const(32, "uint64"))
-
-
-@T.macro
-def philox_impl(c0, c1, c2, c3, k0, k1, n_rounds):
-    PHILOX_KEY_A = tir.const(0x9E3779B9, "uint32")
-    PHILOX_KEY_B = tir.const(0xBB67AE85, "uint32")
-    PHILOX_ROUND_A = tir.const(0xD2511F53, "uint32")
-    PHILOX_ROUND_B = tir.const(0xCD9E8D57, "uint32")
-
-    c0_var = T.alloc_var("uint32", init=c0)
-    c1_var = T.alloc_var("uint32", init=c1)
-    c2_var = T.alloc_var("uint32", init=c2)
-    c3_var = T.alloc_var("uint32", init=c3)
-    k0_var = T.alloc_var("uint32", init=k0)
-    k1_var = T.alloc_var("uint32", init=k1)
-
-    for _ in T.serial(n_rounds):
-        _c0 = c0_var
-        _c2 = c2_var
-        A = PHILOX_ROUND_A
-        B = PHILOX_ROUND_B
-        c0_var = umulhi_uint32(B, _c2) ^ c1_var ^ k0_var
-        c2_var = umulhi_uint32(A, _c0) ^ c3_var ^ k1_var
-        c1_var = T.Cast("uint32", T.Cast("uint64", B) * T.Cast("uint64", _c2))
-        c3_var = T.Cast("uint32", T.Cast("uint64", A) * T.Cast("uint64", _c0))
-        k0_var = T.Cast("uint32", T.Cast("uint64", k0_var) + PHILOX_KEY_A)
-        k1_var = T.Cast("uint32", T.Cast("uint64", k1_var) + PHILOX_KEY_B)
-    return c0_var, c1_var, c2_var, c3_var
-
-
-@T.macro
-def uint32_to_uniform_float(x: tir.PrimExpr) -> tir.PrimExpr:
-    assert x.dtype == 'uint32' or x.dtype == "int32", f"x.dtype {x.dtype} is not supported"
-    x_int32 = T.reinterpret('int32', x)
-    scale = tir.const(4.6566127342e-10, "float32")
-
-    x_abs = T.if_then_else(x_int32 < 0, -x_int32 - 1, x_int32)
-
-    return T.Cast("float32", x_abs) * scale
-
-
-@T.macro
-def _rand_parallel_impl(buffer: T.Buffer, seed_lo, seed_hi, total_elems, n_rounds):
-    for i in T.Parallel(total_elems):
-        coords = index_to_coordinates(i, buffer.shape)
-        offset = T.Cast("uint32", i)
-        offset_lo = offset
-        offset_hi = tir.const(0, "uint32")
-
-        c0, c1, c2, c3 = philox_impl(offset_lo, offset_hi, tir.const(0, "uint32"),
-                                     tir.const(0, "uint32"), seed_lo, seed_hi, n_rounds)
-
-        rand_float = uint32_to_uniform_float(c0)
-        buffer[coords] = rand_float
+def _rand_parallel_impl(buffer: T.Buffer, seed, total_elems, n_rounds, dtype="float32"):
+    T.import_source(PHILOX_CUDA_DEVICE_CODE)
+    T.call_extern(
+        "philox_rand_kernel",
+        T.address_of(buffer[0]),
+        total_elems,
+        seed,
+        n_rounds,
+        dtype=dtype,
+    )
 
 
 def rand(buffer: T.Buffer, seed, n_rounds: int = 10):
-    seed = T.Cast("uint64", seed)
-    seed_lo = T.Cast("uint32", seed & tir.const(0xffffffff, "uint64"))
-    seed_hi = T.Cast("uint32", (seed >> 32) & tir.const(0xffffffff, "uint64"))
-
     total_elems = 1
     for dim in buffer.shape:
         total_elems *= dim
 
-    _rand_parallel_impl(buffer, seed_lo, seed_hi, total_elems, n_rounds)
+    _rand_parallel_impl(buffer, seed, total_elems, n_rounds)
