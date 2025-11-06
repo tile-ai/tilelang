@@ -44,11 +44,11 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     env:
-      # NO_VERSION_LABEL disables embedding the toolchain / git commit hash in version metadata.
+      # `NO_VERSION_LABEL=ON` disables embedding the toolchain / git commit hash in version metadata.
       # Otherwise, the version of the SDist has a git hash suffix (e.g., 0.1.0+gitabcdef12),
       # but the package built from the SDist has no way to get the git hash (it is not a git repo),
       # leading to inconsistent versions between SDist and built packages (+gitabcdef12 vs. +gitunknown).
-      NO_VERSION_LABEL: 'OFF'
+      NO_VERSION_LABEL: 'ON'
 
     steps:
       - name: Checkout repository
@@ -72,18 +72,20 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1
         with:
           create-symlink: true
-          key: ccache-${{ runner.os }}-${{ runner.arch }}
           evict-old-files: "7d"
+          append-timestamp: false
+          key: sdist-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+          restore-keys: |
+            sdist-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+            sdist-${{ runner.os }}-${{ runner.arch }}
+            ${{ runner.os }}-${{ runner.arch }}
 
       - name: Test SDist buildable
         run: |
           TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
           cp -r dist "${TEMP_DIR}/dist"
-          uv venv --seed "${TEMP_DIR}/venv"
-          source "${TEMP_DIR}/venv/bin/activate"
           cd "${TEMP_DIR}"
-          python3 -m pip install --upgrade pip setuptools wheel
-          python3 -m pip install -v dist/*.tar.gz
+          uv pip install -v dist/*.tar.gz
           python3 -c "import tilelang; print(tilelang.__version__)"
 
       - name: Upload SDist
@@ -125,14 +127,19 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      # NB: CIBW builds wheels in containers on Linux
-      - name: Setup ccache (macOS only)
-        if: runner.os == 'macOS'
+      - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
           create-symlink: true
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.target.toolkit }}
           evict-old-files: "7d"
+          append-timestamp: false
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}-${{ hashFiles('**/*.cc') }}
+          restore-keys: |
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}-${{ hashFiles('**/*.cc') }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+            wheel-${{ runner.os }}-${{ runner.arch }}
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+            ${{ runner.os }}-${{ runner.arch }}
 
       - name: Set CIBW_BUILD
         run: |
@@ -145,6 +152,11 @@ jobs:
             CUDA_VERSION="${{ matrix.target.toolkit }}"
             CUDA_VERSION="${CUDA_VERSION#CUDA-}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+          fi
+
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            HOST_CCACHE_DIR="$(ccache --get-config cache_dir)"
+            echo "CIBW_BEFORE_BUILD_LINUX=yum install -y ccache && ccache -o cache_dir=/host${HOST_CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
           fi
 
       - name: Build wheels

@@ -63,7 +63,7 @@ N = 16384
 K = 16384
 block_M = 128
 block_N = 128
-block_K = 64
+block_K = 32
 
 # 1. Define the kernel (matmul) and compile/lower it into an executable module
 matmul_relu_kernel = matmul(M, N, K, block_M, block_N, block_K)

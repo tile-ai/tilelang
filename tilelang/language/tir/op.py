@@ -2000,7 +2000,7 @@ def infinity(dtype: str, span: Span | None = None) -> Any:
     value : tvm.Expr
         The infinity value of dtype.
     """
-    return _tvm_op.infinity(dtype, span)
+    return call_intrin(dtype, _tvm_op.Op.get("tl.infinity"), dtype, span=span)
 
 
 def reinterpret(dtype, value, span: Span | None = None) -> Any:
