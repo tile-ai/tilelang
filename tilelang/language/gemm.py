@@ -5,6 +5,7 @@ from tilelang.primitives.gemm.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir
 from tilelang.utils.language import get_buffer_region_from_load
+from tilelang.env import env as _env
 
 
 def gemm_v1(
@@ -434,4 +435,5 @@ def gemm_v2(
     )
 
 
-gemm = gemm_v1
+# Default to v2; allow forcing v1 via environment variable
+gemm = gemm_v1 if _env.use_gemm_v1() else gemm_v2

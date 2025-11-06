@@ -236,6 +236,10 @@ class Environment:
                                            "1")  # print kernel name on compile
     TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE", "0")  # clear cache automatically if set
 
+    # Kernel selection options
+    # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
+    TILELANG_USE_GEMM_V1 = EnvVar("TILELANG_USE_GEMM_V1", "0")
+
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES",
                                                 "0.9")  # percent of CPUs used
@@ -273,6 +277,14 @@ class Environment:
 
     def is_print_on_compilation_enabled(self) -> bool:
         return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
+
+    def use_gemm_v1(self) -> bool:
+        """Return True if GEMM v1 should be used based on env.
+
+        Controlled by `TILELANG_USE_GEMM_V1`. Truthy values are one of
+        {"1", "true", "yes", "on"} (case-insensitive).
+        """
+        return str(self.TILELANG_USE_GEMM_V1).lower() in ("1", "true", "yes", "on")
 
 
 # Instantiate as a global configuration object
