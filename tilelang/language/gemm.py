@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from tilelang.primitives.gemm.base import GemmWarpPolicy
 import tilelang.language as T
-from tvm import tir
+from tvm import tir, ir
 from tilelang.utils.language import get_buffer_region_from_load
 from tilelang.env import env as _env
 
@@ -111,6 +111,36 @@ def gemm_v1(
             raise ValueError(
                 f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
 
+    def to_buffer_region(obj: tir.Buffer | tir.BufferRegion | tir.BufferLoad) -> tir.BufferRegion:
+        """Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
+
+        - Buffer -> full-region BufferRegion covering entire shape
+        - BufferRegion -> returned as-is
+        - BufferLoad -> best-effort convert via get_buffer_region_from_load;
+          if scalar, fall back to 1-sized ranges at given indices
+        """
+        if isinstance(obj, tir.BufferRegion):
+            return obj
+        if isinstance(obj, tir.Buffer):
+            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+            ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
+            return tir.BufferRegion(obj, ranges)
+        if isinstance(obj, tir.BufferLoad):
+            region = get_buffer_region_from_load(obj)
+            if region is not None:
+                return region
+            # Fallback: scalar load -> 1-sized ranges at indices
+            mins = [idx for idx in obj.indices]
+            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
+            return tir.BufferRegion(obj.buffer, ranges)
+        raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
+
+    # Normalize A/B/C to BufferRegion to pass into tl.gemm
+    A = to_buffer_region(A)
+    B = to_buffer_region(B)
+    C = to_buffer_region(C)
+
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
@@ -202,12 +232,9 @@ def gemm_v1(
     offset_a = A_offset[-1]
     offset_b = B_offset[-1]
 
-    Aptr = retrieve_ptr(A, "r")
-    Bptr = retrieve_ptr(B, "r")
-    Cptr = retrieve_ptr(C, "rw")
     mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else tir.const(0, "uint32")
     C_coords = [r.min for r in C.region] if isinstance(C, tir.BufferRegion) else [0, 0]
-    return tir.call_intrin("handle", tir.op.Op.get("tl.gemm"), Aptr, Bptr, Cptr, transpose_A,
+    return tir.call_intrin("handle", tir.op.Op.get("tl.gemm"), A, B, C, transpose_A,
                            transpose_B, M, N, K, policy, clear_accum, stride_a, stride_b, offset_a,
                            offset_b, k_pack, wg_wait, mbarptr, C_coords[0], C_coords[1])
 
@@ -405,17 +432,44 @@ def gemm_v2(
     offset_a = A_offset[-1]
     offset_b = B_offset[-1]
 
-    Aptr = retrieve_ptr(A, "r")
-    Bptr = retrieve_ptr(B, "r")
-    Cptr = retrieve_ptr(C, "rw")
+    def to_buffer_region(obj: tir.Buffer | tir.BufferRegion | tir.BufferLoad) -> tir.BufferRegion:
+        """Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
+
+        - Buffer -> full-region BufferRegion covering entire shape
+        - BufferRegion -> returned as-is
+        - BufferLoad -> best-effort convert via get_buffer_region_from_load;
+          if scalar, fall back to 1-sized ranges at given indices
+        """
+        if isinstance(obj, tir.BufferRegion):
+            return obj
+        if isinstance(obj, tir.Buffer):
+            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+            ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
+            return tir.BufferRegion(obj, ranges)
+        if isinstance(obj, tir.BufferLoad):
+            region = get_buffer_region_from_load(obj)
+            if region is not None:
+                return region
+            # Fallback: scalar load -> 1-sized ranges at indices
+            mins = [idx for idx in obj.indices]
+            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
+            return tir.BufferRegion(obj.buffer, ranges)
+        raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
+
+    # Normalize A/B/C to BufferRegion to pass into tl.gemm
+    A = to_buffer_region(A)
+    B = to_buffer_region(B)
+    C = to_buffer_region(C)
+    
     mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else tir.const(0, "uint32")
     C_coords = [r.min for r in C.region] if isinstance(C, tir.BufferRegion) else [0, 0]
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.gemm_py"),
-        Aptr,
-        Bptr,
-        Cptr,
+        A,
+        B,
+        C,
         transpose_A,
         transpose_B,
         M,

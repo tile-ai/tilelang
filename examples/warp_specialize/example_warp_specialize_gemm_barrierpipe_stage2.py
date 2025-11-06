@@ -1,7 +1,7 @@
 import tilelang
 import tilelang.language as T
 
-
+tilelang.disable_cache()
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 @tilelang.jit(out_idx=[2])
@@ -56,6 +56,8 @@ def main(M=16384, N=16384, K=16384):
     block_N = 128
     block_K = 64
     jit_kernel = matmul(M, N, K, block_M, block_N, block_K)
+    
+    print(jit_kernel.get_kernel_source())
 
     import torch
 

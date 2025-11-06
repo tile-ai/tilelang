@@ -4,7 +4,7 @@ from enum import IntEnum
 from typing import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var, IndexMap
+from tvm.tir import PrimExpr, Buffer, Var, IndexMap, BufferLoad, BufferRegion
 from tilelang.utils import is_fragment
 from math import gcd
 from tilelang.layout import (
@@ -262,17 +262,50 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         num_inst_n = self.warp_col_tiles // wgmma_inst_n
 
         thread_binding = self.get_thread_binding()
+        
+        def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Union[Buffer, BufferLoad, BufferRegion], access_type: str = "r") -> PrimExpr:
+            if isinstance(buffer_or_load_or_region, Buffer):
+                return buffer_or_load_or_region.access_ptr(access_type)
+            elif isinstance(buffer_or_load_or_region, BufferLoad):
+                buffer_load = buffer_or_load_or_region
+                offset, stride = 0, 1
+                buffer = buffer_load.buffer
+                for i, shape in enumerate(reversed(buffer.shape)):
+                    indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
+                    if isinstance(indice, tir.IntImm):
+                        offset += indice * stride
+                    elif isinstance(indice, tir.PrimExpr):
+                        offset += indice * stride
+                    elif isinstance(indice, tir.Ramp):
+                        offset += indice.base * stride
+                    else:
+                        raise ValueError(f"Unsupported index type: {type(indices)}")
+                    stride *= shape
+                return buffer.access_ptr(access_type, offset=offset)
+            elif isinstance(buffer_or_load_or_region, BufferRegion):
+                buffer_region = buffer_or_load_or_region
+                buffer = buffer_region.buffer
+                offset, stride = 0, 1
+                for i, shape in enumerate(reversed(buffer.shape)):
+                    offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
+                    stride *= shape
+                return buffer.access_ptr(access_type, offset=offset)
+            else:
+                raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+        
+        A_ptr = retrive_ptr_from_buffer_region(A_buf)
+        B_ptr = retrive_ptr_from_buffer_region(B_buf)
 
         @T.macro
-        def _warp_mma(A_buf, B_buf, C_local_buf):
+        def _warp_mma():
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
 
             desc_a = T.alloc_wgmma_desc()
             desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_a, A_buf.access_ptr("r"), a_swizzle_mode,
+            T.initialize_wgmma_descriptor(desc_a, A_ptr, a_swizzle_mode,
                                           int(a_leading_byte_offset >> 4),
                                           int(a_stride_byte_offset >> 4))
-            T.initialize_wgmma_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
+            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode,
                                           int(b_leading_byte_offset >> 4),
                                           int(b_stride_byte_offset >> 4))
             T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
@@ -302,7 +335,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 T.warpgroup_wait(wg_wait)
             T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
 
-        return _warp_mma(A_buf, B_buf, C_local_buf)
+        return _warp_mma()
 
     def wgmma_rs(self,
                  A_buf: Buffer,
@@ -373,8 +406,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         def _warp_mma(A_buf, B_buf, C_local_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
 
+            # Handle BufferLoad for B_buf
+            if hasattr(B_buf, 'buffer'):
+                # B_buf is a BufferLoad
+                B_ptr = B_buf.buffer.access_ptr("r")
+            else:
+                # B_buf is a Buffer
+                B_ptr = B_buf.access_ptr("r")
+
             desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
+            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode,
                                           int(b_leading_byte_offset >> 4),
                                           int(b_stride_byte_offset >> 4))
             T.warpgroup_fence_operand(A_buf, num_regs=a_regs)

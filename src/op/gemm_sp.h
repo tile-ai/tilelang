@@ -18,7 +18,7 @@ using namespace tir;
 
 class GemmSPWarpPolicyNode : public GemmWarpPolicyNode {
 public:
-  std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
+  std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
                                            Target target, bool use_wgmma,
                                            int bits) const;
   TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmSPWarpPolicy", GemmSPWarpPolicyNode,
@@ -53,16 +53,16 @@ public:
 
 class GemmSPNode : public TileOperatorNode {
 public:
-  tir::Buffer A, B, C, E;
-  bool trans_A, trans_B;
-  int M, N, K;
-  bool clear_accum = false;
+  tir::Buffer a_, b_, c_, e_;
+  bool transA_, transB_;
+  int m_, n_, k_;
+  bool clearAccum_ = false;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
-  int kPack = 1;
-  int wg_wait = 0;
+  int kPack_ = 1;
+  int wgWait_ = 0;
 
-  mutable GemmSPWarpPolicy policy;
+  mutable GemmSPWarpPolicy policy_;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmSP", GemmSPNode, TileOperatorNode);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
@@ -74,19 +74,19 @@ public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<GemmSPNode>()
-        .def_ro("policy", &GemmSPNode::policy)
-        .def_ro("A", &GemmSPNode::A)
-        .def_ro("B", &GemmSPNode::B)
-        .def_ro("C", &GemmSPNode::C)
-        .def_ro("E", &GemmSPNode::E)
-        .def_ro("trans_A", &GemmSPNode::trans_A)
-        .def_ro("trans_B", &GemmSPNode::trans_B)
-        .def_ro("M", &GemmSPNode::M)
-        .def_ro("N", &GemmSPNode::N)
-        .def_ro("K", &GemmSPNode::K)
-        .def_ro("clear_accum", &GemmSPNode::clear_accum)
-        .def_ro("kPack", &GemmSPNode::kPack)
-        .def_ro("wg_wait", &GemmSPNode::wg_wait);
+        .def_ro("policy", &GemmSPNode::policy_)
+        .def_ro("a", &GemmSPNode::a_)
+        .def_ro("b", &GemmSPNode::b_)
+        .def_ro("c", &GemmSPNode::c_)
+        .def_ro("e", &GemmSPNode::e_)
+        .def_ro("transA", &GemmSPNode::transA_)
+        .def_ro("transB", &GemmSPNode::transB_)
+        .def_ro("m", &GemmSPNode::m_)
+        .def_ro("n", &GemmSPNode::n_)
+        .def_ro("k", &GemmSPNode::k_)
+        .def_ro("clearAccum", &GemmSPNode::clearAccum_)
+        .def_ro("kPack", &GemmSPNode::kPack_)
+        .def_ro("wgWait", &GemmSPNode::wgWait_);
   }
 
 private:

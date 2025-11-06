@@ -84,8 +84,9 @@ class GemmMFMA(GemmBase):
         local_size_b = mfma_emitter.local_size_b
         block_K = mfma_emitter.chunk
         micro_size_k = mfma_emitter.micro_size_k
-        A_shared = self.A
-        B_shared = self.B
+        # Use region for shared-memory operands if available
+        A_src = self.ARegion if is_shared(self.A) else self.A
+        B_src = self.BRegion if is_shared(self.B) else self.B
         C_local = self.C
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
@@ -106,14 +107,14 @@ class GemmMFMA(GemmBase):
                     # Load A into fragment
                     mfma_emitter.ldmatrix_a(
                         A_local,
-                        A_shared,
+                        A_src,
                         ki,
                     )
 
                     # Load B into fragment
                     mfma_emitter.ldmatrix_b(
                         B_local,
-                        B_shared,
+                        B_src,
                         ki,
                     )
 
@@ -140,7 +141,7 @@ class GemmMFMA(GemmBase):
                     # Load A into fragment
                     mfma_emitter.ldmatrix_a(
                         A_local,
-                        A_shared,
+                        A_src,
                         ki,
                     )
 
@@ -169,7 +170,7 @@ class GemmMFMA(GemmBase):
                     # Load B into fragment
                     mfma_emitter.ldmatrix_b(
                         B_local,
-                        B_shared,
+                        B_src,
                         ki,
                     )
 
