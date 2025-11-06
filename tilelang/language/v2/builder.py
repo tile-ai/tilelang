@@ -487,9 +487,9 @@ class Builder(BaseBuilder):
                 f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
 
     def override(self, name: str):
-        import tilelang.language as T
+        from tilelang.language import serial 
         if name == 'range':
-            return T.serial
+            return serial
         raise ValueError(f'Unknown override: {name}')
 
 
