@@ -1,6 +1,7 @@
+# for Volta GPUs, which use legacy MMA instructions
 from .gemm_base import GemmBase
-from tilelang.layout import make_wgmma_swizzled_layout
-from tilelang.intrinsics.wgmma_macro_generator import (
+from tilelang.layout import make_volta_swizzled_layout
+from tilelang.intrinsics.mma_sm70_macro_generator import (
     TensorCoreIntrinEmitter,)
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import tvm as tvm
@@ -10,11 +11,11 @@ from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
 
-class GemmWGMMA(GemmBase):
+class GemmMMASm70(GemmBase):
 
     def infer_layout(self, target: Target, thread_nums: int):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                            True)
+                                                            False)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -31,41 +32,25 @@ class GemmWGMMA(GemmBase):
         )
         a_is_k_major = not self.trans_A
         b_is_k_major = self.trans_B
-
         if self.is_gemm_ss():
-            a_continuity = self.M if a_is_k_major else 4 * self.K // m_warp
-            b_continuity = self.K if b_is_k_major else self.N // n_warp
-
             return {
-                # WGMMA does not support padding
-                self.A:
-                    make_wgmma_swizzled_layout(
-                        self.A, continuity=a_continuity, k_major=a_is_k_major),
-                self.B:
-                    make_wgmma_swizzled_layout(
-                        self.B, continuity=b_continuity, k_major=b_is_k_major),
-                self.C:
-                    mma_emitter.make_mma_store_layout(self.C),
+                self.A: make_volta_swizzled_layout(self.A, is_a=True, k_inner=a_is_k_major),
+                self.B: make_volta_swizzled_layout(self.B, is_a=False, k_inner=b_is_k_major),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_rs():
-            b_continuity = self.N if b_is_k_major else 4 * self.K // n_warp
             return {
-                self.A:
-                    mma_emitter.make_mma_load_layout(self.A, matrix="A"),
-                self.B:
-                    make_wgmma_swizzled_layout(
-                        self.B, continuity=b_continuity, k_major=b_is_k_major),
-                self.C:
-                    mma_emitter.make_mma_store_layout(self.C),
+                self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
+                self.B: make_volta_swizzled_layout(self.B, is_a=False, k_inner=b_is_k_major),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         else:
             raise ValueError(
-                f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                            True)
-
+                                                            False)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -82,16 +67,18 @@ class GemmWGMMA(GemmBase):
             thread_var=thread_var,
         )
 
-        if self.A in layout_map:
-            mma_emitter._assign_a_shared_layout(layout_map[self.A])
-        if self.B in layout_map:
-            mma_emitter._assign_b_shared_layout(layout_map[self.B])
-
+        in_dtype = self.in_dtype
+        warp_rows = mma_emitter.warp_rows
+        warp_cols = mma_emitter.warp_cols
+        local_size_a = mma_emitter.local_size_a
+        local_size_b = mma_emitter.local_size_b
+        block_K = mma_emitter.chunk
+        micro_size_k = mma_emitter.micro_size_k
         A_shared = self.A
         B_shared = self.B
         C_local = self.C
-        clear_accum = self.clear_accum
-        wg_wait = self.wg_wait
+
+        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
 
         if self.is_gemm_ss():
 
@@ -102,8 +89,26 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                # Perform Matrix Multiplication
-                mma_emitter.wgmma(A_shared, B_shared, C_local, clear_accum, wg_wait)
+                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+
+                for ki in T.serial(0, (block_K // micro_size_k)):
+                    # Load A into fragment
+                    mma_emitter.ldmatrix_a(
+                        A_local,
+                        A_shared,
+                        ki,
+                    )
+
+                    # Load B into fragment
+                    mma_emitter.ldmatrix_b(
+                        B_local,
+                        B_shared,
+                        ki,
+                    )
+
+                    # Perform Matrix Multiplication
+                    mma_emitter.mma(A_local, B_local, C_local, ki)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -118,13 +123,26 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                mma_emitter.wgmma(A_local, B_shared, C_local, clear_accum, wg_wait)
+                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+
+                for ki in T.serial(0, (block_K // micro_size_k)):
+
+                    # Load B into fragment
+                    mma_emitter.ldmatrix_b(
+                        B_local,
+                        B_shared,
+                        ki,
+                    )
+
+                    # Perform Matrix Multiplication
+                    mma_emitter.mma(A_local, B_local, C_local, ki)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
-        raise ValueError(
-            f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+        else:
+            raise ValueError(
+                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)

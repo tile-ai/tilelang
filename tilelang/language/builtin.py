@@ -708,3 +708,102 @@ def tcgen05_mma_arrive(mbar_ptr):
         Pointer to the mbarrier object in shared memory (e.g., Barrier*).
     """
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar_ptr)
+
+
+def ptx_mma_sm70(
+    shape,
+    A_layout,
+    B_layout,
+    A_dtype,
+    B_dtype,
+    C_dtype,
+    multiplicand_a,
+    a_index,
+    multiplicand_b,
+    b_index,
+    accumulator,
+    c_index,
+):
+    """TVM intrinsic for ptx tensor core mma instructions on SM70 (Volta).
+
+    This intrinsic provides SM70-specific MMA operations that support m16n16k4 shape
+    with FP16 inputs and FP16/FP32 accumulation.
+
+    Parameters
+    ----------
+
+    shape : str
+        The shape of mma fragment (e.g., "m16n16k4").
+
+    A_layout : str
+        The layout of multiplicand fragment A ("row" or "col").
+
+    B_layout : str
+        The layout of multiplicand fragment B ("row" or "col").
+
+    A_dtype : str
+        The data type of multiplicand fragment A (typically "fp16").
+
+    B_dtype : str
+        The data type of multiplicand fragment B (typically "fp16").
+
+    C_dtype : str
+        The data type of accumulator fragment C ("fp16" or "fp32").
+
+    multiplicand_a : Var
+        The multiplicand fragment A variable.
+
+    a_index : Expr
+        The index of multiplicand fragment A.
+
+    multiplicand_b : Var
+        The multiplicand fragment B variable.
+
+    b_index : Expr
+        The index of multiplicand fragment B.
+
+    accumulator : Var
+        The accumulator fragment C variable.
+
+    c_index : Expr
+        The index of accumulator fragment C.
+
+    Returns
+    -------
+    call : PrimExpr
+        The call expression.
+
+    Examples
+    --------
+    >>> T.ptx_mma_sm70(
+    ...     "float16",
+    ...     "m16n16k4",
+    ...     "row",
+    ...     "col",
+    ...     "fp16",
+    ...     "fp16",
+    ...     "fp16",
+    ...     A_local.data,
+    ...     0,
+    ...     B_local.data,
+    ...     0,
+    ...     C_local.data,
+    ...     0,
+    ... )
+    """
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.ptx_mma_sm70"),
+        shape,
+        A_layout,
+        B_layout,
+        A_dtype,
+        B_dtype,
+        C_dtype,
+        multiplicand_a,
+        a_index,
+        multiplicand_b,
+        b_index,
+        accumulator,
+        c_index,
+    )

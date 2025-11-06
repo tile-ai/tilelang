@@ -540,6 +540,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                                              element_size, k_inner);
              }
            })
+      .def("tl.make_volta_swizzled_layout",
+           [](int stride, int mat_continuous, bool is_a, bool k_inner) {
+             return makeGemmVoltaABLayout(stride, mat_continuous, is_a,
+                                          k_inner);
+           })
       .def("tl.make_wgmma_swizzled_layout",
            [](int stride, int mat_continuous, int continuity, int element_size,
               bool k_inner) {
