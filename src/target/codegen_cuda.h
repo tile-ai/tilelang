@@ -122,6 +122,8 @@ private:
   bool need_cast_smem_ptr_to_int_{false};
   // whether need cooperative_groups.h
   bool need_cooperative_groups_{false};
+  // whether need random.h
+  bool need_random_h_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");

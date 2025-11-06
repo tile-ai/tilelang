@@ -287,6 +287,10 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <cooperative_groups.h>\n";
   }
 
+  if (need_random_h_) {
+    decl_stream << "#include <tl_templates/cuda/random.h>\n";
+  }
+
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
   if (enable_sparse_gemm_) {
     decl_stream << "#include <tl_templates/cuda/gemm_sp.h>\n";
@@ -1199,6 +1203,10 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
                                           bool skip_first_arg,
                                           std::ostream &os) { // NOLINT(*)
   DataType ret_dtype = GetRuntimeDataType(ret_type);
+  std::string func_name = static_cast<std::string>(global_symbol);
+  if (func_name == "tl::philox_rand_kernel") {
+    need_random_h_ = true;
+  }
   if (ret_dtype.is_fixed_length_vector()) {
     //
     // Emit an unsupported vector call
