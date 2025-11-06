@@ -571,6 +571,8 @@ TVM_DLL const Op &device_assert();
  */
 TVM_DLL const Op &device_assert_with_msg();
 
+TVM_DLL const Op &philox_rand();
+
 } // namespace tl
 } // namespace tvm
 

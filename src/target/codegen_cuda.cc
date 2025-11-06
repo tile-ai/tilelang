@@ -1203,10 +1203,6 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
                                           bool skip_first_arg,
                                           std::ostream &os) { // NOLINT(*)
   DataType ret_dtype = GetRuntimeDataType(ret_type);
-  std::string func_name = static_cast<std::string>(global_symbol);
-  if (func_name == "tl::philox_rand_kernel") {
-    need_random_h_ = true;
-  }
   if (ret_dtype.is_fixed_length_vector()) {
     //
     // Emit an unsupported vector call
@@ -2620,6 +2616,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::philox_rand())) {
+    need_random_h_ = true;
+    print_extern_call_stmt("tl::philox_rand");
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

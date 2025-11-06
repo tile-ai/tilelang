@@ -52,7 +52,7 @@ TL_DEVICE float uint32_to_uniform_float_device(uint32_t x) {
 }
 
 
-TL_DEVICE void philox_rand_kernel(
+TL_DEVICE void philox_rand(
     float* output,
     int total_elems,
     uint64_t seed,
