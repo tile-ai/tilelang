@@ -51,20 +51,21 @@ TL_DEVICE float uint32_to_uniform_float_device(uint32_t x) {
 
 TL_DEVICE void philox_rand(float *output, int total_elems, uint64_t seed,
                            int n_rounds) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= total_elems)
+  int local_idx = threadIdx.x;
+  if (local_idx >= total_elems)
     return;
 
   uint32_t seed_lo = (uint32_t)(seed & 0xFFFFFFFFULL);
   uint32_t seed_hi = (uint32_t)((seed >> 32) & 0xFFFFFFFFULL);
-  uint32_t offset_lo = (uint32_t)idx;
+  int block_start = blockIdx.x * total_elems;
+  uint32_t offset_lo = (uint32_t)(block_start + local_idx);
   uint32_t offset_hi = 0U;
   uint32_t c0 = offset_lo;
   uint32_t c1 = offset_hi;
   uint32_t c2 = 0U;
   uint32_t c3 = 0U;
   philox_impl_device(&c0, &c1, &c2, &c3, seed_lo, seed_hi, n_rounds);
-  output[idx] = uint32_to_uniform_float_device(c0);
+  output[local_idx] = uint32_to_uniform_float_device(c0);
 }
 
 } // namespace tl
