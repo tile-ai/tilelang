@@ -2,11 +2,18 @@ from tilelang import tvm
 from tvm import ir
 import torch
 import ctypes
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Generic, TypeVar, Union, TYPE_CHECKING
 from tvm import tir
 import tvm.script.ir_builder.tir._ffi_api as tb_ffi
 
-dtype = tvm.DataType
+_T = TypeVar('_T')
+
+if TYPE_CHECKING:
+    class dtype(Generic[_T]):
+        ...
+else:
+    dtype = tvm.DataType
+
 # Python 3.9 compatibility: avoid PEP 604 unions at runtime
 AnyDType = Union[ir.Type, str, type, torch.dtype, dtype]
 
