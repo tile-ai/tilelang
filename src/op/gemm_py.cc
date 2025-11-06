@@ -302,6 +302,14 @@ LayoutMap GemmPyNode::InferLayout(const LayoutInferArgs &T,
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.infer_layout")) {
     results = Downcast<LayoutMap>(
         (*f)(tvm::ffi::GetRef<GemmPy>(this), T.target, T.thread_bounds));
+    // Bind all fragment layouts with the provided thread range
+    for (auto kv : results) {
+      const Buffer &buf = kv.first;
+      const Layout &layout = kv.second;
+      if (auto frag = layout.as<Fragment>()) {
+        results.Set(buf, frag.value()->BindThreadRange(T.thread_bounds));
+      }
+    }
   } else {
     LOG(FATAL) << "No infer layout function found for gemm_py";
   }
