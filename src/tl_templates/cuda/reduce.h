@@ -73,7 +73,7 @@ struct SharedReduceWarp {
 
       unsigned mask = __activemask();
       for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
-        T other = __shfl_down_sync(mask, partial, offset);
+        T other = tl::shfl_down_sync(mask, partial, offset);
         partial = Reducer()(partial, other);
       }
 
@@ -159,7 +159,7 @@ template <int threads, bool reverse = false> struct CumSum1D {
 
 #pragma unroll
         for (int off = 1; off < SEG; off <<= 1) {
-          T n = (T)__shfl_down_sync(MASK, val, off);
+          T n = (T)tl::shfl_down_sync(MASK, val, off);
           if (lane < SEG - off)
             val += n;
         }
