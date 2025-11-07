@@ -514,4 +514,5 @@ def test_assert_tl_matmul_block_all_dynamic_with_pass_config():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    assert_tl_matmul_macro_correctness(128, 128, 128, "float16", "float16", "float16")

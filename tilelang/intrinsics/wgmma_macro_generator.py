@@ -161,14 +161,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             raise ValueError(f"Unsupported swizzle mode: {layout}")
 
     def wgmma(self,
-              A_buf: Buffer,
-              B_buf: Buffer,
-              C_local_buf: Buffer,
+              A_region: BufferRegion,
+              B_region: BufferRegion,
+              C_region: BufferRegion,
               clear_accum: PrimExpr = False,
               wg_wait: int = 0):
 
-        if is_fragment(A_buf):
-            return self.wgmma_rs(A_buf, B_buf, C_local_buf, clear_accum, wg_wait)
+        if is_fragment(A_region):
+            return self.wgmma_rs(A_region, B_region, C_region, clear_accum, wg_wait)
 
         local_size_out = self.local_size_out
         a_dtype_abbrv = self.a_dtype_abbrv
@@ -188,8 +188,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
 
-        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
-        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        a_swizzle_mode = self._determinate_swizzle_mode(A_region, self.a_shared_layout)
+        b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
 
         elems_in_bits = DataType(self.a_dtype).bits
         elems_in_bytes = elems_in_bits // 8
@@ -293,11 +293,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             else:
                 raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
         
-        A_ptr = retrive_ptr_from_buffer_region(A_buf)
-        B_ptr = retrive_ptr_from_buffer_region(B_buf)
+        A_ptr = retrive_ptr_from_buffer_region(A_region)
+        B_ptr = retrive_ptr_from_buffer_region(B_region)
+        # TODO: check C_buf is full region
+        C_buf = C_region.buffer
 
         @T.macro
-        def _warp_mma():
+        def _warp_mma(A_region, B_region, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
 
             desc_a = T.alloc_wgmma_desc()
@@ -308,7 +310,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode,
                                           int(b_leading_byte_offset >> 4),
                                           int(b_stride_byte_offset >> 4))
-            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
             for j in T.serial(num_inst_n):
                 for i in T.serial(num_inst_m):
@@ -328,19 +330,19 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, a_is_k_major, b_is_k_major,
                                        a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv, desc_a.data,
                                        (A_offset * elems_in_bytes) >> 4, desc_b.data,
-                                       (B_offset * elems_in_bytes) >> 4, C_local_buf.data, C_offset,
+                                       (B_offset * elems_in_bytes) >> 4, C_buf.data, C_offset,
                                        scale_out, scale_in_a, scale_in_b)
             T.warpgroup_commit_batch()
             if wg_wait >= 0:
                 T.warpgroup_wait(wg_wait)
-            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
 
-        return _warp_mma()
+        return _warp_mma(A_region, B_region, C_buf)
 
     def wgmma_rs(self,
-                 A_buf: Buffer,
-                 B_buf: Buffer,
-                 C_local_buf: Buffer,
+                 A_region: BufferRegion,
+                 B_region: BufferRegion,
+                 C_region: BufferRegion,
                  clear_accum: PrimExpr = False,
                  wg_wait: int = 0):
         local_size_a = self.local_size_a
@@ -402,8 +404,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         thread_binding = self.get_thread_binding()
 
+        # TODO: check A_buf, C_buf is full region
+        A_buf = A_region.buffer
+        B_ptr = retrive_ptr_from_buffer_region(B_region)
+        C_buf = C_region.buffer
+
         @T.macro
-        def _warp_mma(A_buf, B_buf, C_local_buf):
+        def _warp_mma(A_buf, B_ptr, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
 
             # Handle BufferLoad for B_buf
@@ -419,7 +426,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                                           int(b_leading_byte_offset >> 4),
                                           int(b_stride_byte_offset >> 4))
             T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
-            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
 
             for j in T.serial(0, num_inst_n):
@@ -445,7 +452,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             A_offset,
                             desc_b.data,
                             (B_offset * elems_in_bytes) >> 4,
-                            C_local_buf.data,
+                            C_buf.data,
                             C_offset,
                             scale_out,
                             scale_in_a,
@@ -454,10 +461,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             T.warpgroup_commit_batch()
             if wg_wait >= 0:
                 T.warpgroup_wait(wg_wait)
-            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
 
-        return _warp_mma(A_buf, B_buf, C_local_buf)
+        return _warp_mma(A_buf, B_ptr, C_buf)
 
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         """

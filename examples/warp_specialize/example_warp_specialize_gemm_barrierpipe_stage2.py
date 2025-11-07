@@ -52,6 +52,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
 
 def main(M=16384, N=16384, K=16384):
+    tilelang.disable_cache()
     block_M = 128
     block_N = 128
     block_K = 64

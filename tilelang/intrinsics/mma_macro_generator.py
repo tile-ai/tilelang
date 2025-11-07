@@ -260,10 +260,7 @@ class TensorCoreIntrinEmitter:
             for i in T.serial(warp_rows):
                 # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
-                if a_transposed:
-                    A_shared_buf_elem = a_buf[a_base0 + wk, a_base1 + wi]
-                else:
-                    A_shared_buf_elem = a_buf[a_base0 + wi, a_base1 + wk]
+                A_shared_buf_elem = a_buf[a_base0 + wk, a_base1 + wi] if a_transposed else a_buf[a_base0 + wi, a_base1 + wk]
 
                 if ldmatrix_available:
                     T.ptx_ldmatrix(
@@ -347,10 +344,7 @@ class TensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    if b_transposed:
-                        B_shared_buf_elem = b_buf[b_base0 + wi, b_base1 + wk]
-                    else:
-                        B_shared_buf_elem = b_buf[b_base0 + wk, b_base1 + wi]
+                    B_shared_buf_elem = b_buf[b_base0 + wi, b_base1 + wk] if b_transposed else b_buf[b_base0 + wk, b_base1 + wi]
 
                     T.ptx_ldmatrix(
                         b_dtype,

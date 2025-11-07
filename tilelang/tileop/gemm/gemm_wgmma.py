@@ -100,7 +100,7 @@ class GemmWGMMA(GemmBase):
         A_region = self.ARegion
         B_region = self.BRegion
         C_region = self.CRegion
-        C_buf = self.C
+
         clear_accum = self.clear_accum
         wg_wait = self.wg_wait
 
@@ -117,7 +117,7 @@ class GemmWGMMA(GemmBase):
                 accumulating into C_local.
                 """
                 # Perform Matrix Multiplication with offset consideration
-                mma_emitter.wgmma(A_region, B_region, C_buf, clear_accum, wg_wait)
+                mma_emitter.wgmma(A_region, B_region, C_region, clear_accum, wg_wait)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -132,7 +132,7 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                mma_emitter.wgmma(A_buf, B_region, C_buf, clear_accum, wg_wait)
+                mma_emitter.wgmma(A_buf, B_region, C_region, clear_accum, wg_wait)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
