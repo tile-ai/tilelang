@@ -724,4 +724,4 @@ if __name__ == "__main__":
     #             print(f"======================= Test {m} {n} {k} False True =============================")
     #             run_gemm_rs(m, n, k * 3, False, True, "float16", "float16", "float16", m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
-    test_gemm_rr_false_false(256, 128, 16)
+    test_gemm_false_true(256, 128, 16, "float16", "float16", "float16")

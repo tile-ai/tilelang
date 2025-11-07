@@ -206,11 +206,12 @@ class TensorCoreIntrinEmitter:
 
         mma_load_layout = mma_load_a_32x4_to_shared_16x4_layout
 
-        # Normalize shared buffer to BufferRegion (region-style access)
+        # legalize shared buffer to region
         A_region = to_buffer_region(A_shared_buf)
-        a_buf = A_region.buffer
-        a_base0 = A_region.region[-2].min
-        a_base1 = A_region.region[-1].min
+        A_buf = A_region.buffer
+        A_base0 = A_region.region[-2].min
+        A_base1 = A_region.region[-1].min
+        A_stride_last = A_buf.shape[-1]
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -227,7 +228,7 @@ class TensorCoreIntrinEmitter:
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
                 for j in T.vectorized(local_size_a):
                     mi, mk = mma_load_layout(tx, j)
-                    A_local_buf[i * local_size_a + j] = a_buf[a_base0 + wi + mi, a_base1 + wk + mk]
+                    A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
 
         return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
@@ -247,11 +248,11 @@ class TensorCoreIntrinEmitter:
 
         mma_load_layout = mma_load_b_32x4_to_shared_16x4_layout_trans if b_transposed else mma_load_b_32x4_to_shared_4x16_layout
 
-        # Normalize shared buffer to BufferRegion (region-style access)
+        # legalize shared buffer to region
         B_region = to_buffer_region(B_shared_buf)
-        b_buf = B_region.buffer
-        b_base0 = B_region.region[-2].min
-        b_base1 = B_region.region[-1].min
+        B_buf = B_region.buffer
+        B_base0 = B_region.region[-2].min
+        B_base1 = B_region.region[-1].min
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -274,12 +275,12 @@ class TensorCoreIntrinEmitter:
                 for j in T.vectorized(local_size_b):
                     if b_transposed:
                         mi, mk = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = b_buf[b_base0 + wi + mi,
-                                                                  b_base1 + wk + mk]
+                        B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wi + mi,
+                                                                  B_base1 + wk + mk]
                     else:
                         mk, mi = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = b_buf[b_base0 + wk + mk,
-                                                                  b_base1 + wi + mi]
+                        B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wk + mk,
+                                                                  B_base1 + wi + mi]
 
         return _warp_ldmatrix_b(B_local_buf, B_region, ki, thread_binding, rk)
 
