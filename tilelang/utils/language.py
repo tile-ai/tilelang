@@ -252,8 +252,8 @@ def retrieve_stride(obj: Buffer | BufferRegion | BufferLoad) -> list:
     return strides
 
 
-def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Buffer | BufferLoad |
-                                   BufferRegion, access_type: str = "r") -> PrimExpr:
+def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion,
+                                   access_type: str = "r") -> PrimExpr:
     if isinstance(buffer_or_load_or_region, Buffer):
         return buffer_or_load_or_region.access_ptr(access_type)
     elif isinstance(buffer_or_load_or_region, BufferLoad):

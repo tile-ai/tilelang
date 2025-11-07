@@ -211,7 +211,6 @@ class TensorCoreIntrinEmitter:
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
-        A_stride_last = A_buf.shape[-1]
 
         @T.macro
         def _warp_ldmatrix_a(

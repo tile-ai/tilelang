@@ -80,7 +80,6 @@ class GemmMMASm70(GemmBase):
         C_region = self.CRegion
 
         A_buf = A_region.buffer
-        B_buf = B_region.buffer
         C_buf = C_region.buffer
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"

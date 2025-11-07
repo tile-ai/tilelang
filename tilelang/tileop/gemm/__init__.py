@@ -181,8 +181,7 @@ class GemmPy(Node, Scriptable):
                 return GemmMMASm70
             return GemmMMA
         elif gemm_inst.is_wgmma():
-            # return GemmWGMMA
-            return GemmMMASm70
+            return GemmWGMMA
         elif gemm_inst.is_tcgen5mma():
             return GemmTCGEN5
         elif gemm_inst.is_mfma():

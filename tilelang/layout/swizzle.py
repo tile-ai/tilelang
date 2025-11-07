@@ -8,7 +8,8 @@ from tilelang import _ffi_api
 
 
 def _get_buffer_info(
-    buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> tuple[Buffer, list[int], str]:
+        buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion
+) -> tuple[Buffer, list[int], str]:
     """
     Extract buffer, shape, and dtype from Buffer, BufferLoad, or BufferRegion.
 
