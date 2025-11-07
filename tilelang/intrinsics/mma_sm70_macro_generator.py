@@ -5,7 +5,7 @@ from tvm import DataType
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion
 from tilelang import tvm as tvm
 from tvm.runtime import convert
-from tilelang.utils import is_fragment
+from tilelang.utils import is_fragment, to_buffer_region
 from tilelang.intrinsics.mma_sm70_layout import (
     shared_16x4_to_mma_a_32x4_layout,
     shared_4x16_to_mma_b_32x4_layout,
@@ -206,15 +206,11 @@ class TensorCoreIntrinEmitter:
 
         mma_load_layout = mma_load_a_32x4_to_shared_16x4_layout
 
-        # Resolve BufferRegion to underlying Buffer and base offsets
-        if isinstance(A_shared_buf, BufferRegion):
-            a_buf = A_shared_buf.buffer
-            a_base0 = A_shared_buf.region[-2].min
-            a_base1 = A_shared_buf.region[-1].min
-        else:
-            a_buf = A_shared_buf
-            a_base0 = tvm.tir.const(0, "int32")
-            a_base1 = tvm.tir.const(0, "int32")
+        # Normalize shared buffer to BufferRegion (region-style access)
+        A_region = to_buffer_region(A_shared_buf)
+        a_buf = A_region.buffer
+        a_base0 = A_region.region[-2].min
+        a_base1 = A_region.region[-1].min
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -233,7 +229,7 @@ class TensorCoreIntrinEmitter:
                     mi, mk = mma_load_layout(tx, j)
                     A_local_buf[i * local_size_a + j] = a_buf[a_base0 + wi + mi, a_base1 + wk + mk]
 
-        return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
+        return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
     def ldmatrix_b(self,
                    B_local_buf: Buffer,
@@ -251,15 +247,11 @@ class TensorCoreIntrinEmitter:
 
         mma_load_layout = mma_load_b_32x4_to_shared_16x4_layout_trans if b_transposed else mma_load_b_32x4_to_shared_4x16_layout
 
-        # Resolve BufferRegion to underlying Buffer and base offsets
-        if isinstance(B_shared_buf, BufferRegion):
-            b_buf = B_shared_buf.buffer
-            b_base0 = B_shared_buf.region[-2].min
-            b_base1 = B_shared_buf.region[-1].min
-        else:
-            b_buf = B_shared_buf
-            b_base0 = tvm.tir.const(0, "int32")
-            b_base1 = tvm.tir.const(0, "int32")
+        # Normalize shared buffer to BufferRegion (region-style access)
+        B_region = to_buffer_region(B_shared_buf)
+        b_buf = B_region.buffer
+        b_base0 = B_region.region[-2].min
+        b_base1 = B_region.region[-1].min
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -287,7 +279,7 @@ class TensorCoreIntrinEmitter:
                         mk, mi = mma_load_layout(tx, j)
                         B_local_buf[i * local_size_b + j] = b_buf[b_base0 + wk + mk, b_base1 + wi + mi]
 
-        return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
+        return _warp_ldmatrix_b(B_local_buf, B_region, ki, thread_binding, rk)
 
     def mma(self,
             A_local_buf: Buffer,

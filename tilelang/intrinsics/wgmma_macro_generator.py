@@ -5,7 +5,7 @@ from typing import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
 from tvm.tir import PrimExpr, Buffer, Var, IndexMap, BufferLoad, BufferRegion
-from tilelang.utils import is_fragment
+from tilelang.utils import is_fragment, retrive_ptr_from_buffer_region, is_full_region
 from math import gcd
 from tilelang.layout import (
     Layout,
@@ -263,43 +263,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         thread_binding = self.get_thread_binding()
         
-        def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Union[Buffer, BufferLoad, BufferRegion], access_type: str = "r") -> PrimExpr:
-            if isinstance(buffer_or_load_or_region, Buffer):
-                return buffer_or_load_or_region.access_ptr(access_type)
-            elif isinstance(buffer_or_load_or_region, BufferLoad):
-                buffer_load = buffer_or_load_or_region
-                offset, stride = 0, 1
-                buffer = buffer_load.buffer
-                for i, shape in enumerate(reversed(buffer.shape)):
-                    indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                    if isinstance(indice, tir.IntImm):
-                        offset += indice * stride
-                    elif isinstance(indice, tir.PrimExpr):
-                        offset += indice * stride
-                    elif isinstance(indice, tir.Ramp):
-                        offset += indice.base * stride
-                    else:
-                        raise ValueError(f"Unsupported index type: {type(indices)}")
-                    stride *= shape
-                return buffer.access_ptr(access_type, offset=offset)
-            elif isinstance(buffer_or_load_or_region, BufferRegion):
-                buffer_region = buffer_or_load_or_region
-                buffer = buffer_region.buffer
-                offset, stride = 0, 1
-                for i, shape in enumerate(reversed(buffer.shape)):
-                    offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
-                    stride *= shape
-                return buffer.access_ptr(access_type, offset=offset)
-            else:
-                raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
-        
         A_ptr = retrive_ptr_from_buffer_region(A_region)
         B_ptr = retrive_ptr_from_buffer_region(B_region)
-        # TODO: check C_buf is full region
+        assert is_full_region(C_region), f"Fragment output C must be a full region"
+
         C_buf = C_region.buffer
 
         @T.macro
-        def _warp_mma(A_region, B_region, C_buf):
+        def _warp_mma(A_ptr, B_ptr, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
 
             desc_a = T.alloc_wgmma_desc()
@@ -337,7 +308,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 T.warpgroup_wait(wg_wait)
             T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
 
-        return _warp_mma(A_region, B_region, C_buf)
+        return _warp_mma(A_ptr, B_ptr, C_buf)
 
     def wgmma_rs(self,
                  A_region: BufferRegion,
@@ -368,7 +339,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
         b_is_k_major = self.b_transposed
 
-        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
         b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none(
         ) else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
 
@@ -404,22 +375,17 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         thread_binding = self.get_thread_binding()
 
-        # TODO: check A_buf, C_buf is full region
+        assert is_full_region(A_region), f"Fragment input A must be a full region"
+        assert is_full_region(C_region), f"Fragment output C must be a full region"
         A_buf = A_region.buffer
         B_ptr = retrive_ptr_from_buffer_region(B_region)
         C_buf = C_region.buffer
+
 
         @T.macro
         def _warp_mma(A_buf, B_ptr, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
 
-            # Handle BufferLoad for B_buf
-            if hasattr(B_buf, 'buffer'):
-                # B_buf is a BufferLoad
-                B_ptr = B_buf.buffer.access_ptr("r")
-            else:
-                # B_buf is a Buffer
-                B_ptr = B_buf.access_ptr("r")
 
             desc_b = T.alloc_wgmma_desc()
             T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode,
