@@ -68,7 +68,7 @@ public:
         // upper_bound = base_max + max(0, stride_max) * (lanes - 1)
         auto base_bound = analyzer_.const_int_bound(ramp->base);
         auto stride_bound = analyzer_.const_int_bound(ramp->stride);
-        int lanes = ramp->lanes;
+        int lanes = *as_const_int(ramp->lanes);
 
         int64_t base_min = base_bound->min_value;
         int64_t base_max = base_bound->max_value;
