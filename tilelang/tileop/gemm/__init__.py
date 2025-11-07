@@ -7,10 +7,12 @@ from tvm.runtime import Scriptable
 import tvm_ffi
 from tilelang.ir import GemmWarpPolicy
 from .gemm_mma import GemmMMA
+from .gemm_mma_sm70 import GemmMMASm70
 from .gemm_wgmma import GemmWGMMA
 from .gemm_tcgen05 import GemmTCGEN5
 from .gemm_mfma import GemmMFMA
 from tilelang import _ffi_api
+from tilelang.utils.target import target_is_volta
 
 
 @tvm_ffi.register_global_func("tl.gemm_py.infer_layout")
@@ -79,13 +81,13 @@ class GemmPy(Node, Scriptable):
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
-        impl_class = self._get_implementation_class(gemm_inst)
+        impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).infer_layout(target, thread_nums)
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
         """Lower the GEMM operation to TIR statements based on target architecture."""
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
-        impl_class = self._get_implementation_class(gemm_inst)
+        impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).lower(layout_map, target, thread_nums, thread_var)
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> GemmInst:
@@ -106,7 +108,7 @@ class GemmPy(Node, Scriptable):
         """
         return GemmInst(_ffi_api.GemmPyGemmInst(self, int(thread_nums), target))
 
-    def _get_implementation_class(self, gemm_inst: GemmInst):
+    def _get_implementation_class(self, gemm_inst: GemmInst, target: Target):
         """Get the appropriate implementation class for the given GEMM instruction.
 
         Args:
@@ -120,6 +122,8 @@ class GemmPy(Node, Scriptable):
             ValueError: If the instruction type is unknown
         """
         if gemm_inst.is_mma():
+            if target_is_volta(target):
+                return GemmMMASm70
             return GemmMMA
         elif gemm_inst.is_wgmma():
             return GemmWGMMA

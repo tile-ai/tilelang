@@ -276,6 +276,17 @@ TVM_DLL const Op &ptx_init_tensor_memory();
 TVM_DLL const Op &ptx_deallocate_tensor_memory();
 
 /*!
+ * \brief tvm intrinsic for ptx tensor core mma instructions on SM70.
+ *
+ *  void ptx_mma_sm70(StringImm shape, StringImm A_layout, StringImm B_layout,
+ *                    StringImm A_dtype, StringImm B_dtype, StringImm C_dtype,
+ *                    Var multiplicand_a, Expr a_index,
+ *                    Var multiplicand_b, Expr b_index,
+ *                    Var accumulator, Expr c_index, bool saturate);
+ */
+TVM_DLL const Op &ptx_mma_sm70();
+
+/*!
  * \brief tvm intrinsics for ldmatrix
  *
  * ptx_ldmatrix(transposed, num, shared_addr, local_addr)

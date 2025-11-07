@@ -129,13 +129,6 @@ jobs:
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
 
-      - name: Set environment (GitHub-hosted runners)
-        if: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
-        run: |
-          # Enable ccache on GitHub-hosted runners to speed up builds
-          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" | tee -a "${GITHUB_ENV}"
-          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" | tee -a "${GITHUB_ENV}"
-
       # Do not use ccache on self-hosted runners, as it will download/upload caches which is slow.
       # Self-hosted runners usually have more CPU power to compile without ccache.
       - name: Setup ccache (GitHub-hosted runners)
@@ -144,8 +137,13 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1
         with:
           create-symlink: true
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}
           evict-old-files: "7d"
+          append-timestamp: false
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/*.cc') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/*.cc') }}
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}
+            ${{ runner.os }}-${{ runner.arch }}
 
       - name: Set environment (CUDA)
         if: contains(matrix.runner.toolkit, 'CUDA')

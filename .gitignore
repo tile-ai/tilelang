@@ -104,4 +104,4 @@ cmake-build/
 cmake-build-*/
 
 # Git version for sdist
-_git_commit.txt
+.git_commit.txt
