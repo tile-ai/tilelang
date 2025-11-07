@@ -91,9 +91,6 @@ class GemmWGMMA(GemmBase):
         # All dimensions may have offsets, including the matrix dimensions
         # However, for WGMMA, we pass the Buffer directly and handle offsets
         # through proper indexing in the access_ptr call or buffer slicing
-        A_offsets = self.A_base_offsets
-        B_offsets = self.B_base_offsets
-        C_offsets = self.C_base_offsets
 
         # We use region for memory input to support strided gemm
         # T.gemm(A_shared[0:128, :], B_shared, C_local)
@@ -123,7 +120,6 @@ class GemmWGMMA(GemmBase):
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_ssr, inline_let=True)
         elif self.is_gemm_rs():
-            A_buf = self.A
 
             @T.prim_func
             def _gemm_rsr() -> None:

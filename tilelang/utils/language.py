@@ -1,6 +1,5 @@
 from __future__ import annotations
-from typing import Union
-from tvm.tir import Buffer, BufferLoad, BufferRegion
+from tvm.tir import Buffer, BufferLoad, BufferRegion, PrimExpr
 from functools import reduce
 from tvm import IRModule
 from tvm.tir import PrimFunc
@@ -10,7 +9,7 @@ from tvm import ir, tir
 # These utility functions check the memory scope of a given TVM buffer.
 
 
-def _get_buffer(buffer_or_load_or_region: Union[Buffer, BufferLoad, BufferRegion]) -> Buffer:
+def _get_buffer(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> Buffer:
     """
     Extract Buffer from Buffer, BufferLoad, or BufferRegion.
 
@@ -22,15 +21,14 @@ def _get_buffer(buffer_or_load_or_region: Union[Buffer, BufferLoad, BufferRegion
     """
     if isinstance(buffer_or_load_or_region, Buffer):
         return buffer_or_load_or_region
-    elif isinstance(buffer_or_load_or_region, tir.BufferLoad):
-        return buffer_or_load_or_region.buffer
-    elif isinstance(buffer_or_load_or_region, tir.BufferRegion):
+    elif isinstance(buffer_or_load_or_region, (tir.BufferLoad, tir.BufferRegion)):
         return buffer_or_load_or_region.buffer
     else:
-        raise TypeError(f"Expected Buffer, BufferLoad, or BufferRegion, got {type(buffer_or_load_or_region)}")
+        raise TypeError(
+            f"Expected Buffer, BufferLoad, or BufferRegion, got {type(buffer_or_load_or_region)}")
 
 
-def is_global(buffer: Union[Buffer, BufferLoad, BufferRegion]) -> bool:
+def is_global(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is in the global memory scope.
 
@@ -44,7 +42,7 @@ def is_global(buffer: Union[Buffer, BufferLoad, BufferRegion]) -> bool:
     return buffer.scope() == "global"
 
 
-def is_shared(buffer: Union[Buffer, BufferLoad, BufferRegion], allow_dynamic: bool = True) -> bool:
+def is_shared(buffer: Buffer | BufferLoad | BufferRegion, allow_dynamic: bool = True) -> bool:
     """
     Check if the buffer is in the shared memory scope.
 
@@ -62,7 +60,7 @@ def is_shared(buffer: Union[Buffer, BufferLoad, BufferRegion], allow_dynamic: bo
     return any(conditions)
 
 
-def is_shared_dynamic(buffer: Union[Buffer, BufferLoad, BufferRegion]) -> bool:
+def is_shared_dynamic(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is in the dynamic shared memory scope.
 
@@ -76,7 +74,7 @@ def is_shared_dynamic(buffer: Union[Buffer, BufferLoad, BufferRegion]) -> bool:
     return buffer.scope() == "shared.dyn"
 
 
-def is_tensor_memory(buffer: Union[Buffer, BufferLoad, BufferRegion]) -> bool:
+def is_tensor_memory(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is in tensor memory scope (e.g., shared.tmem).
 
@@ -90,7 +88,7 @@ def is_tensor_memory(buffer: Union[Buffer, BufferLoad, BufferRegion]) -> bool:
     return buffer.scope().startswith("shared.tmem")
 
 
-def is_local(buffer: Union[Buffer, BufferLoad, BufferRegion]) -> bool:
+def is_local(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is in the local memory scope.
 
@@ -104,7 +102,7 @@ def is_local(buffer: Union[Buffer, BufferLoad, BufferRegion]) -> bool:
     return buffer.scope() == "local"
 
 
-def is_fragment(buffer: Union[Buffer, BufferLoad, BufferRegion]) -> bool:
+def is_fragment(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is a fragment (e.g., for matrix multiplication operations).
 
@@ -186,7 +184,7 @@ def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> tir.BufferRegion
         return None
 
 
-def to_buffer_region(obj: Union[Buffer, BufferLoad, BufferRegion]) -> BufferRegion:
+def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
     """
     Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
 
@@ -213,7 +211,7 @@ def to_buffer_region(obj: Union[Buffer, BufferLoad, BufferRegion]) -> BufferRegi
     raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
 
 
-def retrieve_shape(obj: Union[Buffer, BufferRegion, BufferLoad]) -> list:
+def retrieve_shape(obj: Buffer | BufferRegion | BufferLoad) -> list:
     """
     Retrieve shape-like extents for a buffer-like object.
 
@@ -233,7 +231,7 @@ def retrieve_shape(obj: Union[Buffer, BufferRegion, BufferLoad]) -> list:
     raise ValueError(f"Unsupported retrieve_shape argument type: {type(obj)} for object {obj}")
 
 
-def retrieve_stride(obj: Union[Buffer, BufferRegion, BufferLoad]) -> list:
+def retrieve_stride(obj: Buffer | BufferRegion | BufferLoad) -> list:
     """
     Retrieve row-major strides for a buffer-like object based on its buffer.shape.
 
@@ -241,9 +239,7 @@ def retrieve_stride(obj: Union[Buffer, BufferRegion, BufferLoad]) -> list:
     """
     if isinstance(obj, tir.Buffer):
         shape = obj.shape
-    elif isinstance(obj, tir.BufferRegion):
-        shape = obj.buffer.shape
-    elif isinstance(obj, tir.BufferLoad):
+    elif isinstance(obj, (tir.BufferRegion, tir.BufferLoad)):
         shape = obj.buffer.shape
     else:
         raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
@@ -256,7 +252,8 @@ def retrieve_stride(obj: Union[Buffer, BufferRegion, BufferLoad]) -> list:
     return strides
 
 
-def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Union[Buffer, BufferLoad, BufferRegion], access_type: str = "r") -> PrimExpr:
+def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Buffer | BufferLoad |
+                                   BufferRegion, access_type: str = "r") -> PrimExpr:
     if isinstance(buffer_or_load_or_region, Buffer):
         return buffer_or_load_or_region.access_ptr(access_type)
     elif isinstance(buffer_or_load_or_region, BufferLoad):
@@ -265,14 +262,12 @@ def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Union[Buffer, Buffe
         buffer = buffer_load.buffer
         for i, shape in enumerate(reversed(buffer.shape)):
             indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-            if isinstance(indice, tir.IntImm):
-                offset += indice * stride
-            elif isinstance(indice, tir.PrimExpr):
+            if isinstance(indice, (tir.IntImm, tir.PrimExpr)):
                 offset += indice * stride
             elif isinstance(indice, tir.Ramp):
                 offset += indice.base * stride
             else:
-                raise ValueError(f"Unsupported index type: {type(indices)}")
+                raise ValueError(f"Unsupported index type: {type(indice)}")
             stride *= shape
         return buffer.access_ptr(access_type, offset=offset)
     elif isinstance(buffer_or_load_or_region, BufferRegion):
@@ -288,7 +283,7 @@ def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Union[Buffer, Buffe
 
 
 def retrieve_ptr(
-    obj: Union[Buffer, BufferRegion, BufferLoad],
+    obj: Buffer | BufferRegion | BufferLoad,
     access_type: str = "r",
     ignore_last_ndim: int = 0,
 ) -> PrimExpr:
@@ -334,7 +329,7 @@ def retrieve_ptr(
     raise ValueError(f"Unsupported retrieve_ptr argument type: {type(obj)} for object {obj}")
 
 
-def retrieve_offset(obj: Union[Buffer, BufferRegion, BufferLoad]) -> list:
+def retrieve_offset(obj: Buffer | BufferRegion | BufferLoad) -> list:
     """
     Retrieve per-dimension minima offsets.
 

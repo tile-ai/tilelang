@@ -1,13 +1,14 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
-from typing import Union, Tuple
+from __future__ import annotations
 import tvm
 from tvm.tir import Buffer, BufferLoad, BufferRegion
 from tilelang import _ffi_api
 
 
-def _get_buffer_info(buffer_or_load_or_region: Union[Buffer, BufferLoad, BufferRegion]) -> tuple[Buffer, list[int], str]:
+def _get_buffer_info(
+    buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> tuple[Buffer, list[int], str]:
     """
     Extract buffer, shape, and dtype from Buffer, BufferLoad, or BufferRegion.
 
@@ -17,19 +18,18 @@ def _get_buffer_info(buffer_or_load_or_region: Union[Buffer, BufferLoad, BufferR
     Returns:
         tuple: (buffer, shape, dtype)
     """
-    if isinstance(buffer_or_load_or_region, tvm.tir.Buffer):
+    if isinstance(buffer_or_load_or_region, Buffer):
         return buffer_or_load_or_region, buffer_or_load_or_region.shape, buffer_or_load_or_region.dtype
-    elif isinstance(buffer_or_load_or_region, tvm.tir.BufferLoad):
-        buf = buffer_or_load_or_region.buffer
-        return buf, buf.shape, buf.dtype
-    elif isinstance(buffer_or_load_or_region, tvm.tir.BufferRegion):
+    elif isinstance(buffer_or_load_or_region, (BufferLoad, BufferRegion)):
         buf = buffer_or_load_or_region.buffer
         return buf, buf.shape, buf.dtype
     else:
-        raise TypeError(f"Expected Buffer, BufferLoad, or BufferRegion, got {type(buffer_or_load_or_region)}")
+        raise TypeError(
+            f"Expected Buffer, BufferLoad, or BufferRegion, got {type(buffer_or_load_or_region)}")
 
 
-def _get_stride_continuous(buffer_or_load_or_region: Union[Buffer, BufferLoad, BufferRegion]) -> Tuple[int, int]:
+def _get_stride_continuous(
+        buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> tuple[int, int]:
     """
     Get stride (last 2nd dimension) and continuous (last dimension) from Buffer, BufferLoad, or BufferRegion.
 
@@ -45,7 +45,7 @@ def _get_stride_continuous(buffer_or_load_or_region: Union[Buffer, BufferLoad, B
     return stride, continuous
 
 
-def _get_element_size(buffer_or_load_or_region: Union[Buffer, BufferLoad, BufferRegion]) -> int:
+def _get_element_size(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> int:
     """
     Get element size in bits from Buffer, BufferLoad, or BufferRegion.
 
@@ -61,7 +61,9 @@ def _get_element_size(buffer_or_load_or_region: Union[Buffer, BufferLoad, Buffer
 
 # Use a stable swizzled layout to ensure consistent memory access patterns.
 # Swizzling should be enabled or disabled based on whether TMA (Tensor Memory Access) is applied.
-def make_swizzled_layout(buffer: Union[Buffer, BufferLoad, BufferRegion], k_major: bool = True, allow_pad: bool = True):
+def make_swizzled_layout(buffer: Buffer | BufferLoad | BufferRegion,
+                         k_major: bool = True,
+                         allow_pad: bool = True):
     stride, continuous = _get_stride_continuous(buffer)
     element_size = _get_element_size(buffer)
     return _ffi_api.make_swizzled_layout(
@@ -74,7 +76,9 @@ def make_swizzled_layout(buffer: Union[Buffer, BufferLoad, BufferRegion], k_majo
 
 
 # for Volta Intrinsics
-def make_volta_swizzled_layout(buffer: Union[Buffer, BufferLoad, BufferRegion], is_a: bool = True, k_inner: bool = True):
+def make_volta_swizzled_layout(buffer: Buffer | BufferLoad | BufferRegion,
+                               is_a: bool = True,
+                               k_inner: bool = True):
     stride, continuous = _get_stride_continuous(buffer)
     return _ffi_api.make_volta_swizzled_layout(
         stride,
@@ -85,7 +89,7 @@ def make_volta_swizzled_layout(buffer: Union[Buffer, BufferLoad, BufferRegion], 
 
 
 # for WGMMA Intrinsics
-def make_wgmma_swizzled_layout(buffer: Union[Buffer, BufferLoad, BufferRegion],
+def make_wgmma_swizzled_layout(buffer: Buffer | BufferLoad | BufferRegion,
                                continuity: int = None,
                                k_major: bool = True):
     stride, continuous = _get_stride_continuous(buffer)
@@ -102,7 +106,7 @@ def make_wgmma_swizzled_layout(buffer: Union[Buffer, BufferLoad, BufferRegion],
 
 
 # for TCGEN05MMA Intrinsics
-def make_tcgen05mma_swizzled_layout(buffer: Union[Buffer, BufferLoad, BufferRegion],
+def make_tcgen05mma_swizzled_layout(buffer: Buffer | BufferLoad | BufferRegion,
                                     continuity: int = None,
                                     k_major: bool = True):
     stride, continuous = _get_stride_continuous(buffer)

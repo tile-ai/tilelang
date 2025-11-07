@@ -274,10 +274,12 @@ class TensorCoreIntrinEmitter:
                 for j in T.vectorized(local_size_b):
                     if b_transposed:
                         mi, mk = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = b_buf[b_base0 + wi + mi, b_base1 + wk + mk]
+                        B_local_buf[i * local_size_b + j] = b_buf[b_base0 + wi + mi,
+                                                                  b_base1 + wk + mk]
                     else:
                         mk, mi = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = b_buf[b_base0 + wk + mk, b_base1 + wi + mi]
+                        B_local_buf[i * local_size_b + j] = b_buf[b_base0 + wk + mk,
+                                                                  b_base1 + wi + mi]
 
         return _warp_ldmatrix_b(B_local_buf, B_region, ki, thread_binding, rk)
 

@@ -3,7 +3,6 @@ from tilelang import tvm as tvm
 import tilelang.language as T
 from tvm import DataType
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion
-from tilelang import tvm as tvm
 from tvm.runtime import convert
 from .utils import (
     mfma_store_index_map,)
@@ -290,7 +289,7 @@ class MatrixCoreIntrinEmitter:
                         l, r = (rk * chunk + ki * (k_pack * micro_size_k),
                                 warp_m * warp_row_tiles + i * micro_size_x)
                         A_local_buf[i * k_pack * local_size_a + local_id] = a_buf[a_base0 + l + row,
-                                                                                   a_base1 + r + col]
+                                                                                  a_base1 + r + col]
             else:
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
@@ -298,7 +297,7 @@ class MatrixCoreIntrinEmitter:
                         l, r = (warp_m * warp_row_tiles + i * micro_size_x,
                                 rk * chunk + ki * (k_pack * micro_size_k))
                         A_local_buf[i * k_pack * local_size_a + local_id] = a_buf[a_base0 + l + row,
-                                                                                   a_base1 + r + col]
+                                                                                  a_base1 + r + col]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -342,7 +341,7 @@ class MatrixCoreIntrinEmitter:
                             rk * chunk + ki * (k_pack * micro_size_k),
                         )
                         B_local_buf[j * k_pack * local_size_b + local_id] = b_buf[b_base0 + l + row,
-                                                                                   b_base1 + r + col]
+                                                                                  b_base1 + r + col]
 
             else:
                 for j in T.serial(warp_cols):
@@ -353,7 +352,7 @@ class MatrixCoreIntrinEmitter:
                             warp_n * warp_col_tiles + j * micro_size_y,
                         )
                         B_local_buf[j * k_pack * local_size_b + local_id] = b_buf[b_base0 + l + row,
-                                                                                   b_base1 + r + col]
+                                                                                  b_base1 + r + col]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 

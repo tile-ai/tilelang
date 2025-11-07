@@ -540,7 +540,9 @@ def warpgroup_fence_operand(buffer_or_ptr: Buffer | PrimExpr,
                 bits_per_elem = DataType(dtype).bits
                 num_regs = (total_elems * bits_per_elem + 31) // 32
             else:
-                raise ValueError("warpgroup_fence_operand requires num_regs when BufferRegion extent is symbolic.")
+                raise ValueError(
+                    "warpgroup_fence_operand requires num_regs when BufferRegion extent is symbolic."
+                )
         return evaluate(
             tir.call_intrin(
                 "handle",
@@ -573,7 +575,8 @@ def warpgroup_fence_operand(buffer_or_ptr: Buffer | PrimExpr,
                     inferred = None
             if inferred is None:
                 raise ValueError(
-                    "dtype must be provided when passing a pointer expression and cannot be inferred.")
+                    "dtype must be provided when passing a pointer expression and cannot be inferred."
+                )
             dtype = inferred
         if num_regs is None:
             raise ValueError("num_regs must be provided when passing a pointer expression.")

@@ -639,10 +639,10 @@ private:
       thread_bounds = Range::FromMinExtent(0, 1);
     }
 
-    auto lowered = tile_op->Lower(
-        LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  layout_map_, buffer_remap_},
-        analyzer_);
+    auto lowered =
+        tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_->var,
+                                 callback, layout_map_, buffer_remap_},
+                       analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 
@@ -680,7 +680,6 @@ private:
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
   bool has_tma_{false};
-  
 };
 
 namespace transform {

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from tilelang.primitives.gemm.base import GemmWarpPolicy
 import tilelang.language as T
-from tvm import tir, ir
+from tvm import tir
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -92,9 +92,9 @@ def _gemm_impl(
 
     mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else tir.const(0, "uint32")
     C_coords = [r.min for r in C.region]
-    return tir.call_intrin("handle", tir.op.Op.get(op_key), A, B, C, transpose_A,
-                           transpose_B, M, N, K, policy, clear_accum, stride_a, stride_b, offset_a,
-                           offset_b, k_pack, wg_wait, mbarptr, C_coords[0], C_coords[1])
+    return tir.call_intrin("handle", tir.op.Op.get(op_key), A, B, C, transpose_A, transpose_B, M, N,
+                           K, policy, clear_accum, stride_a, stride_b, offset_a, offset_b, k_pack,
+                           wg_wait, mbarptr, C_coords[0], C_coords[1])
 
 
 # Public wrappers

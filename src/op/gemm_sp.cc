@@ -154,8 +154,8 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   std::string op_name = "tl::gemm_sp_ss";
   ICHECK((a_.scope() == "shared" || a_.scope() == "shared.dyn") &&
          (b_.scope() == "shared" || b_.scope() == "shared.dyn"))
-      << "Only support shared.dyn scope for A and B, but received " << a_.scope()
-      << " and " << b_.scope();
+      << "Only support shared.dyn scope for A and B, but received "
+      << a_.scope() << " and " << b_.scope();
   ICHECK((e_.scope() == "shared" || e_.scope() == "shared.dyn"))
       << "Only support shared.dyn scope for E as copy from smem to rmem are "
          "delegated to cute implementation, found "
@@ -227,19 +227,19 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
         (this->m_ >= wgmma_m) && (block_size / warp_size % 4 == 0);
     auto [warp_m, warp_n] = policy_->computeWarpPartition(
         m_, n_, block_size, T.target, maybe_wgmma, a_->dtype.bits());
-    auto fragment =
-        maybe_wgmma
-            ? makeGemmFragmentCHopper(m_, n_, m_ / warp_m, n_ / warp_n,
-                                      c_->dtype.bits())
-            : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n, c_->dtype.bits());
+    auto fragment = maybe_wgmma
+                        ? makeGemmFragmentCHopper(m_, n_, m_ / warp_m,
+                                                  n_ / warp_n, c_->dtype.bits())
+                        : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
+                                            c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
     if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
       results.Set(a_, makeGemmABLayoutHopper(mat_stride, mat_continuous,
-                                            mat_continuous, a_->dtype.bits(),
-                                            transA_ ? 1 : 2));
+                                             mat_continuous, a_->dtype.bits(),
+                                             transA_ ? 1 : 2));
     } else {
       ICHECK(false) << "Not implemented";
     }
@@ -259,8 +259,8 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
   } else if (TargetIsAmpere(T.target)) {
     auto [warp_m, warp_n] = policy_->computeWarpPartition(
         m_, n_, block_size, T.target, false, a_->dtype.bits());
-    auto fragment =
-        makeGemmSparseFragmentC(m_, n_, m_ / warp_m, n_ / warp_n, c_->dtype.bits());
+    auto fragment = makeGemmSparseFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
+                                            c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
 
     if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
@@ -268,7 +268,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
       results.Set(a_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                  a_->dtype.bits()));
+                                                   a_->dtype.bits()));
     } else if (a_.scope() == "local.fragment") {
       // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
       //                                   A->dtype.bits(), trans_A);
@@ -282,7 +282,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
       results.Set(b_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                  b_->dtype.bits()));
+                                                   b_->dtype.bits()));
     } else if (b_.scope() == "local.fragment") {
       // auto fragment =
       //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);

@@ -12,22 +12,25 @@
 #include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
-#include "tcgen5_meta.h"
 #include "region.h"
+#include "tcgen5_meta.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-// Normalize a GEMM argument (BufferRegion/BufferLoad/tvm_access_ptr/tl.region) to BufferRegion
-static BufferRegion NormalizeToBufferRegion(const PrimExpr &arg, const BufferMap &vmap) {
+// Normalize a GEMM argument (BufferRegion/BufferLoad/tvm_access_ptr/tl.region)
+// to BufferRegion
+static BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
+                                            const BufferMap &vmap) {
   // Case 1: Already a BufferRegion
   if (arg->IsInstance<BufferRegionNode>()) {
     return Downcast<BufferRegion>(arg);
   }
 
-  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else extent=1)
+  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
+  // extent=1)
   if (const auto *load = arg.as<BufferLoadNode>()) {
     Array<Range> ranges;
     for (const PrimExpr &index : load->indices) {
@@ -65,13 +68,15 @@ static BufferRegion NormalizeToBufferRegion(const PrimExpr &arg, const BufferMap
   }
 
   LOG(FATAL) << "Unsupported GEMM argument for BufferRegion: " << arg;
-  throw;  // Unreachable, keeps compiler happy
+  throw; // Unreachable, keeps compiler happy
 }
 
-// Build a tvm_access_ptr(handle) to the start of the 2D tile within a BufferRegion.
-// Offset is computed from all but the last two dimensions; extent is the product of
-// the last two extents. rw_mask: 1=read, 2=write, 3=readwrite.
-static PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask) {
+// Build a tvm_access_ptr(handle) to the start of the 2D tile within a
+// BufferRegion. Offset is computed from all but the last two dimensions; extent
+// is the product of the last two extents. rw_mask: 1=read, 2=write,
+// 3=readwrite.
+static PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
+                                        int rw_mask) {
   Buffer buf = region->buffer;
   int ndim = static_cast<int>(buf->shape.size());
   ICHECK(ndim >= 2) << "GEMM expects buffers with at least 2 dims";
@@ -92,7 +97,8 @@ static PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask)
   }
 
   // Extent: last two extents product (elements)
-  PrimExpr extent = region->region[ndim - 2]->extent * region->region[ndim - 1]->extent;
+  PrimExpr extent =
+      region->region[ndim - 2]->extent * region->region[ndim - 1]->extent;
 
   // ptype and return handle
   PrimExpr ptype = tir::TypeAnnotation(buf->dtype);
@@ -276,7 +282,8 @@ bool GemmPyNode::checkWgmma() const {
     else if (a_->dtype == DataType::BFloat(16) &&
              b_->dtype == DataType::BFloat(16))
       return k_ % 16 == 0;
-    else if (a_->dtype == DataType::Float(32) && b_->dtype == DataType::Float(32))
+    else if (a_->dtype == DataType::Float(32) &&
+             b_->dtype == DataType::Float(32))
       return (!transA_) && transB_ && k_ % 8 == 0;
     else if (a_->dtype.is_float8_e4m3() && b_->dtype.is_float8_e4m3())
       return (!transA_) && transB_ && k_ % 32 == 0;

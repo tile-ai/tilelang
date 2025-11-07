@@ -88,14 +88,14 @@ class GemmMMA(GemmBase):
         A_region = self.ARegion
         B_region = self.BRegion
         C_region = self.CRegion
-        
+
         A_buf = A_region.buffer
         B_buf = B_region.buffer
         C_buf = C_region.buffer
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
-        
-        assert is_full_region(C_region), f"Fragment output C must be a full region"
+
+        assert is_full_region(C_region), "Fragment output C must be a full region"
 
         if self.is_gemm_ss():
 
@@ -131,7 +131,7 @@ class GemmMMA(GemmBase):
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_ssr, inline_let=True)
         elif self.is_gemm_sr():
-            assert is_full_region(B_region), f"Fragment input B must be a full region"
+            assert is_full_region(B_region), "Fragment input B must be a full region"
 
             @T.prim_func
             def _gemm_srr() -> None:
@@ -160,7 +160,8 @@ class GemmMMA(GemmBase):
             # insert into parent block
             return _Simplify(_gemm_srr, inline_let=True)
         elif self.is_gemm_rs():
-            assert is_full_region(A_region), f"Fragment input A must be a full region"
+            assert is_full_region(A_region), "Fragment input A must be a full region"
+
             @T.prim_func
             def _gemm_rsr() -> None:
                 """
@@ -186,8 +187,8 @@ class GemmMMA(GemmBase):
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
         elif self.is_gemm_rr():
-            assert is_full_region(A_region), f"Fragment input A must be a full region"
-            assert is_full_region(B_region), f"Fragment input B must be a full region"
+            assert is_full_region(A_region), "Fragment input A must be a full region"
+            assert is_full_region(B_region), "Fragment input B must be a full region"
 
             @T.prim_func
             def _gemm_rrr() -> None:

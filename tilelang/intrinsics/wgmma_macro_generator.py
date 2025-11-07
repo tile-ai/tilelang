@@ -4,7 +4,7 @@ from enum import IntEnum
 from typing import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var, IndexMap, BufferLoad, BufferRegion
+from tvm.tir import PrimExpr, Buffer, Var, IndexMap, BufferRegion
 from tilelang.utils import is_fragment, retrive_ptr_from_buffer_region, is_full_region
 from math import gcd
 from tilelang.layout import (
@@ -262,10 +262,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         num_inst_n = self.warp_col_tiles // wgmma_inst_n
 
         thread_binding = self.get_thread_binding()
-        
+
         A_ptr = retrive_ptr_from_buffer_region(A_region)
         B_ptr = retrive_ptr_from_buffer_region(B_region)
-        assert is_full_region(C_region), f"Fragment output C must be a full region"
+        assert is_full_region(C_region), "Fragment output C must be a full region"
 
         C_buf = C_region.buffer
 
@@ -375,17 +375,15 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         thread_binding = self.get_thread_binding()
 
-        assert is_full_region(A_region), f"Fragment input A must be a full region"
-        assert is_full_region(C_region), f"Fragment output C must be a full region"
+        assert is_full_region(A_region), "Fragment input A must be a full region"
+        assert is_full_region(C_region), "Fragment output C must be a full region"
         A_buf = A_region.buffer
         B_ptr = retrive_ptr_from_buffer_region(B_region)
         C_buf = C_region.buffer
 
-
         @T.macro
         def _warp_mma(A_buf, B_ptr, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
-
 
             desc_b = T.alloc_wgmma_desc()
             T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode,
