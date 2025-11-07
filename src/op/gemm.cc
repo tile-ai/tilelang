@@ -209,11 +209,9 @@ bool GemmNode::allowWgmma(int block_size, Target target) const {
 }
 
 GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
-  bool allow_tcgen5mma = allowTcgen5Mma(target);
-  bool allow_wgmma = allowWgmma(block_size, target);
-  if (allow_tcgen5mma) {
+  if (allowTcgen5Mma(target)) {
     return GemmInst::kTCGEN5MMA;
-  } else if (allow_wgmma) {
+  } else if (allowWgmma(block_size, target)) {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
