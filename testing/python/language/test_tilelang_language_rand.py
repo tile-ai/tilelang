@@ -109,10 +109,83 @@ def run_seeded_dropout(M=1024, p=0.5, seed=42, dtype="float32", device="cuda"):
     torch.testing.assert_close(tilelang_result, triton_output, atol=1e-3, rtol=1e-3)
 
 
+@triton.jit
+def triton_rand_2d(X, M, N, seed, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+                   dtype: tl.constexpr):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+
+    block_start_m = pid_m * BLOCK_M
+    block_start_n = pid_n * BLOCK_N
+
+    offsets_m = block_start_m + tl.arange(0, BLOCK_M)[:, None]
+    offsets_n = block_start_n + tl.arange(0, BLOCK_N)[None, :]
+
+    offsets = offsets_m * N + offsets_n
+
+    mask = (offsets_m < M) & (offsets_n < N)
+
+    rand = tl.rand(seed, offsets)
+
+    tl.store(X + offsets, rand, mask=mask)
+
+
+@tilelang.jit(out_idx=[0])
+def tilelang_rand_2d(M, N, seed, dtype, block_m, block_n):
+
+    @T.prim_func
+    def rand_kernel(A: T.Tensor((M, N), dtype)):
+        with T.Kernel(T.ceildiv(M, block_m), T.ceildiv(N, block_n), threads=64) as (bx, by):
+            rand_buffer = T.alloc_fragment((block_m, block_n), dtype)
+            T.rand(rand_buffer, seed)
+            T.copy(rand_buffer, A[bx * block_m, by * block_n])
+
+    return rand_kernel
+
+
+def run_rand_2d(M=128, N=128, seed=42, dtype="float32", device="cuda", block_m=16, block_n=16):
+    tilelang_kernel = tilelang_rand_2d(
+        M=M, N=N, seed=seed, dtype=dtype, block_m=block_m, block_n=block_n)
+    tilelang_result = torch.empty(M, N, dtype=getattr(torch, dtype), device=device)
+    tilelang_result = tilelang_kernel()
+
+    triton_result = torch.empty(M, N, dtype=getattr(torch, dtype), device=device)
+    # grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']))
+    BLOCK_M = tl.constexpr(block_m)
+    BLOCK_N = tl.constexpr(block_n)
+    triton_rand_2d[[triton.cdiv(M, block_m), triton.cdiv(N, block_n)
+                   ]](triton_result,
+                      M,
+                      N,
+                      seed=seed,
+                      BLOCK_M=BLOCK_M,
+                      BLOCK_N=BLOCK_N,
+                      dtype=getattr(tl, dtype))
+
+    torch.testing.assert_close(tilelang_result, triton_result, atol=1e-3, rtol=1e-3)
+
+
+def run_triton_rand_2d(M=8, N=8, seed=42, dtype="float32", block_m=4, block_n=4, device="cuda"):
+    triton_result = torch.empty(M, N, dtype=getattr(torch, dtype), device=device)
+    # grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']))
+    BLOCK_M = tl.constexpr(block_m)
+    BLOCK_N = tl.constexpr(block_n)
+    triton_rand_2d[[triton.cdiv(M, block_m), triton.cdiv(N, block_n)
+                   ]](triton_result,
+                      M,
+                      N,
+                      seed=seed,
+                      BLOCK_M=BLOCK_M,
+                      BLOCK_N=BLOCK_N,
+                      dtype=getattr(tl, dtype))
+    return triton_result
+
+
 @tilelang.testing.requires_cuda
 def test_rand():
-    run_rand_1d()
     run_seeded_dropout()
+    run_rand_1d()
+    run_rand_2d()
 
 
 if __name__ == "__main__":

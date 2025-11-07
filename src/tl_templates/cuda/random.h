@@ -49,23 +49,38 @@ TL_DEVICE float uint32_to_uniform_float_device(uint32_t x) {
   return (float)x_abs * scale;
 }
 
-TL_DEVICE void philox_rand(float *output, int total_elems, uint64_t seed,
-                           int n_rounds) {
-  int local_idx = threadIdx.x;
-  if (local_idx >= total_elems)
-    return;
+TL_DEVICE void philox_rand(float *output, int total_elems, int block_m,
+                           int block_n, uint64_t seed, int n_rounds) {
+  int N = block_n * gridDim.y;
 
   uint32_t seed_lo = (uint32_t)(seed & 0xFFFFFFFFULL);
   uint32_t seed_hi = (uint32_t)((seed >> 32) & 0xFFFFFFFFULL);
-  int block_start = blockIdx.x * total_elems;
-  uint32_t offset_lo = (uint32_t)(block_start + local_idx);
-  uint32_t offset_hi = 0U;
-  uint32_t c0 = offset_lo;
-  uint32_t c1 = offset_hi;
-  uint32_t c2 = 0U;
-  uint32_t c3 = 0U;
-  philox_impl_device(&c0, &c1, &c2, &c3, seed_lo, seed_hi, n_rounds);
-  output[local_idx] = uint32_to_uniform_float_device(c0);
+
+  int tid = threadIdx.x;
+  int num_threads = blockDim.x;
+
+  int block_row_offset = blockIdx.x * block_m;
+  int block_col_offset = blockIdx.y * block_n;
+
+  int elems_per_thread = (total_elems + num_threads - 1) / num_threads;
+
+  for (int i = 0; i < elems_per_thread; i++) {
+    int local_linear_idx = tid * elems_per_thread + i;
+    int local_row = local_linear_idx / block_n;
+    int local_col = local_linear_idx % block_n;
+
+    int global_row = block_row_offset + local_row;
+    int global_col = block_col_offset + local_col;
+    uint64_t global_idx = (uint64_t)global_row * N + global_col;
+
+    uint32_t c0 = (uint32_t)(global_idx & 0xFFFFFFFFULL);
+    uint32_t c1 = (uint32_t)((global_idx >> 32) & 0xFFFFFFFFULL);
+    uint32_t c2 = 0U;
+    uint32_t c3 = 0U;
+
+    philox_impl_device(&c0, &c1, &c2, &c3, seed_lo, seed_hi, n_rounds);
+    output[i] = uint32_to_uniform_float_device(c0);
+  }
 }
 
 } // namespace tl
