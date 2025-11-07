@@ -584,9 +584,7 @@ def get_type_hints(func):
         freevars = getattr(func.__code__, 'co_freevars', ())
         cells = getattr(func, '__closure__', ()) or ()
         closure_bindings = {
-            name: cell.cell_contents
-            for name, cell in zip(freevars, cells)
-            if name not in localns
+            name: cell.cell_contents for name, cell in zip(freevars, cells) if name not in localns
         }
         if closure_bindings:
             localns.update(closure_bindings)
