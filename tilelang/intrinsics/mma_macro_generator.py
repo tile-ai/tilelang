@@ -750,7 +750,8 @@ class TensorCoreIntrinEmitter:
         from tilelang.utils import is_fragment
 
         shape = local_buf.shape
-        assert is_fragment(local_buf), f"local_buf {local_buf} must be a fragment, but got {local_buf.scope()}"
+        assert is_fragment(
+            local_buf), f"local_buf {local_buf} must be a fragment, but got {local_buf.scope()}"
         inverse_mma_store_layout = self.get_store_index_map(inverse=True)
 
         micro_size_x, micro_size_y = self.micro_size_x, self.micro_size_y
