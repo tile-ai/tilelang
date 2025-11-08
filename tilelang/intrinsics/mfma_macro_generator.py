@@ -9,7 +9,7 @@ from .utils import (
 from typing import Literal, Callable
 
 from tilelang.utils import is_fragment
-
+from tilelang.utils.language import to_buffer_region
 from .mfma_layout import (
     shared_16x4_to_local_64x1_layout_A,
     shared_4x16_to_local_64x1_layout_B,

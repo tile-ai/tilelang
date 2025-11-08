@@ -2,7 +2,7 @@ from .gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mfma_macro_generator import (
     MatrixCoreIntrinEmitter,)
-from tilelang.utils.language import is_shared, is_fragment
+from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm import tir
@@ -137,7 +137,6 @@ class GemmMFMA(GemmBase):
             return _Simplify(_gemm_ssr, inline_let=True)
         elif self.is_gemm_sr():
             assert is_full_region(B_region), "Fragment input B must be a full region"
-
 
             @T.prim_func
             def _gemm_srr() -> None:

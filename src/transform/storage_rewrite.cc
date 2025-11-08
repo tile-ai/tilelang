@@ -1425,9 +1425,30 @@ public:
   void
   OnArrayDeclaration(const Var &buffer, DataType element_dtype, PrimExpr extent,
                      BufferVarInfo::DeclarationLocation declaration_location) {
-    ICHECK(info_map_.find(buffer.get()) == info_map_.end())
-        << "Array declaration of " << buffer->name_hint
-        << " occurred multiple times.";
+    auto it = info_map_.find(buffer.get());
+    if (it != info_map_.end()) {
+      // The same buffer var may appear in more than one Allocate due to
+      // upstream transforms (e.g., storage planning/merging). Treat repeated
+      // declarations as benign and merge metadata instead of erroring.
+      BufferVarInfo &existing = it->second;
+      // Prefer a concrete element dtype if the previous one was a handle.
+      if (existing.element_dtype.is_handle() && !element_dtype.is_handle()) {
+        existing.element_dtype =
+            element_dtype == DataType::Bool()
+                ? DataType::Int(8).with_lanes(element_dtype.lanes())
+                : element_dtype;
+      }
+      // If extent was previously unknown (0) and a concrete extent is
+      // provided now, record it.
+      if (!existing.extent.defined() || is_zero(existing.extent)) {
+        existing.extent = extent;
+      }
+      // Merge declaration locations (bitwise OR of flags).
+      existing.declaration_location =
+          static_cast<BufferVarInfo::DeclarationLocation>(
+              existing.declaration_location | declaration_location);
+      return;
+    }
 
     if (element_dtype == DataType::Bool()) {
       element_dtype = DataType::Int(8).with_lanes(element_dtype.lanes());
