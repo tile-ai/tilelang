@@ -46,8 +46,7 @@ def matmul(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                # T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
-                T.gemm_v2(A_shared, B_shared, C_local, trans_A, trans_B)
+                T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
@@ -681,7 +680,7 @@ def test_gemm_rr_true_true(m, n, k):
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
+    tilelang.testing.main()
 
     # # Test Pass
     # for m in [64, 128, 256]:
@@ -724,4 +723,13 @@ if __name__ == "__main__":
     #             print(f"======================= Test {m} {n} {k} False True =============================")
     #             run_gemm_rs(m, n, k * 3, False, True, "float16", "float16", "float16", m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
-    test_gemm_false_true(256, 128, 16, "float16", "float16", "float16")
+
+    # for n in [16, 32, 64, 128]:
+    #     for k in [16, 32, 64, 128]:
+    #         run_gemm_rs(64, n, k, False, False, "float16", "float16", "float16", 64, n, k, 0, 256)
+    #         print(f"Test {64} {n} {k} Pass")
+
+    # for n in [16, 32, 64, 128]:
+    #     for k in [16, 32, 64, 128]:
+    #         run_gemm(64, n, k, False, False, "float16", "float16", "float16", 64, n, k, 0, 256)
+    #         print(f"Test {64} {n} {k} Pass")

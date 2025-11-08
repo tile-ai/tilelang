@@ -354,11 +354,28 @@ public:
   }
 
 private:
+  // Helper to record alignment for a shared/shared.dyn Var under alignment
+  // scope
+  void MarkSharedVarIfNeeded(const VarNode *op) {
+    if (!op || !under_alignment_scope_)
+      return;
+    auto ptr_type = op->type_annotation.as<PointerTypeNode>();
+    if (!ptr_type)
+      return;
+    auto scope = GetPtrStorageScope(tvm::ffi::GetRef<Var>(op));
+    if (scope == "shared" || scope == "shared.dyn") {
+      auto target = Target::Current();
+      ICHECK(target.defined()) << "Target is not defined";
+      const int alignment = TargetIsHopper(target) ? 1024 : 16;
+      shmem_alignment_map_[op] = alignment;
+    }
+  }
+
   void VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) ||
         op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
-        op->op.same_as(tl::ptx_wgmma_ss()) ||
-        op->op.same_as(tl::ptx_wgmma_rs())) {
+        op->op.same_as(tl::initialize_wgmma_descriptor()) ||
+        op->op.same_as(tl::initialize_tcgen05_descriptor())) {
       // These intrinsics introduce stricter SMEM alignment requirements; mark
       // the subtree.
       under_alignment_scope_ = true;
@@ -370,15 +387,16 @@ private:
   }
 
   void VisitExpr_(const VarNode *op) {
-    auto ptr_type = op->type_annotation.as<PointerTypeNode>();
-    if (ptr_type && under_alignment_scope_) {
-      auto scope = GetPtrStorageScope(tvm::ffi::GetRef<Var>(op));
-      if (scope == "shared" || scope == "shared.dyn") {
-        auto target = Target::Current();
-        ICHECK(target.defined()) << "Target is not defined";
-        const int alignment = TargetIsHopper(target) ? 1024 : 16;
-        shmem_alignment_map_[op] = alignment;
-      }
+    MarkSharedVarIfNeeded(op);
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) {
+    // If we encounter address_of(BufferLoad(...)) or any direct BufferLoad
+    // within an alignment scope, make sure we mark the underlying shared var.
+    if (op && under_alignment_scope_) {
+      const VarNode *data_var = op->buffer->data.get();
+      MarkSharedVarIfNeeded(data_var);
     }
     StmtExprVisitor::VisitExpr_(op);
   }

@@ -296,7 +296,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         ) * m_dim * a_swizzle_atom_elems if a_is_k_major else warp_i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
                         B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
                             ki % bk_atom_size
-                        ) * micro_size_k + warp_j * wgmma_inst_n * b_swizzle_atom_elems if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k + warp_j * k_dim * wgmma_inst_n
+                        ) * micro_size_k + warp_j * wgmma_inst_n * b_swizzle_atom_elems if b_is_k_major else (
+                            ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n *
+                            (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1))
                         C_offset = i * warp_cols * local_size_out + j * warp_cols * local_size_out // num_inst_n  # 4 warps as an unit
                         T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, a_is_k_major, b_is_k_major,
                                        a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv, desc_a.data,
@@ -402,8 +404,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         B_offset = (
                             ki // bk_atom_size
                         ) * n_dim * b_swizzle_atom_elems + warp_j * wgmma_inst_n * b_swizzle_atom_elems + (
-                            ki % bk_atom_size
-                        ) * micro_size_k if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k + warp_j * k_dim * wgmma_inst_n
+                            ki % bk_atom_size) * micro_size_k if b_is_k_major else (
+                                ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n *
+                                (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1))
                         C_offset = i * warp_cols * local_size_out + j * warp_cols * local_size_out // num_inst_n  # 4 warps as an unit
                         T.ptx_wgmma_rs(
                             accum_dtype,
