@@ -915,36 +915,55 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string b_bias = this->PrintExpr(op->args[9]);
     std::string c_ref = this->PrintExpr(op->args[10]);
     std::string c_bias = this->PrintExpr(op->args[11]);
+    (void)prefix;
     ICHECK(A_layout == "row" || B_layout == "row")
         << "Matrix core only support row major";
-    // map for dtype -> float32x4 -> float4
-    std::unordered_map<std::string, std::string> dtype_map = {
-        {"int8", "char"},
-        {"int32", "int"},
-        {"int8x4", "int32_t"},
-        {"int8x8", "int64_t"},
-        {"int32x4", "int32x4"},
-        {"float16", "half"},
+    // Prefer calling our typed wrapper rather than raw __builtin to handle
+    // packing and vector types correctly across dtypes (f16/bf16/i8/fp8).
+    // Map input dtype strings to scalar element types expected by MfmaTraits.
+    auto map_to_scalar = [this](const std::string &s) -> std::string {
+      // normalize to element type
+      if (s == "half" || s == "float16" || s == "float16x2" || s == "float16x4" ||
+          s == "float16x8" || s == "float16x16")
+        return "half";
+      if (s == "bfloat16" || s == "bf16" || s == "bfloat16x2" || s == "bfloat16x4" ||
+          s == "bfloat16x8" || s == "bfloat16x16")
+        return "bfloat16_t";
+      if (s.rfind("int8", 0) == 0 || s == "int8x4" || s == "int8x8")
+        return "int8_t";
+      // FP8 variants (e4m3/e5m2), possibly with vector suffix x4/x8/x16
+      if (s.find("float8") != std::string::npos || s.find("fp8") != std::string::npos ||
+          s.find("e4m3") != std::string::npos || s.find("e5m2") != std::string::npos) {
+        enable_fp8_ = true;
+        if (s.find("e5m2") != std::string::npos)
+          return "fp8_e5_t";
+        return "fp8_e4_t";
+      }
+      // fallback: keep as-is
+      return s;
+    };
+
+    // Map accumulator dtype to concrete C type.
+    std::unordered_map<std::string, std::string> acc_type_map = {
         {"float32", "float"},
         {"float64", "double"},
-        {"float16x4", "float16x4"},
-        {"bfloat16x4", "bfloat16x4"},
         {"float32x4", "float32x4"},
-        {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
-        {"float8_e4m3fnuzx8", "long"},
+        {"int32x4", "int32x4"},
         {"float32x16", "float32x16"}};
-    std::string call_mfma_code = R"({
-      *((({C_dtype}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),
-                    *((({B_dtype}*){b_ref}) + {b_bias}),
-                    *((({C_dtype}*){c_ref}) + {c_bias}), 0, 0, 0);
-    })";
-    std::string mfma_buildin = "__builtin_amdgcn_mfma_" + prefix;
-    Replacer replacer;
 
-    replacer.register_rule("{mfma_buildin}", mfma_buildin);
-    replacer.register_rule("{A_dtype}", dtype_map[A_dtype]);
-    replacer.register_rule("{B_dtype}", dtype_map[B_dtype]);
-    replacer.register_rule("{C_dtype}", dtype_map[C_dtype]);
+    std::string A_scalar = map_to_scalar(A_dtype);
+    std::string B_scalar = map_to_scalar(B_dtype);
+    std::string C_acc =
+        acc_type_map.count(C_dtype) ? acc_type_map[C_dtype] : C_dtype;
+
+    // Generate wrapper call in a single line. Order: (B, A, C).
+    std::string call_mfma_code =
+        R"(tl::MfmaTraits<{A_scalar}>::mfma_op(reinterpret_cast<const {B_scalar}*>({b_ref})+{b_bias},reinterpret_cast<const {A_scalar}*>({a_ref})+{a_bias},reinterpret_cast<{C_dtype}*>({c_ref})+{c_bias});)";
+
+    Replacer replacer;
+    replacer.register_rule("{A_scalar}", A_scalar);
+    replacer.register_rule("{B_scalar}", B_scalar);
+    replacer.register_rule("{C_dtype}", C_acc);
     replacer.register_rule("{a_ref}", a_ref);
     replacer.register_rule("{a_bias}", a_bias);
     replacer.register_rule("{b_ref}", b_ref);
