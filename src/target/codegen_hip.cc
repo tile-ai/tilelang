@@ -923,17 +923,19 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     // Map input dtype strings to scalar element types expected by MfmaTraits.
     auto map_to_scalar = [this](const std::string &s) -> std::string {
       // normalize to element type
-      if (s == "half" || s == "float16" || s == "float16x2" || s == "float16x4" ||
-          s == "float16x8" || s == "float16x16")
+      if (s == "half" || s == "float16" || s == "float16x2" ||
+          s == "float16x4" || s == "float16x8" || s == "float16x16")
         return "half";
-      if (s == "bfloat16" || s == "bf16" || s == "bfloat16x2" || s == "bfloat16x4" ||
-          s == "bfloat16x8" || s == "bfloat16x16")
+      if (s == "bfloat16" || s == "bf16" || s == "bfloat16x2" ||
+          s == "bfloat16x4" || s == "bfloat16x8" || s == "bfloat16x16")
         return "bfloat16_t";
       if (s.rfind("int8", 0) == 0 || s == "int8x4" || s == "int8x8")
         return "int8_t";
       // FP8 variants (e4m3/e5m2), possibly with vector suffix x4/x8/x16
-      if (s.find("float8") != std::string::npos || s.find("fp8") != std::string::npos ||
-          s.find("e4m3") != std::string::npos || s.find("e5m2") != std::string::npos) {
+      if (s.find("float8") != std::string::npos ||
+          s.find("fp8") != std::string::npos ||
+          s.find("e4m3") != std::string::npos ||
+          s.find("e5m2") != std::string::npos) {
         enable_fp8_ = true;
         if (s.find("e5m2") != std::string::npos)
           return "fp8_e5_t";
