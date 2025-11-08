@@ -139,6 +139,7 @@ class MatrixCoreIntrinEmitter:
         }[out_dtype]
 
         in_dtype_abbrv = {
+            "bfloat16": "bf16",
             "float16": "f16",
             "float32": "f32",
             "int8": "i8",
