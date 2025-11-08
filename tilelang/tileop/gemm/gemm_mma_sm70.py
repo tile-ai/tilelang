@@ -81,6 +81,8 @@ class GemmMMASm70(GemmBase):
 
         A_buf = A_region.buffer
         C_buf = C_region.buffer
+        
+        clear_accum = self.clear_accum
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
 
@@ -97,6 +99,9 @@ class GemmMMASm70(GemmBase):
                 """
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+
+                if clear_accum:
+                    T.clear(C_buf)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
                     # Load A into fragment
@@ -130,6 +135,9 @@ class GemmMMASm70(GemmBase):
                 accumulating into C_local.
                 """
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+
+                if clear_accum:
+                    T.clear(C_buf)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
 

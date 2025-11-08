@@ -263,15 +263,11 @@ class MatrixCoreIntrinEmitter:
         thread_binding = self.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=False)
 
-        # Resolve BufferRegion to underlying Buffer and base offsets
-        if isinstance(A_shared_buf, BufferRegion):
-            a_buf = A_shared_buf.buffer
-            a_base0 = A_shared_buf.region[-2].min
-            a_base1 = A_shared_buf.region[-1].min
-        else:
-            a_buf = A_shared_buf
-            a_base0 = tvm.tir.const(0, "int32")
-            a_base1 = tvm.tir.const(0, "int32")
+        # legalize shared buffer to region
+        A_region = to_buffer_region(A_shared_buf)
+        A_buf = A_region.buffer
+        A_base0 = A_region.region[-2].min
+        A_base1 = A_region.region[-1].min
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -288,16 +284,16 @@ class MatrixCoreIntrinEmitter:
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (rk * chunk + ki * (k_pack * micro_size_k),
                                 warp_m * warp_row_tiles + i * micro_size_x)
-                        A_local_buf[i * k_pack * local_size_a + local_id] = a_buf[a_base0 + l + row,
-                                                                                  a_base1 + r + col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[A_base0 + l + row,
+                                                                                  A_base1 + r + col]
             else:
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (warp_m * warp_row_tiles + i * micro_size_x,
                                 rk * chunk + ki * (k_pack * micro_size_k))
-                        A_local_buf[i * k_pack * local_size_a + local_id] = a_buf[a_base0 + l + row,
-                                                                                  a_base1 + r + col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[A_base0 + l + row,
+                                                                                  A_base1 + r + col]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -313,15 +309,11 @@ class MatrixCoreIntrinEmitter:
         thread_binding = self.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=True)
 
-        # Resolve BufferRegion to underlying Buffer and base offsets
-        if isinstance(B_shared_buf, BufferRegion):
-            b_buf = B_shared_buf.buffer
-            b_base0 = B_shared_buf.region[-2].min
-            b_base1 = B_shared_buf.region[-1].min
-        else:
-            b_buf = B_shared_buf
-            b_base0 = tvm.tir.const(0, "int32")
-            b_base1 = tvm.tir.const(0, "int32")
+        # legalize shared buffer to region
+        B_region = to_buffer_region(B_shared_buf)
+        B_buf = B_region.buffer
+        B_base0 = B_region.region[-2].min
+        B_base1 = B_region.region[-1].min
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -340,8 +332,8 @@ class MatrixCoreIntrinEmitter:
                             warp_n * warp_col_tiles + j * micro_size_y,
                             rk * chunk + ki * (k_pack * micro_size_k),
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = b_buf[b_base0 + l + row,
-                                                                                  b_base1 + r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[B_base0 + l + row,
+                                                                                  B_base1 + r + col]
 
             else:
                 for j in T.serial(warp_cols):
@@ -351,8 +343,8 @@ class MatrixCoreIntrinEmitter:
                             rk * chunk + ki * (k_pack * micro_size_k),
                             warp_n * warp_col_tiles + j * micro_size_y,
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = b_buf[b_base0 + l + row,
-                                                                                  b_base1 + r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[B_base0 + l + row,
+                                                                                  B_base1 + r + col]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
