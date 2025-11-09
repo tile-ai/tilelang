@@ -65,9 +65,50 @@ else()
 endif()
 
 # Configs
-set(USE_CUDA OFF)
-set(USE_ROCM OFF)
-set(USE_METAL OFF)
+set(TILELANG_BACKENDS CUDA ROCM METAL)
+
+set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
+set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
+set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
+
+# TVM's config.cmake redefines USE_* options later, so we cache the user's choice
+# (including explicit -DUSE_XXX arguments) before we include TVM and restore it
+# afterwards.
+
+macro(tilelang_define_backend_option BACKEND)
+  set(_backend_var "USE_${BACKEND}")
+  set(_doc "${TILELANG_BACKEND_DOC_${BACKEND}}")
+  set(_user_override_var "TILELANG_USER_OVERRIDE_${_backend_var}")
+
+  set(_user_override OFF)
+  if(DEFINED ${_user_override_var})
+    set(_user_override "${${_user_override_var}}")
+  endif()
+
+  if(DEFINED CACHE{${_backend_var}})
+    get_property(_cache_type CACHE ${_backend_var} PROPERTY TYPE)
+    if(_cache_type STREQUAL "UNINITIALIZED")
+      set(_user_override ON)
+    endif()
+  endif()
+
+  set(_default OFF)
+  if(DEFINED ${_backend_var})
+    set(_default "${${_backend_var}}")
+  endif()
+
+  option(${_backend_var} "${_doc}" "${_default}")
+  # Remember if the user explicitly set this option so that later logic
+  # won't auto-toggle backends they configured on the command line.
+  set(${_user_override_var} ${_user_override} CACHE INTERNAL
+    "User explicitly set ${_backend_var} during configuration" FORCE)
+  set(TILELANG_OPTION_${_backend_var} "${${_backend_var}}")
+endmacro()
+
+foreach(BACKEND IN LISTS TILELANG_BACKENDS)
+  tilelang_define_backend_option(${BACKEND})
+endforeach()
+
 set(PREBUILD_CYTHON ON)
 # Configs end
 
@@ -78,6 +119,14 @@ if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
 else()
   message(FATAL_ERROR "Nor tvm provided or submodule checkout-ed.")
 endif()
+# Re-apply TileLang's preferred backend settings after TVM's config may have
+# overridden the USE_* cache entries.
+foreach(BACKEND IN LISTS TILELANG_BACKENDS)
+  set(_backend_var "USE_${BACKEND}")
+  set(_doc "${TILELANG_BACKEND_DOC_${BACKEND}}")
+  set(${_backend_var} ${TILELANG_OPTION_${_backend_var}} CACHE STRING "${_doc}" FORCE)
+  set(${_backend_var} ${TILELANG_OPTION_${_backend_var}})
+endforeach()
 
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
@@ -95,23 +144,35 @@ file(GLOB TILE_LANG_SRCS
   src/target/intrin_rule*.cc
 )
 
-# Backend-specific checks and configs
-if($ENV{USE_METAL})
-  set(USE_METAL ON)
-elseif(APPLE)
-  message(STATUS "Enable Metal support by default.")
-  set(USE_METAL ON)
-elseif($ENV{USE_ROCM})
-  set(USE_ROCM ON)
-else()
-  if($ENV{USE_CUDA})
-    set(USE_CUDA ON)
-  elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
-    # Build CPU-only when we explicitly disable CUDA
-    set(USE_CUDA OFF)
+# Track if the user explicitly selected a backend via cache options.
+set(TILELANG_BACKEND_USER_SELECTED OFF)
+foreach(BACKEND IN LISTS TILELANG_BACKENDS)
+  set(_backend_var "USE_${BACKEND}")
+  set(_override_var "TILELANG_USER_OVERRIDE_${_backend_var}")
+  if(${_backend_var} OR ${_override_var})
+    set(TILELANG_BACKEND_USER_SELECTED ON)
+  endif()
+endforeach()
+
+# Only auto-select a backend when the user didn't specify one explicitly.
+if(NOT TILELANG_BACKEND_USER_SELECTED)
+  if($ENV{USE_METAL})
+    set(USE_METAL ON)
+  elseif(APPLE)
+    message(STATUS "Enable Metal support by default.")
+    set(USE_METAL ON)
+  elseif($ENV{USE_ROCM})
+    set(USE_ROCM ON)
   else()
-    message(STATUS "Enable CUDA support by default.")
-    set(USE_CUDA ON)
+    if($ENV{USE_CUDA})
+      set(USE_CUDA ON)
+    elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
+      # Build CPU-only when we explicitly disable CUDA
+      set(USE_CUDA OFF)
+    else()
+      message(STATUS "Enable CUDA support by default.")
+      set(USE_CUDA ON)
+    endif()
   endif()
 endif()
 
@@ -125,7 +186,7 @@ if(USE_METAL)
 elseif(USE_ROCM)
   set(CMAKE_HIP_STANDARD 17)
   include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
-  find_rocm($ENV{USE_ROCM})
+  find_rocm(${USE_ROCM})
   add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
 
   file(GLOB TILE_LANG_HIP_SRCS

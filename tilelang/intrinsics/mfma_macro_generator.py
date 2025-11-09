@@ -151,6 +151,8 @@ class MatrixCoreIntrinEmitter:
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_fp8_fp8"
         elif in_dtype_abbrv == "i8":
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_i8"
+        elif in_dtype_abbrv == "bf16":
+            self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_bf16_1k"
         else:
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
 
