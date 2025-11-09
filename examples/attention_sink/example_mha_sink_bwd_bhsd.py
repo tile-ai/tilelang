@@ -267,14 +267,10 @@ def flashattn_bwd(
             T.clear(dk)
 
             loop_st = T.floordiv(by * block_M, block_N)
-            loop_ed = T.alloc_local([1], 'int32')
-            if window_size is not None:
-                loop_ed[0] = T.min(
-                    T.ceildiv((by + 1) * block_M + window_size, block_N),
-                    T.ceildiv(seq_len, block_N))
-            else:
-                loop_ed[0] = T.ceildiv(seq_len, block_N)
-            for k in T.Pipelined(loop_st, loop_ed[0], num_stages=num_stages):
+            loop_ed = T.min(
+                T.ceildiv((by + 1) * block_M + window_size, block_N), T.ceildiv(
+                    seq_len, block_N)) if window_size is not None else T.ceildiv(seq_len, block_N)
+            for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
                 T.copy(Q[bz, bx, k * block_N:(k + 1) * block_N, :], q)
                 T.clear(qkT)
                 T.gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)

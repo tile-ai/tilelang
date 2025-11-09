@@ -273,6 +273,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         def _warp_mma(A_ptr, B_ptr, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
 
+            scale_out = T.alloc_var("int32")
             desc_a = T.alloc_wgmma_desc()
             desc_b = T.alloc_wgmma_desc()
             T.initialize_wgmma_descriptor(desc_a, A_ptr, a_swizzle_mode,
@@ -283,12 +284,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                                           int(b_stride_byte_offset >> 4))
             T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
-            for j in T.serial(num_inst_n):
-                for i in T.serial(num_inst_m):
-                    for ki in T.serial(k_dim // micro_size_k):
+
+            if clear_accum:
+                scale_out = 0
+            else:
+                scale_out = 1
+            for j in T.unroll(num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(k_dim // micro_size_k):
                         warp_i = (warp_m // 4) * num_inst_m + i
                         warp_j = warp_n * num_inst_n + j
-                        scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
                         A_offset = (
                             ki % ak_atom_size
                         ) * micro_size_k + warp_i * 64 * a_swizzle_atom_elems + (
@@ -305,6 +310,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                                        (A_offset * elems_in_bytes) >> 4, desc_b.data,
                                        (B_offset * elems_in_bytes) >> 4, C_buf.data, C_offset,
                                        scale_out, scale_in_a, scale_in_b)
+                if clear_accum:
+                    scale_out = 1
+
             T.warpgroup_commit_batch()
             if wg_wait >= 0:
                 T.warpgroup_wait(wg_wait)
@@ -387,6 +395,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         def _warp_mma(A_buf, B_ptr, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
 
+            scale_out = T.alloc_var("int32")
             desc_b = T.alloc_wgmma_desc()
             T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode,
                                           int(b_leading_byte_offset >> 4),
@@ -395,11 +404,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
 
-            for j in T.serial(0, num_inst_n):
-                for i in T.serial(num_inst_m):
-                    for ki in T.serial(0, (k_dim // micro_size_k)):
+            if clear_accum:
+                scale_out = 0
+            else:
+                scale_out = 1
+
+            for j in T.unroll(0, num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(0, (k_dim // micro_size_k)):
                         warp_j = warp_n * num_inst_n + j
-                        scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
+
                         A_offset = ki * warp_rows * local_size_a + i * local_size_a
                         B_offset = (
                             ki // bk_atom_size
@@ -425,6 +439,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             scale_in_a,
                             scale_in_b,
                         )
+                        if clear_accum:
+                            scale_out = 1
+
             T.warpgroup_commit_batch()
             if wg_wait >= 0:
                 T.warpgroup_wait(wg_wait)

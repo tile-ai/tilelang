@@ -81,13 +81,10 @@ def flashattn_fwd(
                 sinks[i] = Sinks[by]
 
             end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
-            start = T.alloc_local([1], 'int32')
-            if window_size is not None:
-                start[0] = T.max(0, (bx * block_M - window_size) // block_N)
-            else:
-                start[0] = 0
+            start = T.max(0,
+                          (bx * block_M - window_size) // block_N) if window_size is not None else 0
 
-            for k in T.Pipelined(start[0], end, num_stages=num_stages):
+            for k in T.Pipelined(start, end, num_stages=num_stages):
                 T.copy(K[bz, by // groups, k * block_N:(k + 1) * block_N, :], K_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     q_idx = bx * block_M + i
