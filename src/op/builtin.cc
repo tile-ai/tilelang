@@ -342,7 +342,7 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_mma_arrive)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(philox_rand)
-    .set_num_inputs(4)
+    .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
