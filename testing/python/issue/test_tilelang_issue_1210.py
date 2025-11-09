@@ -1,6 +1,5 @@
 import tilelang
 import tilelang.language as T
-from tilelang.transform import PassContext
 import tilelang.testing
 
 
@@ -32,6 +31,6 @@ def test_make_packed_api_no_free_loop_var():
     }
     tilelang.compile(func, pass_configs=cfg)
 
+
 if __name__ == "__main__":
     tilelang.testing.main()
-
