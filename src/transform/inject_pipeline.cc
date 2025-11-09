@@ -925,9 +925,8 @@ private:
           // substituted with the correct per-iteration index. Otherwise, keep
           // it as a normal wrapper.
           bool uses_loop_var = UsesVar(
-              let_stmt->value, [v = op->loop_var.get()](const VarNode *vn) {
-                return vn == v;
-              });
+              let_stmt->value,
+              [v = op->loop_var.get()](const VarNode *vn) { return vn == v; });
           if (uses_loop_var) {
             loop_var_let_wrappers.push_back({let_stmt->var, let_stmt->value});
           } else {
