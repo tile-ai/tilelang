@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import subprocess
 import warnings
+import contextlib
 from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 import shutil
 import tempfile
@@ -244,7 +245,8 @@ def get_sass_from_source(code: str,
     cand_cuobjdump = _find_tool("cuobjdump")
     if not cand_nvdisasm and not cand_cuobjdump:
         raise RuntimeError(
-            "Cannot find 'nvdisasm' or 'cuobjdump'. Please ensure CUDA toolkit is installed and in PATH.")
+            "Cannot find 'nvdisasm' or 'cuobjdump'. Please ensure CUDA toolkit is installed and in PATH."
+        )
     last_err: str | None = None
     try:
         # Attempt nvdisasm first
@@ -267,10 +269,8 @@ def get_sass_from_source(code: str,
         raise RuntimeError(f"SASS disassembly failed. Tried tools: "
                            f"{', '.join(name for name, _ in tools_to_try)}\n{last_err or ''}")
     finally:
-        try:
+        with contextlib.suppress(Exception):
             os.remove(cubin_path)
-        except Exception:
-            pass
 
 
 def find_cuda_path():
