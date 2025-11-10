@@ -623,8 +623,10 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   // Prefer a simple path: if original 2D indices form a bijective map, invert
   // them directly and avoid introducing a synthetic replicate dimension.
   {
-    auto res2d = arith::DetectIterMap(indice_map_[buffer], ToVMap(loop_vars_), 1,
-                                      arith::IterMapLevel::Bijective, const_cast<arith::Analyzer*>(&analyzer_));
+    auto res2d =
+        arith::DetectIterMap(indice_map_[buffer], ToVMap(loop_vars_), 1,
+                             arith::IterMapLevel::Bijective,
+                             const_cast<arith::Analyzer *>(&analyzer_));
     if (res2d->errors.empty()) {
       Layout ind_inv2d = Layout(loop_vars_, indice_map_[buffer])->Inverse();
       PrimExpr indice_rep_extent = 1;
@@ -634,8 +636,10 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
       for (size_t i = 0; i < buffer->shape.size(); i++) {
         fwd2.push_back(InputPlaceholder(i));
       }
-      PrimExpr thd_b2 = loop_layout_->ForwardThread(ind_inv2d->Forward(fwd2), std::nullopt);
-      return Fragment(buffer->shape, {}, thd_b2, dest_buffer_rep_extent, std::nullopt)
+      PrimExpr thd_b2 =
+          loop_layout_->ForwardThread(ind_inv2d->Forward(fwd2), std::nullopt);
+      return Fragment(buffer->shape, {}, thd_b2, dest_buffer_rep_extent,
+                      std::nullopt)
           ->CondenseReplicateVar();
     }
   }
@@ -647,15 +651,20 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   bijective_indice.push_back(rep_b);
   Layout layout_before_inv = Layout(loop_vars_, bijective_indice);
 
-  // Pre-check cardinality to guard non-bijective combinations after adding rep_b.
+  // Pre-check cardinality to guard non-bijective combinations after adding
+  // rep_b.
   PrimExpr in_prod = 1;
-  for (const auto &iv : loop_vars_) in_prod *= iv->dom->extent;
+  for (const auto &iv : loop_vars_)
+    in_prod *= iv->dom->extent;
   PrimExpr out_prod = 1;
-  for (const auto &d : layout_before_inv->OutputShape()) out_prod *= d;
+  for (const auto &d : layout_before_inv->OutputShape())
+    out_prod *= d;
 
   if (!analyzer_.CanProveEqual(in_prod, out_prod)) {
-    DLOG(WARNING) << "  Non-bijective mapping after appending rep_b; falling back to no-rep inversion.";
-    Layout ind_inv_fallback = Layout(loop_vars_, indice_map_[buffer])->Inverse();
+    DLOG(WARNING) << "  Non-bijective mapping after appending rep_b; falling "
+                     "back to no-rep inversion.";
+    Layout ind_inv_fallback =
+        Layout(loop_vars_, indice_map_[buffer])->Inverse();
     PrimExpr indice_rep_extent = 1;
     PrimExpr loop_rep_extent = loop_layout_->ReplicateExtent();
     PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
@@ -663,8 +672,10 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
     for (size_t i = 0; i < buffer->shape.size(); i++) {
       fwd2.push_back(InputPlaceholder(i));
     }
-    PrimExpr thd_b = loop_layout_->ForwardThread(ind_inv_fallback->Forward(fwd2), std::nullopt);
-    return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, std::nullopt)
+    PrimExpr thd_b = loop_layout_->ForwardThread(
+        ind_inv_fallback->Forward(fwd2), std::nullopt);
+    return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent,
+                    std::nullopt)
         ->CondenseReplicateVar();
   }
 

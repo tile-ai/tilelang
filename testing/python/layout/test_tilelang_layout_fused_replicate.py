@@ -5,7 +5,6 @@ import tilelang
 import tilelang.testing
 import tilelang.language as T
 
-
 tilelang.testing.set_random_seed()
 
 VEC_SIZE = 32
@@ -13,28 +12,25 @@ VEC_SIZE = 32
 
 @tilelang.jit
 def fused_index_kernel(B: int, M: int, N: int, BLOCK_MN: int, BLOCK_K: int):
+
     @T.prim_func
     def main(
-        a: T.Buffer((B, M, N), "bfloat16"),
-        a_out: T.Buffer((B, M, N), "float32"),
+            a: T.Buffer((B, M, N), "bfloat16"),
+            a_out: T.Buffer((B, M, N), "float32"),
     ):
         with T.Kernel(
-            T.ceildiv(M, BLOCK_MN),
-            T.ceildiv(N, BLOCK_K),
-            B,
-            threads=128,
+                T.ceildiv(M, BLOCK_MN),
+                T.ceildiv(N, BLOCK_K),
+                B,
+                threads=128,
         ) as (pid_m, pid_n, pid_b):
-            a_fp32_local = T.alloc_fragment(
-                (BLOCK_MN * BLOCK_K // VEC_SIZE, VEC_SIZE), "float32"
-            )
+            a_fp32_local = T.alloc_fragment((BLOCK_MN * BLOCK_K // VEC_SIZE, VEC_SIZE), "float32")
             offs_m = pid_m * BLOCK_MN
             offs_n = pid_n * BLOCK_K
 
             for i, j in T.Parallel(BLOCK_MN, BLOCK_K):
                 idx = i * BLOCK_K + j
-                a_out[pid_b, offs_m + i, offs_n + j] = a_fp32_local[
-                    idx // VEC_SIZE, idx % VEC_SIZE
-                ]
+                a_out[pid_b, offs_m + i, offs_n + j] = a_fp32_local[idx // VEC_SIZE, idx % VEC_SIZE]
 
     return main
 
@@ -65,4 +61,3 @@ def test_layout_infer_compiles_and_runs():
 
 if __name__ == "__main__":
     tilelang.testing.main()
-
