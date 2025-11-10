@@ -1159,7 +1159,7 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
 
   // replace patterns
   Replacer replacer;
-  replacer.register_rule("{.sparse}", sparse ? ".sp::ordered_metadata" : "");
+  replacer.register_rule("{.sparse}", sparse ? ".sp" : "");
   replacer.register_rule("{.shape}", "." + shape);
   replacer.register_rule("{.saturate}", saturate ? ".satfinite" : "");
   replacer.register_rule("{.alayout}", "." + A_layout);
