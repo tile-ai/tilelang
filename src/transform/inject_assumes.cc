@@ -62,7 +62,7 @@ private:
     Stmt build(Stmt body) {
       auto analyzer = arith::Analyzer{};
       for (const auto &e : items) {
-        auto simplified = analyzer.Simplify(GT(e.expr, 0));
+        auto simplified = analyzer.Simplify(GT(e.expr, IntImm(e.expr->dtype, 0)));
         std::stringstream ss;
         ss << "Buffer shape should be greater than 0: shape `" << e.expr
            << "` from buffer ";

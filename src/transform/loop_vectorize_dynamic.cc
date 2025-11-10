@@ -189,7 +189,7 @@ private:
       }
       PrimExpr offset = buffer.OffsetOf(indices).back();
       // condition for alignment, maybe useless
-      condition_ = (FloorMod(offset, vector_size_) == 0);
+      condition_ = (FloorMod(offset, IntImm(offset.dtype(), vector_size_)) == IntImm(offset.dtype(), 0));
     }
   }
 
