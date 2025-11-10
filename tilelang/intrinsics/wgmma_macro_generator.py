@@ -401,7 +401,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, (k_dim // micro_size_k)):
                         warp_j = warp_n * num_inst_n + j
-                        scale_out = T.select(ki != 0, 1, T.select(clear_accum, 0, 1))
+                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
 
                         A_offset = ki * warp_rows * local_size_a + i * local_size_a
                         B_offset = (
