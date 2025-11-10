@@ -162,11 +162,14 @@ def default_compile_options(compile_flags: list[str] | None = None) -> list[str]
     except Exception:
         pass
 
+    # Preserve user flags exactly, including repeated tokens required by NVCC
+    # (e.g., multiple "-gencode" pairs or repeated "-Xcompiler" entries).
     if compile_flags:
+        import shlex
         for flag in compile_flags:
-            for item in str(flag).split():
-                if item not in options:
-                    options.append(item)
+            # Split each string like a shell would, preserving quoted args
+            tokens = shlex.split(flag) if isinstance(flag, str) else [str(flag)]
+            options.extend(tokens)
     return options
 
 
