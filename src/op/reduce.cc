@@ -104,7 +104,7 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &lhs,
   } else if (type->isMin()) {
     return Min(lhs, rhs);
   } else if (type->isAbsMax()) {
-    return Max(Max(lhs, rhs), -Min(lhs, rhs));
+    return Max(tvm::abs(lhs), tvm::abs(rhs));
   } else if (type->isBitAnd()) {
     return lhs & rhs;
   } else if (type->isBitOr()) {
