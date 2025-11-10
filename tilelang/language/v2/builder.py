@@ -12,7 +12,7 @@ import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
-from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
+from typing import TYPE_CHECKING, Callable, Any, Generic, Hashable, TypeVar, ForwardRef, Union
 # Python 3.9 compatibility for ParamSpec and Self
 try:
     from typing import ParamSpec, Self
@@ -336,7 +336,7 @@ class Builder(BaseBuilder):
         elif isinstance(value, (Buffer, tir.IterVar, tir.Var)):
             IRBuilder.name(name, value)
             return value
-        elif isinstance(value, (tuple, list, tvm.ffi.Array)):
+        elif isinstance(value, (tuple, list, tvm.ffi.Array, int, float)):
             return value
         else:
             try:
@@ -452,8 +452,8 @@ class Builder(BaseBuilder):
             return tir.arg(name, value)
         elif value is self.empty:
             raise ValueError(f'Argument `{name}` is not annotated')
-        # elif isinstance(value, Hashable):
-        #     return value
+        elif isinstance(value, Hashable):
+            return value
         else:
             raise TypeError(
                 f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
@@ -632,7 +632,7 @@ def prim_func(func: Callable[_P, _T] = None,
         annot = get_type_hints(func)
 
         for k in annot:
-            if callable(annot[k]):
+            if annot[k] is not dt.dtype and callable(annot[k]):
                 annot[k] = annot[k]()
 
         # check whether all arguments are annotated
