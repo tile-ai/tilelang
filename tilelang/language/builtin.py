@@ -8,7 +8,7 @@ from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
 from typing import Any
-from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad, BufferRegion
+from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 
