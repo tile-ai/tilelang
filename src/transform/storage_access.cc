@@ -254,7 +254,11 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   this->VisitExpr(op->condition);
   PrimExpr real_condition = ExtractRealCondition(op->condition);
 
-  curr_stmt_.access.clear();
+  // Preserve accesses collected from the condition expression so they
+  // participate in dependency analysis. Otherwise, a write to shared memory
+  // immediately followed by an if-condition reading that memory would not
+  // trigger a sync before the if-statement.
+  std::vector<AccessEntry> cond_access = std::move(curr_stmt_.access);
   allow_append_ = false;
 
   scope_.push_back(std::vector<StmtEntry>());
@@ -267,6 +271,11 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   s.stmt = op;
   s.access = Summarize(std::move(scope_.back()), nullptr);
   scope_.pop_back();
+  // Merge the condition's access summary into the if-statement's access list
+  // so the planner can insert a sync before the if when necessary.
+  if (!cond_access.empty()) {
+    s.access.insert(s.access.begin(), cond_access.begin(), cond_access.end());
+  }
   if (op->else_case) {
     scope_.push_back(std::vector<StmtEntry>());
     {

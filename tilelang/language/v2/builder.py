@@ -100,6 +100,14 @@ class BreakFrame(Frame):
     ...
 
 
+@dataclass
+class SerialForWithStep:
+    start: PrimExpr
+    stop: PrimExpr
+    step: PrimExpr
+    annotations: dict[str, Any] | None = None
+
+
 # Python 3.9 compatibility: avoid PEP 604 unions at runtime
 # Use tuple for isinstance checks and typing.Union for annotations/aliases
 ContinueOrBreak = (ContinueFrame, BreakFrame)
@@ -243,12 +251,32 @@ class Builder(BaseBuilder):
     def ctx_for(self, it):
         self.check_continue_break()
         it = unwrap_expr(it)
-        if not isinstance(it, tir.frame.ForFrame):
-            raise TypeError(
-                f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
-                "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding")
-        with self.with_frame(it) as v:
-            yield v
+        if isinstance(it, SerialForWithStep):
+            # Validate and compute the trip count before constructing the frame
+            if isinstance(it.step, (int, IntImm)):
+                step_value = it.step if isinstance(it.step, int) else it.step.value
+                if step_value == 0:
+                    raise ValueError('Invalid stepped serial: step must be non-zero')
+                if step_value > 0:
+                    real_stop = tir.ceildiv(it.stop - it.start, step_value)
+                else:
+                    real_stop = tir.ceildiv(it.start - it.stop, -step_value)
+            else:
+                logger.warning(
+                    f'Using a non-constant step `{it.step}` in stepped serial may lead to undefined behavior in tilelang'
+                )
+                real_stop = tir.ceildiv(it.stop - it.start, it.step)
+            real_frame = tir.serial(real_stop, annotations=it.annotations)
+            with self.with_frame(real_frame) as v:
+                IRBuilder.name('_tmp', v)
+                yield it.start + v * it.step
+        else:
+            if not isinstance(it, tir.frame.ForFrame):
+                raise TypeError(
+                    f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
+                    "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding")
+            with self.with_frame(it) as v:
+                yield v
 
     def ctx_continue(self):
         self.check_continue_break()
@@ -459,8 +487,9 @@ class Builder(BaseBuilder):
                 f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
 
     def override(self, name: str):
+        from tilelang.language import serial
         if name == 'range':
-            return tir.serial
+            return serial
         raise ValueError(f'Unknown override: {name}')
 
 
@@ -546,10 +575,25 @@ def get_type_hints(func):
     if annot is None:
         raise TypeError(f'Failed to get function type hints, {func} is not a function')
     hints = {}
-    # type params are not used currently, it is support since python 3.12.4
-    # type_params = getattr(func, "__type_params__", ())
-    globalns = getattr(func, '__globals__', {})
-    localns = globalns
+    # Build eval namespaces from function globals plus captured closure variables
+    # This lets annotations reference symbols like `n`, `h`, or dtype vars
+    # defined in the outer scope of a nested function.
+    globalns = dict(getattr(func, '__globals__', {}))
+    localns = dict(globalns)
+    try:
+        freevars = getattr(func.__code__, 'co_freevars', ())
+        cells = getattr(func, '__closure__', ()) or ()
+        closure_bindings = {
+            name: cell.cell_contents for name, cell in zip(freevars, cells) if name not in localns
+        }
+        if closure_bindings:
+            localns.update(closure_bindings)
+            # Also update globals so ForwardRef eval sees them uniformly
+            globalns.update(closure_bindings)
+    except Exception:
+        # Be permissive: absence or access issues with closure shouldn't crash
+        pass
+
     for name, value in annot.items():
         if name == 'return':
             continue
@@ -559,10 +603,12 @@ def get_type_hints(func):
         if value is None:
             value = type(None)
         if isinstance(value, str):
-            # this branch handles T.float32 style annotation
-            #  since they are string, directly evaluating them usually causes NameError
-            #  so we need to split and evaluate them separately
-            _, v = value.split('.', maxsplit=1)
+            # Handle simple dtype aliases like T.float32 appearing as strings
+            # Evaluate directly only when it matches known dtypes
+            try:
+                _, v = value.split('.', maxsplit=1)
+            except ValueError:
+                v = value
             if v in dt._all_dtypes:
                 try:
                     hints[name] = eval(value, globalns, localns)
@@ -570,8 +616,7 @@ def get_type_hints(func):
                 except Exception:
                     pass
             value = ForwardRef(value, is_argument=True, is_class=False)
-        hints[name] = _eval_type(
-            value, globalns=globalns, localns=localns)  #, type_params=type_params)
+        hints[name] = _eval_type(value, globalns=globalns, localns=localns)
     return hints
 
 
