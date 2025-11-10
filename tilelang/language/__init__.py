@@ -82,7 +82,7 @@ from .customize import (
 )
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
-
+from .proxy import Buffer # noqa: F401
 from .utils import index_to_coordinates  # noqa: F401
 
 from .symbolics import dynamic, symbolic  # noqa: F401
