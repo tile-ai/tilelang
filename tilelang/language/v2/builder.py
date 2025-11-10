@@ -245,7 +245,7 @@ class Builder(BaseBuilder):
             pass
         elif isinstance(val, tvm.tir.stmt.BufferStore):
             tir.buffer_store(val.buffer, val.value, val.indices, val.predicate)
-        else:
+        elif not isinstance(val, tvm.tir.Buffer):
             raise TypeError(f"Unsupported eval value: {val} of type {type(val)}")
 
     def ctx_for(self, it):
