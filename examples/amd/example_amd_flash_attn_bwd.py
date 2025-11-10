@@ -314,7 +314,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
 
             T.copy(K[bz, by * block_M:(by + 1) * block_M, bx // groups, :], K_shared)
-            T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_register)
+            T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_shared)
             T.clear(dv)
             T.clear(dk)
 
