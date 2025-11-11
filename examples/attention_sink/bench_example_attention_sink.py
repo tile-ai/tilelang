@@ -20,7 +20,8 @@ def bench_example_mha_sink_fwd_bhsd_wgmma_pipelined():
 
 
 def bench_example_mha_sink_fwd_bhsd_wgmma_pipelined_sliding_window():
-    tilelang.tools.bench.process_func(example_mha_sink_fwd_bhsd_wgmma_pipelined.main(window_size=128))
+    tilelang.tools.bench.process_func(
+        example_mha_sink_fwd_bhsd_wgmma_pipelined.main(window_size=128))
 
 
 def bench_example_gqa_sink_fwd_bhsd_wgmma_pipelined():
@@ -28,7 +29,8 @@ def bench_example_gqa_sink_fwd_bhsd_wgmma_pipelined():
 
 
 def bench_example_gqa_sink_fwd_bhsd_wgmma_pipelined_sliding_window():
-    tilelang.tools.bench.process_func(example_gqa_sink_fwd_bhsd_wgmma_pipelined.main(window_size=128))
+    tilelang.tools.bench.process_func(
+        example_gqa_sink_fwd_bhsd_wgmma_pipelined.main(window_size=128))
 
 
 def bench_example_mha_sink_bwd_bhsd():

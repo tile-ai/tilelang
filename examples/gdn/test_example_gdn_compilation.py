@@ -1,6 +1,5 @@
 import tilelang.testing
 import torch
-import bench_example_gdn_compilation
 
 B = 1
 S = 1024  # small but for test only.
@@ -187,7 +186,6 @@ def test_example_chunk_delta_bwd_compilation():
                                                      use_final_state_gradient, block_DV, threads,
                                                      num_stages)
     dh_tilelang, dh0_tilelang, dv2_tilelang = kernel(Q, K, W, G, h0, dht, dO, dv)  # noqa: F841
-
 
 
 if __name__ == "__main__":
