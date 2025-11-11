@@ -388,8 +388,8 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
         fwd.push_back(Var(std::string("_i") + std::to_string(i - 1)));
       }
     }
-    auto thd = src_layout->ForwardThread(
-        fwd, FloorDiv(rep_local, indice_rep_extent));
+    auto thd =
+        src_layout->ForwardThread(fwd, FloorDiv(rep_local, indice_rep_extent));
 
     // Ensure the thread count is divisible by the replicate extent.
     // Otherwise, we cannot infer a valid fragment<->fragment layout.
