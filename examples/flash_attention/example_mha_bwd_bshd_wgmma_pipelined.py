@@ -54,7 +54,8 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
                                                      -T.infinity(acc_s.dtype))
                 else:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0)
+                        acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len,
+                                                     -T.infinity(acc_s.dtype), 0)
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(V[bz, k * block_N:(k + 1) * block_N, by, :], V_shared)
                 T.copy(scores_max, scores_max_prev)
