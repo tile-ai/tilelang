@@ -250,7 +250,7 @@ std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   if (!is_static_shape) {
     // Runtime guards keep dynamic tails safe, so we allow NoCheck here and
     // warn.
-    LOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
+    DLOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
                     "NoCheck; symbolic dims: "
                  << symbolic_dims;
   }
