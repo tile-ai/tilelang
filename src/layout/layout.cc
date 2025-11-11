@@ -5,6 +5,7 @@
 
 #include "layout.h"
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/arith/pattern.h>
 #include <tvm/tir/op.h>
@@ -255,8 +256,11 @@ std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   }
   arith::IterMapResult res =
       arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
-  ICHECK(res->errors.empty())
-      << "Layout " << DebugOutput() << " has errors: " << res->errors;
+  if (!res->errors.empty()) {
+    std::ostringstream msg;
+    msg << "Layout " << DebugOutput() << " has errors: " << res->errors;
+    throw NormalizeIterException(msg.str());
+  }
 
   auto outputs_shape = OutputShape();
   Array<PrimExpr> outputs;
@@ -539,6 +543,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                return makeGemmABLayoutHopper(stride, continuous, continuous,
                                              element_size, k_inner);
              }
+           })
+      .def("tl.make_volta_swizzled_layout",
+           [](int stride, int mat_continuous, bool is_a, bool k_inner) {
+             return makeGemmVoltaABLayout(stride, mat_continuous, is_a,
+                                          k_inner);
            })
       .def("tl.make_wgmma_swizzled_layout",
            [](int stride, int mat_continuous, int continuity, int element_size,

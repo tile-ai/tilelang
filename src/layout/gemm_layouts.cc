@@ -577,11 +577,11 @@ Layout MakeGemmVoltaBLayoutCongruous(int stride, int continuous) {
 
 Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
                              bool k_inner) {
-  if (k_inner)
+  if (k_inner && continuous % 32 == 0 && stride % 32 == 0)
     return MakeGemmVoltaABLayoutCrosswise(stride, continuous);
-  if (is_a && continuous % 64 == 0)
+  if (is_a && continuous % 64 == 0 && stride % 4 == 0)
     return MakeGemmVoltaALayoutCongruous(stride, continuous);
-  if (!is_a && continuous % 64 == 0)
+  if (!is_a && continuous % 64 == 0 && stride % 4 == 0)
     return MakeGemmVoltaBLayoutCongruous(stride, continuous);
   return makeGemmABLayoutPadded(stride, continuous, 16);
 }

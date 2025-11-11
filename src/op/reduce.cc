@@ -104,7 +104,7 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &lhs,
   } else if (type->isMin()) {
     return Min(lhs, rhs);
   } else if (type->isAbsMax()) {
-    return Max(Max(lhs, rhs), -Min(lhs, rhs));
+    return Max(tvm::abs(lhs), tvm::abs(rhs));
   } else if (type->isBitAnd()) {
     return lhs & rhs;
   } else if (type->isBitOr()) {
@@ -358,70 +358,6 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                       clear_buffer->shape, const_true(), body);
     }
     return body;
-  }
-
-  auto is_shared_scope = [](const std::string &scope) {
-    return scope == "shared" || scope == "shared.dyn";
-  };
-
-  if (is_shared_scope(src_scope) && is_shared_scope(dst_scope)) {
-    Buffer src_buffer = get_buffer(this->src);
-    Buffer dst_buffer = get_buffer(this->dst);
-
-    size_t src_dim = src_buffer->shape.size();
-    size_t dst_dim = dst_buffer->shape.size();
-    bool is_1d_reduce = (src_dim == dst_dim && dst_dim == 1);
-    if (!is_1d_reduce) {
-      ICHECK_EQ(src_dim, dst_dim + 1) << "Reduce dimension mismatch.";
-    } else {
-      ICHECK_EQ(dst_dim, 1U) << "Expect scalar layout for 1D reduce.";
-    }
-
-    auto thread_extent = as_const_int(T.thread_bounds->extent);
-    ICHECK(thread_extent)
-        << "Shared-memory reduce requires static thread extent.";
-    int threads = *thread_extent;
-
-    if (TargetIsCuda(T.target)) {
-      ICHECK_EQ(threads % 32, 0)
-          << "Shared reduce expects blockDim.x to be a multiple of 32 on CUDA.";
-    } else if (TargetIsRocm(T.target)) {
-      ICHECK_EQ(threads % 64, 0)
-          << "Shared reduce expects blockDim.x to be a multiple of 64 on HIP.";
-    }
-
-    bool use_abs = this->type->isAbsSum() || this->type->isAbsMax();
-    bool need_accumulate =
-        (!this->clear) && (this->type->isSum() || this->type->isAbsSum() ||
-                           this->type->isBitAnd() || this->type->isBitOr() ||
-                           this->type->isBitXor());
-
-    PrimExpr reduce_extent = src_buffer->shape[this->dim];
-    PrimExpr tail_extent = make_const(DataType::Int(32), 1);
-    for (size_t i = this->dim + 1; i < src_dim; ++i) {
-      tail_extent = analyzer->Simplify(tail_extent * src_buffer->shape[i]);
-    }
-
-    PrimExpr total_dest = make_const(DataType::Int(32), 1);
-    for (size_t i = 0; i < dst_dim; ++i) {
-      total_dest = analyzer->Simplify(total_dest * dst_buffer->shape[i]);
-    }
-
-    std::stringstream ss;
-    std::string reducer = this->MakeCodegenReducer();
-    ss << "tl::SharedReduceWarp<" << reducer << ", " << threads << ", "
-       << (use_abs ? "true" : "false") << ", "
-       << (need_accumulate ? "true" : "false") << ">::run";
-
-    Array<PrimExpr> call_args = {StringImm(ss.str()),
-                                 src_buffer.access_ptr(1),
-                                 dst_buffer.access_ptr(3),
-                                 cast(DataType::Int(32), total_dest),
-                                 cast(DataType::Int(32), reduce_extent),
-                                 cast(DataType::Int(32), tail_extent),
-                                 this->MakeInitValue()};
-
-    return Evaluate(Call(dst_buffer->dtype, builtin::call_extern(), call_args));
   }
 
   LOG(FATAL) << "Reduce for buffers in scope (" << src_scope << ", "

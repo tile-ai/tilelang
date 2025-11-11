@@ -7,7 +7,10 @@ from __future__ import annotations
 import os
 import subprocess
 import warnings
-from tilelang.env import CUDA_HOME
+import contextlib
+from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
+import shutil
+import tempfile
 import tvm_ffi
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -123,6 +126,154 @@ def compile_cuda(code,
         if not data:
             raise RuntimeError("Compilation error: empty result is generated")
         return data
+
+
+def default_compile_options(compile_flags: list[str] | None = None) -> list[str]:
+    """
+    Build a set of default NVCC compile options for TileLang generated sources.
+
+    Includes C++ standard and common include paths (TileLang templates, CUTLASS,
+    CUDA include). Merges user-provided compile flags if given.
+
+    Parameters
+    ----------
+    compile_flags : Optional[List[str]]
+        Additional flags to include. Items are split on whitespace.
+
+    Returns
+    -------
+    List[str]
+        A list of flags suitable for NVCC's command line.
+    """
+    options: list[str] = ["-std=c++17"]
+    try:
+        if TILELANG_TEMPLATE_PATH:
+            options.append(f"-I{TILELANG_TEMPLATE_PATH}")
+    except Exception:
+        pass
+    try:
+        if CUTLASS_INCLUDE_DIR:
+            options.append(f"-I{CUTLASS_INCLUDE_DIR}")
+    except Exception:
+        pass
+    try:
+        if CUDA_HOME:
+            options.append(f"-I{os.path.join(CUDA_HOME, 'include')}")
+    except Exception:
+        pass
+
+    # Preserve user flags exactly, including repeated tokens required by NVCC
+    # (e.g., multiple "-gencode" pairs or repeated "-Xcompiler" entries).
+    if compile_flags:
+        import shlex
+        for flag in compile_flags:
+            # Split each string like a shell would, preserving quoted args
+            tokens = shlex.split(flag) if isinstance(flag, str) else [str(flag)]
+            options.extend(tokens)
+    return options
+
+
+def get_ptx_from_source(code: str,
+                        compile_flags: list[str] | None = None,
+                        verbose: bool = False) -> str:
+    """
+    Compile CUDA C++ source to PTX using NVCC and return as text.
+
+    Parameters
+    ----------
+    code : str
+        CUDA C++ kernel source code.
+    compile_flags : Optional[List[str]]
+        Additional flags merged with defaults.
+    verbose : bool
+        Print NVCC output when True.
+
+    Returns
+    -------
+    str
+        PTX text.
+    """
+    opts = default_compile_options(compile_flags)
+    ptx_bytes = compile_cuda(code, target_format="ptx", options=opts, verbose=verbose)
+    try:
+        return ptx_bytes.decode("utf-8")
+    except Exception:
+        return str(ptx_bytes)
+
+
+def _find_tool(name: str) -> str | None:
+    """Find a CUDA binary in PATH or under CUDA_HOME/bin."""
+    path = shutil.which(name)
+    if path:
+        return path
+    if CUDA_HOME:
+        candidate = os.path.join(CUDA_HOME, "bin", name)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def get_sass_from_source(code: str,
+                         compile_flags: list[str] | None = None,
+                         verbose: bool = False) -> str:
+    """
+    Compile CUDA C++ source to CUBIN and disassemble to SASS.
+
+    Uses nvdisasm if available; otherwise falls back to cuobjdump.
+
+    Parameters
+    ----------
+    code : str
+        CUDA C++ kernel source code.
+    compile_flags : Optional[List[str]]
+        Additional flags merged with defaults.
+    verbose : bool
+        Print tool outputs when True.
+
+    Returns
+    -------
+    str
+        SASS text.
+    """
+    opts = default_compile_options(compile_flags)
+    cubin_bytes = compile_cuda(code, target_format="cubin", options=opts, verbose=verbose)
+
+    # Write to a temp .cubin file
+    with tempfile.NamedTemporaryFile(suffix=".cubin", delete=False) as tmp:
+        tmp.write(cubin_bytes)
+        cubin_path = tmp.name
+
+    # Try disassembly tools (prefer nvdisasm, fallback cuobjdump)
+    cand_nvdisasm = _find_tool("nvdisasm")
+    cand_cuobjdump = _find_tool("cuobjdump")
+    if not cand_nvdisasm and not cand_cuobjdump:
+        raise RuntimeError(
+            "Cannot find 'nvdisasm' or 'cuobjdump'. Please ensure CUDA toolkit is installed and in PATH."
+        )
+    last_err: str | None = None
+    try:
+        # Attempt nvdisasm first
+        tools_to_try = []
+        if cand_nvdisasm:
+            tools_to_try.append(("nvdisasm", [cand_nvdisasm, cubin_path]))
+        if cand_cuobjdump:
+            tools_to_try.append(("cuobjdump", [cand_cuobjdump, "--dump-sass", cubin_path]))
+
+        for tool_name, cmd in tools_to_try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            out, _ = proc.communicate()
+            text = py_str(out)
+            if verbose:
+                print(f"[{tool_name}] output:\n{text}")
+            if proc.returncode == 0 and text.strip():
+                return text
+            last_err = f"{tool_name} rc={proc.returncode}, output:\n{text}"
+        # If we reach here, all attempts failed
+        raise RuntimeError(f"SASS disassembly failed. Tried tools: "
+                           f"{', '.join(name for name, _ in tools_to_try)}\n{last_err or ''}")
+    finally:
+        with contextlib.suppress(Exception):
+            os.remove(cubin_path)
 
 
 def find_cuda_path():

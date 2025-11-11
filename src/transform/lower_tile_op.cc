@@ -10,6 +10,7 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 #include <unordered_map>
+#include <vector>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -301,6 +302,9 @@ private:
         layout_map_.Set(buffer, layout);
       }
     }
+    // Begin a new workspace collection frame for this block scope
+    workspace_stack_.emplace_back();
+
     auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
     for (size_t i = 0; i < block->alloc_buffers.size(); i++) {
@@ -309,9 +313,13 @@ private:
         block_ptr->alloc_buffers.Set(i, buffer_remap_[buffer]);
       }
     }
-    for (const auto &buffer : workspaces_)
-      block_ptr->alloc_buffers.push_back(buffer);
-    workspaces_.clear();
+    // Attach any workspaces requested within this block to its alloc_buffers
+    if (!workspace_stack_.empty()) {
+      for (const auto &buffer : workspace_stack_.back()) {
+        block_ptr->alloc_buffers.push_back(buffer);
+      }
+      workspace_stack_.pop_back();
+    }
     return block;
   }
 
@@ -659,7 +667,15 @@ private:
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
-      workspaces_.push_back(workspace);
+      // Record workspace under the innermost block scope so its lifetime
+      // covers the statements that requested it and does not sink into
+      // subsequently created inner blocks (e.g., GEMM macro blocks).
+      if (!workspace_stack_.empty()) {
+        workspace_stack_.back().push_back(workspace);
+      } else {
+        // Fallback: create a temporary frame (should be rare)
+        workspace_stack_.emplace_back(Array<Buffer>{workspace});
+      }
       return workspace.access_ptr(2); // write
     };
 
@@ -707,7 +723,8 @@ private:
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
   size_t thread_block_size_ = 0;
-  Array<Buffer> workspaces_;
+  // Stack of per-Block workspace buffers gathered while visiting children
+  std::vector<Array<Buffer>> workspace_stack_;
   // For ptx Node, we need to remap the buffer and indices
   // By access CallNode instead of BufferLoad Node.
   bool is_ptx_{false};
