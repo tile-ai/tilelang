@@ -428,6 +428,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
           result.push_back(Integer(meta.atom_m));
           result.push_back(Integer(meta.atom_n));
           result.push_back(Integer(meta.atom_k));
+          result.push_back(Integer(meta.enable_ws));
+          result.push_back(Integer(meta.enable_2cta));
         }
         return result;
       });

@@ -15,16 +15,19 @@ using runtime::DataType;
 
 struct TCGEN5MMAMeta {
   int atom_m, atom_n, atom_k;
+  bool enable_ws, enable_2cta;
 };
 
 inline std::pair<bool, TCGEN5MMAMeta>
 GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
 #define FAIL                                                                   \
-  return { false, TCGEN5MMAMeta{0, 0, 0} }
-#define SUCCESS(atom_m, atom_n, atom_k)                                        \
   return {                                                                     \
-    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
+    false, TCGEN5MMAMeta { 0, 0, 0, false, false }                             \
+  }
+#define SUCCESS(atom_m, atom_n, atom_k, use_ws, use_2cta)                      \
+  return {                                                                     \
+    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k, use_ws, use_2cta }           \
   }
   std::vector<int> ws_valid_atom_ns = {256, 128, 64};
   if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
@@ -34,39 +37,52 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
     if (M % 128 == 0) {
       for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
         if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 16);
+          SUCCESS(128, atom_n, 16, false, false);
       FAIL;
     } else if (M % 64 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 16);
+          SUCCESS(64, atom_n, 16, false, false);
       FAIL;
     } else if (M % 32 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 16);
+          SUCCESS(32, atom_n, 16, false, false);
       FAIL;
     } else {
       FAIL;
     }
-  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e5m2()) &&
-             (c_dtype.is_float() && c_dtype.bits() == 32)) {
+  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e4m3() ||
+              ab_dtype.is_float8_e5m2() || ab_dtype.is_float8_e5m2fnuz() ||
+              ab_dtype.is_float6_e2m3fn() || ab_dtype.is_float6_e3m2fn() ||
+              ab_dtype.is_float4_e2m1fn()) &&
+             ((c_dtype.is_float() && c_dtype.bits() == 32) ||
+              (c_dtype.is_float16() && c_dtype.bits() == 16))) {
     if (K % 32 != 0)
       FAIL;
     if (M % 128 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 32, true, false);
       for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
         if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32);
+          SUCCESS(128, atom_n, 32, false, true);
+      for (int atom_n = 256; atom_n >= 8; atom_n -= 8)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 32, false, false);
       FAIL;
     } else if (M % 64 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 32);
+          SUCCESS(64, atom_n, 32, true, false);
+      for (int atom_n = 256; atom_n >= 8; atom_n -= 8)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 32, false, false);
       FAIL;
     } else if (M % 32 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 32);
+          SUCCESS(32, atom_n, 32, true, false);
       FAIL;
     } else {
       FAIL;

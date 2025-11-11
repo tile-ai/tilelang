@@ -45,7 +45,10 @@ class TensorCoreIntrinEmitter:
         "int8": "int8",
         "int32": "int32",
         "float8_e4m3": "e4m3",
+        "float8_e4m3fn": "e4m3",
+        "float8_e4m3fnuz": "e4m3",
         "float8_e5m2": "e5m2",
+        "float8_e5m2fnuz": "e5m2",
     }
 
     # Represent the thread binding in the form of (tx, warp_n, warp_m)
