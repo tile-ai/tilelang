@@ -6,7 +6,7 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 
-from tilelang.jit.adapter.utils import is_metal_target
+from tilelang.jit.adapter.utils import is_metal_target, is_cuda_target
 from tvm.target import Target
 from tvm.tir import PrimFunc
 
@@ -18,7 +18,9 @@ from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, Cython
                                   NVRTCKernelAdapter, TorchDLPackKernelAdapter, MetalKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
+from tilelang.contrib import nvcc as tl_nvcc
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +414,110 @@ class JITKernel(Generic[_P, _T]):
     def run_once(self, func: Callable | None = None) -> None:
         return self.get_profiler().run_once(func)
 
+    def show_source(self, which: Literal["kernel", "host", "both"] = "kernel") -> None:
+        """
+        Print generated source code to stdout.
+
+        Parameters
+        ----------
+        which : Literal["kernel", "host", "both"], optional
+            Select which source to print. Defaults to "kernel".
+
+        Examples
+        --------
+        >>> jit_kernel.show_source()            # print kernel source
+        >>> jit_kernel.show_source("host")      # print host source
+        >>> jit_kernel.show_source("both")      # print both sources
+        """
+        try:
+            if which == "kernel":
+                src = self.get_kernel_source()
+                print(src)
+            elif which == "host":
+                src = self.get_host_source()
+                # Host is generally C/C++
+                print(src)
+            elif which == "both":
+                print("===== Kernel Source =====")
+                ksrc = self.get_kernel_source()
+                print(ksrc)
+                print("===== Host Source =====")
+                hsrc = self.get_host_source()
+                print(hsrc)
+            else:
+                raise ValueError(f"Unknown option for 'which': {which}")
+        except Exception as e:
+            logger.error(f"Failed to show source code: {e}")
+
+    def export_sources(self, kernel_path: str | None = None, host_path: str | None = None) -> None:
+        """
+        Export generated source code to files.
+
+        Parameters
+        ----------
+        kernel_path : Optional[str]
+            Destination file path to write the kernel source. If None, skips writing kernel code.
+        host_path : Optional[str]
+            Destination file path to write the host source. If None, skips writing host code.
+
+        Examples
+        --------
+        >>> jit_kernel.export_sources(kernel_path="/tmp/kernel.cu")
+        >>> jit_kernel.export_sources(host_path="/tmp/host.cc")
+        >>> jit_kernel.export_sources(
+        ...     kernel_path="/tmp/kernel.cu",
+        ...     host_path="/tmp/host.cc",
+        ... )
+        """
+        if kernel_path is None and host_path is None:
+            raise ValueError("At least one of kernel_path or host_path must be provided.")
+        try:
+            if kernel_path is not None:
+                dir_path = os.path.dirname(kernel_path)
+                if dir_path:
+                    os.makedirs(dir_path, exist_ok=True)
+                with open(kernel_path, 'w') as f:
+                    f.write(self.get_kernel_source())
+            if host_path is not None:
+                dir_path = os.path.dirname(host_path)
+                if dir_path:
+                    os.makedirs(dir_path, exist_ok=True)
+                with open(host_path, 'w') as f:
+                    f.write(self.get_host_source())
+        except Exception as e:
+            logger.error(f"Failed to export sources: {e}")
+
+    # Backward compatibility alias (deprecated)
+    def print_source_code(self,
+                          which: Literal["kernel", "host", "both"] = "kernel",
+                          file: str | None = None) -> None:
+        """
+        Deprecated: use show_source() or export_sources() instead.
+
+        Parameters
+        ----------
+        which : Literal["kernel", "host", "both"], optional
+            Kept for backward compatibility with printing behavior.
+        file : Optional[str]
+            If provided, behaves like export_sources(kernel_path=file).
+
+        Examples
+        --------
+        >>> # New API (preferred)
+        >>> jit_kernel.show_source("both")
+        >>> jit_kernel.export_sources(kernel_path="/tmp/kernel.cu")
+
+        >>> # Old API (still works but deprecated)
+        >>> jit_kernel.print_source_code(file="/tmp/kernel.cu")
+        """
+        logger.warning(
+            "print_source_code is deprecated; use show_source() or export_sources() instead.")
+        if file is not None:
+            # Historical behavior wrote only kernel source when file provided
+            self.export_sources(kernel_path=file)
+        else:
+            self.show_source(which=which)
+
     def update_tuner_result(self, latency: float, config: dict[str, Any],
                             ref_latency: float) -> JITKernel:
         """
@@ -491,3 +597,131 @@ class JITKernel(Generic[_P, _T]):
 
         # Export the compiled kernel function to a shared library file.
         self.rt_module.export_library(kernel_file)
+
+    def _get_ptx(self, verbose: bool | None = None) -> str:
+        """
+        Compile and return PTX for the current kernel (CUDA only).
+
+        Parameters
+        ----------
+        verbose : Optional[bool]
+            Whether to enable verbose NVRTC logs. Defaults to self.verbose.
+
+        Returns
+        -------
+        str
+            The compiled PTX text.
+        """
+        if not is_cuda_target(self.target):
+            raise ValueError("PTX is only available for CUDA targets.")
+        # Prefer NVCC for PTX generation via contrib helper
+        code = self.get_kernel_source()
+        if verbose is None:
+            verbose = self.verbose
+        # Ensure target is set so nvcc picks correct arch via Target.current()
+        with self.target:
+            return tl_nvcc.get_ptx_from_source(
+                code, compile_flags=self.compile_flags, verbose=verbose)
+
+    def show_ptx(self) -> None:
+        """
+        Print compiled PTX for the kernel (CUDA only).
+
+        Examples
+        --------
+        >>> jit_kernel.show_ptx()
+        """
+        try:
+            ptx = self._get_ptx()
+            print(ptx)
+        except Exception as e:
+            logger.error(f"Failed to show PTX: {e}")
+
+    def export_ptx(self, path: str) -> None:
+        """
+        Export compiled PTX to a file (CUDA only).
+
+        Parameters
+        ----------
+        path : str
+            Destination file path to write PTX.
+
+        Examples
+        --------
+        >>> jit_kernel.export_ptx("/tmp/kernel.ptx")
+        """
+        if not path:
+            raise ValueError("path must be provided to export PTX")
+        try:
+            ptx = self._get_ptx()
+            dir_path = os.path.dirname(path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+            with open(path, "w") as f:
+                f.write(ptx)
+            logger.info(f"PTX saved to {os.path.abspath(path)}")
+        except Exception as e:
+            logger.error(f"Failed to export PTX: {e}")
+
+    def _get_sass(self, verbose: bool | None = None) -> str:
+        """
+        Compile and return SASS for the current kernel (CUDA only).
+
+        Parameters
+        ----------
+        verbose : Optional[bool]
+            Whether to enable verbose tool logs. Defaults to self.verbose.
+
+        Returns
+        -------
+        str
+            The disassembled SASS text.
+        """
+        if not is_cuda_target(self.target):
+            raise ValueError("SASS is only available for CUDA targets.")
+        code = self.get_kernel_source()
+        if verbose is None:
+            verbose = self.verbose
+        with self.target:
+            return tl_nvcc.get_sass_from_source(
+                code, compile_flags=self.compile_flags, verbose=verbose)
+
+    def show_sass(self) -> None:
+        """
+        Print disassembled SASS for the kernel (CUDA only).
+
+        Examples
+        --------
+        >>> jit_kernel.show_sass()
+        """
+        try:
+            sass = self._get_sass()
+            print(sass)
+        except Exception as e:
+            logger.error(f"Failed to show SASS: {e}")
+
+    def export_sass(self, path: str) -> None:
+        """
+        Export disassembled SASS to a file (CUDA only).
+
+        Parameters
+        ----------
+        path : str
+            Destination file path to write SASS.
+
+        Examples
+        --------
+        >>> jit_kernel.export_sass("/tmp/kernel.sass")
+        """
+        if not path:
+            raise ValueError("path must be provided to export SASS")
+        try:
+            sass = self._get_sass()
+            dir_path = os.path.dirname(path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+            with open(path, "w") as f:
+                f.write(sass)
+            logger.info(f"SASS saved to {os.path.abspath(path)}")
+        except Exception as e:
+            logger.error(f"Failed to export SASS: {e}")

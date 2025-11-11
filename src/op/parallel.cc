@@ -620,11 +620,66 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   if (IsCommonAccessIndice(buffer)) {
     return loop_layout_;
   }
+  // Prefer a simple path: if original 2D indices form a bijective map, invert
+  // them directly and avoid introducing a synthetic replicate dimension.
+  {
+    auto res2d =
+        arith::DetectIterMap(indice_map_[buffer], ToVMap(loop_vars_), 1,
+                             arith::IterMapLevel::Bijective,
+                             const_cast<arith::Analyzer *>(&analyzer_));
+    if (res2d->errors.empty()) {
+      Layout ind_inv2d = Layout(loop_vars_, indice_map_[buffer])->Inverse();
+      PrimExpr indice_rep_extent = 1;
+      PrimExpr loop_rep_extent = loop_layout_->ReplicateExtent();
+      PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
+      Array<PrimExpr> fwd2;
+      for (size_t i = 0; i < buffer->shape.size(); i++) {
+        fwd2.push_back(InputPlaceholder(i));
+      }
+      PrimExpr thd_b2 =
+          loop_layout_->ForwardThread(ind_inv2d->Forward(fwd2), std::nullopt);
+      return Fragment(buffer->shape, {}, thd_b2, dest_buffer_rep_extent,
+                      std::nullopt)
+          ->CondenseReplicateVar();
+    }
+  }
+  // Otherwise, infer an extra flattened iterator that captures truly-unused
+  // pieces of the loop space (if any), then try inversion with it.
   PrimExpr rep_b = MakeFlattenedExpression(
       DivideUnusedIterators(indice_map_[buffer], loop_vars_, &analyzer_));
   auto bijective_indice = indice_map_[buffer];
   bijective_indice.push_back(rep_b);
-  Layout ind_inv = Layout(loop_vars_, bijective_indice)->Inverse();
+  Layout layout_before_inv = Layout(loop_vars_, bijective_indice);
+
+  // Pre-check cardinality to guard non-bijective combinations after adding
+  // rep_b.
+  PrimExpr in_prod = 1;
+  for (const auto &iv : loop_vars_)
+    in_prod *= iv->dom->extent;
+  PrimExpr out_prod = 1;
+  for (const auto &d : layout_before_inv->OutputShape())
+    out_prod *= d;
+
+  if (!analyzer_.CanProveEqual(in_prod, out_prod)) {
+    DLOG(WARNING) << "  Non-bijective mapping after appending rep_b; falling "
+                     "back to no-rep inversion.";
+    Layout ind_inv_fallback =
+        Layout(loop_vars_, indice_map_[buffer])->Inverse();
+    PrimExpr indice_rep_extent = 1;
+    PrimExpr loop_rep_extent = loop_layout_->ReplicateExtent();
+    PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
+    Array<PrimExpr> fwd2;
+    for (size_t i = 0; i < buffer->shape.size(); i++) {
+      fwd2.push_back(InputPlaceholder(i));
+    }
+    PrimExpr thd_b = loop_layout_->ForwardThread(
+        ind_inv_fallback->Forward(fwd2), std::nullopt);
+    return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent,
+                    std::nullopt)
+        ->CondenseReplicateVar();
+  }
+
+  Layout ind_inv = layout_before_inv->Inverse();
   PrimExpr indice_rep_extent =
       ind_inv->InputShape().back(); // this is the size of rep_b
   PrimExpr loop_rep_extent = loop_layout_->ReplicateExtent();
