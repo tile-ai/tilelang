@@ -2,7 +2,6 @@ import tilelang.tools.bench
 import example_convolution
 import example_convolution_autotune
 
-@cy): TMA with convolution must be fixed in future.
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def bench_example_convolution():
