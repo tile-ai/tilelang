@@ -55,7 +55,9 @@ def flashattn(batch,
                 k_idx = k * block_N + j
                 acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
         else:
-            T.clear(acc_s)
+            # We shall fill -inf for OOB positions
+            for i, j in T.Parallel(block_M, block_N):
+                acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_kv, -T.infinity(acc_s.dtype), 0)
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
