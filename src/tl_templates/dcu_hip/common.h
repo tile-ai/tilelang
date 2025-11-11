@@ -1,6 +1,5 @@
 #pragma once
 
-
 #include "core.hpp"
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -106,41 +105,36 @@ TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
-template <typename T>
-struct is_half_type : std::false_type {};
+template <typename T> struct is_half_type : std::false_type {};
 
-template <>
-struct is_half_type<__half> : std::true_type {};
+template <> struct is_half_type<__half> : std::true_type {};
 
-template <>
-struct is_half_type<half_t> : std::true_type {};
+template <> struct is_half_type<half_t> : std::true_type {};
 
 template <typename T>
 inline constexpr bool is_half_v = is_half_type<std::decay_t<T>>::value;
 
 template <typename T1, typename T2>
-TL_DEVICE void AtomicAdd(T1* address, T2 val) {
-    if constexpr (is_half_v<T1>) {
-        __half* addr = reinterpret_cast<__half*>(address);
-        __half hval = __float2half(static_cast<float>(val));
-        atomicAdd(addr, hval);
-    } else {
-        atomicAdd(address, static_cast<T1>(val));
-    }
+TL_DEVICE void AtomicAdd(T1 *address, T2 val) {
+  if constexpr (is_half_v<T1>) {
+    __half *addr = reinterpret_cast<__half *>(address);
+    __half hval = __float2half(static_cast<float>(val));
+    atomicAdd(addr, hval);
+  } else {
+    atomicAdd(address, static_cast<T1>(val));
+  }
 }
 
-template <typename T1, typename T2>
-TL_DEVICE void AtomicAdd(T1 &ref, T2 val) {
-    AtomicAdd(&ref, val);
+template <typename T1, typename T2> TL_DEVICE void AtomicAdd(T1 &ref, T2 val) {
+  AtomicAdd(&ref, val);
 }
 template <typename T1, typename T2> TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val) {
   return atomicAdd(&ref, static_cast<T1>(val));
 }
 
-template <typename T>
-TL_DEVICE void AtomicAddx4(T* ref, const T val[4]) {
-    atomicAdd(&ref[0], val[0]);
-    atomicAdd(&ref[1], val[1]);
-    atomicAdd(&ref[2], val[2]);
-    atomicAdd(&ref[3], val[3]);
+template <typename T> TL_DEVICE void AtomicAddx4(T *ref, const T val[4]) {
+  atomicAdd(&ref[0], val[0]);
+  atomicAdd(&ref[1], val[1]);
+  atomicAdd(&ref[2], val[2]);
+  atomicAdd(&ref[3], val[3]);
 }

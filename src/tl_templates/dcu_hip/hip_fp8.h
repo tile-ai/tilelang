@@ -72,4 +72,3 @@ __device__ fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x, fp8_e4_t y, fp8_e4_t z,
   res.y = *reinterpret_cast<fp8_e4_4_t *>(&b);
   return res;
 }
-

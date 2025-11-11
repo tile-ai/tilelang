@@ -5,7 +5,6 @@
 
 #include "utils.h"
 
-
 namespace tvm {
 namespace tl {
 

@@ -8,7 +8,8 @@ from tilelang.intrinsics.mmac_macro_generator import (
 from tilelang.transform import simplify_prim_func
 from tilelang import disable_cache
 
-disable_cache() 
+disable_cache()
+
 
 def make_swizzle_layout(shared_buf):
     dtype = shared_buf.dtype
@@ -81,7 +82,7 @@ def tl_matmul(
     threads = warp_size * (block_row_warps * block_col_warps)
     local_size_a = (micro_size_x * micro_size_k) // warp_size
     local_size_b = (micro_size_y * micro_size_k) // warp_size
-    local_size_c = (micro_size_x * micro_size_y) // warp_size   
+    local_size_c = (micro_size_x * micro_size_y) // warp_size
     warp_rows = warp_row_tiles // micro_size_x
     warp_cols = warp_col_tiles // micro_size_y
 
@@ -152,7 +153,7 @@ def tl_matmul(
             for i, j in T.Parallel(block_M, block_N):
                 C[by * block_M + i, bx * block_N + j] = C_shared[
                     j // micro_size_y,
-                    i // micro_size_x,  
+                    i // micro_size_x,
                     i % micro_size_x,
                     j % micro_size_y,
                 ]
@@ -186,5 +187,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

@@ -12,6 +12,7 @@ from tilelang.transform import simplify_prim_func
 tilelang.testing.set_random_seed(0)
 tilelang.disable_cache()
 
+
 def make_swizzle_layout(shared_buf):
     dtype = shared_buf.dtype
     shape = shared_buf.shape
@@ -63,7 +64,7 @@ def tl_matmul(
     chunk = 32 * k_pack
 
     shared_scope = "shared"
-    cache_write_shared = False
+    # cache_write_shared = False
 
     block_M = block_row_warps * warp_row_tiles
     block_N = block_col_warps * warp_col_tiles
@@ -171,7 +172,7 @@ def tl_matmul(
             for i, j in T.Parallel(block_M, block_N):
                 C[by * block_M + i, bx * block_N + j] = C_shared[
                     j // micro_size_y,
-                    i // micro_size_x,  
+                    i // micro_size_x,
                     i % micro_size_x,
                     j % micro_size_y,
                 ]

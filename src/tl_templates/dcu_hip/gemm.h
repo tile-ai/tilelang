@@ -69,7 +69,7 @@ template <int M, int N, int K, int num_warp_n, int num_warp_m, bool TransposeA,
           typename B_type, typename C_type, typename AccDataType = float>
 class GemmTensorOp {
 public:
-  //static_assert(!clear_accum, "clear_accum=true is not supported yet");
+  // static_assert(!clear_accum, "clear_accum=true is not supported yet");
 
   static constexpr int micro_size_x = 16;
   static constexpr int micro_size_y = 16;
@@ -156,8 +156,8 @@ public:
                              C_type *C_local) {
     auto tid = threadIdx.x;
     auto warp_id = tid / warp_size;
-    auto warp_n = warp_id / block_row_warps;
-    auto warp_m = warp_id % block_row_warps;
+    auto warp_m = warp_id / block_col_warps;
+    auto warp_n = warp_id % block_col_warps;
     auto warp_row_tiles = warp_rows * micro_size_x;
     auto warp_col_tiles = warp_cols * micro_size_y;
 
@@ -165,8 +165,8 @@ public:
     auto tx = lane_id;
 
     auto alane_id = lane_id;
-    auto blane_id = ((lane_id & 15) >> 2) + ((lane_id & 3) << 2) + ((lane_id >> 4) << 4);
-    
+    auto blane_id =
+        ((lane_id & 15) >> 2) + ((lane_id & 3) << 2) + ((lane_id >> 4) << 4);
 
     constexpr auto local_size_a = (micro_size_x * micro_size_k) / warp_size;
     constexpr auto local_size_b = (micro_size_y * micro_size_k) / warp_size;
@@ -186,15 +186,14 @@ public:
         for (int local_id = 0; local_id < (kPack * local_size_b); local_id++) {
           if constexpr (TransposeB) {
             auto [row, col] = reverse_index_map(blane_id, local_id);
-            B_local[i * kPack * local_size_b + local_id] = 
+            B_local[i * kPack * local_size_b + local_id] =
                 B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
                     l + row, r + col)];
           } else {
             auto [row, col] = reverse_index_map_transposed(blane_id, local_id);
-            B_local[i * kPack * local_size_b + local_id] = 
+            B_local[i * kPack * local_size_b + local_id] =
                 B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
                     r + row, l + col)];
-
           }
         }
       }
@@ -205,12 +204,12 @@ public:
         for (int local_id = 0; local_id < (kPack * local_size_a); local_id++) {
           if constexpr (TransposeA) {
             auto [row, col] = reverse_index_map_transposed(alane_id, local_id);
-            A_local[j * kPack * local_size_a + local_id] = 
+            A_local[j * kPack * local_size_a + local_id] =
                 A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
                     r + row, l + col)];
           } else {
             auto [row, col] = reverse_index_map(alane_id, local_id);
-            A_local[j * kPack * local_size_a + local_id] = 
+            A_local[j * kPack * local_size_a + local_id] =
                 A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
                     l + row, r + col)];
           }
@@ -237,8 +236,8 @@ public:
                                 C_type *C_local) {
     auto tid = threadIdx.x;
     auto warp_id = tid / warp_size;
-    auto warp_n = warp_id / block_row_warps;
-    auto warp_m = warp_id % block_row_warps;
+    auto warp_m = warp_id / block_col_warps;
+    auto warp_n = warp_id % block_col_warps;
     auto warp_row_tiles = warp_rows * micro_size_x;
     auto warp_col_tiles = warp_cols * micro_size_y;
 
@@ -246,7 +245,8 @@ public:
     auto tx = lane_id;
 
     auto alane_id = lane_id;
-    auto blane_id = ((lane_id & 15) >> 2) + ((lane_id & 3) << 2) + ((lane_id >> 4) << 4);
+    auto blane_id =
+        ((lane_id & 15) >> 2) + ((lane_id & 3) << 2) + ((lane_id >> 4) << 4);
 
     constexpr auto local_size_a = (micro_size_x * micro_size_k) / warp_size;
     constexpr auto local_size_b = (micro_size_y * micro_size_k) / warp_size;
@@ -265,12 +265,12 @@ public:
         for (int local_id = 0; local_id < (kPack * local_size_b); local_id++) {
           if constexpr (TransposeB) {
             auto [row, col] = reverse_index_map(blane_id, local_id);
-            B_local[i * kPack * local_size_b + local_id] = 
+            B_local[i * kPack * local_size_b + local_id] =
                 B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
                     l + row, r + col)];
           } else {
             auto [row, col] = reverse_index_map_transposed(blane_id, local_id);
-            B_local[i * kPack * local_size_b + local_id] = 
+            B_local[i * kPack * local_size_b + local_id] =
                 B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
                     r + row, l + col)];
           }
@@ -321,4 +321,3 @@ TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
 }
 
 } // namespace tl
-

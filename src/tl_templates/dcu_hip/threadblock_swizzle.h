@@ -43,4 +43,3 @@ template <int panel_width> TL_DEVICE dim3 rasterization2DColumn() {
 }
 
 } // namespace tl
-

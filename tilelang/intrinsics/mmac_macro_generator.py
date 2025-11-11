@@ -1,17 +1,16 @@
+from __future__ import annotations
 from tilelang import tvm as tvm
 import tilelang.language as T
-from typing import Tuple
 from tvm import DataType
 from tvm.tir import PrimExpr
 from tvm.runtime import convert
-from typing import Optional
 from .utils import (
     mfma_store_index_map,)
 
 lift = convert
 
 
-class MatrixCoreIntrinEmitter(object):
+class MatrixCoreIntrinEmitter:
     """
     To eliminate Python syntax within TIR Macro.
     """
@@ -51,9 +50,9 @@ class MatrixCoreIntrinEmitter(object):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        k_pack: Optional[int] = None,
-        is_m_first: Optional[bool] = False,
-        b_preshuffle: Optional[bool] = False,
+        k_pack: int | None = None,
+        is_m_first: bool | None = False,
+        b_preshuffle: bool | None = False,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -119,7 +118,7 @@ class MatrixCoreIntrinEmitter(object):
             "float16": "f16",
             "float32": "f32",
             "int8": "i8",
-            "bfloat16" : "bf16"
+            "bfloat16": "bf16"
         }[in_dtype]
 
         self.mmac_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
@@ -129,15 +128,15 @@ class MatrixCoreIntrinEmitter(object):
         self.micro_size_y = n_dim
         self.micro_size_k = k_dim
 
-    def _initialize_k_pack(self, k_pack: Optional[int] = None):
+    def _initialize_k_pack(self, k_pack: int | None = None):
         if k_pack is not None:
             self.k_pack = k_pack
 
-    def _initialize_is_m_first(self, is_m_first: Optional[bool] = False):
+    def _initialize_is_m_first(self, is_m_first: bool | None = False):
         if is_m_first is not None:
             self.is_m_first = is_m_first
 
-    def _initialize_b_preshuffle(self, b_preshuffle: Optional[bool] = False):
+    def _initialize_b_preshuffle(self, b_preshuffle: bool | None = False):
         if b_preshuffle is not None:
             self.b_preshuffle = b_preshuffle
 
@@ -197,7 +196,7 @@ class MatrixCoreIntrinEmitter(object):
 
     def extract_thread_binding(self,
                                thread_id,
-                               is_m_first=None) -> Tuple[PrimExpr, PrimExpr, PrimExpr]:
+                               is_m_first=None) -> tuple[PrimExpr, PrimExpr, PrimExpr]:
         '''
             is_m_first: True if the thread binding is in the form of (tx, warp_n, warp_m)
             which represents [warp_size, block_row_warps (split n), block_col_warps (split m)]
@@ -290,7 +289,9 @@ class MatrixCoreIntrinEmitter(object):
             if is_transposed:
                 for j in T.serial(warp_cols):
                     for local_id in T.vectorized(k_pack * local_size_b):
-                        row, col = T.meta_var(reverse_index_map((tx & 15) // 4 + (tx & 3) * 4 + (tx // 16) * 16, local_id))
+                        row, col = T.meta_var(
+                            reverse_index_map((tx & 15) // 4 + (tx & 3) * 4 + (tx // 16) * 16,
+                                              local_id))
                         l, r = (
                             warp_n * warp_col_tiles + j * micro_size_y,
                             rk * chunk + ki * (k_pack * micro_size_k),
@@ -301,7 +302,9 @@ class MatrixCoreIntrinEmitter(object):
             else:
                 for j in T.serial(warp_cols):
                     for local_id in T.vectorized(k_pack * local_size_b):
-                        row, col = T.meta_var(reverse_index_map((tx & 15) // 4 + (tx & 3) * 4 + (tx // 16) * 16, local_id))
+                        row, col = T.meta_var(
+                            reverse_index_map((tx & 15) // 4 + (tx & 3) * 4 + (tx // 16) * 16,
+                                              local_id))
                         l, r = (
                             rk * chunk + ki * (k_pack * micro_size_k),
                             warp_n * warp_col_tiles + j * micro_size_y,
@@ -372,13 +375,13 @@ class MatrixCoreIntrinEmitter(object):
                     row, col = T.meta_var(mfma_store_index_map(tx, local_id))
                     if C_buf_dims == 2:
                         C_buf[(warp_m * warp_rows + i) * M_DIM + row,
-                                (warp_n * warp_cols + j) * N_DIM +
-                                col] = C_local_buf[j * (warp_rows * local_size_out) +
-                                                    i * local_size_out + local_id]
+                              (warp_n * warp_cols + j) * N_DIM +
+                              col] = C_local_buf[j * (warp_rows * local_size_out) +
+                                                 i * local_size_out + local_id]
                     else:
                         C_buf[warp_n * warp_cols + j, warp_m * warp_rows + i, row,
-                                col] = C_local_buf[j * warp_rows * local_size_out +
-                                                    i * local_size_out + local_id]
+                              col] = C_local_buf[j * warp_rows * local_size_out +
+                                                 i * local_size_out + local_id]
 
         @T.macro
         def _warp_stmatrix_global(C_local_buf, C_buf, thread_binding):
@@ -412,10 +415,10 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        k_pack: Optional[int] = None,
-        is_m_first: Optional[bool] = False,
-        a_preshuffle: Optional[bool] = False,
-        b_preshuffle: Optional[bool] = False,
+        k_pack: int | None = None,
+        is_m_first: bool | None = False,
+        a_preshuffle: bool | None = False,
+        b_preshuffle: bool | None = False,
     ):
 
         self.a_dtype = a_dtype
@@ -579,7 +582,9 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
             if is_transposed:
                 for j in T.serial(warp_cols):
                     for local_id in T.vectorized(k_pack * local_size_b):
-                        row, col = T.meta_var(reverse_index_map(((tx & 15) >> 2) + ((tx & 3) << 2) + ((tx >> 4) << 4), local_id))
+                        row, col = T.meta_var(
+                            reverse_index_map(((tx & 15) >> 2) + ((tx & 3) << 2) + ((tx >> 4) << 4),
+                                              local_id))
                         l, r = (
                             warp_n * warp_cols + j,
                             rk * (chunk // micro_size_k) + ki,
@@ -589,7 +594,9 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
             else:
                 for j in T.serial(warp_cols):
                     for local_id in T.vectorized(k_pack * local_size_b):
-                        row, col = T.meta_var(reverse_index_map(((tx & 15) >> 2) + ((tx & 3) << 2) + ((tx >> 4) << 4), local_id))
+                        row, col = T.meta_var(
+                            reverse_index_map(((tx & 15) >> 2) + ((tx & 3) << 2) + ((tx >> 4) << 4),
+                                              local_id))
                         l, r = (
                             rk * (chunk // micro_size_k) + ki,
                             warp_n * warp_cols + j,
@@ -600,4 +607,3 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         return _warp_ldmatrix_b_global(B_local_buf, B_buf, ki, thread_binding,
                                        rk) if is_global else _warp_ldmatrix_b_shared(
                                            B_local_buf, B_buf, ki, thread_binding, rk)
-

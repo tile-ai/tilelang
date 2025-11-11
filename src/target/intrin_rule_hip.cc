@@ -249,7 +249,6 @@ TVM_REGISTER_OP("tir.hip.__shfl")
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-
 TVM_REGISTER_OP("tir.hip.__shfl_sync")
     .set_num_inputs(4)
     .add_argument("mask", "Expr", "The thread mask.")

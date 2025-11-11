@@ -189,4 +189,3 @@ __device__ void debug_print_buffer_value<double>(const char *msg,
          (int)threadIdx.x, (int)threadIdx.y, (int)threadIdx.z, safe_buf_name,
          index, var);
 }
-

@@ -157,8 +157,8 @@ Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
 }
 
 Fragment makeGemmFragmentCDCU(const int block_m, const int block_n,
-                               const int warp_m, const int warp_n,
-                               const int element_size) {
+                              const int warp_m, const int warp_n,
+                              const int element_size) {
   if (element_size == 64)
     LOG(FATAL) << "Not supported";
   ICHECK(block_m % warp_m == 0);
@@ -169,7 +169,7 @@ Fragment makeGemmFragmentCDCU(const int block_m, const int block_n,
   auto warp_layout =
       base_layout->Repeat({warp_m / 16, warp_n / 16}, false, false);
   auto block_layout =
-      warp_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, true);
+      warp_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
   return block_layout;
 }
 
@@ -747,7 +747,8 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   if (!k_inner && element_size == 8) // int8 KxN
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 8) == 0)
-    // return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+    // return makeHalfBankSwizzleLayout(mat_stride, mat_continuous,
+    // element_size);
     return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 4) == 0)
     return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);

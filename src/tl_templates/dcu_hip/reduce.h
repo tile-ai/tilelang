@@ -22,14 +22,11 @@ struct MinOp {
   }
 };
 // Detect half types
-template <typename T>
-struct is_half_type : std::false_type {};
+template <typename T> struct is_half_type : std::false_type {};
 
-template <>
-struct is_half_type<__half> : std::true_type {};
+template <> struct is_half_type<__half> : std::true_type {};
 
-template <>
-struct is_half_type<_Float16> : std::true_type {};
+template <> struct is_half_type<_Float16> : std::true_type {};
 
 template <typename T>
 inline constexpr bool is_half_v = is_half_type<std::decay_t<T>>::value;
@@ -56,7 +53,10 @@ struct AllReduce {
         if constexpr (std::is_same_v<std::decay_t<T>, __half>) {
           x_raw = __half_as_ushort(x);
         } else { // _Float16
-          union { _Float16 f; unsigned short s; } u;
+          union {
+            _Float16 f;
+            unsigned short s;
+          } u;
           u.f = x;
           x_raw = u.s;
         }
@@ -67,7 +67,10 @@ struct AllReduce {
         if constexpr (std::is_same_v<std::decay_t<T>, __half>) {
           shuffled_x = __ushort_as_half(shuffled_raw);
         } else { // _Float16
-          union { unsigned short s; _Float16 f; } u;
+          union {
+            unsigned short s;
+            _Float16 f;
+          } u;
           u.s = shuffled_raw;
           shuffled_x = u.f;
         }
@@ -116,7 +119,7 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
 
           T val = (col < W) ? src[real_row * W + real_col] : (T)0;
 
-          #pragma unroll
+#pragma unroll
           for (int off = 1; off < SEG; off <<= 1) {
             T n = (T)__shfl_down_sync(MASK, val, off);
             if (lane < SEG - off)
@@ -142,7 +145,7 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
 
           T val = (col < W) ? src[real_row * W + real_col] : (T)0;
 
-          #pragma unroll
+#pragma unroll
           for (int off = 1; off < SEG; off <<= 1) {
             T n = (T)__shfl_up_sync(MASK, val, off);
             if (lane >= off)
@@ -164,4 +167,3 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   }
 };
 } // namespace tl
-

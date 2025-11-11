@@ -108,4 +108,3 @@ TL_DEVICE void cp_async_gs_conditional(void *lds_base_ptr,
 }
 
 } // namespace tl
-
