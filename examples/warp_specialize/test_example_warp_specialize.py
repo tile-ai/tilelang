@@ -39,8 +39,9 @@ def test_example_warp_specialize_gemm_softpipe_stage2():
     example_warp_specialize_gemm_softpipe_stage2.main(M=1024, N=1024, K=1024)
 
 
-
 def test_bench_example_warp_specialize():
     bench_example_warp_specialize.main()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

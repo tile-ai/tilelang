@@ -44,8 +44,9 @@ def test_example_dequant_gemm_w4a8():
     example_dequant_gemm_w4a8.main()
 
 
-
 def test_bench_example_dequantize_gemm():
     bench_example_dequantize_gemm.main()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

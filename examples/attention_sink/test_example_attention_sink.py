@@ -62,8 +62,9 @@ def test_example_gqa_sink_bwd_bhsd_sliding_window():
     example_gqa_sink_bwd_bhsd.main(window_size=128)
 
 
-
 def test_bench_example_attention_sink():
     bench_example_attention_sink.main()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

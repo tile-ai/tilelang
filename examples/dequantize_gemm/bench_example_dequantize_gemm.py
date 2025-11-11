@@ -6,6 +6,7 @@ import example_dequant_gemm_w4a8
 import example_dequant_gemv_fp16xint4
 import example_dequant_groupedgemm_bf16_mxfp4_hopper
 
+
 @tilelang.testing.requires_cuda
 def bench_example_dequant_gemv_fp16xint4():
     tilelang.tools.bench.process_func(example_dequant_gemv_fp16xint4.main)
@@ -40,8 +41,10 @@ def bench_example_dequant_groupedgemm_bf16_mxfp4_hopper():
 def bench_example_dequant_gemm_w4a8():
     tilelang.tools.bench.process_func(example_dequant_gemm_w4a8.main)
 
+
 def main():
     tilelang.tools.bench.main()
+
 
 if __name__ == "__main__":
     main()

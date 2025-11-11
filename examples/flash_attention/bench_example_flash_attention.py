@@ -13,6 +13,7 @@ import example_mha_fwd_bshd
 import example_mha_fwd_bshd_wgmma_pipelined
 import example_mha_fwd_varlen
 
+
 @tilelang.testing.requires_cuda
 def bench_example_gqa_bwd_tma_reduce_varlen():
     tilelang.tools.bench.process_func(example_gqa_bwd_tma_reduce_varlen.main)
@@ -82,8 +83,10 @@ def bench_example_mha_fwd_bshd():
 def bench_example_mha_fwd_varlen():
     tilelang.tools.bench.process_func(example_mha_fwd_varlen.main)
 
+
 def main():
     tilelang.tools.bench.main()
+
 
 if __name__ == "__main__":
     main()

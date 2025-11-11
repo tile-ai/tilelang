@@ -17,8 +17,9 @@ def test_example_tilelang_gemm_fp8():
     example_tilelang_gemm_fp8.main()
 
 
-
 def test_bench_example_gemm_fp8():
     bench_example_gemm_fp8.main()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

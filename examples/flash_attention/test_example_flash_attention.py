@@ -100,8 +100,9 @@ def test_example_mha_fwd_varlen():
     example_mha_fwd_varlen.main(batch=4, heads=16, seq_len=512, dim=64)
 
 
-
 def test_bench_example_flash_attention():
     bench_example_flash_attention.main()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

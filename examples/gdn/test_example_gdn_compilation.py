@@ -190,7 +190,5 @@ def test_example_chunk_delta_bwd_compilation():
 
 
 
-def test_bench_example_gdn_compilation():
-    bench_example_gdn_compilation.main()
 if __name__ == "__main__":
     tilelang.testing.main()

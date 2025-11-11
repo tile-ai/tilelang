@@ -20,8 +20,10 @@ def bench_example_gemm_schedule():
 def bench_example_gemm():
     tilelang.tools.bench.process_func(example_gemm.main)
 
+
 def main():
     tilelang.tools.bench.main()
+
 
 if __name__ == "__main__":
     main()

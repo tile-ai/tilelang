@@ -15,8 +15,9 @@ def test_example_linear_attn_bwd():
     example_linear_attn_bwd.main()
 
 
-
 def test_bench_linear_attn():
     bench_linear_attn.main()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -52,7 +52,9 @@ def process_func(func, *args, repeat=10, warmup=3, **kwargs):
         if fail_count == 0:
             print(f"{func.__module__}.{func.__name__}  {avg_latency:.2f} ms")
         else:
-            print(f"{func.__module__}.{func.__name__}  {avg_latency:.2f} ms  (fail {fail_count}/{repeat})")
+            print(
+                f"{func.__module__}.{func.__name__}  {avg_latency:.2f} ms  (fail {fail_count}/{repeat})"
+            )
     else:
         print(f"{func.__module__}.{func.__name__}  FAILED (no valid run)")
 
@@ -61,7 +63,7 @@ def main():
     # Entry point — automatically run all test_* functions in caller file.
     test_file = inspect.getsourcefile(sys._getframe(1))
     module = {}
-    with open(test_file, "r") as f:
+    with open(test_file) as f:
         exec(f.read(), module)
 
     for name, func in module.items():

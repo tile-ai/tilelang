@@ -10,7 +10,6 @@ def bench_topk_selector():
     tilelang.tools.bench.process_func(topk_selector.test_topk_selector)
 
 
-
 def bench_fp8_lighting_indexer():
     tilelang.tools.bench.process_func(fp8_lighting_indexer.test_fp8_lighting_indexer)
 
@@ -32,8 +31,10 @@ def bench_sparse_mla_fwd_pipelined():
 def bench_sparse_mla_bwd():
     tilelang.tools.bench.process_func(sparse_mla_bwd.test_sparse_mla_bwd)
 
+
 def main():
     tilelang.tools.bench.main()
+
 
 if __name__ == "__main__":
     main()

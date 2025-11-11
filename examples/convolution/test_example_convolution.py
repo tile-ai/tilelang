@@ -18,8 +18,9 @@ def test_example_convolution_autotune():
     example_convolution_autotune.main()
 
 
-
 def test_bench_example_convolution():
     bench_example_convolution.main()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

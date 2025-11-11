@@ -14,8 +14,9 @@ def test_example_tilelang_nsa_fwd_decode():
     main_fwd_decode()
 
 
-
 def test_bench_example_tilelang_nsa():
     bench_example_tilelang_nsa.main()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

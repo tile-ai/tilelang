@@ -23,8 +23,9 @@ def test_example_gemm():
     example_gemm.main()
 
 
-
 def test_bench_example_gemm():
     bench_example_gemm.main()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
