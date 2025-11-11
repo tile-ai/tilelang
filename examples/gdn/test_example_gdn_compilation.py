@@ -1,5 +1,6 @@
 import tilelang.testing
 import torch
+import bench_example_gdn_compilation
 
 B = 1
 S = 1024  # small but for test only.
@@ -188,5 +189,8 @@ def test_example_chunk_delta_bwd_compilation():
     dh_tilelang, dh0_tilelang, dv2_tilelang = kernel(Q, K, W, G, h0, dht, dO, dv)  # noqa: F841
 
 
+
+def test_bench_example_gdn_compilation():
+    bench_example_gdn_compilation.main()
 if __name__ == "__main__":
     tilelang.testing.main()

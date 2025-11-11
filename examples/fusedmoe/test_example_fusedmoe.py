@@ -1,5 +1,6 @@
 import tilelang.testing
 import example_fusedmoe_tilelang
+import bench_example_fusedmoe
 
 
 def test_example_fusedmoe_tilelang():
@@ -13,5 +14,8 @@ def test_example_fusedmoe_tilelang():
         seq_len=1024)
 
 
+
+def test_bench_example_fusedmoe():
+    bench_example_fusedmoe.main()
 if __name__ == "__main__":
     tilelang.testing.main()

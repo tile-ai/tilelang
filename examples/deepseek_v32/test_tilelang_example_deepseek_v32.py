@@ -39,5 +39,8 @@ def test_example_sparse_mla_bwd():
         S=256, SKV=512, H=64, HKV=1, DQKV=576, DV=512, topk=256, check_correctness=False)
 
 
+
+def test_bench_tilelang_example_deepseek_v32():
+    bench_tilelang_example_deepseek_v32.main()
 if __name__ == "__main__":
     tilelang.testing.main()
