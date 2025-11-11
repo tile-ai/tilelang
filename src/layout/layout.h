@@ -25,6 +25,9 @@ class LayoutNode : public Object {
 public:
   LayoutNode() = default;
   LayoutNode(Array<PrimExpr> input_size, Array<PrimExpr> forward_index);
+  // Construct from IterVars; forward_index is expressed in terms of these
+  // vars and will be remapped to per-object placeholders.
+  LayoutNode(Array<IterVar> forward_var, Array<PrimExpr> forward_index);
 
   size_t InputDim() const { return input_size_.size(); }
 
@@ -57,6 +60,8 @@ protected:
   void UpdateAnalyzer(arith::Analyzer *analyzer) const;
   Array<PrimExpr> forward_index_;
   Array<PrimExpr> input_size_;
+  // Per-object placeholders replacing previous global singletons.
+  Array<Var> input_placeholders_;
 };
 
 /*!
@@ -75,6 +80,16 @@ public:
   FragmentNode() = default;
   FragmentNode(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
                PrimExpr forward_thread, PrimExpr replicate_size);
+  // Construct from IterVars; forward_index and forward_thread are expressed in
+  // terms of these vars and an optional thread replicate var; both will be
+  // remapped to per-object placeholders.
+  FragmentNode(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
+               PrimExpr forward_thread, IterVar thread_replicate);
+  // Construct from input shape; if replicate_var is provided, forward_thread's
+  // occurrences of it will be remapped to the per-object replicate placeholder.
+  FragmentNode(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
+               PrimExpr forward_thread, PrimExpr replicate_size,
+               Optional<Var> replicate_var);
 
   PrimExpr GetForwardThread() const { return forward_thread_; }
 
@@ -120,6 +135,8 @@ protected:
   Range thread_range_;
   PrimExpr forward_thread_;
   PrimExpr replicate_size_;
+  // Per-object replication placeholder.
+  Var rep_placeholder_;
 };
 
 /*!
@@ -137,8 +154,7 @@ public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fragment, Layout, FragmentNode);
 };
 
-Var InputPlaceholder(size_t idx);
-Var ReplicationPlaceholder();
+// Global placeholders have been removed in favor of per-object placeholders.
 IterVar make_itervar(std::string name, PrimExpr dom);
 
 Fragment makeGemmFragment8x8();

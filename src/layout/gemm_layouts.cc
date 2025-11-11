@@ -382,8 +382,8 @@ PrimExpr xor8x8(const PrimExpr &i, const PrimExpr j) {
 Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
                                     int element_size) {
   // Swizzle 1 bit
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  IterVar i = make_itervar("i", stride);
+  IterVar j = make_itervar("j", continuous);
   int vector_size = 128 / element_size;
   ICHECK(stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 2) == 0)
@@ -395,14 +395,14 @@ Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
   PrimExpr vec = FloorMod(j, vector_size);
   PrimExpr c_swizzle = xor2x2(c, FloorDiv(s, 4));
   PrimExpr index = vec + (c_swizzle + s * 2) * vector_size;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array{i, j}, {tc, ts, index});
 }
 
 // Layout swizzling for 64 bytes
 Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size) {
   // Swizzle 2 bit
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  IterVar i = make_itervar("i", stride);
+  IterVar j = make_itervar("j", continuous);
   int vector_size = 128 / element_size;
   ICHECK(stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 4) == 0)
@@ -414,14 +414,14 @@ Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size) {
   PrimExpr vec = FloorMod(j, vector_size);
   PrimExpr c_swizzle = xor4x4(c, FloorDiv(s, 2));
   PrimExpr index = vec + (c_swizzle + s * 4) * vector_size;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array{i, j}, {tc, ts, index});
 }
 
 // Layout swizzling for 128 bytes
 Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size) {
   // Swizzle 3 bit
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  IterVar i = make_itervar("i", stride);
+  IterVar j = make_itervar("j", continuous);
   int vector_size = 128 / element_size;
   ICHECK(stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 8) == 0)
@@ -433,7 +433,7 @@ Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size) {
   PrimExpr vec = FloorMod(j, vector_size);
   PrimExpr c_swizzle = xor8x8(c, s);
   PrimExpr index = vec + (c_swizzle + s * 8) * vector_size;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array{i, j}, {tc, ts, index});
 }
 
 // Detail implementation please ref to
@@ -463,28 +463,28 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
 
 Layout makeGemmABLayoutF64_Kinner(int stride, int continuous) {
   // Swizzle<2, 0, 4>
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  IterVar i = make_itervar("i", stride);
+  IterVar j = make_itervar("j", continuous);
   PrimExpr tc = FloorDiv(j, 16);
   PrimExpr ts = FloorDiv(i, 4);
   PrimExpr c = FloorMod(j, 16);
   PrimExpr s = FloorMod(i, 4);
   PrimExpr swizzled_c = FloorDiv(c, 4) * 4 + xor4x4(FloorMod(c, 4), s);
   PrimExpr index = swizzled_c + s * 16;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array{i, j}, {tc, ts, index});
 }
 
 Layout makeGemmABLayoutF64_Kouter(int stride, int continuous) {
   // Swizzle<2, 2, 2>
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  IterVar i = make_itervar("i", stride);
+  IterVar j = make_itervar("j", continuous);
   PrimExpr tc = FloorDiv(j, 16);
   PrimExpr ts = FloorDiv(i, 4);
   PrimExpr c = FloorMod(j, 16);
   PrimExpr s = FloorMod(i, 4);
   PrimExpr swizzled_c = FloorMod(c, 4) + xor4x4(FloorDiv(c, 4), s) * 4;
   PrimExpr index = swizzled_c + s * 16;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array{i, j}, {tc, ts, index});
 }
 
 // The Default Layout for Tensor Access

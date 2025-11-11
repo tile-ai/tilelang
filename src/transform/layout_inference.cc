@@ -143,7 +143,7 @@ public:
           indices.reserve(dst_layout->InputDim());
           arith::Analyzer inner_analyzer;
           for (int i = 0; i < dst_layout->InputDim(); ++i) {
-            auto x = InputPlaceholder(i);
+            Var x(std::string("_i") + std::to_string(i));
             indices.push_back(x);
             // should be literal - literal = 0, any analyzer will work
             ICHECK(is_zero(inner_analyzer.Simplify(

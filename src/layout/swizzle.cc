@@ -48,6 +48,35 @@ SwizzledLayoutNode::SwizzledLayoutNode(Array<PrimExpr> input_size,
       [&](const PrimExpr &e) { return analyzer.Simplify(e); });
 }
 
+SwizzledLayoutNode::SwizzledLayoutNode(Array<IterVar> forward_var,
+                                       Array<PrimExpr> forward_index,
+                                       SwizzlePattern pattern)
+    : pattern_(pattern) {
+  Array<PrimExpr> input_size;
+  input_size.reserve(forward_var.size());
+  for (size_t i = 0; i < forward_var.size(); ++i) {
+    CHECK(is_zero(forward_var[i]->dom->min));
+    input_size.push_back(forward_var[i]->dom->extent);
+  }
+  input_size_ = input_size;
+  input_placeholders_.clear();
+  input_placeholders_.reserve(input_size_.size());
+  for (size_t i = 0; i < input_size_.size(); ++i) {
+    input_placeholders_.push_back(Var(std::string{"_"} + char('i' + i)));
+  }
+  Map<Var, PrimExpr> vmap;
+  for (size_t i = 0; i < forward_var.size(); ++i) {
+    vmap.Set(forward_var[i]->var, input_placeholders_[i]);
+  }
+  forward_index =
+      forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
+
+  arith::Analyzer analyzer;
+  UpdateAnalyzer(&analyzer);
+  forward_index_ = forward_index.Map(
+      [&](const PrimExpr &e) { return analyzer.Simplify(e); });
+}
+
 Array<PrimExpr> SwizzledLayoutNode::Forward(const Array<PrimExpr> &vars) const {
   auto expr_list = LayoutNode::Forward(vars);
   auto expr = expr_list.back();
@@ -77,17 +106,7 @@ bool SwizzledLayoutNode::IsEqual(const SwizzledLayoutNode *other,
 SwizzledLayout::SwizzledLayout(Array<IterVar> forward_var,
                                Array<PrimExpr> forward_index,
                                SwizzlePattern pattern) {
-  Map<Var, PrimExpr> vmap;
-  Array<PrimExpr> input_size;
-  for (size_t i = 0; i < forward_var.size(); i++) {
-    vmap.Set(forward_var[i]->var, InputPlaceholder(i));
-    CHECK(is_zero(forward_var[i]->dom->min));
-    input_size.push_back(forward_var[i]->dom->extent);
-  }
-  forward_index =
-      forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
-
-  auto n = tvm::ffi::make_object<SwizzledLayoutNode>(input_size, forward_index,
+  auto n = tvm::ffi::make_object<SwizzledLayoutNode>(forward_var, forward_index,
                                                      pattern);
   data_ = std::move(n);
 }

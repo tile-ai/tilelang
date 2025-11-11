@@ -39,6 +39,8 @@ public:
   SwizzledLayoutNode() = default;
   SwizzledLayoutNode(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
                      SwizzlePattern pattern);
+  SwizzledLayoutNode(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
+                     SwizzlePattern pattern);
 
   Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const final;
   Layout Inverse() const final;

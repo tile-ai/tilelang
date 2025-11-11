@@ -358,19 +358,20 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  */
 Layout CopyNode::ComputeLinearLayout(const Buffer &shared_tensor) const {
   Array<PrimExpr> input_size = shared_tensor->shape;
-  Array<PrimExpr> forward_vars;
+  Array<IterVar> forward_var;
   for (size_t i = 0; i < input_size.size(); i++) {
-    forward_vars.push_back(InputPlaceholder(i));
+    forward_var.push_back(
+        make_itervar(std::string("i") + std::to_string(i), input_size[i]));
   }
   // [i, j] -> [i // 256, j // 256, i % 256, j % 256]
   Array<PrimExpr> forward_index;
   for (size_t i = 0; i < input_size.size(); i++) {
-    forward_index.push_back(FloorDiv(forward_vars[i], 256));
+    forward_index.push_back(FloorDiv(forward_var[i]->var, 256));
   }
   for (size_t i = 0; i < input_size.size(); i++) {
-    forward_index.push_back(FloorMod(forward_vars[i], 256));
+    forward_index.push_back(FloorMod(forward_var[i]->var, 256));
   }
-  return Layout(input_size, forward_index);
+  return Layout(forward_var, forward_index);
 }
 
 /**

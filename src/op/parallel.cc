@@ -554,7 +554,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         Array<PrimExpr> fwd;
         for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
           fwd.push_back(0);
-        fwd.push_back(InputPlaceholder(0) - T.thread_bounds->min);
+        fwd.push_back(thread_placeholder_ - T.thread_bounds->min);
         auto rep = inv->Forward(fwd).back();
         AddPredicate(EQ(rep, 0));
       }
@@ -570,15 +570,15 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     if (loop_layout_->ThreadRange().defined()) {
       auto thread_range = loop_layout_->ThreadRange();
       block_size = thread_range->extent;
-      AddPredicate(GE(InputPlaceholder(0), thread_range->min));
+      AddPredicate(GE(thread_placeholder_, thread_range->min));
       AddPredicate(
-          LT(InputPlaceholder(0), thread_range->min + thread_range->extent));
+          LT(thread_placeholder_, thread_range->min + thread_range->extent));
     }
   }
 
   if (!analyzer_.CanProveEqual(loop_thread_extent, block_size)) {
     AddPredicate(
-        LT(InputPlaceholder(0), loop_thread_extent + T.thread_bounds->min));
+        LT(thread_placeholder_, loop_thread_extent + T.thread_bounds->min));
   }
 
   // Step 2: Check that the loop's partition can correctly align with all source
@@ -609,7 +609,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
 Optional<PrimExpr> ParallelOpNode::GetPredicate(Var thread_var) const {
   if (predicate_.defined()) {
-    return Substitute(predicate_.value(), {{InputPlaceholder(0), thread_var}});
+    return Substitute(predicate_.value(), {{thread_placeholder_, thread_var}});
   } else {
     return std::nullopt;
   }
@@ -634,7 +634,7 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
       PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
       Array<PrimExpr> fwd2;
       for (size_t i = 0; i < buffer->shape.size(); i++) {
-        fwd2.push_back(InputPlaceholder(i));
+        fwd2.push_back(Var(std::string("_i") + std::to_string(i)));
       }
       PrimExpr thd_b2 =
           loop_layout_->ForwardThread(ind_inv2d->Forward(fwd2), std::nullopt);
@@ -670,7 +670,7 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
     PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
     Array<PrimExpr> fwd2;
     for (size_t i = 0; i < buffer->shape.size(); i++) {
-      fwd2.push_back(InputPlaceholder(i));
+      fwd2.push_back(Var(std::string("_i") + std::to_string(i)));
     }
     PrimExpr thd_b = loop_layout_->ForwardThread(
         ind_inv_fallback->Forward(fwd2), std::nullopt);
@@ -686,12 +686,12 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
   Array<PrimExpr> fwd;
   for (size_t i = 0; i < buffer->shape.size(); i++) {
-    fwd.push_back(InputPlaceholder(i));
+    fwd.push_back(Var(std::string("_i") + std::to_string(i)));
   }
-  fwd.push_back(FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+  Var rep_local("__rep_local");
+  fwd.push_back(FloorMod(rep_local, indice_rep_extent));
   PrimExpr thd_b = loop_layout_->ForwardThread(
-      ind_inv->Forward(fwd),
-      FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
+      ind_inv->Forward(fwd), FloorDiv(rep_local, indice_rep_extent));
   return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent,
                   std::nullopt)
       ->CondenseReplicateVar();

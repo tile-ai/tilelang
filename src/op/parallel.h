@@ -132,6 +132,8 @@ private:
   mutable arith::Analyzer analyzer_;
   // Mapping from buffer to reducer info.
   Map<Var, ReducerInfo> reducer_info_map_;
+  // Placeholder for thread var used in predicates and temporary expressions.
+  mutable Var thread_placeholder_;
 };
 
 class ParallelOp : public TileOperator {

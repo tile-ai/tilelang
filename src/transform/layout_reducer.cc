@@ -213,15 +213,21 @@ private:
         const auto &buffer = opt_buffer.value();
         Fragment f;
         if (info->rep == ReducerRepType::ALL) {
-          f = Fragment(buffer->shape, {}, ReplicationPlaceholder(),
-                       thread_extent, std::nullopt);
+          Var rep_local("__rep_local");
+          f = Fragment(buffer->shape, {}, rep_local, thread_extent, rep_local);
         } else if (info->rep == ReducerRepType::NONE) {
-          PrimExpr flatten_idx = InputPlaceholder(0);
+          // Build using itervars to avoid global placeholders
+          Array<IterVar> ivs;
+          for (int i = 0; i < buffer->shape.size(); ++i) {
+            ivs.push_back(make_itervar(std::string("i") + std::to_string(i),
+                                       buffer->shape[i]));
+          }
+          PrimExpr flatten_idx = ivs[0]->var;
           for (int i = 1; i < buffer->shape.size(); ++i)
-            flatten_idx = flatten_idx * buffer->shape[i] + InputPlaceholder(i);
-          f = Fragment(buffer->shape, {},
-                       indexmod(flatten_idx, thread_extent) + thread_min, 1,
-                       std::nullopt);
+            flatten_idx = flatten_idx * buffer->shape[i] + ivs[i]->var;
+          f = Fragment(ivs, {},
+                       indexmod(flatten_idx, thread_extent) + thread_min,
+                       IterVar());
         }
         new_layout_map_.Set(buffer->data, f);
       }

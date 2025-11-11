@@ -378,17 +378,18 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
     PrimExpr dest_buffer_rep_extent = indice_rep_extent * src_rep_extent;
 
     Array<PrimExpr> fwd;
+    Var rep_local("__rep_local");
     for (int i = 0; i < static_cast<int>(src->shape.size()); i++) {
       if (i == dim) {
-        fwd.push_back(FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+        fwd.push_back(FloorMod(rep_local, indice_rep_extent));
       } else if (i < dim) {
-        fwd.push_back(InputPlaceholder(i));
+        fwd.push_back(Var(std::string("_i") + std::to_string(i)));
       } else if (i > dim) {
-        fwd.push_back(InputPlaceholder(i - 1));
+        fwd.push_back(Var(std::string("_i") + std::to_string(i - 1)));
       }
     }
-    auto thd = src_layout->ForwardThread(
-        fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
+    auto thd =
+        src_layout->ForwardThread(fwd, FloorDiv(rep_local, indice_rep_extent));
     Fragment dst_layout =
         Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, std::nullopt)
             ->CondenseReplicateVar()
@@ -405,7 +406,7 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
       indices.reserve(dst_layout->InputDim());
       arith::Analyzer inner_analyzer;
       for (int i = 0; i < dst_layout->InputDim(); ++i) {
-        auto x = InputPlaceholder(i);
+        Var x(std::string("_i") + std::to_string(i));
         indices.push_back(x);
         // should be literal - literal = 0, any analyzer will work
         ICHECK(is_zero(inner_analyzer.Simplify(
