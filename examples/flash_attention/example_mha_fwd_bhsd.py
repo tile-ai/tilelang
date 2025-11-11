@@ -223,10 +223,10 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=16, help='batch size')
-    parser.add_argument('--heads', type=int, default=64, help='heads')
-    parser.add_argument('--seq_q', type=int, default=298, help='query sequence length')
-    parser.add_argument('--seq_kv', type=int, default=298, help='key/value sequence length')
+    parser.add_argument('--batch', type=int, default=1, help='batch size')
+    parser.add_argument('--heads', type=int, default=1, help='heads')
+    parser.add_argument('--seq_q', type=int, default=256, help='query sequence length')
+    parser.add_argument('--seq_kv', type=int, default=256, help='key/value sequence length')
     parser.add_argument('--dim', type=int, default=64, help='dim')
     parser.add_argument('--is_causal', action='store_true', help='causal', default=False)
     parser.add_argument('--tune', action='store_true', help='tune configs')
