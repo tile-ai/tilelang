@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from tvm import tir
-from tilelang.language import copy, macro, alloc_shared
+from tilelang.language import copy, macro, alloc_shared, alloc_fragment
+from tilelang.utils.language import is_shared, is_fragment
+from tvm.script.ir_builder import IRBuilder
 
 
 def _legalize_dim(buffer: tir.Buffer, dim: int):
@@ -34,17 +36,70 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
         raise ValueError(
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
             f"output shape is {out.shape}, expected shapes are {expected_shapes_str}")
-    buffer = buffer.access_ptr("r")
-    out = out.access_ptr("w")
-    return tir.call_intrin(
-        "handle",
-        tir.op.Op.get("tl.reduce"),
-        buffer,
-        out,
-        reduce_type,
-        dim,
-        clear,
-    )
+
+    @macro
+    def reduce_macro(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool):
+        if is_shared(buffer) and is_shared(out):
+            red_frag_in = alloc_fragment(buffer.shape, buffer.dtype)
+            red_frag_out = alloc_fragment(out.shape, out.dtype)
+
+            # rename buffers
+            IRBuilder.name(buffer.name + "_frag", red_frag_in)
+            IRBuilder.name(out.name + "_frag", red_frag_out)
+
+            copy(buffer, red_frag_in)
+            tir.call_intrin(
+                "handle",
+                tir.op.Op.get("tl.reduce"),
+                red_frag_in.access_ptr("r"),
+                red_frag_out.access_ptr("w"),
+                reduce_type,
+                dim,
+                clear,
+            )
+            copy(red_frag_out, out)
+        elif is_shared(buffer) and is_fragment(out):
+            red_frag_in = alloc_fragment(buffer.shape, buffer.dtype)
+            IRBuilder.name(buffer.name + "_frag", red_frag_in)
+
+            copy(buffer, red_frag_in)
+            tir.call_intrin(
+                "handle",
+                tir.op.Op.get("tl.reduce"),
+                red_frag_in.access_ptr("r"),
+                out.access_ptr("w"),
+                reduce_type,
+                dim,
+                clear,
+            )
+        elif is_fragment(buffer) and is_shared(out):
+            red_frag_out = alloc_fragment(out.shape, out.dtype)
+            IRBuilder.name(out.name + "_frag", red_frag_out)
+
+            tir.call_intrin(
+                "handle",
+                tir.op.Op.get("tl.reduce"),
+                buffer.access_ptr("r"),
+                red_frag_out.access_ptr("w"),
+                reduce_type,
+                dim,
+                clear,
+            )
+            copy(red_frag_out, out)
+        elif is_fragment(buffer) and is_fragment(out):
+            tir.call_intrin(
+                "handle",
+                tir.op.Op.get("tl.reduce"),
+                buffer.access_ptr("r"),
+                out.access_ptr("w"),
+                reduce_type,
+                dim,
+                clear,
+            )
+        else:
+            raise ValueError(f"Invalid buffer scopes: {buffer.scope()} and {out.scope()}")
+
+    return reduce_macro(buffer, out, reduce_type, dim, clear)
 
 
 def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):

@@ -5,6 +5,7 @@
 
 #include "layout.h"
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/arith/pattern.h>
 #include <tvm/tir/op.h>
@@ -249,14 +250,17 @@ std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   if (!is_static_shape) {
     // Runtime guards keep dynamic tails safe, so we allow NoCheck here and
     // warn.
-    LOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
-                    "NoCheck; symbolic dims: "
-                 << symbolic_dims;
+    DLOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
+                     "NoCheck; symbolic dims: "
+                  << symbolic_dims;
   }
   arith::IterMapResult res =
       arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
-  ICHECK(res->errors.empty())
-      << "Layout " << DebugOutput() << " has errors: " << res->errors;
+  if (!res->errors.empty()) {
+    std::ostringstream msg;
+    msg << "Layout " << DebugOutput() << " has errors: " << res->errors;
+    throw NormalizeIterException(msg.str());
+  }
 
   auto outputs_shape = OutputShape();
   Array<PrimExpr> outputs;

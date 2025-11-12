@@ -115,6 +115,10 @@ Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
   return results;
 }
 
+// Heuristic: detect per-iterator gaps ("unused" pieces) even when the iterator
+// appears in fused forms across multiple index expressions. We first normalize
+// every index into IterSumExpr, collect all splits per source Var, then
+// consolidate them to avoid misclassifying a used split as unused.
 Array<IterSplitExpr> DivideUnusedIterators(const Array<PrimExpr> &exprs,
                                            const Array<IterVar> input_iters,
                                            Analyzer *analyzer) {
@@ -134,17 +138,25 @@ Array<IterSplitExpr> DivideUnusedIterators(const Array<PrimExpr> &exprs,
   }
 
   for (const IterVar &iter : input_iters) {
-    IterMark iv_mark;
+    // Merge splits from all IterMark that share the same source Var as `iter`.
+    std::vector<IterSplitExpr> merged_splits;
     for (const IterMark &mark : collector.visited_) {
-      if (mark->source.as<Var>()->same_as(iter->var)) { // NOLINT(*)
-        iv_mark = mark;
-        break;
+      auto vexpr = mark->source.as<Var>();
+      if (vexpr && vexpr.value().same_as(iter->var)) {
+        auto it = collector.mark2splits_.find(mark);
+        if (it != collector.mark2splits_.end()) {
+          const auto &vec = it->second;
+          merged_splits.insert(merged_splits.end(), vec.begin(), vec.end());
+        }
       }
     }
-    if (iv_mark.defined()) {
-      auto splits =
-          get_unused_iters(iv_mark, collector.mark2splits_[iv_mark], analyzer);
-      // Put the small axis last
+
+    if (!merged_splits.empty()) {
+      // Use a unified mark (Var + full extent) to compute the missing pieces
+      // so that fused usages are honored as "used" and not reintroduced.
+      IterMark unified_mark(iter->var, iter->dom->extent);
+      auto splits = get_unused_iters(unified_mark, merged_splits, analyzer);
+      // Put the small axis last for a flattened ordering.
       results.insert(results.end(), splits.rbegin(), splits.rend());
     } else if (!is_one(iter->dom->extent)) {
       auto mark = IterMark(iter->var, iter->dom->extent);

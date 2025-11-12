@@ -977,16 +977,19 @@ class TLCPUSourceWrapper:
         "float32": "float",
         "float16": "half",
         "int32": "int32_t",
+        "int8": "int8_t",
+        "uint8": "uint8_t",
+        "int16": "int16_t",
+        "uint16": "uint16_t",
+        "int64": "int64_t",
+        "uint64": "uint64_t",
+        "float64": "double",
+        "bool": "bool",
+        "uchar": "uchar",
     }
 
-    INIT_FUNC = textwrap.dedent('''
-        #ifdef __cplusplus
-        extern "C"
-        #endif
-        int32_t init() {
-            return 0;
-        }
-    ''')
+    # Use common init with error buffer and get_last_error for CPU backend as well
+    INIT_FUNC = PREDEF_INIT_FUNC.format("")
 
     CALL_PREFIX = textwrap.dedent("""
         #ifdef __cplusplus
@@ -1107,8 +1110,8 @@ class TLCPUSourceWrapper:
         return dynamic_symbolic_set
 
     def get_cpu_init_func(self):
-        init_funcs = self.INIT_FUNC
-        return init_funcs
+        # Provide init() and get_last_error() for CPU backend
+        return self.INIT_FUNC
 
     def update_lib_code(self, code: str):
         # Update the library code with the given code string
