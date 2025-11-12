@@ -21,9 +21,5 @@ def bench_example_warp_specialize_gemm_softpipe_stage2():
     tilelang.tools.bench.process_func(example_warp_specialize_gemm_softpipe_stage2.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

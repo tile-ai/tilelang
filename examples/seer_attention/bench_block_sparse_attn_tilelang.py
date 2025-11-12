@@ -6,9 +6,5 @@ def bench_block_sparse_attn_tilelang():
     tilelang.tools.bench.process_func(block_sparse_attn_tilelang.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

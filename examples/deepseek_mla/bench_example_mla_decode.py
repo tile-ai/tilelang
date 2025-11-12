@@ -6,9 +6,5 @@ def bench_example_mla_decode():
     tilelang.tools.bench.process_func(example_mla_decode.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

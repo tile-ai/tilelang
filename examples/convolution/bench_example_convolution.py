@@ -11,9 +11,5 @@ def bench_example_convolution_autotune():
     tilelang.tools.bench.process_func(example_convolution_autotune.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

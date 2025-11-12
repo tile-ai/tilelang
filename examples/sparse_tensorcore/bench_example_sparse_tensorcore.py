@@ -7,9 +7,5 @@ def bench_example_sparse_tensorcore():
     tilelang.tools.bench.process_func(tilelang_example_sparse_tensorcore.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

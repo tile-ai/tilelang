@@ -31,9 +31,5 @@ def bench_example_triton_sparse_gqa_decode_varlen_mask():
     tilelang.tools.bench.process_func(example_triton_sparse_gqa_decode_varlen_mask.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

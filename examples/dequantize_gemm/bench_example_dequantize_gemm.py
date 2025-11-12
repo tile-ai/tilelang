@@ -31,9 +31,5 @@ def bench_example_dequant_gemm_w4a8():
     tilelang.tools.bench.process_func(example_dequant_gemm_w4a8.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

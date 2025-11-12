@@ -26,9 +26,5 @@ def bench_sparse_mla_bwd():
     tilelang.tools.bench.process_func(sparse_mla_bwd.test_sparse_mla_bwd)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

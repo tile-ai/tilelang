@@ -66,9 +66,5 @@ def bench_example_mha_fwd_varlen():
     tilelang.tools.bench.process_func(example_mha_fwd_varlen.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

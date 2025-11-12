@@ -21,9 +21,5 @@ def bench_example_gemm():
     tilelang.tools.bench.process_func(example_gemm.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

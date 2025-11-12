@@ -48,9 +48,5 @@ def bench_example_gqa_sink_bwd_bhsd_sliding_window():
     tilelang.tools.bench.process_func(example_gqa_sink_bwd_bhsd.main, window_size=128)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()

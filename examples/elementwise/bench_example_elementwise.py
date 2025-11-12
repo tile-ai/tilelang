@@ -6,9 +6,5 @@ def bench_example_elementwise_add():
     tilelang.tools.bench.process_func(example_elementwise_add.main)
 
 
-def main():
+if globals().get("__name__") == "__main__":
     tilelang.tools.bench.main()
-
-
-if __name__ == "__main__":
-    main()
