@@ -325,7 +325,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
                         A_byte_offset = A_elem_offset * elems_in_bytes
                         B_byte_offset = B_elem_offset * elems_in_bytes
-                        C_offset = (i * n_dim + j * tmem_col_step) * accum_dtype_in_bits // 32  # 32 bits per tmem bank
+                        C_offset = (i * n_dim + j * tmem_col_step
+                                   ) * accum_dtype_in_bits // 32  # 32 bits per tmem bank
 
                         T.ptx_tcgen05_mma_ss(
                             a_dtype_abbrv,

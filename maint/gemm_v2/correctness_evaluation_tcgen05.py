@@ -61,7 +61,6 @@ def matmul(
     return main
 
 
-
 def _compile_and_check(
     program,
     trans_A,
@@ -147,13 +146,15 @@ FALSE_TRUE_CASES = ([
         "float32",
         id=f"K{k}-float16-float-float",
     ) for k in K_VALUES
-] + [pytest.param(
-    k,
-    "float8_e5m2",
-    "float32",
-    "float32",
-    id="K32-float8_e5m2-float32-float32",
-) for k in K_VALUES_8Bit])
+] + [
+    pytest.param(
+        k,
+        "float8_e5m2",
+        "float32",
+        "float32",
+        id="K32-float8_e5m2-float32-float32",
+    ) for k in K_VALUES_8Bit
+])
 
 TRANS_CASES = [
     pytest.param(False, True, id="nt"),

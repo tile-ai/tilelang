@@ -85,7 +85,6 @@ class GemmTCGEN5(GemmBase):
             raise ValueError(f"TCGEN5MMA currently only supports gemm_ss, got "
                              f"A scope {self.A.scope()}, B scope {self.B.scope()}")
 
-
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
             raise ValueError(f"Unsupported A scope for TCGEN5MMA: {self.A.scope()}")
         if self.B.scope() not in {"shared", "shared.dyn"}:
