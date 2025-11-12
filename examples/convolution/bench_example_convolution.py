@@ -1,5 +1,4 @@
 import tilelang.tools.bench
-import tilelang.testing
 import example_convolution
 import example_convolution_autotune
 

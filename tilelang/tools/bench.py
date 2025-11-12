@@ -59,7 +59,7 @@ def process_func(func, *args, repeat=10, warmup=3, **kwargs):
 
 
 def main():
-    # Entry point — automatically run all test_* functions in caller file.
+    # Entry point — automatically run all bench_* functions in caller file.
     test_file = inspect.getsourcefile(sys._getframe(1))
     module = {}
     with open(test_file) as f:

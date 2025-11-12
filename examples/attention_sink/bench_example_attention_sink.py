@@ -1,4 +1,3 @@
-import tilelang.testing
 import tilelang.tools.bench
 import example_gqa_sink_bwd_bhsd
 import example_gqa_sink_fwd_bhsd_wgmma_pipelined
