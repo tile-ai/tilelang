@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from tvm import tir
 from tilelang.language import copy, macro, alloc_shared, alloc_fragment
+from tilelang.language.utils import buffer_to_tile_region
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.script.ir_builder import IRBuilder
 
@@ -51,8 +52,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                red_frag_in.access_ptr("r"),
-                red_frag_out.access_ptr("w"),
+                buffer_to_tile_region(red_frag_in, "r"),
+                buffer_to_tile_region(red_frag_out, "w"),
                 reduce_type,
                 dim,
                 clear,
@@ -66,8 +67,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                red_frag_in.access_ptr("r"),
-                out.access_ptr("w"),
+                buffer_to_tile_region(red_frag_in, "r"),
+                buffer_to_tile_region(out, "w"),
                 reduce_type,
                 dim,
                 clear,
@@ -79,8 +80,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer.access_ptr("r"),
-                red_frag_out.access_ptr("w"),
+                buffer_to_tile_region(buffer, "r"),
+                buffer_to_tile_region(red_frag_out, "w"),
                 reduce_type,
                 dim,
                 clear,
@@ -90,8 +91,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer.access_ptr("r"),
-                out.access_ptr("w"),
+                buffer_to_tile_region(buffer, "r"),
+                buffer_to_tile_region(out, "w"),
                 reduce_type,
                 dim,
                 clear,
