@@ -20,7 +20,8 @@ from .v2.annot import (
     StridedTensor,  # noqa: F401
     FragmentBuffer,  # noqa: F401
     SharedBuffer,  # noqa: F401
-    LocalBuffer  # noqa: F401
+    LocalBuffer,  # noqa: F401
+    dyn, # noqa: F401
 )
 # from .proxy import (
 #     ptr,  # noqa: F401

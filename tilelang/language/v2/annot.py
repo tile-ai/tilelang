@@ -71,7 +71,7 @@ class ArgVarTable:
 
     def get_or_create_var(self, name: str, dtype: dt.dtype) -> tir.Var:
         if name not in self.var_tab:
-            self.var_tab[name] = tir.Var(name, dtype.tir_dtype)
+            self.var_tab[name] = tir.Var(name, dtype)
         return self.var_tab[name]
 
 
@@ -239,7 +239,7 @@ class BufferAnnot(Annot):
 
     def __getitem__(self, params):
         shape, dtype = params
-        if not isinstance(shape, tuple):
+        if not isinstance(shape, (tuple, list)):
             shape = (shape,)
         shape = _canonicalize_shape(shape)
         dtype = _canonicalize_dtype(dtype)
@@ -519,10 +519,32 @@ if TYPE_CHECKING:
         def scope(self) -> Scope: ...
 
     class Tensor(Generic[_Shape, _DType], Buffer[_Shape, _DType]):
-        pass
+        def __new__(
+            shape: tuple[Unpack[_Shapes]],
+            dtype: _DType="float32",
+            data=None,
+            strides=None,
+            elem_offset=None,
+            scope=None,
+            align=0,
+            offset_factor=0,
+            buffer_type="",
+            axis_separators=None,
+        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
 
     class StridedTensor(Generic[_Shape, _Stride, _DType], Buffer[_Shape, _DType]):
-        pass
+        def __new__(
+            shape: tuple[Unpack[_Shapes]],
+            strides=None,
+            dtype: _DType="float32",
+            data=None,
+            elem_offset=None,
+            scope=None,
+            align=0,
+            offset_factor=0,
+            buffer_type="",
+            axis_separators=None,
+        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
 
     class FragmentBuffer(Generic[_Shape, _DType], Buffer[_Shape, _DType]):
         pass

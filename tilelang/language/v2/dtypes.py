@@ -10,7 +10,7 @@ _T = TypeVar('_T')
 
 if TYPE_CHECKING:
     class dtype(Generic[_T]):
-        ...
+        def torch(self) -> torch.dtype: ...
 else:
     dtype = tvm.DataType
 
@@ -131,13 +131,19 @@ def __dtype_new__(cls, value: AnyDType) -> dtype:
         raise TypeError(f"Invalid DataType {value}({type(value)}), expect one of {expected}")
 
 
+def __dtype_to_torch(self) -> torch.dtype:
+    if self not in _dtype_tvm2py:
+        raise TypeError(f'Unable to convert {self} to torch type')
+    return _dtype_tvm2py[self]
+
+
 dtype.__eq__ = __dtype_eq__
 dtype.__req__ = __dtype_eq__
 dtype.__ne__ = __dtype_ne__
 dtype.__rne__ = __dtype_ne__
 dtype.__call__ = __dtype_call__
 dtype.__new__ = __dtype_new__
-
+dtype.torch = __dtype_to_torch
 
 def get_tvm_dtype(value: AnyDType) -> dtype:
     if isinstance(value, (dtype, ir.Type)):
