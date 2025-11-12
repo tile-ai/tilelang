@@ -2,8 +2,6 @@ import tilelang.tools.bench
 import example_tilelang_gemm_streamk
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def bench_example_tilelang_gemm_streamk():
     tilelang.tools.bench.process_func(example_tilelang_gemm_streamk.main)
 
