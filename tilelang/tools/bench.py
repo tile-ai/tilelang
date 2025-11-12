@@ -26,7 +26,6 @@ def suppress_output():
 
 def process_func(func, *args, repeat=10, warmup=3, **kwargs):
     # Run a target function multiple times and measure average latency.
-
     try:
         with suppress_output():
             for _ in range(warmup):

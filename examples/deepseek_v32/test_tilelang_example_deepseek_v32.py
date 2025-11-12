@@ -1,11 +1,11 @@
 # ruff: noqa
 import tilelang.testing
 
-from topk_selector import test_topk_selector
-from fp8_lighting_indexer import test_fp8_lighting_indexer
-from sparse_mla_fwd import test_sparse_mla_fwd
-from sparse_mla_fwd_pipelined import test_sparse_mla_fwd_pipelined
-from sparse_mla_bwd import test_sparse_mla_bwd
+import topk_selector
+import fp8_lighting_indexer
+import sparse_mla_fwd
+import sparse_mla_fwd_pipelined
+import sparse_mla_bwd
 
 
 def test_example_topk_selector():
