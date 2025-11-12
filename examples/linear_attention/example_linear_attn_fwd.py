@@ -80,7 +80,6 @@ def tl_fused_chunk_fwd_kernel(
                 T.atomic_add(
                     O[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV],
                     o_shared)
-                #TODO: consider using vectorized atomic add or tma reduce for sm90
 
             # Output final state
             T.copy(h, final_state[i_b, i_h, i_k * BK:(i_k + 1) * BK, i_v * BV:(i_v + 1) * BV])
@@ -91,6 +90,7 @@ def tl_fused_chunk_fwd_kernel(
 def tl_fused_chunk_fwd(q, k, v):
     B, S, H, D = q.shape
     kernel = tl_fused_chunk_fwd_kernel(B, S, H, D, D)
+    print(kernel.get_kernel_source())
     o = torch.zeros((B, S, H, D), device='cuda', dtype=torch.float32)
     h = kernel(q, k, v, o)
     return o, h

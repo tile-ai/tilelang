@@ -105,3 +105,6 @@ cmake-build-*/
 
 # Git version for sdist
 .git_commit.txt
+
+# pre-commit cache
+.pre-commit-cache/*

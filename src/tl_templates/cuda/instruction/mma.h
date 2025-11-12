@@ -136,6 +136,10 @@ TL_DEFINE_MMA_DISPATCHER(kTensorFloat32, kTensorFloat32, kFloat32, 16, 8, 8,
                          false, true, false,
                          cute::SM80_16x8x8_F32TF32TF32F32_TN)
 
+// FP64 inputs (DMMA: m8n8k4, TN layout)
+TL_DEFINE_MMA_DISPATCHER(kFloat64, kFloat64, kFloat64, 8, 8, 4, false, true,
+                         false, cute::SM80_8x8x4_F64F64F64F64_TN)
+
 #undef TL_DEFINE_MMA_DISPATCHER
 
 } // namespace detail

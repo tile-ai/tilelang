@@ -11,15 +11,101 @@
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/transform.h>
 
-#include "../support/ffi_aliases.h"
 #include "../target/utils.h"
+#include "region.h"
 #include "tcgen5_meta.h"
-#include "tvm/ffi/string.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+// Normalize a GEMM argument (BufferRegion/BufferLoad/tvm_access_ptr/tl.region)
+// to BufferRegion
+static BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
+                                            const BufferMap &vmap) {
+  // Case 1: Already a BufferRegion
+  if (arg->IsInstance<BufferRegionNode>()) {
+    return Downcast<BufferRegion>(arg);
+  }
+
+  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
+  // extent=1)
+  if (const auto *load = arg.as<BufferLoadNode>()) {
+    Array<Range> ranges;
+    for (const PrimExpr &index : load->indices) {
+      if (const auto *ramp = index.as<RampNode>()) {
+        ICHECK(ramp->stride.as<IntImmNode>()) << "Ramp stride must be IntImm";
+        ICHECK_EQ(ramp->stride.as<IntImmNode>()->value, 1)
+            << "Only stride-1 Ramp is supported in GEMM region conversion";
+        ICHECK(ramp->lanes.as<IntImmNode>())
+            << "Scalable vector lanes not supported in GEMM region conversion";
+        ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
+      } else {
+        ranges.push_back(Range::FromMinExtent(index, 1));
+      }
+    }
+    return BufferRegion(load->buffer, ranges);
+  }
+
+  // Case 3: Call nodes
+  if (const auto *call = arg.as<CallNode>()) {
+    // tl.region(...) — reconstruct via RegionOp
+    if (call->op.same_as(RegionOp::Get())) {
+      RegionOp region(call->args, vmap);
+      return BufferRegion(region->GetBuffer(), region->GetRanges());
+    }
+    // builtin.tvm_access_ptr(...) — map var to Buffer and take full region
+    if (call->op.same_as(builtin::tvm_access_ptr())) {
+      Var var = Downcast<Var>(call->args[1]);
+      Buffer buf = vmap.at(var);
+      Array<Range> ranges;
+      for (PrimExpr extent : buf->shape) {
+        ranges.push_back(Range(IntImm(extent->dtype, 0), extent));
+      }
+      return BufferRegion(buf, ranges);
+    }
+  }
+
+  LOG(FATAL) << "Unsupported GEMM argument for BufferRegion: " << arg;
+  throw; // Unreachable, keeps compiler happy
+}
+
+// Build a tvm_access_ptr(handle) to the start of the 2D tile within a
+// BufferRegion. Offset is computed from all but the last two dimensions; extent
+// is the product of the last two extents. rw_mask: 1=read, 2=write,
+// 3=readwrite.
+static PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
+                                        int rw_mask) {
+  Buffer buf = region->buffer;
+  int ndim = static_cast<int>(buf->shape.size());
+  ICHECK(ndim >= 2) << "GEMM expects buffers with at least 2 dims";
+
+  // Compute row-major strides
+  std::vector<PrimExpr> strides(ndim);
+  PrimExpr one = make_const(buf->shape[0].dtype(), 1);
+  PrimExpr cur = one;
+  for (int i = ndim - 1; i >= 0; --i) {
+    strides[i] = cur;
+    cur = cur * buf->shape[i];
+  }
+
+  // Offset: sum_{i in [0..ndim-3]} min_i * stride_i
+  PrimExpr offset = make_const(buf->shape[0].dtype(), 0);
+  for (int i = 0; i < ndim - 2; ++i) {
+    offset = offset + region->region[i]->min * strides[i];
+  }
+
+  // Extent: last two extents product (elements)
+  PrimExpr extent =
+      region->region[ndim - 2]->extent * region->region[ndim - 1]->extent;
+
+  // ptype and return handle
+  PrimExpr ptype = tir::TypeAnnotation(buf->dtype);
+  Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
+                           IntImm(DataType::Int(32), rw_mask)};
+  return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
+}
 
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
@@ -51,45 +137,42 @@ using namespace tir;
  */
 GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<GemmPyNode> node = tvm::ffi::make_object<GemmPyNode>();
-  node->Aptr = args[0];
-  node->Bptr = args[1];
-  node->Cptr = args[2];
-  node->A = vmap[GetVarFromAccessPtr(node->Aptr)];
-  node->B = vmap[GetVarFromAccessPtr(node->Bptr)];
-  node->C = vmap[GetVarFromAccessPtr(node->Cptr)];
-  node->trans_A = args[3].as<Bool>().value();
-  node->trans_B = args[4].as<Bool>().value();
-  node->M = args[5].as<IntImm>().value()->value;
-  node->N = args[6].as<IntImm>().value()->value;
-  node->K = args[7].as<IntImm>().value()->value;
-  node->policy = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
-  node->clear_accum = args[9].as<PrimExpr>().value();
-  node->stride_A = args[10].as<IntImm>().value()->value;
-  node->stride_B = args[11].as<IntImm>().value()->value;
-  node->offset_A = args[12].as<IntImm>().value()->value;
-  node->offset_B = args[13].as<IntImm>().value()->value;
+
+  node->aRegion_ = NormalizeToBufferRegion(args[0], vmap);
+  node->bRegion_ = NormalizeToBufferRegion(args[1], vmap);
+  node->cRegion_ = NormalizeToBufferRegion(args[2], vmap);
+
+  node->a_ = node->aRegion_->buffer;
+  node->b_ = node->bRegion_->buffer;
+  node->c_ = node->cRegion_->buffer;
+  node->transA_ = args[3].as<Bool>().value();
+  node->transB_ = args[4].as<Bool>().value();
+  node->m_ = args[5].as<IntImm>().value()->value;
+  node->n_ = args[6].as<IntImm>().value()->value;
+  node->k_ = args[7].as<IntImm>().value()->value;
+  node->policy_ = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
+  node->clearAccum_ = args[9].as<PrimExpr>().value();
+  node->strideA_ = args[10].as<IntImm>().value()->value;
+  node->strideB_ = args[11].as<IntImm>().value()->value;
+  node->offsetA_ = args[12].as<IntImm>().value()->value;
+  node->offsetB_ = args[13].as<IntImm>().value()->value;
   if (args.size() > 14) {
-    node->kPack = args[14].as<IntImm>().value()->value;
-    if (node->kPack != 1 && node->kPack != 2) {
+    node->kPack_ = args[14].as<IntImm>().value()->value;
+    if (node->kPack_ != 1 && node->kPack_ != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
   if (args.size() > 15) {
-    node->wg_wait = args[15].as<IntImm>().value()->value;
+    node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
-  if (args.size() > 16) {
-    node->mbarptr = args[16];
+  node->mbarPtr_ = args[16];
+  if (node->mbarPtr_.as<CallNode>()) {
+    node->mbar_ = vmap[GetVarFromAccessPtr(node->mbarPtr_)];
   } else {
-    node->mbarptr = IntImm(DataType::UInt(32), 0);
+    node->mbar_ = std::nullopt;
   }
-  if (args.size() > 18) {
-    node->C_coords = Array<PrimExpr>({args[17], args[18]});
-  } else if (args.size() > 17) {
-    node->C_coords = Array<PrimExpr>({args[17], IntImm(DataType::Int(32), 0)});
-  } else {
-    node->C_coords = Array<PrimExpr>(
-        {IntImm(DataType::Int(32), 0), IntImm(DataType::Int(32), 0)});
-  }
+  node->cCoords_ = Array<PrimExpr>(
+      {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
   data_ = std::move(node);
 }
 
@@ -106,28 +189,28 @@ TileOperator GemmPyNode::Clone() const {
   return GemmPy(op);
 }
 
-bool GemmPyNode::AllowTCGEN5MMA(Target target) const {
+bool GemmPyNode::allowTcgen5Mma(Target target) const {
   return TargetIsSm100(target) &&
-         ((A.scope() == "shared.dyn" || A.scope() == "shared" ||
-           A.scope() == "shared.tmem") &&
-          (B.scope() == "shared.dyn" || B.scope() == "shared") &&
-          C.scope() == "shared.tmem") &&
-         GetTCGEN5MMAMeta(M, N, K, A->dtype, C->dtype).first;
+         ((a_.scope() == "shared.dyn" || a_.scope() == "shared" ||
+           a_.scope() == "shared.tmem") &&
+          (b_.scope() == "shared.dyn" || b_.scope() == "shared") &&
+          c_.scope() == "shared.tmem") &&
+         GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype).first;
 }
 
-bool GemmPyNode::AllowWGMMA(int block_size, Target target) const {
+bool GemmPyNode::allowWgmma(int block_size, Target target) const {
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
 
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
   return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
-         TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0) &&
-         CheckWGMMA();
+         TargetIsHopper(target) && (this->m_ >= 64) && (num_warps % 4 == 0) &&
+         checkWgmma();
 }
 
-GemmInst GemmPyNode::GetGemmInst(int block_size, Target target) const {
-  bool allow_tcgen5mma = AllowTCGEN5MMA(target);
-  bool allow_wgmma = AllowWGMMA(block_size, target);
+GemmInst GemmPyNode::getGemmInst(int block_size, Target target) const {
+  bool allow_tcgen5mma = allowTcgen5Mma(target);
+  bool allow_wgmma = allowWgmma(block_size, target);
   if (allow_tcgen5mma) {
     return GemmInst::kTCGEN5MMA;
   } else if (allow_wgmma) {
@@ -175,51 +258,52 @@ GemmInst GemmPyNode::GetGemmInst(int block_size, Target target) const {
  * @return true if WGMMA is supported for the current buffers, dtypes, and
  *         transpose/shape constraints; false otherwise.
  */
-bool GemmPyNode::CheckWGMMA() const {
-  if (B.scope() != "shared.dyn" && B.scope() != "shared") {
+bool GemmPyNode::checkWgmma() const {
+  if (b_.scope() != "shared.dyn" && b_.scope() != "shared") {
     return false;
   }
 
-  if (C->dtype == DataType::Float(16)) {
-    if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
-      return K % 16 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
+  if (c_->dtype == DataType::Float(16)) {
+    if (a_->dtype == DataType::Float(16) && b_->dtype == DataType::Float(16))
+      return k_ % 16 == 0;
+    else if (a_->dtype.is_float8_e4m3() && b_->dtype.is_float8_e4m3())
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype.is_float8_e4m3() && b_->dtype.is_float8_e5m2())
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype.is_float8_e5m2() && b_->dtype.is_float8_e4m3())
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype.is_float8_e5m2() && b_->dtype.is_float8_e5m2())
+      return (!transA_) && transB_ && k_ % 32 == 0;
     else
       return false;
-  } else if (C->dtype == DataType::Float(32)) {
-    if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
-      return K % 16 == 0;
-    else if (A->dtype == DataType::BFloat(16) &&
-             B->dtype == DataType::BFloat(16))
-      return K % 16 == 0;
-    else if (A->dtype == DataType::Float(32) && B->dtype == DataType::Float(32))
-      return (!trans_A) && trans_B && K % 8 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
+  } else if (c_->dtype == DataType::Float(32)) {
+    if (a_->dtype == DataType::Float(16) && b_->dtype == DataType::Float(16))
+      return k_ % 16 == 0;
+    else if (a_->dtype == DataType::BFloat(16) &&
+             b_->dtype == DataType::BFloat(16))
+      return k_ % 16 == 0;
+    else if (a_->dtype == DataType::Float(32) &&
+             b_->dtype == DataType::Float(32))
+      return (!transA_) && transB_ && k_ % 8 == 0;
+    else if (a_->dtype.is_float8_e4m3() && b_->dtype.is_float8_e4m3())
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype.is_float8_e4m3() && b_->dtype.is_float8_e5m2())
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype.is_float8_e5m2() && b_->dtype.is_float8_e4m3())
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype.is_float8_e5m2() && b_->dtype.is_float8_e5m2())
+      return (!transA_) && transB_ && k_ % 32 == 0;
     else
       return false;
-  } else if (C->dtype == DataType::Int(32)) {
-    if (A->dtype == DataType::Int(8) && B->dtype == DataType::Int(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::Int(8) && B->dtype == DataType::UInt(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::Int(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::UInt(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
+  } else if (c_->dtype == DataType::Int(32)) {
+    if (a_->dtype == DataType::Int(8) && b_->dtype == DataType::Int(8))
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype == DataType::Int(8) && b_->dtype == DataType::UInt(8))
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype == DataType::UInt(8) && b_->dtype == DataType::Int(8))
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype == DataType::UInt(8) && b_->dtype == DataType::UInt(8))
+      return (!transA_) && transB_ && k_ % 32 == 0;
     else
       return false;
   } else {
@@ -256,10 +340,10 @@ static int GetArchInt(Target target) {
 
 Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
-  GemmInst gemm_inst = GetGemmInst(block_size, T.target);
+  GemmInst gemm_inst = getGemmInst(block_size, T.target);
 
   auto [warp_m, warp_n] =
-      policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
+      policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
     auto prim_func =
@@ -302,6 +386,14 @@ LayoutMap GemmPyNode::InferLayout(const LayoutInferArgs &T,
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.infer_layout")) {
     results = Downcast<LayoutMap>(
         (*f)(tvm::ffi::GetRef<GemmPy>(this), T.target, T.thread_bounds));
+    // Bind all fragment layouts with the provided thread range
+    for (auto kv : results) {
+      const Buffer &buf = kv.first;
+      const Layout &layout = kv.second;
+      if (auto frag = layout.as<Fragment>()) {
+        results.Set(buf, frag.value()->BindThreadRange(T.thread_bounds));
+      }
+    }
   } else {
     LOG(FATAL) << "No infer layout function found for gemm_py";
   }
@@ -321,7 +413,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.GemmPyGemmInst",
                         [](GemmPy gemm_py, int block_size, Target target) {
-                          return gemm_py->GetGemmInst(block_size, target);
+                          return gemm_py->getGemmInst(block_size, target);
                         });
 }
 

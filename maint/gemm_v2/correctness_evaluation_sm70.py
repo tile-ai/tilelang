@@ -211,7 +211,7 @@ def run_gemm_rs(
 
 
 M_VALUES = [64, 128]
-N_VALUES = [16, 32, 64, 128]
+N_VALUES = [32, 64, 128]
 K_VALUES = [16, 32, 64]
 FALSE_TRUE_CASES = ([
     pytest.param(

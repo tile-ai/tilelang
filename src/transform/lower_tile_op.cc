@@ -104,55 +104,6 @@ private:
 
   Map<Buffer, Layout> layout_remap_;
 };
-class BufferGemmCollector : public StmtExprVisitor {
-public:
-  BufferGemmCollector() { Clear(); }
-
-  void Clear() { buffer_var_gemm_.clear(); }
-
-  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
-
-  Array<Var> GetBufferVarGemm() { return buffer_var_gemm_; }
-
-private:
-  void VisitStmt_(const EvaluateNode *op) {
-    const CallNode *call_node = op->value.as<CallNode>();
-    // Value of EvaluateNode may not be a call
-    if (!call_node) {
-      return;
-    }
-    auto call = Downcast<Call>(call_node);
-    if (call->op.same_as(Gemm::Get())) {
-      auto srcA_buffer_access_ptr = Downcast<Call>(call->args[0]);
-      ICHECK(srcA_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto srcA_buffer_var = Downcast<Var>(srcA_buffer_access_ptr->args[1]);
-      auto srcB_buffer_access_ptr = Downcast<Call>(call->args[1]);
-      ICHECK(srcB_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto srcB_buffer_var = Downcast<Var>(srcB_buffer_access_ptr->args[1]);
-      auto dst_buffer_access_ptr = Downcast<Call>(call->args[2]);
-      ICHECK(dst_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto dst_buffer_var = Downcast<Var>(dst_buffer_access_ptr->args[1]);
-      buffer_var_gemm_.push_back(srcA_buffer_var);
-      buffer_var_gemm_.push_back(srcB_buffer_var);
-      buffer_var_gemm_.push_back(dst_buffer_var);
-    } else if (call->op.same_as(GemmSP::Get())) {
-      auto srcA_buffer_access_ptr = Downcast<Call>(call->args[0]);
-      ICHECK(srcA_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto srcA_buffer_var = Downcast<Var>(srcA_buffer_access_ptr->args[1]);
-      auto srcB_buffer_access_ptr = Downcast<Call>(call->args[1]);
-      ICHECK(srcB_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto srcB_buffer_var = Downcast<Var>(srcB_buffer_access_ptr->args[1]);
-      auto dst_buffer_access_ptr = Downcast<Call>(call->args[2]);
-      ICHECK(dst_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto dst_buffer_var = Downcast<Var>(dst_buffer_access_ptr->args[1]);
-      buffer_var_gemm_.push_back(srcA_buffer_var);
-      buffer_var_gemm_.push_back(srcB_buffer_var);
-      buffer_var_gemm_.push_back(dst_buffer_var);
-    }
-  }
-
-  Array<Var> buffer_var_gemm_;
-};
 
 /*!
  * \brief A class that rewrites buffer references in a statement based on a
@@ -254,11 +205,6 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
-    // For TMA 1D, we should collect the buffers which are not used in GEMM and
-    // do not need swizzle
-    BufferGemmCollector collector;
-    collector.Collect(f->body);
-    substituter.buffer_var_gemm_ = collector.GetBufferVarGemm();
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -693,10 +639,10 @@ private:
       thread_bounds = Range::FromMinExtent(0, 1);
     }
 
-    auto lowered = tile_op->Lower(
-        LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  layout_map_, buffer_remap_, buffer_var_gemm_},
-        analyzer_);
+    auto lowered =
+        tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_->var,
+                                 callback, layout_map_, buffer_remap_},
+                       analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 
@@ -734,7 +680,6 @@ private:
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
   bool has_tma_{false};
-  Array<Var> buffer_var_gemm_;
 };
 
 namespace transform {

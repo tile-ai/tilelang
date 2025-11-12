@@ -1,5 +1,5 @@
 from __future__ import annotations
-from tvm.tir import Buffer
+from tvm.tir import Buffer, BufferLoad, BufferRegion, PrimExpr
 from functools import reduce
 from tvm import IRModule
 from tvm.tir import PrimFunc
@@ -9,29 +9,50 @@ from tvm import ir, tir
 # These utility functions check the memory scope of a given TVM buffer.
 
 
-def is_global(buffer: Buffer) -> bool:
+def _get_buffer(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> Buffer:
+    """
+    Extract Buffer from Buffer, BufferLoad, or BufferRegion.
+
+    Args:
+        buffer_or_load_or_region: Can be Buffer, BufferLoad, or BufferRegion
+
+    Returns:
+        Buffer: The underlying buffer object
+    """
+    if isinstance(buffer_or_load_or_region, Buffer):
+        return buffer_or_load_or_region
+    elif isinstance(buffer_or_load_or_region, (tir.BufferLoad, tir.BufferRegion)):
+        return buffer_or_load_or_region.buffer
+    else:
+        raise TypeError(
+            f"Expected Buffer, BufferLoad, or BufferRegion, got {type(buffer_or_load_or_region)}")
+
+
+def is_global(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is in the global memory scope.
 
     Args:
-        buffer (Buffer): The TVM buffer to check.
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
 
     Returns:
         bool: True if the buffer is in global memory, False otherwise.
     """
+    buffer = _get_buffer(buffer)
     return buffer.scope() == "global"
 
 
-def is_shared(buffer: Buffer, allow_dynamic: bool = True) -> bool:
+def is_shared(buffer: Buffer | BufferLoad | BufferRegion, allow_dynamic: bool = True) -> bool:
     """
     Check if the buffer is in the shared memory scope.
 
     Args:
-        buffer (Buffer): The TVM buffer to check.
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
 
     Returns:
         bool: True if the buffer is in shared memory, False otherwise.
     """
+    buffer = _get_buffer(buffer)
     conditions = [False]
     conditions.append(buffer.scope() == "shared")
     if allow_dynamic:
@@ -39,55 +60,59 @@ def is_shared(buffer: Buffer, allow_dynamic: bool = True) -> bool:
     return any(conditions)
 
 
-def is_shared_dynamic(buffer: Buffer) -> bool:
+def is_shared_dynamic(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is in the dynamic shared memory scope.
 
     Args:
-        buffer (Buffer): The TVM buffer to check.
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
 
     Returns:
         bool: True if the buffer is in dynamic shared memory, False otherwise.
     """
+    buffer = _get_buffer(buffer)
     return buffer.scope() == "shared.dyn"
 
 
-def is_tensor_memory(buffer: Buffer) -> bool:
+def is_tensor_memory(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is in tensor memory scope (e.g., shared.tmem).
 
     Args:
-        buffer (Buffer): The TVM buffer to check.
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
 
     Returns:
         bool: True if the buffer is in tensor memory, False otherwise.
     """
+    buffer = _get_buffer(buffer)
     return buffer.scope().startswith("shared.tmem")
 
 
-def is_local(buffer: Buffer) -> bool:
+def is_local(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is in the local memory scope.
 
     Args:
-        buffer (Buffer): The TVM buffer to check.
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
 
     Returns:
         bool: True if the buffer is in local memory, False otherwise.
     """
+    buffer = _get_buffer(buffer)
     return buffer.scope() == "local"
 
 
-def is_fragment(buffer: Buffer) -> bool:
+def is_fragment(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     """
     Check if the buffer is a fragment (e.g., for matrix multiplication operations).
 
     Args:
-        buffer (Buffer): The TVM buffer to check.
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
 
     Returns:
         bool: True if the buffer is a fragment, False otherwise.
     """
+    buffer = _get_buffer(buffer)
     return buffer.scope().startswith("local.fragment")
 
 
@@ -157,3 +182,218 @@ def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> tir.BufferRegion
         return tir.BufferRegion(buffer, regions)
     else:
         return None
+
+
+def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
+    """
+    Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
+
+    - Buffer -> full-region BufferRegion covering entire shape
+    - BufferRegion -> returned as-is
+    - BufferLoad -> best-effort convert via get_buffer_region_from_load;
+      if scalar, fall back to 1-sized ranges at given indices
+    """
+    if isinstance(obj, tir.BufferRegion):
+        return obj
+    if isinstance(obj, tir.Buffer):
+        mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+        ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
+        return tir.BufferRegion(obj, ranges)
+    if isinstance(obj, tir.BufferLoad):
+        region = get_buffer_region_from_load(obj)
+        if region is not None:
+            return region
+        # Fallback: scalar load -> 1-sized ranges at indices
+        mins = [idx for idx in obj.indices]
+        ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+        ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
+        return tir.BufferRegion(obj.buffer, ranges)
+    raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
+
+
+def retrieve_shape(obj: Buffer | BufferRegion | BufferLoad) -> list:
+    """
+    Retrieve shape-like extents for a buffer-like object.
+
+    - Buffer -> its `shape`
+    - BufferRegion -> list of each range's `extent`
+    - BufferLoad -> extents from `get_buffer_region_from_load(obj)`
+    """
+    if isinstance(obj, tir.Buffer):
+        return obj.shape
+    if isinstance(obj, tir.BufferRegion):
+        return [r.extent for r in obj.region]
+    if isinstance(obj, tir.BufferLoad):
+        region = get_buffer_region_from_load(obj)
+        if region is None:
+            raise ValueError("Cannot retrieve shape from scalar BufferLoad without region")
+        return [r.extent for r in region.region]
+    raise ValueError(f"Unsupported retrieve_shape argument type: {type(obj)} for object {obj}")
+
+
+def retrieve_stride(obj: Buffer | BufferRegion | BufferLoad) -> list:
+    """
+    Retrieve row-major strides for a buffer-like object based on its buffer.shape.
+
+    For BufferRegion and BufferLoad, uses the underlying buffer's `shape`.
+    """
+    if isinstance(obj, tir.Buffer):
+        shape = obj.shape
+    elif isinstance(obj, (tir.BufferRegion, tir.BufferLoad)):
+        shape = obj.buffer.shape
+    else:
+        raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
+
+    strides = []
+    stride = 1
+    for s in reversed(shape):
+        strides.insert(0, stride)
+        stride *= s
+    return strides
+
+
+def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion,
+                                   access_type: str = "r") -> PrimExpr:
+    if isinstance(buffer_or_load_or_region, Buffer):
+        return buffer_or_load_or_region.access_ptr(access_type)
+    elif isinstance(buffer_or_load_or_region, BufferLoad):
+        buffer_load = buffer_or_load_or_region
+        offset, stride = 0, 1
+        buffer = buffer_load.buffer
+        for i, shape in enumerate(reversed(buffer.shape)):
+            indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
+            if isinstance(indice, (tir.IntImm, tir.PrimExpr)):
+                offset += indice * stride
+            elif isinstance(indice, tir.Ramp):
+                offset += indice.base * stride
+            else:
+                raise ValueError(f"Unsupported index type: {type(indice)}")
+            stride *= shape
+        return buffer.access_ptr(access_type, offset=offset)
+    elif isinstance(buffer_or_load_or_region, BufferRegion):
+        buffer_region = buffer_or_load_or_region
+        buffer = buffer_region.buffer
+        offset, stride = 0, 1
+        for i, shape in enumerate(reversed(buffer.shape)):
+            offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
+            stride *= shape
+        return buffer.access_ptr(access_type, offset=offset)
+    else:
+        raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+
+
+def retrieve_ptr(
+    obj: Buffer | BufferRegion | BufferLoad,
+    access_type: str = "r",
+    ignore_last_ndim: int = 0,
+) -> PrimExpr:
+    """
+    Retrieve a pointer to the start of a (possibly sliced) buffer region.
+
+    - Buffer -> base pointer
+    - BufferRegion -> pointer with byte offset computed from region minima
+    - BufferLoad -> pointer offset computed from indices or derived region
+
+    Args:
+        obj: Buffer-like object
+        access_type: TVM Buffer access mask, e.g. "r", "w", "rw"
+        ignore_last_ndim: do not offset the last N dimensions
+    """
+    if isinstance(obj, tir.Buffer):
+        return obj.access_ptr(access_type)
+
+    if isinstance(obj, tir.BufferRegion):
+        buffer, region = obj.buffer, obj.region
+        strides = retrieve_stride(obj)
+        # offset only over the leading dims, optionally ignoring the tail dims
+        upto = max(0, len(region) - int(ignore_last_ndim))
+        offset = 0
+        for i in range(upto):
+            offset += region[i].min * strides[i]
+        return buffer.access_ptr(access_type, offset=offset)
+
+    if isinstance(obj, tir.BufferLoad):
+        buffer = obj.buffer
+        region = get_buffer_region_from_load(obj)
+        if region is not None:
+            mins = [r.min for r in region.region]
+        else:
+            mins = list(obj.indices)
+        strides = retrieve_stride(obj)
+        upto = max(0, len(mins) - int(ignore_last_ndim))
+        offset = 0
+        for i in range(upto):
+            offset += mins[i] * strides[i]
+        return buffer.access_ptr(access_type, offset=offset)
+
+    raise ValueError(f"Unsupported retrieve_ptr argument type: {type(obj)} for object {obj}")
+
+
+def retrieve_offset(obj: Buffer | BufferRegion | BufferLoad) -> list:
+    """
+    Retrieve per-dimension minima offsets.
+
+    - Buffer -> [0, 0, ...]
+    - BufferRegion -> [r.min for r in region]
+    - BufferLoad -> indices (or derived region minima)
+    """
+    if isinstance(obj, tir.Buffer):
+        return [0] * len(obj.shape)
+    if isinstance(obj, tir.BufferRegion):
+        return [r.min for r in obj.region]
+    if isinstance(obj, tir.BufferLoad):
+        region = get_buffer_region_from_load(obj)
+        if region is not None:
+            return [r.min for r in region.region]
+        return list(obj.indices)
+    raise ValueError(f"Unsupported retrieve_offset argument type: {type(obj)} for object {obj}")
+
+
+def prim_expr_equal(lhs, rhs) -> bool:
+    """
+    Robust equality for PrimExpr shapes/extents.
+
+    Tries structural_equal first, then falls back to expr_deep_equal.
+    Python ints are converted to IntImm for comparison.
+    """
+    if isinstance(lhs, int) and isinstance(rhs, int):
+        return lhs == rhs
+    if isinstance(lhs, int):
+        lhs = tir.IntImm("int32", lhs)
+    if isinstance(rhs, int):
+        rhs = tir.IntImm("int32", rhs)
+    if ir.structural_equal(lhs, rhs):
+        return True
+    return tir.analysis.expr_deep_equal(lhs, rhs)
+
+
+def is_full_region(buffer_region: BufferRegion) -> bool:
+    """
+    Check whether a BufferRegion covers the full buffer region.
+
+    A full region means each dimension has start 0 and extent equal to
+    the corresponding dimension in the buffer's shape.
+
+    Args:
+        buffer_region: The TVM BufferRegion to check.
+
+    Returns:
+        bool: True if the region is full; otherwise False.
+    """
+    if not isinstance(buffer_region, tir.BufferRegion):
+        raise TypeError(f"Expected BufferRegion, got {type(buffer_region)}")
+
+    buf = buffer_region.buffer
+    ranges = buffer_region.region
+
+    if len(buf.shape) != len(ranges):
+        return False
+
+    expr_equal = tir.analysis.expr_deep_equal
+    for dim, r in zip(buf.shape, ranges):
+        # start == 0 and extent == shape
+        if not expr_equal(r.min, 0):
+            return False
+        if not expr_equal(r.extent, dim):
+            return False
+    return True

@@ -123,9 +123,9 @@ public:
 
       states.push_back(IndexSignState::kUnknown);
       needs_record = true;
-      LOG(WARNING) << "LegalizeNegativeIndex: cannot prove non-negative index "
-                   << simplified << " for buffer " << load->buffer->name
-                   << " (axis " << i << ").";
+      DLOG(WARNING) << "LegalizeNegativeIndex: cannot prove non-negative index "
+                    << simplified << " for buffer " << load->buffer->name
+                    << " (axis " << i << ").";
     }
 
     if (needs_record) {

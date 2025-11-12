@@ -5,7 +5,7 @@ from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.runtime import Scriptable
 import tvm_ffi
-from tilelang.ir import GemmWarpPolicy
+from tilelang.ir import GemmWarpPolicy as GemmWarpPolicy
 from .gemm_mma import GemmMMA
 from .gemm_mma_sm70 import GemmMMASm70
 from .gemm_wgmma import GemmWGMMA
@@ -54,29 +54,84 @@ class GemmInst(IntEnum):
 
 @tvm_ffi.register_object("tl.GemmPy")
 class GemmPy(Node, Scriptable):
-    A: tir.Buffer
-    B: tir.Buffer
-    C: tir.Buffer
+    # FFI fields (LLVM/MLIR-style lowerCamel via reflection):
+    # a, b, c, aPtr, bPtr, cPtr, m, n, k, transA, transB,
+    # strideA, strideB, offsetA, offsetB, clearAccum, kPack, wgWait, policy
+    #
+    # Backward-compat alias properties are provided below to support old names.
 
-    APtr: tir.PrimExpr
-    BPtr: tir.PrimExpr
-    CPtr: tir.PrimExpr
+    # Backward-compat alias properties (old API → new FFI fields)
+    @property
+    def A(self):
+        return self.a
 
-    M: int
-    N: int
-    K: int
+    @property
+    def B(self):
+        return self.b
 
-    trans_A: bool
-    trans_B: bool
+    @property
+    def C(self):
+        return self.c
 
-    stride_A: int
-    stride_B: int
-    offset_A: int
-    offset_B: int
-    clear_accum: bool
-    k_pack: int
-    wg_wait: int
-    policy: GemmWarpPolicy
+    @property
+    def APtr(self):
+        return self.aPtr
+
+    @property
+    def BPtr(self):
+        return self.bPtr
+
+    @property
+    def CPtr(self):
+        return self.cPtr
+
+    @property
+    def M(self):
+        return self.m
+
+    @property
+    def N(self):
+        return self.n
+
+    @property
+    def K(self):
+        return self.k
+
+    @property
+    def trans_A(self):
+        return self.transA
+
+    @property
+    def trans_B(self):
+        return self.transB
+
+    @property
+    def stride_A(self):
+        return self.strideA
+
+    @property
+    def stride_B(self):
+        return self.strideB
+
+    @property
+    def offset_A(self):
+        return self.offsetA
+
+    @property
+    def offset_B(self):
+        return self.offsetB
+
+    @property
+    def clear_accum(self):
+        return self.clearAccum
+
+    @property
+    def k_pack(self):
+        return self.kPack
+
+    @property
+    def wg_wait(self):
+        return self.wgWait
 
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""
