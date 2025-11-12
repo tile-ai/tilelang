@@ -553,7 +553,7 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_Name(self, node: ast.Name):
         if isinstance(node.ctx, ast.Load):
-            return quote_expr(f"__tb.rval('{node.id}', {node.id})", span=node)
+            return quote_expr(f"__tb.rval('{node.id}', node)", node=node, span=node)
         return node
 
 
