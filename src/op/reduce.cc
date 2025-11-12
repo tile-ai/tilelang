@@ -389,6 +389,35 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
     }
     auto thd = src_layout->ForwardThread(
         fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
+
+    // Ensure the thread count is divisible by the replicate extent.
+    // Otherwise, we cannot infer a valid fragment<->fragment layout.
+    {
+      arith::Analyzer analyzer;
+      PrimExpr num_threads = T.thread_bounds->extent;
+      // Though the dest_buffer_rep_extent will be compressed at
+      // CondenseReplicateVar, we need to check the divisibility here to avoid
+      // the issue that the thread count is not divisible by the replicate
+      // extent.
+      if (!analyzer.CanProve(FloorMod(num_threads, dest_buffer_rep_extent) ==
+                             0) &&
+          !analyzer.CanProve(FloorMod(dest_buffer_rep_extent, num_threads) ==
+                             0)) {
+        ICHECK(false) << "ReduceOp fragment layout inference failed: "
+                         "num_threads % replicate_extent != 0. "
+                      << "This mapping requires the block's thread count to be "
+                         "divisible by the "
+                      << "replicate extent. "
+                      << "Try one of: (1) choose a thread block size divisible "
+                         "by replicate_extent; "
+                      << "(2) pick a different reduce dimension or adjust the "
+                         "source fragment layout; "
+                      << "Details: num_threads=" << num_threads
+                      << ", replicate_extent=" << indice_rep_extent
+                      << ", src=" << src << ", dst=" << dst;
+      }
+    }
+
     Fragment dst_layout =
         Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, std::nullopt)
             ->CondenseReplicateVar()

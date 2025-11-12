@@ -4,24 +4,51 @@ import ctypes
 
 import logging
 import warnings
+from pathlib import Path
 from tqdm.auto import tqdm
 
-from importlib.metadata import PackageNotFoundError, version
 
-try:
-    __version__ = version('tilelang')
-except PackageNotFoundError:
+def _compute_version() -> str:
+    """Return the package version without being polluted by unrelated installs.
+
+    Preference order:
+    1) If running from a source checkout (VERSION file present at repo root),
+       use the dynamic version from version_provider (falls back to plain VERSION).
+    2) Otherwise, use importlib.metadata for the installed distribution.
+    3) As a last resort, return a dev sentinel.
+    """
     try:
-        from version_provider import dynamic_metadata
+        repo_root = Path(__file__).resolve().parent.parent
+        version_file = repo_root / "VERSION"
+        print("version_file:", version_file)
+        if version_file.is_file():
+            try:
+                import version_provider
+                print("version_provider ", version_provider.__file__)
+                from version_provider import dynamic_metadata  # type: ignore
+                print("dynamic_metadata:", dynamic_metadata, "version:",
+                      dynamic_metadata("version"))
+                return dynamic_metadata("version")
+            except Exception:
+                # Fall back to the raw VERSION file if provider isn't available.
+                return version_file.read_text().strip()
+    except Exception:
+        # If any of the above fails, fall through to installed metadata.
+        pass
 
-        __version__ = dynamic_metadata('version')
+    try:
+        from importlib.metadata import version as _dist_version  # py3.8+
+        return _dist_version("tilelang")
     except Exception as exc:
         warnings.warn(
             f"tilelang version metadata unavailable ({exc!r}); using development version.",
             RuntimeWarning,
             stacklevel=2,
         )
-        __version__ = "0.0.dev0"
+        return "0.0.dev0"
+
+
+__version__ = _compute_version()
 
 
 class TqdmLoggingHandler(logging.Handler):
