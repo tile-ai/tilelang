@@ -13,7 +13,8 @@ import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
-from typing import TYPE_CHECKING, Callable, Any, Generic, Hashable, Sequence, TypeVar, ForwardRef, Union
+from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
+from collections.abc import Sequence
 from .annot import FuncAnnot, ArgVarTable, Annot
 import pprint
 # Python 3.9 compatibility for ParamSpec and Self
@@ -320,7 +321,7 @@ class Builder(BaseBuilder):
         locals = self.get_parent_locals()
         orig_value = locals.get(name, None)
 
-        # 1. Determine wheter the bind is a var assign
+        # 1. Determine whether the bind is a var assign
         if is_var(orig_value) and not is_var(value):
             tir.buffer_store(orig_value, value, 0)
             return orig_value
@@ -380,14 +381,12 @@ class Builder(BaseBuilder):
                 )
             return self.enter_frame(value)
         elif isinstance(value, OutTensor):
-            arg = tir.arg(
-                name,
-                tir.buffer(
-                    shape=value.shape,
-                    dtype=value.dtype,
-                    strides=value.strides,
-                )
-            )
+            arg = tir.arg(name,
+                          tir.buffer(
+                              shape=value.shape,
+                              dtype=value.dtype,
+                              strides=value.strides,
+                          ))
             arg._out_idx = self.out_tensor_cnt
             self.out_tensor_cnt += 1
             return arg
@@ -500,7 +499,7 @@ class Builder(BaseBuilder):
         self.check_continue_break()
         cond = unwrap_cond(cond)
         if msg is None:
-            msg = f'Assertion failed'
+            msg = 'Assertion failed'
         if isinstance(cond, PrimExpr):
             self.enter_frame(tir.Assert(cond, msg))
         elif not cond:
@@ -523,10 +522,8 @@ class Builder(BaseBuilder):
             else:
                 return value
         if self.func_annot is None:
-            raise RuntimeError(
-                'Tilelang fail to get function annotation info, '
-                'this is an internal bug, please report to developers.'
-            )
+            raise RuntimeError('Tilelang fail to get function annotation info, '
+                               'this is an internal bug, please report to developers.')
         return self.func_annot.create_argument(name, value, self.arg_vt)
         # if isinstance(value, (Buffer, Var)):
         #     return tir.arg(name, value)
@@ -547,6 +544,7 @@ class Builder(BaseBuilder):
 
 _P = ParamSpec('_P')
 _T = TypeVar('_T')
+
 
 @dataclass
 class PrimFuncCreater(Generic[_P, _T]):
@@ -570,11 +568,13 @@ class PrimFuncCreater(Generic[_P, _T]):
         return res
 
     def __repr__(self):
-        fmt = pprint.pformat({
-            'annot': self.func_annot.annots,
-            'ir_gen': self.ir_gen,
-            'orig_func': self.orig_func
-        }, indent=2)
+        fmt = pprint.pformat(
+            {
+                'annot': self.func_annot.annots,
+                'ir_gen': self.ir_gen,
+                'orig_func': self.orig_func
+            },
+            indent=2)
         return f'{self.__class__.__name__}(\n{fmt}\n)'
 
 
@@ -651,8 +651,7 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
     return impl(func) if func is not None else impl
 
 
-from typing import _eval_type, _GenericAlias
-from types import GenericAlias, UnionType
+from typing import _eval_type
 
 
 def get_type_hints(func):
@@ -766,13 +765,12 @@ def prim_func(func: Callable[_P, _T] = None,
             args = func_annot.get_all_static_args()
             return prim_func_generator(**args)
         else:
-            if generator == False:
+            if generator is False:
                 unknown_args = func_annot.get_compile_time_unknown_args()
                 raise ValueError(
                     f"Cannot create PrimFunc for `{func.__name__}`, some arguments are not compile-time known, \n"
                     f"Annotations:\n{func_annot.annots}"
-                    f"Unknown Args: {unknown_args}"
-                )
+                    f"Unknown Args: {unknown_args}")
             return prim_func_generator
 
     return impl(func) if func is not None else impl

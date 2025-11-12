@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
-from re import L
 from typing import (
     Any,
     Callable,
@@ -25,9 +24,9 @@ except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
 from tilelang.language.v2 import PrimFunc, PrimFuncCreater, prim_func
+from tilelang.language.v2.annot import Annot
 from tilelang.jit.adapter.utils import is_metal_target
 from tvm.target import Target
-import pprint
 
 from tilelang.jit.kernel import JITKernel
 from tilelang.utils.target import determine_target
@@ -85,7 +84,9 @@ def compile(
 
     if hasattr(func, 'out_idx_override'):
         if func.out_idx_override is not None and out_idx is not None:
-            raise ValueError("Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors")
+            raise ValueError(
+                "Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors"
+            )
         out_idx = func.out_idx_override or out_idx
 
     # This path is not a performance critical path, so we can afford to convert the target.
@@ -257,6 +258,11 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     # place func at the last element for better __repr__
     func: Callable[_P, _T] | PrimFunc[_KP, _T]
 
+    @property
+    def annot(self) -> dict[str, Annot]:
+        assert self.call_through, "annot is only support in @tilelang.jit2"
+        return self.func.func_annot.annots
+
     def __post_init__(self):
         if self.debug_root_path is not None and not path.isabs(self.debug_root_path):
             try:
@@ -372,14 +378,17 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             tune_params = kwargs.pop('__tune_params', {})
             return self.func.func_annot.convert_to_kernel_args(*args, **kwargs, **tune_params)
         else:
-            raise NotImplementedError("convert_arg_to_kernel_args is only implemented for PrimFuncCreater.")
+            raise NotImplementedError(
+                "convert_arg_to_kernel_args is only implemented for PrimFuncCreater.")
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         # Separate out the tuning parameters from the user's kwargs
         # Whether to return the compile arguments (out_idx, target, target_host, etc.) for autotuner cache
         return_compile_arguments = kwargs.pop('__return_compile_arguments', False)
         if return_compile_arguments:
-            logger.warning("`__return_compile_arguments` is deprecated and will be removed in future versions.")
+            logger.warning(
+                "`__return_compile_arguments` is deprecated and will be removed in future versions."
+            )
             compile_args = {
                 'out_idx': self.out_idx,
                 'execution_backend': self.execution_backend,
@@ -427,7 +436,7 @@ def jit(
     ...
 
 
-def jit(# This is the new public interface
+def jit(  # This is the new public interface
         func: Callable[_P, _T] | PrimFunc | None = None,
         *,  # Indicates subsequent arguments are keyword-only
         out_idx: Any = None,
@@ -489,19 +498,22 @@ def jit(# This is the new public interface
             compile_flags=compile_flags,
             func_source=inspect.getsource(orig_func),
             signature=inspect.signature(orig_func),
-            call_through=False
-        )
+            call_through=False)
 
     if func is not None:
         return decorator(func)
     else:
         return decorator
 
-@overload
-def jit2(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]: ...
 
 @overload
-def jit2(*,
+def jit2(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]:
+    ...
+
+
+@overload
+def jit2(
+    *,
     out_idx: Any = None,
     target: str | Target = "auto",
     target_host: str | Target = None,
@@ -510,7 +522,9 @@ def jit2(*,
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None
-) -> Callable[[Callable[_KP, _T]], JITImpl[_KP, _KP, _T, _T]]: ...
+) -> Callable[[Callable[_KP, _T]], JITImpl[_KP, _KP, _T, _T]]:
+    ...
+
 
 def jit2(
     func: Callable[_P, _T] | PrimFunc | None = None,
@@ -535,8 +549,7 @@ def jit2(
         verbose=verbose,
         pass_configs=pass_configs,
         debug_root_path=debug_root_path,
-        compile_flags=compile_flags
-    )
+        compile_flags=compile_flags)
 
     def decorator(func: Callable[_P, _T]):
         pf: PrimFunc[_P, _T] | PrimFuncCreater[_P, _T] = prim_func(func, generator=None)
@@ -549,7 +562,6 @@ def jit2(
                 **compile_args,
                 func_source=inspect.getsource(pf.orig_func),
                 signature=inspect.signature(pf.orig_func),
-                call_through=True
-            )
+                call_through=True)
 
     return decorator(func) if func is not None else decorator

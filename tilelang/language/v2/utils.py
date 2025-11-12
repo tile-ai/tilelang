@@ -106,7 +106,8 @@ def get_compiled_object(source: str | ast.AST,
     exec(compiled, globals, locs)
     return locs[name]
 
-def construct_strides(shape: tuple[Any, ...], allow_prim_expr: bool=True) -> tuple[Any, ...]:
+
+def construct_strides(shape: tuple[Any, ...], allow_prim_expr: bool = True) -> tuple[Any, ...]:
     """Construct row-major strides from shape."""
     strides = []
     stride = 1
@@ -114,6 +115,7 @@ def construct_strides(shape: tuple[Any, ...], allow_prim_expr: bool=True) -> tup
         strides.append(stride)
         stride *= s
         if not allow_prim_expr and isinstance(stride, tir.PrimExpr):
-            raise ValueError("Cannot construct strides with PrimExpr when allow_prim_expr is False.")
+            raise ValueError(
+                "Cannot construct strides with PrimExpr when allow_prim_expr is False.")
     strides = tuple(reversed(strides))
     return strides

@@ -22,7 +22,6 @@ def _compute_version() -> str:
         version_file = repo_root / "VERSION"
         if version_file.is_file():
             try:
-                import version_provider
                 from version_provider import dynamic_metadata  # type: ignore
                 return dynamic_metadata("version")
             except Exception:

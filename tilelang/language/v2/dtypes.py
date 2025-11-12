@@ -2,15 +2,18 @@ from tilelang import tvm
 from tvm import ir
 import torch
 import ctypes
-from typing import TYPE_CHECKING, Generic, TypeVar, Union, TYPE_CHECKING
+from typing import Generic, TypeVar, Union, TYPE_CHECKING
 from tvm import tir
 import tvm.script.ir_builder.tir._ffi_api as tb_ffi
 
 _T = TypeVar('_T')
 
 if TYPE_CHECKING:
+
     class dtype(Generic[_T]):
-        def torch(self) -> torch.dtype: ...
+
+        def torch(self) -> torch.dtype:
+            ...
 else:
     dtype = tvm.DataType
 
@@ -144,6 +147,7 @@ dtype.__rne__ = __dtype_ne__
 dtype.__call__ = __dtype_call__
 dtype.__new__ = __dtype_new__
 dtype.torch = __dtype_to_torch
+
 
 def get_tvm_dtype(value: AnyDType) -> dtype:
     if isinstance(value, (dtype, ir.Type)):

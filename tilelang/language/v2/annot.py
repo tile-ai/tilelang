@@ -4,14 +4,14 @@ from abc import ABC, abstractmethod
 from tvm import tir
 from tvm.ir.expr import PrimExpr
 from tvm.script.ir_builder.tir import buffer
-from typing import Any, Callable, Literal, Sequence, TypeVar, ParamSpec, Generic, TypeVarTuple, Unpack, TYPE_CHECKING, _GenericAlias, Self
+from typing import Any, Callable, Literal, TypeVar, ParamSpec, Generic, TypeVarTuple, Unpack, TYPE_CHECKING, _GenericAlias, Self
+from collections.abc import Sequence
 from .dtypes import AnyDType
 from . import dtypes as dt
 import tvm.script.ir_builder.tir as tb_tir
 from tvm.script.ir_builder import IRBuilder
 import torch
 import inspect
-
 
 _Shapes = TypeVarTuple('_Shapes')
 _Shape = ParamSpec('_Shape')
@@ -59,6 +59,7 @@ class Annot(ABC):
         Try to promote the annotation into a FixedAnnot if possible
         Return None if not promotable
         '''
+        return None
 
 
 @dataclass
@@ -68,20 +69,28 @@ class ArgVarTable:
     '''
 
     var_tab: dict[str, tir.Var] = field(default_factory=dict)
+    tmp_name_idx: int = 0
 
     def get_or_create_var(self, name: str, dtype: dt.dtype) -> tir.Var:
+        if not name:
+            name = self.create_tmp_name()
         if name not in self.var_tab:
             self.var_tab[name] = tir.Var(name, dtype)
         return self.var_tab[name]
+
+    def create_tmp_name(self) -> str:
+        name = f'varg_{self.tmp_name_idx}'
+        self.tmp_name_idx += 1
+        return name
 
 
 @dataclass
 class Value(Annot):
     kind: Literal['static', 'dynamic'] = 'dynamic'
     name: str | None = None
-    dtype: dt.dtype | None = None
+    dtype: dt.dtype | None = dt.int32
     value: int | tir.Var | None = None
-    creater: Callable[[], Any] | None = None
+    creator: Callable[[], Any] | None = None
 
     def is_kernel_arg(self) -> bool:
         return self.kind == 'dynamic'
@@ -104,7 +113,8 @@ class Value(Annot):
             return value
         elif isinstance(value, TypeVar):
             return Value(kind='static', name=value.__name__, value=None)
-        elif value is Any or value is None or value is dt.dtype or isinstance(value, (type, _GenericAlias)):
+        elif value is Any or value is None or value is dt.dtype or isinstance(
+                value, (type, _GenericAlias)):
             # A # no annotation
             # A: Any
             # A: _T
@@ -112,18 +122,20 @@ class Value(Annot):
             # A: tuple[...]
             return Value(kind='static', name=prefer_name, value=None)
         else:
-            raise TypeError(f"Unsupported Value annotation: {value!r}") 
+            raise TypeError(f"Unsupported Value annotation: {value!r}")
 
     def with_name(self, name: str) -> Value:
-        return Value(kind=self.kind, name=name, dtype=self.dtype, value=self.value)
+        return Value(kind=self.kind, name=self.name or name, dtype=self.dtype, value=self.value)
 
     def get_key_parser(self):
         if self.kind == 'static':
             if self.value is not None:
                 expected_value = self.value
+
                 def key_parser(name: str, target: Any):
                     assert target == expected_value
                     return target
+
                 return key_parser
             else:
                 return lambda name, target: (target,)
@@ -133,67 +145,72 @@ class Value(Annot):
     def parse_key(self, target: Any):
         return self.get_key_parser()(target)
 
-    def create_prim_func_arg(self, name: str, value: Any, vt: ArgVarTable):
+    def create_prim_func_arg(self, name: str, value: Any, vt: ArgVarTable, create_arg: bool = True):
         if self.kind == 'static':
             if self.value:
                 assert self.value == value, f"static value mismatch for {name}: expected {self.value}, got {value}"
             return value
         else:
+            name = self.name or name or vt.create_tmp_name()
             if self.value is not None:
                 arg = self.value
-            elif self.creater is not None:
-                arg = self.creater()
+            elif self.creator is not None:
+                arg = self.creator()
             else:
-                arg = vt.get_or_create_var(self.name or name, self.dtype)
-            return tb_tir.arg(name, arg)
+                arg = vt.get_or_create_var(name, self.dtype)
+            return tb_tir.arg(name, arg) if create_arg else arg
 
     def __repr__(self):
         if self.kind == 'static':
             if self.value is not None:
                 return repr(self.value)
             else:
-                return self.name + '$'
+                return (self.name or '$unnamed') + '$'
         else:
             if self.value is not None:
                 return repr(self.value)
-            elif self.creater is not None:
-                return repr(self.creater())
+            elif self.creator is not None:
+                return repr(self.creator())
             else:
-                return self.name + '$dyn'
+                return (self.name or '$unnamed') + '$dyn'
 
 
 def _canonicalize_dtype(val: Any) -> dt.dtype | None:
-    if val == Any or val == None:
+    if val == Any or val is None:
         return None
     if isinstance(val, TypeVar):
         return None
     return dt.dtype(val)
 
+
 def _canonicalize_shape(shape: Sequence[Any]) -> list[Value]:
     if shape is None or shape is Any:
         return None
-    return [Value.from_value(dim, prefer_name=f'shape_{i}') for i, dim in enumerate(shape)]
+    return [Value.from_value(dim) for _, dim in enumerate(iterable=shape)]
+
 
 def _canonicalize_strides(strides: Sequence[Any]) -> list[Value]:
     if strides is None or strides is Any:
         return None
-    return [Value.from_value(dim, prefer_name=f'stride_{i}') for i, dim in enumerate(strides)]
+    return [Value.from_value(dim) for _, dim in enumerate(strides)]
+
 
 def _shape_with_name(shape: Sequence[Value], base_name: str) -> list[Value]:
-    if shape is None: return None
+    if shape is None:
+        return None
     res = []
     for i, dim in enumerate(shape):
         dim = dim.with_name(f'{base_name}_{i}')
         res.append(dim)
     return res
 
+
 def _try_convert_static_shape(shape: Sequence[Value]):
-    if shape is None: return None
+    if shape is None:
+        return None
     res = []
     for s in shape:
-        if s.kind == 'static' and s.value is not None:
-            res.append(s.value)
-        elif s.kind == 'dynamic' and s.value is not None:
+        if s.kind == 'static' and s.value is not None or s.kind == 'dynamic' and s.value is not None:
             res.append(s.value)
     if len(res) == len(shape):
         return res
@@ -212,9 +229,10 @@ class BufferAnnot(Annot):
     def scope(self):
         return 'global'
 
-    def __call__(self, 
+    def __call__(
+        self,
         shape: tuple[Unpack[_Shapes]],
-        dtype: _DType="float32",
+        dtype: _DType = "float32",
         data=None,
         strides=None,
         elem_offset=None,
@@ -280,7 +298,9 @@ class BufferAnnot(Annot):
                 strides = tuple(target.strides)
                 dtype = dt.dtype(target.dtype)
             else:
-                raise TypeError(f"Unsupported buffer argument type for argument `{name}`: expected a `torch.Tensor` or `tir.Buffer`, got {type(target)}")
+                raise TypeError(
+                    f"Unsupported buffer argument type for argument `{name}`: expected a `torch.Tensor` or `tir.Buffer`, got {type(target)}"
+                )
             if not raw_shapes:
                 assert len(shape) == shape_len
                 shape = tuple(shape[i] for i in static_shape_idx)
@@ -294,7 +314,9 @@ class BufferAnnot(Annot):
             if not raw_dtype:
                 dtype = dt.dtype(dtype)
                 if dtype != expected_dtype:
-                    raise TypeError(f"Tensor dtype mismatch for argument `{name}`, expected {expected_dtype}, got {dtype}")
+                    raise TypeError(
+                        f"Tensor dtype mismatch for argument `{name}`, expected {expected_dtype}, got {dtype}"
+                    )
             return shape, strides, dtype
 
         return key_parser
@@ -308,7 +330,7 @@ class BufferAnnot(Annot):
             return target_shape
         args = []
         for s, target in zip(shape, target_shape):
-            args.append(s.create_prim_func_arg(s.name, target, vt))
+            args.append(s.create_prim_func_arg(s.name, target, vt, create_arg=False))
         return args
 
     def create_prim_func_arg(self, name: str, value: Any, vt: ArgVarTable):
@@ -321,7 +343,7 @@ class BufferAnnot(Annot):
             strides = value.stride()
             dtype = dt.dtype(value.dtype)
         else:
-            raise TypeError(f"Unsupported buffer argument type: {type(value)}")            
+            raise TypeError(f"Unsupported buffer argument type: {type(value)}")
         shape = self.match_shape(self.shape, shape, vt)
         strides = self.match_shape(self.strides, strides, vt)
         arg = buffer(shape, dtype=self.dtype or dtype, strides=strides, scope=self.scope)
@@ -345,7 +367,9 @@ class BufferAnnot(Annot):
     #     items.append(f'scope={repr(self.scope)}')
     #     return 'Buffer(' + ', '.join(items) + ')'
 
+
 class TensorAnnot(BufferAnnot):
+
     @staticmethod
     def _construct_strides(shape: tuple[Any]):
         s, strides = 1, [1]
@@ -353,9 +377,11 @@ class TensorAnnot(BufferAnnot):
             s *= dim
             strides.append(s)
         return tuple(reversed(strides))
-    def __call__(self,
+
+    def __call__(
+        self,
         shape: tuple[Unpack[_Shapes]],
-        dtype: _DType="float32",
+        dtype: _DType = "float32",
         data=None,
         strides=None,
         elem_offset=None,
@@ -378,8 +404,8 @@ class TensorAnnot(BufferAnnot):
             align=align,
             offset_factor=offset_factor,
             buffer_type=buffer_type,
-            axis_separators=axis_separators
-        )
+            axis_separators=axis_separators)
+
     def promote(self):
         shape = _try_convert_static_shape(self.shape)
         if shape is not None and self.dtype is not None:
@@ -387,11 +413,14 @@ class TensorAnnot(BufferAnnot):
             buf = buffer(shape, self.dtype, strides=strides, scope=self.scope)
             return TIRAnnot(data=buf)
 
+
 class StridedTensorAnnot(BufferAnnot):
-    def __call__(self, 
+
+    def __call__(
+        self,
         shape,
         strides,
-        dtype: _DType="float32",
+        dtype: _DType = "float32",
         data=None,
         elem_offset=None,
         scope=None,
@@ -412,6 +441,7 @@ class StridedTensorAnnot(BufferAnnot):
             buffer_type=buffer_type,
             axis_separators=axis_separators,
         )
+
     def __getitem__(self, params):
         shape, strides, dtype = params
         shape = _canonicalize_shape(shape)
@@ -419,27 +449,36 @@ class StridedTensorAnnot(BufferAnnot):
         dtype = _canonicalize_dtype(dtype)
         return StridedTensorAnnot(shape, strides, dtype)
 
+
 class FragmentBufferAnnot(BufferAnnot):
+
     @property
     def scope(self):
         return 'local.fragment'
 
+
 class SharedBufferAnnot(BufferAnnot):
+
     @property
     def scope(self):
         return 'shared.dyn'
 
+
 class LocalBufferAnnot(BufferAnnot):
+
     @property
     def scope(self):
         return 'local'
+
 
 class DynAnnot(Value):
     '''
     Dynamic variable annotation represents a tvm tir.Var argument
     '''
-    def __call__(self, dtype: AnyDType=dt.float32, name: str | None = None) -> DynAnnot:
+
+    def __call__(self, dtype: AnyDType = dt.float32, name: str | None = None) -> DynAnnot:
         return tir.Var(name, dtype)
+
     def __getitem__(self, params):
         if not isinstance(params, tuple):
             params = (params,)
@@ -450,6 +489,7 @@ class DynAnnot(Value):
             dtype, name = params
         dtype = _canonicalize_dtype(dtype) or dt.int32
         return DynAnnot(kind='dynamic', dtype=dtype, name=name)
+
 
 @dataclass
 class DTypeAnnot(Annot):
@@ -464,16 +504,22 @@ class DTypeAnnot(Annot):
     dtype('float32')
     '''
     name: str | None = None
+
     def is_kernel_arg(self) -> bool:
         return False
+
     def with_name(self, name):
         return DTypeAnnot(name=name)
+
     def get_key_parser(self):
         return lambda name, value: (dt.dtype(value),)
+
     def create_prim_func_arg(self, name, value, vt):
         return dt.dtype(value)
+
     def __repr__(self):
         return self.name + '$dtype'
+
 
 @dataclass
 class TIRAnnot(Annot):
@@ -482,25 +528,31 @@ class TIRAnnot(Annot):
     >>> def foo(A: T.Buffer((128,), T.float32)): ...
     '''
     data: tir.Buffer | tir.Var
+
     def is_kernel_arg(self) -> bool:
         return True
+
     def get_key_parser(self):
         return lambda name, value: (None,)
+
     def create_prim_func_arg(self, name, value, vt):
         return tb_tir.arg(name, self.data)
+
     def with_name(self, name: str):
         IRBuilder.name(name, self.data)
         return self
+
     def __repr__(self):
         return repr(self.data)
 
 
 if TYPE_CHECKING:
 
-    class Buffer(Generic[_Shape, _DType], tir.Buffer):
-        def __new__(
+    class Buffer(Generic[_Shape, _DType]):
+
+        def __init__(
             shape: tuple[Unpack[_Shapes]],
-            dtype: _DType="float32",
+            dtype: _DType = "float32",
             data=None,
             strides=None,
             elem_offset=None,
@@ -509,19 +561,29 @@ if TYPE_CHECKING:
             offset_factor=0,
             buffer_type="",
             axis_separators=None,
-        ) -> Buffer[Callable[[Unpack[_Shapes]]], _DType]: ...
+        ) -> Buffer[Callable[[Unpack[_Shapes]]], _DType]:
+            ...
+
         @property
-        def shape(self: Buffer[Callable[[Unpack[_Shapes]]], _DType]) -> tuple[Unpack[_Shapes]]: ...
+        def shape(self: Buffer[Callable[[Unpack[_Shapes]]], _DType]) -> tuple[Unpack[_Shapes]]:
+            ...
+
         @property
-        def dtype(self: Buffer[Callable[[Unpack[_Shapes]]], _DType]) -> dt.dtype[_DType]: ...
+        def dtype(self: Buffer[Callable[[Unpack[_Shapes]]], _DType]) -> dt.dtype[_DType]:
+            ...
+
         @property
-        def strides(self) -> tuple[tir.PrimExpr]: ...
-        def scope(self) -> Scope: ...
+        def strides(self) -> tuple[tir.PrimExpr]:
+            ...
+
+        def scope(self) -> Scope:
+            ...
 
     class Tensor(Generic[_Shape, _DType], Buffer[_Shape, _DType]):
+
         def __new__(
             shape: tuple[Unpack[_Shapes]],
-            dtype: _DType="float32",
+            dtype: _DType = "float32",
             data=None,
             strides=None,
             elem_offset=None,
@@ -530,13 +592,15 @@ if TYPE_CHECKING:
             offset_factor=0,
             buffer_type="",
             axis_separators=None,
-        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
+        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
+            ...
 
     class StridedTensor(Generic[_Shape, _Stride, _DType], Buffer[_Shape, _DType]):
+
         def __new__(
             shape: tuple[Unpack[_Shapes]],
             strides=None,
-            dtype: _DType="float32",
+            dtype: _DType = "float32",
             data=None,
             elem_offset=None,
             scope=None,
@@ -544,7 +608,8 @@ if TYPE_CHECKING:
             offset_factor=0,
             buffer_type="",
             axis_separators=None,
-        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
+        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
+            ...
 
     class FragmentBuffer(Generic[_Shape, _DType], Buffer[_Shape, _DType]):
         pass
@@ -556,10 +621,13 @@ if TYPE_CHECKING:
         pass
 
     class dyn(Generic[_DType], tir.Var):
-        def __new__(cls, dtype: _DType="float32", name: str | None = None) -> dyn[_DType]: ...
-        @property
-        def dtype(self: dyn[_DType]) -> dt.dtype[_DType]: ...
 
+        def __new__(cls, dtype: _DType = "float32", name: str | None = None) -> dyn[_DType]:
+            ...
+
+        @property
+        def dtype(self: dyn[_DType]) -> dt.dtype[_DType]:
+            ...
 
 else:
 
