@@ -14,8 +14,8 @@
 #include "../op/parallel.h"
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
-#include "tir/transforms/ir_utils.h"
 #include "region.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -31,7 +31,8 @@ static BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
     return Downcast<BufferRegion>(arg);
   }
 
-  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else extent=1)
+  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
+  // extent=1)
   if (const auto *load = arg.as<BufferLoadNode>()) {
     Array<Range> ranges;
     for (const PrimExpr &index : load->indices) {

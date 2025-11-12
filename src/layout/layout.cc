@@ -297,78 +297,79 @@ std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   return {Layout(outputs_shape, backward_index), level};
 }
 
+Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
+                           arith::Analyzer *analyzer) const {
+  // Fast path: if shape is the same, return the original layout
+  if (StructuralEqual()(InputShape(), shape)) {
+    return ffi::GetRef<Layout>(this);
+  }
 
-Layout LayoutNode::Reshape(const Array<PrimExpr> &shape, arith::Analyzer *analyzer) const {
-    // Fast path: if shape is the same, return the original layout
-    if (StructuralEqual()(InputShape(), shape)) {
-      return ffi::GetRef<Layout>(this);
-    }
+  // Step 1. Prove the product of InputShape is equal to the product of shape
+  PrimExpr input_shape_product = Integer(1);
+  for (const auto &dim : InputShape()) {
+    input_shape_product *= dim;
+  }
+  PrimExpr shape_product = Integer(1);
+  for (const auto &dim : shape) {
+    shape_product *= dim;
+  }
 
-    // Step 1. Prove the product of InputShape is equal to the product of shape
-    PrimExpr input_shape_product = Integer(1);
-    for (const auto &dim : InputShape()) {
-      input_shape_product *= dim;
-    }
-    PrimExpr shape_product = Integer(1);
-    for (const auto &dim : shape) {
-      shape_product *= dim;
-    }
+  if (analyzer) {
+    ICHECK(analyzer->CanProveEqual(input_shape_product, shape_product))
+        << "InputShape() = " << InputShape() << " shape = " << shape;
+  } else {
+    arith::Analyzer local_analyzer;
+    ICHECK(local_analyzer.CanProveEqual(input_shape_product, shape_product))
+        << "InputShape() = " << InputShape() << " shape = " << shape;
+  }
 
-    if (analyzer) {
-      ICHECK(analyzer->CanProveEqual(input_shape_product, shape_product))
-          << "InputShape() = " << InputShape() << " shape = " << shape;
-    } else {
-      arith::Analyzer local_analyzer;
-      ICHECK(local_analyzer.CanProveEqual(input_shape_product, shape_product))
-          << "InputShape() = " << InputShape() << " shape = " << shape;
+  // Step 2. Create new forward indices by reshaping
+  // For each dimension in the new shape, we create a placeholder variable
+  Array<Var> new_vars;
+  for (size_t i = 0; i < shape.size(); ++i) {
+    new_vars.push_back(InputPlaceholder(i));
+  }
+  // Step 3. Compute the flat index from new shape indices
+  // flat_index = k0 * (s1 * s2 * ...) + k1 * (s2 * s3 * ...) + ... + kn
+  PrimExpr flat_index = Integer(0);
+  for (size_t i = 0; i < shape.size(); ++i) {
+    PrimExpr stride = Integer(1);
+    for (size_t j = i + 1; j < shape.size(); ++j) {
+      stride = stride * shape[j];
     }
-
-    // Step 2. Create new forward indices by reshaping
-    // For each dimension in the new shape, we create a placeholder variable
-    Array<Var> new_vars;
-    for (size_t i = 0; i < shape.size(); ++i) {
-      new_vars.push_back(InputPlaceholder(i));
+    flat_index = flat_index + new_vars[i] * stride;
+  }
+  // Step 4. Convert flat index back to original shape indices
+  // For original shape [s0, s1, ..., sm]:
+  // i0 = flat_index // (s1 * s2 * ... * sm)
+  // i1 = (flat_index % (s1 * s2 * ... * sm)) // (s2 * s3 * ... * sm)
+  // ...
+  Array<PrimExpr> original_indices;
+  PrimExpr remaining = flat_index;
+  for (size_t i = 0; i < InputShape().size(); ++i) {
+    PrimExpr stride = Integer(1);
+    for (size_t j = i + 1; j < InputShape().size(); ++j) {
+      stride = stride * InputShape()[j];
     }
-    // Step 3. Compute the flat index from new shape indices
-    // flat_index = k0 * (s1 * s2 * ...) + k1 * (s2 * s3 * ...) + ... + kn
-    PrimExpr flat_index = Integer(0);
-    for (size_t i = 0; i < shape.size(); ++i) {
-      PrimExpr stride = Integer(1);
-      for (size_t j = i + 1; j < shape.size(); ++j) {
-        stride = stride * shape[j];
-      }
-      flat_index = flat_index + new_vars[i] * stride;
-    }
-    // Step 4. Convert flat index back to original shape indices
-    // For original shape [s0, s1, ..., sm]:
-    // i0 = flat_index // (s1 * s2 * ... * sm)
-    // i1 = (flat_index % (s1 * s2 * ... * sm)) // (s2 * s3 * ... * sm)
-    // ...
-    Array<PrimExpr> original_indices;
-    PrimExpr remaining = flat_index;
+    original_indices.push_back(floordiv(remaining, stride));
+    remaining = floormod(remaining, stride);
+  }
+  // Step 5. Substitute original indices into forward_index_
+  Array<PrimExpr> new_forward_index;
+  for (const auto &fwd_expr : forward_index_) {
+    PrimExpr substituted = fwd_expr;
+    // Replace each InputPlaceholder(i) with original_indices[i]
     for (size_t i = 0; i < InputShape().size(); ++i) {
-      PrimExpr stride = Integer(1);
-      for (size_t j = i + 1; j < InputShape().size(); ++j) {
-        stride = stride * InputShape()[j];
-      }
-      original_indices.push_back(floordiv(remaining, stride));
-      remaining = floormod(remaining, stride);
+      substituted =
+          Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
     }
-    // Step 5. Substitute original indices into forward_index_
-    Array<PrimExpr> new_forward_index;
-    for (const auto &fwd_expr : forward_index_) {
-      PrimExpr substituted = fwd_expr;
-      // Replace each InputPlaceholder(i) with original_indices[i]
-      for (size_t i = 0; i < InputShape().size(); ++i) {
-        substituted = Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
-      }
-      new_forward_index.push_back(substituted);
-    }
-    return Layout(shape, new_forward_index);
+    new_forward_index.push_back(substituted);
+  }
+  return Layout(shape, new_forward_index);
 }
 
 Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
-                               arith::Analyzer *analyzer) const {
+                             arith::Analyzer *analyzer) const {
   // Fast path: identical input shape, return self
   if (StructuralEqual()(InputShape(), shape)) {
     return ffi::GetRef<Fragment>(this);
@@ -376,9 +377,11 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
 
   // 1) Prove total number of elements remains the same
   PrimExpr input_prod = Integer(1);
-  for (const auto &d : InputShape()) input_prod *= d;
+  for (const auto &d : InputShape())
+    input_prod *= d;
   PrimExpr shape_prod = Integer(1);
-  for (const auto &d : shape) shape_prod *= d;
+  for (const auto &d : shape)
+    shape_prod *= d;
 
   if (analyzer) {
     ICHECK(analyzer->CanProveEqual(input_prod, shape_prod))
@@ -392,12 +395,14 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
   // 2) Build flat index from new-shape indices
   Array<Var> new_vars;
   new_vars.reserve(shape.size());
-  for (size_t i = 0; i < shape.size(); ++i) new_vars.push_back(InputPlaceholder(i));
+  for (size_t i = 0; i < shape.size(); ++i)
+    new_vars.push_back(InputPlaceholder(i));
 
   PrimExpr flat = Integer(0);
   for (size_t i = 0; i < shape.size(); ++i) {
     PrimExpr stride = Integer(1);
-    for (size_t j = i + 1; j < shape.size(); ++j) stride = stride * shape[j];
+    for (size_t j = i + 1; j < shape.size(); ++j)
+      stride = stride * shape[j];
     flat = flat + new_vars[i] * stride;
   }
 
@@ -424,8 +429,8 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
 
   PrimExpr new_forward_thread = forward_thread_;
   for (size_t i = 0; i < InputShape().size(); ++i) {
-    new_forward_thread =
-        Substitute(new_forward_thread, {{InputPlaceholder(i), orig_indices[i]}});
+    new_forward_thread = Substitute(new_forward_thread,
+                                    {{InputPlaceholder(i), orig_indices[i]}});
   }
 
   Fragment reshaped(shape, new_forward_index, new_forward_thread,

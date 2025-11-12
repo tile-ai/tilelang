@@ -11,8 +11,8 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
-#include <queue>
 #include <algorithm>
+#include <queue>
 
 #include "../layout/utils.h"
 #include "../op/copy.h"
@@ -118,28 +118,34 @@ public:
       ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
 
       // Helper: propagate inferred layout to alias buffers (same data Var)
-      auto propagate_alias = [&](const Buffer &src_buffer, const Layout &src_layout) {
-        if (!buffer_data_to_buffers_.count(src_buffer->data)) return;
+      auto propagate_alias = [&](const Buffer &src_buffer,
+                                 const Layout &src_layout) {
+        if (!buffer_data_to_buffers_.count(src_buffer->data))
+          return;
         const auto &siblings = buffer_data_to_buffers_[src_buffer->data];
         for (const auto &sib : siblings) {
-          if (sib.same_as(src_buffer)) continue;
-          bool shapes_equal = src_layout->InputShape().size() == sib->shape.size();
+          if (sib.same_as(src_buffer))
+            continue;
+          bool shapes_equal =
+              src_layout->InputShape().size() == sib->shape.size();
           if (shapes_equal) {
             for (size_t i = 0; i < src_layout->InputShape().size(); ++i) {
-              if (!analyzer_.CanProveEqual(src_layout->InputShape()[i], sib->shape[i])) {
+              if (!analyzer_.CanProveEqual(src_layout->InputShape()[i],
+                                           sib->shape[i])) {
                 shapes_equal = false;
                 break;
               }
             }
           }
-          Layout target_layout = shapes_equal ? src_layout
-                                              : src_layout->Reshape(sib->shape, &analyzer_);
+          Layout target_layout =
+              shapes_equal ? src_layout
+                           : src_layout->Reshape(sib->shape, &analyzer_);
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
-                << " (data-shared with " << src_buffer << ")\n current: "
-                << target_layout->DebugOutput() << "\n previous: "
-                << layout_map[sib]->DebugOutput();
+                << " (data-shared with " << src_buffer
+                << ")\n current: " << target_layout->DebugOutput()
+                << "\n previous: " << layout_map[sib]->DebugOutput();
           } else {
             layout_map.Set(sib, target_layout);
             if (update_queue && use_list_.count(sib)) {
@@ -324,39 +330,50 @@ public:
           break;
         }
       }
-      if (!rep_layout.defined()) continue;
+      if (!rep_layout.defined())
+        continue;
       for (const auto &buf : buffers) {
         if (layout_map.count(buf)) {
           // If already exists, ensure equal after potential reshape
-          bool shapes_equal = rep_layout.value()->InputShape().size() == buf->shape.size();
+          bool shapes_equal =
+              rep_layout.value()->InputShape().size() == buf->shape.size();
           if (shapes_equal) {
-            for (size_t i = 0; i < rep_layout.value()->InputShape().size(); ++i) {
-              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i], buf->shape[i])) {
+            for (size_t i = 0; i < rep_layout.value()->InputShape().size();
+                 ++i) {
+              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i],
+                                           buf->shape[i])) {
                 shapes_equal = false;
                 break;
               }
             }
           }
 
-          Layout expected = shapes_equal ? rep_layout.value()
-                                         : rep_layout.value()->Reshape(buf->shape, &analyzer_);
+          Layout expected =
+              shapes_equal
+                  ? rep_layout.value()
+                  : rep_layout.value()->Reshape(buf->shape, &analyzer_);
           ICHECK(expected->IsEqual(layout_map[buf].get()))
-              << "Alias buffer layout mismatch for " << buf << ":\n expected: "
-              << expected->DebugOutput() << "\n actual: "
-              << layout_map[buf]->DebugOutput();
+              << "Alias buffer layout mismatch for " << buf
+              << ":\n expected: " << expected->DebugOutput()
+              << "\n actual: " << layout_map[buf]->DebugOutput();
         } else {
-          bool shapes_equal = rep_layout.value()->InputShape().size() == buf->shape.size();
+          bool shapes_equal =
+              rep_layout.value()->InputShape().size() == buf->shape.size();
           if (shapes_equal) {
-            for (size_t i = 0; i < rep_layout.value()->InputShape().size(); ++i) {
-              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i], buf->shape[i])) {
+            for (size_t i = 0; i < rep_layout.value()->InputShape().size();
+                 ++i) {
+              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i],
+                                           buf->shape[i])) {
                 shapes_equal = false;
                 break;
               }
             }
           }
 
-          Layout reshaped = shapes_equal ? rep_layout.value()
-                                         : rep_layout.value()->Reshape(buf->shape, &analyzer_);
+          Layout reshaped =
+              shapes_equal
+                  ? rep_layout.value()
+                  : rep_layout.value()->Reshape(buf->shape, &analyzer_);
           layout_map.Set(buf, reshaped);
         }
       }
@@ -503,14 +520,14 @@ private:
       auto var_opt = call->args[1].as<Var>();
       if (!var_opt.has_value()) {
         LOG(WARNING) << "[getBufferFromAccessPtr] args[1] is not a Var, type: "
-                      << call->args[1]->GetTypeKey();
+                     << call->args[1]->GetTypeKey();
         return std::nullopt;
       }
       const auto &var = var_opt.value();
       if (buffer_data_to_buffers_.count(var)) {
         const auto &buffers = buffer_data_to_buffers_[var];
         if (!buffers.empty()) {
-          return buffers[0];  // Return the first buffer
+          return buffers[0]; // Return the first buffer
         }
       }
       return std::nullopt;
@@ -565,7 +582,8 @@ private:
       }
     }
 
-    // First, visit the block body to collect all buffers from BufferLoad/BufferStore
+    // First, visit the block body to collect all buffers from
+    // BufferLoad/BufferStore
     IRVisitorWithAnalyzer::VisitStmt_(op);
 
     // After visiting, apply layouts to all collected buffers
@@ -577,17 +595,18 @@ private:
         ICHECK(buffer_data_to_buffers_.count(var))
             << "buffer " << var << " is not found in the block";
         const auto &buffers = buffer_data_to_buffers_[var];
-        ICHECK(!buffers.empty())
-            << "buffer list for " << var << " is empty";
+        ICHECK(!buffers.empty()) << "buffer list for " << var << " is empty";
         // Apply layout to all buffers associated with this var
         for (const auto &buffer : buffers) {
 
           // Reshape the layout to match the buffer's shape
           // Check if shapes are structurally equal
-          bool shapes_equal = layout->InputShape().size() == buffer->shape.size();
+          bool shapes_equal =
+              layout->InputShape().size() == buffer->shape.size();
           if (shapes_equal) {
             for (size_t i = 0; i < layout->InputShape().size(); ++i) {
-              if (!analyzer_.CanProveEqual(layout->InputShape()[i], buffer->shape[i])) {
+              if (!analyzer_.CanProveEqual(layout->InputShape()[i],
+                                           buffer->shape[i])) {
                 shapes_equal = false;
                 break;
               }
@@ -632,15 +651,15 @@ private:
         if (!found) {
           buffers.push_back(op->buffer);
           buffer_data_to_buffers_.Set(op->buffer->data, buffers);
-          DLOG(INFO) << "[LayoutInference] BufferLoad: added buffer " << op->buffer
-                    << " buffer.get() = " << op->buffer.get()
-                    << " data = " << op->buffer->data.get();
+          DLOG(INFO) << "[LayoutInference] BufferLoad: added buffer "
+                     << op->buffer << " buffer.get() = " << op->buffer.get()
+                     << " data = " << op->buffer->data.get();
         }
       } else {
         buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
         DLOG(INFO) << "[LayoutInference] BufferLoad: new buffer " << op->buffer
-                  << " buffer.get() = " << op->buffer.get()
-                  << " data = " << op->buffer->data.get();
+                   << " buffer.get() = " << op->buffer.get()
+                   << " data = " << op->buffer->data.get();
       }
     }
     IRVisitorWithAnalyzer::VisitExpr_(op);
@@ -662,15 +681,15 @@ private:
         if (!found) {
           buffers.push_back(op->buffer);
           buffer_data_to_buffers_.Set(op->buffer->data, buffers);
-          DLOG(INFO) << "[LayoutInference] BufferStore: added buffer " << op->buffer
-                    << " buffer.get() = " << op->buffer.get()
-                    << " data = " << op->buffer->data.get();
+          DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
+                     << op->buffer << " buffer.get() = " << op->buffer.get()
+                     << " data = " << op->buffer->data.get();
         }
       } else {
         buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
         DLOG(INFO) << "[LayoutInference] BufferStore: new buffer " << op->buffer
-                  << " buffer.get() = " << op->buffer.get()
-                  << " data = " << op->buffer->data.get();
+                   << " buffer.get() = " << op->buffer.get()
+                   << " data = " << op->buffer->data.get();
       }
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);

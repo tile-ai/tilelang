@@ -41,8 +41,9 @@ public:
   virtual Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const;
 
   virtual Layout Inverse() const;
-  
-  virtual Layout Reshape(const Array<PrimExpr> &shape, arith::Analyzer *analyzer) const;
+
+  virtual Layout Reshape(const Array<PrimExpr> &shape,
+                         arith::Analyzer *analyzer) const;
 
   virtual std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const;
 
