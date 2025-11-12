@@ -120,7 +120,6 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
         }
       }
     } else {
-      CHECK(is_one(ist.min())) << ist.min();
       ret.Set(i, ist.max());
     }
   }
