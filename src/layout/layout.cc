@@ -385,7 +385,8 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
 
   if (analyzer) {
     ICHECK(analyzer->CanProveEqual(input_prod, shape_prod))
-        << "InputShape() = " << InputShape() << " shape = " << shape;
+        << "InputShape() = " << InputShape() << " shape = " << shape
+        << " input fragment layout is = " << DebugOutput();
   } else {
     arith::Analyzer local_analyzer;
     ICHECK(local_analyzer.CanProveEqual(input_prod, shape_prod))

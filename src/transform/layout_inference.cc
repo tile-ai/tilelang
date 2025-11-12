@@ -333,30 +333,7 @@ public:
       if (!rep_layout.defined())
         continue;
       for (const auto &buf : buffers) {
-        if (layout_map.count(buf)) {
-          // If already exists, ensure equal after potential reshape
-          bool shapes_equal =
-              rep_layout.value()->InputShape().size() == buf->shape.size();
-          if (shapes_equal) {
-            for (size_t i = 0; i < rep_layout.value()->InputShape().size();
-                 ++i) {
-              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i],
-                                           buf->shape[i])) {
-                shapes_equal = false;
-                break;
-              }
-            }
-          }
-
-          Layout expected =
-              shapes_equal
-                  ? rep_layout.value()
-                  : rep_layout.value()->Reshape(buf->shape, &analyzer_);
-          ICHECK(expected->IsEqual(layout_map[buf].get()))
-              << "Alias buffer layout mismatch for " << buf
-              << ":\n expected: " << expected->DebugOutput()
-              << "\n actual: " << layout_map[buf]->DebugOutput();
-        } else {
+        if (!layout_map.count(buf)) {
           bool shapes_equal =
               rep_layout.value()->InputShape().size() == buf->shape.size();
           if (shapes_equal) {
