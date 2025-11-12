@@ -20,14 +20,10 @@ def _compute_version() -> str:
     try:
         repo_root = Path(__file__).resolve().parent.parent
         version_file = repo_root / "VERSION"
-        print("version_file:", version_file)
         if version_file.is_file():
             try:
                 import version_provider
-                print("version_provider ", version_provider.__file__)
                 from version_provider import dynamic_metadata  # type: ignore
-                print("dynamic_metadata:", dynamic_metadata, "version:",
-                      dynamic_metadata("version"))
                 return dynamic_metadata("version")
             except Exception:
                 # Fall back to the raw VERSION file if provider isn't available.
