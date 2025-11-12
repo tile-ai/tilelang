@@ -410,9 +410,8 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                                                                      accum_dtype),
                          Delta: T.Tensor([batch, heads, seq_len],
                                          accum_dtype),
-                         dQ_partial: T.Tensor(
-                             [batch, T.ceildiv(seq_len, block_M), seq_len, heads, dim],
-                             accum_dtype),
+                         dQ_partial: T.Tensor([batch, T.ceildiv(seq_len, block_M), seq_len, heads,
+                                               dim], dtype),
                          dK: T.Tensor(kv_shape, accum_dtype), dV: T.Tensor(kv_shape, accum_dtype)):
         with T.Kernel(head_kv, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bk, by, bz):
             T.use_swizzle(panel_size, enable=enable_rasterization)
@@ -496,7 +495,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                     for i, j in T.Parallel(block_N, dim):
                         seq_idx = k * block_N + i
                         if seq_idx < seq_len and q_head < heads:
-                            dQ_partial[bz, by, seq_idx, q_head, j] = dq[i, j]
+                            dQ_partial[bz, by, seq_idx, q_head, j] = T.cast(dq[i, j], dtype)
 
             for i, j in T.Parallel(block_M, dim):
                 seq_idx = kv_offset + i
@@ -528,19 +527,19 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
 @tilelang.jit(out_idx=[1])
 def flashattn_bwd_reduce_dq(batch, num_tiles, seq_len, heads, dim):
     accum_dtype = "float"
-
     @T.prim_func
     def flash_bwd_reduce(
-        dQ_partial: T.Tensor([batch, num_tiles, seq_len, heads, dim], accum_dtype),
+        dQ_partial: T.Tensor([batch, num_tiles, seq_len, heads, dim], "float16"),
         dQ_out: T.Tensor([batch, seq_len, heads, dim], accum_dtype),
     ):
-        with T.Kernel(batch, heads, seq_len, threads=128) as (bz, bh, bs):
+        with T.Kernel(batch, heads, seq_len, threads=64) as (bz, bh, bs):
             acc = T.alloc_fragment([dim], accum_dtype)
             T.clear(acc)
 
             for tile in range(num_tiles):
                 for d in T.Parallel(dim):
-                    acc[d] += dQ_partial[bz, tile, bs, bh, d]
+                    val = T.cast(dQ_partial[bz, tile, bs, bh, d], accum_dtype)
+                    acc[d] += val
 
             for d in T.Parallel(dim):
                 dQ_out[bz, bs, bh, d] = acc[d]
@@ -676,7 +675,7 @@ def main(batch: int = 1,
     num_kv_tiles = math.ceil(seq_len / block_M)
 
     dQ_partial = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
-                              dtype=torch.float32,
+                              dtype=torch.float16,
                               device=device)
     dK_tl = torch.zeros_like(k, dtype=torch.float32)
     dV_tl = torch.zeros_like(v, dtype=torch.float32)
@@ -745,7 +744,7 @@ def main(batch: int = 1,
         delta_tl_bench = bwd_prep(o_tl_bench, dO)
 
         dQ_partial_bench = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
-                                       dtype=torch.float32,
+                                       dtype=torch.float16,
                                        device=device)
         dK_bench = torch.zeros_like(k, dtype=torch.float32)
         dV_bench = torch.zeros_like(v, dtype=torch.float32)
