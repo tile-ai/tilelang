@@ -15,16 +15,21 @@ with the appropriate memory scope.
 """
 
 from __future__ import annotations
-from typing import overload, Literal
+from typing import TypeVarTuple, TypeVar, overload, Literal, Unpack, Callable
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
 from tvm.tir.buffer import Buffer
 from tvm.tir.expr import FloatImm, IntImm
+from .v2.builder import OutTensor
+from .v2.annot import Tensor, SharedBuffer, LocalBuffer, FragmentBuffer
+from .v2 import dtypes as dt
 
+_Shapes = TypeVarTuple('_Shapes')
+_DType = TypeVar('_DType')
 
-def alloc_shared(shape, dtype, scope="shared.dyn"):
+def alloc_shared(shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="shared.dyn") -> SharedBuffer[Callable[[Unpack[_Shapes]]], _DType]:
     """Allocate a shared memory buffer for inter-thread communication.
 
     Args:
@@ -42,7 +47,7 @@ def alloc_shared(shape, dtype, scope="shared.dyn"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_local(shape, dtype, scope="local"):
+def alloc_local(shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="local") -> LocalBuffer[Callable[[Unpack[_Shapes]]], _DType]:
     """Allocate a local memory buffer for thread-private storage.
 
     Args:
@@ -56,7 +61,7 @@ def alloc_local(shape, dtype, scope="local"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_fragment(shape, dtype, scope="local.fragment"):
+def alloc_fragment(shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="local.fragment") -> FragmentBuffer[Callable[[Unpack[_Shapes]]], _DType]:
     """Allocate a fragment memory buffer for specialized operations.
 
     Args:
@@ -255,3 +260,7 @@ def alloc_tcgen05_instruction_desc(dtype: str = "uint32"):
 # Alias: short name consistent with imports
 def alloc_tcgen05_instr_desc(dtype: str = "uint32"):
     return alloc_tcgen05_instruction_desc(dtype)
+
+def empty(*shape: Unpack[_Shapes], dtype: str = 'float32') -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
+    """Create an empty tensor as output."""
+    return OutTensor(shape, dtype)
