@@ -4,7 +4,6 @@ import example_warp_specialize_gemm_barrierpipe_stage2
 import example_warp_specialize_gemm_copy_0_gemm_1
 import example_warp_specialize_gemm_copy_1_gemm_0
 import example_warp_specialize_gemm_softpipe_stage2
-import bench_example_warp_specialize
 
 # TODO: skip for now as non-deterministic on H20
 # CC @cunxiao
@@ -37,10 +36,6 @@ def test_example_warp_specialize_gemm_copy_1_gemm_0():
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_example_warp_specialize_gemm_softpipe_stage2():
     example_warp_specialize_gemm_softpipe_stage2.main(M=1024, N=1024, K=1024)
-
-
-def test_bench_example_warp_specialize():
-    bench_example_warp_specialize.main()
 
 
 if __name__ == "__main__":

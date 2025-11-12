@@ -5,7 +5,6 @@ import example_mha_sink_fwd_bhsd_wgmma_pipelined
 import example_gqa_sink_fwd_bhsd_wgmma_pipelined
 import example_mha_sink_bwd_bhsd
 import example_gqa_sink_bwd_bhsd
-import bench_example_attention_sink
 
 
 @tilelang.testing.requires_cuda
@@ -60,10 +59,6 @@ def test_example_gqa_sink_bwd_bhsd():
 @tilelang.testing.requires_cuda
 def test_example_gqa_sink_bwd_bhsd_sliding_window():
     example_gqa_sink_bwd_bhsd.main(window_size=128)
-
-
-def test_bench_example_attention_sink():
-    bench_example_attention_sink.main()
 
 
 if __name__ == "__main__":

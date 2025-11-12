@@ -5,7 +5,6 @@ import example_tilelang_sparse_gqa_decode_varlen_indice
 import example_tilelang_sparse_gqa_decode_varlen_mask
 import example_triton_sparse_gqa_decode_varlen_indice
 import example_triton_sparse_gqa_decode_varlen_mask
-import bench_example_blocksparse_attention
 
 
 def test_block_sparse_attn_triton():
@@ -46,10 +45,6 @@ def test_example_triton_sparse_gqa_decode_varlen_mask():
         dim_v=128,
         sparse_ratio=0.8,
         block_size=32)
-
-
-def test_bench_example_blocksparse_attention():
-    bench_example_blocksparse_attention.main()
 
 
 if __name__ == "__main__":

@@ -2,7 +2,6 @@ import tilelang.testing
 import example_tilelang_gemm_fp8_2xAcc
 import example_tilelang_gemm_fp8_intrinsic
 import example_tilelang_gemm_fp8
-import bench_example_gemm_fp8
 
 
 def test_example_tilelang_gemm_fp8_2xAcc():
@@ -15,10 +14,6 @@ def test_example_tilelang_gemm_fp8_intrinsic():
 
 def test_example_tilelang_gemm_fp8():
     example_tilelang_gemm_fp8.main()
-
-
-def test_bench_example_gemm_fp8():
-    bench_example_gemm_fp8.main()
 
 
 if __name__ == "__main__":

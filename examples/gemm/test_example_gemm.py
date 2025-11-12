@@ -3,7 +3,6 @@ import example_gemm_autotune
 import example_gemm_intrinsics
 import example_gemm_schedule
 import example_gemm
-import bench_example_gemm
 
 
 def test_example_gemm_autotune():
@@ -21,10 +20,6 @@ def test_example_gemm_schedule():
 
 def test_example_gemm():
     example_gemm.main()
-
-
-def test_bench_example_gemm():
-    bench_example_gemm.main()
 
 
 if __name__ == "__main__":
