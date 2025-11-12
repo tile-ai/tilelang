@@ -1,13 +1,22 @@
+import argparse
+import hashlib
+import itertools
+import math
+import os
+import re
+import subprocess
+import tempfile
+import time
+from functools import partial
+
+import numpy as np
 import torch
 import torch.nn.functional as F
+
 import tilelang
 import tilelang.language as T
+from tilelang import env as tilelang_env
 from tilelang.primitives.gemm.base import GemmWarpPolicy
-import itertools
-import argparse
-from functools import partial
-import numpy as np
-import time
 
 
 def ref_program(Q, K, V, is_causal, groups=1):
@@ -63,6 +72,115 @@ def get_fwd_configs():
             "v_coalesced_width": vw,
         })
     return valid_configs
+
+
+def _sanitize_filename(name: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_.-]", "_", name)
+
+
+def _get_hip_include_options() -> list[str]:
+    options: list[str] = []
+    template_path = tilelang_env.TILELANG_TEMPLATE_PATH
+    if template_path:
+        options.append(f"-I{template_path}")
+    ck_path = tilelang_env.COMPOSABLE_KERNEL_INCLUDE_DIR
+    if ck_path:
+        options.append(f"-I{ck_path}")
+    return options
+
+
+def _compile_hip_to_asm(code: str,
+                        asm_path: str,
+                        arch: str | None = None,
+                        options: list[str] | None = None) -> None:
+    from tilelang.contrib import hipcc  # pylint: disable=import-outside-toplevel
+
+    if arch is None:
+        rocm_path = hipcc.find_rocm_path()
+        arch = hipcc.get_rocm_arch(rocm_path)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_code = os.path.join(temp_dir, "kernel.cc")
+        with open(temp_code, "w", encoding="utf-8") as f:
+            f.write(code)
+
+        cmd = ["hipcc", "-O3", "-c"]
+        if arch:
+            cmd.append(f"--offload-arch={arch}")
+        cmd.append("--genco")
+        cmd.append("-S")
+        include_options = _get_hip_include_options()
+        if options:
+            if isinstance(options, str):
+                include_options.append(options)
+            else:
+                include_options.extend(options)
+        if include_options:
+            cmd.extend(include_options)
+        cmd.extend(["-o", asm_path, temp_code])
+
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"hipcc assembly generation failed:\n{proc.stdout}")
+
+
+def dump_kernel_artifacts(kernel, dump_dir: str | None, tag: str) -> None:
+    if not dump_dir or kernel is None:
+        return
+
+    try:
+        kernel_source = kernel.get_kernel_source()
+    except AttributeError:
+        print(f"[TileLang] Kernel `{tag}` does not expose source; skip dumping.")
+        return
+
+    if not kernel_source:
+        print(f"[TileLang] Kernel `{tag}` returned empty source; skip dumping.")
+        return
+
+    os.makedirs(dump_dir, exist_ok=True)
+
+    prim_func = getattr(kernel, "prim_func", None)
+    func_name = "kernel"
+    if prim_func is not None and hasattr(prim_func, "attrs"):
+        func_name = prim_func.attrs.get("global_symbol", func_name)
+
+    digest = hashlib.sha1(kernel_source.encode("utf-8")).hexdigest()[:8]
+    base = _sanitize_filename(f"{tag}_{func_name}_{digest}")
+
+    hip_path = os.path.join(dump_dir, f"{base}.hip.cpp")
+    with open(hip_path, "w", encoding="utf-8") as f:
+        f.write(kernel_source)
+    print(f"[TileLang] HIP source saved to {hip_path}")
+
+    from tilelang.contrib import hipcc  # pylint: disable=import-outside-toplevel
+
+    hsaco_path = os.path.join(dump_dir, f"{base}.hsaco")
+    hip_options = _get_hip_include_options()
+    try:
+        hipcc.compile_hip(
+            kernel_source,
+            target_format="hsaco",
+            options=hip_options if hip_options else None,
+            path_target=hsaco_path,
+        )
+        print(f"[TileLang] HSACO saved to {hsaco_path}")
+    except Exception as err:  # noqa: BLE001
+        print(f"[TileLang] HIP compilation failed for {hip_path}: {err}")
+        return
+
+    asm_path = os.path.join(dump_dir, f"{base}.s")
+    try:
+        _compile_hip_to_asm(kernel_source, asm_path)
+        print(f"[TileLang] Assembly saved to {asm_path}")
+    except Exception as err:  # noqa: BLE001
+        print(f"[TileLang] Assembly generation failed for {hip_path}: {err}")
 
 
 @tilelang.autotune(configs=get_fwd_configs(), cache_input_tensors=True)
@@ -291,9 +409,12 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                          dO: T.Tensor(q_shape, dtype), lse: T.Tensor([batch, heads, seq_len],
                                                                      accum_dtype),
                          Delta: T.Tensor([batch, heads, seq_len],
-                                         accum_dtype), dQ: T.Tensor(q_shape, accum_dtype),
+                                         accum_dtype),
+                         dQ_partial: T.Tensor(
+                             [batch, T.ceildiv(seq_len, block_M), seq_len, heads, dim],
+                             accum_dtype),
                          dK: T.Tensor(kv_shape, accum_dtype), dV: T.Tensor(kv_shape, accum_dtype)):
-        with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bx, by, bz):
+        with T.Kernel(head_kv, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bk, by, bz):
             T.use_swizzle(panel_size, enable=enable_rasterization)
 
             K_shared = T.alloc_shared([block_M, dim], dtype)
@@ -313,56 +434,75 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
             dk = T.alloc_fragment([block_M, dim], accum_dtype)
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
 
-            T.copy(K[bz, by * block_M:(by + 1) * block_M, bx // groups, :], K_shared)
-            T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_shared)
+            kv_offset = by * block_M
+
+            T.copy(K[bz, kv_offset:kv_offset + block_M, bk, :], K_shared)
+            T.copy(V[bz, kv_offset:kv_offset + block_M, bk, :], V_shared)
             T.clear(dv)
             T.clear(dk)
 
             loop_st = T.floordiv(by * block_M, block_N) if is_causal else 0
             loop_ed = T.ceildiv(seq_len, block_N)
 
-            for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
-                T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q_shared)
-                T.clear(qkT)
+            for group_idx in range(groups):
+                q_head = bk * groups + group_idx
+                if q_head >= heads:
+                    continue
 
-                T.gemm(K_shared, q_shared, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
+                    T.copy(Q[bz, k * block_N:(k + 1) * block_N, q_head, :], q_shared)
+                    T.clear(qkT)
 
-                T.copy(lse[bz, bx, k * block_N:(k + 1) * block_N], lse_shared)
+                    T.gemm(K_shared,
+                           q_shared,
+                           qkT,
+                           transpose_B=True,
+                           policy=T.GemmWarpPolicy.FullRow)
 
-                for i, j in T.Parallel(block_M, block_N):
-                    P_acc[i, j] = T.exp(qkT[i, j] * sm_scale - lse_shared[j])
+                    T.copy(lse[bz, q_head, k * block_N:(k + 1) * block_N], lse_shared)
 
-                if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        P_acc[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j,
-                                                     P_acc[i, j], 0.0)
+                        P_acc[i, j] = T.exp(qkT[i, j] * sm_scale - lse_shared[j])
 
-                T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do_shared)
-                T.clear(dP)
+                    if is_causal:
+                        for i, j in T.Parallel(block_M, block_N):
+                            P_acc[i, j] = T.if_then_else(
+                                kv_offset + i <= k * block_N + j, P_acc[i, j], 0.0)
 
-                T.gemm(V_shared, do_shared, dP, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    T.copy(dO[bz, k * block_N:(k + 1) * block_N, q_head, :], do_shared)
+                    T.clear(dP)
 
-                T.copy(P_acc, p_cast)
-                T.gemm(p_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(V_shared,
+                           do_shared,
+                           dP,
+                           transpose_B=True,
+                           policy=T.GemmWarpPolicy.FullRow)
 
-                T.copy(Delta[bz, bx, k * block_N:(k + 1) * block_N], delta_shared)
+                    T.copy(P_acc, p_cast)
+                    T.gemm(p_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
 
-                # Compute ds = P * (dP - delta) * sm_scale for dk and dq computation
-                # First compute in fragment, then copy to shared memory (following standard implementation pattern)
-                for i, j in T.Parallel(block_M, block_N):
-                    p_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
+                    T.copy(Delta[bz, q_head, k * block_N:(k + 1) * block_N], delta_shared)
 
-                T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
+                    # Compute ds = P * (dP - delta) * sm_scale for dk and dq computation
+                    # First compute in fragment, then copy to shared memory (following standard implementation pattern)
+                    for i, j in T.Parallel(block_M, block_N):
+                        p_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
 
-                T.copy(p_cast, ds_shared)
-                T.clear(dq)
-                T.gemm(ds_shared, K_shared, dq, transpose_A=True)
-                for i, j in T.Parallel(block_N, dim):
-                    T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
+                    T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
+
+                    T.copy(p_cast, ds_shared)
+                    T.clear(dq)
+                    T.gemm(ds_shared, K_shared, dq, transpose_A=True)
+                    for i, j in T.Parallel(block_N, dim):
+                        seq_idx = k * block_N + i
+                        if seq_idx < seq_len and q_head < heads:
+                            dQ_partial[bz, by, seq_idx, q_head, j] = dq[i, j]
 
             for i, j in T.Parallel(block_M, dim):
-                T.atomic_add(dV[bz, by * block_M + i, bx // groups, j], dv[i, j])
-                T.atomic_add(dK[bz, by * block_M + i, bx // groups, j], dk[i, j])
+                seq_idx = kv_offset + i
+                if seq_idx < seq_len:
+                    dV[bz, seq_idx, bk, j] = dv[i, j]
+                    dK[bz, seq_idx, bk, j] = dk[i, j]
 
     return flash_bwd_kernel
 
@@ -383,6 +523,29 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
             )
 
     return flash_bwd_post
+
+
+@tilelang.jit(out_idx=[1])
+def flashattn_bwd_reduce_dq(batch, num_tiles, seq_len, heads, dim):
+    accum_dtype = "float"
+
+    @T.prim_func
+    def flash_bwd_reduce(
+        dQ_partial: T.Tensor([batch, num_tiles, seq_len, heads, dim], accum_dtype),
+        dQ_out: T.Tensor([batch, seq_len, heads, dim], accum_dtype),
+    ):
+        with T.Kernel(batch, heads, seq_len, threads=128) as (bz, bh, bs):
+            acc = T.alloc_fragment([dim], accum_dtype)
+            T.clear(acc)
+
+            for tile in range(num_tiles):
+                for d in T.Parallel(dim):
+                    acc[d] += dQ_partial[bz, tile, bs, bh, d]
+
+            for d in T.Parallel(dim):
+                dQ_out[bz, bs, bh, d] = acc[d]
+
+    return flash_bwd_reduce
 
 
 def debug_tensor_comparison(tensor1, tensor2, name, rtol=1e-3, atol=1e-3):
@@ -451,10 +614,14 @@ def main(batch: int = 1,
          seq_len: int = 4096,
          dim: int = 128,
          is_causal: bool = False,
-         groups: int = 1):
+         groups: int = 1,
+         dump_dir: str | None = None):
 
     device = "cuda"
     dtype = torch.float16
+
+    if not dump_dir:
+        dump_dir = os.path.join(os.getcwd(), "tilelang_kernel_dumps")
 
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
@@ -488,9 +655,12 @@ def main(batch: int = 1,
     profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
     print("Forward pass is correct.")
 
+    dump_kernel_artifacts(fwd_kernel, dump_dir, "flashattn_fwd")
+
     o_tl, lse_tl = fwd_kernel(q, k, v)
 
     bwd_prep = flashattn_bwd_preprocess(batch, heads, seq_len, dim)
+    dump_kernel_artifacts(bwd_prep, dump_dir, "flashattn_bwd_preprocess")
     delta_tl = bwd_prep(o_tl, dO)
 
     print("\nStarting FlashAttention-V2 backward pass autotuning...")
@@ -500,13 +670,25 @@ def main(batch: int = 1,
         return
     print(f"Autotuning completed. Best backward pass configuration: {bwd_kernel.config}")
 
-    dQ_accum = torch.zeros_like(q, dtype=torch.float32)
+    dump_kernel_artifacts(bwd_kernel, dump_dir, "flashattn_bwd")
+
+    block_M = bwd_kernel.config["block_M"]
+    num_kv_tiles = math.ceil(seq_len / block_M)
+
+    dQ_partial = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
+                              dtype=torch.float32,
+                              device=device)
     dK_tl = torch.zeros_like(k, dtype=torch.float32)
     dV_tl = torch.zeros_like(v, dtype=torch.float32)
 
-    bwd_kernel(q, k, v, dO, lse_tl, delta_tl, dQ_accum, dK_tl, dV_tl)
+    bwd_kernel(q, k, v, dO, lse_tl, delta_tl, dQ_partial, dK_tl, dV_tl)
+
+    reduce_kernel = flashattn_bwd_reduce_dq(batch, num_kv_tiles, seq_len, heads, dim)
+    dump_kernel_artifacts(reduce_kernel, dump_dir, "flashattn_bwd_reduce_dq")
+    dQ_accum = reduce_kernel(dQ_partial)
 
     post_kernel = flashattn_bwd_postprocess(batch, heads, seq_len, dim)
+    dump_kernel_artifacts(post_kernel, dump_dir, "flashattn_bwd_postprocess")
     dQ_tl = post_kernel(dQ_accum)
 
     q_ref = q.clone().detach().requires_grad_()
@@ -562,10 +744,14 @@ def main(batch: int = 1,
 
         delta_tl_bench = bwd_prep(o_tl_bench, dO)
 
-        dQ_bench = torch.zeros_like(q, dtype=torch.float32)
+        dQ_partial_bench = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
+                                       dtype=torch.float32,
+                                       device=device)
         dK_bench = torch.zeros_like(k, dtype=torch.float32)
         dV_bench = torch.zeros_like(v, dtype=torch.float32)
-        bwd_kernel(q, k, v, dO, lse_tl_bench, delta_tl_bench, dQ_bench, dK_bench, dV_bench)
+        bwd_kernel(q, k, v, dO, lse_tl_bench, delta_tl_bench, dQ_partial_bench, dK_bench,
+                   dV_bench)
+        dQ_bench = reduce_kernel(dQ_partial_bench)
 
         post_kernel(dQ_bench)
 
@@ -599,8 +785,11 @@ if __name__ == "__main__":
     parser.add_argument('--dim', type=int, default=64, help='dim')
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--groups', type=int, default=1, help='groups')
+    parser.add_argument('--dump_dir',
+                        type=str,
+                        default=None,
+                        help='directory to save HIP, HSACO and disassembled files')
     args = parser.parse_args()
 
-    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
-
-    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
+    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups,
+         args.dump_dir)
