@@ -108,8 +108,8 @@ class GemmTCGEN5(GemmBase):
         if accum_dtype != "float32":
             raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
 
-        A_shared = self.A
-        B_shared = self.B
+        A_shared = self.ARegion
+        B_shared = self.BRegion
         C_local = self.C
         clear_accum = self.clear_accum
         mbar = self.mbarptr

@@ -40,7 +40,7 @@ public:
         .def_ro("n_warp", &GemmWarpPolicyNode::n_warp);
   }
 
-  std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
+  std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
                                            Target target,
                                            GemmInst gemm_inst) const;
 
@@ -84,47 +84,47 @@ public:
 
 class GemmNode : public TileOperatorNode {
 public:
-  bool CheckWGMMA() const;
-  tir::Buffer A, B, C;
-  // pointer to the A, B, C
-  PrimExpr Aptr, Bptr, Cptr;
-  bool trans_A, trans_B;
-  int M, N, K;
-  int stride_A, stride_B;
-  int offset_A, offset_B;
-  PrimExpr clear_accum = const_false();
+  bool checkWgmma() const;
+  tir::Buffer a_, b_, c_;
+  // BufferRegion for A, B and C
+  BufferRegion aRegion_, bRegion_, cRegion_;
+  bool transA_, transB_;
+  int m_, n_, k_;
+  int strideA_, strideB_;
+  int offsetA_, offsetB_;
+  PrimExpr clearAccum_ = const_false();
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
-  int kPack = 1;
-  int wg_wait = 0;
-  PrimExpr mbarptr;
-  std::optional<tir::Buffer> mbar; // mbar is optional, only used for TCGEN5MMA
-  Array<PrimExpr> C_coords;
-  mutable GemmWarpPolicy policy;
+  int kPack_ = 1;
+  int wgWait_ = 0;
+  PrimExpr mbarPtr_;
+  std::optional<tir::Buffer> mbar_; // mbar is optional, only used for TCGEN5MMA
+  Array<PrimExpr> cCoords_;
+  mutable GemmWarpPolicy policy_;
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<GemmNode>()
-        .def_ro("A", &GemmNode::A)
-        .def_ro("B", &GemmNode::B)
-        .def_ro("C", &GemmNode::C)
-        .def_ro("Aptr", &GemmNode::Aptr)
-        .def_ro("Bptr", &GemmNode::Bptr)
-        .def_ro("Cptr", &GemmNode::Cptr)
-        .def_ro("trans_A", &GemmNode::trans_A)
-        .def_ro("trans_B", &GemmNode::trans_B)
-        .def_ro("M", &GemmNode::M)
-        .def_ro("N", &GemmNode::N)
-        .def_ro("K", &GemmNode::K)
-        .def_ro("stride_A", &GemmNode::stride_A)
-        .def_ro("stride_B", &GemmNode::stride_B)
-        .def_ro("offset_A", &GemmNode::offset_A)
-        .def_ro("offset_B", &GemmNode::offset_B)
-        .def_ro("clear_accum", &GemmNode::clear_accum)
-        .def_ro("kPack", &GemmNode::kPack)
-        .def_ro("wg_wait", &GemmNode::wg_wait)
-        .def_ro("policy", &GemmNode::policy);
+        .def_ro("a", &GemmNode::a_)
+        .def_ro("b", &GemmNode::b_)
+        .def_ro("c", &GemmNode::c_)
+        .def_ro("aRegion", &GemmNode::aRegion_)
+        .def_ro("bRegion", &GemmNode::bRegion_)
+        .def_ro("cRegion", &GemmNode::cRegion_)
+        .def_ro("transA", &GemmNode::transA_)
+        .def_ro("transB", &GemmNode::transB_)
+        .def_ro("m", &GemmNode::m_)
+        .def_ro("n", &GemmNode::n_)
+        .def_ro("k", &GemmNode::k_)
+        .def_ro("strideA", &GemmNode::strideA_)
+        .def_ro("strideB", &GemmNode::strideB_)
+        .def_ro("offsetA", &GemmNode::offsetA_)
+        .def_ro("offsetB", &GemmNode::offsetB_)
+        .def_ro("clearAccum", &GemmNode::clearAccum_)
+        .def_ro("kPack", &GemmNode::kPack_)
+        .def_ro("wgWait", &GemmNode::wgWait_)
+        .def_ro("policy", &GemmNode::policy_);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
@@ -134,9 +134,9 @@ public:
   TileOperator Clone() const;
 
 private:
-  GemmInst GetGemmInst(int block_size, Target target) const;
-  bool AllowTCGEN5MMA(Target target) const;
-  bool AllowWGMMA(int block_size, Target target) const;
+  GemmInst getGemmInst(int block_size, Target target) const;
+  bool allowTcgen5Mma(Target target) const;
+  bool allowWgmma(int block_size, Target target) const;
 
   mutable bool completed_ = false;
 };

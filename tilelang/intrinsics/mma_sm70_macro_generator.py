@@ -2,9 +2,10 @@ from __future__ import annotations
 import tilelang.language as T
 from typing import Literal, Callable
 from tvm import DataType
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var
+from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion
+from tilelang import tvm as tvm
 from tvm.runtime import convert
-from tilelang.utils import is_fragment
+from tilelang.utils import is_fragment, to_buffer_region
 from tilelang.intrinsics.mma_sm70_layout import (
     shared_16x4_to_mma_a_32x4_layout,
     shared_4x16_to_mma_b_32x4_layout,
@@ -188,7 +189,7 @@ class TensorCoreIntrinEmitter:
 
     def ldmatrix_a(self,
                    A_local_buf: Buffer,
-                   A_shared_buf: Buffer,
+                   A_shared_buf: Buffer | BufferRegion,
                    ki: PrimExpr,
                    rk: PrimExpr | None = 0):
         warp_row_tiles = self.warp_row_tiles
@@ -205,6 +206,12 @@ class TensorCoreIntrinEmitter:
 
         mma_load_layout = mma_load_a_32x4_to_shared_16x4_layout
 
+        # legalize shared buffer to region
+        A_region = to_buffer_region(A_shared_buf)
+        A_buf = A_region.buffer
+        A_base0 = A_region.region[-2].min
+        A_base1 = A_region.region[-1].min
+
         @T.macro
         def _warp_ldmatrix_a(
             A_local_buf,
@@ -220,13 +227,13 @@ class TensorCoreIntrinEmitter:
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
                 for j in T.vectorized(local_size_a):
                     mi, mk = mma_load_layout(tx, j)
-                    A_local_buf[i * local_size_a + j] = A_shared_buf[wi + mi, wk + mk]
+                    A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
 
-        return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
+        return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
     def ldmatrix_b(self,
                    B_local_buf: Buffer,
-                   B_shared_buf: Buffer,
+                   B_shared_buf: Buffer | BufferRegion,
                    ki: PrimExpr,
                    rk: PrimExpr | None = 0):
         warp_col_tiles = self.warp_col_tiles
@@ -239,6 +246,12 @@ class TensorCoreIntrinEmitter:
         thread_binding = self.get_thread_binding()
 
         mma_load_layout = mma_load_b_32x4_to_shared_16x4_layout_trans if b_transposed else mma_load_b_32x4_to_shared_4x16_layout
+
+        # legalize shared buffer to region
+        B_region = to_buffer_region(B_shared_buf)
+        B_buf = B_region.buffer
+        B_base0 = B_region.region[-2].min
+        B_base1 = B_region.region[-1].min
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -261,12 +274,14 @@ class TensorCoreIntrinEmitter:
                 for j in T.vectorized(local_size_b):
                     if b_transposed:
                         mi, mk = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = B_shared_buf[wi + mi, wk + mk]
+                        B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wi + mi,
+                                                                  B_base1 + wk + mk]
                     else:
                         mk, mi = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = B_shared_buf[wk + mk, wi + mi]
+                        B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wk + mk,
+                                                                  B_base1 + wi + mi]
 
-        return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
+        return _warp_ldmatrix_b(B_local_buf, B_region, ki, thread_binding, rk)
 
     def mma(self,
             A_local_buf: Buffer,

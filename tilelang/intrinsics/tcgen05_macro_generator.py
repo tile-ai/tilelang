@@ -3,7 +3,8 @@ from enum import IntEnum
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var
+from tvm.tir import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
+from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tilelang.utils import is_tensor_memory
 from tilelang.layout import (
@@ -245,13 +246,42 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         mask_zero = T.Cast("int32", 0)
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
+        # Helper to allow BufferRegion/BufferLoad as inputs
+        def access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
+            if isinstance(buffer_or_load_or_region, Buffer):
+                return buffer_or_load_or_region.access_ptr(access_type)
+            elif isinstance(buffer_or_load_or_region, BufferLoad):
+                buffer_load = buffer_or_load_or_region
+                offset, stride = 0, 1
+                buffer = buffer_load.buffer
+                for i, shape in enumerate(reversed(buffer.shape)):
+                    indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
+                    if isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
+                        offset += indice * stride
+                    elif isinstance(indice, tvm.tir.Ramp):
+                        offset += indice.base * stride
+                    else:
+                        raise ValueError(f"Unsupported index type: {type(indice)}")
+                    stride *= shape
+                return buffer.access_ptr(access_type, offset=offset)
+            elif isinstance(buffer_or_load_or_region, BufferRegion):
+                buffer_region = buffer_or_load_or_region
+                buffer = buffer_region.buffer
+                offset, stride = 0, 1
+                for i, shape in enumerate(reversed(buffer.shape)):
+                    offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
+                    stride *= shape
+                return buffer.access_ptr(access_type, offset=offset)
+            else:
+                raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf, mbar):
             # Allocate SMEM descriptors for A and B
             desc_a = T.alloc_tcgen05_smem_desc()
             desc_b = T.alloc_tcgen05_smem_desc()
-            A_ptr = A_buf.access_ptr("r")
-            B_ptr = B_buf.access_ptr("r")
+            A_ptr = access_ptr_from(A_buf, "r")
+            B_ptr = access_ptr_from(B_buf, "r")
 
             T.initialize_tcgen05_descriptor(
                 desc_a,

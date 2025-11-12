@@ -2,7 +2,7 @@ from .gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mma_macro_generator import (
     TensorCoreIntrinEmitter,)
-from tilelang.utils.language import is_shared, is_fragment
+from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm import tir
@@ -83,11 +83,21 @@ class GemmMMA(GemmBase):
         local_size_b = mma_emitter.local_size_b
         block_K = mma_emitter.chunk
         micro_size_k = mma_emitter.micro_size_k
-        A_shared = self.A
-        B_shared = self.B
-        C_local = self.C
+        # We use region for memory input to support strided gemm
+        # T.gemm(A_shared[0:128, :], B_shared, C_local)
+        A_region = self.ARegion
+        B_region = self.BRegion
+        C_region = self.CRegion
+
+        A_buf = A_region.buffer
+        B_buf = B_region.buffer
+        C_buf = C_region.buffer
+
+        clear_accum = self.clear_accum
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+
+        assert is_full_region(C_region), "Fragment output C must be a full region"
 
         if self.is_gemm_ss():
 
@@ -100,30 +110,31 @@ class GemmMMA(GemmBase):
                 """
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
-
+                if clear_accum:
+                    T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
-                        A_shared,
+                        A_region,
                         ki,
                     )
 
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,
-                        B_shared,
+                        B_region,
                         ki,
                     )
 
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local, ki)
+                    mma_emitter.mma(A_local, B_local, C_buf, ki)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_ssr, inline_let=True)
         elif self.is_gemm_sr():
-            B_local = self.B
+            assert is_full_region(B_region), "Fragment input B must be a full region"
 
             @T.prim_func
             def _gemm_srr() -> None:
@@ -135,16 +146,17 @@ class GemmMMA(GemmBase):
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
+                    if clear_accum:
+                        T.clear(C_buf)
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
-                        A_shared,
+                        A_region,
                         ki,
                     )
 
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local, ki)
+                    mma_emitter.mma(A_local, B_buf, C_buf, ki)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -152,7 +164,7 @@ class GemmMMA(GemmBase):
             # insert into parent block
             return _Simplify(_gemm_srr, inline_let=True)
         elif self.is_gemm_rs():
-            A_local = self.A
+            assert is_full_region(A_region), "Fragment input A must be a full region"
 
             @T.prim_func
             def _gemm_rsr() -> None:
@@ -162,28 +174,29 @@ class GemmMMA(GemmBase):
                 accumulating into C_local.
                 """
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
-
+                if clear_accum:
+                    T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
 
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,
-                        B_shared,
+                        B_region,
                         ki,
                     )
 
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local, ki)
+                    mma_emitter.mma(A_buf, B_local, C_buf, ki)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
         elif self.is_gemm_rr():
-            A_local = self.A
-            B_local = self.B
+            assert is_full_region(A_region), "Fragment input A must be a full region"
+            assert is_full_region(B_region), "Fragment input B must be a full region"
 
             @T.prim_func
-            def _gemm_rsr() -> None:
+            def _gemm_rrr() -> None:
                 """
                 The inner macro that loads data from shared buffers A_shared and
                 B_shared into local fragments, then issues Tensor Core mma ops,
@@ -192,11 +205,11 @@ class GemmMMA(GemmBase):
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local, ki)
+                    mma_emitter.mma(A_buf, B_buf, C_buf, ki)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
-            return _Simplify(_gemm_rsr, inline_let=True)
+            return _Simplify(_gemm_rrr, inline_let=True)
         else:
             raise ValueError(
                 f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")

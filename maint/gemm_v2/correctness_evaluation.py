@@ -46,8 +46,7 @@ def matmul(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                # T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
-                T.gemm_v2(A_shared, B_shared, C_local, trans_A, trans_B)
+                T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
@@ -103,9 +102,11 @@ def run_gemm(
     block_M,
     block_N,
     block_K,
-    num_stages=3,
+    num_stages=2,
     num_threads=128,
 ):
+    if block_N >= 256 or block_M >= 256 or block_K >= 256:
+        num_stages = 0
     program = matmul(
         M,
         N,
@@ -189,9 +190,11 @@ def run_gemm_rs(
     block_M,
     block_N,
     block_K,
-    num_stages=3,
+    num_stages=2,
     num_threads=128,
 ):
+    if block_N >= 256 or block_M >= 256 or block_K >= 256:
+        num_stages = 0
     program = matmul_rs(
         M,
         N,
@@ -273,9 +276,11 @@ def run_gemm_sr(
     block_M,
     block_N,
     block_K,
-    num_stages=3,
+    num_stages=2,
     num_threads=128,
 ):
+    if block_N >= 256 or block_M >= 256 or block_K >= 256:
+        num_stages = 0
     program = matmul_sr(
         M,
         N,
@@ -361,9 +366,11 @@ def run_gemm_rr(
     block_M,
     block_N,
     block_K,
-    num_stages=3,
+    num_stages=2,
     num_threads=128,
 ):
+    if block_N >= 256 or block_M >= 256 or block_K >= 256:
+        num_stages = 0
     program = matmul_rr(
         M,
         N,
@@ -429,51 +436,51 @@ def _ensure_torch_dtypes(*dtype_names):
 
 
 def run_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
-    run_gemm_rs(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k, 2, 128)
+    run_gemm_rs(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k)
 
 
 def run_gemm_rs_false_false(m, n, k):
-    run_gemm_rs(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_rs(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k)
 
 
 def run_gemm_rs_true_false(m, n, k):
-    run_gemm_rs(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_rs(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k)
 
 
 def run_gemm_rs_true_true(m, n, k):
-    run_gemm_rs(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_rs(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k)
 
 
 def run_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
-    run_gemm_sr(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k, 2, 128)
+    run_gemm_sr(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k)
 
 
 def run_gemm_sr_false_false(m, n, k):
-    run_gemm_sr(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_sr(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k)
 
 
 def run_gemm_sr_true_false(m, n, k):
-    run_gemm_sr(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_sr(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k)
 
 
 def run_gemm_sr_true_true(m, n, k):
-    run_gemm_sr(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_sr(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k)
 
 
 def run_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
-    run_gemm_rr(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k, 2, 128)
+    run_gemm_rr(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k)
 
 
 def run_gemm_rr_false_false(m, n, k):
-    run_gemm_rr(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_rr(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k)
 
 
 def run_gemm_rr_true_false(m, n, k):
-    run_gemm_rr(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_rr(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k)
 
 
 def run_gemm_rr_true_true(m, n, k):
-    run_gemm_rr(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_rr(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k)
 
 
 TRANS_CASES = [
@@ -516,8 +523,6 @@ def test_gemm_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
         m,
         n,
         k,
-        2,
-        128,
     )
 
 
@@ -537,8 +542,6 @@ def test_gemm_false_false(m, n, k):
         m,
         n,
         k,
-        2,
-        128,
     )
 
 
@@ -558,8 +561,6 @@ def test_gemm_true_false(m, n, k):
         m,
         n,
         k,
-        2,
-        128,
     )
 
 
@@ -579,8 +580,6 @@ def test_gemm_true_true(m, n, k):
         m,
         n,
         k,
-        2,
-        128,
     )
 
 
@@ -724,3 +723,13 @@ if __name__ == "__main__":
     #             print(f"======================= Test {m} {n} {k} False True =============================")
     #             run_gemm_rs(m, n, k * 3, False, True, "float16", "float16", "float16", m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
+
+    # for n in [16, 32, 64, 128]:
+    #     for k in [16, 32, 64, 128]:
+    #         run_gemm_rs(64, n, k, False, False, "float16", "float16", "float16", 64, n, k, 0, 256)
+    #         print(f"Test {64} {n} {k} Pass")
+
+    # for n in [16, 32, 64, 128]:
+    #     for k in [16, 32, 64, 128]:
+    #         run_gemm(64, n, k, False, False, "float16", "float16", "float16", 64, n, k, 0, 256)
+    #         print(f"Test {64} {n} {k} Pass")
