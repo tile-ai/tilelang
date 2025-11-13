@@ -5,7 +5,11 @@ from typing import Literal
 from tilelang import language as T
 from tilelang.utils.language import get_buffer_region_from_load
 from tvm import ir, tir
-from tilelang.language.utils import buffer_region_to_tile_region, buffer_load_to_tile_region
+from tilelang.language.utils import (
+    buffer_to_tile_region,
+    buffer_region_to_tile_region,
+    buffer_load_to_tile_region,
+)
 
 
 def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
@@ -57,26 +61,35 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
     assert src_extent or dst_extent, "Can't deduce copy extents from args"
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    # Use element-wise minimum to define the copy region shared by src and dst
-    # Support dynamic PrimExpr using tir.min rather than Python's max/min.
-    extent = [tir.min(s, d) for s, d in zip(src_extent, dst_extent)]
+    # Align ranks by left-padding with 1s so trailing dimensions line up.
+    rank = max(len(src_extent), len(dst_extent))
+    src_aligned = [tir.IntImm("int32", 1)] * (rank - len(src_extent)) + list(src_extent)
+    dst_aligned = [tir.IntImm("int32", 1)] * (rank - len(dst_extent)) + list(dst_extent)
+    # Use element-wise minimum to define the overlapping copy region.
+    extent = [tir.min(s, d) for s, d in zip(src_aligned, dst_aligned)]
 
     def _to_region(data, access_type):
         if isinstance(data, tir.Var) and T.has_let_value(data):
             data = T.get_let_value(data)
         if isinstance(data, tir.Buffer):
-            # Restrict a raw buffer to the computed copy extent by creating
-            # a BufferLoad at origin and passing the extents explicitly.
-            zeros = [tir.IntImm("int32", 0) for _ in extent]
-            return buffer_load_to_tile_region(tir.BufferLoad(data, zeros), access_type, extent)
+            # Keep full buffer region semantics for buffers to avoid unintended
+            # rank-mismatch side effects. Broadcasting is handled by the region pair.
+            return buffer_to_tile_region(data, access_type)
         elif isinstance(data, tir.BufferRegion):
-            return buffer_region_to_tile_region(data, access_type, extent)
+            ndim = len(data.region)
+            ex = extent[-ndim:]
+            return buffer_region_to_tile_region(data, access_type, ex)
         elif isinstance(data, tir.BufferLoad):
             region = get_buffer_region_from_load(data)
             if region is None:
-                return buffer_load_to_tile_region(data, access_type, extent)
-            return buffer_region_to_tile_region(region, access_type, extent)
+                ndim = len(data.indices)
+                ex = extent[-ndim:]
+                return buffer_load_to_tile_region(data, access_type, ex)
+            ndim = len(region.region)
+            ex = extent[-ndim:]
+            return buffer_region_to_tile_region(region, access_type, ex)
         else:
+            # Fallback assumption: treat as BufferLoad-like with indices matching extent length
             return buffer_load_to_tile_region(data, access_type, extent)
 
     src = _to_region(src, "r")
