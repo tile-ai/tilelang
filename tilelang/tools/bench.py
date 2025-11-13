@@ -67,9 +67,10 @@ def process_func(func, *args, repeat=10, warmup=3, **kwargs):
             stacklevel=2,
         )
 
+
 def analyze_records(records):
     # Analyze the data and draw a chart
-    records.sort(key = lambda x: x[1])
+    records.sort(key=lambda x: x[1])
     name_col_width = max(len(r[0]) for r in records)
     safe_width = name_col_width + 20
     print("=" * safe_width)
@@ -107,5 +108,5 @@ def main():
     for name, func in module.items():
         if name.startswith("bench_") and callable(func):
             func()
-    
+
     analyze_records(_RECORDS)
