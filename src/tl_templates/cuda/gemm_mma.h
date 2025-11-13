@@ -41,14 +41,16 @@ using _X = Underscore;
   }
 
 #ifdef __CUDA_ARCH_LIST__
-#if __CUDA_ARCH_LIST__ >= 1200#include "cuda_fp8.h"
+#if __CUDA_ARCH_LIST__ >= 1200 #include "cuda_fp8.h"
 #include <cute/arch/mma_sm120.hpp>
 #include <cute/arch/mma_sm80.hpp>
 TL_DISPATCH_MMA_TEMPLATE(fp8_e4_t, fp8_e4_t, float, SM120_16x8x32_TN)
 TL_DISPATCH_MMA_TEMPLATE(fp8_e5_t, fp8_e5_t, float, SM120_16x8x32_TN)
 // Also add specializations for cute::float_e4m3_t and cute::float_e5m2_t
-TL_DISPATCH_MMA_TEMPLATE(cute::float_e4m3_t, cute::float_e4m3_t, float, SM120_16x8x32_TN)
-TL_DISPATCH_MMA_TEMPLATE(cute::float_e5m2_t, cute::float_e5m2_t, float, SM120_16x8x32_TN)
+TL_DISPATCH_MMA_TEMPLATE(cute::float_e4m3_t, cute::float_e4m3_t, float,
+                         SM120_16x8x32_TN)
+TL_DISPATCH_MMA_TEMPLATE(cute::float_e5m2_t, cute::float_e5m2_t, float,
+                         SM120_16x8x32_TN)
 TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
@@ -64,8 +66,10 @@ TL_DISPATCH_MMA(fp8_e4_t, fp8_e4_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
 TL_DISPATCH_MMA(fp8_e5_t, fp8_e5_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
 // Also add specializations for cute::float_e4m3_t and cute::float_e5m2_t
 // since to_cute_type converts fp8_e4_t/fp8_e5_t to these types
-TL_DISPATCH_MMA(cute::float_e4m3_t, cute::float_e4m3_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
-TL_DISPATCH_MMA(cute::float_e5m2_t, cute::float_e5m2_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
+TL_DISPATCH_MMA(cute::float_e4m3_t, cute::float_e4m3_t, float,
+                SM89_16x8x32_F32E4M3E4M3F32_TN)
+TL_DISPATCH_MMA(cute::float_e5m2_t, cute::float_e5m2_t, float,
+                SM89_16x8x32_F32E5M2E5M2F32_TN)
 TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
@@ -79,8 +83,10 @@ TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 TL_DISPATCH_MMA(fp8_e4_t, fp8_e4_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
 TL_DISPATCH_MMA(fp8_e5_t, fp8_e5_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
 // Also add specializations for cute::float_e4m3_t and cute::float_e5m2_t
-TL_DISPATCH_MMA(cute::float_e4m3_t, cute::float_e4m3_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
-TL_DISPATCH_MMA(cute::float_e5m2_t, cute::float_e5m2_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
+TL_DISPATCH_MMA(cute::float_e4m3_t, cute::float_e4m3_t, float,
+                SM89_16x8x32_F32E4M3E4M3F32_TN)
+TL_DISPATCH_MMA(cute::float_e5m2_t, cute::float_e5m2_t, float,
+                SM89_16x8x32_F32E5M2E5M2F32_TN)
 TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
@@ -94,8 +100,10 @@ TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 TL_DISPATCH_MMA(fp8_e4_t, fp8_e4_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
 TL_DISPATCH_MMA(fp8_e5_t, fp8_e5_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
 // Also add specializations for cute::float_e4m3_t and cute::float_e5m2_t
-TL_DISPATCH_MMA(cute::float_e4m3_t, cute::float_e4m3_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
-TL_DISPATCH_MMA(cute::float_e5m2_t, cute::float_e5m2_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
+TL_DISPATCH_MMA(cute::float_e4m3_t, cute::float_e4m3_t, float,
+                SM89_16x8x32_F32E4M3E4M3F32_TN)
+TL_DISPATCH_MMA(cute::float_e5m2_t, cute::float_e5m2_t, float,
+                SM89_16x8x32_F32E5M2E5M2F32_TN)
 TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
@@ -113,16 +121,19 @@ TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 #elif __CUDA_ARCH_LIST__ >= 750
 TL_DISPATCH_MMA(half_t, half_t, float, SM75_16x8x8_F32F16F16F32_TN)
 #else
-// Fallback: include FP8 support for SM89+ architectures when architecture detection fails
-// This ensures FP8 specializations are available during template instantiation
+// Fallback: include FP8 support for SM89+ architectures when architecture
+// detection fails This ensures FP8 specializations are available during
+// template instantiation
 #include "cuda_fp8.h"
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
 TL_DISPATCH_MMA(fp8_e4_t, fp8_e4_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
 TL_DISPATCH_MMA(fp8_e5_t, fp8_e5_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
 // Also add specializations for cute::float_e4m3_t and cute::float_e5m2_t
-TL_DISPATCH_MMA(cute::float_e4m3_t, cute::float_e4m3_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
-TL_DISPATCH_MMA(cute::float_e5m2_t, cute::float_e5m2_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
+TL_DISPATCH_MMA(cute::float_e4m3_t, cute::float_e4m3_t, float,
+                SM89_16x8x32_F32E4M3E4M3F32_TN)
+TL_DISPATCH_MMA(cute::float_e5m2_t, cute::float_e5m2_t, float,
+                SM89_16x8x32_F32E5M2E5M2F32_TN)
 TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
