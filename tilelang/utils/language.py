@@ -392,7 +392,7 @@ def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[lis
 
     # If both sides have the same number of non-1 extents, don't re-broadcast.
     def _num_non_one(exts: list) -> int:
-      return sum(0 if prim_expr_equal(x, 1) else 1 for x in exts)
+        return sum(0 if prim_expr_equal(x, 1) else 1 for x in exts)
 
     if _num_non_one(a) == _num_non_one(b):
         return a, b
