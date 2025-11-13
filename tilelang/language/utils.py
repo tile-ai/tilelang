@@ -85,7 +85,14 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
         extents
     ), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
 
-    return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
+    # Clamp extents element-wise so that the produced region respects the
+    # requested copy/fill extent, supporting dynamic PrimExpr via tir.min.
+    clamped_extents = [
+        tir.min(region_extents[i], extents[i]) if i < len(extents) else region_extents[i]
+        for i in range(len(region_extents))
+    ]
+
+    return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *clamped_extents)
 
 
 def index_to_coordinates(index, shape) -> list[PrimExpr]:

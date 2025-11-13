@@ -6,7 +6,7 @@ from __future__ import annotations
 import tilelang.language as T
 from tvm import ir, tir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
-from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
+from tilelang.language.utils import buffer_region_to_tile_region, buffer_load_to_tile_region
 from tilelang.utils.language import get_buffer_region_from_load
 
 _MEMORY_ORDER_ID_MAP = {
@@ -201,13 +201,15 @@ def atomic_add(dst: Buffer,
     assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    extent = max(src_extent, dst_extent)
+    # Use element-wise minimum to ensure we operate on the overlapping region
+    extent = [tir.min(s, d) for s, d in zip(src_extent, dst_extent)]
 
     def _to_region(data, access_type):
         if isinstance(data, tir.Var) and T.has_let_value(data):
             data = T.get_let_value(data)
         if isinstance(data, tir.Buffer):
-            return buffer_to_tile_region(data, access_type)
+            zeros = [tir.IntImm("int32", 0) for _ in extent]
+            return buffer_load_to_tile_region(tir.BufferLoad(data, zeros), access_type, extent)
         elif isinstance(data, tir.BufferRegion):
             return buffer_region_to_tile_region(data, access_type, extent)
         elif isinstance(data, tir.BufferLoad):
