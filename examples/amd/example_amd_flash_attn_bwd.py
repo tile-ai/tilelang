@@ -244,7 +244,8 @@ def fast_flashattn(
                 current_bx = bx_loop_var
                 q_block_offset = current_bx * block_M
 
-                Q_shared = T.alloc_shared([block_M, dim], dtype)
+                # Forward: Q在register里, K/V在LDS里
+                Q_fragment = T.alloc_fragment([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
                 acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
@@ -255,7 +256,7 @@ def fast_flashattn(
 
                 T.copy(
                     Q[bz, q_block_offset:q_block_offset + block_M, by, :],
-                    Q_shared,
+                    Q_fragment,
                     coalesced_width=vec_size)
 
                 loop_end_k = (
@@ -283,7 +284,7 @@ def fast_flashattn(
                     else:
                         T.clear(acc_s)
                     T.gemm(
-                        Q_shared,
+                        Q_fragment,
                         K_shared,
                         acc_s,
                         transpose_B=True,
@@ -416,8 +417,9 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
         with T.Kernel(head_kv, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bk, by, bz):
             T.use_swizzle(panel_size, enable=enable_rasterization)
 
+            # Backward: K在shared里, V在register里, Q/QT/dO/dOT在LDS里
             K_shared = T.alloc_shared([block_M, dim], dtype)
-            V_shared = T.alloc_shared([block_M, dim], dtype)
+            V_fragment = T.alloc_fragment([block_M, dim], dtype)
             q_shared = T.alloc_shared([block_N, dim], dtype)
             do_shared = T.alloc_shared([block_N, dim], dtype)
             lse_shared = T.alloc_shared([block_N], accum_dtype)
@@ -436,7 +438,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
             kv_offset = by * block_M
 
             T.copy(K[bz, kv_offset:kv_offset + block_M, bk, :], K_shared)
-            T.copy(V[bz, kv_offset:kv_offset + block_M, bk, :], V_shared)
+            T.copy(V[bz, kv_offset:kv_offset + block_M, bk, :], V_fragment)
             T.clear(dv)
             T.clear(dk)
 
@@ -471,7 +473,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                     T.copy(dO[bz, k * block_N:(k + 1) * block_N, q_head, :], do_shared)
                     T.clear(dP)
 
-                    T.gemm(V_shared,
+                    T.gemm(V_fragment,
                            do_shared,
                            dP,
                            transpose_B=True,
