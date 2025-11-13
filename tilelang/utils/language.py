@@ -367,6 +367,39 @@ def prim_expr_equal(lhs, rhs) -> bool:
     return tir.analysis.expr_deep_equal(lhs, rhs)
 
 
+def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[list, list]:
+    """
+    Right-align and broadcast two extent lists to be mutually compatible.
+
+    For each pair of tail-aligned dimensions (x, y):
+      - if x == y: keep both
+      - elif x == 1: set x = y
+      - elif y == 1: set y = x
+      - else: promote both to tir.max(x, y) to handle dynamic-vs-static safely
+
+    Leading unmatched dimensions are kept as-is.
+
+    Returns a tuple of new lists (src_new, dst_new).
+    """
+    a = list(src_extents)
+    b = list(dst_extents)
+    k = min(len(a), len(b))
+    for i in range(1, k + 1):
+        x, y = a[-i], b[-i]
+        if prim_expr_equal(x, y):
+            continue
+        elif prim_expr_equal(x, 1):
+            a[-i] = y
+        elif prim_expr_equal(y, 1):
+            b[-i] = x
+        else:
+            # Dynamic mismatch: promote to max so downstream clamping/predicates remain safe
+            m = tir.max(x, y)
+            a[-i] = m
+            b[-i] = m
+    return a, b
+
+
 def is_full_region(buffer_region: BufferRegion) -> bool:
     """
     Check whether a BufferRegion covers the full buffer region.

@@ -7,7 +7,7 @@ import tilelang.language as T
 from tvm import ir, tir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
 from tilelang.language.utils import buffer_region_to_tile_region, buffer_load_to_tile_region
-from tilelang.utils.language import get_buffer_region_from_load
+from tilelang.utils.language import get_buffer_region_from_load, legalize_pairwise_extents
 
 _MEMORY_ORDER_ID_MAP = {
     "relaxed": 0,
@@ -201,6 +201,7 @@ def atomic_add(dst: Buffer,
     assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
+    src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
     def _to_region(data, access_type, extent):
         if isinstance(data, tir.Var) and T.has_let_value(data):
