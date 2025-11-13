@@ -4,6 +4,8 @@ import inspect
 import time
 import traceback
 import contextlib
+import warnings
+import matplotlib.pyplot as plt
 
 __all__ = ["main", "process_func"]
 
@@ -49,13 +51,51 @@ def process_func(func, *args, repeat=10, warmup=3, **kwargs):
     if times:
         avg_latency = sum(times) / len(times)
         if fail_count == 0:
-            print(f"{func.__module__}.{func.__name__}  {avg_latency:.2f} ms")
+            return (f"{func.__module__}.{func.__name__}", avg_latency)
         else:
-            print(
-                f"{func.__module__}.{func.__name__}  {avg_latency:.2f} ms  (fail {fail_count}/{repeat})"
+            warnings.warn(
+                f"benchmark for {func.__module__}.{func.__name__} failed {fail_count} times in {repeat} repeats",
+                RuntimeWarning,
+                stacklevel=2,
             )
+            return (f"{func.__module__}.{func.__name__}", avg_latency)
     else:
-        print(f"{func.__module__}.{func.__name__}  FAILED (no valid run)")
+        warnings.warn(
+            f"benchmark for {func.__module__}.{func.__name__} failed in all repeats (no valid run)",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+def analyze_records(records):
+    # Analyze the data and draw a picture
+    valid = [r for r in records if r is not None]
+
+    name_col_width = max(len(r[0]) for r in valid)
+    print("=" * (name_col_width + 20))
+    head = f"{'Function':{name_col_width}s} | Avg Latency (ms)"
+    print(f"{head:^(name_col_width + 20)}")
+    print("-" * (name_col_width + 20))
+    for name, lat in valid:
+        print(f"{name:<name_col_width} | {lat:>10.4f}")
+    print("=" * (name_col_width + 20))
+
+    names = [r[0] for r in valid]
+    lats = [r[1] for r in valid]
+    plt.figure(figsize=(max(6, len(names) * 0.5), 6))
+    plt.barh(names, lats)
+    plt.xlabel("Latency (ms)")
+    plt.title("Benchmark Results")
+
+    test_file = inspect.getsourcefile(sys._getframe(2))
+    out_dir = os.path.dirname(test_file)
+    out_path = os.path.join(out_dir, "bench_result.png")
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close()
+
+    print(f"[Saved] Bar chart -> {out_path}")
 
 
 def main():
@@ -65,6 +105,9 @@ def main():
     with open(test_file) as f:
         exec(f.read(), module)
 
+    records = []
     for name, func in module.items():
         if name.startswith("bench_") and callable(func):
-            func()
+            records.append(func())
+    
+    analyze_records(records)
