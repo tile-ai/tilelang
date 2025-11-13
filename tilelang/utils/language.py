@@ -371,7 +371,13 @@ def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[lis
     """
     Right-align and broadcast two extent lists to be mutually compatible.
 
-    For each pair of tail-aligned dimensions (x, y):
+    Early-exit rule:
+    - If the number of non-1 dimensions in `src_extents` equals that in `dst_extents`,
+      no adjustment is made; the original extents are returned unchanged. This
+      preserves the per-dimension iteration mapping (one loop var per non-1 dim)
+      and avoids creating extra varying axes on either side.
+
+    Otherwise, for each pair of tail-aligned dimensions (x, y):
       - if x == y: keep both
       - elif x == 1: set x = y
       - elif y == 1: set y = x
@@ -383,6 +389,13 @@ def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[lis
     """
     a = list(src_extents)
     b = list(dst_extents)
+
+    # If both sides have the same number of non-1 extents, don't re-broadcast.
+    def _num_non_one(exts: list) -> int:
+      return sum(0 if prim_expr_equal(x, 1) else 1 for x in exts)
+
+    if _num_non_one(a) == _num_non_one(b):
+        return a, b
     k = min(len(a), len(b))
     for i in range(1, k + 1):
         x, y = a[-i], b[-i]
