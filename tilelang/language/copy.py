@@ -57,11 +57,8 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
     assert src_extent or dst_extent, "Can't deduce copy extents from args"
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    # Use element-wise minimum to define the copy region shared by src and dst
-    # Support dynamic PrimExpr using tir.min rather than Python's max/min.
-    extent = [tir.min(s, d) for s, d in zip(src_extent, dst_extent)]
 
-    def _to_region(data, access_type):
+    def _to_region(data, access_type, extent):
         if isinstance(data, tir.Var) and T.has_let_value(data):
             data = T.get_let_value(data)
         if isinstance(data, tir.Buffer):
@@ -79,8 +76,8 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         else:
             return buffer_load_to_tile_region(data, access_type, extent)
 
-    src = _to_region(src, "r")
-    dst = _to_region(dst, "w")
+    src = _to_region(src, "r", src_extent)
+    dst = _to_region(dst, "w", dst_extent)
 
     if coalesced_width is None:
         coalesced_width = -1  # PrimExpr can not be None

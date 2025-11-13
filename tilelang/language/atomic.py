@@ -201,10 +201,8 @@ def atomic_add(dst: Buffer,
     assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    # Use element-wise minimum to ensure we operate on the overlapping region
-    extent = [tir.min(s, d) for s, d in zip(src_extent, dst_extent)]
 
-    def _to_region(data, access_type):
+    def _to_region(data, access_type, extent):
         if isinstance(data, tir.Var) and T.has_let_value(data):
             data = T.get_let_value(data)
         if isinstance(data, tir.Buffer):
@@ -220,8 +218,8 @@ def atomic_add(dst: Buffer,
         else:
             return buffer_load_to_tile_region(data, access_type, extent)
 
-    value = _to_region(value, "r")
-    dst = _to_region(dst, "w")
+    value = _to_region(value, "r", src_extent)
+    dst = _to_region(dst, "w", dst_extent)
 
     # Note: tile-region-based atomic operations don't support return_prev yet
     # This would need to be implemented in the tile runtime
