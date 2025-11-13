@@ -326,7 +326,9 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
   // For each dimension in the new shape, we create a placeholder variable
   Array<Var> new_vars;
   for (size_t i = 0; i < shape.size(); ++i) {
-    new_vars.push_back(InputPlaceholder(i));
+    auto var = Var(std::string("n_") + std::to_string(i), shape[i].dtype());
+    analyzer->Bind(var, Range(0, shape[i]));
+    new_vars.push_back(var);
   }
   // Step 3. Compute the flat index from new shape indices
   // flat_index = k0 * (s1 * s2 * ...) + k1 * (s2 * s3 * ...) + ... + kn
@@ -362,7 +364,11 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
       substituted =
           Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
     }
-    new_forward_index.push_back(substituted);
+    new_forward_index.push_back(analyzer->Simplify(substituted));
+  }
+  for (size_t i = 0; i < new_vars.size(); ++i) {
+    new_forward_index =
+        Substitute(new_forward_index, {{new_vars[i], InputPlaceholder(i)}});
   }
   return Layout(shape, new_forward_index);
 }
@@ -395,8 +401,15 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
   // 2) Build flat index from new-shape indices
   Array<Var> new_vars;
   new_vars.reserve(shape.size());
-  for (size_t i = 0; i < shape.size(); ++i)
-    new_vars.push_back(InputPlaceholder(i));
+  for (size_t i = 0; i < shape.size(); ++i) {
+    // Cannot use InputPlaceholder(i) here, because it would cause name capture
+    // (variable capture) with InputPlaceholder(i) in upper scopes. Therefore,
+    // we must create a fresh variable here to avoid confusion when
+    // substituting.
+    auto var = Var(std::string("n_") + std::to_string(i), shape[i].dtype());
+    analyzer->Bind(var, Range(0, shape[i]));
+    new_vars.push_back(var);
+  }
 
   PrimExpr flat = Integer(0);
   for (size_t i = 0; i < shape.size(); ++i) {
@@ -405,7 +418,6 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
       stride = stride * shape[j];
     flat = flat + new_vars[i] * stride;
   }
-
   // 3) Recover original indices from flat index
   Array<PrimExpr> orig_indices;
   PrimExpr remain = flat;
@@ -416,7 +428,6 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
     orig_indices.push_back(floordiv(remain, stride));
     remain = floormod(remain, stride);
   }
-
   // 4) Substitute old placeholders with expressions of new indices
   Array<PrimExpr> new_forward_index;
   for (const auto &e : forward_index_) {
@@ -424,15 +435,22 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
     for (size_t i = 0; i < InputShape().size(); ++i) {
       cur = Substitute(cur, {{InputPlaceholder(i), orig_indices[i]}});
     }
+    cur = analyzer->Simplify(cur);
     new_forward_index.push_back(cur);
   }
-
   PrimExpr new_forward_thread = forward_thread_;
   for (size_t i = 0; i < InputShape().size(); ++i) {
     new_forward_thread = Substitute(new_forward_thread,
                                     {{InputPlaceholder(i), orig_indices[i]}});
   }
-
+  new_forward_thread = analyzer->Simplify(new_forward_thread);
+  for (size_t i = 0; i < new_vars.size(); ++i) {
+    auto var = new_vars[i];
+    new_forward_index =
+        Substitute(new_forward_index, {{var, InputPlaceholder(i)}});
+    new_forward_thread =
+        Substitute(new_forward_thread, {{var, InputPlaceholder(i)}});
+  }
   Fragment reshaped(shape, new_forward_index, new_forward_thread,
                     ReplicateExtent(), std::nullopt);
   if (thread_range_.defined()) {
