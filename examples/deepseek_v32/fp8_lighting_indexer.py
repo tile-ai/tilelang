@@ -127,7 +127,7 @@ def mqa_attn_return_logits(
             index_k_shared = T.alloc_shared([block_N, index_dim], dtype)
             index_k_scale_fragment = T.alloc_fragment([block_N], accum_dtype)
             s = T.alloc_fragment([block_N, block_Q * heads], accum_dtype)
-            s_reshaped = T.alloc_fragment([block_N, block_Q, heads], accum_dtype)
+            s_reshaped = T.reshape(s, (block_N, block_Q, heads))
             logits = T.alloc_fragment([block_N, block_Q], accum_dtype)
             weights = T.alloc_fragment([block_Q, heads], accum_dtype)
 
@@ -165,7 +165,7 @@ def mqa_attn_return_logits(
 
                 for bn_i, bq_i, h_i in T.Parallel(block_N, block_Q, heads):
                     s_reshaped[bn_i, bq_i,
-                               h_i] = (T.max(s[bn_i, bq_i * heads + h_i], 0) *
+                               h_i] = (T.max(s_reshaped[bn_i, bq_i, h_i], 0) *
                                        weights[bq_i, h_i]) * index_k_scale_fragment[bn_i]
 
                 T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
