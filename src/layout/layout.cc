@@ -313,21 +313,20 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
     shape_product *= dim;
   }
 
-  if (analyzer) {
-    ICHECK(analyzer->CanProveEqual(input_shape_product, shape_product))
-        << "InputShape() = " << InputShape() << " shape = " << shape;
-  } else {
-    arith::Analyzer local_analyzer;
-    ICHECK(local_analyzer.CanProveEqual(input_shape_product, shape_product))
-        << "InputShape() = " << InputShape() << " shape = " << shape;
-  }
+  // Use provided analyzer if present, otherwise a local fallback to avoid
+  // potential null dereference paths flagged by static analysis.
+  arith::Analyzer fallback_analyzer;
+  arith::Analyzer *az = analyzer ? analyzer : &fallback_analyzer;
+  ICHECK(az->CanProveEqual(input_shape_product, shape_product))
+      << "InputShape() = " << InputShape() << " shape = " << shape;
 
   // Step 2. Create new forward indices by reshaping
   // For each dimension in the new shape, we create a placeholder variable
   Array<Var> new_vars;
+  new_vars.reserve(shape.size());
   for (size_t i = 0; i < shape.size(); ++i) {
     auto var = Var(std::string("n_") + std::to_string(i), shape[i].dtype());
-    analyzer->Bind(var, Range(0, shape[i]));
+    az->Bind(var, Range(0, shape[i]));
     new_vars.push_back(var);
   }
   // Step 3. Compute the flat index from new shape indices
@@ -364,7 +363,7 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
       substituted =
           Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
     }
-    new_forward_index.push_back(analyzer->Simplify(substituted));
+    new_forward_index.push_back(az->Simplify(substituted));
   }
   for (size_t i = 0; i < new_vars.size(); ++i) {
     new_forward_index =
@@ -388,15 +387,12 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
   for (const auto &d : shape)
     shape_prod *= d;
 
-  if (analyzer) {
-    ICHECK(analyzer->CanProveEqual(input_prod, shape_prod))
-        << "InputShape() = " << InputShape() << " shape = " << shape
-        << " input fragment layout is = " << DebugOutput();
-  } else {
-    arith::Analyzer local_analyzer;
-    ICHECK(local_analyzer.CanProveEqual(input_prod, shape_prod))
-        << "InputShape() = " << InputShape() << " shape = " << shape;
-  }
+  // Use provided analyzer if present, otherwise a local fallback.
+  arith::Analyzer fallback_analyzer;
+  arith::Analyzer *az = analyzer ? analyzer : &fallback_analyzer;
+  ICHECK(az->CanProveEqual(input_prod, shape_prod))
+      << "InputShape() = " << InputShape() << " shape = " << shape
+      << " input fragment layout is = " << DebugOutput();
 
   // 2) Build flat index from new-shape indices
   Array<Var> new_vars;
@@ -407,7 +403,7 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
     // we must create a fresh variable here to avoid confusion when
     // substituting.
     auto var = Var(std::string("n_") + std::to_string(i), shape[i].dtype());
-    analyzer->Bind(var, Range(0, shape[i]));
+    az->Bind(var, Range(0, shape[i]));
     new_vars.push_back(var);
   }
 
@@ -435,7 +431,7 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
     for (size_t i = 0; i < InputShape().size(); ++i) {
       cur = Substitute(cur, {{InputPlaceholder(i), orig_indices[i]}});
     }
-    cur = analyzer->Simplify(cur);
+    cur = az->Simplify(cur);
     new_forward_index.push_back(cur);
   }
   PrimExpr new_forward_thread = forward_thread_;
@@ -443,7 +439,7 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
     new_forward_thread = Substitute(new_forward_thread,
                                     {{InputPlaceholder(i), orig_indices[i]}});
   }
-  new_forward_thread = analyzer->Simplify(new_forward_thread);
+  new_forward_thread = az->Simplify(new_forward_thread);
   for (size_t i = 0; i < new_vars.size(); ++i) {
     auto var = new_vars[i];
     new_forward_index =
