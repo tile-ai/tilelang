@@ -289,6 +289,67 @@ public:
       }
     }
   }
+
+  static TL_DEVICE void body_sr(A_type *A_shared, B_type *B_local,
+                                C_type *C_local) {
+    auto tid = threadIdx.x;
+    auto warp_id = tid / warp_size;
+    auto warp_n = warp_id / block_row_warps;
+    auto warp_m = warp_id % block_row_warps;
+    auto warp_row_tiles = warp_rows * micro_size_x;
+    auto warp_col_tiles = warp_cols * micro_size_y;
+
+    auto lane_id = tid % warp_size;
+    auto tx = lane_id;
+
+    constexpr auto local_size_a = (micro_size_x * micro_size_k) / warp_size;
+    constexpr auto local_size_b = (micro_size_y * micro_size_k) / warp_size;
+    constexpr auto local_size_c = (micro_size_x * micro_size_y) / warp_size;
+
+    constexpr auto last_dim_a = TransposeA ? M_Tile : K_Tile;
+    constexpr auto last_dim_b = TransposeB ? K_Tile : N_Tile;
+
+    A_type A_local[warp_rows * kPack * local_size_a];
+
+    for (int ki = 0; ki < inner_k; ki++) {
+      // Fetch A from shared memory into register
+      for (int i = 0; i < warp_rows; i++) {
+        const auto l = warp_m * warp_row_tiles + i * micro_size_x;
+        const auto r = ki * (kPack * micro_size_k);
+        for (int local_id = 0; local_id < (kPack * local_size_a); local_id++) {
+          if constexpr (TransposeA) {
+            auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
+            A_local[i * kPack * local_size_a + local_id] =
+                A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
+                    r + row, l + col)];
+          } else {
+            auto [row, col] = reverse_index_map(lane_id, local_id);
+            A_local[i * kPack * local_size_a + local_id] =
+                A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
+                    l + row, r + col)];
+          }
+        }
+      }
+
+      // Compute
+      for (int kp = 0; kp < kPack; kp++) {
+        for (int i = 0; i < warp_rows; ++i) {
+          for (int j = 0; j < warp_cols; ++j) {
+            auto acc_ptr = ((float32x4 *)C_local) + ((i * warp_cols) + j);
+            // B is already in register, layout: [inner_k][warp_cols][kPack][local_size_b]
+            auto b_ptr = ((B_type *)B_local) +
+                         (ki * warp_cols * kPack + j * kPack + kp) * vec_size;
+            // A is loaded from shared memory, layout: [warp_rows][kPack][local_size_a]
+            auto a_ptr = ((A_type *)A_local) + (i * kPack + kp) * vec_size;
+
+            // Use the trait to select the correct MFMA instruction, either fp8,
+            // fp16 or bf16 currently
+            MfmaTraits<A_type>::mfma_op(b_ptr, a_ptr, acc_ptr);
+          }
+        }
+      }
+    }
+  }
 };
 
 } // namespace tl
@@ -313,6 +374,16 @@ TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
       GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A, trans_B,
                    clear_accum, kPack, A_type, B_type, C_type>;
   Compute::body_rs(pA, pB, accum);
+}
+
+template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
+          bool trans_B, bool clear_accum, int kPack, typename A_type,
+          typename B_type, typename C_type>
+TL_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
+  using Compute =
+      GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A, trans_B,
+                   clear_accum, kPack, A_type, B_type, C_type>;
+  Compute::body_sr(pA, pB, accum);
 }
 
 } // namespace tl
