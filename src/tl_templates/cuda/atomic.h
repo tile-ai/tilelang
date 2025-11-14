@@ -4,7 +4,13 @@
 #include <cuda_runtime.h>
 #endif
 
-#include <cuda/atomic>
+#if (__CUDACC_VER_MAJOR__ >= 13)
+  #define CUDA_STD_HEADER(header) <cccl/cuda/std/header>
+#else
+  #define CUDA_STD_HEADER(header) <cuda/std/header>
+#endif
+
+#include CUDA_STD_HEADER(atomic)
 #include <cuda_fp16.h>
 #include <cutlass/numeric_types.h>
 
