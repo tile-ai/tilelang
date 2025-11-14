@@ -19,7 +19,7 @@ _PYTHON_DTYPE_TO_STR = {
 _NUMPY_DTYPE_TO_STR = {
     np.bool_: 'bool',
     np.short: 'short',
-    np.int_: 'int32',
+    np.int_: 'int64',
     np.longlong: 'int64',
     np.half: 'float16',
     np.double: 'float64',
