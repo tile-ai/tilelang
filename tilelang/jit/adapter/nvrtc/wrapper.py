@@ -109,6 +109,56 @@ TMA_IM2COL_DESC_INIT_FUNC_PY = """
         raise RuntimeError(f"Failed to initialize the TMA descriptor {0}: {{res}}")
 """
 
+L2_PERSISTENT_MAP_CREATE_HANDLE_PY = """
+    from cuda.bindings.driver import (
+        CUstreamAttrValue,
+        CUstreamAttrID,
+        CUlimit,
+        CUaccessProperty,
+        cuDeviceGetLimit,
+        cuDeviceSetLimit,
+        cuStreamSetAttribute,
+        cuCtxResetPersistingL2Cache,
+    )
+
+    stream_attribute = CUstreamAttrValue()
+    res, init_persisting_l2_cache_size = cuDeviceGetLimit(CUlimit.CU_LIMIT_PERSISTING_L2_CACHE_SIZE)
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to get L2 cache size limit: {{res}}")
+"""
+
+L2_PERSISTENT_MAP_INIT_FUNC_PY = """
+    stream_attribute.accessPolicyWindow.hitRatio = {1}
+    stream_attribute.accessPolicyWindow.hitProp = CUaccessProperty.CU_ACCESS_PROPERTY_PERSISTING
+    stream_attribute.accessPolicyWindow.missProp = CUaccessProperty.CU_ACCESS_PROPERTY_STREAMING
+
+    res = cuDeviceSetLimit(CUlimit.CU_LIMIT_PERSISTING_L2_CACHE_SIZE, {2})[0]
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to set L2 cache size limit: {{res}}")
+
+    stream_attribute.accessPolicyWindow.base_ptr = {0}.data_ptr()
+    stream_attribute.accessPolicyWindow.num_bytes = {2}
+
+    res = cuStreamSetAttribute(stream, CUstreamAttrID.CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW, stream_attribute)[0]
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to set stream L2 access policy: {{res}}")
+"""
+
+L2_PERSISTENT_MAP_RESET_HANDLE_PY = """
+    stream_attribute.accessPolicyWindow.num_bytes = 0
+    res = cuStreamSetAttribute(stream, CUstreamAttrID.CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW, stream_attribute)[0]
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to reset stream L2 access policy: {{res}}")
+
+    res = cuCtxResetPersistingL2Cache()[0]
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to reset L2 cache: {{res}}")
+
+    res = cuDeviceSetLimit(CUlimit.CU_LIMIT_PERSISTING_L2_CACHE_SIZE, init_persisting_l2_cache_size)[0]
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to restore L2 cache size limit: {{res}}")
+"""
+
 KERNEL_LAUNCH_FUNC_PY = """
     res = cuKernelSetAttribute(
         CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
@@ -197,12 +247,19 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         # Format the function arguments for declaration
         def_args = ", ".join([f"{arg['name']}" for arg in function_args])
 
-        # [TODO] L2 Persistent Map
+        # Check if any function needs L2 Persistent Map
+        has_l2_persistent_map = False
+        for function_name, _ in function_informations.items():
+            if function_name in self.l2_persistent_map:
+                has_l2_persistent_map = True
+                break
 
         desc_name_map: dict[str, str] = {}
         desc_name_var_map: dict[str, tvm.tir.Var] = {}
         device_index = 0
         kernel_launch_code = """"""
+        if has_l2_persistent_map:
+            kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE_PY
         for function_name, function_info in function_informations.items():
             block_info = function_info["block_info"]
             grid_info = function_info["grid_info"]
@@ -235,6 +292,12 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             arg_names = ", ".join([arg[0] for arg in call_args])
             arg_types = ", ".join([arg[1] for arg in call_args])
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
+
+            # Generate L2 persistent map initialization for this function
+            init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
+            kernel_launch_code += init_l2_persistent_map
+
+            # Generate TMA descriptor initialization and kernel launch code
             kernel_launch_code += self.generate_tma_descriptor_args(
                 desc_name_map, desc_name_var_map) + KERNEL_LAUNCH_FUNC_PY.format(
                     function_name, self._pythonic_expr(grid_info[0]),
@@ -243,10 +306,33 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     self._pythonic_expr(block_info[2]), smem_str, arg_names, arg_types,
                     device_index)
 
+            # Reset L2 persistent map after kernel execution
+            if has_l2_persistent_map:
+                kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE_PY
+
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC_PY.format(
             repr(list(function_informations.keys())), def_args, kernel_launch_code)
         return host_func
+
+    def generate_l2_persistent_map(self, function_name: str) -> str:
+        """Generate L2 persistent cache mapping code for Python NVRTC backend."""
+        if function_name not in self.l2_persistent_map:
+            return ""
+        init_l2_persistent_map = ""
+        for buffer_name, (hit_ratio, size_in_bytes) in self.l2_persistent_map[function_name].items():
+            # Get persisting_l2_cache_max_size
+            from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
+            persisting_l2_cache_max_size = get_persisting_l2_cache_max_size()
+            try:
+                num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
+            except Exception:
+                # as size_in_bytes maybe a symbolic expression
+                num_bytes = persisting_l2_cache_max_size
+            init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC_PY.format(
+                buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes))
+
+        return init_l2_persistent_map
 
     def generate_tma_descriptor_args(self, desc_name_map: dict[str, str],
                                      desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
