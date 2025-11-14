@@ -14,7 +14,6 @@ from tilelang import tvm as tvm
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
 from tilelang.jit.adapter.utils import match_declare_kernel
 
-
 PREDEF_HOST_FUNC_PY = """
 from cuda.bindings.driver import (
     CUtensorMapDataType,
@@ -134,8 +133,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                  device_mod: IRModule | None = None,
                  host_mod: IRModule | None = None,
                  pass_configs: dict[str, Any] | None = None):
-        super().__init__(scheduled_ir_module, source,
-                         target, device_mod, host_mod, pass_configs)
+        super().__init__(scheduled_ir_module, source, target, device_mod, host_mod, pass_configs)
 
     @property
     def host_func(self):
@@ -163,8 +161,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     "type": "ctypes.c_void_p",
                 })
             elif isinstance(param, tvm.tir.Var):
-                function_args.append(
-                    {"name": param.name, "type": self._lookup_type(param.dtype)})
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
@@ -182,8 +179,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                            function_args,
                            function_params,
                            desc_name_map: dict[str, str] | None = None,
-                           desc_name_var_map: dict[str,
-                                                   tvm.tir.Var] | None = None,
+                           desc_name_var_map: dict[str, tvm.tir.Var] | None = None,
                            device_index: int | None = None):
             # Extract the function call arguments matching the function definition
             def maybe_desc(name: str, matches: list[str], i: int):
@@ -213,8 +209,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                         assert len(call_args) <= len(
                             function_params
                         ), f"Function {function_name} has {len(function_params)} parameters, but {len(call_args)} arguments"
-                        desc_name_var_map[match] = function_params[len(
-                            call_args) - 1]
+                        desc_name_var_map[match] = function_params[len(call_args) - 1]
             return call_args
 
         # [TODO] L2 Persistent Map
@@ -249,12 +244,9 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             kernel_launch_code += self.generate_tma_descriptor_args(
                 desc_name_map, desc_name_var_map) + KERNEL_LAUNCH_FUNC_PY.format(
                     function_name, self._pythonic_expr(grid_info[0]),
-                    self._pythonic_expr(
-                        grid_info[1]), self._pythonic_expr(grid_info[2]),
-                    self._pythonic_expr(
-                        block_info[0]), self._pythonic_expr(block_info[1]),
-                    self._pythonic_expr(
-                        block_info[2]), smem_str, arg_names, arg_types,
+                    self._pythonic_expr(grid_info[1]), self._pythonic_expr(grid_info[2]),
+                    self._pythonic_expr(block_info[0]), self._pythonic_expr(block_info[1]),
+                    self._pythonic_expr(block_info[2]), smem_str, arg_names, arg_types,
                     device_index)
 
         # Wrap the kernel dispatch logic in an external C function
@@ -283,8 +275,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             tensor_rank = int(tensor_rank)
             # Validate tensor_rank
             if not isinstance(tensor_rank, int) or tensor_rank <= 0:
-                raise ValueError(
-                    f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
+                raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
 
             # Calculate required length for remaining_args
             # 4 groups of tensor_rank size + 4 parameters

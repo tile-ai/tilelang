@@ -19,6 +19,7 @@ try:
 except ImportError:
     is_nvrtc_available = False
 
+
 class PyLibraryGenerator(LibraryGenerator):
     host_func: str | None = None
     culib = None
@@ -62,15 +63,13 @@ class PyLibraryGenerator(LibraryGenerator):
         target = self.target
         verbose = self.verbose
         if is_cuda_target(target):
-            from tilelang.env import (
-                CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
+            from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cu", ".cubin")
 
             project_root = osp.join(osp.dirname(__file__), "..", "..")
             if CUTLASS_INCLUDE_DIR is None:
-                cutlass_path = osp.abspath(
-                    osp.join(project_root, "3rdparty/cutlass/include"))
+                cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
             else:
                 cutlass_path = CUTLASS_INCLUDE_DIR
 
@@ -86,7 +85,7 @@ class PyLibraryGenerator(LibraryGenerator):
                 f"-I{tl_template_path}",
                 f"-I{cutlass_path}",
                 f"-I{cuda_home}/include",
-                f"-I{cuda_home}/targets/x86_64-linux/include", # [TODO](zihuaw) remove temporary include path
+                f"-I{cuda_home}/targets/x86_64-linux/include",  # [TODO](zihuaw) remove temporary include path
                 f"-D__CUDACC_VER_MAJOR__={__CUDACC_VER_MAJOR__}",
             ]
             if self.compile_flags:

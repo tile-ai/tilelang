@@ -236,18 +236,18 @@ def test_gemm_jit_kernel():
 
 
 def run_nvrtc_kernel_do_bench(M,
-                               N,
-                               K,
-                               trans_A,
-                               trans_B,
-                               in_dtype,
-                               out_dtype,
-                               dtypeAccum,
-                               block_M,
-                               block_N,
-                               block_K,
-                               num_stages=3,
-                               num_threads=128):
+                              N,
+                              K,
+                              trans_A,
+                              trans_B,
+                              in_dtype,
+                              out_dtype,
+                              dtypeAccum,
+                              block_M,
+                              block_N,
+                              block_K,
+                              num_stages=3,
+                              num_threads=128):
     program = matmul(
         M,
         N,
@@ -281,22 +281,22 @@ def run_nvrtc_kernel_do_bench(M,
 
 def test_nvrtc_kernel_do_bench():
     run_nvrtc_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128,
-                               256, 32, 2)
+                              256, 32, 2)
 
 
 def run_nvrtc_kernel_multi_stream(M,
-                                   N,
-                                   K,
-                                   trans_A,
-                                   trans_B,
-                                   in_dtype,
-                                   out_dtype,
-                                   dtypeAccum,
-                                   block_M,
-                                   block_N,
-                                   block_K,
-                                   num_stages=3,
-                                   num_threads=128):
+                                  N,
+                                  K,
+                                  trans_A,
+                                  trans_B,
+                                  in_dtype,
+                                  out_dtype,
+                                  dtypeAccum,
+                                  block_M,
+                                  block_N,
+                                  block_K,
+                                  num_stages=3,
+                                  num_threads=128):
     program = matmul(
         M,
         N,
@@ -334,22 +334,22 @@ def run_nvrtc_kernel_multi_stream(M,
 
 def test_nvrtc_kernel_multi_stream():
     run_nvrtc_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16",
-                                   128, 256, 32, 2)
+                                  128, 256, 32, 2)
 
 
 def run_nvrtc_dynamic_shape(M,
-                             N,
-                             K,
-                             trans_A,
-                             trans_B,
-                             in_dtype,
-                             out_dtype,
-                             dtypeAccum,
-                             block_M,
-                             block_N,
-                             block_K,
-                             num_stages=3,
-                             num_threads=128):
+                            N,
+                            K,
+                            trans_A,
+                            trans_B,
+                            in_dtype,
+                            out_dtype,
+                            dtypeAccum,
+                            block_M,
+                            block_N,
+                            block_K,
+                            num_stages=3,
+                            num_threads=128):
     program = matmul(
         M,
         N,
@@ -408,4 +408,3 @@ def test_nvrtc_dynamic_shape():
 
 if __name__ == "__main__":
     tilelang.testing.main()
-

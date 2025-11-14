@@ -147,15 +147,18 @@ template <class T, size_t N> struct remove_extent<T[N]> {
 
 template <class T> using remove_extent_t = typename remove_extent<T>::type;
 
-template <class T, unsigned I = 0> struct extent : integral_constant<size_t, 0> {};
+template <class T, unsigned I = 0>
+struct extent : integral_constant<size_t, 0> {};
 
 template <class T> struct extent<T[], 0> : integral_constant<size_t, 0> {};
 
 template <class T, unsigned I> struct extent<T[], I> : extent<T, I - 1> {};
 
-template <class T, size_t N> struct extent<T[N], 0> : integral_constant<size_t, N> {};
+template <class T, size_t N>
+struct extent<T[N], 0> : integral_constant<size_t, N> {};
 
-template <class T, size_t N, unsigned I> struct extent<T[N], I> : extent<T, I - 1> {};
+template <class T, size_t N, unsigned I>
+struct extent<T[N], I> : extent<T, I - 1> {};
 
 template <class T, unsigned I = 0>
 inline constexpr size_t extent_v = extent<T, I>::value;
