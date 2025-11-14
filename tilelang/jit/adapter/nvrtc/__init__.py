@@ -51,6 +51,10 @@ else:
         def __init__(self, *args, **kwargs):
             raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
 
+        @classmethod
+        def from_database(cls, *args, **kwargs):
+            raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
+
     class TLNVRTCSourceWrapper:
         """Dummy TLNVRTCSourceWrapper that raises ImportError on instantiation."""
 

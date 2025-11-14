@@ -957,7 +957,7 @@ class TLPyWrapper(TLWrapper):
             from tilelang.jit.adapter.nvrtc import TLNVRTCSourceWrapper
             wrapper_class = TLNVRTCSourceWrapper
         else:
-            raise ValueError(f"Unsupported platform: {self.arch.platform}")
+            raise ValueError(f"Unsupported target for NVRTC backend: {self.target}")
         wrapper = wrapper_class(
             scheduled_ir_module=self.scheduled_ir_module,
             source=c_source,
