@@ -4,13 +4,17 @@
 #include <cuda_runtime.h>
 #endif
 
-#if (__CUDACC_VER_MAJOR__ >= 13)
-  #define CUDA_STD_HEADER(header) <cccl/cuda/std/header>
+#if (defined(__CUDACC_VER_MAJOR__) && __CUDACC_VER_MAJOR__ >= 13)
+  #include <cccl/cuda/std/atomic>
+  // CUDA 13+ uses internal __atomic_ref_impl to specify thread_scope
+  template <typename T, cuda::std::thread_scope Scope>
+  using atomic_ref = cuda::std::__atomic_ref_impl<T, Scope>;
 #else
-  #define CUDA_STD_HEADER(header) <cuda/std/header>
+  #include <cuda/std/atomic>
+  template <typename T, typename Scope>
+  using atomic_ref = cuda::atomic_ref<T, Scope>;
 #endif
 
-#include CUDA_STD_HEADER(atomic)
 #include <cuda_fp16.h>
 #include <cutlass/numeric_types.h>
 
@@ -57,7 +61,7 @@ TL_DEVICE void AtomicMax(T1 &ref, T2 val,
                 memory_order == int(cuda::memory_order_relaxed)) {
     atomicMax(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
   } else {
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
   }
 }
@@ -73,7 +77,7 @@ TL_DEVICE T1 AtomicMaxRet(T1 &ref, T2 val,
     return static_cast<T1>(
         atomicMax(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
   } else {
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     return static_cast<T1>(
         aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
   }
@@ -89,7 +93,7 @@ TL_DEVICE void AtomicMin(T1 &ref, T2 val,
                 memory_order == int(cuda::memory_order_relaxed)) {
     atomicMin(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
   } else {
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
   }
 }
@@ -105,7 +109,7 @@ TL_DEVICE T1 AtomicMinRet(T1 &ref, T2 val,
     return static_cast<T1>(
         atomicMin(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
   } else {
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     return static_cast<T1>(
         aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
   }
@@ -121,7 +125,7 @@ TL_DEVICE void AtomicAdd(T1 &ref, T2 val,
                 memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
   } else {
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     aref.fetch_add(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
   }
 }
@@ -137,7 +141,7 @@ TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val,
     return static_cast<T1>(
         atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
   } else {
-    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     return static_cast<T1>(
         aref.fetch_add(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
   }
@@ -465,13 +469,13 @@ AtomicAddx4Ret(float *ref, float *val,
 #endif
 
 template <typename T> TL_DEVICE T AtomicLoad(T &ref, int memory_order) {
-  cuda::atomic_ref<T, cuda::thread_scope_device> aref(ref);
+  atomic_ref<T, cuda::thread_scope_device> aref(ref);
   return aref.load(cuda::memory_order(memory_order));
 }
 
 template <typename T1, typename T2>
 TL_DEVICE void AtomicStore(T1 &ref, T2 value, int memory_order) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(ref);
+  atomic_ref<NT1, cuda::thread_scope_device> aref(ref);
   aref.store(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
 }
