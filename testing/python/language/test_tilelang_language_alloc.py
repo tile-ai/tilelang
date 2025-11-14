@@ -151,8 +151,7 @@ def run_alloc_multi_vars_with_initializer(
     program = alloc_multi_vars_with_initializer(N, block_N, dtype)
 
     kernel = tilelang.compile(program, out_idx=[1])
-    code = kernel.get_kernel_source()
-    print(code)
+    code = kernel.get_kernel_source(kernel_only=True)
     assert code.count("= 1;") == 1
     assert code.count("= 2;") == 1
 

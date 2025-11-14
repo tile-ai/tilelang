@@ -18,7 +18,7 @@ def cached(
     *args,
     target: str | Target = "auto",
     target_host: str | Target = None,
-    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] | None = "cython",
+    execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc"] | None = "tvm_ffi",
     verbose: bool | None = False,
     pass_configs: dict | None = None,
     compile_flags: list[str] | str | None = None,

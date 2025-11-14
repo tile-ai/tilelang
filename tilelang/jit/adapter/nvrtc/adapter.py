@@ -33,7 +33,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                  func_or_mod: tir.PrimFunc | tvm.IRModule,
                  host_mod: tvm.IRModule | None = None,
                  device_mod: tvm.IRModule | None = None,
-                 kernel_global_source: str | None = None,
+                 device_kernel_source: str | None = None,
                  verbose: bool = False,
                  pass_configs: dict[str, Any] | None = None,
                  compile_flags: list[str] | None = None):
@@ -42,7 +42,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
-        self.kernel_global_source = kernel_global_source
+        self.device_kernel_source = device_kernel_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -73,10 +73,10 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_pass_configs(pass_configs)
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
-        self.host_func, self.function_names = self.wrapper.wrap(kernel_global_source)
+        self.host_func, self.function_names = self.wrapper.wrap(device_kernel_source)
 
         self.lib_generator = PyLibraryGenerator(self.target, self.verbose)
-        self.lib_generator.update_lib_code(self.kernel_global_source)
+        self.lib_generator.update_lib_code(self.device_kernel_source)
         self.lib_generator.update_host_func(self.host_func)
         self.lib_generator.assign_compile_flags(compile_flags)
         self.lib_generator.compile_lib()
@@ -96,7 +96,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                       result_idx: list[int],
                       target: str,
                       func_or_mod: tir.PrimFunc | tvm.IRModule,
-                      kernel_global_source: str,
+                      host_kernel_source: str,
+                      device_kernel_source: str,
                       kernel_lib_path: str,
                       verbose: bool = False,
                       pass_configs: dict[str, Any] | None = None,
@@ -104,7 +105,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter.kernel_global_source = kernel_global_source
+        adapter.host_kernel_source = host_kernel_source
+        adapter.device_kernel_source = device_kernel_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -174,7 +176,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         Optional[str]
             The kernel source code, or None if not available
         """
-        return self.kernel_global_source
+        return self.device_kernel_source
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
         """Low-level function to call the compiled CUDA kernel.

@@ -96,8 +96,29 @@ void ArgBinder::BindBuffer(const Buffer &arg, const Buffer &value,
                            const std::string &arg_name, bool fuzzy_match) {
   ICHECK_EQ(arg.scope(), value.scope())
       << "Argument " << arg_name << " Buffer bind scope mismatch";
-  ICHECK_EQ(arg->dtype, value->dtype)
-      << "Argument " << arg_name << " Buffer bind data type mismatch";
+  // Relax dtype check to allow FP8 E4M3 variants to bind together.
+  auto dtype_compatible = [](DataType expected, DataType provided) -> bool {
+    if (expected == provided) return true;
+    // If expected is float8_e4m3, allow float8_e4m3fn/float8_e4m3fnuz as well.
+    if (expected.is_float8_e4m3()) {
+      return provided.is_float8_e4m3() || provided.is_float8_e4m3fn() ||
+             provided.is_float8_e4m3fnuz();
+    }
+    // If expected is float8_e5m2, allow float8_e5m2fnuz as well.
+    if (expected.is_float8_e5m2()) {
+      return provided.is_float8_e5m2() || provided.is_float8_e5m2fnuz();
+    }
+    // If expected is bool, allow binding from int8/uint8 with same lanes.
+    if (expected.is_bool()) {
+      bool is_i8 = provided.is_int() && provided.bits() == 8;
+      bool is_u8 = provided.is_uint() && provided.bits() == 8;
+      return (is_i8 || is_u8) && expected.lanes() == provided.lanes();
+    }
+    return false;
+  };
+  ICHECK(dtype_compatible(arg->dtype, value->dtype))
+      << "Argument " << arg_name << " Buffer bind data type mismatch: expected "
+      << arg->dtype << ", got " << value->dtype;
   if (value->data_alignment % arg->data_alignment != 0) {
     LOG(WARNING) << "Trying to bind buffer to another one with lower alignment "
                     "requirement "
@@ -169,7 +190,7 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
 
   init_nest_.emplace_back(AssertStmt(
       !Call(DataType::Bool(), builtin::isnullptr(), {handle}),
-      StringImm(arg_name + " is expected to have non-NULL DLTensor* pointer"),
+      StringImm(arg_name + " is expected to have non-NULL DLTensor* pointer, but got NULL"),
       nop));
 
   // dimension checks
@@ -193,20 +214,68 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
   PrimExpr a_ndim =
       make_const(tvm_ndim_type, static_cast<int64_t>(buffer->shape.size()));
   std::ostringstream ndim_err_msg;
+  // Note: We cannot embed runtime values into the message string.
+  // Keep message human-friendly without printing TIR exprs.
   ndim_err_msg << arg_name << ".ndim is expected to equal "
-               << buffer->shape.size();
+               << buffer->shape.size() << ", but got mismatched ndim";
   auto msg = StringImm(ndim_err_msg.str());
   init_nest_.emplace_back(AssertStmt(a_ndim == v_ndim, msg, nop));
   // type checks
   std::ostringstream type_err_msg;
-  type_err_msg << arg_name << ".dtype is expected to be " << buffer->dtype;
-  PrimExpr cond =
-      (TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeCode) ==
-           IntImm(DataType::UInt(8), buffer->dtype.code()) &&
-       TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeBits) ==
-           IntImm(DataType::UInt(8), buffer->dtype.bits()) &&
-       TVMArrayGet(DataType::UInt(16), handle, builtin::kArrTypeLanes) ==
-           IntImm(DataType::UInt(16), buffer->dtype.lanes()));
+  // Avoid dumping TIR expressions in error text; just state mismatch.
+  // Include expected dtype triplet for clarity.
+  type_err_msg << arg_name << ".dtype is expected to be " << buffer->dtype
+               << ", but got incompatible dtype";
+  PrimExpr v_type_code =
+      TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeCode);
+  PrimExpr v_type_bits =
+      TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeBits);
+  PrimExpr v_type_lanes =
+      TVMArrayGet(DataType::UInt(16), handle, builtin::kArrTypeLanes);
+  PrimExpr expect_code = IntImm(DataType::UInt(8), buffer->dtype.code());
+  PrimExpr expect_bits = IntImm(DataType::UInt(8), buffer->dtype.bits());
+  PrimExpr expect_lanes = IntImm(DataType::UInt(16), buffer->dtype.lanes());
+
+  PrimExpr cond = (v_type_code == expect_code && v_type_bits == expect_bits &&
+                   v_type_lanes == expect_lanes);
+
+  // Allow float8_e4m3 to match float8_e4m3fn/float8_e4m3fnuz at runtime.
+  if (buffer->dtype.is_float8_e4m3()) {
+    PrimExpr code_e4m3 = IntImm(DataType::UInt(8), DataType::kFloat8_e4m3);
+    PrimExpr code_e4m3fn = IntImm(DataType::UInt(8), DataType::kFloat8_e4m3fn);
+    PrimExpr code_e4m3fnuz =
+        IntImm(DataType::UInt(8), DataType::kFloat8_e4m3fnuz);
+    PrimExpr code_match = (v_type_code == code_e4m3 || v_type_code == code_e4m3fn ||
+                           v_type_code == code_e4m3fnuz);
+    cond = cond || (code_match && v_type_bits == expect_bits &&
+                    v_type_lanes == expect_lanes);
+  }
+  // Allow float8_e5m2 to match float8_e5m2fnuz at runtime.
+  if (buffer->dtype.is_float8_e5m2()) {
+    PrimExpr code_e5m2 = IntImm(DataType::UInt(8), DataType::kFloat8_e5m2);
+    PrimExpr code_e5m2fnuz =
+        IntImm(DataType::UInt(8), DataType::kFloat8_e5m2fnuz);
+    PrimExpr code_match = (v_type_code == code_e5m2 || v_type_code == code_e5m2fnuz);
+    cond = cond || (code_match && v_type_bits == expect_bits &&
+                    v_type_lanes == expect_lanes);
+  }
+  // Allow bool to match int8/uint8 at runtime, and also kDLBool(code=6).
+  if (buffer->dtype.is_bool()) {
+    PrimExpr code_int = IntImm(DataType::UInt(8), DataType::kInt);
+    PrimExpr code_uint = IntImm(DataType::UInt(8), DataType::kUInt);
+    PrimExpr code_kdlbool = IntImm(DataType::UInt(8), 6);
+    PrimExpr bits8 = IntImm(DataType::UInt(8), 8);
+    PrimExpr bits1 = IntImm(DataType::UInt(8), 1);
+    PrimExpr lanes_ok = (v_type_lanes == expect_lanes);
+    PrimExpr int8_ok = (v_type_code == code_int && v_type_bits == bits8 && lanes_ok);
+    PrimExpr uint8_ok = (v_type_code == code_uint && v_type_bits == bits8 && lanes_ok);
+    // Some frontends may tag bool tensors as kDLBool(code=6), commonly with bits=8 or bits=1.
+    PrimExpr kdlbool8_ok = (v_type_code == code_kdlbool && v_type_bits == bits8 && lanes_ok);
+    PrimExpr kdlbool1_ok = (v_type_code == code_kdlbool && v_type_bits == bits1 && lanes_ok);
+    // Also accept any dtype whose bitwidth=1, regardless of code, to be defensive.
+    PrimExpr bit1_ok = (v_type_bits == bits1 && lanes_ok);
+    cond = cond || int8_ok || uint8_ok || kdlbool8_ok || kdlbool1_ok || bit1_ok;
+  }
   if (!(buffer->dtype == DataType::Int(1) ||
         buffer->dtype == DataType::Int(4) ||
         buffer->dtype == DataType::UInt(4))) {
@@ -259,7 +328,8 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
       expect_stride = expect_stride * buffer->shape[k];
     }
     std::ostringstream stride_err_msg;
-    stride_err_msg << stride_handle_name() << ": expected to be compact array";
+    stride_err_msg << stride_handle_name()
+                   << ": expected to be compact array, but got non-compact strides";
     if (!conds.empty()) {
       auto stride_msg = StringImm(stride_err_msg.str());
       Stmt check =
@@ -361,7 +431,7 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
     asserts_.emplace_back(AssertStmt(
         alloc_size == 0 ||
             !Call(DataType::Bool(), builtin::isnullptr(), {vptr}),
-        StringImm(arg_name + " is expected to have non-NULL data pointer"),
+        StringImm(arg_name + " is expected to have non-NULL data pointer, but got NULL"),
         nop));
 
     def_handle_dtype_.Set(vptr, tir::TypeAnnotation(buffer->dtype));
