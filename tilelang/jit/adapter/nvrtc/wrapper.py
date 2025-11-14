@@ -279,6 +279,9 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         kernel_launch_code = """"""
         if has_l2_persistent_map:
             kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE_PY
+
+        # First pass: collect all TMA descriptors from all kernels to avoid duplication
+        kernel_info_list = []
         for function_name, function_info in function_informations.items():
             block_info = function_info["block_info"]
             grid_info = function_info["grid_info"]
@@ -308,6 +311,29 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                 if arg_type == "ctypes.c_void_p":
                     device_index = f"{arg_name.replace('.data_ptr()', '')}.device.index"
                     break
+
+            # Store kernel info for second pass
+            kernel_info_list.append({
+                'function_name': function_name,
+                'block_info': block_info,
+                'grid_info': grid_info,
+                'dynamic_smem_buf': dynamic_smem_buf,
+                'call_args': call_args,
+                'device_index': device_index,
+            })
+
+        # Generate TMA descriptor initialization code once for all kernels
+        kernel_launch_code += self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
+
+        # Second pass: generate kernel launch code for each kernel
+        for kernel_info in kernel_info_list:
+            function_name = kernel_info['function_name']
+            block_info = kernel_info['block_info']
+            grid_info = kernel_info['grid_info']
+            dynamic_smem_buf = kernel_info['dynamic_smem_buf']
+            call_args = kernel_info['call_args']
+            device_index = kernel_info['device_index']
+
             arg_names = ", ".join([arg[0] for arg in call_args])
             arg_types = ", ".join([arg[1] for arg in call_args])
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
@@ -316,18 +342,20 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
 
-            # Generate TMA descriptor initialization and kernel launch code
-            kernel_launch_code += self.generate_tma_descriptor_args(
-                desc_name_map, desc_name_var_map) + KERNEL_LAUNCH_FUNC_PY.format(
-                    function_name, self._pythonic_expr(grid_info[0]),
-                    self._pythonic_expr(grid_info[1]), self._pythonic_expr(grid_info[2]),
-                    self._pythonic_expr(block_info[0]), self._pythonic_expr(block_info[1]),
-                    self._pythonic_expr(block_info[2]), smem_str, arg_names, arg_types,
-                    device_index)
+            # Generate kernel launch code
+            kernel_launch_code += KERNEL_LAUNCH_FUNC_PY.format(function_name,
+                                                               self._pythonic_expr(grid_info[0]),
+                                                               self._pythonic_expr(grid_info[1]),
+                                                               self._pythonic_expr(grid_info[2]),
+                                                               self._pythonic_expr(block_info[0]),
+                                                               self._pythonic_expr(block_info[1]),
+                                                               self._pythonic_expr(block_info[2]),
+                                                               smem_str, arg_names, arg_types,
+                                                               device_index)
 
-            # Reset L2 persistent map after kernel execution
-            if has_l2_persistent_map:
-                kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE_PY
+        # Reset L2 persistent map after all kernel execution
+        if has_l2_persistent_map:
+            kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE_PY
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC_PY.format(
