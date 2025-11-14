@@ -115,14 +115,14 @@ L2_PERSISTENT_MAP_CREATE_HANDLE_PY = """
         CUstreamAttrID,
         CUlimit,
         CUaccessProperty,
-        cuDeviceGetLimit,
-        cuDeviceSetLimit,
+        cuCtxGetLimit,
+        cuCtxSetLimit,
         cuStreamSetAttribute,
         cuCtxResetPersistingL2Cache,
     )
 
     stream_attribute = CUstreamAttrValue()
-    res, init_persisting_l2_cache_size = cuDeviceGetLimit(CUlimit.CU_LIMIT_PERSISTING_L2_CACHE_SIZE)
+    res, init_persisting_l2_cache_size = cuCtxGetLimit(CUlimit.CU_LIMIT_PERSISTING_L2_CACHE_SIZE)
     if res != CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"Failed to get L2 cache size limit: {{res}}")
 """
@@ -132,21 +132,21 @@ L2_PERSISTENT_MAP_INIT_FUNC_PY = """
     stream_attribute.accessPolicyWindow.hitProp = CUaccessProperty.CU_ACCESS_PROPERTY_PERSISTING
     stream_attribute.accessPolicyWindow.missProp = CUaccessProperty.CU_ACCESS_PROPERTY_STREAMING
 
-    res = cuDeviceSetLimit(CUlimit.CU_LIMIT_PERSISTING_L2_CACHE_SIZE, {2})[0]
+    res = cuCtxSetLimit(CUlimit.CU_LIMIT_PERSISTING_L2_CACHE_SIZE, {2})[0]
     if res != CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"Failed to set L2 cache size limit: {{res}}")
 
     stream_attribute.accessPolicyWindow.base_ptr = {0}.data_ptr()
     stream_attribute.accessPolicyWindow.num_bytes = {2}
 
-    res = cuStreamSetAttribute(stream, CUstreamAttrID.CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW, stream_attribute)[0]
+    res = cuStreamSetAttribute(stream, CUstreamAttrID.CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW, stream_attribute)[0]
     if res != CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"Failed to set stream L2 access policy: {{res}}")
 """
 
 L2_PERSISTENT_MAP_RESET_HANDLE_PY = """
     stream_attribute.accessPolicyWindow.num_bytes = 0
-    res = cuStreamSetAttribute(stream, CUstreamAttrID.CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW, stream_attribute)[0]
+    res = cuStreamSetAttribute(stream, CUstreamAttrID.CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW, stream_attribute)[0]
     if res != CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"Failed to reset stream L2 access policy: {{res}}")
 
@@ -154,7 +154,7 @@ L2_PERSISTENT_MAP_RESET_HANDLE_PY = """
     if res != CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"Failed to reset L2 cache: {{res}}")
 
-    res = cuDeviceSetLimit(CUlimit.CU_LIMIT_PERSISTING_L2_CACHE_SIZE, init_persisting_l2_cache_size)[0]
+    res = cuCtxSetLimit(CUlimit.CU_LIMIT_PERSISTING_L2_CACHE_SIZE, init_persisting_l2_cache_size)[0]
     if res != CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"Failed to restore L2 cache size limit: {{res}}")
 """
