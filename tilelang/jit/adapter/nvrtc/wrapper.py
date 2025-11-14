@@ -4,7 +4,6 @@ This module provides C++ kernel launcher generation for the NVRTC backend.
 """
 from __future__ import annotations
 from typing import Any
-import re
 
 from tvm import IRModule
 from tvm.target import Target
@@ -12,7 +11,8 @@ from tvm.tir.stmt_functor import post_order_visit
 
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
-from tilelang.jit.adapter.utils import match_declare_kernel, pythonic_expr
+from tilelang.jit.adapter.utils import (match_declare_kernel, pythonic_expr,
+                                        parse_function_call_args, parse_tma_descriptor_args)
 
 PREDEF_HOST_FUNC_PY = """
 from cuda.bindings.driver import (
@@ -197,43 +197,6 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         # Format the function arguments for declaration
         def_args = ", ".join([f"{arg['name']}" for arg in function_args])
 
-        def func_call_args(s,
-                           function_args,
-                           function_params,
-                           desc_name_map: dict[str, str] | None = None,
-                           desc_name_var_map: dict[str, tvm.tir.Var] | None = None,
-                           device_index: int | None = None):
-            # Extract the function call arguments matching the function definition
-            def maybe_desc(name: str, matches: list[str], i: int):
-                match = matches[i]
-                if not (match == name + "_desc" or match.startswith(name + "_desc_")):
-                    return False
-                desc_decls = []
-                if desc_name_map is not None:
-                    desc_name_map[match] = name
-                if i > 0:
-                    desc_decls.append(matches[i - 1])
-                if i < len(matches) - 1:
-                    desc_decls.append(matches[i + 1])
-                return any([decl == "CUtensorMap" for decl in desc_decls])
-
-            pattern = r"[,\s]*(?:\w+\s*\*+\s*__restrict__\s+)?(\w+)"
-            matches = re.findall(pattern, s)
-            call_args = []
-            for i, match in enumerate(matches):
-                for arg in function_args:
-                    if arg["name"] == match:
-                        call_args.append(
-                            (f"{match}.data_ptr()" if arg["type"] == "ctypes.c_void_p" else match,
-                             arg["type"]))
-                    elif maybe_desc(arg["name"], matches, i):
-                        call_args.append((match, "None"))
-                        assert len(call_args) <= len(
-                            function_params
-                        ), f"Function {function_name} has {len(function_params)} parameters, but {len(call_args)} arguments"
-                        desc_name_var_map[match] = function_params[len(call_args) - 1]
-            return call_args
-
         # [TODO] L2 Persistent Map
 
         desc_name_map: dict[str, str] = {}
@@ -254,8 +217,17 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)
-            call_args = func_call_args(declaration, function_args, function_params, desc_name_map,
-                                       desc_name_var_map)
+
+            # Transform function for NVRTC: returns (arg_value, arg_type) tuples
+            def transform_nvrtc_arg(name: str, arg_type: str):
+                if arg_type == "ctypes.c_void_p":
+                    return (f"{name}.data_ptr()", arg_type)
+                return (name, arg_type)
+
+            call_args = parse_function_call_args(declaration, function_args, function_params,
+                                                 desc_name_map, desc_name_var_map,
+                                                 transform_nvrtc_arg)
+
             for arg_name, arg_type in call_args:
                 if arg_type == "ctypes.c_void_p":
                     device_index = f"{arg_name.replace('.data_ptr()', '')}.device.index"
@@ -282,109 +254,29 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         if self.tma_descriptor_args is None:
             return tma_descriptor_init
 
-        for handle_name, _ in desc_name_map.items():
-            assert handle_name in desc_name_var_map, f"Handle name {handle_name} not found in desc_name_var_map"
-            desc_var = desc_name_var_map[handle_name]
+        # Parse TMA descriptor arguments using the common utility
+        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map,
+                                                  desc_name_var_map, self._pythonic_expr)
 
-            assert desc_var in self.tma_descriptor_args, f"TMA descriptor {desc_var} not found in {self.tma_descriptor_args}"
-            args = self.tma_descriptor_args[desc_var]
-            # Skip __tvm_tensormap_create_tiled and second element (like CUDA version)
-            if len(args) < 3:
-                raise ValueError(
-                    f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
-
-            tma_create_str, _, dtype, tensor_rank, globalAddress, *remaining_args = args
-
-            is_img2col = (tma_create_str.value == "__tvm_tensormap_create_im2col")
-            # Use _pythonic_expr to properly convert TIR expressions
-            dtype = self._pythonic_expr(dtype)
-            tensor_rank = int(self._pythonic_expr(tensor_rank))
-
-            # Validate tensor_rank
-            if not isinstance(tensor_rank, int) or tensor_rank <= 0:
-                raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
-
-            if not is_img2col:
-                # Calculate required length for remaining_args
-                # 4 groups of tensor_rank size + 4 parameters
-                expected_args_len = 4 * tensor_rank + 4
-                if len(remaining_args) < expected_args_len:
-                    raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
-                                     f"expected {expected_args_len} for tensor_rank {tensor_rank}")
-
-                # Extract dimensions and strides using list slicing
-                global_dim = remaining_args[:tensor_rank]
-                global_stride = remaining_args[tensor_rank:2 * tensor_rank]
-                box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
-                element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
-
-                # Use _pythonic_expr to properly convert TIR expressions
-                global_dim = [self._pythonic_expr(i) for i in global_dim]
-                global_stride = [self._pythonic_expr(i) for i in global_stride]
-                box_dim = [self._pythonic_expr(i) for i in box_dim]
-                element_strides = [self._pythonic_expr(i) for i in element_strides]
-
-                # Extract remaining parameters
-                try:
-                    interleave, swizzle, l2Promotion, oobFill = remaining_args[4 * tensor_rank:4 *
-                                                                               tensor_rank + 4]
-                    interleave = self._pythonic_expr(interleave)
-                    swizzle = self._pythonic_expr(swizzle)
-                    l2Promotion = self._pythonic_expr(l2Promotion)
-                    oobFill = self._pythonic_expr(oobFill)
-                except ValueError as e:
-                    raise ValueError(
-                        "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"
-                    ) from e
-
+        # Generate Python code from parsed parameters
+        for params in parsed_params:
+            if not params.is_img2col:
                 tma_descriptor_init += TMA_DESC_INIT_FUNC_PY.format(
-                    handle_name, dtype, tensor_rank, globalAddress,
-                    ", ".join(map(lambda x: f"cuuint64_t({x})", global_dim)),
-                    ", ".join(map(lambda x: f"cuuint64_t({x})", global_stride)),
-                    ", ".join(map(lambda x: f"cuuint32_t({x})", box_dim)),
-                    ", ".join(map(lambda x: f"cuuint32_t({x})",
-                                  element_strides)), interleave, swizzle, l2Promotion, oobFill)
+                    params.handle_name, params.dtype, params.tensor_rank, params.global_address,
+                    ", ".join(map(lambda x: f"cuuint64_t({x})", params.global_dim)),
+                    ", ".join(map(lambda x: f"cuuint64_t({x})", params.global_stride)),
+                    ", ".join(map(lambda x: f"cuuint32_t({x})", params.box_dim)),
+                    ", ".join(map(lambda x: f"cuuint32_t({x})", params.element_strides)),
+                    params.interleave, params.swizzle, params.l2_promotion, params.oob_fill)
             else:
-                # Calculate required length for remaining_args
-                expected_args_len = 5 * tensor_rank + 2
-                if len(remaining_args) < expected_args_len:
-                    raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
-                                     f"expected {expected_args_len} for tensor_rank {tensor_rank}")
-
-                # Extract dimensions and strides using list slicing
-                global_dim = remaining_args[:tensor_rank]
-                global_stride = remaining_args[tensor_rank:2 * tensor_rank]
-                element_strides = remaining_args[2 * tensor_rank:3 * tensor_rank]
-                lower_corner = remaining_args[3 * tensor_rank:4 * tensor_rank - 2]
-                upper_corner = remaining_args[4 * tensor_rank - 2:5 * tensor_rank - 4]
-                global_dim = [self._pythonic_expr(i) for i in global_dim]
-                global_stride = [self._pythonic_expr(i) for i in global_stride]
-                element_strides = [self._pythonic_expr(i) for i in element_strides]
-                lower_corner = [self._pythonic_expr(i) for i in lower_corner]
-                upper_corner = [self._pythonic_expr(i) for i in upper_corner]
-
-                # Extract remaining parameters
-                try:
-                    smem_box_pixel, smem_box_channel, interleave, swizzle, l2Promotion, oobFill = remaining_args[
-                        5 * tensor_rank - 4:5 * tensor_rank + 2]
-                    smem_box_pixel = self._pythonic_expr(smem_box_pixel)
-                    smem_box_channel = self._pythonic_expr(smem_box_channel)
-                    interleave = self._pythonic_expr(interleave)
-                    swizzle = self._pythonic_expr(swizzle)
-                    l2Promotion = self._pythonic_expr(l2Promotion)
-                    oobFill = self._pythonic_expr(oobFill)
-                except ValueError as e:
-                    raise ValueError(
-                        "Failed to unpack the final 6 TMA parameters (smem_box_pixel, smem_box_channel, interleave, swizzle, l2Promotion, oobFill)"
-                    ) from e
-
                 tma_descriptor_init += TMA_IM2COL_DESC_INIT_FUNC_PY.format(
-                    handle_name, dtype, tensor_rank, globalAddress,
-                    ", ".join(map(lambda x: f"cuuint64_t({x})", global_dim)),
-                    ", ".join(map(lambda x: f"cuuint64_t({x})", global_stride)),
-                    ", ".join(map(lambda x: f"cuuint32_t({x})", element_strides)),
-                    ", ".join(lower_corner), ", ".join(upper_corner), smem_box_channel,
-                    smem_box_pixel, interleave, swizzle, l2Promotion, oobFill)
+                    params.handle_name, params.dtype, params.tensor_rank, params.global_address,
+                    ", ".join(map(lambda x: f"cuuint64_t({x})", params.global_dim)),
+                    ", ".join(map(lambda x: f"cuuint64_t({x})", params.global_stride)),
+                    ", ".join(map(lambda x: f"cuuint32_t({x})",
+                                  params.element_strides)), ", ".join(params.lower_corner),
+                    ", ".join(params.upper_corner), params.smem_box_channel, params.smem_box_pixel,
+                    params.interleave, params.swizzle, params.l2_promotion, params.oob_fill)
 
         return tma_descriptor_init
 
