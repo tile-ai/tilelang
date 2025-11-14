@@ -22,6 +22,7 @@ from cuda.bindings.driver import (
     CUtensorMapL2promotion,
     CUtensorMapFloatOOBfill,
     cuTensorMapEncodeTiled,
+    cuTensorMapEncodeIm2col,
     CUresult,
     cuKernelSetAttribute,
     CUfunction_attribute,
@@ -41,62 +42,99 @@ def call({}):
 """
 
 TMA_DESC_INIT_FUNC_PY = """
-\t{0}_type = CUtensorMapDataType({1})
-\t{0}_tensorRank = {2}
-\t{0}_globalAddress = {3}.data_ptr()
-\t{0}_globalDim = [{4}]
-\t{0}_globalStride = [{5}][1:]
-\t{0}_boxDim = [{6}]
-\t{0}_elementStrides = [{7}]
-\t{0}_interleave = CUtensorMapInterleave({8})
-\t{0}_swizzle = CUtensorMapSwizzle({9})
-\t{0}_l2Promotion = CUtensorMapL2promotion({10})
-\t{0}_oobFill = CUtensorMapFloatOOBfill({11})
+    {0}_type = CUtensorMapDataType({1})
+    {0}_tensorRank = {2}
+    {0}_globalAddress = {3}.data_ptr()
+    {0}_globalDim = [{4}]
+    {0}_globalStride = [{5}][1:]
+    {0}_boxDim = [{6}]
+    {0}_elementStrides = [{7}]
+    {0}_interleave = CUtensorMapInterleave({8})
+    {0}_swizzle = CUtensorMapSwizzle({9})
+    {0}_l2Promotion = CUtensorMapL2promotion({10})
+    {0}_oobFill = CUtensorMapFloatOOBfill({11})
 
-\tres, {0} = cuTensorMapEncodeTiled(
-\t\t{0}_type,
-\t\t{0}_tensorRank,
-\t\t{0}_globalAddress,
-\t\t{0}_globalDim,
-\t\t{0}_globalStride,
-\t\t{0}_boxDim,
-\t\t{0}_elementStrides,
-\t\t{0}_interleave,
-\t\t{0}_swizzle,
-\t\t{0}_l2Promotion,
-\t\t{0}_oobFill,
-\t)
+    res, {0} = cuTensorMapEncodeTiled(
+        {0}_type,
+        {0}_tensorRank,
+        {0}_globalAddress,
+        {0}_globalDim,
+        {0}_globalStride,
+        {0}_boxDim,
+        {0}_elementStrides,
+        {0}_interleave,
+        {0}_swizzle,
+        {0}_l2Promotion,
+        {0}_oobFill,
+    )
 
-\tif res != CUresult.CUDA_SUCCESS:
-\t\traise RuntimeError(f"Failed to initialize the TMA descriptor {0}: {{res}}")
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to initialize the TMA descriptor {0}: {{res}}")
+"""
+
+TMA_IM2COL_DESC_INIT_FUNC_PY = """
+    {0}_type = CUtensorMapDataType({1})
+    {0}_tensorRank = {2}
+    {0}_globalAddress = {3}.data_ptr()
+    {0}_globalDim = [{4}]
+    {0}_globalStride = [{5}][1:]
+    {0}_elementStrides = [{6}]
+    {0}_lowerCorner = [{7}]
+    {0}_upperCorner = [{8}]
+    {0}_channelsPerPixel = cuuint32_t({9})
+    {0}_pixelsPerColumn = cuuint32_t({10})
+    {0}_interleave = CUtensorMapInterleave({11})
+    {0}_swizzle = CUtensorMapSwizzle({12})
+    {0}_l2Promotion = CUtensorMapL2promotion({13})
+    {0}_oobFill = CUtensorMapFloatOOBfill({14})
+
+    res, {0} = cuTensorMapEncodeIm2col(
+        {0}_type,
+        {0}_tensorRank,
+        {0}_globalAddress,
+        {0}_globalDim,
+        {0}_globalStride,
+        {0}_lowerCorner,
+        {0}_upperCorner,
+        {0}_channelsPerPixel,
+        {0}_pixelsPerColumn,
+        {0}_elementStrides,
+        {0}_interleave,
+        {0}_swizzle,
+        {0}_l2Promotion,
+        {0}_oobFill,
+    )
+
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to initialize the TMA descriptor {0}: {{res}}")
 """
 
 KERNEL_LAUNCH_FUNC_PY = """
-\tres = cuKernelSetAttribute(
-\t\tCUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-\t\t{7},
-\t\tkernels["{0}"],
-\t\tCUdevice({10})
-\t)[0]
-\tif res != CUresult.CUDA_SUCCESS:
-\t\traise RuntimeError(f"Failed to set max dynamic shared memory size to {7} for kernel {0}: {{res}}")
+    res = cuKernelSetAttribute(
+        CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+        {7},
+        kernels["{0}"],
+        CUdevice({10})
+    )[0]
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to set max dynamic shared memory size to {7} for kernel {0}: {{res}}")
 
-\tconfig = CUlaunchConfig()
-\tconfig.gridDimX = {1}
-\tconfig.gridDimY = {2}
-\tconfig.gridDimZ = {3}
-\tconfig.blockDimX = {4}
-\tconfig.blockDimY = {5}
-\tconfig.blockDimZ = {6}
-\tconfig.sharedMemBytes = {7}
-\tconfig.hStream = stream
+    config = CUlaunchConfig()
+    config.gridDimX = {1}
+    config.gridDimY = {2}
+    config.gridDimZ = {3}
+    config.blockDimX = {4}
+    config.blockDimY = {5}
+    config.blockDimZ = {6}
+    config.sharedMemBytes = {7}
+    config.hStream = stream
 
-\targ_values = {8}
-\targ_types = {9}
+    arg_values = {8}
+    arg_types = {9}
 
-\tres = cuLaunchKernelEx(config, kernels["{0}"], (arg_values, arg_types), 0)[0]
-\tif res != CUresult.CUDA_SUCCESS:
-\t\traise RuntimeError(f"Failed to launch kernel {0}: {{res}}")
+    res = cuLaunchKernelEx(config, kernels["{0}"], (arg_values, arg_types), 0)[0]
+    if res != CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Failed to launch kernel {0}: {{res}}")
 """
 
 
@@ -270,8 +308,10 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             if len(args) < 3:
                 raise ValueError(
                     f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
-            _, _, dtype, tensor_rank, globalAddress, *remaining_args = args
 
+            tma_create_str, _, dtype, tensor_rank, globalAddress, *remaining_args = args
+
+            is_img2col = (tma_create_str.value == "__tvm_tensormap_create_im2col")
             # Use _pythonic_expr to properly convert TIR expressions
             dtype = self._pythonic_expr(dtype)
             tensor_rank = int(self._pythonic_expr(tensor_rank))
@@ -280,45 +320,88 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             if not isinstance(tensor_rank, int) or tensor_rank <= 0:
                 raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
 
-            # Calculate required length for remaining_args
-            # 4 groups of tensor_rank size + 4 parameters
-            expected_args_len = 4 * tensor_rank + 4
-            if len(remaining_args) < expected_args_len:
-                raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
-                                 f"expected {expected_args_len} for tensor_rank {tensor_rank}")
+            if not is_img2col:
+                # Calculate required length for remaining_args
+                # 4 groups of tensor_rank size + 4 parameters
+                expected_args_len = 4 * tensor_rank + 4
+                if len(remaining_args) < expected_args_len:
+                    raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
+                                     f"expected {expected_args_len} for tensor_rank {tensor_rank}")
 
-            # Extract dimensions and strides using list slicing
-            global_dim = remaining_args[:tensor_rank]
-            global_stride = remaining_args[tensor_rank:2 * tensor_rank]
-            box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
-            element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
+                # Extract dimensions and strides using list slicing
+                global_dim = remaining_args[:tensor_rank]
+                global_stride = remaining_args[tensor_rank:2 * tensor_rank]
+                box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
+                element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
 
-            # Use _pythonic_expr to properly convert TIR expressions
-            global_dim = [self._pythonic_expr(i) for i in global_dim]
-            global_stride = [self._pythonic_expr(i) for i in global_stride]
-            box_dim = [self._pythonic_expr(i) for i in box_dim]
-            element_strides = [self._pythonic_expr(i) for i in element_strides]
+                # Use _pythonic_expr to properly convert TIR expressions
+                global_dim = [self._pythonic_expr(i) for i in global_dim]
+                global_stride = [self._pythonic_expr(i) for i in global_stride]
+                box_dim = [self._pythonic_expr(i) for i in box_dim]
+                element_strides = [self._pythonic_expr(i) for i in element_strides]
 
-            # Extract remaining parameters
-            try:
-                interleave, swizzle, l2Promotion, oobFill = remaining_args[4 * tensor_rank:4 *
-                                                                           tensor_rank + 4]
-                interleave = self._pythonic_expr(interleave)
-                swizzle = self._pythonic_expr(swizzle)
-                l2Promotion = self._pythonic_expr(l2Promotion)
-                oobFill = self._pythonic_expr(oobFill)
-            except ValueError as e:
-                raise ValueError(
-                    "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"
-                ) from e
+                # Extract remaining parameters
+                try:
+                    interleave, swizzle, l2Promotion, oobFill = remaining_args[4 * tensor_rank:4 *
+                                                                               tensor_rank + 4]
+                    interleave = self._pythonic_expr(interleave)
+                    swizzle = self._pythonic_expr(swizzle)
+                    l2Promotion = self._pythonic_expr(l2Promotion)
+                    oobFill = self._pythonic_expr(oobFill)
+                except ValueError as e:
+                    raise ValueError(
+                        "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"
+                    ) from e
 
-            tma_descriptor_init += TMA_DESC_INIT_FUNC_PY.format(
-                handle_name, dtype, tensor_rank, globalAddress,
-                ", ".join(map(lambda x: f"cuuint64_t({x})", global_dim)),
-                ", ".join(map(lambda x: f"cuuint64_t({x})", global_stride)),
-                ", ".join(map(lambda x: f"cuuint32_t({x})", box_dim)),
-                ", ".join(map(lambda x: f"cuuint32_t({x})",
-                              element_strides)), interleave, swizzle, l2Promotion, oobFill)
+                tma_descriptor_init += TMA_DESC_INIT_FUNC_PY.format(
+                    handle_name, dtype, tensor_rank, globalAddress,
+                    ", ".join(map(lambda x: f"cuuint64_t({x})", global_dim)),
+                    ", ".join(map(lambda x: f"cuuint64_t({x})", global_stride)),
+                    ", ".join(map(lambda x: f"cuuint32_t({x})", box_dim)),
+                    ", ".join(map(lambda x: f"cuuint32_t({x})",
+                                  element_strides)), interleave, swizzle, l2Promotion, oobFill)
+            else:
+                # Calculate required length for remaining_args
+                expected_args_len = 5 * tensor_rank + 2
+                if len(remaining_args) < expected_args_len:
+                    raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
+                                     f"expected {expected_args_len} for tensor_rank {tensor_rank}")
+
+                # Extract dimensions and strides using list slicing
+                global_dim = remaining_args[:tensor_rank]
+                global_stride = remaining_args[tensor_rank:2 * tensor_rank]
+                element_strides = remaining_args[2 * tensor_rank:3 * tensor_rank]
+                lower_corner = remaining_args[3 * tensor_rank:4 * tensor_rank - 2]
+                upper_corner = remaining_args[4 * tensor_rank - 2:5 * tensor_rank - 4]
+                global_dim = [self._pythonic_expr(i) for i in global_dim]
+                global_stride = [self._pythonic_expr(i) for i in global_stride]
+                element_strides = [self._pythonic_expr(i) for i in element_strides]
+                lower_corner = [self._pythonic_expr(i) for i in lower_corner]
+                upper_corner = [self._pythonic_expr(i) for i in upper_corner]
+
+                # Extract remaining parameters
+                try:
+                    smem_box_pixel, smem_box_channel, interleave, swizzle, l2Promotion, oobFill = remaining_args[
+                        5 * tensor_rank - 4:5 * tensor_rank + 2]
+                    smem_box_pixel = self._pythonic_expr(smem_box_pixel)
+                    smem_box_channel = self._pythonic_expr(smem_box_channel)
+                    interleave = self._pythonic_expr(interleave)
+                    swizzle = self._pythonic_expr(swizzle)
+                    l2Promotion = self._pythonic_expr(l2Promotion)
+                    oobFill = self._pythonic_expr(oobFill)
+                except ValueError as e:
+                    raise ValueError(
+                        "Failed to unpack the final 6 TMA parameters (smem_box_pixel, smem_box_channel, interleave, swizzle, l2Promotion, oobFill)"
+                    ) from e
+
+                tma_descriptor_init += TMA_IM2COL_DESC_INIT_FUNC_PY.format(
+                    handle_name, dtype, tensor_rank, globalAddress,
+                    ", ".join(map(lambda x: f"cuuint64_t({x})", global_dim)),
+                    ", ".join(map(lambda x: f"cuuint64_t({x})", global_stride)),
+                    ", ".join(map(lambda x: f"cuuint32_t({x})", element_strides)),
+                    ", ".join(lower_corner), ", ".join(upper_corner), smem_box_channel,
+                    smem_box_pixel, interleave, swizzle, l2Promotion, oobFill)
+
         return tma_descriptor_init
 
     def update_lib_code(self, code: str):
