@@ -6,14 +6,12 @@
 
 #if (defined(__CUDACC_VER_MAJOR__) && __CUDACC_VER_MAJOR__ >= 13)
 #include <cccl/cuda/std/atomic>
-// CUDA 13+ uses internal __atomic_ref_impl to specify thread_scope
-template <typename T, cuda::std::thread_scope Scope>
-using atomic_ref = cuda::std::__atomic_ref_impl<T, Scope>;
 #else
 #include <cuda/std/atomic>
-template <typename T, typename Scope>
-using atomic_ref = cuda::atomic_ref<T, Scope>;
 #endif
+
+template <typename T, cuda::std::thread_scope Scope>
+using atomic_ref = cuda::std::__atomic_ref_impl<T, Scope>;
 
 #include <cuda_fp16.h>
 #include <cutlass/numeric_types.h>
