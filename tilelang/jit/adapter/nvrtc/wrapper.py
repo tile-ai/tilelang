@@ -320,7 +320,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         if function_name not in self.l2_persistent_map:
             return ""
         init_l2_persistent_map = ""
-        for buffer_name, (hit_ratio, size_in_bytes) in self.l2_persistent_map[function_name].items():
+        for buffer_name, (hit_ratio,
+                          size_in_bytes) in self.l2_persistent_map[function_name].items():
             # Get persisting_l2_cache_max_size
             from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
             persisting_l2_cache_max_size = get_persisting_l2_cache_max_size()

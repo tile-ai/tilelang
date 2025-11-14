@@ -532,10 +532,10 @@ def test_nvrtc_im2col_tma_desc():
 def test_nvrtc_l2_persistent_map():
     """Test L2 persistent cache annotation with elementwise add."""
     from tilelang.language import annotate_l2_hit_ratio
-    
+
     M = 1024
     N = 1024
-    
+
     @tilelang.jit(out_idx=[-1], execution_backend="nvrtc")
     def elementwise_add_with_l2_cache(
         M,
@@ -543,40 +543,41 @@ def test_nvrtc_l2_persistent_map():
         block_size=256,
         dtype="float32",
     ):
+
         @T.prim_func
         def kernel(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
-            C: T.Tensor((M, N), dtype),
+                A: T.Tensor((M, N), dtype),
+                B: T.Tensor((M, N), dtype),
+                C: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(M * N // block_size, threads=block_size) as bx:
                 # Annotate L2 persistent cache for buffer B
                 # B will be accessed multiple times and benefit from L2 caching
                 annotate_l2_hit_ratio({B: 0.8})
-                
+
                 for i in T.serial(block_size):
                     idx = bx * block_size + i
                     if idx < M * N:
                         row = idx // N
                         col = idx % N
                         C[row, col] = A[row, col] + B[row, col]
-        
+
         return kernel
-    
+
     # Compile the kernel
     kernel = elementwise_add_with_l2_cache(M, N)
-    
+
     # Create test tensors
     a = torch.randn(M, N, dtype=torch.float32).cuda()
     b = torch.randn(M, N, dtype=torch.float32).cuda()
-    
+
     # Run kernel with out_idx=[-1], C is returned not passed in
     c = kernel(a, b)
-    
+
     # Verify correctness
     ref_c = a + b
     tilelang.testing.torch_assert_close(c, ref_c, atol=1e-5, rtol=1e-5)
-    
+
     print("L2 persistent map test passed!")
 
 
