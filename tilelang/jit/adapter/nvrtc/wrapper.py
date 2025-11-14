@@ -192,6 +192,25 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
     """
     A wrapper class for the TileLang NVRTC backend.
     """
+    
+    _TYPE_MAP = {
+        "float32": "ctypes.c_float",
+        "float16": "ctypes.c_uint16",
+        "bfloat16": "ctypes.c_uint16",
+        "float8_e4m3": "ctypes.c_uint8",
+        "float8_e4m3fn": "ctypes.c_uint8",
+        "float8_e5m2": "ctypes.c_uint8",
+        "float64": "ctypes.c_double",
+        "int64": "ctypes.c_int64",
+        "int32": "ctypes.c_int32",
+        "uint32": "ctypes.c_uint32",
+        "bool": "ctypes.c_bool",
+        "int8": "ctypes.c_int8",
+        "uint8": "ctypes.c_uint8",
+        "int16": "ctypes.c_int16",
+        "uint16": "ctypes.c_uint16",
+        "uchar": "ctypes.c_uint8",
+    }
 
     _generated_host_func: str | None = None
 
@@ -217,7 +236,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         self._generated_host_func = value
 
     def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
-        return pythonic_expr(expr, dtype_map=None, ignore_cast=True)
+        return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True)
 
     def create_dispatch_func(self, code, function_informations):
         # Extract the set of dynamic symbolic names used in the primary function

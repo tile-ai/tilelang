@@ -161,11 +161,11 @@ def pythonic_expr(expr: tvm.tir.PrimExpr,
         elif isinstance(node, tvm.tir.Cast):
             # C-style cast has high precedence
             value_str, _ = node_to_result_map[node.value]
-            type_str = node.dtype if dtype_map is None else dtype_map[node.dtype]
-            if not ignore_cast:
-                s = f"({type_str}){value_str}"
-            else:
+            if ignore_cast:
                 s = value_str
+            else:
+                type_str = node.dtype if dtype_map is None else dtype_map[node.dtype]
+                s = f"({type_str}){value_str}"
             p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
                 node,
