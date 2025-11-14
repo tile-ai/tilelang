@@ -192,7 +192,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
     """
     A wrapper class for the TileLang NVRTC backend.
     """
-    
+
     _TYPE_MAP = {
         "float32": "ctypes.c_float",
         "float16": "ctypes.c_uint16",
