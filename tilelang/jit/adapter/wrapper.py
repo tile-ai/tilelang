@@ -604,7 +604,7 @@ class TLCUDASourceWrapper:
                 buffer = prim_func.buffer_map[param]
                 for stride in buffer.strides:
                     if isinstance(stride, tvm.tir.Var):
-                        unique_push_back(stride.name, str(dim.dtype))
+                        unique_push_back(stride.name, str(stride.dtype))
 
         return list(dynamic_symbolic_set.items())
 
