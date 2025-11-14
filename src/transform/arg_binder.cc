@@ -98,7 +98,8 @@ void ArgBinder::BindBuffer(const Buffer &arg, const Buffer &value,
       << "Argument " << arg_name << " Buffer bind scope mismatch";
   // Relax dtype check to allow FP8 E4M3 variants to bind together.
   auto dtype_compatible = [](DataType expected, DataType provided) -> bool {
-    if (expected == provided) return true;
+    if (expected == provided)
+      return true;
     // If expected is float8_e4m3, allow float8_e4m3fn/float8_e4m3fnuz as well.
     if (expected.is_float8_e4m3()) {
       return provided.is_float8_e4m3() || provided.is_float8_e4m3fn() ||
@@ -190,7 +191,9 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
 
   init_nest_.emplace_back(AssertStmt(
       !Call(DataType::Bool(), builtin::isnullptr(), {handle}),
-      StringImm(arg_name + " is expected to have non-NULL DLTensor* pointer, but got NULL"),
+      StringImm(
+          arg_name +
+          " is expected to have non-NULL DLTensor* pointer, but got NULL"),
       nop));
 
   // dimension checks
@@ -245,8 +248,9 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
     PrimExpr code_e4m3fn = IntImm(DataType::UInt(8), DataType::kFloat8_e4m3fn);
     PrimExpr code_e4m3fnuz =
         IntImm(DataType::UInt(8), DataType::kFloat8_e4m3fnuz);
-    PrimExpr code_match = (v_type_code == code_e4m3 || v_type_code == code_e4m3fn ||
-                           v_type_code == code_e4m3fnuz);
+    PrimExpr code_match =
+        (v_type_code == code_e4m3 || v_type_code == code_e4m3fn ||
+         v_type_code == code_e4m3fnuz);
     cond = cond || (code_match && v_type_bits == expect_bits &&
                     v_type_lanes == expect_lanes);
   }
@@ -255,7 +259,8 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
     PrimExpr code_e5m2 = IntImm(DataType::UInt(8), DataType::kFloat8_e5m2);
     PrimExpr code_e5m2fnuz =
         IntImm(DataType::UInt(8), DataType::kFloat8_e5m2fnuz);
-    PrimExpr code_match = (v_type_code == code_e5m2 || v_type_code == code_e5m2fnuz);
+    PrimExpr code_match =
+        (v_type_code == code_e5m2 || v_type_code == code_e5m2fnuz);
     cond = cond || (code_match && v_type_bits == expect_bits &&
                     v_type_lanes == expect_lanes);
   }
@@ -267,12 +272,18 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
     PrimExpr bits8 = IntImm(DataType::UInt(8), 8);
     PrimExpr bits1 = IntImm(DataType::UInt(8), 1);
     PrimExpr lanes_ok = (v_type_lanes == expect_lanes);
-    PrimExpr int8_ok = (v_type_code == code_int && v_type_bits == bits8 && lanes_ok);
-    PrimExpr uint8_ok = (v_type_code == code_uint && v_type_bits == bits8 && lanes_ok);
-    // Some frontends may tag bool tensors as kDLBool(code=6), commonly with bits=8 or bits=1.
-    PrimExpr kdlbool8_ok = (v_type_code == code_kdlbool && v_type_bits == bits8 && lanes_ok);
-    PrimExpr kdlbool1_ok = (v_type_code == code_kdlbool && v_type_bits == bits1 && lanes_ok);
-    // Also accept any dtype whose bitwidth=1, regardless of code, to be defensive.
+    PrimExpr int8_ok =
+        (v_type_code == code_int && v_type_bits == bits8 && lanes_ok);
+    PrimExpr uint8_ok =
+        (v_type_code == code_uint && v_type_bits == bits8 && lanes_ok);
+    // Some frontends may tag bool tensors as kDLBool(code=6), commonly with
+    // bits=8 or bits=1.
+    PrimExpr kdlbool8_ok =
+        (v_type_code == code_kdlbool && v_type_bits == bits8 && lanes_ok);
+    PrimExpr kdlbool1_ok =
+        (v_type_code == code_kdlbool && v_type_bits == bits1 && lanes_ok);
+    // Also accept any dtype whose bitwidth=1, regardless of code, to be
+    // defensive.
     PrimExpr bit1_ok = (v_type_bits == bits1 && lanes_ok);
     cond = cond || int8_ok || uint8_ok || kdlbool8_ok || kdlbool1_ok || bit1_ok;
   }
@@ -328,8 +339,9 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
       expect_stride = expect_stride * buffer->shape[k];
     }
     std::ostringstream stride_err_msg;
-    stride_err_msg << stride_handle_name()
-                   << ": expected to be compact array, but got non-compact strides";
+    stride_err_msg
+        << stride_handle_name()
+        << ": expected to be compact array, but got non-compact strides";
     if (!conds.empty()) {
       auto stride_msg = StringImm(stride_err_msg.str());
       Stmt check =
@@ -431,7 +443,8 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
     asserts_.emplace_back(AssertStmt(
         alloc_size == 0 ||
             !Call(DataType::Bool(), builtin::isnullptr(), {vptr}),
-        StringImm(arg_name + " is expected to have non-NULL data pointer, but got NULL"),
+        StringImm(arg_name +
+                  " is expected to have non-NULL data pointer, but got NULL"),
         nop));
 
     def_handle_dtype_.Set(vptr, tir::TypeAnnotation(buffer->dtype));

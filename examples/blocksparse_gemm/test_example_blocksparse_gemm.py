@@ -1,4 +1,3 @@
-import tilelang.testing
 import example_blocksparse_gemm
 
 

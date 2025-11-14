@@ -17,6 +17,7 @@ from tvm.relax import TensorType
 from tilelang.utils.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter
 from tilelang.utils.language import retrieve_func_from_module
+from tilelang.engine.param import KernelParam
 
 
 class TVMFFIKernelAdapter(BaseKernelAdapter):
@@ -89,11 +90,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.rt_mod = rt_mod
         self.verbose = verbose
         self.pass_configs = pass_configs
-        self.compile_flags = compile_flags        
+        self.compile_flags = compile_flags
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
 
         self._post_init()
-
 
     def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int]]:
         """Extract information about dynamic shapes from the TIR function.
@@ -126,14 +126,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Capture thunks that reflect Torch's current stream and device.
         # These are evaluated at call time to align TVM execution with the
         # caller's active PyTorch stream/device.
-        current_stream_functor = self.get_current_stream_functor()
+        # current_stream_functor = self.get_current_stream_functor()
         current_device_functor = self.get_current_device_functor()
 
         # Convert TVM types to native Python types during initialization
         param_dtypes = [param.dtype for param in self.params]
         # Convert TVM shape arrays to native Python lists
         param_shapes = []
-        
+
         for param in self.params:
             native_shape = []
             for dim in param.shape:
@@ -144,7 +144,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 else:
                     native_shape.append(dim)
             param_shapes.append(native_shape)
-        
+
         if self.executable is None:
             self.executable = runtime.Executable(self.rt_mod)
 
@@ -217,8 +217,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     for s in param_shapes[i]:
                         if isinstance(s, tir.Var):
                             for key in dynamic_symbolic_map:
-                                if(str(s) == str(key)):
-                                    ref_id, ref_tensor_idx, ref_shape_idx = dynamic_symbolic_map[key]
+                                if (str(s) == str(key)):
+                                    ref_id, ref_tensor_idx, ref_shape_idx = dynamic_symbolic_map[
+                                        key]
                                     shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
                         else:  # Already converted to Python int during initialization
                             shape.append(s)
@@ -227,11 +228,11 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         out_device = current_device_functor()
 
                     if len(shape) == 0:
-                        param_name = self.params[i].name if hasattr(self.params[i], 'name') else f'parameter_{i}'
+                        param_name = self.params[i].name if hasattr(self.params[i],
+                                                                    'name') else f'parameter_{i}'
                         raise ValueError(
                             f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
-                            f"Expected shape: {shape}"
-                        )
+                            f"Expected shape: {shape}")
                     tensor = torch.empty(*shape, dtype=dtype, device=out_device)
                 else:
                     tensor = inputs[ins_idx]
@@ -240,18 +241,19 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         expected_dtype_str = expected_dtype_strs[i]
                         expected_torch_dtype = param_dtypes[i]
                         # Only check when the argument is a tensor and expected dtype is known
-                        if isinstance(tensor, torch.Tensor) and expected_dtype_str is not None:
-                            if tensor.dtype != expected_torch_dtype:
-                                param_var = params[i]
-                                # Reconstruct TVM-like handle name A_handle for error clarity
-                                handle_name = f"{param_var.name}_handle"
-                                actual_dtype_str = torch_dtype_to_tvm_str(tensor.dtype)
-                                raise RuntimeError(
-                                    f"{global_symbol}.{handle_name}.dtype is expected to be {expected_dtype_str}, but got {actual_dtype_str}"
-                                )
+                        if isinstance(
+                                tensor, torch.Tensor
+                        ) and expected_dtype_str is not None and tensor.dtype != expected_torch_dtype:
+                            param_var = params[i]
+                            # Reconstruct TVM-like handle name A_handle for error clarity
+                            handle_name = f"{param_var.name}_handle"
+                            actual_dtype_str = torch_dtype_to_tvm_str(tensor.dtype)
+                            raise RuntimeError(
+                                f"{global_symbol}.{handle_name}.dtype is expected to be {expected_dtype_str}, but got {actual_dtype_str}"
+                            )
                     ins_idx += 1
                 tensor_list.append(tensor)
-            
+
             executable(*tensor_list)
 
             # Return outputs in the requested form
@@ -260,7 +262,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             return [tensor_list[i] for i in self.result_idx]
 
         return func
-    
+
     @classmethod
     def from_database(cls,
                       params: list[TensorType],

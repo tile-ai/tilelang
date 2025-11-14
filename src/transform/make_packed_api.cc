@@ -137,7 +137,7 @@ public:
   Apply(const ffi::Map<GlobalVar, ffi::String> &packed_func_methods,
         Stmt stmt) {
     SubroutineCallRewriter rewriter(packed_func_methods);
-    stmt = rewriter.VisitStmt(std::move(stmt));
+    stmt = rewriter.VisitStmt(stmt);
     if (rewriter.made_change_) {
       return stmt;
     } else {

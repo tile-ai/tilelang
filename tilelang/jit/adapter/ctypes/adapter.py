@@ -15,7 +15,7 @@ from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 
 
-# TODO(lei): remove ctypes adapater.
+# TODO(lei): remove ctypes adapter.
 class CtypesKernelAdapter(BaseKernelAdapter):
     """Adapter class that converts TVM/TIR functions to callable CUDA kernels using ctypes.
 
