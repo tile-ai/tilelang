@@ -91,19 +91,21 @@ struct TensorMapArgs {
 // set device api
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def_packed("tvm_tensormap_create_tiled", [](PackedArgs args,
-                                                                Any *ret) {
-    TensorMapArgs T = TensorMapArgs::Extract(args);
-    CUresult result = cuTensorMapEncodeTiled(
-        T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
-        T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave, T.swizzle,
-        T.l2Promotion, T.oobFill);
-    if (result != CUDA_SUCCESS) {
-      LOG_FATAL << "Failed to initialize the TMA descriptor " << result << '\n'
-                << T.ToDebugString();
-    }
-    *ret = static_cast<int>(result);
-  });
+  // Register using the canonical names defined in runtime.h
+  refl::GlobalDef().def_packed(
+      tl::tvm_tensormap_create_tiled, [](PackedArgs args, Any *ret) {
+        TensorMapArgs T = TensorMapArgs::Extract(args);
+        CUresult result = cuTensorMapEncodeTiled(
+            T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
+            T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave,
+            T.swizzle, T.l2Promotion, T.oobFill);
+        if (result != CUDA_SUCCESS) {
+          LOG_FATAL << "Failed to initialize the TMA descriptor " << result
+                    << '\n'
+                    << T.ToDebugString();
+        }
+        *ret = static_cast<int>(result);
+      });
 }
 
 struct TensorMapIm2ColArgs {
@@ -183,7 +185,7 @@ struct TensorMapIm2ColArgs {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def_packed(
-      "tvm_tensormap_create_im2col", [](PackedArgs args, Any *ret) {
+      tl::tvm_tensormap_create_im2col, [](PackedArgs args, Any *ret) {
         TensorMapIm2ColArgs T = TensorMapIm2ColArgs::Extract(args);
         CUresult result = cuTensorMapEncodeIm2col(
             T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,

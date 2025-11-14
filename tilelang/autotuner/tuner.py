@@ -140,7 +140,7 @@ class AutoTuner:
     def set_compile_args(self,
                          out_idx: list[int] | int | None = None,
                          target: Literal['auto', 'cuda', 'hip'] = 'auto',
-                         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+                         execution_backend: Literal["tvm_ffi", "ctypes", "cython"] = "tvm_ffi",
                          target_host: str | Target = None,
                          verbose: bool = False,
                          pass_configs: dict[str, Any] | None = None):
@@ -571,7 +571,7 @@ class AutoTuner:
             func=best_kernel.prim_func,
             kernel=best_kernel)
 
-        if self.compile_args.execution_backend in ("dlpack", "torch"):
+        if self.compile_args.execution_backend in ("torch"):
             logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:
@@ -708,7 +708,7 @@ def autotune(  # This is the new public interface
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["dlpack", "ctypes", "cython"], optional
+    execution_backend : Literal["tvm_ffi", "ctypes", "cython"], optional
         Backend for kernel execution and argument passing. Defaults to "cython".
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.

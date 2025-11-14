@@ -29,7 +29,7 @@ public:
     for (const auto &[call, var] : substituter.desc_map_) {
       // Should allocate 128 bytes for TensorMap on stack
       Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
-                             {StringImm("arg_value"), 16});
+                             {StringImm("tvm_ffi_any"), 16});
       Array<PrimExpr> init_desc_args;
       if (call->op.same_as(create_tma_descriptor())) {
         init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));

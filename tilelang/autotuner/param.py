@@ -42,7 +42,7 @@ class CompileArgs:
     """
 
     out_idx: list[int] | int | None = None
-    execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython"
+    execution_backend: Literal["tvm_ffi", "ctypes", "cython"] = "tvm_ffi"
     target: Literal['auto', 'cuda', 'hip'] = 'auto'
     target_host: str | Target = None
     verbose: bool = False
@@ -208,7 +208,7 @@ class AutotuneResult:
         target: str | Target = "auto",
         target_host: str | Target = None,
         out_idx: list[int] | int | None = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython"] = "tvm_ffi",
         pass_configs: dict = None,
         func: Callable = None,
         verbose: bool = False,
