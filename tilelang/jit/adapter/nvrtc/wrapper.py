@@ -266,13 +266,16 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
             assert desc_var in self.tma_descriptor_args, f"TMA descriptor {desc_var} not found in {self.tma_descriptor_args}"
             args = self.tma_descriptor_args[desc_var]
-            # Skip __tvm_tensormap_create_tiled
+            # Skip __tvm_tensormap_create_tiled and second element (like CUDA version)
             if len(args) < 3:
                 raise ValueError(
                     f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
-            _, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
+            _, _, dtype, tensor_rank, globalAddress, *remaining_args = args
 
-            tensor_rank = int(tensor_rank)
+            # Use _pythonic_expr to properly convert TIR expressions
+            dtype = self._pythonic_expr(dtype)
+            tensor_rank = int(self._pythonic_expr(tensor_rank))
+
             # Validate tensor_rank
             if not isinstance(tensor_rank, int) or tensor_rank <= 0:
                 raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
@@ -290,15 +293,20 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
             element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
 
-            global_dim = [str(i) for i in global_dim]
-            global_stride = [str(i) for i in global_stride]
-            box_dim = [str(i) for i in box_dim]
-            element_strides = [str(i) for i in element_strides]
+            # Use _pythonic_expr to properly convert TIR expressions
+            global_dim = [self._pythonic_expr(i) for i in global_dim]
+            global_stride = [self._pythonic_expr(i) for i in global_stride]
+            box_dim = [self._pythonic_expr(i) for i in box_dim]
+            element_strides = [self._pythonic_expr(i) for i in element_strides]
 
             # Extract remaining parameters
             try:
                 interleave, swizzle, l2Promotion, oobFill = remaining_args[4 * tensor_rank:4 *
                                                                            tensor_rank + 4]
+                interleave = self._pythonic_expr(interleave)
+                swizzle = self._pythonic_expr(swizzle)
+                l2Promotion = self._pythonic_expr(l2Promotion)
+                oobFill = self._pythonic_expr(oobFill)
             except ValueError as e:
                 raise ValueError(
                     "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"

@@ -6,7 +6,7 @@ This module provides runtime compilation support using NVIDIA's NVRTC API.
 import logging
 
 __all__ = [
-    'NVRTCKernelAdapter', 'TLNVRTCSourceWrapper', 'PyLibraryGenerator', 'is_nvrtc_available',
+    'NVRTCKernelAdapter', 'TLNVRTCSourceWrapper', 'NVRTCLibraryGenerator', 'is_nvrtc_available',
     'check_nvrtc_available'
 ]
 
@@ -40,9 +40,9 @@ def check_nvrtc_available():
 
 # Conditionally import the adapter
 if is_nvrtc_available:
-    from .adapter import NVRTCKernelAdapter  # noqa: F401
-    from .wrapper import TLNVRTCSourceWrapper  # noqa: F401
-    from .libgen import PyLibraryGenerator  # noqa: F401
+    from .adapter import NVRTCKernelAdapter
+    from .wrapper import TLNVRTCSourceWrapper
+    from .libgen import NVRTCLibraryGenerator
 else:
     # Provide a dummy class that raises error on instantiation
     class NVRTCKernelAdapter:
@@ -61,8 +61,8 @@ else:
         def __init__(self, *args, **kwargs):
             raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
 
-    class PyLibraryGenerator:
-        """Dummy PyLibraryGenerator that raises ImportError on instantiation."""
+    class NVRTCLibraryGenerator:
+        """Dummy NVRTCLibraryGenerator that raises ImportError on instantiation."""
 
         def __init__(self, *args, **kwargs):
             raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)

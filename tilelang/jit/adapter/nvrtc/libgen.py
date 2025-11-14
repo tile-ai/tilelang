@@ -20,7 +20,7 @@ except ImportError:
     is_nvrtc_available = False
 
 
-class PyLibraryGenerator(LibraryGenerator):
+class NVRTCLibraryGenerator(LibraryGenerator):
     host_func: str | None = None
     culib = None
     pymodule = None
@@ -45,6 +45,8 @@ class PyLibraryGenerator(LibraryGenerator):
     def load_lib(self, lib_path: str | None = None):
         if lib_path is None:
             lib_path = self.libpath
+        else:
+            self.libpath = lib_path
 
         pypath = lib_path.replace(".cubin", ".py")
         self.pymodule = self.import_from_file("kernel", pypath)
