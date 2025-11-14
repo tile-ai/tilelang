@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from typing import Literal
 from tilelang import language as T
-from tilelang.utils.language import get_buffer_region_from_load
+from tilelang.utils.language import (
+    get_buffer_region_from_load,
+    legalize_pairwise_extents,
+)
 from tvm import ir, tir
-from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
+from tilelang.language.utils import buffer_region_to_tile_region, buffer_load_to_tile_region
 
 
 def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
@@ -55,15 +58,26 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         return tir.BufferStore(dst.buffer, src, dst.indices)
 
     assert src_extent or dst_extent, "Can't deduce copy extents from args"
+    # Treat missing extent as length-matched ones to enable broadcasting logic.
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    extent = max(src_extent, dst_extent)
 
-    def _to_region(data, access_type):
+    # Align and broadcast extents from the right (tail) side independently
+    # for src and dst, so we can pass them unchanged into _to_region.
+    # Rules per-dim from the right:
+    # - equal -> keep both
+    # - one is 1 -> set that side to the other side's dim
+    # - otherwise -> error
+    src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
+
+    def _to_region(data, access_type, extent):
         if isinstance(data, tir.Var) and T.has_let_value(data):
             data = T.get_let_value(data)
         if isinstance(data, tir.Buffer):
-            return buffer_to_tile_region(data, access_type)
+            # Restrict a raw buffer to the computed copy extent by creating
+            # a BufferLoad at origin and passing the extents explicitly.
+            zeros = [tir.IntImm("int32", 0) for _ in extent]
+            return buffer_load_to_tile_region(tir.BufferLoad(data, zeros), access_type, extent)
         elif isinstance(data, tir.BufferRegion):
             return buffer_region_to_tile_region(data, access_type, extent)
         elif isinstance(data, tir.BufferLoad):
@@ -74,8 +88,9 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         else:
             return buffer_load_to_tile_region(data, access_type, extent)
 
-    src = _to_region(src, "r")
-    dst = _to_region(dst, "w")
+    # Use legalized extents for src and dst respectively.
+    src = _to_region(src, "r", src_extent)
+    dst = _to_region(dst, "w", dst_extent)
 
     if coalesced_width is None:
         coalesced_width = -1  # PrimExpr can not be None

@@ -75,23 +75,23 @@ private:
 
     PrimExpr VisitExpr_(const VarNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
-        return cast(DataType::Int(64), GetRef<Var>(op));
+        return cast(DataType::Int(64), tvm::ffi::GetRef<Var>(op));
       }
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const IntImmNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return IntImm(DataType::Int(64), op->value);
       }
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const CastNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return cast(DataType::Int(64), op->value);
       }
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
     Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -115,7 +115,7 @@ private:
         << "All MatchBufferRegion should be removed in "
            "tir.transform.LowerMatchBuffer.";
 
-    Block block = GetRef<Block>(op);
+    Block block = tvm::ffi::GetRef<Block>(op);
 
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     alloc_buffers.MutateByApply(
@@ -385,10 +385,10 @@ tvm::transform::Pass FlattenBuffer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.FlattenBuffer", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.FlattenBuffer", FlattenBuffer);
-});
+}
 
 } // namespace tl
 } // namespace tvm

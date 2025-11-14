@@ -30,7 +30,7 @@ public:
 
 private:
   Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = GetRef<Block>(op);
+    Block block = tvm::ffi::GetRef<Block>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     if (op->annotations.count(attr::kLayoutMap)) {
       auto layout_map = op->annotations.Get(attr::kLayoutMap);
@@ -88,6 +88,8 @@ private:
     Array<Var> new_data_vars;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
+      if (var_remap_.count(data))
+        continue;
       auto new_data =
           Var(data->name_hint, PointerType(PrimType(tmem_dtype_), "shared"));
       var_remap_.Set(data, new_data);
@@ -107,6 +109,7 @@ private:
                                buffer->buffer_type);
       new_buffers.push_back(new_buffer);
       buffer_remap_.Set(buffer, new_buffer);
+      buffer_data_to_buffer_.Set(new_data, new_buffer);
     }
 
     // remove the tmem buffers
@@ -255,7 +258,15 @@ private:
           op->dtype, op->op,
           {op->args[0], new_data, op->args[2], op->args[3], op->args[4]});
     }
-    return StmtExprMutator::VisitExpr_(op);
+    auto expr = StmtExprMutator::VisitExpr_(op);
+    return expr;
+  }
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    Var var = tvm::ffi::GetRef<Var>(op);
+    if (var_remap_.count(var)) {
+      return var_remap_[var];
+    }
+    return var;
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -300,10 +311,10 @@ tvm::transform::Pass LowerSharedTmem() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerSharedTmem", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerSharedTmem", LowerSharedTmem);
-});
+}
 
 } // namespace transform
 } // namespace tl

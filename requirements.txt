@@ -1,4 +1,5 @@
 # Runtime requirements
+apache-tvm-ffi~=0.1.0
 cloudpickle
 ml-dtypes
 numpy>=1.23.5
@@ -7,4 +8,3 @@ torch
 torch>=2.7; platform_system == 'Darwin'
 tqdm>=4.62.3
 typing-extensions>=4.10.0
-flash-linear-attention==0.3.2

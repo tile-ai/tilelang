@@ -104,6 +104,13 @@ def unroll(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
+    # Ensure annotations has {"pragma_unroll_explicit": True} by default
+    if annotations is None:
+        annotations = {"pragma_unroll_explicit": False}
+    else:
+        # Add "pragma_unroll_explicit": True if not already present
+        annotations = dict(annotations)
+        annotations.setdefault("pragma_unroll_explicit", False)
     return _ir.unroll(start=start, stop=stop, annotations=annotations)
 
 
@@ -294,6 +301,8 @@ ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
 ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
+ptx_tcgen05_mma_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_ss)
+ptx_tcgen05_mma_ts = _dtype_forward(_tir_op.ptx_tcgen05_mma_ts)
 ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
 ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)

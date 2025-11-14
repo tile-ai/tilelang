@@ -96,6 +96,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.LetInline()(mod)
     # Add wrapper for single buf store
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
+    # Normalize negative indices to canonical non-negative form
+    mod = tilelang.transform.LegalizeNegativeIndex()(mod)
     # Inject assumes to speedup tvm prover
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
@@ -118,8 +120,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # TODO(lei): return to tir pass when kSymbolicBound simplification
     # is merged into tvm.
     mod = tilelang.transform.Simplify()(mod)
-    # Try to vectorize loop with dynamic shape
-    mod = tilelang.transform.LoopVectorizeDynamic()(mod)
     return mod
 
 

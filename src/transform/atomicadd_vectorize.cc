@@ -249,7 +249,6 @@ private:
         new_args.push_back(dst_node);
         new_args.push_back(value_node);
       }
-
       new_args.push_back(memory_order);
 
       Call new_call =

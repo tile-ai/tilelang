@@ -15,10 +15,13 @@ with the appropriate memory scope.
 """
 
 from __future__ import annotations
+from typing import overload, Literal
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
+from tvm.tir.buffer import Buffer
+from tvm.tir.expr import FloatImm, IntImm
 
 
 def alloc_shared(shape, dtype, scope="shared.dyn"):
@@ -67,6 +70,19 @@ def alloc_fragment(shape, dtype, scope="local.fragment"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
+@overload
+def alloc_var(dtype: str, init: PrimExpr | int | float, scope: str = 'local.var') -> Buffer:
+    ...
+
+
+@overload
+def alloc_var(dtype: str,
+              scope: str = 'local.var',
+              *,
+              init: PrimExpr | int | float | None = None) -> Buffer:
+    ...
+
+
 def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
     """Allocate a single-element variable buffer.
 
@@ -82,7 +98,12 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
         init (PrimExpr, optional): The optional initializer value. When provided,
             the generated code will initialize the variable with this value instead
             of defaulting to zero.
-
+    Examples:
+        a = T.alloc_var('int32', 1) # var with init 1
+        a = T.alloc_var('int32', 'local.var') # var with local.var scope
+        a = T.alloc_var('int32', 1, 'local.var') # var with init 1 and local.var scope
+        a = T.alloc_var('int32', 'local.var', init=1) # var with init 1 and local.var scope
+        a = T.alloc_var('int32', init=1) # var with init 1 and local.var scope
     Returns:
         T.Buffer: A TVM buffer object allocated as a single-element variable
     """
@@ -113,7 +134,10 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
 
     buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
-        block_attr({"tl.local_var_init": {buffer.data: parsed_init}})
+        if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
+            block_attr({"tl.local_var_init": {buffer.data: parsed_init}})
+        else:
+            T.buffer_store(buffer, parsed_init, 0)
     return buffer
 
 
@@ -194,10 +218,40 @@ def alloc_reducer(shape, dtype, op="sum", replication=None):
     return reducer
 
 
-def alloc_descriptor(dtype="uint64", scope="local.descriptor"):
-    """Allocate a descriptor buffer for wgmma and utcmma.
+DescKind = Literal["wgmma", "tcgen05_smem", "tcgen05_instr"]
+
+
+def alloc_descriptor(
+    kind: DescKind = "wgmma",
+    dtype: str = "uint64",
+):
+    """Allocate a descriptor buffer for WGMMA and TCGEN5.MMA.
+
+    Args:
+        kind: The descriptor kind, one of "wgmma", "tcgen05" ("utcmma" as alias).
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a descriptor
     """
+
+    scope = "local.descriptor." + kind
+    # Buffer naming via `name` is not supported by this TVM builder signature;
+    # keep parameter for forward-compat, but do not pass it.
     return T.alloc_buffer([1], dtype, scope=scope)
+
+
+def alloc_wgmma_desc(dtype: str = "uint64"):
+    return alloc_descriptor("wgmma", dtype=dtype)
+
+
+def alloc_tcgen05_smem_desc(dtype: str = "uint64"):
+    return alloc_descriptor("tcgen05_smem", dtype=dtype)
+
+
+def alloc_tcgen05_instruction_desc(dtype: str = "uint32"):
+    return alloc_descriptor("tcgen05_instr", dtype=dtype)
+
+
+# Alias: short name consistent with imports
+def alloc_tcgen05_instr_desc(dtype: str = "uint32"):
+    return alloc_tcgen05_instruction_desc(dtype)

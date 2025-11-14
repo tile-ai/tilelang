@@ -37,6 +37,7 @@
 namespace tvm {
 namespace tl {
 using namespace tir;
+using namespace ffi;
 
 class IntrinInjecter : public tvm::arith::IRMutatorWithAnalyzer {
 public:
@@ -70,9 +71,9 @@ public:
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (auto *ptr_op = op->op.as<OpNode>()) {
       for (const auto &f_attr_map : attr_maps_) {
-        FLowerGeneral f = f_attr_map.get(GetRef<Op>(ptr_op), nullptr);
+        FLowerGeneral f = f_attr_map.get(tvm::ffi::GetRef<Op>(ptr_op), nullptr);
         if (f != nullptr) {
-          PrimExpr e = GetRef<PrimExpr>(op);
+          PrimExpr e = tvm::ffi::GetRef<PrimExpr>(op);
           PrimExpr r = f(e);
           ICHECK(r.defined()) << "intrinsic rule must always return valid Expr";
           if (!r.same_as(e)) {
@@ -99,7 +100,7 @@ public:
   // We use floordiv for integer analysis,
   // but will need to lower them to native truncdiv instructions
   PrimExpr VisitExpr_(const FloorDivNode *op) final {
-    auto e = GetRef<PrimExpr>(op);
+    auto e = tvm::ffi::GetRef<PrimExpr>(op);
     PrimExpr ret = IRMutatorWithAnalyzer::VisitExpr_(op);
     op = ret.as<FloorDivNode>();
     if (op == nullptr)
@@ -305,7 +306,7 @@ public:
     using namespace arith;
     PVar<PrimExpr> x, y;
     PVar<IntImm> c;
-    auto e = GetRef<PrimExpr>(op);
+    auto e = tvm::ffi::GetRef<PrimExpr>(op);
     if (max(floordiv(x, y), c).Match(e) && c.Eval()->value >= 0 &&
         analyzer_->CanProveGreaterEqual(y.Eval(), 0)) {
       return max(VisitExpr(truncdiv(x, y).Eval()), c.Eval());
@@ -316,7 +317,7 @@ public:
   PrimExpr VisitExpr_(const EQNode *op) final {
     using namespace arith;
     PVar<PrimExpr> x, y;
-    auto e = GetRef<PrimExpr>(op);
+    auto e = tvm::ffi::GetRef<PrimExpr>(op);
     if ((floormod(x, y) == 0).Match(e)) {
       return VisitExpr((truncmod(x, y) == 0).Eval());
     }
@@ -326,7 +327,7 @@ public:
   PrimExpr VisitExpr_(const NENode *op) final {
     using namespace arith;
     PVar<PrimExpr> x, y;
-    auto e = GetRef<PrimExpr>(op);
+    auto e = tvm::ffi::GetRef<PrimExpr>(op);
     if ((floormod(x, y) != 0).Match(e)) {
       return VisitExpr((truncmod(x, y) != 0).Eval());
     }
@@ -413,10 +414,10 @@ tir::transform::Pass LowerIntrin() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerIntrin", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerIntrin", LowerIntrin);
-});
+}
 
 } // namespace transform
 

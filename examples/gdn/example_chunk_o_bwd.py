@@ -7,8 +7,6 @@ import tilelang
 import tilelang.language as T
 from tilelang.engine.callback import register_cuda_postproc_callback  # noqa: F401
 
-print(tilelang.__file__)
-
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
@@ -256,8 +254,9 @@ def tilelang_chunk_o_bwd_dqkwg(
                     # for i_kv in T.Parallel(block_DK * block_DV):
                     #     dg_last_fragment[i_kv] = h_shared[i_kv // block_DV, i_kv % block_DV] * dh_shared[i_kv // block_DV, i_kv % block_DV]
                     for i_kv in T.Parallel(block_DK * block_DV):
-                        i_k, i_v = i_kv // block_DV, i_kv % block_DV
-                        dg_last_fragment[i_kv] = h_shared[i_k, i_v] * dh_shared[i_k, i_v]
+                        dg_last_fragment[i_kv] = h_shared[i_kv // block_DV, i_kv %
+                                                          block_DV] * dh_shared[i_kv // block_DV,
+                                                                                i_kv % block_DV]
                     T.reduce_sum(dg_last_fragment, dg_last_fragment_scalar, dim=-1, clear=False)
                     dg_last_local[0] += dg_last_fragment_scalar[0]
 

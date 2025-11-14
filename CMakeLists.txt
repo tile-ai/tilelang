@@ -8,6 +8,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND "$ENV{CIBUILDWHEEL}")
+  # Warning came from tvm submodule
+  string(APPEND CMAKE_CXX_FLAGS " -Wno-dangling-reference")
+endif()
+
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
@@ -36,15 +41,74 @@ endif()
 
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
+  message(STATUS "Using ccache: ${CCACHE_PROGRAM} with base_dir=${CMAKE_SOURCE_DIR}")
+  if(APPLE)
+    # Passing configs like `ccache base_dir=/xxx cc ...` is supported
+    # (likely) since ccache 4.x, which has been provided by homebrew.
+    # Our Linux builder image (manylinux2014 & manylinux_2_28) still
+    # provides ccache 3.x and do not support this form.
+    # `cibuildwheel` uses fixed folder on Linux (`/project`) as working directory,
+    # so cache would work without setting `base_dir`.
+    set(CCACHE_PROGRAM "${CCACHE_PROGRAM};base_dir=${CMAKE_SOURCE_DIR}")
+  endif()
   set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C compiler launcher")
   set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "CXX compiler launcher")
   set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "CUDA compiler launcher")
+else()
+  find_program(SCCACHE_PROGRAM sccache)
+  if(SCCACHE_PROGRAM)
+    message(STATUS "Using sccache: ${SCCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}" CACHE STRING "C compiler launcher")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}" CACHE STRING "CXX compiler launcher")
+    set(CMAKE_CUDA_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}" CACHE STRING "CUDA compiler launcher")
+  endif()
 endif()
 
 # Configs
-set(USE_CUDA OFF)
-set(USE_ROCM OFF)
-set(USE_METAL OFF)
+set(TILELANG_BACKENDS CUDA ROCM METAL)
+
+set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
+set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
+set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
+
+# TVM's config.cmake redefines USE_* options later, so we cache the user's choice
+# (including explicit -DUSE_XXX arguments) before we include TVM and restore it
+# afterwards.
+
+macro(tilelang_define_backend_option BACKEND)
+  set(_backend_var "USE_${BACKEND}")
+  set(_doc "${TILELANG_BACKEND_DOC_${BACKEND}}")
+  set(_user_override_var "TILELANG_USER_OVERRIDE_${_backend_var}")
+
+  set(_user_override OFF)
+  if(DEFINED ${_user_override_var})
+    set(_user_override "${${_user_override_var}}")
+  endif()
+
+  if(DEFINED CACHE{${_backend_var}})
+    get_property(_cache_type CACHE ${_backend_var} PROPERTY TYPE)
+    if(_cache_type STREQUAL "UNINITIALIZED")
+      set(_user_override ON)
+    endif()
+  endif()
+
+  set(_default OFF)
+  if(DEFINED ${_backend_var})
+    set(_default "${${_backend_var}}")
+  endif()
+
+  option(${_backend_var} "${_doc}" "${_default}")
+  # Remember if the user explicitly set this option so that later logic
+  # won't auto-toggle backends they configured on the command line.
+  set(${_user_override_var} ${_user_override} CACHE INTERNAL
+    "User explicitly set ${_backend_var} during configuration" FORCE)
+  set(TILELANG_OPTION_${_backend_var} "${${_backend_var}}")
+endmacro()
+
+foreach(BACKEND IN LISTS TILELANG_BACKENDS)
+  tilelang_define_backend_option(${BACKEND})
+endforeach()
+
 set(PREBUILD_CYTHON ON)
 # Configs end
 
@@ -55,6 +119,14 @@ if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
 else()
   message(FATAL_ERROR "Nor tvm provided or submodule checkout-ed.")
 endif()
+# Re-apply TileLang's preferred backend settings after TVM's config may have
+# overridden the USE_* cache entries.
+foreach(BACKEND IN LISTS TILELANG_BACKENDS)
+  set(_backend_var "USE_${BACKEND}")
+  set(_doc "${TILELANG_BACKEND_DOC_${BACKEND}}")
+  set(${_backend_var} ${TILELANG_OPTION_${_backend_var}} CACHE STRING "${_doc}" FORCE)
+  set(${_backend_var} ${TILELANG_OPTION_${_backend_var}})
+endforeach()
 
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
@@ -68,29 +140,39 @@ file(GLOB TILE_LANG_SRCS
   src/target/utils.cc
   src/target/codegen_cpp.cc
   src/target/rt_mod_cpp.cc
-  # webgpu doesn't have system dependency
-  src/target/codegen_webgpu.cc
   # intrin_rule doesn't have system dependency
   src/target/intrin_rule*.cc
 )
 
-# Backend-specific checks and configs
-if($ENV{USE_METAL})
-  set(USE_METAL ON)
-elseif(APPLE)
-  message(STATUS "Enable Metal support by default.")
-  set(USE_METAL ON)
-elseif($ENV{USE_ROCM})
-  set(USE_ROCM ON)
-else()
-  if($ENV{USE_CUDA})
-    set(USE_CUDA ON)
-  elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
-    # Build CPU-only when we explicitly disable CUDA
-    set(USE_CUDA OFF)
+# Track if the user explicitly selected a backend via cache options.
+set(TILELANG_BACKEND_USER_SELECTED OFF)
+foreach(BACKEND IN LISTS TILELANG_BACKENDS)
+  set(_backend_var "USE_${BACKEND}")
+  set(_override_var "TILELANG_USER_OVERRIDE_${_backend_var}")
+  if(${_backend_var} OR ${_override_var})
+    set(TILELANG_BACKEND_USER_SELECTED ON)
+  endif()
+endforeach()
+
+# Only auto-select a backend when the user didn't specify one explicitly.
+if(NOT TILELANG_BACKEND_USER_SELECTED)
+  if($ENV{USE_METAL})
+    set(USE_METAL ON)
+  elseif(APPLE)
+    message(STATUS "Enable Metal support by default.")
+    set(USE_METAL ON)
+  elseif($ENV{USE_ROCM})
+    set(USE_ROCM ON)
   else()
-    message(STATUS "Enable CUDA support by default.")
-    set(USE_CUDA ON)
+    if($ENV{USE_CUDA})
+      set(USE_CUDA ON)
+    elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
+      # Build CPU-only when we explicitly disable CUDA
+      set(USE_CUDA OFF)
+    else()
+      message(STATUS "Enable CUDA support by default.")
+      set(USE_CUDA ON)
+    endif()
   endif()
 endif()
 
@@ -104,7 +186,7 @@ if(USE_METAL)
 elseif(USE_ROCM)
   set(CMAKE_HIP_STANDARD 17)
   include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
-  find_rocm($ENV{USE_ROCM})
+  find_rocm(${USE_ROCM})
   add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
 
   file(GLOB TILE_LANG_HIP_SRCS
@@ -148,12 +230,8 @@ target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 add_library(tilelang_module SHARED $<TARGET_OBJECTS:tilelang_objs>)
-target_link_libraries(tilelang PUBLIC tvm_runtime)
+target_link_libraries(tilelang PUBLIC tvm_runtime tvm)
 target_link_libraries(tilelang_module PUBLIC tvm)
-if(APPLE)
-  # FIXME: libtilelang should only link against tvm runtime
-  target_link_libraries(tilelang PUBLIC tvm)
-endif()
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
@@ -181,18 +259,18 @@ install(TARGETS tilelang_cython_wrapper
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
-  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path")
-  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path")
-else()
-  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN")
-  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN")
+  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  set_target_properties(tvm PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+elseif(UNIX)
+  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  set_target_properties(tvm PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
 endif()
 
-install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION tilelang/lib)
-
-# Copy tvm cython ext for wheels
-# TODO: not necessary for editable builds
-if(TVM_BUILD_FROM_SOURCE)
-  add_dependencies(tilelang tvm_cython)
-  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so" DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi/)
-endif()
+install(
+  TARGETS tvm tvm_runtime tilelang_module tilelang
+  LIBRARY DESTINATION tilelang/lib
+)

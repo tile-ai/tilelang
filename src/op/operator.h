@@ -39,7 +39,6 @@ struct LowerArgs {
   AddWorkspaceCallback AddWorkspace;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
-  Array<Var> buffer_var_gemm;
 };
 
 struct LayoutInferArgs {
@@ -62,14 +61,13 @@ public:
 
   virtual TileOperator Clone() const = 0;
 
-  static constexpr const char *_type_key = "tl.TileOperator";
-
-  TVM_DECLARE_BASE_OBJECT_INFO(TileOperatorNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.TileOperator", TileOperatorNode, Object);
 };
 
 class TileOperator : public ObjectRef {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(TileOperator, ObjectRef, TileOperatorNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(TileOperator, ObjectRef,
+                                             TileOperatorNode);
 };
 
 Var GetVarFromAccessPtr(const PrimExpr &expr);

@@ -85,7 +85,7 @@ def run_gemm(
 
     stramp = "&*(XS)"
 
-    @tvm.register_func("tilelang_callback_cuda_postproc", override=True)
+    @tvm.register_global_func("tilelang_callback_cuda_postproc", override=True)
     def tilelang_callback_cuda_postproc(code, _):
         code = f"// {stramp}\n" + code
         return code

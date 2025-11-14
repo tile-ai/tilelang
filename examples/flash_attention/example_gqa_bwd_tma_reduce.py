@@ -5,6 +5,8 @@ import tilelang.language as T
 from tilelang.contrib import nvcc
 import argparse
 
+tilelang.disable_cache()
+
 
 @tilelang.jit(
     out_idx=[3, 4], pass_configs={
@@ -44,7 +46,9 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             T.copy(Q[bz, bx * block_M:(bx + 1) * block_M, by, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
-            T.fill(scores_max, -T.infinity(accum_dtype))
+            # Warning: in causal/varlen/unaligned seqlen scenarios, the -inf will cause undefined behavior in exp ops
+            # We should set it to negative large number instead
+            T.fill(scores_max, T.Cast(accum_dtype, -1e30))
             loop_range = (
                 T.ceildiv(
                     (bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N))
@@ -53,7 +57,7 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
-                                                     -T.infinity(acc_s.dtype))
+                                                     T.Cast(accum_dtype, -1e30))
                 else:
                     T.clear(acc_s)
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -265,17 +269,17 @@ def flashattn_bwd_atomic_add(batch,
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
-def flashattn_bwd_split(batch,
-                        heads,
-                        seq_len,
-                        dim_qk,
-                        dim_v,
-                        is_causal,
-                        block_M,
-                        block_N,
-                        threads=256,
-                        num_stages=2,
-                        groups=1):
+def flashattn_bwd_split_novarlen(batch,
+                                 heads,
+                                 seq_len,
+                                 dim_qk,
+                                 dim_v,
+                                 is_causal,
+                                 block_M,
+                                 block_N,
+                                 threads=256,
+                                 num_stages=2,
+                                 groups=1):
     sm_scale = (1.0 / dim_qk)**0.5
     scale = (1.0 / dim_qk)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -424,7 +428,7 @@ class _attention(torch.autograd.Function):
             kernel(q, k, v, do, lse, delta, dq, dk, dv)
             dq, dk, dv = mod_post(dq, dk, dv)
         else:
-            kernel = flashattn_bwd_split(
+            kernel = flashattn_bwd_split_novarlen(
                 BATCH,
                 H,
                 N_CTX,

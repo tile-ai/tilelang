@@ -67,6 +67,20 @@ template <int NumMma> TL_DEVICE void warpgroup_wait() {
   cute::warpgroup_wait<NumMma>();
 }
 
+TL_DEVICE void warpgroup_fence_operand(uint32_t *regs, int count) {
+#pragma unroll
+  for (int i = 0; i < count; ++i) {
+    cute::warpgroup_fence_operand(regs[i]);
+  }
+}
+
+TL_DEVICE void warpgroup_fence_operand(float *regs, int count) {
+#pragma unroll
+  for (int i = 0; i < count; ++i) {
+    cute::warpgroup_fence_operand(regs[i]);
+  }
+}
+
 // Template parameter:
 //   thread_extent: the logical size (in number of threads) of each "group"
 //                  within which we want to elect exactly ONE representative

@@ -236,6 +236,10 @@ class Environment:
                                            "1")  # print kernel name on compile
     TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE", "0")  # clear cache automatically if set
 
+    # Kernel selection options
+    # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
+    TILELANG_USE_GEMM_V1 = EnvVar("TILELANG_USE_GEMM_V1", "0")
+
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES",
                                                 "0.9")  # percent of CPUs used
@@ -274,6 +278,14 @@ class Environment:
     def is_print_on_compilation_enabled(self) -> bool:
         return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
 
+    def use_gemm_v1(self) -> bool:
+        """Return True if GEMM v1 should be used based on env.
+
+        Controlled by `TILELANG_USE_GEMM_V1`. Truthy values are one of
+        {"1", "true", "yes", "on"} (case-insensitive).
+        """
+        return str(self.TILELANG_USE_GEMM_V1).lower() in ("1", "true", "yes", "on")
+
 
 # Instantiate as a global configuration object
 env = Environment()
@@ -297,12 +309,11 @@ def prepend_pythonpath(path):
 if env.TVM_IMPORT_PYTHON_PATH is not None:
     prepend_pythonpath(env.TVM_IMPORT_PYTHON_PATH)
 else:
-    tvm_path = os.path.join(THIRD_PARTY_ROOT, "tvm")
+    tvm_path = os.path.join(THIRD_PARTY_ROOT, 'tvm', 'python')
     assert os.path.exists(tvm_path), tvm_path
     if tvm_path not in sys.path:
-        tvm_python_binding = os.path.join(tvm_path, 'python')
-        prepend_pythonpath(tvm_python_binding)
-        env.TVM_IMPORT_PYTHON_PATH = tvm_python_binding
+        prepend_pythonpath(tvm_path)
+        env.TVM_IMPORT_PYTHON_PATH = tvm_path
 
     if os.environ.get("TVM_LIBRARY_PATH") is None:
         os.environ['TVM_LIBRARY_PATH'] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)

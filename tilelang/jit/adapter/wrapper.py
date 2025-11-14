@@ -257,6 +257,12 @@ class TLCUDASourceWrapper:
     def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
         return pythonic_expr(expr, self._TYPE_MAP)
 
+    def _lookup_type(self, dtype: str | Any) -> str:
+        key = dtype if isinstance(dtype, str) else str(dtype)
+        result = self._TYPE_MAP.get(key)
+        assert result is not None, f"Unsupported dtype {dtype}"
+        return result
+
     def is_tma_descriptor_arg(self, arg_name: str) -> bool:
         return arg_name in self.prim_func.buffer_map
 
@@ -274,10 +280,10 @@ class TLCUDASourceWrapper:
                 buffer = self.prim_func.buffer_map[param]
                 function_args.append({
                     "name": buffer.data.name,
-                    "type": self._TYPE_MAP[buffer.dtype] + "* __restrict__",
+                    "type": self._lookup_type(buffer.dtype) + "* __restrict__",
                 })
             elif isinstance(param, tvm.tir.Var):
-                function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
@@ -717,6 +723,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         "float16": "ctypes.c_uint16",
         "bfloat16": "ctypes.c_uint16",
         "float8_e4m3": "ctypes.c_uint8",
+        "float8_e4m3fn": "ctypes.c_uint8",
         "float8_e5m2": "ctypes.c_uint8",
         "float64": "ctypes.c_double",
         "int64": "ctypes.c_int64",
@@ -753,7 +760,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     "type": "ctypes.c_void_p",
                 })
             elif isinstance(param, tvm.tir.Var):
-                function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
@@ -923,6 +930,7 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         "float16": "half_t",
         "bfloat16": "bfloat16_t",
         "float8_e4m3": "fp8_e4_t",
+        "float8_e4m3fn": "fp8_e4_t",
         "float8_e5m2": "fp8_e5_t",
         "float8_e4m3fnuz": "fp8_e4_t",
         "e4m3fnuz_float8": "fp8_e4_t",
@@ -969,16 +977,19 @@ class TLCPUSourceWrapper:
         "float32": "float",
         "float16": "half",
         "int32": "int32_t",
+        "int8": "int8_t",
+        "uint8": "uint8_t",
+        "int16": "int16_t",
+        "uint16": "uint16_t",
+        "int64": "int64_t",
+        "uint64": "uint64_t",
+        "float64": "double",
+        "bool": "bool",
+        "uchar": "uchar",
     }
 
-    INIT_FUNC = textwrap.dedent('''
-        #ifdef __cplusplus
-        extern "C"
-        #endif
-        int32_t init() {
-            return 0;
-        }
-    ''')
+    # Use common init with error buffer and get_last_error for CPU backend as well
+    INIT_FUNC = PREDEF_INIT_FUNC.format("")
 
     CALL_PREFIX = textwrap.dedent("""
         #ifdef __cplusplus
@@ -1014,6 +1025,12 @@ class TLCPUSourceWrapper:
         self.libpath: str | None = None
         self.lib_code: str | None = self.update_lib_code(source)
 
+    def _lookup_type(self, dtype: str | Any) -> str:
+        key = dtype if isinstance(dtype, str) else str(dtype)
+        result = self._TYPE_MAP.get(key)
+        assert result is not None, f"Unsupported dtype {dtype}"
+        return result
+
     def create_call_func(self, code, function_informations):
         # Extract the set of dynamic symbolic names used in the primary function
         dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
@@ -1025,10 +1042,10 @@ class TLCPUSourceWrapper:
                 buffer = self.prim_func.buffer_map[param]
                 function_args.append({
                     "name": buffer.name,
-                    "type": self._TYPE_MAP[buffer.dtype] + "*",
+                    "type": self._lookup_type(buffer.dtype) + "*",
                 })
             elif isinstance(param, tvm.tir.Var):
-                function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
@@ -1093,8 +1110,8 @@ class TLCPUSourceWrapper:
         return dynamic_symbolic_set
 
     def get_cpu_init_func(self):
-        init_funcs = self.INIT_FUNC
-        return init_funcs
+        # Provide init() and get_last_error() for CPU backend
+        return self.INIT_FUNC
 
     def update_lib_code(self, code: str):
         # Update the library code with the given code string
