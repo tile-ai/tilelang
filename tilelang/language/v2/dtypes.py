@@ -1,7 +1,6 @@
 from tilelang import tvm
 from tvm import ir
 import torch
-import ctypes
 from typing import TYPE_CHECKING, Union
 from tvm import tir
 import tvm.script.ir_builder.tir._ffi_api as tb_ffi
@@ -12,6 +11,7 @@ dtype = tvm.DataType
 AnyDType = Union[ir.Type, str, type, torch.dtype, dtype]
 
 _PYTHON_DTYPE_TO_STR = {
+    bool: 'bool',
     int: 'int32',
     float: 'float32',
 }
@@ -21,11 +21,9 @@ _NUMPY_DTYPE_TO_STR = {
     np.short: 'short',
     np.int_: 'int32',
     np.longlong: 'int64',
-
     np.half: 'float16',
     np.float_: 'float32',
     np.double: 'float64',
-
     np.int8: 'int8',
     np.int16: 'int16',
     np.int32: 'int32',
@@ -49,7 +47,6 @@ _TORCH_DTYPE_TO_STR = {
     torch.half: 'float16',
     torch.float: 'float32',
     torch.double: 'float64',
-
     torch.int8: 'int8',
     torch.int16: 'int16',
     torch.int32: 'int32',
@@ -68,11 +65,7 @@ _TORCH_DTYPE_TO_STR = {
 
 # _STR_TO_NUMPY_DTYPE = {v: k for k, v in _NUMPY_DTYPE_TO_STR.items()}
 
-_DTYPE_TO_STR = {
-    **_PYTHON_DTYPE_TO_STR,
-    **_NUMPY_DTYPE_TO_STR,
-    **_TORCH_DTYPE_TO_STR
-}
+_DTYPE_TO_STR = {**_PYTHON_DTYPE_TO_STR, **_NUMPY_DTYPE_TO_STR, **_TORCH_DTYPE_TO_STR}
 
 _STR_TO_TVM_DTYPE_CALL = {
     'bool': 'Boolean',
