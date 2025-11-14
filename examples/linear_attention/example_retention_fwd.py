@@ -51,13 +51,6 @@ def chunk_retention_fwd_kernel(
             o = T.alloc_fragment([chunk_size, BV], accum_dtype)
             T.clear(h)
 
-            T.annotate_layout({
-                q: tl.layout.make_swizzled_layout(q),
-                k: tl.layout.make_swizzled_layout(k),
-                v: tl.layout.make_swizzled_layout(v),
-                h_shared: tl.layout.make_swizzled_layout(h_shared),
-                s_shared: tl.layout.make_swizzled_layout(s_shared),
-            })
             T.use_swizzle(10)
 
             for i in T.Pipelined(0, NT):

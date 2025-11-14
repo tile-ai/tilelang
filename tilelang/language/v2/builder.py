@@ -390,6 +390,7 @@ class Builder(BaseBuilder):
         self.check_continue_break()
         if is_var(target):
             tir.buffer_store(target, eval_op(op, target[0], aug_value), 0)
+            return target
         elif isinstance(target, Buffer):
             raise RuntimeError("Augmented assignment is not supported for Buffer")
         else:

@@ -3,7 +3,8 @@ from enum import IntEnum
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var
+from tvm.tir import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
+from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tilelang.utils import is_tensor_memory
 from tilelang.layout import (
@@ -102,13 +103,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
         warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
-        assert warp_row_tiles >= 16, f"warp_row_tiles must be greater than 16, got {warp_row_tiles}"
-        assert warp_row_tiles % 16 == 0, f"warp_row_tiles must be divisible by 16, got {warp_row_tiles}"
+        # For tcgen05, warp_row_tiles is 8 as we can use .ws to support m32
+        assert warp_row_tiles >= 8, f"warp_row_tiles must be greater than 8, got {warp_row_tiles}"
+        assert warp_row_tiles % 8 == 0, f"warp_row_tiles must be divisible by 8, got {warp_row_tiles}"
         assert warp_col_tiles >= 8, f"warp_col_tiles must be greater than 8, got {warp_col_tiles}"
         assert warp_col_tiles % 8 == 0, f"warp_col_tiles must be divisible by 8, got {warp_col_tiles}"
 
         # four warps per block
-        self.warp_rows = warp_row_tiles // m_dim
+        self.warp_rows = warp_row_tiles // 8
         if warp_col_tiles % 16 == 0:
             self.n_dim = 16
             self.micro_size_y = 16
@@ -245,13 +247,45 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         mask_zero = T.Cast("int32", 0)
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
+        num_inst_m = 4 * self.warp_row_tiles // atom_m
+        num_inst_n = self.warp_col_tiles // atom_n
+
+        # Helper to allow BufferRegion/BufferLoad as inputs
+        def access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
+            if isinstance(buffer_or_load_or_region, Buffer):
+                return buffer_or_load_or_region.access_ptr(access_type)
+            elif isinstance(buffer_or_load_or_region, BufferLoad):
+                buffer_load = buffer_or_load_or_region
+                offset, stride = 0, 1
+                buffer = buffer_load.buffer
+                for i, shape in enumerate(reversed(buffer.shape)):
+                    indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
+                    if isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
+                        offset += indice * stride
+                    elif isinstance(indice, tvm.tir.Ramp):
+                        offset += indice.base * stride
+                    else:
+                        raise ValueError(f"Unsupported index type: {type(indice)}")
+                    stride *= shape
+                return buffer.access_ptr(access_type, offset=offset)
+            elif isinstance(buffer_or_load_or_region, BufferRegion):
+                buffer_region = buffer_or_load_or_region
+                buffer = buffer_region.buffer
+                offset, stride = 0, 1
+                for i, shape in enumerate(reversed(buffer.shape)):
+                    offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
+                    stride *= shape
+                return buffer.access_ptr(access_type, offset=offset)
+            else:
+                raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf, mbar):
             # Allocate SMEM descriptors for A and B
             desc_a = T.alloc_tcgen05_smem_desc()
             desc_b = T.alloc_tcgen05_smem_desc()
-            A_ptr = A_buf.access_ptr("r")
-            B_ptr = B_buf.access_ptr("r")
+            A_ptr = access_ptr_from(A_buf, "r")
+            B_ptr = access_ptr_from(B_buf, "r")
 
             T.initialize_tcgen05_descriptor(
                 desc_a,
@@ -272,37 +306,44 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 int(b_swizzle_mode),
             )
 
-            for ki in T.serial(0, (k_dim // micro_size_k)):
-                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
-                for i in T.serial(m_dim // atom_m):
-                    A_elem_offset = (
-                        ki % ak_atom_size
-                    ) * micro_size_k + i * atom_m * a_swizzle_atom_elems + (
-                        ki // ak_atom_size
-                    ) * m_dim * a_swizzle_atom_elems if a_is_k_major else i * atom_m * k_dim + ki * a_swizzle_atom_elems * micro_size_k
-                    B_elem_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
-                        ki % bk_atom_size
-                    ) * micro_size_k if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k
-                    A_byte_offset = A_elem_offset * elems_in_bytes
-                    B_byte_offset = B_elem_offset * elems_in_bytes
-                    C_offset = i * atom_n * accum_dtype_in_bits // 32  # 32 bits per tmem bank
+            tmem_col_step = atom_n // (128 // atom_m)
+            for j in T.unroll(num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(0, (k_dim // micro_size_k)):
+                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+                        A_elem_offset = (
+                            ki % ak_atom_size
+                        ) * micro_size_k + i * atom_m * a_swizzle_atom_elems + (
+                            ki // ak_atom_size
+                        ) * m_dim * a_swizzle_atom_elems if a_is_k_major else i * atom_m * k_dim + ki * a_swizzle_atom_elems * micro_size_k
 
-                    T.ptx_tcgen05_mma_ss(
-                        a_dtype_abbrv,
-                        desc_a.data,
-                        A_byte_offset,
-                        desc_b.data,
-                        B_byte_offset,
-                        C_local_buf.data,
-                        C_offset,
-                        instr_desc,
-                        scale_out,
-                        mask0,
-                        mask1,
-                        mask2,
-                        mask3,
-                        enable_ws,
-                    )
+                        B_elem_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
+                            ki % bk_atom_size
+                        ) * micro_size_k + j * atom_n * b_swizzle_atom_elems if b_is_k_major else (
+                            ki * b_swizzle_atom_elems * micro_size_k + j * atom_n *
+                            (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1))
+
+                        A_byte_offset = A_elem_offset * elems_in_bytes
+                        B_byte_offset = B_elem_offset * elems_in_bytes
+                        C_offset = (i * n_dim + j * tmem_col_step
+                                   ) * accum_dtype_in_bits // 32  # 32 bits per tmem bank
+
+                        T.ptx_tcgen05_mma_ss(
+                            a_dtype_abbrv,
+                            desc_a.data,
+                            A_byte_offset,
+                            desc_b.data,
+                            B_byte_offset,
+                            C_local_buf.data,
+                            C_offset,
+                            instr_desc,
+                            scale_out,
+                            mask0,
+                            mask1,
+                            mask2,
+                            mask3,
+                            enable_ws,
+                        )
             T.tcgen05_mma_arrive(mbar)
 
         return _warp_mma(A_buf, B_buf, C_local_buf, mbar)

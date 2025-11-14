@@ -85,8 +85,6 @@ class GemmTCGEN5(GemmBase):
             raise ValueError(f"TCGEN5MMA currently only supports gemm_ss, got "
                              f"A scope {self.A.scope()}, B scope {self.B.scope()}")
 
-        atom_m, atom_n, atom_k = mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K)
-
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
             raise ValueError(f"Unsupported A scope for TCGEN5MMA: {self.A.scope()}")
         if self.B.scope() not in {"shared", "shared.dyn"}:
@@ -108,8 +106,8 @@ class GemmTCGEN5(GemmBase):
         if accum_dtype != "float32":
             raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
 
-        A_shared = self.A
-        B_shared = self.B
+        A_shared = self.ARegion
+        B_shared = self.BRegion
         C_local = self.C
         clear_accum = self.clear_accum
         mbar = self.mbarptr

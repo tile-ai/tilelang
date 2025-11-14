@@ -119,7 +119,7 @@ private:
     // Step 1. Update unit loop info.
     PrimExpr min = this->VisitExpr(op->min);
     PrimExpr extent = this->VisitExpr(op->extent);
-    if (is_one(extent) && op->annotations.empty()) {
+    if (is_one(extent) && IsEffectivelyEmptyAnnotation(op->annotations)) {
       // handling unit loop
       unit_loop_vars_[op->loop_var] = min;
     }
@@ -135,7 +135,8 @@ private:
       ICHECK(op->thread_binding.defined());
       String thread_tag = op->thread_binding.value()->thread_tag;
       body = MakeLaunchThread(min, extent, op->loop_var, thread_tag, body);
-    } else if (is_one(extent) && op->annotations.empty()) {
+    } else if (is_one(extent) &&
+               IsEffectivelyEmptyAnnotation(op->annotations)) {
       // Case 2. Unit loop
       return body;
     } else {
@@ -148,6 +149,23 @@ private:
       body = AttrStmt(op->loop_var, it->first, it->second, std::move(body));
     }
     return body;
+  }
+
+  // Treat annotations as empty if they are truly empty or contain only
+  // the unroll hint `pragma_unroll_explicit`. This allows unit-length
+  // loops produced by unroll pragmas to be simplified away.
+  bool
+  IsEffectivelyEmptyAnnotation(const Map<String, ffi::Any> &annotations) const {
+    if (annotations.empty()) {
+      return true;
+    }
+    if (annotations.size() == 1) {
+      auto it = annotations.find(tir::attr::pragma_unroll_explicit);
+      if (it != annotations.end()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   PrimExpr VisitExpr_(const VarNode *op) final {

@@ -78,13 +78,10 @@ def flashattn_fwd(
                 sinks[i] = Sinks[by]
 
             end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
-            start = T.alloc_local([1], 'int32')
-            if window_size is not None:
-                start[0] = T.max(0, (bx * block_M - window_size) // block_N)
-            else:
-                start[0] = 0
+            start = T.max(0,
+                          (bx * block_M - window_size) // block_N) if window_size is not None else 0
 
-            for k in T.Pipelined(start[0], end, num_stages=num_stages):
+            for k in T.Pipelined(start, end, num_stages=num_stages):
                 T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     q_idx = bx * block_M + i
@@ -267,14 +264,10 @@ def flashattn_bwd(
             T.clear(dk)
 
             loop_st = T.floordiv(by * block_M, block_N)
-            loop_ed = T.alloc_local([1], 'int32')
-            if window_size is not None:
-                loop_ed[0] = T.min(
-                    T.ceildiv((by + 1) * block_M + window_size, block_N),
-                    T.ceildiv(seq_len, block_N))
-            else:
-                loop_ed[0] = T.ceildiv(seq_len, block_N)
-            for k in T.Pipelined(loop_st, loop_ed[0], num_stages=num_stages):
+            loop_ed = T.min(
+                T.ceildiv((by + 1) * block_M + window_size, block_N), T.ceildiv(
+                    seq_len, block_N)) if window_size is not None else T.ceildiv(seq_len, block_N)
+            for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
                 T.copy(Q[bz, bx, k * block_N:(k + 1) * block_N, :], q)
                 T.clear(qkT)
                 T.gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)

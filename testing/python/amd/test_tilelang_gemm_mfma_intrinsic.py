@@ -22,15 +22,6 @@ def tl_matmul(
     b_transposed=True,
     k_pack=1,
 ):
-    assert in_dtype in [
-        "float16",
-        "int8",
-    ], "Currently only float16 and int8 are supported"
-    assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
-    ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
@@ -190,6 +181,9 @@ def assert_tl_matmul_correctness(M,
     if in_dtype == "int8":
         A = torch.randint(-128, 127, A_shape, device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, B_shape, device="cuda", dtype=torch.int8)
+    elif in_dtype == "float8_e4m3fnuz":
+        A = torch.rand(A_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
+        B = torch.rand(B_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
     else:
         A = torch.rand(A_shape, device="cuda", dtype=getattr(torch, in_dtype))
         B = torch.rand(B_shape, device="cuda", dtype=getattr(torch, in_dtype))

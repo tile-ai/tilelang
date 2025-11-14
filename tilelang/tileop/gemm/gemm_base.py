@@ -32,23 +32,23 @@ class GemmBase:
 
     @property
     def M(self) -> int:
-        return self.gemm_node.M
+        return getattr(self.gemm_node, "m", None)
 
     @property
     def N(self) -> int:
-        return self.gemm_node.N
+        return getattr(self.gemm_node, "n", None)
 
     @property
     def K(self) -> int:
-        return self.gemm_node.K
+        return getattr(self.gemm_node, "k", None)
 
     @property
     def trans_A(self) -> bool:
-        return self.gemm_node.trans_A
+        return getattr(self.gemm_node, "transA", None)
 
     @property
     def trans_B(self) -> bool:
-        return self.gemm_node.trans_B
+        return getattr(self.gemm_node, "transB", None)
 
     @property
     def in_dtype(self) -> str:
@@ -65,68 +65,100 @@ class GemmBase:
 
     @property
     def A(self) -> tir.Buffer:
-        return self.gemm_node.A
+        return getattr(self.gemm_node, "a", None)
 
     @property
     def B(self) -> tir.Buffer:
-        return self.gemm_node.B
+        return getattr(self.gemm_node, "b", None)
 
     @property
     def C(self) -> tir.Buffer:
-        return self.gemm_node.C
+        return getattr(self.gemm_node, "c", None)
 
     @property
-    def APtr(self) -> tir.PrimExpr:
-        return self.gemm_node.APtr
+    def ARegion(self):
+        return getattr(self.gemm_node, "aRegion", None)
 
     @property
-    def BPtr(self) -> tir.PrimExpr:
-        return self.gemm_node.BPtr
+    def BRegion(self):
+        return getattr(self.gemm_node, "bRegion", None)
 
     @property
-    def CPtr(self) -> tir.PrimExpr:
-        return self.gemm_node.CPtr
+    def CRegion(self):
+        return getattr(self.gemm_node, "cRegion", None)
 
     @property
     def stride_A(self) -> int:
-        return self.gemm_node.stride_A
+        return getattr(self.gemm_node, "strideA", None)
 
     @property
     def stride_B(self) -> int:
-        return self.gemm_node.stride_B
+        return getattr(self.gemm_node, "strideB", None)
 
     @property
     def offset_A(self) -> int:
-        return self.gemm_node.offset_A
+        return getattr(self.gemm_node, "offsetA", None)
 
     @property
     def offset_B(self) -> int:
-        return self.gemm_node.offset_B
+        return getattr(self.gemm_node, "offsetB", None)
 
     @property
     def clear_accum(self) -> PrimExpr:
-        return self.gemm_node.clear_accum
+        return getattr(self.gemm_node, "clearAccum", None)
 
     @property
     def k_pack(self) -> int:
-        return self.gemm_node.k_pack
+        return getattr(self.gemm_node, "kPack", None)
 
     @property
     def wg_wait(self) -> int:
-        return self.gemm_node.wg_wait
+        return getattr(self.gemm_node, "wgWait", 0)
 
     @property
     def policy(self) -> GemmWarpPolicy:
-        return self.gemm_node.policy
+        return getattr(self.gemm_node, "policy", None)
 
     @property
     def mbarptr(self) -> PrimExpr:
-        return getattr(self.gemm_node, "mbarptr", tvm.tir.const(0, "uint32"))
+        return getattr(self.gemm_node, "mbarPtr", tvm.tir.const(0, "uint32"))
 
     @property
     def C_coords(self):
-        coords = getattr(self.gemm_node, "C_coords", None)
+        coords = getattr(self.gemm_node, "cCoords", None)
         if coords is None or len(coords) == 0:
             zero = tvm.tir.const(0, "int32")
             return [zero, zero]
         return [coords[i] for i in range(len(coords))]
+
+    def get_region_base_offsets(self, region):
+        """
+        Get the base offset (start index) for each dimension from a BufferRegion.
+
+        For example, if region is A_shared[ko % 2, 0:128, 0:64],
+        this returns [ko % 2, 0, 0]
+
+        Args:
+            region: BufferRegion object
+
+        Returns:
+            List of PrimExpr representing the base offset for each dimension
+        """
+        if region is None:
+            return []
+        return [r.min for r in region.region]
+
+    @property
+    def A_base_offsets(self):
+        """Get base offsets for each dimension of A region"""
+        return self.get_region_base_offsets(self.ARegion)
+
+    @property
+    def B_base_offsets(self):
+        """Get base offsets for each dimension of B region"""
+        return self.get_region_base_offsets(self.BRegion)
+
+    @property
+    def C_base_offsets(self):
+        """Get base offsets for each dimension of C region"""
+        return self.get_region_base_offsets(self.CRegion)

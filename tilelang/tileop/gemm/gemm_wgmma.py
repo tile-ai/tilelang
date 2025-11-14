@@ -87,13 +87,24 @@ class GemmWGMMA(GemmBase):
         if self.B in layout_map:
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
 
-        A_shared = self.A
-        B_shared = self.B
-        C_local = self.C
+        # Get base offsets from regions
+        # All dimensions may have offsets, including the matrix dimensions
+        # However, for WGMMA, we pass the Buffer directly and handle offsets
+        # through proper indexing in the access_ptr call or buffer slicing
+
+        # We use region for memory input to support strided gemm
+        # T.gemm(A_shared[0:128, :], B_shared, C_local)
+        A_region = self.ARegion
+        B_region = self.BRegion
+        C_region = self.CRegion
+
         clear_accum = self.clear_accum
         wg_wait = self.wg_wait
 
         if self.is_gemm_ss():
+            # For WGMMA, we need to handle buffer region offsets
+            # If there are offsets, we create a BufferLoad inside the prim_func
+            # to properly generate offset access
 
             @T.prim_func
             def _gemm_ssr() -> None:
@@ -102,14 +113,13 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                # Perform Matrix Multiplication
-                mma_emitter.wgmma(A_shared, B_shared, C_local, clear_accum, wg_wait)
+                # Perform Matrix Multiplication with offset consideration
+                mma_emitter.wgmma(A_region, B_region, C_region, clear_accum, wg_wait)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_ssr, inline_let=True)
         elif self.is_gemm_rs():
-            A_local = self.A
 
             @T.prim_func
             def _gemm_rsr() -> None:
@@ -118,7 +128,7 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                mma_emitter.wgmma(A_local, B_shared, C_local, clear_accum, wg_wait)
+                mma_emitter.wgmma(A_region, B_region, C_region, clear_accum, wg_wait)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis

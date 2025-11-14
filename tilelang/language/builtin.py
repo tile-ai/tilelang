@@ -8,7 +8,7 @@ from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
 from typing import Any
-from tvm.tir import PrimExpr, Var, Call, BufferLoad
+from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 
@@ -440,21 +440,55 @@ def warpgroup_fence_operand(buffer_or_ptr: tir.Buffer | PrimExpr,
     WGMMA operations by issuing an empty inline assembly barrier on every register.
 
     Args:
-        buffer_or_ptr: Buffer | PrimExpr
-            Either a buffer representing the accumulator fragment or a pointer expression.
+        buffer_or_ptr: Buffer | BufferLoad | BufferRegion | PrimExpr
+            A buffer representing the accumulator fragment, a buffer load/region
+            that identifies a starting element within the fragment, or a pointer expression
+            (e.g., tvm_access_ptr/address_of/typed Var).
         offset: int | PrimExpr
             Element offset from the start of the accumulator fragment.
         num_regs: int | PrimExpr | None
             Number of 32-bit registers to fence. If None and a Buffer is provided, it will be
             derived from the buffer shape and dtype.
         dtype: str | None
-            Data type string of the accumulator elements. Required when passing a pointer.
+            Data type string of the accumulator elements. When passing a buffer or
+            buffer-derived expression, dtype is inferred. It is required only when
+            passing a raw pointer expression that cannot be inferred.
 
     Returns:
         tir.Call: A handle to the warpgroup fence operation.
     """
     if isinstance(buffer_or_ptr, BufferLoad):
-        raise TypeError("Expected a buffer handle or pointer expression, got BufferLoad.")
+        # Treat BufferLoad as a request to fence starting from the loaded element's address
+        buf = buffer_or_ptr.buffer
+        data_ptr = buf.data
+        inferred_dtype = buf.dtype
+        if dtype is not None and dtype != inferred_dtype:
+            raise ValueError(f"dtype mismatch: provided {dtype}, buffer uses {inferred_dtype}.")
+        dtype = inferred_dtype
+        # Compute element offset from indices using strides if present, otherwise row-major
+        if len(buf.strides) == len(buf.shape) and len(buf.strides) > 0:
+            elem_off = 0
+            for idx, stride in zip(buffer_or_ptr.indices, buf.strides):
+                elem_off = elem_off + idx * stride
+        else:
+            elem_off = 0
+            stride_acc = 1
+            for idx, dim in zip(reversed(buffer_or_ptr.indices), reversed(buf.shape)):
+                elem_off = elem_off + idx * stride_acc
+                stride_acc = stride_acc * dim
+        # Combine with user-provided offset
+        offset = elem_off + convert(offset)
+        if num_regs is None:
+            raise ValueError("num_regs must be provided when passing a BufferLoad.")
+        return evaluate(
+            tir.call_intrin(
+                "handle",
+                tir.op.Op.get("tl.warpgroup_fence_operand"),
+                dtype,
+                data_ptr,
+                convert(offset),
+                convert(num_regs),
+            ))
 
     if isinstance(buffer_or_ptr, tir.Buffer):
         data_ptr = buffer_or_ptr.data
@@ -472,10 +506,78 @@ def warpgroup_fence_operand(buffer_or_ptr: tir.Buffer | PrimExpr,
                         "warpgroup_fence_operand requires num_regs when buffer shape is symbolic.")
             bits_per_elem = DataType(dtype).bits
             num_regs = (total_elems * bits_per_elem + 31) // 32
+    elif isinstance(buffer_or_ptr, BufferRegion):
+        buf = buffer_or_ptr.buffer
+        data_ptr = buf.data
+        inferred_dtype = buf.dtype
+        if dtype is not None and dtype != inferred_dtype:
+            raise ValueError(f"dtype mismatch: provided {dtype}, buffer uses {inferred_dtype}.")
+        dtype = inferred_dtype
+        # Compute element offset from region min using strides if present, otherwise row-major
+        if len(buf.strides) == len(buf.shape) and len(buf.strides) > 0:
+            elem_off = 0
+            for r, stride in zip(buffer_or_ptr.region, buf.strides):
+                elem_off = elem_off + r.min * stride
+        else:
+            elem_off = 0
+            stride_acc = 1
+            for r, dim in zip(reversed(buffer_or_ptr.region), reversed(buf.shape)):
+                elem_off = elem_off + r.min * stride_acc
+                stride_acc = stride_acc * dim
+        # Combine with user-provided offset
+        offset = elem_off + convert(offset)
+        # Try derive num_regs from region extents if fully static; otherwise require user input
+        if num_regs is None:
+            total_elems = 1
+            static = True
+            for r in buffer_or_ptr.region:
+                if isinstance(r.extent, tir.IntImm):
+                    total_elems *= int(r.extent)
+                else:
+                    static = False
+                    break
+            if static:
+                bits_per_elem = DataType(dtype).bits
+                num_regs = (total_elems * bits_per_elem + 31) // 32
+            else:
+                raise ValueError(
+                    "warpgroup_fence_operand requires num_regs when BufferRegion extent is symbolic."
+                )
+        return evaluate(
+            tir.call_intrin(
+                "handle",
+                tir.op.Op.get("tl.warpgroup_fence_operand"),
+                dtype,
+                data_ptr,
+                convert(offset),
+                convert(num_regs),
+            ))
     else:
         data_ptr = buffer_or_ptr
+        # Try to infer dtype from common pointer expressions when not provided
         if dtype is None:
-            raise ValueError("dtype must be provided when passing a pointer expression.")
+            inferred = None
+            # Case 1: Pointer from Buffer.access_ptr -> tir.builtin.tvm_access_ptr
+            if isinstance(data_ptr, Call) and data_ptr.op.same_as(tir.builtin.tvm_access_ptr()):
+                # args[0] is a type annotation call; its dtype carries the element dtype
+                inferred = str(data_ptr.args[0].dtype)
+            # Case 2: Pointer from tir.address_of(BufferLoad(...))
+            elif isinstance(data_ptr, Call) and data_ptr.op.same_as(tir.builtin.address_of()):
+                # args[0] should be a BufferLoad; its dtype is the element dtype
+                inferred = str(data_ptr.args[0].dtype)
+            # Case 3: Typed pointer Var with PrimType element (typed TIR)
+            elif hasattr(data_ptr, "type_annotation") and data_ptr.type_annotation is not None:
+                try:
+                    elem_ty = getattr(data_ptr.type_annotation, "element_type", None)
+                    if elem_ty is not None and hasattr(elem_ty, "dtype"):
+                        inferred = str(elem_ty.dtype)
+                except Exception:
+                    inferred = None
+            if inferred is None:
+                raise ValueError(
+                    "dtype must be provided when passing a pointer expression and cannot be inferred."
+                )
+            dtype = inferred
         if num_regs is None:
             raise ValueError("num_regs must be provided when passing a pointer expression.")
 
