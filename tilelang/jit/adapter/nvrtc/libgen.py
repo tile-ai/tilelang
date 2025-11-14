@@ -19,21 +19,22 @@ import logging
 import os.path as osp
 import platform
 import tempfile
+from types import ModuleType
 
 from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target
+from tilelang.jit.adapter.nvrtc import is_nvrtc_available, NVRTC_UNAVAILABLE_MESSAGE
 
 logger = logging.getLogger(__name__)
 
-try:
-    import cuda.bindings.driver as cuda  # noqa: F401
+if is_nvrtc_available:
+    import cuda.bindings.driver as cuda
     from tilelang.contrib.nvrtc import compile_cuda
-    is_nvrtc_available = True
-except ImportError:
-    is_nvrtc_available = False
+else:
+    raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
 
 
 class NVRTCLibraryGenerator(LibraryGenerator):
@@ -56,8 +57,9 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         pymodule: Imported Python module containing call() function
     """
     host_func: str | None = None
-    culib = None
-    pymodule = None
+    culib: cuda.CUlibrary | None = None
+    pymodule: ModuleType | None = None
+    pypath: str | None = None
 
     def __init__(self, target: Target, verbose: bool = False):
         """Initialize NVRTC library generator.
@@ -127,8 +129,8 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         else:
             self.libpath = lib_path
 
-        pypath = lib_path.replace(".cubin", ".py")
-        self.pymodule = self.import_from_file("kernel", pypath)
+        self.pypath = lib_path.replace(".cubin", ".py")
+        self.pymodule = self.import_from_file("kernel", self.pypath)
 
         # Ensure the context is valid
         ctx = cuda.cuCtxGetCurrent()[1]
@@ -212,9 +214,8 @@ class NVRTCLibraryGenerator(LibraryGenerator):
 
             self.srcpath = src.name
             self.libpath = libpath
-
-            pypath = src.name.replace(".cu", ".py")
-            with open(pypath, "w") as f:
+            self.pypath = src.name.replace(".cu", ".py")
+            with open(self.pypath, "w") as f:
                 f.write(self.host_func)
         else:
             raise ValueError(f"Unsupported target: {target}")
