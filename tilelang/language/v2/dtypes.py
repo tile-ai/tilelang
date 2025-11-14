@@ -22,7 +22,6 @@ _NUMPY_DTYPE_TO_STR = {
     np.int_: 'int32',
     np.longlong: 'int64',
     np.half: 'float16',
-    np.float_: 'float32',
     np.double: 'float64',
     np.int8: 'int8',
     np.int16: 'int16',
