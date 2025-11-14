@@ -2,6 +2,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os.path as osp
+import platform
 import tempfile
 
 from tvm.target import Target
@@ -83,11 +84,16 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             cuda_home = CUDA_HOME if CUDA_HOME else "/usr/local/cuda"
             __CUDACC_VER_MAJOR__ = cuda.CUDA_VERSION // 1000
 
+            # Determine target architecture
+            machine = platform.machine()
+            target_arch = "sbsa-linux" if machine in ("aarch64", "arm64") else "x86_64-linux"
+
             options = [
                 f"-I{tl_template_path}",
                 f"-I{cutlass_path}",
                 f"-I{cuda_home}/include",
-                f"-I{cuda_home}/targets/x86_64-linux/include",  # [TODO](zihuaw) remove temporary include path
+                f"-I{cuda_home}/targets/{target_arch}/include",
+                f"-I{cuda_home}/targets/{target_arch}/include/cccl",
                 f"-D__CUDACC_VER_MAJOR__={__CUDACC_VER_MAJOR__}",
             ]
             if self.compile_flags:
