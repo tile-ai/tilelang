@@ -11,6 +11,7 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
+#include <algorithm>
 #include <queue>
 
 #include "../layout/utils.h"
@@ -105,19 +106,59 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    DLOG(INFO) << "[RunInferStep] working on " << cur_infer_id << '\n';
     auto updates =
         next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
                                           &analyzer_, buffer_oob},
                           level);
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
-      DLOG(INFO) << "    consider update " << buffer << " as "
-                 << layout->DebugOutput() << '\n';
 
       // Basic validity checks
       ICHECK(buffer.defined()) << "InferLayout returned an undefined buffer.";
       ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
+
+      // Helper: propagate inferred layout to alias buffers (same data Var)
+      auto propagate_alias = [&](const Buffer &src_buffer,
+                                 const Layout &src_layout) {
+        if (!buffer_data_to_buffers_.count(src_buffer->data))
+          return;
+        const auto &siblings = buffer_data_to_buffers_[src_buffer->data];
+        for (const auto &sib : siblings) {
+          if (sib.same_as(src_buffer))
+            continue;
+          bool shapes_equal =
+              src_layout->InputShape().size() == sib->shape.size();
+          if (shapes_equal) {
+            for (size_t i = 0; i < src_layout->InputShape().size(); ++i) {
+              if (!analyzer_.CanProveEqual(src_layout->InputShape()[i],
+                                           sib->shape[i])) {
+                shapes_equal = false;
+                break;
+              }
+            }
+          }
+          Layout target_layout =
+              shapes_equal ? src_layout
+                           : src_layout->Reshape(sib->shape, &analyzer_);
+          if (layout_map.count(sib)) {
+            ICHECK(target_layout->IsEqual(layout_map[sib].get()))
+                << "Get different layout for alias buffer " << sib
+                << " (data-shared with " << src_buffer
+                << ")\n current: " << target_layout->DebugOutput()
+                << "\n previous: " << layout_map[sib]->DebugOutput();
+          } else {
+            layout_map.Set(sib, target_layout);
+            if (update_queue && use_list_.count(sib)) {
+              for (int idx : use_list_[sib]) {
+                if (!in_queue[idx] && idx != cur_infer_id) {
+                  in_queue[idx] = true;
+                  q.push(idx);
+                }
+              }
+            }
+          }
+        }
+      };
 
       if (layout_map.count(buffer)) {
         // If new layout contains the old one, update map
@@ -153,8 +194,8 @@ public:
           if (ProveFragmentContains(src_layout, dst_layout, indices, indices,
                                     inner_analyzer)) {
             layout_map.Set(buffer, layout);
-            DLOG(INFO) << "    layout broadcast from "
-                       << src_layout->DebugOutput() << ", accepted" << '\n';
+            // Propagate to alias buffers as well
+            propagate_alias(buffer, layout);
             continue;
           }
         }
@@ -163,10 +204,13 @@ public:
             << "Get different layout for " << buffer
             << "\n current layout: " << layout->DebugOutput()
             << "\n previous layout: " << layout_map[buffer]->DebugOutput();
+        // Ensure aliases are consistent too
+        propagate_alias(buffer, layout);
       } else {
         // Otherwise, update map
         layout_map.Set(buffer, layout);
-        DLOG(INFO) << "    new layout accepted" << '\n';
+        // Propagate to alias buffers (may enqueue their users)
+        propagate_alias(buffer, layout);
         if (!update_queue)
           continue;
 
@@ -272,6 +316,46 @@ public:
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
 
+    // step 4: finalize alias layouts by Var
+    // For each storage var, if any buffer in the group has a layout,
+    // propagate (reshape if needed) to the rest to ensure completeness.
+    for (const auto &[var, buffers] : buffer_data_to_buffers_) {
+      // Find a representative with existing layout
+      Optional<Buffer> rep;
+      Optional<Layout> rep_layout;
+      for (const auto &buf : buffers) {
+        if (layout_map.count(buf)) {
+          rep = buf;
+          rep_layout = layout_map[buf];
+          break;
+        }
+      }
+      if (!rep_layout.defined())
+        continue;
+      for (const auto &buf : buffers) {
+        if (!layout_map.count(buf)) {
+          bool shapes_equal =
+              rep_layout.value()->InputShape().size() == buf->shape.size();
+          if (shapes_equal) {
+            for (size_t i = 0; i < rep_layout.value()->InputShape().size();
+                 ++i) {
+              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i],
+                                           buf->shape[i])) {
+                shapes_equal = false;
+                break;
+              }
+            }
+          }
+
+          Layout reshaped =
+              shapes_equal
+                  ? rep_layout.value()
+                  : rep_layout.value()->Reshape(buf->shape, &analyzer_);
+          layout_map.Set(buf, reshaped);
+        }
+      }
+    }
+
     // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
       if (buffer.scope() == "local.fragment") {
@@ -314,7 +398,13 @@ public:
 
   void Collect(const PrimFunc &f) {
     for (const auto &[_, buffer] : f->buffer_map) {
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
+      if (buffer_data_to_buffers_.count(buffer->data)) {
+        auto buffers = buffer_data_to_buffers_[buffer->data];
+        buffers.push_back(buffer);
+        buffer_data_to_buffers_.Set(buffer->data, buffers);
+      } else {
+        buffer_data_to_buffers_.Set(buffer->data, {buffer});
+      }
     }
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined())
@@ -324,13 +414,25 @@ public:
   }
 
 private:
+  Map<Var, Buffer> GetBufferMap() const {
+    Map<Var, Buffer> buffer_map;
+    for (const auto &[var, buffers] : buffer_data_to_buffers_) {
+      // Use the first buffer for each var
+      // TODO(lei): phaseout buffer_map in future.
+      if (!buffers.empty()) {
+        buffer_map.Set(var, buffers[0]);
+      }
+    }
+    return buffer_map;
+  }
+
   void VisitExpr_(const CallNode *op) final {
     IRVisitorWithAnalyzer::VisitExpr_(op);
     // Do not analysis the call node to the global function.
     if (op->op.as<GlobalVarNode>())
       return;
 
-    auto p = ParseOperator(tvm::ffi::GetRef<Call>(op), buffer_data_to_buffer_);
+    auto p = ParseOperator(tvm::ffi::GetRef<Call>(op), GetBufferMap());
     if (p.defined()) {
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
@@ -394,12 +496,18 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       auto var_opt = call->args[1].as<Var>();
       if (!var_opt.has_value()) {
-        DLOG(WARNING) << "[getBufferFromAccessPtr] args[1] is not a Var, type: "
-                      << call->args[1]->GetTypeKey();
+        LOG(WARNING) << "[getBufferFromAccessPtr] args[1] is not a Var, type: "
+                     << call->args[1]->GetTypeKey();
         return std::nullopt;
       }
       const auto &var = var_opt.value();
-      return buffer_data_to_buffer_[var];
+      if (buffer_data_to_buffers_.count(var)) {
+        const auto &buffers = buffer_data_to_buffers_[var];
+        if (!buffers.empty()) {
+          return buffers[0]; // Return the first buffer
+        }
+      }
+      return std::nullopt;
     } else if (call->op.same_as(RegionOp::Get())) {
       return call->args[0].as<BufferLoadNode>()->buffer;
     }
@@ -442,21 +550,55 @@ private:
 
   void VisitStmt_(const BlockNode *op) final {
     for (auto buffer : op->alloc_buffers) {
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
+      if (buffer_data_to_buffers_.count(buffer->data)) {
+        auto buffers = buffer_data_to_buffers_[buffer->data];
+        buffers.push_back(buffer);
+        buffer_data_to_buffers_.Set(buffer->data, buffers);
+      } else {
+        buffer_data_to_buffers_.Set(buffer->data, {buffer});
+      }
     }
+
+    // First, visit the block body to collect all buffers from
+    // BufferLoad/BufferStore
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+
+    // After visiting, apply layouts to all collected buffers
     if (op->annotations.count(attr::kLayoutMap)) {
       // Check if the layout map is Map<Var, Layout>
       auto map =
           op->annotations.Get(attr::kLayoutMap)->as<Map<Var, Layout>>().value();
       for (const auto &[var, layout] : map) {
-        ICHECK(buffer_data_to_buffer_.count(var))
+        ICHECK(buffer_data_to_buffers_.count(var))
             << "buffer " << var << " is not found in the block";
-        auto buffer = buffer_data_to_buffer_[var];
-        ICHECK(StructuralEqual()(layout->InputShape(), buffer->shape));
-        annotated_layout_map_.Set(buffer, layout);
+        const auto &buffers = buffer_data_to_buffers_[var];
+        ICHECK(!buffers.empty()) << "buffer list for " << var << " is empty";
+        // Apply layout to all buffers associated with this var
+        for (const auto &buffer : buffers) {
+
+          // Reshape the layout to match the buffer's shape
+          // Check if shapes are structurally equal
+          bool shapes_equal =
+              layout->InputShape().size() == buffer->shape.size();
+          if (shapes_equal) {
+            for (size_t i = 0; i < layout->InputShape().size(); ++i) {
+              if (!analyzer_.CanProveEqual(layout->InputShape()[i],
+                                           buffer->shape[i])) {
+                shapes_equal = false;
+                break;
+              }
+            }
+          }
+
+          if (shapes_equal) {
+            annotated_layout_map_.Set(buffer, layout);
+          } else {
+            auto reshaped_layout = layout->Reshape(buffer->shape, &analyzer_);
+            annotated_layout_map_.Set(buffer, reshaped_layout);
+          }
+        }
       }
     }
-    IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
@@ -470,7 +612,67 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
-  Map<Var, Buffer> buffer_data_to_buffer_;
+  void VisitExpr_(const BufferLoadNode *op) final {
+    // Collect buffer from BufferLoad
+    if (op->buffer.defined() && op->buffer->data.defined()) {
+      if (buffer_data_to_buffers_.count(op->buffer->data)) {
+        // Check if this buffer is already in the list
+        auto buffers = buffer_data_to_buffers_[op->buffer->data];
+        bool found = false;
+        for (const auto &buf : buffers) {
+          if (buf.same_as(op->buffer)) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          buffers.push_back(op->buffer);
+          buffer_data_to_buffers_.Set(op->buffer->data, buffers);
+          DLOG(INFO) << "[LayoutInference] BufferLoad: added buffer "
+                     << op->buffer << " buffer.get() = " << op->buffer.get()
+                     << " data = " << op->buffer->data.get();
+        }
+      } else {
+        buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
+        DLOG(INFO) << "[LayoutInference] BufferLoad: new buffer " << op->buffer
+                   << " buffer.get() = " << op->buffer.get()
+                   << " data = " << op->buffer->data.get();
+      }
+    }
+    IRVisitorWithAnalyzer::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    // Collect buffer from BufferStore
+    if (op->buffer.defined() && op->buffer->data.defined()) {
+      if (buffer_data_to_buffers_.count(op->buffer->data)) {
+        // Check if this buffer is already in the list
+        auto buffers = buffer_data_to_buffers_[op->buffer->data];
+        bool found = false;
+        for (const auto &buf : buffers) {
+          if (buf.same_as(op->buffer)) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          buffers.push_back(op->buffer);
+          buffer_data_to_buffers_.Set(op->buffer->data, buffers);
+          DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
+                     << op->buffer << " buffer.get() = " << op->buffer.get()
+                     << " data = " << op->buffer->data.get();
+        }
+      } else {
+        buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
+        DLOG(INFO) << "[LayoutInference] BufferStore: new buffer " << op->buffer
+                   << " buffer.get() = " << op->buffer.get()
+                   << " data = " << op->buffer->data.get();
+      }
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  Map<Var, Array<Buffer>> buffer_data_to_buffers_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
@@ -513,10 +715,31 @@ private:
       if (infer_indices.empty())
         continue;
 
-      // Union all infer_list_ indices that share the same buffer
+      // Union all infer_list_ indices that share the same Buffer object
       int first_idx = infer_indices[0];
       for (size_t i = 1; i < infer_indices.size(); i++) {
         uf.Union(first_idx, infer_indices[i]);
+      }
+    }
+    // Additionally, union across buffers that share the same underlying
+    // buffer->data (Var). This handles cases like reshape where multiple
+    // Buffer objects alias the same storage.
+    for (const auto &[var, buffers] : buffer_data_to_buffers_) {
+      std::vector<int> merged;
+      for (const auto &buf : buffers) {
+        auto it = use_list_.find(buf);
+        if (it != use_list_.end()) {
+          const auto &vec = it->second;
+          merged.insert(merged.end(), vec.begin(), vec.end());
+        }
+      }
+      if (merged.size() > 1) {
+        std::sort(merged.begin(), merged.end());
+        merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+        int first = merged[0];
+        for (size_t i = 1; i < merged.size(); ++i) {
+          uf.Union(first, merged[i]);
+        }
       }
     }
     std::unordered_map<int, std::vector<int>> components;

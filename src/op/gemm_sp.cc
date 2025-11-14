@@ -18,14 +18,14 @@
 namespace tvm {
 namespace tl {
 
-std::pair<int, int> GemmSPWarpPolicyNode::ComputeWarpPartition(int M, int N,
+std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
                                                                int block_size,
                                                                Target target,
                                                                bool use_wgmma,
                                                                int bits) const {
   int num_warps = block_size / TargetGetWarpSize(target);
 
-  auto [m_warp, n_warp] = GemmWarpPolicyNode::ComputeWarpPartition(
+  auto [m_warp, n_warp] = GemmWarpPolicyNode::computeWarpPartition(
       M, N, block_size, target, use_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA);
 
   // Special handling for gemm_sp when the tiling size is not a multiple
@@ -85,25 +85,25 @@ std::pair<int, int> GemmSPWarpPolicyNode::ComputeWarpPartition(int M, int N,
  */
 GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
-  node->A = vmap[GetVarFromAccessPtr(args[0])];
-  node->E = vmap[GetVarFromAccessPtr(args[1])];
-  node->B = vmap[GetVarFromAccessPtr(args[2])];
-  node->C = vmap[GetVarFromAccessPtr(args[3])];
-  node->trans_A = args[4].as<Bool>().value();
-  node->trans_B = args[5].as<Bool>().value();
-  node->M = args[6].as<IntImm>().value()->value;
-  node->N = args[7].as<IntImm>().value()->value;
-  node->K = args[8].as<IntImm>().value()->value;
-  node->policy = GemmSPWarpPolicy(args[9].as<IntImm>().value()->value);
-  node->clear_accum = args[10].as<Bool>().value();
+  node->a_ = vmap[GetVarFromAccessPtr(args[0])];
+  node->e_ = vmap[GetVarFromAccessPtr(args[1])];
+  node->b_ = vmap[GetVarFromAccessPtr(args[2])];
+  node->c_ = vmap[GetVarFromAccessPtr(args[3])];
+  node->transA_ = args[4].as<Bool>().value();
+  node->transB_ = args[5].as<Bool>().value();
+  node->m_ = args[6].as<IntImm>().value()->value;
+  node->n_ = args[7].as<IntImm>().value()->value;
+  node->k_ = args[8].as<IntImm>().value()->value;
+  node->policy_ = GemmSPWarpPolicy(args[9].as<IntImm>().value()->value);
+  node->clearAccum_ = args[10].as<Bool>().value();
   if (args.size() > 11) {
-    node->kPack = args[11].as<IntImm>().value()->value;
-    if (node->kPack != 1 && node->kPack != 2) {
+    node->kPack_ = args[11].as<IntImm>().value()->value;
+    if (node->kPack_ != 1 && node->kPack_ != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
   if (args.size() > 12) {
-    node->wg_wait = args[12].as<IntImm>().value()->value;
+    node->wgWait_ = args[12].as<IntImm>().value()->value;
   }
   data_ = std::move(node);
 }
@@ -144,37 +144,37 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   int warp_size = 32;
 
   auto block_size = *as_const_int(T.thread_bounds->extent);
-  bool maybe_wgmma = TargetIsHopper(T.target) && (this->M >= 64) &&
+  bool maybe_wgmma = TargetIsHopper(T.target) && (this->m_ >= 64) &&
                      (block_size / warp_size % 4 == 0);
 
-  auto [warp_m, warp_n] = policy->ComputeWarpPartition(
-      M, N, block_size, T.target, maybe_wgmma, A->dtype.bits());
+  auto [warp_m, warp_n] = policy_->computeWarpPartition(
+      m_, n_, block_size, T.target, maybe_wgmma, a_->dtype.bits());
 
   std::stringstream ss;
   std::string op_name = "tl::gemm_sp_ss";
-  ICHECK((A.scope() == "shared" || A.scope() == "shared.dyn") &&
-         (B.scope() == "shared" || B.scope() == "shared.dyn"))
-      << "Only support shared.dyn scope for A and B, but received " << A.scope()
-      << " and " << B.scope();
-  ICHECK((E.scope() == "shared" || E.scope() == "shared.dyn"))
+  ICHECK((a_.scope() == "shared" || a_.scope() == "shared.dyn") &&
+         (b_.scope() == "shared" || b_.scope() == "shared.dyn"))
+      << "Only support shared.dyn scope for A and B, but received "
+      << a_.scope() << " and " << b_.scope();
+  ICHECK((e_.scope() == "shared" || e_.scope() == "shared.dyn"))
       << "Only support shared.dyn scope for E as copy from smem to rmem are "
          "delegated to cute implementation, found "
-      << E.scope();
-  ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
+      << e_.scope();
+  ss << op_name << "<" << m_ << ", " << n_ << ", " << k_ << ", ";
   ss << warp_m << ", " << warp_n << ", ";
-  ss << trans_A << ", " << trans_B;
-  ss << ", " << clear_accum;
+  ss << transA_ << ", " << transB_;
+  ss << ", " << clearAccum_;
   if (TargetIsHopper(T.target)) {
     ss << ", " << (maybe_wgmma ? "true" : "false");
   }
-  if (wg_wait != 0) {
-    ss << ", " << wg_wait;
+  if (wgWait_ != 0) {
+    ss << ", " << wgWait_;
   }
   ss << ">";
-  auto A_buffer = T.buffer_remap.count(A) ? T.buffer_remap[A] : A;
-  auto B_buffer = T.buffer_remap.count(B) ? T.buffer_remap[B] : B;
-  auto C_buffer = T.buffer_remap[C];
-  auto E_buffer = T.buffer_remap.count(E) ? T.buffer_remap[E] : E;
+  auto A_buffer = T.buffer_remap.count(a_) ? T.buffer_remap[a_] : a_;
+  auto B_buffer = T.buffer_remap.count(b_) ? T.buffer_remap[b_] : b_;
+  auto C_buffer = T.buffer_remap[c_];
+  auto E_buffer = T.buffer_remap.count(e_) ? T.buffer_remap[e_] : e_;
 
   auto new_call =
       Call(DataType::Handle(), tl::tl_gemm_sp(),
@@ -217,59 +217,59 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
   if (completed_)
     return {};
   LayoutMap results;
-  ICHECK(C.scope() == "local.fragment");
+  ICHECK(c_.scope() == "local.fragment");
   auto thread_range = T.thread_bounds;
   auto block_size = *as_const_int(thread_range->extent);
   if (TargetIsHopper(T.target)) {
     const int warp_size = 32;
     constexpr int wgmma_m = 16 * 4;
     bool maybe_wgmma =
-        (this->M >= wgmma_m) && (block_size / warp_size % 4 == 0);
-    auto [warp_m, warp_n] = policy->ComputeWarpPartition(
-        M, N, block_size, T.target, maybe_wgmma, A->dtype.bits());
-    auto fragment =
-        maybe_wgmma
-            ? makeGemmFragmentCHopper(M, N, M / warp_m, N / warp_n,
-                                      C->dtype.bits())
-            : makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment->BindThreadRange(thread_range));
-    if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      int dim_A = A->shape.size();
-      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
-      results.Set(A, makeGemmABLayoutHopper(mat_stride, mat_continuous,
-                                            mat_continuous, A->dtype.bits(),
-                                            trans_A ? 1 : 2));
+        (this->m_ >= wgmma_m) && (block_size / warp_size % 4 == 0);
+    auto [warp_m, warp_n] = policy_->computeWarpPartition(
+        m_, n_, block_size, T.target, maybe_wgmma, a_->dtype.bits());
+    auto fragment = maybe_wgmma
+                        ? makeGemmFragmentCHopper(m_, n_, m_ / warp_m,
+                                                  n_ / warp_n, c_->dtype.bits())
+                        : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
+                                            c_->dtype.bits());
+    results.Set(c_, fragment->BindThreadRange(thread_range));
+    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+      int dim_A = a_->shape.size();
+      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
+      results.Set(a_, makeGemmABLayoutHopper(mat_stride, mat_continuous,
+                                             mat_continuous, a_->dtype.bits(),
+                                             transA_ ? 1 : 2));
     } else {
       ICHECK(false) << "Not implemented";
     }
 
-    if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      int dim_B = B->shape.size();
-      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
+    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+      int dim_B = b_->shape.size();
+      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
       const int64_t continuity =
-          trans_B ? mat_continuous : mat_continuous / warp_n;
-      results.Set(B,
+          transB_ ? mat_continuous : mat_continuous / warp_n;
+      results.Set(b_,
                   makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                         B->dtype.bits(), trans_B ? 2 : 1));
+                                         b_->dtype.bits(), transB_ ? 2 : 1));
     } else {
       ICHECK(false) << "WGMMA only support B in shared.";
     }
   } else if (TargetIsAmpere(T.target)) {
-    auto [warp_m, warp_n] = policy->ComputeWarpPartition(
-        M, N, block_size, T.target, false, A->dtype.bits());
-    auto fragment =
-        makeGemmSparseFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment->BindThreadRange(thread_range));
+    auto [warp_m, warp_n] = policy_->computeWarpPartition(
+        m_, n_, block_size, T.target, false, a_->dtype.bits());
+    auto fragment = makeGemmSparseFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
+                                            c_->dtype.bits());
+    results.Set(c_, fragment->BindThreadRange(thread_range));
 
-    if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      int dim_A = A->shape.size();
-      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
-      results.Set(A, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                  A->dtype.bits()));
-    } else if (A.scope() == "local.fragment") {
+    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+      int dim_A = a_->shape.size();
+      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
+      results.Set(a_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                   a_->dtype.bits()));
+    } else if (a_.scope() == "local.fragment") {
       // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
       //                                   A->dtype.bits(), trans_A);
       // results.Set(A, fragment->BindThreadRange(thread_range));
@@ -277,13 +277,13 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
     } else {
       ICHECK(0);
     }
-    if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      int dim_B = B->shape.size();
-      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
-      results.Set(B, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                  B->dtype.bits()));
-    } else if (B.scope() == "local.fragment") {
+    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+      int dim_B = b_->shape.size();
+      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
+      results.Set(b_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                   b_->dtype.bits()));
+    } else if (b_.scope() == "local.fragment") {
       // auto fragment =
       //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
       // results.Set(B, fragment->BindThreadRange(thread_range));

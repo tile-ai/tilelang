@@ -10,5 +10,10 @@ from .language import (
     is_fragment,  # noqa: F401
     is_local,  # noqa: F401
     array_reduce,  # noqa: F401
+    retrieve_stride,  # noqa: F401
+    retrieve_shape,  # noqa: F401
+    retrive_ptr_from_buffer_region,  # noqa: F401
+    is_full_region,  # noqa: F401
+    to_buffer_region,  # noqa: F401
 )
 from .deprecated import deprecated  # noqa: F401

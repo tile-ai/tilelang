@@ -4,8 +4,9 @@ from enum import IntEnum
 from typing import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var, IndexMap
-from tilelang.utils import is_fragment
+from tvm.tir import PrimExpr, Buffer, Var, IndexMap, BufferRegion
+from tilelang.utils import is_fragment, retrive_ptr_from_buffer_region, is_full_region
+from math import gcd
 from tilelang.layout import (
     Layout,
     make_full_bank_swizzled_layout,
@@ -70,6 +71,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     # should be rewritten to support dynamic k_dim
     wgmma_prefix: str
 
+    # wgmma instruction M dimension
+    wgmma_inst_m: int
+    # wgmma instruction N dimension
+    wgmma_inst_n: int
+
     a_shared_layout: Layout = None
     b_shared_layout: Layout = None
 
@@ -104,9 +110,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return self
 
     def _initialize_wgmma_prefix(self, n_dim: int = 16):
-        inst_m, inst_n = 64, self.block_col_warps * self.warp_col_tiles
+        inst_m, inst_n = 64, gcd(self.warp_col_tiles, 256)
+        assert inst_n % 8 == 0, (
+            f"inst_n must be a multiple of 8, got {inst_n} "
+            f"(block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles})")
+        # Validate inst_n: Hopper WGMMA supports n in [8, 256] and multiple of 8
+        assert 8 <= inst_n <= 256, (
+            f"inst_n must be within [8, 256], got {inst_n} "
+            f"(block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles})")
         # 256 bits per instruction
         inst_k = 256 // DataType(self.a_dtype).bits
+        self.wgmma_inst_m = inst_m
+        self.wgmma_inst_n = inst_n
         self.wgmma_prefix = f"m{inst_m}n{inst_n}k{inst_k}"
 
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
@@ -146,13 +161,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             raise ValueError(f"Unsupported swizzle mode: {layout}")
 
     def wgmma(self,
-              A_buf: Buffer,
-              B_buf: Buffer,
-              C_local_buf: Buffer,
-              clear_accum: PrimExpr = False):
+              A_region: BufferRegion,
+              B_region: BufferRegion,
+              C_region: BufferRegion,
+              clear_accum: PrimExpr = False,
+              wg_wait: int = 0):
 
-        if is_fragment(A_buf):
-            return self.wgmma_rs(A_buf, B_buf, C_local_buf, clear_accum)
+        if is_fragment(A_region):
+            return self.wgmma_rs(A_region, B_region, C_region, clear_accum, wg_wait)
 
         local_size_out = self.local_size_out
         a_dtype_abbrv = self.a_dtype_abbrv
@@ -172,8 +188,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
 
-        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
-        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        a_swizzle_mode = self._determinate_swizzle_mode(A_region, self.a_shared_layout)
+        b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
 
         elems_in_bits = DataType(self.a_dtype).bits
         elems_in_bytes = elems_in_bits // 8
@@ -241,45 +257,69 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         # where max specially handles the case when n_dim is 8.
         ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
+        wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
+        num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
+        num_inst_n = self.warp_col_tiles // wgmma_inst_n
+
+        thread_binding = self.get_thread_binding()
+
+        A_ptr = retrive_ptr_from_buffer_region(A_region)
+        B_ptr = retrive_ptr_from_buffer_region(B_region)
+        assert is_full_region(C_region), "Fragment output C must be a full region"
+
+        C_buf = C_region.buffer
 
         @T.macro
-        def _warp_mma(A_buf, B_buf, C_local_buf):
+        def _warp_mma(A_ptr, B_ptr, C_buf):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+
             desc_a = T.alloc_wgmma_desc()
             desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_a, A_buf.access_ptr("r"), a_swizzle_mode,
+            T.initialize_wgmma_descriptor(desc_a, A_ptr, a_swizzle_mode,
                                           int(a_leading_byte_offset >> 4),
                                           int(a_stride_byte_offset >> 4))
-            T.initialize_wgmma_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
+            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode,
                                           int(b_leading_byte_offset >> 4),
                                           int(b_stride_byte_offset >> 4))
-            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
-            for ki in T.serial(0, (k_dim // micro_size_k)):
-                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
-                for i in T.serial(m_dim // 64):
-                    A_offset = (ki % ak_atom_size) * micro_size_k + i * 64 * a_swizzle_atom_elems + (
-                        ki // ak_atom_size
-                    ) * m_dim * a_swizzle_atom_elems if a_is_k_major else i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
-                    B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
-                        ki % bk_atom_size
-                    ) * micro_size_k if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k
-                    C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
-                    T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, a_is_k_major, b_is_k_major,
-                                   a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv, desc_a.data,
-                                   (A_offset * elems_in_bytes) >> 4, desc_b.data,
-                                   (B_offset * elems_in_bytes) >> 4, C_local_buf.data, C_offset,
-                                   scale_out, scale_in_a, scale_in_b)
-            T.warpgroup_commit_batch()
-            T.warpgroup_wait(0)
-            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
 
-        return _warp_mma(A_buf, B_buf, C_local_buf)
+            for j in T.unroll(num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(k_dim // micro_size_k):
+                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+                        warp_i = (warp_m // 4) * num_inst_m + i
+                        warp_j = warp_n * num_inst_n + j
+                        A_offset = (
+                            ki % ak_atom_size
+                        ) * micro_size_k + warp_i * 64 * a_swizzle_atom_elems + (
+                            ki // ak_atom_size
+                        ) * m_dim * a_swizzle_atom_elems if a_is_k_major else warp_i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                        B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
+                            ki % bk_atom_size
+                        ) * micro_size_k + warp_j * wgmma_inst_n * b_swizzle_atom_elems if b_is_k_major else (
+                            ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n *
+                            (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1))
+                        C_offset = i * warp_cols * local_size_out + j * warp_cols * local_size_out // num_inst_n  # 4 warps as an unit
+                        T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, a_is_k_major, b_is_k_major,
+                                       a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv, desc_a.data,
+                                       (A_offset * elems_in_bytes) >> 4, desc_b.data,
+                                       (B_offset * elems_in_bytes) >> 4, C_buf.data, C_offset,
+                                       scale_out, scale_in_a, scale_in_b)
+
+            T.warpgroup_commit_batch()
+            if wg_wait >= 0:
+                T.warpgroup_wait(wg_wait)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
+
+        return _warp_mma(A_ptr, B_ptr, C_buf)
 
     def wgmma_rs(self,
-                 A_buf: Buffer,
-                 B_buf: Buffer,
-                 C_local_buf: Buffer,
-                 clear_accum: PrimExpr = False):
+                 A_region: BufferRegion,
+                 B_region: BufferRegion,
+                 C_region: BufferRegion,
+                 clear_accum: PrimExpr = False,
+                 wg_wait: int = 0):
         local_size_a = self.local_size_a
         local_size_out = self.local_size_out
         a_dtype_abbrv = self.a_dtype_abbrv
@@ -303,7 +343,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
         b_is_k_major = self.b_transposed
 
-        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
         b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none(
         ) else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
 
@@ -333,47 +373,69 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                     b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
 
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
+        wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
+        num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
+        num_inst_n = self.warp_col_tiles // wgmma_inst_n
+
+        thread_binding = self.get_thread_binding()
+
+        assert is_full_region(A_region), "Fragment input A must be a full region"
+        assert is_full_region(C_region), "Fragment output C must be a full region"
+        A_buf = A_region.buffer
+        B_ptr = retrive_ptr_from_buffer_region(B_region)
+        C_buf = C_region.buffer
 
         @T.macro
-        def _warp_mma(A_buf, B_buf, C_local_buf):
+        def _warp_mma(A_buf, B_ptr, C_buf):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+
             desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
+            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode,
                                           int(b_leading_byte_offset >> 4),
                                           int(b_stride_byte_offset >> 4))
             T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
-            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
-            for ki in T.serial(0, (k_dim // micro_size_k)):
-                scale_out = T.if_then_else(ki != 0, 1, T.if_then_else(clear_accum, 0, 1))
-                for i in T.serial(m_dim // 64):
-                    A_offset = ki * warp_rows * local_size_a + i * local_size_a
-                    B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
-                        ki % bk_atom_size
-                    ) * micro_size_k if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k
-                    C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
-                    T.ptx_wgmma_rs(
-                        accum_dtype,
-                        wgmma_prefix,
-                        self.b_transposed,
-                        a_dtype_abbrv,
-                        b_dtype_abbrv,
-                        accum_dtype_abbrv,
-                        A_buf.data,
-                        A_offset,
-                        desc_b.data,
-                        (B_offset * elems_in_bytes) >> 4,
-                        C_local_buf.data,
-                        C_offset,
-                        scale_out,
-                        scale_in_a,
-                        scale_in_b,
-                    )
+
+            for j in T.unroll(0, num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(0, (k_dim // micro_size_k)):
+                        warp_j = warp_n * num_inst_n + j
+                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+
+                        A_offset = ki * warp_rows * local_size_a + i * local_size_a
+                        B_offset = (
+                            ki // bk_atom_size
+                        ) * n_dim * b_swizzle_atom_elems + warp_j * wgmma_inst_n * b_swizzle_atom_elems + (
+                            ki % bk_atom_size) * micro_size_k if b_is_k_major else (
+                                ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n *
+                                (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1))
+                        C_offset = i * warp_cols * local_size_out + j * warp_cols * local_size_out // num_inst_n  # 4 warps as an unit
+                        T.ptx_wgmma_rs(
+                            accum_dtype,
+                            wgmma_prefix,
+                            self.b_transposed,
+                            a_dtype_abbrv,
+                            b_dtype_abbrv,
+                            accum_dtype_abbrv,
+                            A_buf.data,
+                            A_offset,
+                            desc_b.data,
+                            (B_offset * elems_in_bytes) >> 4,
+                            C_buf.data,
+                            C_offset,
+                            scale_out,
+                            scale_in_a,
+                            scale_in_b,
+                        )
+
             T.warpgroup_commit_batch()
-            T.warpgroup_wait(0)
-            T.warpgroup_fence_operand(C_local_buf, num_regs=accum_regs)
+            if wg_wait >= 0:
+                T.warpgroup_wait(wg_wait)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
 
-        return _warp_mma(A_buf, B_buf, C_local_buf)
+        return _warp_mma(A_buf, B_ptr, C_buf)
 
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         """

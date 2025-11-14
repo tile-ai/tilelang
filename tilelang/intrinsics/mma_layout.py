@@ -45,6 +45,12 @@ def mma_store_32x8_to_shared_16x16_layout(thread_id, local_id):
     return row, col
 
 
+def mma_store_32x2_to_shared_8x8_layout_fp64(thread_id, local_id):
+    row = thread_id // 4
+    col = (thread_id % 4) * 2 + local_id
+    return row, col
+
+
 # sr represents spatial + reduction layout
 # the first axis is spatial while the second axis is reduction
 # mma.sync matrix A layout, if wanna trans, please apply map_indices

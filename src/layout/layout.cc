@@ -5,6 +5,7 @@
 
 #include "layout.h"
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/arith/pattern.h>
 #include <tvm/tir/op.h>
@@ -101,10 +102,24 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
   for (size_t i = 0; i < ret.size(); i++) {
     auto ist = analyzer.int_set(forward_index_[i] + 1);
     if (arith::is_neg_inf(ist.min()) && arith::is_pos_inf(ist.max())) {
-      // X-OR Expression
-      ret.Set(i, input_size_[i]);
+      // Analyzer couldn't form an IntervalSet (e.g. bitwise ops).
+      // Fall back to ConstIntBound to derive a safe extent.
+      auto cib = analyzer.const_int_bound(forward_index_[i]);
+      if (cib->min_value != arith::ConstIntBound::kNegInf &&
+          cib->max_value != arith::ConstIntBound::kPosInf &&
+          cib->min_value >= 0) {
+        // extent = max - min + 1, using 64-bit integer literal
+        ret.Set(i, Integer(cib->max_value - cib->min_value + 1));
+      } else {
+        // Last-resort conservative fallback to avoid OOB/crash
+        // Prefer to keep dimension from known input_size_ if available.
+        if (i < input_size_.size()) {
+          ret.Set(i, input_size_[i]);
+        } else {
+          ret.Set(i, Integer(1));
+        }
+      }
     } else {
-      // CHECK(is_one(ist.min())) << ist.min();
       ret.Set(i, ist.max());
     }
   }
@@ -249,14 +264,17 @@ std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   if (!is_static_shape) {
     // Runtime guards keep dynamic tails safe, so we allow NoCheck here and
     // warn.
-    LOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
-                    "NoCheck; symbolic dims: "
-                 << symbolic_dims;
+    DLOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
+                     "NoCheck; symbolic dims: "
+                  << symbolic_dims;
   }
   arith::IterMapResult res =
       arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
-  ICHECK(res->errors.empty())
-      << "Layout " << DebugOutput() << " has errors: " << res->errors;
+  if (!res->errors.empty()) {
+    std::ostringstream msg;
+    msg << "Layout " << DebugOutput() << " has errors: " << res->errors;
+    throw NormalizeIterException(msg.str());
+  }
 
   auto outputs_shape = OutputShape();
   Array<PrimExpr> outputs;
@@ -278,10 +296,170 @@ std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   return {Layout(outputs_shape, backward_index), level};
 }
 
+Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
+                           arith::Analyzer *analyzer) const {
+  // Fast path: if shape is the same, return the original layout
+  if (StructuralEqual()(InputShape(), shape)) {
+    return ffi::GetRef<Layout>(this);
+  }
+
+  // Step 1. Prove the product of InputShape is equal to the product of shape
+  PrimExpr input_shape_product = Integer(1);
+  for (const auto &dim : InputShape()) {
+    input_shape_product *= dim;
+  }
+  PrimExpr shape_product = Integer(1);
+  for (const auto &dim : shape) {
+    shape_product *= dim;
+  }
+
+  // Use provided analyzer if present, otherwise a local fallback to avoid
+  // potential null dereference paths flagged by static analysis.
+  arith::Analyzer fallback_analyzer;
+  arith::Analyzer *az = analyzer ? analyzer : &fallback_analyzer;
+  ICHECK(az->CanProveEqual(input_shape_product, shape_product))
+      << "InputShape() = " << InputShape() << " shape = " << shape;
+
+  // Step 2. Create new forward indices by reshaping
+  // For each dimension in the new shape, we create a placeholder variable
+  Array<Var> new_vars;
+  new_vars.reserve(shape.size());
+  for (size_t i = 0; i < shape.size(); ++i) {
+    auto var = Var(std::string("n_") + std::to_string(i), shape[i].dtype());
+    az->Bind(var, Range(0, shape[i]));
+    new_vars.push_back(var);
+  }
+  // Step 3. Compute the flat index from new shape indices
+  // flat_index = k0 * (s1 * s2 * ...) + k1 * (s2 * s3 * ...) + ... + kn
+  PrimExpr flat_index = Integer(0);
+  for (size_t i = 0; i < shape.size(); ++i) {
+    PrimExpr stride = Integer(1);
+    for (size_t j = i + 1; j < shape.size(); ++j) {
+      stride = stride * shape[j];
+    }
+    flat_index = flat_index + new_vars[i] * stride;
+  }
+  // Step 4. Convert flat index back to original shape indices
+  // For original shape [s0, s1, ..., sm]:
+  // i0 = flat_index // (s1 * s2 * ... * sm)
+  // i1 = (flat_index % (s1 * s2 * ... * sm)) // (s2 * s3 * ... * sm)
+  // ...
+  Array<PrimExpr> original_indices;
+  PrimExpr remaining = flat_index;
+  for (size_t i = 0; i < InputShape().size(); ++i) {
+    PrimExpr stride = Integer(1);
+    for (size_t j = i + 1; j < InputShape().size(); ++j) {
+      stride = stride * InputShape()[j];
+    }
+    original_indices.push_back(floordiv(remaining, stride));
+    remaining = floormod(remaining, stride);
+  }
+  // Step 5. Substitute original indices into forward_index_
+  Array<PrimExpr> new_forward_index;
+  for (const auto &fwd_expr : forward_index_) {
+    PrimExpr substituted = fwd_expr;
+    // Replace each InputPlaceholder(i) with original_indices[i]
+    for (size_t i = 0; i < InputShape().size(); ++i) {
+      substituted =
+          Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
+    }
+    new_forward_index.push_back(az->Simplify(substituted));
+  }
+  for (size_t i = 0; i < new_vars.size(); ++i) {
+    new_forward_index =
+        Substitute(new_forward_index, {{new_vars[i], InputPlaceholder(i)}});
+  }
+  return Layout(shape, new_forward_index);
+}
+
+Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
+                             arith::Analyzer *analyzer) const {
+  // Fast path: identical input shape, return self
+  if (StructuralEqual()(InputShape(), shape)) {
+    return ffi::GetRef<Fragment>(this);
+  }
+
+  // 1) Prove total number of elements remains the same
+  PrimExpr input_prod = Integer(1);
+  for (const auto &d : InputShape())
+    input_prod *= d;
+  PrimExpr shape_prod = Integer(1);
+  for (const auto &d : shape)
+    shape_prod *= d;
+
+  // Use provided analyzer if present, otherwise a local fallback.
+  arith::Analyzer fallback_analyzer;
+  arith::Analyzer *az = analyzer ? analyzer : &fallback_analyzer;
+  ICHECK(az->CanProveEqual(input_prod, shape_prod))
+      << "InputShape() = " << InputShape() << " shape = " << shape
+      << " input fragment layout is = " << DebugOutput();
+
+  // 2) Build flat index from new-shape indices
+  Array<Var> new_vars;
+  new_vars.reserve(shape.size());
+  for (size_t i = 0; i < shape.size(); ++i) {
+    // Cannot use InputPlaceholder(i) here, because it would cause name capture
+    // (variable capture) with InputPlaceholder(i) in upper scopes. Therefore,
+    // we must create a fresh variable here to avoid confusion when
+    // substituting.
+    auto var = Var(std::string("n_") + std::to_string(i), shape[i].dtype());
+    az->Bind(var, Range(0, shape[i]));
+    new_vars.push_back(var);
+  }
+
+  PrimExpr flat = Integer(0);
+  for (size_t i = 0; i < shape.size(); ++i) {
+    PrimExpr stride = Integer(1);
+    for (size_t j = i + 1; j < shape.size(); ++j)
+      stride = stride * shape[j];
+    flat = flat + new_vars[i] * stride;
+  }
+  // 3) Recover original indices from flat index
+  Array<PrimExpr> orig_indices;
+  PrimExpr remain = flat;
+  for (size_t i = 0; i < InputShape().size(); ++i) {
+    PrimExpr stride = Integer(1);
+    for (size_t j = i + 1; j < InputShape().size(); ++j)
+      stride = stride * InputShape()[j];
+    orig_indices.push_back(floordiv(remain, stride));
+    remain = floormod(remain, stride);
+  }
+  // 4) Substitute old placeholders with expressions of new indices
+  Array<PrimExpr> new_forward_index;
+  for (const auto &e : forward_index_) {
+    PrimExpr cur = e;
+    for (size_t i = 0; i < InputShape().size(); ++i) {
+      cur = Substitute(cur, {{InputPlaceholder(i), orig_indices[i]}});
+    }
+    cur = az->Simplify(cur);
+    new_forward_index.push_back(cur);
+  }
+  PrimExpr new_forward_thread = forward_thread_;
+  for (size_t i = 0; i < InputShape().size(); ++i) {
+    new_forward_thread = Substitute(new_forward_thread,
+                                    {{InputPlaceholder(i), orig_indices[i]}});
+  }
+  new_forward_thread = az->Simplify(new_forward_thread);
+  for (size_t i = 0; i < new_vars.size(); ++i) {
+    auto var = new_vars[i];
+    new_forward_index =
+        Substitute(new_forward_index, {{var, InputPlaceholder(i)}});
+    new_forward_thread =
+        Substitute(new_forward_thread, {{var, InputPlaceholder(i)}});
+  }
+  Fragment reshaped(shape, new_forward_index, new_forward_thread,
+                    ReplicateExtent(), std::nullopt);
+  if (thread_range_.defined()) {
+    reshaped = reshaped->BindThreadRange(thread_range_);
+  }
+  return reshaped;
+}
+
 Layout LayoutNode::Inverse() const {
   auto inverse_result = InverseWithLevel();
   return std::move(inverse_result.first);
 }
+
 PrimExpr infer_fragment_index(const Map<Var, Range> &input_iters,
                               const PrimExpr &forward_thread,
                               arith::Analyzer *analyzer) {
@@ -539,6 +717,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                return makeGemmABLayoutHopper(stride, continuous, continuous,
                                              element_size, k_inner);
              }
+           })
+      .def("tl.make_volta_swizzled_layout",
+           [](int stride, int mat_continuous, bool is_a, bool k_inner) {
+             return makeGemmVoltaABLayout(stride, mat_continuous, is_a,
+                                          k_inner);
            })
       .def("tl.make_wgmma_swizzled_layout",
            [](int stride, int mat_continuous, int continuity, int element_size,

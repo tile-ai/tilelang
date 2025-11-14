@@ -82,9 +82,11 @@ public:
 class ReduceOpNode : public TileOperatorNode {
 public:
   tir::Buffer src, dst; ///< Source and destination buffers
-  int dim;              ///< Dimension to reduce along
-  ReduceType type;      ///< Type of reduction operation
-  bool clear;           ///< Whether to clear destination before reduction
+  // Optional: keep the original regions used to construct this op
+  BufferRegion srcRegion_, dstRegion_;
+  int dim;         ///< Dimension to reduce along
+  ReduceType type; ///< Type of reduction operation
+  bool clear;      ///< Whether to clear destination before reduction
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceOp", ReduceOpNode,
                                     TileOperatorNode);
@@ -94,6 +96,8 @@ public:
     refl::ObjectDef<ReduceOpNode>()
         .def_ro("src", &ReduceOpNode::src)
         .def_ro("dst", &ReduceOpNode::dst)
+        .def_ro("srcRegion", &ReduceOpNode::srcRegion_)
+        .def_ro("dstRegion", &ReduceOpNode::dstRegion_)
         .def_ro("dim", &ReduceOpNode::dim)
         .def_ro("type", &ReduceOpNode::type)
         .def_ro("clear", &ReduceOpNode::clear);

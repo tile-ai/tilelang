@@ -162,13 +162,10 @@ def flashattn(
             end = T.min(
                 T.ceildiv(seq_kv, block_N), T.ceildiv((bx + 1) * block_M + past_len, block_N))
 
-            start = T.alloc_local([1], 'int32')
-            if window_size is not None:
-                start[0] = T.max(0, (bx * block_M + past_len - window_size) // block_N)
-            else:
-                start[0] = 0
+            start = T.max(0, (bx * block_M + past_len - window_size) //
+                          block_N) if window_size is not None else 0
 
-            for k in T.Pipelined(start[0], end, num_stages=num_stages):
+            for k in T.Pipelined(start, end, num_stages=num_stages):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
                         logsum)
