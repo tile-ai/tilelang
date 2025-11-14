@@ -1,6 +1,16 @@
 """NVRTC Source Wrapper for TileLang.
 
-This module provides C++ kernel launcher generation for the NVRTC backend.
+Generates Python runtime code for launching CUDA kernels compiled via NVRTC.
+
+Why this exists:
+- NVRTC compiles kernels at runtime, needs Python launch code (not C++)
+- TMA descriptors must be initialized once per unique buffer, not per kernel
+- L2 cache policies require explicit CUDA Driver API setup/teardown
+
+Key design:
+- Two-pass generation: collect all descriptors first, then generate launches
+- Dict-based deduplication ensures TMA descriptors created only once
+- Generates pure Python using cuda.bindings.driver for zero C++ dependency
 """
 from __future__ import annotations
 from typing import Any
@@ -189,8 +199,19 @@ KERNEL_LAUNCH_FUNC_PY = """
 
 
 class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
-    """
-    A wrapper class for the TileLang NVRTC backend.
+    """NVRTC backend wrapper: generates Python kernel launch code.
+
+    Core responsibility: transform TVM IRModule into executable Python function
+    that initializes resources (TMA descriptors, L2 cache) and launches kernels
+    via CUDA Driver API.
+
+    Data flow:
+        IRModule → collect kernel metadata → deduplicate resources →
+        generate Python code → executable function
+
+    Why Python generation instead of C++:
+        NVRTC workflow requires runtime compilation, Python is the natural host.
+        Using cuda.bindings.driver eliminates C++ wrapper complexity.
     """
 
     _TYPE_MAP = {
@@ -221,6 +242,16 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                  device_mod: IRModule | None = None,
                  host_mod: IRModule | None = None,
                  pass_configs: dict[str, Any] | None = None):
+        """Initialize NVRTC wrapper with compiled IR modules.
+
+        Args:
+            scheduled_ir_module: TVM IR after scheduling passes
+            source: Generated CUDA C++ source code
+            target: Compilation target (should be NVRTC-compatible)
+            device_mod: Device-side IR module (kernel functions)
+            host_mod: Host-side IR module (launch logic)
+            pass_configs: Optional compiler pass configurations
+        """
         super().__init__(scheduled_ir_module, source, target, device_mod, host_mod, pass_configs)
 
     @property
@@ -236,9 +267,34 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         self._generated_host_func = value
 
     def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
+        """Convert TVM expression to Python string, ignoring casts.
+
+        Casts are noise in generated Python code - Python is dynamically typed.
+        """
         return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True)
 
     def create_dispatch_func(self, code, function_informations):
+        """Generate Python dispatch function that launches multiple CUDA kernels.
+
+        Why two-pass design:
+            Pass 1: Collect TMA descriptors from all kernels into shared dicts
+            Pass 2: Generate code - descriptors first (deduplicated), then launches
+
+            Single-pass would create duplicate descriptors for each kernel.
+            Dict naturally deduplicates by descriptor name.
+
+        Args:
+            code: CUDA C++ source containing kernel declarations
+            function_informations: Dict mapping kernel names to metadata
+                (grid/block dims, params, shared memory size)
+
+        Returns:
+            Python source code defining a call() function that:
+            1. Initializes L2 cache policies (if needed)
+            2. Creates TMA descriptors once per unique buffer
+            3. Launches each kernel with cuLaunchKernelEx
+            4. Resets L2 cache policies (if needed)
+        """
         # Extract the set of dynamic symbolic names used in the primary function
         dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
 
@@ -363,7 +419,18 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         return host_func
 
     def generate_l2_persistent_map(self, function_name: str) -> str:
-        """Generate L2 persistent cache mapping code for Python NVRTC backend."""
+        """Generate Python code to configure L2 cache persistence for a kernel.
+
+        L2 persistence pins frequently-accessed data in L2 cache to reduce
+        memory bandwidth. Requires explicit setup via CUDA stream attributes.
+
+        Args:
+            function_name: Kernel name to check for L2 persistence config
+
+        Returns:
+            Python code that sets stream access policy window, or empty
+            string if no L2 persistence configured for this kernel.
+        """
         if function_name not in self.l2_persistent_map:
             return ""
         init_l2_persistent_map = ""
@@ -384,6 +451,20 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
     def generate_tma_descriptor_args(self, desc_name_map: dict[str, str],
                                      desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
+        """Generate Python code to initialize TMA descriptors.
+
+        TMA (Tensor Memory Accelerator) descriptors are opaque CUDA objects
+        that describe memory layout for async copies. Must be created on host
+        before kernel launch.
+
+        Args:
+            desc_name_map: Maps descriptor variable names to buffer names
+            desc_name_var_map: Maps descriptor names to TVM variables
+
+        Returns:
+            Python code that calls cuTensorMapEncodeTiled/Im2col for each
+            unique descriptor. Empty string if no TMA descriptors needed.
+        """
         tma_descriptor_init = ""
         if self.tma_descriptor_args is None:
             return tma_descriptor_init
@@ -415,6 +496,19 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         return tma_descriptor_init
 
     def update_lib_code(self, code: str):
+        """Update library code and generate host dispatch function.
+
+        Entry point for code generation. Walks the host IR to extract kernel
+        call sites, matches them with device kernels, then generates Python
+        dispatch code via create_dispatch_func().
+
+        Args:
+            code: CUDA C++ source code containing compiled kernels
+
+        Returns:
+            The same code string (stored in self.lib_code). Side effect:
+            sets self.host_func to generated Python dispatcher.
+        """
         # Update the library code with the given code string
         self.lib_code = code
 
@@ -461,4 +555,9 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         return self.lib_code
 
     def get_stream_type(self) -> dict[str, str]:
+        """Return stream parameter spec for Python signature.
+
+        NVRTC backend uses raw int for stream handle (not cudaStream_t pointer).
+        Default to 0 (NULL stream) for convenience.
+        """
         return {"name": "stream=0", "type": "int"}

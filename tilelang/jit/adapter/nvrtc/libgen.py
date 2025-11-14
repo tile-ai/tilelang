@@ -1,3 +1,18 @@
+"""NVRTC Library Generator for TileLang.
+
+Compiles CUDA kernels at runtime using NVRTC and manages resulting binaries.
+
+Why NVRTC instead of nvcc:
+- No offline compilation step, enables true JIT workflows
+- Works without CUDA toolkit installed (only requires driver)
+- Allows kernel specialization based on runtime parameters
+
+Key responsibilities:
+- Compile CUDA source to cubin using NVRTC API
+- Generate accompanying Python launcher code
+- Load compiled cubin and extract kernel handles
+- Manage library lifecycle (load/unload)
+"""
 from __future__ import annotations
 import importlib
 import logging
@@ -22,11 +37,38 @@ except ImportError:
 
 
 class NVRTCLibraryGenerator(LibraryGenerator):
+    """Runtime compiler and loader for NVRTC-compiled CUDA kernels.
+
+    Lifecycle:
+        1. compile_lib(): CUDA source → cubin + Python launcher
+        2. load_lib(): cubin → loaded library + kernel handles
+        3. pymodule.call(): Execute kernels via Python launcher
+        4. __del__: Cleanup (unload library)
+
+    Why three files (cu, cubin, py):
+        - .cu: Source for debugging, kept in temp directory
+        - .cubin: Compiled binary, loaded by CUDA driver
+        - .py: Launch code, imported as Python module
+
+    Attributes:
+        host_func: Generated Python launch code (from wrapper)
+        culib: CUDA library handle (CUlibrary)
+        pymodule: Imported Python module containing call() function
+    """
     host_func: str | None = None
     culib = None
     pymodule = None
 
     def __init__(self, target: Target, verbose: bool = False):
+        """Initialize NVRTC library generator.
+
+        Args:
+            target: Compilation target (must be CUDA)
+            verbose: Enable verbose compilation output
+
+        Raises:
+            ImportError: If cuda-python is not installed
+        """
         if not is_nvrtc_available:
             raise ImportError("cuda-python is not available, nvrtc backend cannot be used. "
                               "Please install cuda-python via `pip install cuda-python` "
@@ -35,15 +77,51 @@ class NVRTCLibraryGenerator(LibraryGenerator):
 
     @staticmethod
     def import_from_file(module_name, file_path):
+        """Dynamically import Python module from file path.
+
+        Standard importlib pattern for loading modules outside sys.path.
+        Used to import generated .py launcher code from temp directory.
+
+        Args:
+            module_name: Name to assign to imported module
+            file_path: Absolute path to .py file
+
+        Returns:
+            Imported module object
+        """
         spec = importlib.util.spec_from_file_location(module_name, file_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
 
     def update_host_func(self, host_func: str):
+        """Store generated Python launch code for later file write.
+
+        Called by adapter after wrapper generates the launch code.
+        This is the bridge between code generation and file output.
+
+        Args:
+            host_func: Python source code containing call() function
+        """
         self.host_func = host_func
 
     def load_lib(self, lib_path: str | None = None):
+        """Load compiled cubin and Python launcher into memory.
+
+        Why two loads:
+            1. Import Python module for launch logic
+            2. Load cubin via CUDA Driver API for kernel handles
+
+        Context synchronization: CUDA context must be current before loading.
+        If not, use torch.cuda.synchronize() to establish context.
+
+        Args:
+            lib_path: Path to .cubin file (optional, uses self.libpath if None)
+
+        Side effects:
+            - Sets self.pymodule to imported Python module
+            - Sets self.culib to CUDA library handle
+        """
         if lib_path is None:
             lib_path = self.libpath
         else:
@@ -63,6 +141,28 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {lib_path}"
 
     def compile_lib(self, timeout: float = None):
+        """Compile CUDA source to cubin using NVRTC and write output files.
+
+        Output artifacts (all in temp directory):
+            - .cu: Source code (for debugging)
+            - .cubin: Compiled binary (for execution)
+            - .py: Python launcher (for calling kernels)
+
+        Include paths setup:
+            - TileLang templates: kernel primitives and utilities
+            - CUTLASS: optimized GEMM/tensor ops
+            - CUDA headers: driver/runtime APIs
+
+        Why architecture detection:
+            ARM64 servers (SBSA) have different header paths than x86_64.
+
+        Args:
+            timeout: Compilation timeout in seconds (currently unused)
+
+        Side effects:
+            - Writes .cu, .cubin, .py files to temp directory
+            - Sets self.srcpath, self.libpath, self.pypath
+        """
         target = self.target
         verbose = self.verbose
         if is_cuda_target(target):
@@ -120,6 +220,14 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             raise ValueError(f"Unsupported target: {target}")
 
     def __del__(self):
+        """Cleanup: unload CUDA library when object is destroyed.
+
+        Critical for resource management - CUDA libraries consume GPU memory.
+        Failure to unload is logged but not raised (destructor can't fail).
+
+        Why explicit unload:
+            Python GC doesn't know about GPU resources, must release manually.
+        """
         if self.culib:
             result = cuda.cuLibraryUnload(self.culib)[0]
             if result != cuda.CUresult.CUDA_SUCCESS:
