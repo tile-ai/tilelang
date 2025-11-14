@@ -134,8 +134,6 @@ def matmu_jit_kernel(
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
-    import tilelang.language as T
-
     @T.prim_func
     def main(
             A: T.Tensor(A_shape, in_dtype),
@@ -404,6 +402,131 @@ def test_nvrtc_dynamic_shape():
     run_nvrtc_dynamic_shape(
         T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16",
         "float16", 128, 256, 32, 2)
+
+
+def check_hopper():
+    if not torch.cuda.is_available():
+        return False
+    props = torch.cuda.get_device_properties(0)
+    compute_capability = props.major, props.minor
+    return compute_capability == (9, 0)
+
+
+def convolution_im2col(N,
+                       C,
+                       H,
+                       W,
+                       F,
+                       K,
+                       S,
+                       D,
+                       P,
+                       block_M,
+                       block_N,
+                       block_K,
+                       num_stages,
+                       threads,
+                       dtype="float16",
+                       accum_dtype="float"):
+    KH, KW = K, K
+    OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
+    OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
+
+    @T.prim_func
+    def main(
+            data: T.Tensor((N, H, W, C), dtype),
+            kernel: T.Tensor((KH, KW, C, F), dtype),
+            out: T.Tensor((N, OH, OW, F), dtype),
+    ):
+        with T.Kernel(
+                T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M),
+                threads=threads) as (bx, by):
+            data_shared = T.alloc_shared((block_M, block_K), dtype)
+            kernel_shared = T.alloc_shared((block_K, block_N), dtype)
+            out_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            out_shared = T.alloc_shared((block_M, block_N), dtype)
+
+            kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)
+            out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
+
+            T.annotate_layout({
+                out_shared: tilelang.layout.make_swizzled_layout(out_shared),
+                data_shared: tilelang.layout.make_swizzled_layout(data_shared),
+                kernel_shared: tilelang.layout.make_swizzled_layout(kernel_shared),
+            })
+
+            T.clear(out_local)
+            for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
+                T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)
+                T.copy(kernel_flat[k_iter * block_K, bx * block_N], kernel_shared)
+                T.gemm(data_shared, kernel_shared, out_local)
+
+            T.copy(out_local, out_shared)
+            T.copy(out_shared, out_flat[by * block_M, bx * block_N])
+
+    return main
+
+
+def run_nvrtc_im2col_tma_desc(N,
+                              C,
+                              H,
+                              W,
+                              F,
+                              K,
+                              S,
+                              D,
+                              P,
+                              block_M,
+                              block_N,
+                              block_K,
+                              num_stages=3,
+                              num_threads=256):
+    """Test im2col TMA descriptor functionality in NVRTC backend."""
+    program = convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages,
+                                 num_threads)
+
+    conv_kernel = tilelang.compile(program, out_idx=-1, execution_backend="nvrtc")
+
+    a = torch.randn(N, H, W, C).cuda().half()
+    b = torch.randn(K, K, C, F).cuda().half()
+
+    out_c = conv_kernel(a, b)
+
+    # Reference implementation using torch.conv2d
+    def ref_program(A, B):
+        A = A.permute(0, 3, 1, 2)  # N, H, W, C -> N, C, H, W
+        B = B.permute(3, 2, 0, 1)  # H, W, C, F -> F, C, H, W
+        C = torch.conv2d(A, B, stride=S, padding=P, dilation=D)
+        C = C.permute(0, 2, 3, 1)  # N, C, H, W -> N, H, W, C
+        return C
+
+    ref_c = ref_program(a, b)
+    tilelang.testing.torch_assert_close(
+        out_c, ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+
+
+def test_nvrtc_im2col_tma_desc():
+    """Test im2col TMA descriptor with NVRTC backend."""
+    if not check_hopper():
+        import pytest
+        pytest.skip("Test requires Hopper GPU (compute capability 9.0)")
+
+    # Small test case for im2col TMA descriptor
+    run_nvrtc_im2col_tma_desc(
+        N=4,
+        C=64,
+        H=32,
+        W=32,
+        F=64,
+        K=3,
+        S=1,
+        D=1,
+        P=1,
+        block_M=64,
+        block_N=128,
+        block_K=32,
+        num_stages=3,
+        num_threads=256)
 
 
 if __name__ == "__main__":

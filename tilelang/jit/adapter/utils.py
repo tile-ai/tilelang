@@ -107,13 +107,16 @@ def get_annotated_mod(
     return dispatch[model_type](mod)
 
 
-def pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: dict[str, str] | None = None) -> str:
+def pythonic_expr(expr: tvm.tir.PrimExpr,
+                  dtype_map: dict[str, str] | None = None,
+                  ignore_cast: bool = False) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
 
     Args:
         expr: The TVM PrimExpr to convert.
-
+        dtype_map: A dictionary mapping data types to their string representations.
+        ignore_cast: Whether to ignore the cast operator and return the string representation of the value without the cast.
     Returns:
         A string representation of the expression.
     """
@@ -158,10 +161,11 @@ def pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: dict[str, str] | None = Non
         elif isinstance(node, tvm.tir.Cast):
             # C-style cast has high precedence
             value_str, _ = node_to_result_map[node.value]
-            if dtype_map is None:
-                s = f"({node.dtype}){value_str}"
+            type_str = node.dtype if dtype_map is None else dtype_map[node.dtype]
+            if not ignore_cast:
+                s = f"({type_str}){value_str}"
             else:
-                s = f"({dtype_map[node.dtype]}){value_str}"
+                s = value_str
             p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
                 node,
