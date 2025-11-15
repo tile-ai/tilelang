@@ -55,7 +55,9 @@ def flashattn(batch,
                 k_idx = k * block_N + j
                 acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
         else:
-            T.clear(acc_s)
+            # We shall fill -inf for OOB positions
+            for i, j in T.Parallel(block_M, block_N):
+                acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_kv, -T.infinity(acc_s.dtype), 0)
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
@@ -226,7 +228,7 @@ if __name__ == "__main__":
     parser.add_argument('--seq_q', type=int, default=256, help='query sequence length')
     parser.add_argument('--seq_kv', type=int, default=256, help='key/value sequence length')
     parser.add_argument('--dim', type=int, default=64, help='dim')
-    parser.add_argument('--is_causal', action='store_true', help='causal')
+    parser.add_argument('--is_causal', action='store_true', help='causal', default=False)
     parser.add_argument('--tune', action='store_true', help='tune configs')
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.is_causal, args.tune)

@@ -96,7 +96,9 @@ def flashattn(batch,
                 acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
                                              -T.infinity(acc_s.dtype))
         else:
-            T.clear(acc_s)
+            for i, j in T.Parallel(block_M, block_N):
+                acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype),
+                                             0)
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro

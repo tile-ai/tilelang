@@ -342,5 +342,23 @@ def test_swap_logic():
     torch.testing.assert_close(data, ref)
 
 
+def test_while_loop():
+
+    @tilelang.jit(out_idx=-1)
+    @T.prim_func
+    def test_while_loop(A: T.Tensor((1,), T.int32)):
+        with T.Kernel(1) as _:
+            i = T.alloc_var(T.int32, 0)
+            sum = T.alloc_var(T.int32)
+            while i < 10:
+                sum += i
+                i += 1
+            A[0] = sum
+
+    ker = test_while_loop()
+    A = ker()
+    assert A[0].item() == sum(range(10)), f"Expected {sum(range(10))}, but got {A[0].item()}"
+
+
 if __name__ == '__main__':
     tilelang.testing.main()
