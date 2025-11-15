@@ -41,7 +41,7 @@ class KernelCache:
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
-    execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc"] = "tvm_ffi"
+    execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "tvm_ffi"
 
     def __new__(cls):
         """
@@ -70,7 +70,7 @@ class KernelCache:
         self,
         func: Callable,
         out_idx: list[int],
-        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "tvm_ffi",
         args=None,
         target: str | Target = "auto",
         target_host: str | Target = None,
@@ -118,7 +118,8 @@ class KernelCache:
         *args,
         target: str | Target = "auto",
         target_host: str | Target = None,
-        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc"] = "tvm_ffi",
+        execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc",
+                                   "torch"] = "auto",
         verbose: bool = False,
         pass_configs: dict = None,
         compile_flags: list[str] | str | None = None,
@@ -136,12 +137,30 @@ class KernelCache:
         Returns:
             JITKernel: The compiled kernel, either freshly compiled or from cache
         """
+        # Normalize target and resolve execution backend before proceeding
+        from tilelang.utils.target import determine_target as _determine_target
+        from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target
+        norm_target = Target(_determine_target(target)) if isinstance(target, str) else target
+        requested_backend = execution_backend
+        execution_backend = resolve_execution_backend(requested_backend, norm_target)
+        if verbose:
+            allowed_now = allowed_backends_for_target(norm_target, include_unavailable=False)
+            # Avoid duplicate logs when caller already resolved explicitly
+            if requested_backend in (None, "auto") or requested_backend != execution_backend:
+                self.logger.info(
+                    "Execution backend resolved -> '%s' (requested='%s', target='%s', allowed: %s)",
+                    execution_backend,
+                    requested_backend,
+                    norm_target.kind.name,
+                    ", ".join(sorted(allowed_now)),
+                )
+
         if not env.is_cache_enabled():
             return JITKernel(
                 func,
                 out_idx=out_idx,
                 execution_backend=execution_backend,
-                target=target,
+                target=norm_target,
                 target_host=target_host,
                 verbose=verbose,
                 pass_configs=pass_configs,
@@ -153,7 +172,7 @@ class KernelCache:
             out_idx=out_idx,
             execution_backend=execution_backend,
             args=args,
-            target=target,
+            target=norm_target,
             target_host=target_host,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
@@ -169,7 +188,7 @@ class KernelCache:
                 self.logger.debug(f"Checking disk cache for kernel {func.attrs['global_symbol']}")
 
             # Then check disk cache
-            kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
+            kernel = self._load_kernel_from_disk(key, norm_target, target_host, out_idx,
                                                  execution_backend, pass_configs, compile_flags,
                                                  func, verbose)
             if kernel is not None:
@@ -187,7 +206,7 @@ class KernelCache:
             func,
             out_idx=out_idx,
             execution_backend=execution_backend,
-            target=target,
+            target=norm_target,
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs,
@@ -348,7 +367,7 @@ class KernelCache:
         target: str | Target = "auto",
         target_host: str | Target = None,
         out_idx: list[int] = None,
-        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "tvm_ffi",
         pass_configs: dict = None,
         compile_flags: list[str] | str | None = None,
         func: Callable = None,

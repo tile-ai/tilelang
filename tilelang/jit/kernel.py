@@ -55,7 +55,7 @@ class JITKernel(Generic[_P, _T]):
         self,
         func: PrimFunc = None,
         out_idx: list[int] | int = None,
-        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "tvm_ffi",
         target: str | Target = "auto",
         target_host: str | Target = None,
         verbose: bool = False,
@@ -72,8 +72,8 @@ class JITKernel(Generic[_P, _T]):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["tvm_ffi", "ctypes", "cython", "nvrtc"], optional
-            Execution backend to use for kernel execution (default: "cython").
+        execution_backend : Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+            Execution backend to use for kernel execution.
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
         target_host : Union[str, Target], optional
@@ -150,7 +150,7 @@ class JITKernel(Generic[_P, _T]):
         target: str | Target,
         target_host: str | Target,
         out_idx: list[int] | int,
-        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc"],
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"],
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):

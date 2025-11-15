@@ -139,8 +139,9 @@ class AutoTuner:
 
     def set_compile_args(self,
                          out_idx: list[int] | int | None = None,
-                         target: Literal['auto', 'cuda', 'hip'] = 'auto',
-                         execution_backend: Literal["tvm_ffi", "ctypes", "cython"] = "tvm_ffi",
+                         target: Literal['auto', 'cuda', 'hip', 'metal'] = 'auto',
+                         execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc",
+                                                    "torch"] = "auto",
                          target_host: str | Target = None,
                          verbose: bool = False,
                          pass_configs: dict[str, Any] | None = None):
@@ -157,10 +158,15 @@ class AutoTuner:
         Returns:
             AutoTuner: Self for method chaining.
         """
+        # Normalize target to a concrete TVM Target and resolve execution backend
+        t = Target(determine_target(target))
+        from tilelang.jit.execution_backend import resolve_execution_backend
+        resolved_backend = resolve_execution_backend(execution_backend, t)
+
         self.compile_args = CompileArgs(
             out_idx=out_idx,
-            target=Target(determine_target(target)),
-            execution_backend=execution_backend,
+            target=t,
+            execution_backend=resolved_backend,
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs)
@@ -708,8 +714,9 @@ def autotune(  # This is the new public interface
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["tvm_ffi", "ctypes", "cython"], optional
-        Backend for kernel execution and argument passing. Defaults to "cython".
+    execution_backend : Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+        Backend for kernel execution and argument passing. Use "auto" to pick a sensible
+        default per target (cuda->tvm_ffi, metal->torch, others->cython).
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.
     pass_configs : Optional[Dict[str, Any]], optional
