@@ -13,7 +13,7 @@ Key design:
 - Generates pure Python using cuda.bindings.driver for zero C++ dependency
 """
 from __future__ import annotations
-from typing import Any
+from typing import Any, ClassVar
 
 from tvm import IRModule
 from tvm.target import Target
@@ -214,7 +214,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         Using cuda.bindings.driver eliminates C++ wrapper complexity.
     """
 
-    _TYPE_MAP = {
+    _TYPE_MAP: ClassVar[dict[str, str]] = {
         "float32": "ctypes.c_float",
         "float16": "ctypes.c_uint16",
         "bfloat16": "ctypes.c_uint16",
@@ -441,8 +441,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             persisting_l2_cache_max_size = get_persisting_l2_cache_max_size()
             try:
                 num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
-            except Exception:
-                # as size_in_bytes maybe a symbolic expression
+            except TypeError:
+                # as size_in_bytes may be a symbolic expression
                 num_bytes = persisting_l2_cache_max_size
             init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC_PY.format(
                 buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes))

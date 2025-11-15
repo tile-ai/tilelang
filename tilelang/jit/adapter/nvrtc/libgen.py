@@ -92,6 +92,8 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             Imported module object
         """
         spec = importlib.util.spec_from_file_location(module_name, file_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to import module from file: {file_path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
@@ -140,9 +142,10 @@ class NVRTCLibraryGenerator(LibraryGenerator):
 
         result, self.culib = cuda.cuLibraryLoadFromFile(
             bytes(lib_path, "utf-8"), [], [], 0, [], [], 0)
-        assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {lib_path}"
+        if result != cuda.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"Failed to load library: {lib_path}, error: {result}")
 
-    def compile_lib(self, timeout: float = None):
+    def compile_lib(self, timeout: float | None = None):
         """Compile CUDA source to cubin using NVRTC and write output files.
 
         Output artifacts (all in temp directory):
@@ -159,7 +162,7 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             ARM64 servers (SBSA) have different header paths than x86_64.
 
         Args:
-            timeout: Compilation timeout in seconds (currently unused)
+            timeout: Compilation timeout in seconds (currently unsupported by NVRTC compiler)
 
         Side effects:
             - Writes .cu, .cubin, .py files to temp directory
@@ -169,7 +172,7 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             libpath = src.name.replace(".cu", ".cubin")
 
             project_root = osp.join(osp.dirname(__file__), "..", "..")
