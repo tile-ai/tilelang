@@ -218,6 +218,9 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             self.srcpath = src.name
             self.libpath = libpath
             self.pypath = src.name.replace(".cu", ".py")
+            if self.host_func is None:
+                raise RuntimeError(
+                    "Host function is not set, please call update_host_func() first.")
             with open(self.pypath, "w") as f:
                 f.write(self.host_func)
         else:
