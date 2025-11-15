@@ -67,14 +67,7 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         Args:
             target: Compilation target (must be CUDA)
             verbose: Enable verbose compilation output
-
-        Raises:
-            ImportError: If cuda-python is not installed
         """
-        if not is_nvrtc_available:
-            raise ImportError("cuda-python is not available, nvrtc backend cannot be used. "
-                              "Please install cuda-python via `pip install cuda-python` "
-                              "if you want to use the nvrtc backend.")
         super().__init__(target, verbose)
 
     @staticmethod
