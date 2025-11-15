@@ -8,7 +8,7 @@ def bench_example_gqa_decode():
 
 
 def bench_example_mha_inference():
-    tilelang.tools.bench.process_func(example_mha_inference.main)
+    tilelang.tools.bench.process_func(example_mha_inference.main,BATCH=1, H=32, Q_CTX=128, KV_CTX=2048, D_HEAD=128, causal=False)
 
 
 if globals().get("__name__") == "__main__":

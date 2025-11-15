@@ -1,11 +1,14 @@
 import os
+import re
 import sys
 import inspect
 import time
 import traceback
 import contextlib
 import warnings
+from tabulate import tabulate
 import matplotlib.pyplot as plt
+import importlib.util
 
 __all__ = ["main", "process_func"]
 _RECORDS = []
@@ -67,18 +70,11 @@ def process_func(func, *args, repeat=10, warmup=3, **kwargs):
             stacklevel=2,
         )
 
-
-def analyze_records(records):
+def analyze_records(records, out_dir):
     # Analyze the data and draw a chart
     records.sort(key=lambda x: x[1])
-    name_col_width = max(len(r[0]) for r in records)
-    safe_width = name_col_width + 20
-    print("=" * safe_width)
-    print(f"{'Function':<{name_col_width}} | Avg Latency (ms)")
-    print("-" * safe_width)
-    for name, lat in records:
-        print(f"{name:<{name_col_width}} | {lat:>10.4f}")
-    print("=" * safe_width)
+    headers = ["Functions", "Avg Latency (ms)"]
+    print(tabulate(_RECORDS, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
 
     names = [r[0] for r in records]
     lats = [r[1] for r in records]
@@ -86,9 +82,6 @@ def analyze_records(records):
     plt.bar(names, lats)
     plt.xlabel("Latency (ms)")
     plt.title("Benchmark Results")
-
-    test_file = inspect.getsourcefile(sys._getframe(2))
-    out_dir = os.path.dirname(test_file)
     out_path = os.path.join(out_dir, "bench_result.png")
 
     plt.tight_layout()
@@ -101,6 +94,7 @@ def analyze_records(records):
 def main():
     # Entry point — automatically run all bench_* functions in caller file.
     test_file = inspect.getsourcefile(sys._getframe(1))
+    out_dir = os.path.dirname(test_file)
     module = {}
     with open(test_file) as f:
         exec(f.read(), module)
@@ -108,5 +102,49 @@ def main():
     for name, func in module.items():
         if name.startswith("bench_") and callable(func):
             func()
+   
+    analyze_records(_RECORDS, out_dir)
 
-    analyze_records(_RECORDS)
+
+def bench_all():
+
+    # Load a Python file as a real module (preserves sys.path, __file__, imports)
+    def _load_module(full_path):
+        module_name = os.path.splitext(os.path.basename(full_path))[0]
+        spec = importlib.util.spec_from_file_location(module_name, full_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    examples_root = os.path.abspath(os.path.join(current_dir, "../../examples"))
+
+    bench_funcs = []
+    added_roots = set()
+
+    for root, _, files in os.walk(examples_root):
+        for file_name in files:
+            if re.match(r"^bench_.*\.py$", file_name):
+                full_path = os.path.join(root, file_name)
+
+                # 永久把这个目录加入 sys.path，保证 bench 运行时的 import 正常
+                if root not in added_roots:
+                    sys.path.insert(0, root)
+                    added_roots.add(root)
+
+                mod = _load_module(full_path)
+
+                # 收集该模块内的所有 bench_* 函数
+                for name in dir(mod):
+                    if name.startswith("bench_"):
+                        func = getattr(mod, name)
+                        if callable(func):
+                            bench_funcs.append(func)
+
+    # 依次执行所有 bench_* 函数（内部用 process_func 记录 _RECORDS）
+    for func in bench_funcs:
+        func()
+
+    # 打印最终统计表
+    print(tabulate(_RECORDS, tablefmt="github",
+                   stralign="left", numalign="decimal"))

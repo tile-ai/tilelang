@@ -3,7 +3,7 @@ import example_gemv
 
 
 def bench_example_gemv():
-    tilelang.tools.bench.process_func(example_gemv.main)
+    tilelang.tools.bench.process_func(example_gemv.main,do_bench=False)
 
 
 if globals().get("__name__") == "__main__":

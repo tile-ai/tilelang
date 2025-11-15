@@ -6,19 +6,19 @@ import example_warp_specialize_gemm_softpipe_stage2
 
 
 def bench_example_warp_specialize_gemm_barrierpipe_stage2():
-    tilelang.tools.bench.process_func(example_warp_specialize_gemm_barrierpipe_stage2.main)
+    tilelang.tools.bench.process_func(example_warp_specialize_gemm_barrierpipe_stage2.main,M=1024, N=1024, K=1024)
 
 
 def bench_example_warp_specialize_gemm_copy_0_gemm_1():
-    tilelang.tools.bench.process_func(example_warp_specialize_gemm_copy_0_gemm_1.main)
+    tilelang.tools.bench.process_func(example_warp_specialize_gemm_copy_0_gemm_1.main,M=1024, N=1024, K=1024)
 
 
 def bench_example_warp_specialize_gemm_copy_1_gemm_0():
-    tilelang.tools.bench.process_func(example_warp_specialize_gemm_copy_1_gemm_0.main)
+    tilelang.tools.bench.process_func(example_warp_specialize_gemm_copy_1_gemm_0.main,M=1024, N=1024, K=1024)
 
 
 def bench_example_warp_specialize_gemm_softpipe_stage2():
-    tilelang.tools.bench.process_func(example_warp_specialize_gemm_softpipe_stage2.main)
+    tilelang.tools.bench.process_func(example_warp_specialize_gemm_softpipe_stage2.main,M=1024, N=1024, K=1024)
 
 
 if globals().get("__name__") == "__main__":
