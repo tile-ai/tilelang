@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from tvm.target import Target
-
 
 # Canonical names for execution backends used internally
 _CANONICAL_MAP = {
@@ -90,15 +89,12 @@ def resolve_execution_backend(requested: str | None, target: Target) -> str:
     if req not in allowed_all:
         raise ValueError(
             f"Invalid execution backend '{requested}' for target '{_target_kind(target)}'. "
-            f"Allowed: {_format_options(allowed_all)}. Tip: use execution_backend='auto'."
-        )
+            f"Allowed: {_format_options(allowed_all)}. Tip: use execution_backend='auto'.")
 
     # Promote to availability-aware set for nicer errors (e.g., nvrtc not installed)
     if req not in allowed_avail:
         raise ValueError(
             f"Execution backend '{requested}' requires extra dependencies and is not available now. "
-            f"Try one of: {_format_options(allowed_avail)}."
-        )
+            f"Try one of: {_format_options(allowed_avail)}.")
 
     return req
-
