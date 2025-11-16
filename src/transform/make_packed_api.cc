@@ -436,7 +436,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // zero to keep the generated host stub simple and robust.
   if (ffi::Array<Var> undefined =
           UndefinedVars(func_ptr->body, func_ptr->params);
-      undefined.size() != 0) {
+      !undefined.empty()) {
     for (const Var &v : undefined) {
       DataType t = v->dtype;
       PrimExpr zero = make_zero(t);
