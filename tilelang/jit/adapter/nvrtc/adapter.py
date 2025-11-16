@@ -169,7 +169,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                     dynamic_symbolic_map[shape] = (i, j)
         return dynamic_symbolic_map
 
-    def get_kernel_source(self) -> str | None:
+    def get_kernel_source(self, kernel_only: bool = True) -> str | None:
         """Get the CUDA kernel source code.
 
         Returns
@@ -177,7 +177,10 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         Optional[str]
             The kernel source code, or None if not available
         """
-        return self.device_kernel_source
+        if kernel_only:
+            return self.device_kernel_source
+        else:
+            return self.host_func
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
         """Low-level function to call the compiled CUDA kernel.

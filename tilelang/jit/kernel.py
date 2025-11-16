@@ -437,6 +437,8 @@ class JITKernel(Generic[_P, _T]):
         """
         Returns the source code of the host function.
         """
+        if self.execution_backend in {"ctypes", "cython", "nvrtc", "tvm_ffi"}:
+            return self.adapter.get_host_source()
         assert self.artifact.host_mod is not None, "host_mod is not available"
         return str(self.artifact.host_mod)
 
