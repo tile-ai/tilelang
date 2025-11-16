@@ -292,9 +292,10 @@ def run_test(
                                                                       getattr(torch, state_dtype))
 
     # fla ref
-    h_ref, V_new_ref, final_state_ref = chunk_gated_delta_rule_fwd_h(K, W, U, G, initial_state,
-                                                                     store_final_state, chunk_size,
-                                                                     save_new_value)
+    h_ref, V_new_ref, final_state_ref = chunk_gated_delta_rule_fwd_h(
+        k=K, w=W, u=U, g=G, initial_state=initial_state, output_final_state=store_final_state,
+        chunk_size=chunk_size, save_new_value=save_new_value
+    )
 
     # tilelang
     kernel = tilelang_chunk_gated_delta_rule_fwd_h(B, S, H, DK, DV, input_dtype, output_dtype,
@@ -305,8 +306,10 @@ def run_test(
     # (zhengju) If you want to print the generated cuda code, you can uncomment the following line
     # print("CUDA Code:\n", kernel.get_kernel_source())
 
-    fla_time = do_bench(chunk_gated_delta_rule_fwd_h, K, W, U, G, initial_state, store_final_state,
-                        chunk_size, save_new_value)
+    fla_time = do_bench(
+        chunk_gated_delta_rule_fwd_h,
+        k=K, w=W, u=U, g=G, initial_state=initial_state, output_final_state=store_final_state,
+        chunk_size=chunk_size, save_new_value=save_new_value)
     tilelang_time = do_bench(kernel, K, W, U, G, initial_state)
 
     # check correctness
