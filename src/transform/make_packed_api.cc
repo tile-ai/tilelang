@@ -434,9 +434,10 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // redundant with existing parameterized symbols. Instead of failing the
   // compilation here, conservatively bind any remaining undefined vars to
   // zero to keep the generated host stub simple and robust.
-  if (ffi::Array<Var> undefined = UndefinedVars(func_ptr->body, func_ptr->params);
+  if (ffi::Array<Var> undefined =
+          UndefinedVars(func_ptr->body, func_ptr->params);
       undefined.size() != 0) {
-    for (const Var& v : undefined) {
+    for (const Var &v : undefined) {
       DataType t = v->dtype;
       PrimExpr zero = make_zero(t);
       seq_init.push_back(LetStmt(v, zero, nop));
