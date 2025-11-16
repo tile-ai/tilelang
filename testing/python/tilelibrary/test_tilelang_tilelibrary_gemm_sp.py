@@ -36,9 +36,11 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
             device='cuda')
     else:
         A = randn_semi_sparse(
-            M, K, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
+            M, K, dtype=torch.float32, device='cuda',
+            transposed=trans_A).to(map_torch_type(in_dtype))
         B = torch.randn(
-            (N, K) if trans_B else (K, N), device='cuda', dtype=map_torch_type(in_dtype))
+            (N, K) if trans_B else (K, N), device='cuda',
+            dtype=torch.float32).to(map_torch_type(in_dtype))
     return A, B
 
 
