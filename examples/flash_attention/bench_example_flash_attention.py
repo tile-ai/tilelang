@@ -50,7 +50,12 @@ def bench_example_mha_bwd_bhsd():
 
 def bench_example_mha_bwd_bshd_wgmma_pipelined():
     tilelang.tools.bench.process_func(
-        example_mha_bwd_bshd_wgmma_pipelined.main, BATCH=1, H=32, N_CTX=256, D_HEAD=64, causal=False)
+        example_mha_bwd_bshd_wgmma_pipelined.main,
+        BATCH=1,
+        H=32,
+        N_CTX=256,
+        D_HEAD=64,
+        causal=False)
 
 
 def bench_example_gqa_fwd_bshd_wgmma_pipelined():
