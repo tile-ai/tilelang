@@ -3,7 +3,9 @@ import example_fusedmoe_tilelang
 
 
 def bench_example_fusedmoe_tilelang():
-    tilelang.tools.bench.process_func(example_fusedmoe_tilelang.main,        d_hidden=1024,
+    tilelang.tools.bench.process_func(
+        example_fusedmoe_tilelang.main,
+        d_hidden=1024,
         d_expert=256,
         n_routed_experts=8,
         n_shared_experts=1,

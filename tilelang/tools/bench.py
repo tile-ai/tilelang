@@ -70,11 +70,13 @@ def process_func(func, *args, repeat=10, warmup=3, **kwargs):
             stacklevel=2,
         )
 
+
 def analyze_records(records, out_dir):
     # Analyze the data and draw a chart
     records.sort(key=lambda x: x[1])
     headers = ["Functions", "Avg Latency (ms)"]
-    print(tabulate(_RECORDS, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
+    print(
+        tabulate(_RECORDS, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
 
     names = [r[0] for r in records]
     lats = [r[1] for r in records]
@@ -102,7 +104,7 @@ def main():
     for name, func in module.items():
         if name.startswith("bench_") and callable(func):
             func()
-   
+
     analyze_records(_RECORDS, out_dir)
 
 

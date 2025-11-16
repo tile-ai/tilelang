@@ -3,7 +3,7 @@ import example_vertical_slash_sparse_attn
 
 
 def bench_example_vertical_slash_sparse_attn():
-    tilelang.tools.bench.process_func(example_vertical_slash_sparse_attn.main,argv=[])
+    tilelang.tools.bench.process_func(example_vertical_slash_sparse_attn.main, argv=[])
 
 
 if globals().get("__name__") == "__main__":
