@@ -107,6 +107,7 @@ def main():
 
 
 def bench_all():
+    # Do benchmark for all bench_* functions in examples
 
     # Load a Python file as a real module (preserves sys.path, __file__, imports)
     def _load_module(full_path):
@@ -126,25 +127,16 @@ def bench_all():
         for file_name in files:
             if re.match(r"^bench_.*\.py$", file_name):
                 full_path = os.path.join(root, file_name)
-
-                # 永久把这个目录加入 sys.path，保证 bench 运行时的 import 正常
                 if root not in added_roots:
                     sys.path.insert(0, root)
                     added_roots.add(root)
-
                 mod = _load_module(full_path)
-
-                # 收集该模块内的所有 bench_* 函数
                 for name in dir(mod):
                     if name.startswith("bench_"):
                         func = getattr(mod, name)
                         if callable(func):
                             bench_funcs.append(func)
-
-    # 依次执行所有 bench_* 函数（内部用 process_func 记录 _RECORDS）
     for func in bench_funcs:
         func()
 
-    # 打印最终统计表
-    print(tabulate(_RECORDS, tablefmt="github",
-                   stralign="left", numalign="decimal"))
+    print(tabulate(_RECORDS, tablefmt="github", stralign="left", numalign="decimal"))
