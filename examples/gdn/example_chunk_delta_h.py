@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 from tilelang.engine.callback import register_cuda_postproc_callback  # noqa: F401
 
-from utils import assert_similar
+from test_utils import assert_similar
 
 # (zhengju) We can slightly modify the generated cuda code from tilelang lowering
 # in the debug folder to make the performance better. To enable this callback,

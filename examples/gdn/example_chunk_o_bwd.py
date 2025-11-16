@@ -19,7 +19,7 @@ except ImportError:
     fla = None
 
 import torch
-from utils import *
+from test_utils import assert_similar
 
 torch.random.manual_seed(0)
 # torch.set_printoptions(profile="full")
