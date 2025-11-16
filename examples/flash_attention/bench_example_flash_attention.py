@@ -4,9 +4,9 @@ import example_gqa_bwd_tma_reduce_varlen
 import example_gqa_bwd_wgmma_pipelined
 import example_gqa_fwd_bshd
 import example_gqa_fwd_bshd_wgmma_pipelined
-import example_mha_bwd
+import example_mha_bwd_bshd
 import example_mha_bwd_bhsd
-import example_mha_bwd_wgmma_pipelined
+import example_mha_bwd_bshd_wgmma_pipelined
 import example_mha_fwd_bhsd
 import example_mha_fwd_bhsd_wgmma_pipelined
 import example_mha_fwd_bshd
@@ -26,9 +26,9 @@ def bench_example_gqa_bwd_wgmma_pipelined():
     tilelang.tools.bench.process_func(example_gqa_bwd_wgmma_pipelined.main)
 
 
-def bench_example_mha_bwd():
+def bench_example_mha_bwd_bshd():
     tilelang.tools.bench.process_func(
-        example_mha_bwd.main,
+        example_mha_bwd_bshd.main,
         BATCH=1,
         H=16,
         N_CTX=512,
@@ -48,9 +48,9 @@ def bench_example_mha_bwd_bhsd():
     )
 
 
-def bench_example_mha_bwd_wgmma_pipelined():
+def bench_example_mha_bwd_bshd_wgmma_pipelined():
     tilelang.tools.bench.process_func(
-        example_mha_bwd_wgmma_pipelined.main, BATCH=1, H=32, N_CTX=256, D_HEAD=64, causal=False)
+        example_mha_bwd_bshd_wgmma_pipelined.main, BATCH=1, H=32, N_CTX=256, D_HEAD=64, causal=False)
 
 
 def bench_example_gqa_fwd_bshd_wgmma_pipelined():

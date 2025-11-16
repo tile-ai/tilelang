@@ -6,7 +6,7 @@ on:
       - created
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -98,7 +98,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               tree: [{
-                path: `perf_plot_${context.runId}.png`,
+                path: `bench_${context.runId}.png`,
                 mode: '100644',
                 type: 'blob',
                 sha: blob.data.sha
