@@ -208,7 +208,6 @@ def fast_flashattn(
 
 
 def main(batch: int = 1,
-
          heads: int = 8,
          seq_len: int = 4096,
          dim: int = 128,

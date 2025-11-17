@@ -346,7 +346,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=8, help='Batch size')
     parser.add_argument('--h', type=int, default=32, help='Number of heads')
-    parser.add_argument('--n_ctx', type=int, default=1048, help='Context size')
+    parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
     parser.add_argument('--d_head', type=int, default=64, help='Head dimension')
     parser.add_argument('--causal', type=bool, default=False, help='Causal flag')
     args = parser.parse_args()
