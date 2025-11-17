@@ -4,7 +4,6 @@
 #include "tvm/ir/expr.h"
 #include "tvm/ir/transform.h"
 #include "tvm/node/structural_hash.h"
-#include "tvm/tir/analysis.h"
 #include "tvm/tir/builtin.h"
 #include "tvm/tir/expr.h"
 #include "tvm/tir/stmt.h"
@@ -64,11 +63,6 @@ private:
       auto analyzer = arith::Analyzer{};
       for (const auto &e : items) {
         auto simplified = analyzer.Simplify(GT(e.expr, 0));
-        // Guard against introducing undefined symbolic vars (e.g., pretty
-        // names that are not actually bound in this PrimFunc's params).
-        // If the condition references vars not in scope, skip injecting.
-        if (!tvm::tir::UndefinedVars(simplified).empty())
-          continue;
         std::stringstream ss;
         ss << "Buffer shape should be greater than 0: shape `" << e.expr
            << "` from buffer ";
