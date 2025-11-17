@@ -15,7 +15,7 @@ from tilelang import tvm
 from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
-                                  NVRTCKernelAdapter, TorchDLPackKernelAdapter, MetalKernelAdapter)
+                                  TorchDLPackKernelAdapter, MetalKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
@@ -270,6 +270,7 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags=compile_flags,
             )
         elif execution_backend == "nvrtc":
+            from tilelang.jit.adapter import NVRTCKernelAdapter
             adapter = NVRTCKernelAdapter(
                 params=artifact.params,
                 result_idx=out_idx,
@@ -339,6 +340,7 @@ class JITKernel(Generic[_P, _T]):
                 pass_configs=pass_configs,
             )
         elif execution_backend == "nvrtc":
+            from tilelang.jit.adapter import NVRTCKernelAdapter
             adapter = NVRTCKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
