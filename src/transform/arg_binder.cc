@@ -189,15 +189,12 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
   const DataType tvm_ndim_type = DataType::Int(32);
   const Stmt nop = Evaluate(0);
 
-  // Allow NULL DLTensor* for optional inputs.  When the handle is NULL,
-  // avoid dereferencing it by using expression-level conditionals and
-  // short-circuiting guards in asserts. Cache the null check in a Let-bound
-  // boolean so codegen does not repeat `(handle == NULL)` everywhere.
-  Var is_null_var(arg_name + "_is_null", DataType::Bool());
-  init_nest_.emplace_back(
-      LetStmt(is_null_var,
-              Call(DataType::Bool(), builtin::isnullptr(), {handle}), nop));
-  const PrimExpr &is_null = is_null_var;
+  init_nest_.emplace_back(AssertStmt(
+      !Call(DataType::Bool(), builtin::isnullptr(), {handle}),
+      StringImm(
+          arg_name +
+          " is expected to have non-NULL DLTensor* pointer, but got NULL"),
+      nop));
 
   // dimension checks
   PrimExpr v_ndim = TVMArrayGet(tvm_ndim_type, handle, builtin::kArrNDim);
@@ -225,28 +222,19 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
   ndim_err_msg << arg_name << ".ndim is expected to equal "
                << buffer->shape.size() << ", but got mismatched ndim";
   auto msg = StringImm(ndim_err_msg.str());
-  // Only check ndim when handle is non-NULL (using short-circuit OR)
-  v_ndim = tvm::if_then_else(Not(is_null), v_ndim, make_zero(tvm_ndim_type));
-  init_nest_.emplace_back(AssertStmt(Or(is_null, a_ndim == v_ndim), msg, nop));
+  init_nest_.emplace_back(AssertStmt(a_ndim == v_ndim, msg, nop));
   // type checks
   std::ostringstream type_err_msg;
   // Avoid dumping TIR expressions in error text; just state mismatch.
   // Include expected dtype triplet for clarity.
   type_err_msg << arg_name << ".dtype is expected to be " << buffer->dtype
                << ", but got incompatible dtype";
-  // Guard all dtype field loads by `is_null` using if_then_else
-  PrimExpr v_type_code = tvm::if_then_else(
-      Not(is_null),
-      TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeCode),
-      IntImm(DataType::UInt(8), buffer->dtype.code()));
-  PrimExpr v_type_bits = tvm::if_then_else(
-      Not(is_null),
-      TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeBits),
-      IntImm(DataType::UInt(8), buffer->dtype.bits()));
-  PrimExpr v_type_lanes = tvm::if_then_else(
-      Not(is_null),
-      TVMArrayGet(DataType::UInt(16), handle, builtin::kArrTypeLanes),
-      IntImm(DataType::UInt(16), buffer->dtype.lanes()));
+  PrimExpr v_type_code =
+      TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeCode);
+  PrimExpr v_type_bits =
+      TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeBits);
+  PrimExpr v_type_lanes =
+      TVMArrayGet(DataType::UInt(16), handle, builtin::kArrTypeLanes);
   PrimExpr expect_code = IntImm(DataType::UInt(8), buffer->dtype.code());
   PrimExpr expect_bits = IntImm(DataType::UInt(8), buffer->dtype.bits());
   PrimExpr expect_lanes = IntImm(DataType::UInt(16), buffer->dtype.lanes());
@@ -303,8 +291,7 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
         buffer->dtype == DataType::Int(4) ||
         buffer->dtype == DataType::UInt(4))) {
     auto type_msg = StringImm(type_err_msg.str());
-    // Only check dtype when handle is non-NULL (short-circuit)
-    asserts_.emplace_back(AssertStmt(Or(is_null, cond), type_msg, nop));
+    asserts_.emplace_back(AssertStmt(cond, type_msg, nop));
   }
 
   // shape field
@@ -313,15 +300,9 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
                   tvm_shape_type, shape_handle_name());
   Var v_shape(shape_handle_name(), DataType::Handle());
   def_handle_dtype_.Set(v_shape, make_const(tvm_shape_type, 0));
-  // Shape field pointer, guarded via expression-level if_then_else to avoid
-  // dereference on NULL handle.
-  init_nest_.emplace_back(
-      LetStmt(buf_shape->data,
-              tvm::if_then_else(
-                  Not(is_null),
-                  TVMArrayGet(DataType::Handle(), handle, builtin::kArrShape),
-                  make_zero(DataType::Handle())),
-              nop));
+  init_nest_.emplace_back(LetStmt(
+      buf_shape->data,
+      TVMArrayGet(DataType::Handle(), handle, builtin::kArrShape), nop));
   init_nest_.emplace_back(DeclBuffer(buf_shape, nop));
   for (size_t k = 0; k < buffer->shape.size(); ++k) {
     if (buffer->dtype == DataType::Int(4) ||
@@ -329,28 +310,19 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
         buffer->dtype == DataType::Int(1)) {
       break;
     }
-    PrimExpr shape_val =
-        cast(buffer->shape[k].dtype(),
-             BufferLoad(buf_shape,
-                        {IntImm(DataType::Int(32), static_cast<int>(k))}));
-    Stmt shape_check = AssertStmt(
-        Or(is_null, buffer->shape[k] == shape_val),
-        StringImm(shape_element_name(k) + " mismatch with DLTensor shape"),
-        Evaluate(0));
-    asserts_.emplace_back(shape_check);
+    Bind_(buffer->shape[k],
+          cast(buffer->shape[k].dtype(),
+               BufferLoad(buf_shape, {IntImm(DataType::Int(32), k)})),
+          shape_element_name(k), true);
   }
   // strides field
   Buffer buf_strides =
       decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
                   tvm_shape_type, arg_name + ".strides");
   def_handle_dtype_.Set(buf_strides->data, tir::TypeAnnotation(tvm_shape_type));
-  init_nest_.emplace_back(
-      LetStmt(buf_strides->data,
-              tvm::if_then_else(
-                  Not(is_null),
-                  TVMArrayGet(DataType::Handle(), handle, builtin::kArrStrides),
-                  make_zero(DataType::Handle())),
-              nop));
+  init_nest_.emplace_back(LetStmt(
+      buf_strides->data,
+      TVMArrayGet(DataType::Handle(), handle, builtin::kArrStrides), nop));
   init_nest_.emplace_back(DeclBuffer(buf_strides, nop));
   PrimExpr v_strides_is_null =
       Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
@@ -378,9 +350,6 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
                            const_true(1), conds),
                      stride_msg, Evaluate(0));
       check = IfThenElse(Not(v_strides_is_null), check);
-      // Place inside a SeqStmt so MergeNest can stitch body; short-circuit via
-      // stride-is-null condition already, and the handle null is covered since
-      // buf_strides->data is zero when handle is NULL.
       asserts_.emplace_back(SeqStmt({check, Evaluate(0)}));
     }
   } else if (buffer->buffer_type == kAutoBroadcast) {
@@ -396,13 +365,7 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
           v_strides_is_null, stride_from_shape_cast, explicit_stride);
       value = tvm::if_then_else(buffer->shape[k] == 1, make_zero(stride_dtype),
                                 value);
-      // Only check stride when strides info is provided; the value expression
-      // is safe because buf_strides->data is zero when handle is NULL.
-      Stmt stride_check = AssertStmt(
-          Or(is_null, buffer->strides[k] == value),
-          StringImm(stride_element_name(k) + " mismatch with DLTensor strides"),
-          Evaluate(0));
-      asserts_.emplace_back(stride_check);
+      Bind_(buffer->strides[k], value, stride_element_name(k), true);
       PrimExpr shape_extent = cast(stride_dtype, buffer->shape[k]);
       stride_from_shape =
           analyzer_.Simplify(stride_from_shape_cast * shape_extent);
@@ -419,13 +382,10 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
           stride_dtype, BufferLoad(buf_shape, {IntImm(DataType::Int(32), k)}));
       PrimExpr stride_from_shape_cast = cast(stride_dtype, stride_from_shape);
 
-      PrimExpr stride_val = tvm::if_then_else(
-          v_strides_is_null, stride_from_shape_cast, explicit_stride);
-      Stmt stride_check = AssertStmt(
-          Or(is_null, buffer->strides[k] == stride_val),
-          StringImm(stride_element_name(k) + " mismatch with DLTensor strides"),
-          Evaluate(0));
-      asserts_.emplace_back(stride_check);
+      Bind_(buffer->strides[k],
+            tvm::if_then_else(v_strides_is_null, stride_from_shape_cast,
+                              explicit_stride),
+            stride_element_name(k), true);
 
       stride_from_shape =
           analyzer_.Simplify(stride_from_shape_cast * shape_stride);
@@ -434,91 +394,64 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
   // Byte_offset field.
   int data_bytes = GetVectorBytes(buffer->dtype);
 
-  // Byte_offset and elem_offset: validate with short-circuit guards
   if (const auto *const_offset = buffer->elem_offset.as<IntImmNode>()) {
-    PrimExpr actual_byte_offset = tvm::if_then_else(
-        Not(is_null),
-        TVMArrayGet(DataType::UInt(64), handle, builtin::kArrByteOffset),
-        make_const(DataType::UInt(64), 0));
-    Stmt byte_off_check =
-        AssertStmt(Or(is_null, make_const(DataType::UInt(64),
-                                          const_offset->value * data_bytes) ==
-                                   actual_byte_offset),
-                   StringImm(arg_name + ".byte_offset mismatch"), nop);
-    asserts_.emplace_back(byte_off_check);
+    Bind_(make_const(DataType::UInt(64), const_offset->value * data_bytes),
+          TVMArrayGet(DataType::UInt(64), handle, builtin::kArrByteOffset),
+          arg_name + ".byte_offset", true);
   } else {
-    PrimExpr actual_byte_offset = tvm::if_then_else(
-        Not(is_null),
-        TVMArrayGet(DataType::UInt(64), handle, builtin::kArrByteOffset),
-        make_const(DataType::UInt(64), 0));
-    PrimExpr expect_elem_off =
-        cast(buffer->elem_offset.dtype(),
-             (actual_byte_offset / make_const(DataType::UInt(64), data_bytes)));
-    Stmt elem_off_check =
-        AssertStmt(Or(is_null, buffer->elem_offset == expect_elem_off),
-                   StringImm(arg_name + ".elem_offset mismatch"), nop);
-    asserts_.emplace_back(elem_off_check);
-    if (buffer->offset_factor > 1) {
-      PrimExpr offset = buffer->elem_offset;
-      PrimExpr factor = make_const(offset.dtype(), buffer->offset_factor);
-      PrimExpr zero = make_zero(offset.dtype());
-      Stmt off_factor_check =
-          AssertStmt(Or(is_null, truncmod(offset, factor) == zero),
-                     StringImm(arg_name + ".elem_offset factor mismatch"), nop);
-      asserts_.emplace_back(off_factor_check);
+    if (Bind_(buffer->elem_offset,
+              cast(buffer->elem_offset.dtype(),
+                   (TVMArrayGet(DataType::UInt(64), handle,
+                                builtin::kArrByteOffset) /
+                    make_const(DataType::UInt(64), data_bytes))),
+              arg_name + ".elem_offset", true)) {
+      if (buffer->offset_factor > 1) {
+        PrimExpr offset = buffer->elem_offset;
+        PrimExpr factor = make_const(offset.dtype(), buffer->offset_factor);
+        PrimExpr zero = make_zero(offset.dtype());
+        BinderAddAssert(&analyzer_, truncmod(offset, factor) == zero,
+                        arg_name + ".elem_offset", &asserts_);
+      }
     }
   }
   // device info.
-  // Define device_id from handle when available (so later passes can use it)
-  PrimExpr actual_dev_type = tvm::if_then_else(
-      Not(is_null),
-      TVMArrayGet(DataType::Int(32), handle, builtin::kArrDeviceType),
-      make_zero(DataType::Int(32)));
-  PrimExpr actual_dev_id = tvm::if_then_else(
-      Not(is_null),
-      TVMArrayGet(DataType::Int(32), handle, builtin::kArrDeviceId),
-      make_zero(DataType::Int(32)));
-  // Bind device_id to a safe expression (0 when NULL handle)
-  Bind_(device_id, actual_dev_id, arg_name + ".device_id", true);
-  // Check device_type consistency (device_id equality is implicitly ensured by
-  // binding above)
-  init_nest_.emplace_back(
-      AssertStmt(Or(is_null, device_type == actual_dev_type),
-                 StringImm(arg_name + ".device_type mismatch"), nop));
+  Bind_(device_type,
+        TVMArrayGet(DataType::Int(32), handle, builtin::kArrDeviceType),
+        arg_name + ".device_type", true);
+  Bind_(device_id,
+        TVMArrayGet(DataType::Int(32), handle, builtin::kArrDeviceId),
+        arg_name + ".device_id", true);
 
   // Data field.  Because the validation of the data field may depend
   // on a dynamic size defined by the other DLTensor* parameters, this
   // field must be generated last.
-  // Bind data pointer using expression-level guard to avoid deref on NULL.
-  {
+  if (Bind_(buffer->data,
+            TVMArrayGet(DataType::Handle(), handle, builtin::kArrData),
+            arg_name + ".data", true)) {
     Var vptr(buffer->data);
-    PrimExpr data_ptr = tvm::if_then_else(
-        Not(is_null),
-        TVMArrayGet(DataType::Handle(), handle, builtin::kArrData),
-        make_zero(DataType::Handle()));
-    Bind_(buffer->data, data_ptr, arg_name + ".data", true);
 
     // Check if the data pointer is NULL.  This check is skipped for
-    // size-0 arrays and also skipped when handle itself is NULL.
+    // size-0 arrays, since CUDA provides a NULL pointer for size-zero
+    // allocations.
     auto alloc_size = [&]() -> PrimExpr {
       PrimExpr product = IntImm(buffer->DefaultIndexType(), 1);
-      for (const auto &dim : buffer->shape)
+      for (const auto &dim : buffer->shape) {
         product *= dim;
+      }
       return product;
     }();
     asserts_.emplace_back(AssertStmt(
-        Or(is_null, (alloc_size == 0) ||
-                        !Call(DataType::Bool(), builtin::isnullptr(), {vptr})),
+        alloc_size == 0 ||
+            !Call(DataType::Bool(), builtin::isnullptr(), {vptr}),
         StringImm(arg_name +
                   " is expected to have non-NULL data pointer, but got NULL"),
         nop));
 
+    def_handle_dtype_.Set(vptr, tir::TypeAnnotation(buffer->dtype));
     // mark alignment of external bufs
     init_nest_.emplace_back(
         AttrStmt(vptr, tir::attr::storage_alignment,
                  IntImm(DataType::Int(32), buffer->data_alignment), nop));
-
-    def_handle_dtype_.Set(vptr, tir::TypeAnnotation(buffer->dtype));
   }
 }
 
