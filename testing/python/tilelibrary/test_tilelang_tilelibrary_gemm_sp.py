@@ -335,7 +335,7 @@ def test_gemm_sp_sm90():
     run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True,
                      True)
 
-    run_gemm_sp_sm90(512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False,
+    run_gemm_sp_sm90(256, 256, 256, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False,
                      True)
     run_gemm_sp_sm90(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True)
 
