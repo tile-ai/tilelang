@@ -423,8 +423,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   body = SeqStmt({body, Evaluate(ret(Integer(0)))});
 
   body = MergeNest({seq_init, binder.init_nest(), seq_check, binder.asserts(),
-    arg_buffer_declarations},
-   body);
+                    arg_buffer_declarations},
+                   body);
   func_ptr->body = body;
   func_ptr->params = args;
 
