@@ -428,9 +428,9 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   func_ptr->body = body;
   func_ptr->params = args;
 
-  // ffi::Array<Var> undefined = UndefinedVars(body, func_ptr->params);
-  // ICHECK_EQ(undefined.size(), 0) << "In PrimFunc " << name_hint << " variables " << undefined
-  //                                << " are used, but are not passed in as API arguments";
+  ffi::Array<Var> undefined = UndefinedVars(body, func_ptr->params);
+  ICHECK_EQ(undefined.size(), 0) << "In PrimFunc " << name_hint << " variables " << undefined
+                                 << " are used, but are not passed in as API arguments";
 
   func_ptr->buffer_map = ffi::Map<Var, Buffer>();
   func_ptr->ret_type = PrimType(DataType::Int(32));
