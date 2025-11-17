@@ -446,17 +446,31 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
       core_value = tvm::if_then_else(buffer->shape[k] == 1,
                                      make_zero(stride_dtype), core_value);
 
-      // Bind NULL-safe version to buffer->strides[k]
-      PrimExpr bound_stride_val =
-          tvm::if_then_else(is_null, make_zero(stride_dtype), core_value);
-      Bind_(buffer->strides[k], bound_stride_val, stride_element_name(k), true);
+      // Bind like shape: define var when needed, and only assert when non-NULL
+      PrimExpr lhs;
+      if (const VarNode *v = buffer->strides[k].as<VarNode>()) {
+        auto it = def_map_->find(v);
+        if (it == def_map_->end()) {
+          Var v_arg = Downcast<Var>(buffer->strides[k]);
+          defs_.emplace_back(v_arg);
+          // Let-bind a NULL-safe value to avoid deref when handle is NULL
+          PrimExpr bound_val =
+              tvm::if_then_else(is_null, make_zero(stride_dtype), core_value);
+          (*def_map_)[v] = v_arg;
+          init_nest_.emplace_back(LetStmt(v_arg, bound_val, nop));
+          lhs = v_arg;
+        } else {
+          lhs = it->second;
+        }
+      } else {
+        lhs = buffer->strides[k];
+      }
 
-      // Explicit consistency check for non-NULL case
-      Stmt stride_check = AssertStmt(
-          Or(is_null, buffer->strides[k] == core_value),
-          StringImm(stride_element_name(k) + " mismatch with DLTensor strides"),
-          Evaluate(0));
-      asserts_.emplace_back(stride_check);
+      // Only check equality when handle is non-NULL
+      PrimExpr eq = (lhs == core_value);
+      BinderAddAssert(&analyzer_,
+                      tvm::if_then_else(Not(is_null), eq, const_true(1)),
+                      stride_element_name(k), &asserts_);
 
       PrimExpr shape_extent = cast(stride_dtype, buffer->shape[k]);
       stride_from_shape =
@@ -477,12 +491,27 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
       PrimExpr core_value = tvm::if_then_else(
           v_strides_is_null, stride_from_shape_cast, explicit_stride);
 
-      PrimExpr bound_stride_val =
-          tvm::if_then_else(is_null, make_zero(stride_dtype), core_value);
-      Bind_(buffer->strides[k], bound_stride_val, stride_element_name(k), true);
+      // Bind like shape: define var when needed, and only assert when non-NULL
+      PrimExpr lhs;
+      if (const VarNode *v = buffer->strides[k].as<VarNode>()) {
+        auto it = def_map_->find(v);
+        if (it == def_map_->end()) {
+          Var v_arg = Downcast<Var>(buffer->strides[k]);
+          defs_.emplace_back(v_arg);
+          PrimExpr bound_val =
+              tvm::if_then_else(is_null, make_zero(stride_dtype), core_value);
+          (*def_map_)[v] = v_arg;
+          init_nest_.emplace_back(LetStmt(v_arg, bound_val, nop));
+          lhs = v_arg;
+        } else {
+          lhs = it->second;
+        }
+      } else {
+        lhs = buffer->strides[k];
+      }
 
       Stmt stride_check = AssertStmt(
-          Or(is_null, buffer->strides[k] == core_value),
+          Or(is_null, lhs == core_value),
           StringImm(stride_element_name(k) + " mismatch with DLTensor strides"),
           Evaluate(0));
       asserts_.emplace_back(stride_check);
