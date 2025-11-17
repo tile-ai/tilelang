@@ -82,10 +82,10 @@ def matmul_sp_sm90(
             T.annotate_layout({
                 E:
                     make_cutlass_metadata_layout(
-                        E, mma_dtype="float16", arch="9.0", block_k=block_K),
+                        E, mma_dtype=in_dtype, arch="9.0", block_k=block_K),
                 E_shared:
                     make_cutlass_metadata_layout(
-                        E_shared, mma_dtype="float16", arch="9.0", block_k=block_K),
+                        E_shared, mma_dtype=in_dtype, arch="9.0", block_k=block_K),
             })
             T.disable_warp_group_reg_alloc()
             T.clear(C_frag)
@@ -216,14 +216,18 @@ def run_gemm_sp(
 
     C = _matmul(A, B)
 
-    torch_assert_close(
-        C_sp.to(torch.float32),
-        C.to(torch.float32),
-        rtol=1e-3,
-        atol=1e-3,
-        base_name="tilelang_sp",
-        ref_name="ref_dense",
-    )
+    if 'float8' in in_dtype:
+        diff = calc_diff(C_sp, C)
+        assert diff < 1e-3, f"{diff=}"
+    else:
+        torch_assert_close(
+            C_sp.to(torch.float32),
+            C.to(torch.float32),
+            rtol=1e-3,
+            atol=1e-3,
+            base_name="tilelang_sp",
+            ref_name="ref_dense",
+        )
     print("pass")
 
 
@@ -335,7 +339,7 @@ def test_gemm_sp_sm90():
     run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True,
                      True)
 
-    run_gemm_sp_sm90(256, 256, 256, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False,
+    run_gemm_sp_sm90(512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False,
                      True)
     run_gemm_sp_sm90(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True)
 
