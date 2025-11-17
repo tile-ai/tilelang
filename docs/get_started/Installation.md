@@ -51,7 +51,7 @@ apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-e
 
 Then, clone the tilelang repository and install it using pip. The `-v` flag enables verbose output during the build process.
 
-> **Note**: Use the `--recursive` flag to include necessary submodules. Tilelang currently depends on a customized version of TVM, which is included as a submodule. if you prefer [Building with Existing TVM Installation](#use-existing-tvm), you can skip cloning the TVM submodule (but still need other dependencies).
+> **Note**: Use the `--recursive` flag to include necessary submodules. Tilelang currently depends on a customized version of TVM, which is included as a submodule. If you prefer [Building with Existing TVM Installation](#using-existing-tvm), you can skip cloning the TVM submodule (but still need other dependencies).
 
 ```bash
 git clone --recursive https://github.com/tile-ai/tilelang.git
@@ -204,17 +204,17 @@ TODO
 
 ### IDE Configs
 
-Building tilelang locally will automatically `compile_commands.json` file in `build` dir.
+Building tilelang locally will automatically generate a `compile_commands.json` file in `build` dir.
 VSCode with clangd and [clangd extension](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd) should be able to index that without extra configuration.
 
 ### Compile Cache
 
-The default path of the compile cache is `~/.tilelang/cache`.ﬁ `ccache` will be automatically used if found.
+The default path of the compile cache is `~/.tilelang/cache`. `ccache` will be automatically used if found.
 
 ### Repairing Wheels
 
 If you plan to use your wheel in other environment,
-it's recommend to use auditwheel (on Linux) or delocate (on Darwin)
+it's recommended to use auditwheel (on Linux) or delocate (on Darwin)
 to repair them.
 
 (faster-rebuild-for-developers)=
