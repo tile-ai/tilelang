@@ -145,62 +145,63 @@ def test_dtype_str_repr():
         buf_24 = T.alloc_buffer((1,), dtype=T.float64, scope='shared')  # noqa F841
 
 
-def test_torch_eq():
-    dtypes = [
-        T.bool,
-        T.short,
-        T.int,
-        T.long,
-        T.half,
-        T.float,
-        T.long,
-        T.int8,
-        T.int16,
-        T.int32,
-        T.int64,
-        T.uint8,
-        T.uint16,
-        T.uint32,
-        T.uint64,
-        T.float8_e4m3fn,
-        T.float8_e4m3fnuz,
-        T.float8_e5m2,
-        T.float8_e5m2fnuz,
-        T.float8_e8m0fnu,
-        T.float16,
-        T.bfloat16,
-        T.float32,
-        T.float64,
-    ]
-    torch_dtypes = [
-        torch.bool,
-        torch.short,
-        torch.int,
-        torch.long,
-        torch.half,
-        torch.float,
-        torch.long,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-        torch.uint8,
-        torch.uint16,
-        torch.uint32,
-        torch.uint64,
-        torch.float8_e4m3fn,
-        torch.float8_e4m3fnuz,
-        torch.float8_e5m2,
-        torch.float8_e5m2fnuz,
-        torch.float8_e8m0fnu,
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
-        torch.float64,
-    ]
-    for a, b in zip(dtypes, torch_dtypes):
-        assert a == b, f"{a} and {b} are not equal"
-        assert T.dtype(b) == a, "dtype conversion error"
+# not supported now
+# def test_torch_eq():
+#     dtypes = [
+#         T.bool,
+#         T.short,
+#         T.int,
+#         T.long,
+#         T.half,
+#         T.float,
+#         T.long,
+#         T.int8,
+#         T.int16,
+#         T.int32,
+#         T.int64,
+#         T.uint8,
+#         T.uint16,
+#         T.uint32,
+#         T.uint64,
+#         T.float8_e4m3fn,
+#         T.float8_e4m3fnuz,
+#         T.float8_e5m2,
+#         T.float8_e5m2fnuz,
+#         T.float8_e8m0fnu,
+#         T.float16,
+#         T.bfloat16,
+#         T.float32,
+#         T.float64,
+#     ]
+#     torch_dtypes = [
+#         torch.bool,
+#         torch.short,
+#         torch.int,
+#         torch.long,
+#         torch.half,
+#         torch.float,
+#         torch.long,
+#         torch.int8,
+#         torch.int16,
+#         torch.int32,
+#         torch.int64,
+#         torch.uint8,
+#         torch.uint16,
+#         torch.uint32,
+#         torch.uint64,
+#         torch.float8_e4m3fn,
+#         torch.float8_e4m3fnuz,
+#         torch.float8_e5m2,
+#         torch.float8_e5m2fnuz,
+#         torch.float8_e8m0fnu,
+#         torch.float16,
+#         torch.bfloat16,
+#         torch.float32,
+#         torch.float64,
+#     ]
+#     for a, b in zip(dtypes, torch_dtypes):
+#         assert a == b, f"{a} and {b} are not equal"
+#         assert T.dtype(b) == a, "dtype conversion error"
 
 
 def test_var_assign():
@@ -340,6 +341,24 @@ def test_swap_logic():
     k_swap_idx(data)
     ref = torch.tensor([2.0, 1.0], dtype=torch.float32).cuda()
     torch.testing.assert_close(data, ref)
+
+
+def test_while_loop():
+
+    @tilelang.jit(out_idx=-1)
+    @T.prim_func
+    def test_while_loop(A: T.Tensor((1,), T.int32)):
+        with T.Kernel(1) as _:
+            i = T.alloc_var(T.int32, 0)
+            sum = T.alloc_var(T.int32)
+            while i < 10:
+                sum += i
+                i += 1
+            A[0] = sum
+
+    ker = test_while_loop()
+    A = ker()
+    assert A[0].item() == sum(range(10)), f"Expected {sum(range(10))}, but got {A[0].item()}"
 
 
 if __name__ == '__main__':

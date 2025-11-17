@@ -1,8 +1,11 @@
 #pragma once
 
 #include "common.h"
+
+#ifndef __CUDACC_RTC__
 #include <cstdint>
 #include <type_traits>
+#endif
 
 namespace tl {
 

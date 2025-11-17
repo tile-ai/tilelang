@@ -9,11 +9,12 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
-from tilelang.jit.adapter.libgen import PyLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, check_nvrtc_available
+
+from .libgen import NVRTCLibraryGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_device_module(device_mod)
         self.host_func, self.function_names = self.wrapper.wrap(kernel_global_source)
 
-        self.lib_generator = PyLibraryGenerator(self.target, self.verbose)
+        self.lib_generator = NVRTCLibraryGenerator(self.target, self.verbose)
         self.lib_generator.update_lib_code(self.kernel_global_source)
         self.lib_generator.update_host_func(self.host_func)
         self.lib_generator.assign_compile_flags(compile_flags)
@@ -130,7 +131,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
-        adapter.lib_generator = PyLibraryGenerator(adapter.target, adapter.verbose)
+        adapter.lib_generator = NVRTCLibraryGenerator(adapter.target, adapter.verbose)
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         adapter.pymodule = adapter.lib_generator.pymodule

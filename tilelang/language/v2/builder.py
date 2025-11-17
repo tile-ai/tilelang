@@ -292,7 +292,22 @@ class Builder(BaseBuilder):
 
     def ctx_while(self, cond):
         self.check_continue_break()
-        raise RuntimeError("while loops are not supported in TileLang builder")
+        cond_v = cond()
+        cond_v_unwrap = unwrap_cond(cond_v)
+        if not isinstance(cond_v_unwrap, PrimExpr):
+            if cond_v_unwrap:
+                raise RuntimeError(
+                    f'Infinite while loop detected in TileLang\n'
+                    f'Condition: {cond_v}({type(cond_v)}) => {cond_v_unwrap}({type(cond_v_unwrap)})\n'
+                )
+            else:
+                logger.warning(
+                    'While loop with constant false condition detected in Tilelang, the loop body will never be executed.\n',
+                    f'Condition: {cond_v}({type(cond_v)}) => {cond_v_unwrap}({type(cond_v_unwrap)})\n',
+                    stack_info=True,
+                    stacklevel=2)
+        with self.with_frame(tir.While(cond_v_unwrap)):
+            yield None
 
     def bind(self, name, value, annot=BaseBuilder.empty):
         self.check_continue_break()

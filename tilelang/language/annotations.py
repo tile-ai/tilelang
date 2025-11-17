@@ -5,6 +5,7 @@ from typing import Callable
 
 from tilelang.layout import Layout
 from tvm.script.parser.tir import attr, block_attr
+from tvm.tir import FloatImm
 
 __all__ = [
     "use_swizzle",
@@ -49,5 +50,5 @@ def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
     _l2_hit_ratio_map = {}
     for buffer, hit_ratio in l2_hit_ratio_map.items():
         assert buffer.scope() == "global", "persistent L2 can only be applied to global buffers"
-        _l2_hit_ratio_map[buffer.data] = float(hit_ratio)
+        _l2_hit_ratio_map[buffer.data] = FloatImm("float32", float(hit_ratio))
     return block_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
