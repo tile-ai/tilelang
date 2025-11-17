@@ -364,7 +364,8 @@ def run_nvrtc_dynamic_shape(M,
         num_threads,
     )
 
-    matmul_kernel = tilelang.compile(program, execution_backend="nvrtc")
+    matmul_kernel = tilelang.compile(program, execution_backend="tvm_ffi")
+    print(matmul_kernel.get_host_source())
     if isinstance(M, T.Var):
         M = 1024
     if isinstance(N, T.Var):
@@ -582,4 +583,7 @@ def test_nvrtc_l2_persistent_map():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    tilelang.disable_cache()
+    run_nvrtc_dynamic_shape(
+        T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)

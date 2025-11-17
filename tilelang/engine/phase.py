@@ -207,10 +207,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
     if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
-    print("Before MakePackedAPI")
-    print(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
-    print("Before LowerDeviceKernelLaunch")
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
 
     # Transform threadblock to persistent threadblock

@@ -423,14 +423,16 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   body = SeqStmt({body, Evaluate(ret(Integer(0)))});
 
   body = MergeNest({seq_init, binder.init_nest(), seq_check, binder.asserts(),
-                    arg_buffer_declarations},
-                   body);
+    arg_buffer_declarations},
+   body);
   func_ptr->body = body;
   func_ptr->params = args;
 
   ffi::Array<Var> undefined = UndefinedVars(body, func_ptr->params);
-  ICHECK_EQ(undefined.size(), 0) << "In PrimFunc " << name_hint << " variables " << undefined
-                                 << " are used, but are not passed in as API arguments";
+
+  ICHECK_EQ(undefined.size(), 0)
+      << "In PrimFunc " << name_hint << " variables " << undefined
+      << " are used, but are not passed in as API arguments";
 
   func_ptr->buffer_map = ffi::Map<Var, Buffer>();
   func_ptr->ret_type = PrimType(DataType::Int(32));
