@@ -1,7 +1,7 @@
 import torch
 import tilelang
 from tilelang.utils.sparse import compress_sm90
-from tilelang.layout import make_metadata_layout
+from tilelang.layout import make_cutlass_metadata_layout
 import tilelang.testing
 
 
@@ -40,15 +40,11 @@ def matmul_sp(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
                 E:
-                    make_metadata_layout(
-                        E, mma_dtype="float16", arch="9.0", backend="cutlass", block_k=block_K),
+                    make_cutlass_metadata_layout(
+                        E, mma_dtype="float16", arch="9.0", block_k=block_K),
                 E_shared:
-                    make_metadata_layout(
-                        E_shared,
-                        mma_dtype="float16",
-                        arch="9.0",
-                        backend="cutlass",
-                        block_k=block_K),
+                    make_cutlass_metadata_layout(
+                        E_shared, mma_dtype="float16", arch="9.0", block_k=block_K),
             })
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
