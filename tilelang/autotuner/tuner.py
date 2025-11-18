@@ -235,7 +235,8 @@ class AutoTuner:
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
-    def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> AutotuneResult | None:
+    def generate_cache_key(self, parameters: dict[str, Any],
+                           extra_parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process.
         """
 
