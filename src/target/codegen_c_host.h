@@ -40,19 +40,21 @@ namespace tl {
 // TileLang copy of TVM's CodeGenCHost, under the tl namespace.
 // Inherits from tvm::codegen::CodeGenC.
 class CodeGenCHost : public tvm::codegen::CodeGenC {
- public:
+public:
   CodeGenCHost();
-  void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl, std::string target_str,
-            const std::unordered_set<std::string>& devices);
+  void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,
+            std::string target_str,
+            const std::unordered_set<std::string> &devices);
 
   void InitGlobalContext();
 
-  void AddFunction(const tvm::GlobalVar& gvar, const tvm::tir::PrimFunc& f) override;
-  void AddFunction(const tvm::GlobalVar& gvar, const tvm::tir::PrimFunc& f,
+  void AddFunction(const tvm::GlobalVar &gvar,
+                   const tvm::tir::PrimFunc &f) override;
+  void AddFunction(const tvm::GlobalVar &gvar, const tvm::tir::PrimFunc &f,
                    bool emit_fwd_func_decl);
   /*!
-   * \brief Add functions from the (unordered) range to the current module in a deterministic
-   * order. This helps with debugging.
+   * \brief Add functions from the (unordered) range to the current module in a
+   * deterministic order. This helps with debugging.
    *
    * \param functions A vector of unordered range of current module.
    */
@@ -61,25 +63,32 @@ class CodeGenCHost : public tvm::codegen::CodeGenC {
   void DefineModuleName();
 
   using tvm::codegen::CodeGenC::PrintType;
-  void PrintType(tvm::DataType t, std::ostream& os) final;  // NOLINT(*)
-  void PrintFuncPrefix(std::ostream& os) final;              // NOLINT(*)
+  void PrintType(tvm::DataType t, std::ostream &os) final; // NOLINT(*)
+  void PrintFuncPrefix(std::ostream &os) final;            // NOLINT(*)
 
   // overload visitor functions
-  void VisitExpr_(const tvm::tir::BroadcastNode* op, std::ostream& os) final;  // NOLINT(*)
-  void VisitExpr_(const tvm::tir::CallNode* op, std::ostream& os) override;    // NOLINT(*)
+  void VisitExpr_(const tvm::tir::BroadcastNode *op,
+                  std::ostream &os) final; // NOLINT(*)
+  void VisitExpr_(const tvm::tir::CallNode *op,
+                  std::ostream &os) override; // NOLINT(*)
   // overload min and max to use the ternary operator, so we don't rely on the
   // standard library implementations
-  void VisitExpr_(const tvm::tir::MinNode* op, std::ostream& os) final;  // NOLINT(*)
-  void VisitExpr_(const tvm::tir::MaxNode* op, std::ostream& os) final;  // NOLINT(*)
+  void VisitExpr_(const tvm::tir::MinNode *op,
+                  std::ostream &os) final; // NOLINT(*)
+  void VisitExpr_(const tvm::tir::MaxNode *op,
+                  std::ostream &os) final; // NOLINT(*)
 
-  void VisitStmt_(const tvm::tir::AssertStmtNode* op) final;  // NOLINT(*)
+  void VisitStmt_(const tvm::tir::AssertStmtNode *op) final; // NOLINT(*)
 
-  void GenerateForwardFunctionDeclarations(tvm::ffi::String global_symbol,
-                                           const tvm::ffi::Array<tvm::Type>& arg_types,
-                                           const tvm::Type& ret_type) override;
-  tvm::ffi::Array<tvm::ffi::String> GetFunctionNames() { return function_names_; }
+  void GenerateForwardFunctionDeclarations(
+      tvm::ffi::String global_symbol,
+      const tvm::ffi::Array<tvm::Type> &arg_types,
+      const tvm::Type &ret_type) override;
+  tvm::ffi::Array<tvm::ffi::String> GetFunctionNames() {
+    return function_names_;
+  }
 
- private:
+private:
   std::string module_name_;
   /* \brief mapping global packed func to the unique name */
   std::unordered_map<std::string, std::string> declared_globals_;
@@ -87,14 +96,16 @@ class CodeGenCHost : public tvm::codegen::CodeGenC {
   tvm::ffi::Array<tvm::ffi::String> function_names_;
   /*! \brief whether to emit asserts in the resulting C code */
   bool emit_asserts_;
-  /*! \brief whether to emit forwared function declarations in the resulting C code */
+  /*! \brief whether to emit forwared function declarations in the resulting C
+   * code */
   bool emit_fwd_func_decl_;
   /*! \brief whether to generate the entry function if encountered */
   bool has_main_func_ = false;
 
-  std::string GetPackedName(const tvm::tir::CallNode* op);
-  void PrintGetFuncFromBackend(const std::string& func_name, const std::string& packed_func_name);
-  void PrintCallPacked(const tvm::tir::CallNode* op);
+  std::string GetPackedName(const tvm::tir::CallNode *op);
+  void PrintGetFuncFromBackend(const std::string &func_name,
+                               const std::string &packed_func_name);
+  void PrintCallPacked(const tvm::tir::CallNode *op);
   /*!
    * \brief Print ternary conditional operator implementing binary `op`
    * Forces the operands to be in SSA form.
@@ -103,12 +114,11 @@ class CodeGenCHost : public tvm::codegen::CodeGenC {
    * \param os stream reference to print into
    */
   template <typename T>
-  inline void PrintTernaryCondExpr(const T* op, const char* compare,
-                                   std::ostream& os);  // NOLINT(*)
+  inline void PrintTernaryCondExpr(const T *op, const char *compare,
+                                   std::ostream &os); // NOLINT(*)
 };
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
 
-#endif  // TL_TARGET_SOURCE_CODEGEN_C_HOST_H_
-
+#endif // TL_TARGET_SOURCE_CODEGEN_C_HOST_H_

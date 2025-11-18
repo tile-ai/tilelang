@@ -22,9 +22,9 @@
  */
 #include "codegen_c_host.h"
 
+#include <tvm/ffi/container/shape.h>
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ffi/container/shape.h>
 #include <tvm/target/codegen.h>
 
 #include <algorithm>
@@ -43,8 +43,9 @@ CodeGenCHost::CodeGenCHost() {
   module_name_ = name_supply_->FreshName(tvm::ffi::symbol::tvm_ffi_library_ctx);
 }
 
-void CodeGenCHost::Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,
-                        std::string target_str, const std::unordered_set<std::string>& devices) {
+void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
+                        bool emit_fwd_func_decl, std::string target_str,
+                        const std::unordered_set<std::string> &devices) {
   emit_asserts_ = emit_asserts;
   emit_fwd_func_decl_ = emit_fwd_func_decl;
   declared_globals_.clear();
@@ -62,18 +63,24 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_d
 }
 
 void CodeGenCHost::InitGlobalContext() {
-  decl_stream << "void* " << tvm::ffi::symbol::tvm_ffi_library_ctx << " = NULL;\n";
+  decl_stream << "void* " << tvm::ffi::symbol::tvm_ffi_library_ctx
+              << " = NULL;\n";
 }
 
-void CodeGenCHost::DefineModuleName() { decl_stream << "void* " << module_name_ << " = NULL;\n"; }
+void CodeGenCHost::DefineModuleName() {
+  decl_stream << "void* " << module_name_ << " = NULL;\n";
+}
 
-void CodeGenCHost::AddFunction(const tvm::GlobalVar& gvar, const tvm::tir::PrimFunc& func) {
+void CodeGenCHost::AddFunction(const tvm::GlobalVar &gvar,
+                               const tvm::tir::PrimFunc &func) {
   return AddFunction(gvar, func, /*emit_fwd_func_decl=*/false);
 }
 
-void CodeGenCHost::AddFunction(const tvm::GlobalVar& gvar, const tvm::tir::PrimFunc& func,
+void CodeGenCHost::AddFunction(const tvm::GlobalVar &gvar,
+                               const tvm::tir::PrimFunc &func,
                                bool emit_fwd_func_decl) {
-  auto global_symbol = func->GetAttr<tvm::ffi::String>(tvm::attr::kGlobalSymbol);
+  auto global_symbol =
+      func->GetAttr<tvm::ffi::String>(tvm::attr::kGlobalSymbol);
   if (global_symbol) {
     function_names_.push_back(global_symbol.value());
   }
@@ -82,7 +89,8 @@ void CodeGenCHost::AddFunction(const tvm::GlobalVar& gvar, const tvm::tir::PrimF
   tvm::codegen::CodeGenC::AddFunction(gvar, func);
   if (func->HasNonzeroAttr(tvm::tir::attr::kIsEntryFunc) && !has_main_func_) {
     ICHECK(global_symbol.has_value())
-        << "CodeGenCHost: The entry func must have the global_symbol attribute, "
+        << "CodeGenCHost: The entry func must have the global_symbol "
+           "attribute, "
         << "but function " << gvar << " only has attributes " << func->attrs;
     function_names_.push_back(tvm::ffi::symbol::tvm_ffi_main);
     stream << "// CodegenC: NOTE: Auto-generated entry function\n";
@@ -97,13 +105,13 @@ void CodeGenCHost::AddFunction(const tvm::GlobalVar& gvar, const tvm::tir::PrimF
   }
 }
 
-void CodeGenCHost::GenerateForwardFunctionDeclarations(tvm::ffi::String global_symbol,
-                                                       const tvm::ffi::Array<tvm::Type>& arg_types,
-                                                       const tvm::Type& ret_type) {
+void CodeGenCHost::GenerateForwardFunctionDeclarations(
+    tvm::ffi::String global_symbol, const tvm::ffi::Array<tvm::Type> &arg_types,
+    const tvm::Type &ret_type) {
   if (!emit_fwd_func_decl_) {
     return;
   }
-  for (auto& func_already_defined : GetFunctionNames()) {
+  for (auto &func_already_defined : GetFunctionNames()) {
     if (global_symbol == func_already_defined) {
       return;
     }
@@ -120,13 +128,13 @@ void CodeGenCHost::GenerateForwardFunctionDeclarations(tvm::ffi::String global_s
   fwd_decl_stream << ");\n";
 }
 
-void CodeGenCHost::PrintFuncPrefix(std::ostream& os) {  // NOLINT(*)
+void CodeGenCHost::PrintFuncPrefix(std::ostream &os) { // NOLINT(*)
   os << "#ifdef __cplusplus\n"
      << "extern \"C\"\n"
      << "#endif\n";
 }
 
-void CodeGenCHost::PrintType(tvm::DataType t, std::ostream& os) {  // NOLINT(*)
+void CodeGenCHost::PrintType(tvm::DataType t, std::ostream &os) { // NOLINT(*)
   int lanes = t.lanes();
   if (t.is_handle()) {
     ICHECK_EQ(lanes, 1) << "does not support vector types";
@@ -144,20 +152,21 @@ void CodeGenCHost::PrintType(tvm::DataType t, std::ostream& os) {  // NOLINT(*)
   bool fail = false;
   if (t.is_float()) {
     switch (t.bits()) {
-      case 16:
-        os << "half";
-        break;
-      case 32:
-        os << "float";
-        break;
-      case 64:
-        os << "double";
-        break;
-      default:
-        fail = true;
-        break;
+    case 16:
+      os << "half";
+      break;
+    case 32:
+      os << "float";
+      break;
+    case 64:
+      os << "double";
+      break;
+    default:
+      fail = true;
+      break;
     }
-    if (!fail && lanes == 1) return;
+    if (!fail && lanes == 1)
+      return;
     if (!fail && (lanes >= 2 && lanes <= 16)) {
       os << lanes;
       return;
@@ -172,26 +181,27 @@ void CodeGenCHost::PrintType(tvm::DataType t, std::ostream& os) {  // NOLINT(*)
       os << 'u';
     }
     switch (t.bits()) {
-      case 8:
-        os << "int8_t";
-        break;
-      case 16:
-        os << "int16_t";
-        break;
-      case 32:
-        os << "int32_t";
-        break;
-      case 64:
-        os << "int64_t";
-        break;
-      case 1:
-        os << "int32_t";
-        break;
-      default:
-        fail = true;
-        break;
+    case 8:
+      os << "int8_t";
+      break;
+    case 16:
+      os << "int16_t";
+      break;
+    case 32:
+      os << "int32_t";
+      break;
+    case 64:
+      os << "int64_t";
+      break;
+    case 1:
+      os << "int32_t";
+      break;
+    default:
+      fail = true;
+      break;
     }
-    if (!fail && lanes == 1) return;
+    if (!fail && lanes == 1)
+      return;
     if (!fail && (lanes >= 2 && lanes <= 16)) {
       os << lanes;
       return;
@@ -200,27 +210,29 @@ void CodeGenCHost::PrintType(tvm::DataType t, std::ostream& os) {  // NOLINT(*)
   LOG(FATAL) << "Cannot convert type " << t << " to C type";
 }
 
-void CodeGenCHost::VisitExpr_(const tvm::tir::BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenCHost::VisitExpr_(const tvm::tir::BroadcastNode *op,
+                              std::ostream &os) { // NOLINT(*)
   std::string v = PrintExpr(op->value);
   int lanes = op->dtype.lanes();
   os << "((";
   PrintType(op->dtype, os);
   os << ")(";
   for (int i = 0; i < lanes; ++i) {
-    if (i != 0) os << ", ";
+    if (i != 0)
+      os << ", ";
     os << v;
   }
   os << "))";
 }
 
-void CodeGenCHost::PrintGetFuncFromBackend(const std::string& func_name,
-                                           const std::string& packed_func_name) {
+void CodeGenCHost::PrintGetFuncFromBackend(
+    const std::string &func_name, const std::string &packed_func_name) {
   this->PrintIndent();
   this->stream << "if (" << packed_func_name << " == NULL) {\n";
   int packed_func_if_scope = this->BeginScope();
   this->PrintIndent();
-  this->stream << "if (TVMBackendGetFuncFromEnv(" << module_name_ << ", \"" << func_name
-               << "\""
+  this->stream << "if (TVMBackendGetFuncFromEnv(" << module_name_ << ", \""
+               << func_name << "\""
                << ", &" << packed_func_name << ") != 0) {\n";
   int get_func_env_scope = this->BeginScope();
   this->PrintIndent();
@@ -233,9 +245,9 @@ void CodeGenCHost::PrintGetFuncFromBackend(const std::string& func_name,
   this->stream << "}\n";
 }
 
-void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode* op) {
+void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   using namespace tvm::tir;
-  const StringImmNode* func_name = op->args[0].as<StringImmNode>();
+  const StringImmNode *func_name = op->args[0].as<StringImmNode>();
   ICHECK(func_name != nullptr)
       << "tvm_call_[c]packed_lowered expects first argument as function name";
   int64_t begin = op->args[2].as<IntImmNode>()->value;
@@ -250,7 +262,8 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode* op) {
   } else {
     // directly use the original symbol
     ICHECK(op->op.same_as(builtin::tvm_call_cpacked_lowered()));
-    packed_func_name = tvm::ffi::symbol::tvm_ffi_symbol_prefix + func_name->value;
+    packed_func_name =
+        tvm::ffi::symbol::tvm_ffi_symbol_prefix + func_name->value;
   }
 
   std::string args_stack = PrintExpr(op->args[1]);
@@ -280,10 +293,11 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode* op) {
   this->stream << "}\n";
 }
 
-std::string CodeGenCHost::GetPackedName(const tvm::tir::CallNode* op) {
+std::string CodeGenCHost::GetPackedName(const tvm::tir::CallNode *op) {
   using namespace tvm::tir;
-  const StringImmNode* s = op->args[0].as<StringImmNode>();
-  ICHECK(s != nullptr) << "tvm_call_packed_lowered expects first argument as function name";
+  const StringImmNode *s = op->args[0].as<StringImmNode>();
+  ICHECK(s != nullptr)
+      << "tvm_call_packed_lowered expects first argument as function name";
   std::string func_name = s->value;
   std::string packed_func_name = func_name + "_packed";
   std::string unique_name;
@@ -298,12 +312,13 @@ std::string CodeGenCHost::GetPackedName(const tvm::tir::CallNode* op) {
   return unique_name;
 }
 
-void CodeGenCHost::VisitExpr_(const tvm::tir::CallNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenCHost::VisitExpr_(const tvm::tir::CallNode *op,
+                              std::ostream &os) { // NOLINT(*)
   using namespace tvm::tir;
   if (op->op.same_as(builtin::tvm_stack_alloca())) {
     std::string stack_name = name_supply_->FreshName("stack");
-    const std::string& type = op->args[0].as<StringImmNode>()->value;
-    const IntImmNode* num = op->args[1].as<IntImmNode>();
+    const std::string &type = op->args[0].as<StringImmNode>()->value;
+    const IntImmNode *num = op->args[1].as<IntImmNode>();
     ICHECK(num != nullptr);
     static_assert(alignof(TVMFFIAny) % alignof(DLTensor) == 0, "invariant");
     size_t unit = sizeof(TVMFFIAny);
@@ -332,7 +347,7 @@ void CodeGenCHost::VisitExpr_(const tvm::tir::CallNode* op, std::ostream& os) { 
   }
 }
 
-void CodeGenCHost::VisitStmt_(const tvm::tir::AssertStmtNode* op) {  // NOLINT(*)
+void CodeGenCHost::VisitStmt_(const tvm::tir::AssertStmtNode *op) { // NOLINT(*)
   using namespace tvm::tir;
   if (emit_asserts_) {
     std::string cond = PrintExpr(op->condition);
@@ -341,38 +356,38 @@ void CodeGenCHost::VisitStmt_(const tvm::tir::AssertStmtNode* op) {  // NOLINT(*
     int assert_if_scope = this->BeginScope();
     {
       // Prepare the base error message
-      const auto* msg_node = op->message.as<StringImmNode>();
+      const auto *msg_node = op->message.as<StringImmNode>();
       ICHECK(msg_node != nullptr) << "Assert message expected to be StringImm";
-      const std::string& raw_msg = msg_node->value;
-      const std::string esc_msg =
-          tvm::support::StrEscape(raw_msg.c_str(), raw_msg.length(), /*use_octal_escape=*/true,
-                                  /*escape_whitespace_special_chars=*/true);
+      const std::string &raw_msg = msg_node->value;
+      const std::string esc_msg = tvm::support::StrEscape(
+          raw_msg.c_str(), raw_msg.length(), /*use_octal_escape=*/true,
+          /*escape_whitespace_special_chars=*/true);
 
       // If the assertion condition contains any equality checks anywhere
       // in a composite boolean expression, append the actual LHS/RHS values
       // Collect all EQ nodes within the condition (including inside And/Or/Not)
-      std::vector<const EQNode*> eq_nodes;
+      std::vector<const EQNode *> eq_nodes;
       {
         std::vector<PrimExpr> stk;
         stk.push_back(op->condition);
         while (!stk.empty()) {
           PrimExpr cur = stk.back();
           stk.pop_back();
-          if (const auto* eq = cur.as<EQNode>()) {
+          if (const auto *eq = cur.as<EQNode>()) {
             eq_nodes.push_back(eq);
             continue;
           }
-          if (const auto* an = cur.as<AndNode>()) {
+          if (const auto *an = cur.as<AndNode>()) {
             stk.push_back(an->a);
             stk.push_back(an->b);
             continue;
           }
-          if (const auto* on = cur.as<OrNode>()) {
+          if (const auto *on = cur.as<OrNode>()) {
             stk.push_back(on->a);
             stk.push_back(on->b);
             continue;
           }
-          if (const auto* nn = cur.as<NotNode>()) {
+          if (const auto *nn = cur.as<NotNode>()) {
             stk.push_back(nn->a);
             continue;
           }
@@ -384,10 +399,11 @@ void CodeGenCHost::VisitStmt_(const tvm::tir::AssertStmtNode* op) {  // NOLINT(*
         PrintIndent();
         stream << "char __tvm_assert_msg_buf[1024];\n";
         PrintIndent();
-        stream << "int __tvm_assert_msg_len = snprintf(__tvm_assert_msg_buf, sizeof(__tvm_assert_msg_buf), \"%s\", \""
+        stream << "int __tvm_assert_msg_len = snprintf(__tvm_assert_msg_buf, "
+                  "sizeof(__tvm_assert_msg_buf), \"%s\", \""
                << esc_msg << "\");\n";
 
-        auto escape_for_printf_literal = [&](const std::string& s) {
+        auto escape_for_printf_literal = [&](const std::string &s) {
           std::string out;
           out.reserve(s.size());
           for (char c : s) {
@@ -404,19 +420,22 @@ void CodeGenCHost::VisitStmt_(const tvm::tir::AssertStmtNode* op) {  // NOLINT(*
           return out;
         };
 
-        for (const auto* eq : eq_nodes) {
+        for (const auto *eq : eq_nodes) {
           std::string lhs = PrintExpr(eq->a);
           std::string rhs = PrintExpr(eq->b);
           std::string lhs_disp = escape_for_printf_literal(lhs);
           std::string rhs_disp = escape_for_printf_literal(rhs);
           PrintIndent();
-          stream << "__tvm_assert_msg_len += snprintf(__tvm_assert_msg_buf + __tvm_assert_msg_len, "
-                 "sizeof(__tvm_assert_msg_buf) - __tvm_assert_msg_len, \"; (" << lhs_disp
-                 << " == " << rhs_disp << ") got: %lld, expected: %lld\", (long long)(" << lhs
+          stream << "__tvm_assert_msg_len += snprintf(__tvm_assert_msg_buf + "
+                    "__tvm_assert_msg_len, "
+                    "sizeof(__tvm_assert_msg_buf) - __tvm_assert_msg_len, \"; ("
+                 << lhs_disp << " == " << rhs_disp
+                 << ") got: %lld, expected: %lld\", (long long)(" << lhs
                  << "), (long long)(" << rhs << "));\n";
         }
         PrintIndent();
-        stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", __tvm_assert_msg_buf);\n";
+        stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", "
+                  "__tvm_assert_msg_buf);\n";
       } else {
         // Fallback: just emit the base message
         PrintIndent();
@@ -433,17 +452,19 @@ void CodeGenCHost::VisitStmt_(const tvm::tir::AssertStmtNode* op) {  // NOLINT(*
   this->PrintStmt(op->body);
 }
 
-void CodeGenCHost::VisitExpr_(const tvm::tir::MinNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenCHost::VisitExpr_(const tvm::tir::MinNode *op,
+                              std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, "<", os);
 }
 
-void CodeGenCHost::VisitExpr_(const tvm::tir::MaxNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenCHost::VisitExpr_(const tvm::tir::MaxNode *op,
+                              std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, ">", os);
 }
 
 template <typename T>
-inline void CodeGenCHost::PrintTernaryCondExpr(const T* op, const char* compare,
-                                               std::ostream& os) {  // NOLINT(*)
+inline void CodeGenCHost::PrintTernaryCondExpr(const T *op, const char *compare,
+                                               std::ostream &os) { // NOLINT(*)
   std::ostringstream temp_a;
   VisitExpr(op->a, temp_a);
   std::string a_id = SSAGetID(temp_a.str(), op->a.dtype());
@@ -455,61 +476,70 @@ inline void CodeGenCHost::PrintTernaryCondExpr(const T* op, const char* compare,
      << "? (" << a_id << ") : (" << b_id << "))";
 }
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
 
 namespace tvm {
 namespace tl {
 
-using tvm::codegen::CSourceModuleCreate;
 using tvm::codegen::CodeGenSourceBase;
+using tvm::codegen::CSourceModuleCreate;
 using tvm::ffi::Array;
 using tvm::ffi::Map;
 using tvm::ffi::Module;
 using tvm::ffi::String;
 
-// Build function that mirrors TVM's host C codegen, registered under a TileLang-specific name.
-::tvm::ffi::Module BuildTileLangCHost(::tvm::IRModule mod, ::tvm::Target target) {
+// Build function that mirrors TVM's host C codegen, registered under a
+// TileLang-specific name.
+::tvm::ffi::Module BuildTileLangCHost(::tvm::IRModule mod,
+                                      ::tvm::Target target) {
   bool output_ssa = false;
   bool emit_asserts = true;
   bool emit_fwd_func_decl = true;
 
   std::unordered_set<std::string> devices;
-  if (mod->GetAttr<::tvm::ffi::Map<::tvm::GlobalVar, ::tvm::ffi::String>>("device_contexts") != nullptr) {
+  if (mod->GetAttr<::tvm::ffi::Map<::tvm::GlobalVar, ::tvm::ffi::String>>(
+          "device_contexts") != nullptr) {
     ::tvm::ffi::Map<::tvm::GlobalVar, ::tvm::ffi::String> device_contexts =
-        mod->GetAttr<::tvm::ffi::Map<::tvm::GlobalVar, ::tvm::ffi::String>>("device_contexts").value();
-    for (auto const& context : device_contexts) {
+        mod->GetAttr<::tvm::ffi::Map<::tvm::GlobalVar, ::tvm::ffi::String>>(
+               "device_contexts")
+            .value();
+    for (auto const &context : device_contexts) {
       devices.insert(context.second.data());
     }
   }
 
   CodeGenCHost cg;
   cg.Init(output_ssa, emit_asserts, emit_fwd_func_decl, target->str(), devices);
-  cg.SetConstantsByteAlignment(target->GetAttr<::tvm::Integer>("constants-byte-alignment").value_or(16));
+  cg.SetConstantsByteAlignment(
+      target->GetAttr<::tvm::Integer>("constants-byte-alignment").value_or(16));
 
-  auto is_aot_executor_fn = [](::tvm::tir::PrimFunc const& func) -> bool {
-    return func->GetAttr<::tvm::Bool>("runner_function", ::tvm::Bool(false)).value();
+  auto is_aot_executor_fn = [](::tvm::tir::PrimFunc const &func) -> bool {
+    return func->GetAttr<::tvm::Bool>("runner_function", ::tvm::Bool(false))
+        .value();
   };
 
   std::vector<std::pair<::tvm::GlobalVar, ::tvm::tir::PrimFunc>> funcs;
   for (auto [gvar, base_func] : mod->functions) {
-    ICHECK(base_func->IsInstance<::tvm::tir::PrimFuncNode>()) << "CodegenCHost: Can only take PrimFunc";
+    ICHECK(base_func->IsInstance<::tvm::tir::PrimFuncNode>())
+        << "CodegenCHost: Can only take PrimFunc";
     auto prim_func = ::tvm::Downcast<::tvm::tir::PrimFunc>(base_func);
     funcs.push_back({gvar, prim_func});
   }
 
-  auto sort_key = [&is_aot_executor_fn](const auto& kv) {
+  auto sort_key = [&is_aot_executor_fn](const auto &kv) {
     return std::tuple{is_aot_executor_fn(kv.second), kv.first->name_hint};
   };
-  std::sort(funcs.begin(), funcs.end(), [&sort_key](const auto& kv_a, const auto& kv_b) {
-    return sort_key(kv_a) < sort_key(kv_b);
-  });
+  std::sort(funcs.begin(), funcs.end(),
+            [&sort_key](const auto &kv_a, const auto &kv_b) {
+              return sort_key(kv_a) < sort_key(kv_b);
+            });
 
-  for (const auto& [gvar, prim_func] : funcs) {
+  for (const auto &[gvar, prim_func] : funcs) {
     cg.DeclareFunction(gvar, prim_func);
   }
 
-  for (const auto& [gvar, prim_func] : funcs) {
+  for (const auto &[gvar, prim_func] : funcs) {
     cg.AddFunction(gvar, prim_func, emit_fwd_func_decl);
   }
 
@@ -522,5 +552,5 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("target.build.tilelang_c", BuildTileLangCHost);
 }
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
