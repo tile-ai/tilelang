@@ -235,7 +235,7 @@ class AutoTuner:
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
-    def generate_cache_key(self, parameters: dict[str, Any]) -> AutotuneResult | None:
+    def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process.
         """
 
@@ -261,6 +261,7 @@ class AutoTuner:
         key_data = {
             "version": __version__,
             "op_parameters": tuple(op_parameters),
+            "extra_parameters": _normalize_param(extra_parameters),
             "func_source": func_source,
             "configs": self.configs,
             "compile_args": hash(self.compile_args),
@@ -293,10 +294,23 @@ class AutoTuner:
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
 
+        # NOTE(chaofan):  We need to extract some parameters from the closure.
+        # Consider the case:
+        #   def gemm(M, N, K):
+        #       def kernel(...)
+        # If we only extract source, M/N/K will be symbolic and there will be cache problem.
+        extra_parameters: dict[str, Any] = {}
+        cells = self.fn.__closure__
+        var_names = self.fn.__code__.co_freevars
+        for var_name, cell in zip(var_names, cells):
+            if var_name in parameters:
+                continue
+            extra_parameters[var_name] = cell.cell_contents
+
         if isinstance(self.configs, Callable):
             self.configs = self.configs(*self._kernel_parameters)
 
-        key = self.generate_cache_key(parameters)
+        key = self.generate_cache_key(parameters, extra_parameters)
 
         with self._lock:
             if env.is_cache_enabled():
