@@ -303,10 +303,12 @@ class AutoTuner:
         extra_parameters: dict[str, Any] = {}
         cells = self.fn.__closure__
         var_names = self.fn.__code__.co_freevars
-        for var_name, cell in zip(var_names, cells):
-            if var_name in parameters:
-                continue
-            extra_parameters[var_name] = cell.cell_contents
+        if cells is not None:
+            assert len(var_names) == len(cells), "Number of free variables does not match"
+            for var_name, cell in zip(var_names, cells):
+                if var_name in parameters:
+                    continue
+                extra_parameters[var_name] = cell.cell_contents
 
         if isinstance(self.configs, Callable):
             self.configs = self.configs(*self._kernel_parameters)
