@@ -262,7 +262,7 @@ class AutoTuner:
         key_data = {
             "version": __version__,
             "op_parameters": tuple(op_parameters),
-            "extra_parameters": _normalize_param(extra_parameters),
+            "extra_parameters": extra_parameters,
             "func_source": func_source,
             "configs": self.configs,
             "compile_args": hash(self.compile_args),
@@ -308,6 +308,9 @@ class AutoTuner:
             for var_name, cell in zip(var_names, cells):
                 if var_name in parameters:
                     continue
+                # Cell content must be serializable
+                assert isinstance(cell.cell_contents, (int, float, str, bool, type(None))), \
+                    f"Cell contents {cell.cell_contents} is not serializable: {type(cell.cell_contents)}"
                 extra_parameters[var_name] = cell.cell_contents
 
         if isinstance(self.configs, Callable):
