@@ -191,7 +191,7 @@ def test_gemm_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
+    tilelang.testing.main()
 
     # # Test Pass
     # for m in [32, 64, 128, 256]:
@@ -205,22 +205,19 @@ if __name__ == "__main__":
 
     # # Test Pass
     # for m in [32, 64, 128, 256]:
+    #     for n in [32, 64, 128]:
+    #         for k in [16, 32, 64, 128]:
+    #             if m in [32, 64] and (n not in [64, 128, 256]):
+    #                 continue
+    #             print(f"======================= Test {m} {n} {k} False True =============================")
+    #             run_gemm(m, n, k * 3, False, True, "float16", "float", "float", m, n, k, 2, 256)
+    #             print(f"Test {m} {n} {k} Pass")
+
+    # # Test Pass
+    # for m in [32, 64, 128, 256]:
     #     for n in [16, 32, 64, 128]:
     #         for k in [32, 64, 128]:
     #             if m in [32, 64] and (n not in [64, 128, 256]):
     #                 continue
     #             print(f"======================= Test {m} {n} {k} False True =============================")
     #             run_gemm(m, n, k * 3, False, True, "float8_e5m2", "float", "float", m, n, k, 2, 128)
-    #             print(f"Test {m} {n} {k} Pass")
-
-    tilelang.disable_cache()
-    run_gemm(32, 512, 16, False, True, "float16", "float32", "float32", 32, 512, 16, 0, 128)
-    run_gemm(32, 512, 32, False, True, "float16", "float32", "float32", 32, 512, 32, 0, 128)
-    run_gemm(32, 512, 64, False, True, "float16", "float32", "float32", 32, 512, 64, 0, 128)
-    run_gemm(64, 512, 16, False, True, "float16", "float32", "float32", 64, 512, 16, 0, 128)
-    run_gemm(64, 512, 16, False, True, "float16", "float32", "float32", 32, 512, 16, 0, 128)
-    run_gemm(128, 512, 16, False, True, "float16", "float32", "float32", 128, 512, 16, 0, 128)
-
-    # run_gemm(64, 512, 32, False, True, "float16", "float32", "float32", 64, 512, 32, 0, 128)
-    # run_gemm(64, 512, 64, False, True, "float16", "float32", "float32", 64, 512, 64, 0, 128)
-    # run_gemm(128, 512, 16, False, True, "float16", "float32", "float32", 128, 512, 16, 0, 128)
