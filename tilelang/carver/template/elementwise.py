@@ -1,5 +1,4 @@
 # Import necessary modules
-from __future__ import annotations
 from dataclasses import dataclass  # Used for defining data classes
 from .base import BaseTemplate  # Importing the base class for templates
 from tvm import te  # Importing TVM's tensor expression module

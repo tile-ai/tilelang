@@ -1,6 +1,5 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-from __future__ import annotations
 from typing import Literal
 
 decode_i4_to_f16 = """

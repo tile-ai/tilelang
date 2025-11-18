@@ -1,6 +1,4 @@
 """The profiler and convert to torch utils"""
-from __future__ import annotations
-
 import torch
 from tilelang.contrib.dlpack import to_pytorch_func
 from .base import BaseKernelAdapter

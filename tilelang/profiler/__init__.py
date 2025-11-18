@@ -1,6 +1,5 @@
 """The profiler and convert to torch utils"""
 from __future__ import annotations
-
 from typing import Callable, Any, Literal
 from functools import partial
 import torch

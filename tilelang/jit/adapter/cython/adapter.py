@@ -1,6 +1,5 @@
 """The profiler and convert to torch utils"""
 from __future__ import annotations
-
 import ctypes
 import logging
 import torch

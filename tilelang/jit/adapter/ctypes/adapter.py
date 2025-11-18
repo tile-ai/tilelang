@@ -1,6 +1,5 @@
 """The profiler and convert to torch utils"""
 from __future__ import annotations
-
 import torch
 from ..base import BaseKernelAdapter
 import ctypes
