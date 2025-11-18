@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer, op
-from tilelang.utils.language import (
-    bits_product,)
+from tilelang.utils.language import (bits_product, prim_expr_equal)
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store  # noqa: F401
 
 
@@ -48,9 +47,8 @@ def reshape(src: Buffer, shape: list[PrimExpr]) -> Buffer:
     Returns:
         Buffer: A new buffer view with the specified shape
     """
-    assert bits_product(shape,
-                        src.dtype) == bits_product(src.shape,
-                                                   src.dtype), "T.reshape/view shape check failed."
+    assert prim_expr_equal(bits_product(shape, src.dtype),
+                           bits_product(src.shape, src.dtype)), "T.reshape/view shape check failed."
     return T.Tensor(shape, src.dtype, src.data)
 
 
@@ -63,8 +61,8 @@ def view(src: Buffer, shape: list[PrimExpr] | None = None, dtype: str | None = N
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
-    assert bits_product(shape, dtype) == bits_product(
-        src.shape, src.dtype), f"T.reshape/view shape check failed: {shape, src.shape}"
+    assert prim_expr_equal(bits_product(shape, dtype),
+                           bits_product(src.shape, src.dtype)), "T.reshape/view shape check failed."
     return T.Tensor(shape, dtype, src.data)
 
 
