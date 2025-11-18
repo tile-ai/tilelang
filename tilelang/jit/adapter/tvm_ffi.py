@@ -122,7 +122,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
-
     def _convert_torch_func(self) -> Callable[..., Any]:
         # Capture thunks that reflect Torch's current stream and device.
         # These are evaluated at call time to align TVM execution with the
@@ -263,7 +262,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             return [tensor_list[i] for i in self.result_idx]
 
         return func
-
 
     @classmethod
     def from_database(cls,
