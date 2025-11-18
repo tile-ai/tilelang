@@ -234,18 +234,18 @@ def test_gemm_jit_kernel():
 
 
 def run_tvm_ffi_kernel_do_bench(M,
-                              N,
-                              K,
-                              trans_A,
-                              trans_B,
-                              in_dtype,
-                              out_dtype,
-                              dtypeAccum,
-                              block_M,
-                              block_N,
-                              block_K,
-                              num_stages=3,
-                              num_threads=128):
+                                N,
+                                K,
+                                trans_A,
+                                trans_B,
+                                in_dtype,
+                                out_dtype,
+                                dtypeAccum,
+                                block_M,
+                                block_N,
+                                block_K,
+                                num_stages=3,
+                                num_threads=128):
     program = matmul(
         M,
         N,
@@ -279,22 +279,22 @@ def run_tvm_ffi_kernel_do_bench(M,
 
 def test_tvm_ffi_kernel_do_bench():
     run_tvm_ffi_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128,
-                              256, 32, 2)
+                                256, 32, 2)
 
 
 def run_tvm_ffi_kernel_multi_stream(M,
-                                  N,
-                                  K,
-                                  trans_A,
-                                  trans_B,
-                                  in_dtype,
-                                  out_dtype,
-                                  dtypeAccum,
-                                  block_M,
-                                  block_N,
-                                  block_K,
-                                  num_stages=3,
-                                  num_threads=128):
+                                    N,
+                                    K,
+                                    trans_A,
+                                    trans_B,
+                                    in_dtype,
+                                    out_dtype,
+                                    dtypeAccum,
+                                    block_M,
+                                    block_N,
+                                    block_K,
+                                    num_stages=3,
+                                    num_threads=128):
     program = matmul(
         M,
         N,
@@ -332,22 +332,22 @@ def run_tvm_ffi_kernel_multi_stream(M,
 
 def test_tvm_ffi_kernel_multi_stream():
     run_tvm_ffi_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16",
-                                  128, 256, 32, 2)
+                                    128, 256, 32, 2)
 
 
 def run_tvm_ffi_dynamic_shape(M,
-                            N,
-                            K,
-                            trans_A,
-                            trans_B,
-                            in_dtype,
-                            out_dtype,
-                            dtypeAccum,
-                            block_M,
-                            block_N,
-                            block_K,
-                            num_stages=3,
-                            num_threads=128):
+                              N,
+                              K,
+                              trans_A,
+                              trans_B,
+                              in_dtype,
+                              out_dtype,
+                              dtypeAccum,
+                              block_M,
+                              block_N,
+                              block_K,
+                              num_stages=3,
+                              num_threads=128):
     program = matmul(
         M,
         N,
@@ -468,19 +468,19 @@ def convolution_im2col(N,
 
 
 def run_tvm_ffi_im2col_tma_desc(N,
-                              C,
-                              H,
-                              W,
-                              F,
-                              K,
-                              S,
-                              D,
-                              P,
-                              block_M,
-                              block_N,
-                              block_K,
-                              num_stages=3,
-                              num_threads=256):
+                                C,
+                                H,
+                                W,
+                                F,
+                                K,
+                                S,
+                                D,
+                                P,
+                                block_M,
+                                block_N,
+                                block_K,
+                                num_stages=3,
+                                num_threads=256):
     """Test im2col TMA descriptor functionality in tvm_ffi backend."""
     program = convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages,
                                  num_threads)
