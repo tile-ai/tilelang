@@ -293,9 +293,14 @@ def run_test(
 
     # fla ref
     h_ref, V_new_ref, final_state_ref = chunk_gated_delta_rule_fwd_h(
-        k=K, w=W, u=U, g=G, initial_state=initial_state, output_final_state=store_final_state,
-        chunk_size=chunk_size, save_new_value=save_new_value
-    )
+        k=K,
+        w=W,
+        u=U,
+        g=G,
+        initial_state=initial_state,
+        output_final_state=store_final_state,
+        chunk_size=chunk_size,
+        save_new_value=save_new_value)
 
     # tilelang
     kernel = tilelang_chunk_gated_delta_rule_fwd_h(B, S, H, DK, DV, input_dtype, output_dtype,
@@ -308,8 +313,14 @@ def run_test(
 
     fla_time = do_bench(
         chunk_gated_delta_rule_fwd_h,
-        k=K, w=W, u=U, g=G, initial_state=initial_state, output_final_state=store_final_state,
-        chunk_size=chunk_size, save_new_value=save_new_value)
+        k=K,
+        w=W,
+        u=U,
+        g=G,
+        initial_state=initial_state,
+        output_final_state=store_final_state,
+        chunk_size=chunk_size,
+        save_new_value=save_new_value)
     tilelang_time = do_bench(kernel, K, W, U, G, initial_state)
 
     # check correctness
