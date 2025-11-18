@@ -104,7 +104,9 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.barrier_wait(bar_sScale_and_sS_free, ((i_i * 2) & 1) ^ 1)
 
                     T.copy(m_i, m_i_prev)
-                    T.reduce_max(acc_s, m_i, dim=1, clear=False)
+                    T.reduce_max(acc_s, out=m_i, dim=1, clear=False)
+                    for h_i in T.Parallel(block_H):
+                        m_i[h_i] = T.max(m_i[h_i], m_i_prev[h_i])
                     for h_i in T.Parallel(block_H):
                         alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
                     for h_i, bi_i in T.Parallel(block_H, block_N):
@@ -137,6 +139,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     T.copy(m_i, m_i_prev)
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
+                    for h_i in T.Parallel(block_H):
+                        m_i[h_i] = T.max(m_i[h_i], m_i_prev[h_i])
                     for h_i in T.Parallel(block_H):
                         alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
                     for h_i, bi_i in T.Parallel(block_H, block_N):
@@ -325,6 +329,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.copy(m_i, m_i_prev)
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
                     for h_i in T.Parallel(block_H):
+                        m_i[h_i] = T.max(m_i[h_i], m_i_prev[h_i])
+                    for h_i in T.Parallel(block_H):
                         alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
                     for h_i, bi_i in T.Parallel(block_H, block_N):
                         acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
@@ -356,6 +362,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     T.copy(m_i, m_i_prev)
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
+                    for h_i in T.Parallel(block_H):
+                        m_i[h_i] = T.max(m_i[h_i], m_i_prev[h_i])
                     for h_i in T.Parallel(block_H):
                         alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
                     for h_i, bi_i in T.Parallel(block_H, block_N):

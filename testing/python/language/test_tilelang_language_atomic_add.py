@@ -236,41 +236,6 @@ def run_atomic_addx2(M, N, block_M, block_N):
     torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
 
 
-@tilelang.jit
-def atomic_different_memory_orders_program(M, N, block_M, block_N, dtype="float"):
-
-    @T.prim_func
-    def atomic_different_orders(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype), C: T.Tensor(
-        (M, N), dtype), D: T.Tensor((M, N), dtype)):
-        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=32) as (bx, by):
-            for i, j in T.Parallel(block_M, block_N):
-                idx_i = bx * block_M + i
-                idx_j = by * block_N + j
-                if idx_i < M and idx_j < N:
-                    val = A[idx_i, idx_j]
-                    T.atomic_add(B[idx_i, idx_j], val, memory_order="relaxed")
-                    T.atomic_max(C[idx_i, idx_j], val, memory_order="acquire")
-                    T.atomic_min(D[idx_i, idx_j], val, memory_order="release")
-
-    return atomic_different_orders
-
-
-def run_atomic_different_memory_orders(M, N, block_M, block_N, dtype="float32"):
-    kernel = atomic_different_memory_orders_program(M, N, block_M, block_N, dtype=dtype)
-    import torch
-
-    A = torch.randn(M, N, dtype=getattr(torch, dtype)).cuda()
-    B = torch.zeros(M, N, dtype=getattr(torch, dtype)).cuda()
-    C = torch.zeros(M, N, dtype=getattr(torch, dtype)).cuda()
-    D = torch.full((M, N), float('inf'), dtype=getattr(torch, dtype)).cuda()
-
-    kernel(A, B, C, D)
-
-    torch.testing.assert_close(B, A, atol=1e-3, rtol=1e-3)
-    torch.testing.assert_close(C, torch.maximum(torch.zeros_like(A), A))
-    torch.testing.assert_close(D, torch.minimum(torch.full_like(A, float('inf')), A))
-
-
 def test_atomic_add():
     run_atomic_add(8, 128, 128, 32, 32)
 
@@ -293,6 +258,41 @@ def test_atomic_memory_order():
 
 def test_atomic_addx2():
     run_atomic_addx2(32, 64, 8, 16)
+
+
+@tilelang.jit(debug_root_path="./testing/python/language")
+def atomic_different_memory_orders_program(M, N, block_M, block_N, dtype="float"):
+
+    @T.prim_func
+    def atomic_different_orders(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype), C: T.Tensor(
+        (M, N), dtype), D: T.Tensor((M, N), dtype)):
+        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=32) as (bx, by):
+            for i, j in T.Parallel(block_M, block_N):
+                idx_i = bx * block_M + i
+                idx_j = by * block_N + j
+                if idx_i < M and idx_j < N:
+                    val = A[idx_i, idx_j]
+                    T.atomic_add(B[idx_i, idx_j], val, memory_order="release")
+                    T.atomic_max(C[idx_i, idx_j], val, memory_order="relaxed")
+                    T.atomic_min(D[idx_i, idx_j], val, memory_order="relaxed")
+
+    return atomic_different_orders
+
+
+def run_atomic_different_memory_orders(M, N, block_M, block_N, dtype="float32"):
+    kernel = atomic_different_memory_orders_program(M, N, block_M, block_N, dtype=dtype)
+    import torch
+
+    A = torch.randn(M, N, dtype=getattr(torch, dtype)).cuda()
+    B = torch.zeros(M, N, dtype=getattr(torch, dtype)).cuda()
+    C = torch.zeros(M, N, dtype=getattr(torch, dtype)).cuda()
+    D = torch.full((M, N), float('inf'), dtype=getattr(torch, dtype)).cuda()
+
+    kernel(A, B, C, D)
+
+    torch.testing.assert_close(B, A, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(C, torch.maximum(torch.zeros_like(A), A))
+    torch.testing.assert_close(D, torch.minimum(torch.full_like(A, float('inf')), A))
 
 
 @tilelang.jit
@@ -361,7 +361,9 @@ def run_atomic_return_prev(M, N, block_M, block_N, dtype="float32"):
 
 
 def test_atomic_different_memory_orders():
-    run_atomic_different_memory_orders(32, 32, 8, 8)
+    run_atomic_different_memory_orders(32, 32, 8, 8, dtype="float")
+    run_atomic_different_memory_orders(32, 32, 8, 8, dtype="float16")
+    run_atomic_different_memory_orders(32, 32, 8, 8, dtype="bfloat16")
 
 
 def test_atomic_addx4():

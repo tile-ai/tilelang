@@ -1,5 +1,4 @@
 """Rasteration Plan For L2 Cache Locality"""
-from __future__ import annotations
 
 
 class Rasterization:

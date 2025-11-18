@@ -17,8 +17,6 @@
 # This file is modified from the original version,
 # which is part of the TVM project (https://tvm.apache.org/).
 """The tir expression operation registration"""
-from __future__ import annotations
-
 from tvm import tir
 from tvm.ffi.runtime_ctypes import DataType, DataTypeCode
 from tvm.tir import IntImm

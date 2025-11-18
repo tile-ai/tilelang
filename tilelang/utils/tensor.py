@@ -1,4 +1,3 @@
-from __future__ import annotations
 """The profiler and convert to torch utils"""
 from enum import Enum
 import torch

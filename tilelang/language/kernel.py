@@ -1,6 +1,5 @@
 """The language interface for tl programs."""
 from __future__ import annotations
-
 from collections import deque
 from tvm import tir
 from tvm.tir import Var

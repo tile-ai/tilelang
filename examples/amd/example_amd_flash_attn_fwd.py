@@ -171,6 +171,8 @@ def fast_flashattn(
 
                     T.copy(m_i, m_prev)
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
+                    for i in T.Parallel(block_M):
+                        m_i[i] = T.max(m_i[i], m_prev[i])
 
                     for i in T.Parallel(block_M):
                         sf = T.exp(m_prev[i] * scale - m_i[i] * scale)

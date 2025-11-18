@@ -1,4 +1,3 @@
-from __future__ import annotations
 from tilelang import tvm as tvm
 from tvm import tir
 from tvm.tir import PrimExpr, Buffer, BufferLoad, op

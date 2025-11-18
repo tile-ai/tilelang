@@ -1,4 +1,3 @@
-from __future__ import annotations
 from typing import Literal
 
 # Implementation asm for fp4 to bf16, using twiddling
