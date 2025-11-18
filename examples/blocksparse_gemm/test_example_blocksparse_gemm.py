@@ -1,3 +1,4 @@
+import tilelang.testing
 import example_blocksparse_gemm
 
 
@@ -6,5 +7,4 @@ def test_example_blocksparse_gemm():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_example_blocksparse_gemm()
+    tilelang.testing.main()

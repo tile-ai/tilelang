@@ -83,14 +83,12 @@ def tensor_null_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_
 
 
 def run_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-    tilelang.disable_cache()
     kernel = ptr_null_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
 
     a = torch.randn(M, K, device="cuda", dtype=map_torch_type(dtype))
     b = torch.randn(N, K, device="cuda", dtype=map_torch_type(dtype))
     c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))
     d = torch.randn(N, device="cuda", dtype=map_torch_type(accum_dtype))
-    print(kernel.get_host_source())
     kernel(a, b, c, None, M, N, K, False)
 
     ref_no_bias = (a @ b.T).to(map_torch_type(accum_dtype))
@@ -114,5 +112,4 @@ def test_nullptr():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    run_test(1024, 1024, 1024, 128, 128, 32)
+    tilelang.testing.main()

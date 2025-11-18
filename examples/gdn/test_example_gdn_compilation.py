@@ -107,7 +107,6 @@ def test_example_chunk_o_compilation():
 
 
 def test_example_chunk_o_bwd_compilation():
-    tilelang.disable_cache()
     from example_chunk_o_bwd import tilelang_chunk_o_bwd_dqkwg, prepare_input
     Q, K, V, h, G, dO, dh, dv, W = prepare_input(B, S, H, DK, DV, chunk_size,
                                                  getattr(torch, input_dtype),
@@ -115,13 +114,6 @@ def test_example_chunk_o_bwd_compilation():
                                                  getattr(torch, accum_dtype),
                                                  getattr(torch, gate_dtype),
                                                  getattr(torch, state_dtype))
-    kernel = tilelang_chunk_o_bwd_dqkwg(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
-                                        gate_dtype, state_dtype, chunk_size, 1.0, use_g, True,
-                                        block_DK, block_DV, threads, num_stages)
-    # print(kernel.get_kernel_source())
-    kernel = tilelang_chunk_o_bwd_dqkwg(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
-                                        gate_dtype, state_dtype, chunk_size, 1.0, use_g, True,
-                                        block_DK, block_DV, threads, num_stages)
     kernel = tilelang_chunk_o_bwd_dqkwg(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
                                         gate_dtype, state_dtype, chunk_size, 1.0, use_g, True,
                                         block_DK, block_DV, threads, num_stages)
@@ -197,5 +189,4 @@ def test_example_chunk_delta_bwd_compilation():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_example_chunk_o_bwd_compilation()
+    tilelang.testing.main()

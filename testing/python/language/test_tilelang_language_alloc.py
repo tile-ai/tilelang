@@ -113,7 +113,6 @@ def run_alloc_var_with_initializer(
 
     kernel = tilelang.compile(program, out_idx=[1])
     code = kernel.get_kernel_source()
-    print(code)
     assert f"= {init_value};" in code
 
 
