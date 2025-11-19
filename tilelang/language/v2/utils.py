@@ -2,7 +2,6 @@ from __future__ import annotations
 import ast
 import inspect
 from typing import Any, Callable, Literal
-from deprecated import deprecated
 from tilelang import env
 from hashlib import sha256
 import linecache
@@ -52,28 +51,6 @@ def get_func_nonlocals(func):
                 if "empty" not in str(err):
                     raise
     return nonlocal_vars
-
-
-@deprecated("inspect_function_capture is dangerous and will be removed in future versions.")
-def inspect_function_capture(func: Callable) -> dict[str, Any]:
-    """Capture function non-locals and global variables.
-
-    Parameters
-    ----------
-    func : Callable
-        The function to inspect.
-
-    Returns
-    -------
-    res : Dict[str, Any]
-        The function variables map with non-local or global variables.
-    """
-    # dangerous: func.__globals__[..] are strong referenced and may cause memory leak
-    captured = {
-        **func.__globals__,  # type: ignore
-        **get_func_nonlocals(func),
-    }
-    return captured
 
 
 def get_ast(func: Callable):
