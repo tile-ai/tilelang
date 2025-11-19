@@ -53,6 +53,7 @@ jobs:
         run: |
           python -m venv tll
           source tll/bin/activate
+          export PIP_CONFIG_FILE=/dev/null
           export PYTHONUSERBASE=""           # ← 强制禁用 pip --user
           pip config unset global.user       || true
           pip config unset user.user         || true
@@ -67,6 +68,7 @@ jobs:
           git checkout main
           python -m venv tl
           source tl/bin/activate
+          export PIP_CONFIG_FILE=/dev/null
           export PYTHONUSERBASE=""           
           pip config unset global.user || true
           pip config unset user.user || true
