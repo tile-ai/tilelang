@@ -131,7 +131,6 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
             << "Unable to solve variable `" << v << "` from expression `"
             << (arg == value) << "`";
         auto value = ffi::GetRef<PrimExpr>(sol->src_to_dst.Get(v)->get());
-        // std::cerr << "BIND: " << v << " " << value << "\n";
         BindVar(v.as<VarNode>(), value);
       }
     }
@@ -140,7 +139,6 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
     //    ==>   m = n // 3) we re-compute the constraint to verify the solution
     //    is correct
     PrimExpr cond = MakeGuarded(arg == value);
-    // std::cerr << "VERIFY: " << (arg == value) << "\n";
     BinderAddAssert(&analyzer_, cond, arg_name, &asserts_);
   }
   return false;
