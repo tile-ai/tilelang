@@ -38,7 +38,7 @@ def allowed_backends_for_target(target: Target, *, include_unavailable: bool = T
     elif kind == "hip":
         allowed = ["tvm_ffi", "cython"]
     elif kind == "metal":
-        allowed = ["torch"]
+        allowed = ["tvm_ffi", "torch"]
     elif kind == "c":  # CPU C backend
         allowed = ["cython", "tvm_ffi"]
     else:
