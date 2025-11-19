@@ -595,6 +595,25 @@ def get_type_hints(func):
     # This lets annotations reference symbols like `n`, `h`, or dtype vars
     # defined in the outer scope of a nested function.
     globalns = func.__globals__
+    # Here we add nonlocals into localns, to capture the parameters declared in the parent function
+    # ```py
+    # def foo():
+    #   n = 128 # n is nonlocal
+    #   def bar(
+    #       A: T.Tensor(n, T.float32) # we add nonlocal in its eval context
+    #   ):
+    #      for i in range(n): ...
+    # ```
+    #
+    # This is incomplete and buggy
+    #   the only bug senario the function body doesn't use the the parameters
+    #   but such define-no-use senario is very rare in writing kernels
+    # 
+    # ```py
+    # def foo():
+    #   n = 128
+    #   def bar(A: T.Tensor((n,), T.float32)):
+    #     ... # empty function, do not use `n`
     localns = utils.get_func_nonlocals(func)
     for name, value in annot.items():
         if name == 'return':
@@ -605,9 +624,10 @@ def get_type_hints(func):
         if value is None:
             value = type(None)
         if isinstance(value, str):
-            # if annotation value is string, it may be a ForwardRef
-            # Handle simple dtype aliases like T.float32 appearing as strings
-            # Evaluate directly only when it matches known dtypes
+            # if the annotation is string, is can be: (i) a T.float32 like annotations, (ii) a ForwardRef object
+            # typing doesn't handle (i), it will try to interpret T.float32
+            #    typing see: T.float32 is str('float32'), and there is no object named `flaot32` and give a NameError
+            # here we manually interpret it to return T.float32 object
             try:
                 _, v = value.split('.', maxsplit=1)
             except ValueError:
