@@ -69,8 +69,9 @@ def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
 
 def PreLowerSemanticCheck(mod: IRModule) -> None:
     """
-    Check whether the module is valid before lowering. If not, raise an user-friendly error
-    in Python side instead of let the error dive into complicate TVM/C++ stack.
+    Check whether the module is valid before lowering. If not, raise a user-friendly error
+    in Python side instead of letting the error dive into the complicated TVM/C++ stack.
+    Note: This is a validation-only pipeline of passes and does not modify or return the module.
     """
 
     # Check if there are any invalid nested loops.

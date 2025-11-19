@@ -51,10 +51,9 @@ class _NestedLoopCheckVisitor(PyStmtExprVisitor):
 
 def NestedLoopChecker():
     """
-    User-friendly pass which identifies invalid any nested-loop pattern and
-    throw error in Python side, avoiding Internal Error in TVM/C++ compiler stack.
+    User-friendly pass which identifies any invalid any nested-loop pattern.
 
-    Nested loops is a annoying problem in tilelang or other polyhedral-style compilers.
+    Nested loops is an annoying problem in tilelang or other polyhedral-style compilers.
     It contains many corner cases and undefined behaviours.
 
     In tilelang, there are four loops:
@@ -106,5 +105,6 @@ def NestedLoopChecker():
 
     def pass_fn(func: PrimFunc, mod, ctx):
         _NestedLoopCheckVisitor().visit_stmt(func.body)
+        return func
 
     return prim_func_pass(pass_fn, opt_level=0)

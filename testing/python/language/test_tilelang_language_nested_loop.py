@@ -397,8 +397,6 @@ def matmul_nested_pipa(
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_K, block_N)
 
-    import tilelang.language as T
-
     @T.prim_func
     def main(
             A: T.Tensor(A_shape, in_dtype),
@@ -443,8 +441,6 @@ def matmul_nested_papipa(
     B_shape = (K, N)
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_K, block_N)
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(
