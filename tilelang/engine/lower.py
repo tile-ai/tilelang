@@ -14,6 +14,7 @@ from tilelang.contrib import hipcc, nvcc
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
+    PreLowerSemanticChecker,
     LowerAndLegalize,
     OptimizeForTarget,
 )
@@ -223,6 +224,9 @@ def lower(
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
+
+    # Before lowering, do semantic check
+    PreLowerSemanticChecker(mod)
 
     # Phase 1: Lower and legalize the IR
     mod = LowerAndLegalize(mod, target)
