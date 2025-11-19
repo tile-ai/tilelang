@@ -16,7 +16,6 @@ env:
   PYTHONDEVMODE: "1"
   PYTHONUNBUFFERED: "1"
   PYTHONPATH: "" # explicit cleanup
-  PIP_USER: "" # explicit cleanup
   COLUMNS: "100"
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
