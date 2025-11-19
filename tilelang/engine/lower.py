@@ -11,6 +11,8 @@ import tvm_ffi
 from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
+from tilelang.transform import PassConfigKey
+from tilelang.utils.deprecated import deprecated_warning
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
@@ -54,7 +56,7 @@ def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
 
 
 @tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
-def tilelang_callback_cuda_compile(code, target):
+def tilelang_callback_cuda_compile(code, target, pass_config=None):
     project_root = osp.join(osp.dirname(__file__), "../..")
     if "TL_TEMPLATE_PATH" in os.environ:
         tl_template_path = os.environ["TL_TEMPLATE_PATH"]
@@ -69,21 +71,37 @@ def tilelang_callback_cuda_compile(code, target):
     target_arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
 
     arch = [f"-arch=sm_{target_arch}"]
-    format = "cubin"
+    compile_format = "cubin"
 
-    # printing out number of registers
-    debug_option = "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
+    # Read pass-config keys (string-valued) like in jit.adapter.libgen.compile_lib
+    cfg = pass_config or {}
+    if cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH.value, False):
+        deprecated_warning("TL_DISABLE_FAST_MATH", "TL_ENABLE_FAST_MATH", "0.1.7")
+        disable_fast_math = bool(cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH.value, True))
+        enable_fast_math = not disable_fast_math
+    else:
+        enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH.value, False))
+
+    ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL.value, None)
+    verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT.value, False))
+
+    options = [
+        "-std=c++17",
+        "-I" + tl_template_path,
+        "-I" + cutlass_path,
+    ]
+    if enable_fast_math:
+        options.append("--use_fast_math")
+    if ptxas_usage_level is not None:
+        options.append(f"--ptxas-options=--register-usage-level={ptxas_usage_level}")
+    if verbose_ptxas_output:
+        options.append("--ptxas-options=--verbose")
+
     ptx = nvcc.compile_cuda(
         code,
-        format,
+        compile_format,
         arch,
-        options=[
-            "-std=c++17",
-            debug_option,
-            "--use_fast_math",
-            "-I" + tl_template_path,
-            "-I" + cutlass_path,
-        ],
+        options=options,
         verbose=False,
     )
 

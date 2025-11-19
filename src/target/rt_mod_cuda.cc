@@ -2,6 +2,7 @@
 #include "runtime/cuda/cuda_module.h"
 #include "runtime/pack_args.h"
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/transform.h>
 
 namespace tvm {
 namespace codegen {
@@ -66,7 +67,10 @@ ffi::Module BuildTileLangCUDA(IRModule mod, Target target) {
   std::string ptx;
   if (const auto f =
           ffi::Function::GetGlobal("tilelang_callback_cuda_compile")) {
-    ptx = (*f)(code, target).cast<std::string>();
+    // Fetch current pass context config and pass into the compile callback
+    tvm::transform::PassContext pass_ctx =
+        tvm::transform::PassContext::Current();
+    ptx = (*f)(code, target, pass_ctx->config).cast<std::string>();
     if (ptx[0] != '/')
       fmt = "cubin";
   } else {
