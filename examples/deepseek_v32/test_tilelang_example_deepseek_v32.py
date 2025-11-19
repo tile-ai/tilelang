@@ -1,4 +1,5 @@
 # ruff: noqa
+import tilelang
 import tilelang.testing
 
 import topk_selector

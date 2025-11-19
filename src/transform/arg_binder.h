@@ -159,6 +159,7 @@ public:
                     const PrimExpr &nullable_guard);
 
 private:
+  std::vector<Var> getUndefVars(const std::vector<PrimExpr> &arg);
   // Internal bind function
   bool Bind_(const PrimExpr &arg, const PrimExpr &value,
              const std::string &arg_name, bool with_lets);
