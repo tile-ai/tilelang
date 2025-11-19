@@ -1,0 +1,477 @@
+/opt/conda/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+2025-11-15 04:16:16  [TileLang:tilelang.env:WARNING]: Loading tilelang libs from dev root: /root/TileLang/build
+WARNING:fla.utils:Current Python version 3.10 is below the recommended 3.11 version. It is recommended to upgrade to Python 3.11 or higher for the best experience.
+[04:19:55] /root/TileLang/src/op/copy.cc:1322: Warning: TMA bulk copy cannot support a non-swizzled global layout, fallback to normal copy.
+[04:20:15] /root/TileLang/src/transform/warp_specialized_rewriter.h:43: Warning: Auto warp specialization will be disabled because TMA and mbarrier are both present
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 174, in main
+    kernel = tl_matmul_streamk(
+  File "/root/TileLang/tilelang/jit/__init__.py", line 273, in __call__
+    self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 223, in compile
+    func = self.get_tir(*args, **kwargs)
+  File "/root/TileLang/tilelang/jit/__init__.py", line 192, in get_tir
+    program_result = program_result_source(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 152, in tl_matmul_streamk
+    def main(
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 721, in prim_func
+    return impl(func) if func is not None else impl
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 708, in impl
+    return prim_func_generator(**annot)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 693, in prim_func_generator
+    ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 165, in main
+    compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 529, in __call__
+    res = self.ir_gen.gen(builder)(*args, **kwargs)
+  File "/root/TileLang/examples/gemm_streamk/example_tilelang_gemm_streamk.py", line 126, in compute_first_wave
+    start_iter[0] = end_iter[0]
+  File "/root/TileLang/tilelang/language/v2/builder.py", line 295, in ctx_while
+    raise RuntimeError("while loops are not supported in TileLang builder")
+RuntimeError: while loops are not supported in TileLang builder
+/root/TileLang/examples/gemm_streamk/bench_example_tilelang_gemm_splitk.py:6: RuntimeWarning: benchmark for example_tilelang_gemm_streamk failed in all repeats (no valid run)
+  tilelang.tools.bench.process_func(example_tilelang_gemm_streamk.main)Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 282, in test_sparse_mla_fwd
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd.py", line 244, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 54.43 GiB is allocated by PyTorch, and 15.41 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+/root/TileLang/examples/deepseek_v32/bench_tilelang_example_deepseek_v32.py:18: RuntimeWarning: benchmark for sparse_mla_fwd failed in all repeats (no valid run)
+  tilelang.tools.bench.process_func(sparse_mla_fwd.test_sparse_mla_fwd)
+[05:04:44] /root/TileLang/src/transform/warp_specialized_rewriter.h:43: Warning: Auto warp specialization will be disabled because TMA and mbarrier are both present
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 438, in test_sparse_mla_fwd_pipelined
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+  File "/root/TileLang/examples/deepseek_v32/sparse_mla_fwd_pipelined.py", line 391, in ref_sparse_mla_fwd_interface
+    score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 GiB. GPU 0 has a total capacity of 79.10 GiB of which 8.16 GiB is free. Process 1079578 has 70.93 GiB memory in use. Of the allocated memory 57.22 GiB is allocated by PyTorch, and 12.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+/root/TileLang/examples/deepseek_v32/bench_tilelang_example_deepseek_v32.py:22: RuntimeWarning: benchmark for sparse_mla_fwd_pipelined failed in all repeats (no valid run)
+  tilelang.tools.bench.process_func(sparse_mla_fwd_pipelined.test_sparse_mla_fwd_pipelined)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/root/TileLang/tilelang/tools/bench.py", line 146, in bench_all
+    func()
+  File "/root/TileLang/examples/dequantize_gemm/bench_example_dequantize_gemm.py", line 15, in bench_example_dequant_gemm_fp4_hopper
+    tilelang.tools.bench.process_func(example_dequant_gemm_fp4_hopper.main)
+  File "/root/TileLang/tilelang/tools/bench.py", line 48, in process_func
+    func(*args, **kwargs)
+  File "/root/TileLang/examples/dequantize_gemm/example_dequant_gemm_fp4_hopper.py", line 277, in main
+    profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+  File "/root/TileLang/tilelang/profiler/__init__.py", line 95, in assert_allclose
+    ref_outs = reference_program(*ins)
+  File "/root/TileLang/examples/dequantize_gemm/example_dequant_gemm_fp4_hopper.py", line 263, in ref_program
+    B = torch_convert(qB)
+  File "/root/TileLang/examples/dequantize_gemm/example_dequant_gemm_fp4_hopper.py", line 57, in torch_convert
+    new_tensor[i][j] = _convert(tensor[i][j // 2], j % 2)
+  File "/root/TileLang/examples/dequantize_gemm/example_dequant_gemm_fp4_hopper.py", line 49, in _convert
+    lower_16_bits = (val_f16 & 0xFFFF).to(torch.uint16)
+KeyboardInterrupt
+Running BlockSparse MatMul Benchmark for M=1024, N=1024, K=1024
+Target Block Sparsity: 0.5
+Using Autotuner: False
+
+total_tiles=128 
+iters_per_tile=16 
