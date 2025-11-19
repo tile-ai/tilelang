@@ -67,7 +67,7 @@ def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
     return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
 
 
-def PreLowerSemanticChecker(mod: IRModule) -> None:
+def PreLowerSemanticCheck(mod: IRModule) -> None:
     """
     Check whether the module is valid before lowering. If not, raise an user-friendly error
     in Python side instead of let the error dive into complicate TVM/C++ stack.
