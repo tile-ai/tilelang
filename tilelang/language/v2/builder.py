@@ -606,9 +606,9 @@ def get_type_hints(func):
     # ```
     #
     # This is incomplete and buggy
-    #   the only bug senario the function body doesn't use the the parameters
-    #   but such define-no-use senario is very rare in writing kernels
-    # 
+    #   the only bug scenario the function body doesn't use the the parameters
+    #   but such define-no-use scenario is very rare in writing kernels
+    #
     # ```py
     # def foo():
     #   n = 128
