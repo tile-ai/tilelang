@@ -1,7 +1,6 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 from __future__ import annotations
-
 import tvm
 import tilelang.language as T
 import warnings

@@ -117,6 +117,7 @@ def test_example_chunk_o_bwd_compilation():
     kernel = tilelang_chunk_o_bwd_dqkwg(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
                                         gate_dtype, state_dtype, chunk_size, 1.0, use_g, True,
                                         block_DK, block_DV, threads, num_stages)
+
     dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = kernel(Q, K, V, h, G, dO, dh, dv,
                                                                 W)  # noqa: F841
     if use_g:

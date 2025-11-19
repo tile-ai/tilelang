@@ -248,8 +248,9 @@ class BaseBuilder:
 
 class DSLMutator(ast.NodeTransformer):
 
-    def __init__(self):
+    def __init__(self, closure_names: list[str]):
         self.tmp_counter = 0
+        self.closure_names = closure_names
 
     def get_tmp(self) -> str:
         name = f"__{self.tmp_counter}"
@@ -494,9 +495,11 @@ class DSLMutator(ast.NodeTransformer):
         node.body = stmts + node.body
         node.decorator_list.clear()
         return quote1(
-            f"def {node.name}(__tb):\n"
-            "  range = __tb.override('range')\n"
-            "  pass\n"
+            f"def make_closure({', '.join(self.closure_names)}):\n"
+            f"  def {node.name}(__tb):\n"
+            "    range = __tb.override('range')\n"
+            "    pass\n"
+            f"    return {node.name}\n"
             f"  return {node.name}",
             passes=[node],
         )
@@ -595,7 +598,29 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
 
     tree = utils.get_ast(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
-    tree = DSLMutator().visit(tree)
-    fn = utils.get_compiled_object(tree, func.__name__, filename,
-                                   utils.inspect_function_capture(func))
+    nonlocals = utils.get_func_nonlocals(func)
+
+    # DSLMutator generates a function named `make_closure`
+    #   it accepts all names inside nonlocal, and returns the mutated function
+    #   this is because we must separate the closure namespace form the global namespace
+    #     if we directly inject closure variables into the global namespace,
+    #     it generates a new `globals` dict, and the dict owns all reference to the original globalns
+    #     which makes memory leak, because the original globalns cannot be freed
+    #     ```py
+    #     a = 123
+    #     def foo():
+    #       x = foo.__globals__ # OK, globals are maintained by python
+    #       x = {**foo.__globals__, } # Not OK: globals are copied, and the original globals cannot be freed
+    #       def bar(): x
+    #       return bar
+    #     ```
+    tree = DSLMutator(nonlocals.keys()).visit(tree)
+
+    make_closure = utils.get_compiled_object(
+        tree,
+        'make_closure',
+        filename,
+        func.__globals__,  # use the original globalns
+    )
+    fn = make_closure(**nonlocals)
     return IRGenerator(gen=fn, source=ast.unparse(tree))

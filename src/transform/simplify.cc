@@ -240,37 +240,42 @@ public:
     simplifier.MarkBufferMapShapes(func);
     func.CopyOnWrite()->body = simplifier(func->body);
 
-    // Begin to remove useless var and buffer
-    // First get used buffers
-    simplifier.used_buffers_ = CollectUsedBuffers(func);
+    // Optionally remove unused buffer parameters
+    if (simplify_arguments) {
+      // First get used buffers
+      simplifier.used_buffers_ = CollectUsedBuffers(func);
 
-    bool param_updated = false;
-    Array<Var> new_params;
-    Map<Var, Buffer> new_buffer_map;
-    // Check whether each buffer is used
-    for (const auto &var : func->params) {
-      if (func->buffer_map.find(var) != func->buffer_map.end()) {
-        if (simplifier.used_buffers_.find(func->buffer_map[var].get()) !=
-            simplifier.used_buffers_.end()) {
-          new_params.push_back(var);
-          new_buffer_map.Set(var, func->buffer_map[var]);
-        } else if (simplifier.used_in_buffer_def_.find(
-                       func->buffer_map[var]->data.get()) !=
-                   simplifier.used_in_buffer_def_.end()) {
-          new_params.push_back(var);
-          new_buffer_map.Set(var, func->buffer_map[var]);
+      bool param_updated = false;
+      Array<Var> new_params;
+      Map<Var, Buffer> new_buffer_map;
+      // Check whether each buffer is used
+      for (const auto &var : func->params) {
+        if (func->buffer_map.find(var) != func->buffer_map.end()) {
+          if (simplifier.used_buffers_.find(func->buffer_map[var].get()) !=
+              simplifier.used_buffers_.end()) {
+            new_params.push_back(var);
+            new_buffer_map.Set(var, func->buffer_map[var]);
+          } else if (simplifier.used_in_buffer_def_.find(
+                         func->buffer_map[var]->data.get()) !=
+                     simplifier.used_in_buffer_def_.end()) {
+            new_params.push_back(var);
+            new_buffer_map.Set(var, func->buffer_map[var]);
+          } else {
+            param_updated = true;
+          }
         } else {
-          param_updated = true;
+          // Non-buffer parameters (e.g., scalars) are always retained
+          new_params.push_back(var);
         }
       }
-    }
 
-    if (param_updated) {
-      return PrimFunc(new_params, func.CopyOnWrite()->body, func->ret_type,
-                      new_buffer_map, func->attrs, func->span);
-    } else {
-      return func;
+      if (param_updated) {
+        return PrimFunc(new_params, func.CopyOnWrite()->body, func->ret_type,
+                        new_buffer_map, func->attrs, func->span);
+      }
     }
+    // Either no change to params or argument simplification disabled
+    return func;
   }
 
 private:

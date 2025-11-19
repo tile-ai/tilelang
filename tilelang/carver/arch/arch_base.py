@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-
 class TileDevice:
     """
     Represents the architecture of a computing device, capturing various hardware specifications.

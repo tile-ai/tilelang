@@ -53,26 +53,6 @@ def get_func_nonlocals(func):
     return nonlocal_vars
 
 
-def inspect_function_capture(func: Callable) -> dict[str, Any]:
-    """Capture function non-locals and global variables.
-
-    Parameters
-    ----------
-    func : Callable
-        The function to inspect.
-
-    Returns
-    -------
-    res : Dict[str, Any]
-        The function variables map with non-local or global variables.
-    """
-    captured = {
-        **func.__globals__,  # type: ignore
-        **get_func_nonlocals(func),
-    }
-    return captured
-
-
 def get_ast(func: Callable):
     _, start = inspect.getsourcelines(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)

@@ -154,6 +154,10 @@ public:
     return def_handle_dtype_;
   }
 
+  bool BindNullable(const PrimExpr &arg, const PrimExpr &value,
+                    const std::string &arg_name, bool with_lets,
+                    const PrimExpr &nullable_guard);
+
 private:
   // Internal bind function
   bool Bind_(const PrimExpr &arg, const PrimExpr &value,

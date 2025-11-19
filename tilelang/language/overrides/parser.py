@@ -1,6 +1,4 @@
 """TVMScript parser overrides tailored for TileLang."""
-from __future__ import annotations
-
 from functools import partial
 
 from tvm.script.ir_builder import tir as T

@@ -35,7 +35,11 @@ ExtractFuncInfo(const IRModule &mod) {
           continue;
         }
       }
-      info.arg_types.push_back(f->params[i].dtype());
+      DataType dtype = f->params[i].dtype();
+      // Device runtime cannot directly take bool arguments, map to int32.
+      if (dtype.is_bool())
+        dtype = DataType::Int(32);
+      info.arg_types.push_back(dtype);
     }
     if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(
             tir::attr::kKernelLaunchParams)) {

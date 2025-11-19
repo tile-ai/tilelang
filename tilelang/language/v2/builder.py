@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
@@ -19,6 +18,7 @@ try:
 except ImportError:  # Python < 3.11 for Self, < 3.10 for ParamSpec
     from typing_extensions import ParamSpec, Self
 from . import dtypes as dt
+from . import utils
 import threading
 import logging
 
@@ -594,22 +594,27 @@ def get_type_hints(func):
     # Build eval namespaces from function globals plus captured closure variables
     # This lets annotations reference symbols like `n`, `h`, or dtype vars
     # defined in the outer scope of a nested function.
-    globalns = dict(getattr(func, '__globals__', {}))
-    localns = dict(globalns)
-    try:
-        freevars = getattr(func.__code__, 'co_freevars', ())
-        cells = getattr(func, '__closure__', ()) or ()
-        closure_bindings = {
-            name: cell.cell_contents for name, cell in zip(freevars, cells) if name not in localns
-        }
-        if closure_bindings:
-            localns.update(closure_bindings)
-            # Also update globals so ForwardRef eval sees them uniformly
-            globalns.update(closure_bindings)
-    except Exception:
-        # Be permissive: absence or access issues with closure shouldn't crash
-        pass
-
+    globalns = func.__globals__
+    # Here we add nonlocals into localns, to capture the parameters declared in the parent function
+    # ```py
+    # def foo():
+    #   n = 128 # n is nonlocal
+    #   def bar(
+    #       A: T.Tensor(n, T.float32) # we add nonlocal in its eval context
+    #   ):
+    #      for i in range(n): ...
+    # ```
+    #
+    # This is incomplete and buggy
+    #   the only bug scenario the function body doesn't use the the parameters
+    #   but such define-no-use scenario is very rare in writing kernels
+    #
+    # ```py
+    # def foo():
+    #   n = 128
+    #   def bar(A: T.Tensor((n,), T.float32)):
+    #     ... # empty function, do not use `n`
+    localns = utils.get_func_nonlocals(func)
     for name, value in annot.items():
         if name == 'return':
             continue
@@ -619,8 +624,10 @@ def get_type_hints(func):
         if value is None:
             value = type(None)
         if isinstance(value, str):
-            # Handle simple dtype aliases like T.float32 appearing as strings
-            # Evaluate directly only when it matches known dtypes
+            # if the annotation is string, is can be: (i) a T.float32 like annotations, (ii) a ForwardRef object
+            # typing doesn't handle (i), it will try to interpret T.float32
+            #    typing see: T.float32 is str('float32'), and there is no object named `flaot32` and give a NameError
+            # here we manually interpret it to return T.float32 object
             try:
                 _, v = value.split('.', maxsplit=1)
             except ValueError:
@@ -632,7 +639,9 @@ def get_type_hints(func):
                 except Exception:
                     pass
             value = ForwardRef(value, is_argument=True, is_class=False)
-        hints[name] = _eval_type(value, globalns=globalns, localns=localns)
+            hints[name] = _eval_type(value, globalns=globalns, localns=localns)
+        else:
+            hints[name] = value
     return hints
 
 

@@ -60,6 +60,8 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
                 T.copy(scores_max, scores_max_prev)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_M):
+                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+                for i in T.Parallel(block_M):
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 for i, j in T.Parallel(block_M, dim):
                     acc_o[i, j] *= scores_scale[i]
@@ -344,7 +346,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=8, help='Batch size')
     parser.add_argument('--h', type=int, default=32, help='Number of heads')
-    parser.add_argument('--n_ctx', type=int, default=1048, help='Context size')
+    parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
     parser.add_argument('--d_head', type=int, default=64, help='Head dimension')
     parser.add_argument('--causal', type=bool, default=False, help='Causal flag')
     args = parser.parse_args()

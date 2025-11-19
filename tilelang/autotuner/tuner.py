@@ -139,8 +139,9 @@ class AutoTuner:
 
     def set_compile_args(self,
                          out_idx: list[int] | int | None = None,
-                         target: Literal['auto', 'cuda', 'hip'] = 'auto',
-                         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+                         target: Literal['auto', 'cuda', 'hip', 'metal'] = 'auto',
+                         execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc",
+                                                    "torch"] = "auto",
                          target_host: str | Target = None,
                          verbose: bool = False,
                          pass_configs: dict[str, Any] | None = None):
@@ -157,10 +158,15 @@ class AutoTuner:
         Returns:
             AutoTuner: Self for method chaining.
         """
+        # Normalize target to a concrete TVM Target and resolve execution backend
+        t = Target(determine_target(target))
+        from tilelang.jit.execution_backend import resolve_execution_backend
+        resolved_backend = resolve_execution_backend(execution_backend, t)
+
         self.compile_args = CompileArgs(
             out_idx=out_idx,
-            target=Target(determine_target(target)),
-            execution_backend=execution_backend,
+            target=t,
+            execution_backend=resolved_backend,
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs)
@@ -235,7 +241,8 @@ class AutoTuner:
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
-    def generate_cache_key(self, parameters: dict[str, Any]) -> AutotuneResult | None:
+    def generate_cache_key(self, parameters: dict[str, Any],
+                           extra_parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process.
         """
 
@@ -261,6 +268,7 @@ class AutoTuner:
         key_data = {
             "version": __version__,
             "op_parameters": tuple(op_parameters),
+            "extra_parameters": extra_parameters,
             "func_source": func_source,
             "configs": self.configs,
             "compile_args": hash(self.compile_args),
@@ -293,10 +301,28 @@ class AutoTuner:
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
 
+        # NOTE(chaofan):  We need to extract some parameters from the closure.
+        # Consider the case:
+        #   def gemm(M, N, K):
+        #       def kernel(...)
+        # If we only extract source, M/N/K will be symbolic and there will be cache problem.
+        extra_parameters: dict[str, Any] = {}
+        cells = self.fn.__closure__
+        var_names = self.fn.__code__.co_freevars
+        if cells is not None:
+            assert len(var_names) == len(cells), "Number of free variables does not match"
+            for var_name, cell in zip(var_names, cells):
+                if var_name in parameters:
+                    continue
+                # Cell content must be serializable
+                assert isinstance(cell.cell_contents, (int, float, str, bool, type(None))), \
+                    f"Cell contents {cell.cell_contents} is not serializable: {type(cell.cell_contents)}"
+                extra_parameters[var_name] = cell.cell_contents
+
         if isinstance(self.configs, Callable):
             self.configs = self.configs(*self._kernel_parameters)
 
-        key = self.generate_cache_key(parameters)
+        key = self.generate_cache_key(parameters, extra_parameters)
 
         with self._lock:
             if env.is_cache_enabled():
@@ -571,7 +597,7 @@ class AutoTuner:
             func=best_kernel.prim_func,
             kernel=best_kernel)
 
-        if self.compile_args.execution_backend in ("dlpack", "torch"):
+        if self.compile_args.execution_backend in ("torch"):
             logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:
@@ -708,8 +734,9 @@ def autotune(  # This is the new public interface
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["dlpack", "ctypes", "cython"], optional
-        Backend for kernel execution and argument passing. Defaults to "cython".
+    execution_backend : Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+        Backend for kernel execution and argument passing. Use "auto" to pick a sensible
+        default per target (cuda->tvm_ffi, metal->torch, others->cython).
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.
     pass_configs : Optional[Dict[str, Any]], optional

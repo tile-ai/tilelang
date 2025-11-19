@@ -1,7 +1,5 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
-from __future__ import annotations
-
 import tvm
 import tvm_ffi
 from tvm.ir import Range
@@ -124,7 +122,7 @@ class Fragment(Layout):
     def repeat(self,
                repeats,
                repeat_on_thread: bool = False,
-               lower_dim_first: bool = True) -> Fragment:
+               lower_dim_first: bool = True) -> 'Fragment':
         """
         Returns a new Fragment that repeats the iteration space a given number of times.
 
@@ -144,7 +142,7 @@ class Fragment(Layout):
         """
         return _ffi_api.Fragment_repeat(self, repeats, repeat_on_thread, lower_dim_first)
 
-    def replicate(self, replicate: int) -> Fragment:
+    def replicate(self, replicate: int) -> 'Fragment':
         """
         Replicate the Fragment across a new thread dimension.
 
@@ -160,7 +158,7 @@ class Fragment(Layout):
         """
         return _ffi_api.Fragment_replicate(self, replicate)
 
-    def condense_rep_var(self) -> Fragment:
+    def condense_rep_var(self) -> 'Fragment':
         """
         Condense or fold the replicate variable into the existing iteration space.
         This operation may be used to reduce dimensionality if the replicate variable
@@ -207,7 +205,7 @@ class Fragment(Layout):
         """
         return f"Fragment<{self.get_input_shape()}->{self.get_output_shape()}, thread={self.thread}, index={self.index}>"
 
-    def is_equal(self, other: Fragment) -> bool:
+    def is_equal(self, other: 'Fragment') -> bool:
         """
         Check if the current fragment is equal to another fragment.
         """

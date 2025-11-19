@@ -138,6 +138,7 @@ file(GLOB TILE_LANG_SRCS
   src/transform/*.cc
   src/op/*.cc
   src/target/utils.cc
+  src/target/codegen_c_host.cc
   src/target/codegen_cpp.cc
   src/target/rt_mod_cpp.cc
   # intrin_rule doesn't have system dependency

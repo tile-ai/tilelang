@@ -13,7 +13,7 @@ def debug_print_buffer(M=16, N=16, dtype="float16"):
             shared_buf = T.alloc_shared([M, N], dtype)
             T.print(shared_buf)
 
-    jit_kernel = tilelang.compile(program, target="cuda")
+    jit_kernel = tilelang.compile(program, target="cuda", execution_backend="tvm_ffi")
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 

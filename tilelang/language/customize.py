@@ -1,8 +1,8 @@
 """The language interface for tl programs."""
 from __future__ import annotations
-
 import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer, op
+from tilelang.utils.language import (bits_product, prim_expr_equal)
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store  # noqa: F401
 
 
@@ -46,19 +46,22 @@ def reshape(src: Buffer, shape: list[PrimExpr]) -> Buffer:
     Returns:
         Buffer: A new buffer view with the specified shape
     """
+    assert prim_expr_equal(bits_product(shape, src.dtype),
+                           bits_product(src.shape, src.dtype)), "T.reshape/view shape check failed."
     return T.Tensor(shape, src.dtype, src.data)
 
 
 def view(src: Buffer, shape: list[PrimExpr] | None = None, dtype: str | None = None) -> Buffer:
-    """
-         Return a Tensor view of the input buffer with an optional new shape and dtype.
+    """Return a Tensor view of the input buffer with an optional new shape and dtype.
 
-         If `shape` is None the source buffer's shape is used; if `dtype` is None the source buffer's dtype is used. The returned buffer shares the same underlying data as `src` (no copy).
-         """
+    If `shape` is None the source buffer's shape is used; if `dtype` is None the source buffer's dtype is used. The returned buffer shares the same underlying data as `src` (no copy).
+    """
     if shape is None:
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
+    assert prim_expr_equal(bits_product(shape, dtype),
+                           bits_product(src.shape, src.dtype)), "T.reshape/view shape check failed."
     return T.Tensor(shape, dtype, src.data)
 
 

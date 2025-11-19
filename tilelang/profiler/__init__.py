@@ -1,6 +1,5 @@
 """The profiler and convert to torch utils"""
 from __future__ import annotations
-
 from typing import Callable, Any, Literal
 from functools import partial
 import torch
@@ -11,7 +10,6 @@ from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
     torch_assert_close,
-    adapt_torch2tvm,
 )
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
@@ -275,9 +273,8 @@ class Profiler:
             device = tvm.cuda(0) if target == "cuda" else tvm.rocm(0)
             time_evaluator = self.mod.time_evaluator(
                 self.mod.entry_name, device, number=rep, repeat=n_repeat)
-            tvm_inputs = [adapt_torch2tvm(inp) for inp in ins]
             # Transform Latency to ms
-            return time_evaluator(*tvm_inputs).mean * 1e3
+            return time_evaluator(*ins).mean * 1e3
         else:
             raise ValueError(f"Unknown profiler: {profiler}")
 

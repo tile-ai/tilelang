@@ -220,9 +220,9 @@ class TLCUDASourceWrapper:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
-        for dyn_sym in dynamic_symbolic_set:
+        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
             if dyn_sym not in [arg["name"] for arg in function_args]:
-                function_args.append({"name": dyn_sym, "type": "int"})
+                function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
 
         function_args.append(self.get_stream_type())
 
@@ -405,18 +405,20 @@ class TLCUDASourceWrapper:
 
     def get_dynamic_symbolic_set(self, prim_func):
         # Determine the set of dynamic symbols used in the function
-        dynamic_symbolic_set: list[str] = []
+        dynamic_symbolic_set: dict[str, str] = {}
 
-        def unique_push_back(name: str):
+        def unique_push_back(name: str, dtype: str):
             if name not in dynamic_symbolic_set:
-                dynamic_symbolic_set.append(name)
+                dynamic_symbolic_set[name] = dtype
+            else:
+                assert dtype == dynamic_symbolic_set[name]
 
         for param in prim_func.params:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
                     if isinstance(dim, tvm.tir.Var):
-                        unique_push_back(dim.name)
+                        unique_push_back(dim.name, str(dim.dtype))
 
         # Note: In buffer definitions, any dynamic symbols appearing in strides are listed after those in the shape.
         for param in prim_func.params:
@@ -424,9 +426,9 @@ class TLCUDASourceWrapper:
                 buffer = prim_func.buffer_map[param]
                 for stride in buffer.strides:
                     if isinstance(stride, tvm.tir.Var):
-                        unique_push_back(stride.name)
+                        unique_push_back(stride.name, str(stride.dtype))
 
-        return dynamic_symbolic_set
+        return list(dynamic_symbolic_set.items())
 
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call
@@ -665,8 +667,8 @@ class TLCPUSourceWrapper:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
-        for dyn_sym in dynamic_symbolic_set:
-            function_args.append({"name": dyn_sym, "type": "int"})
+        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
+            function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
         # Format the function arguments for declaration
         def_args = ", ".join([f"{arg['type']} {arg['name']}" for arg in function_args])
 
@@ -715,14 +717,14 @@ class TLCPUSourceWrapper:
 
     def get_dynamic_symbolic_set(self, prim_func):
         # Determine the set of dynamic symbols used in the function
-        dynamic_symbolic_set: list[str] = []
+        dynamic_symbolic_set: dict[str, str] = {}
         for param in prim_func.params:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
                     if isinstance(dim, tvm.tir.Var) and (dim.name not in dynamic_symbolic_set):
-                        dynamic_symbolic_set.append(dim.name)
-        return dynamic_symbolic_set
+                        dynamic_symbolic_set[dim.name] = str(dim.dtype)
+        return list(dynamic_symbolic_set.items())
 
     def get_cpu_init_func(self):
         # Provide init() and get_last_error() for CPU backend

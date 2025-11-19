@@ -1,6 +1,5 @@
 """The profiler and convert to torch utils"""
 from __future__ import annotations
-
 import ctypes
 import logging
 import torch
@@ -49,9 +48,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
     ir_module: tvm.IRModule | None = None
     # The global source code of the kernel -> global means the source code of the kernel
     # that is not wrapped by the wrapper code
-    kernel_global_source: str | None = None
+    host_kernel_source: str | None = None
+    device_kernel_source: str | None = None
     lib: ctypes.CDLL | None = None  # Compiled library handle
-    wrapped_source: str | None = None  # Generated C++ wrapper code
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: dict[tir.Var, tuple[int, int]] | None = None
     # Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
@@ -78,7 +77,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  func_or_mod: tir.PrimFunc | tvm.IRModule,
                  host_mod: tvm.IRModule | None = None,
                  device_mod: tvm.IRModule | None = None,
-                 kernel_global_source: str | None = None,
+                 device_kernel_source: str | None = None,
                  verbose: bool = False,
                  pass_configs: dict[str, Any] | None = None,
                  compile_flags: list[str] | None = None):
@@ -93,7 +92,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
-        self.kernel_global_source = kernel_global_source
+        self.device_kernel_source = device_kernel_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -122,9 +121,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_pass_configs(pass_configs)
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
-        self.wrapped_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
+        self.host_kernel_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
-        self.lib_generator.update_lib_code(self.wrapped_source)
+        self.lib_generator.update_lib_code(self.host_kernel_source)
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
 
@@ -151,7 +150,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                       result_idx: list[int],
                       target: str,
                       func_or_mod: tir.PrimFunc | tvm.IRModule,
-                      kernel_global_source: str,
+                      host_kernel_source: str,
+                      device_kernel_source: str,
                       kernel_lib_path: str,
                       verbose: bool = False,
                       pass_configs: dict[str, Any] | None = None,
@@ -159,8 +159,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter.kernel_global_source = kernel_global_source
-        adapter.wrapped_source = kernel_global_source
+        adapter.host_kernel_source = host_kernel_source
+        adapter.device_kernel_source = device_kernel_source
         adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tir.PrimFunc):
@@ -383,7 +383,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
     def get_kernel_source(self, kernel_only: bool = False):
         """Returns the source code of the compiled kernel."""
         if kernel_only:
-            return self.kernel_global_source
+            return self.device_kernel_source
         else:
-            assert self.wrapped_source is not None, "Wrapped source is not available"
-            return self.wrapped_source
+            # Wrapper only has host kernel source
+            assert self.host_kernel_source is not None, "Wrapped source is not available"
+            return self.host_kernel_source

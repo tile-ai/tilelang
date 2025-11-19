@@ -1,7 +1,7 @@
 from __future__ import annotations
 from tvm.tir import Buffer, BufferLoad, BufferRegion, PrimExpr
 from functools import reduce
-from tvm import IRModule
+from tvm import IRModule, DataType
 from tvm.tir import PrimFunc
 from tvm import ir, tir
 
@@ -347,6 +347,17 @@ def retrieve_offset(obj: Buffer | BufferRegion | BufferLoad) -> list:
             return [r.min for r in region.region]
         return list(obj.indices)
     raise ValueError(f"Unsupported retrieve_offset argument type: {type(obj)} for object {obj}")
+
+
+def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
+    """
+    Compute the number of bits in a Buffer (shape with dtype)."""
+    if len(shape) == 0:
+        return tir.IntImm("int32", 1)
+    result = shape[0]
+    for i in range(1, len(shape)):
+        result = result * shape[i]
+    return result * DataType(dtype).bits
 
 
 def prim_expr_equal(lhs, rhs) -> bool:

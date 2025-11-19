@@ -247,8 +247,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         mask_zero = T.Cast("int32", 0)
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
-        num_inst_m = 4 * self.warp_row_tiles // atom_m
-        num_inst_n = self.warp_col_tiles // atom_n
+        # TCGEN05 only has one warp group
+        num_inst_m = self.block_row_warps * self.warp_row_tiles // atom_m
+        num_inst_n = self.block_col_warps * self.warp_col_tiles // atom_n
 
         # Helper to allow BufferRegion/BufferLoad as inputs
         def access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
