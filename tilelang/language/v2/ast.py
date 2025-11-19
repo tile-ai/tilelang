@@ -620,7 +620,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
         tree,
         'make_closure',
         filename,
-        func.__globals__, # use the original globalns
+        func.__globals__,  # use the original globalns
     )
     fn = make_closure(**nonlocals)
     return IRGenerator(gen=fn, source=ast.unparse(tree))

@@ -4,20 +4,21 @@ import torch
 import weakref
 import gc
 
+
 def test_tilelang_capture():
+
     @tilelang.jit(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
-    )
+        },)
     def get_dummy_kernel():
+
         @T.prim_func
-        def dummy_kernel(
-            a: T.Tensor[(1,), "float32"],
-        ):
+        def dummy_kernel(a: T.Tensor[(1,), T.float32],):
             with T.Kernel(1) as _:
                 a[0] = 1
+
         return dummy_kernel
 
     a = torch.randn(1, 1024)
