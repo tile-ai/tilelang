@@ -54,9 +54,9 @@ jobs:
           python -m venv tll
           source tll/bin/activate
           export PIP_CONFIG_FILE=/dev/null
-          export PYTHONUSERBASE=""           # ← 强制禁用 pip --user
-          pip config unset global.user       || true
-          pip config unset user.user         || true
+          export PYTHONUSERBASE=""
+          pip config unset global.user
+          pip config unset user.user
           pip install --no-user -r requirements-test.txt
           pip install --no-user .
 
