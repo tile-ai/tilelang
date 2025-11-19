@@ -19,7 +19,7 @@ except ImportError:
     fla = None
 
 import torch
-from utils import *
+from test_utils import assert_similar
 
 torch.random.manual_seed(0)
 # torch.set_printoptions(profile="full")
@@ -468,7 +468,6 @@ def run_test(
     kernel = tilelang_chunk_o_bwd_dqkwg(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
                                         gate_dtype, state_dtype, chunk_size, scale, use_g, use_dw,
                                         block_DK, block_DV, threads, num_stages)
-    print(kernel.get_kernel_source())
     dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = kernel(Q, K, V, h, G, dO, dh, dv, W)
 
     if use_g:

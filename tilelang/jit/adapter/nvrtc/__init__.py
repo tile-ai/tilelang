@@ -5,7 +5,10 @@ This module provides runtime compilation support using NVIDIA's NVRTC API.
 
 import logging
 
-__all__ = ['NVRTCKernelAdapter', 'is_nvrtc_available', 'check_nvrtc_available']
+__all__ = [
+    'NVRTCKernelAdapter', 'TLNVRTCSourceWrapper', 'NVRTCLibraryGenerator', 'is_nvrtc_available',
+    'check_nvrtc_available'
+]
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +40,29 @@ def check_nvrtc_available():
 
 # Conditionally import the adapter
 if is_nvrtc_available:
-    from .adapter import NVRTCKernelAdapter  # noqa: F401
+    from .adapter import NVRTCKernelAdapter
+    from .wrapper import TLNVRTCSourceWrapper
+    from .libgen import NVRTCLibraryGenerator
 else:
     # Provide a dummy class that raises error on instantiation
     class NVRTCKernelAdapter:
         """Dummy NVRTCKernelAdapter that raises ImportError on instantiation."""
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
+
+        @classmethod
+        def from_database(cls, *args, **kwargs):
+            raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
+
+    class TLNVRTCSourceWrapper:
+        """Dummy TLNVRTCSourceWrapper that raises ImportError on instantiation."""
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
+
+    class NVRTCLibraryGenerator:
+        """Dummy NVRTCLibraryGenerator that raises ImportError on instantiation."""
 
         def __init__(self, *args, **kwargs):
             raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)

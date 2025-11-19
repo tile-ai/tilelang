@@ -1,7 +1,6 @@
 # pylint: disable=invalid-name
 # modified from apache tvm python/tvm/contrib/nvcc.py
 """Utility to invoke nvcc compiler in the system"""
-from __future__ import absolute_import as _abs
 from __future__ import annotations
 
 import os

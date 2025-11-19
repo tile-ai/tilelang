@@ -19,6 +19,11 @@
 
 #ifdef __CUDACC_RTC__
 
+// Disable problematic CUDA standard library headers in NVRTC environment
+// Vector types (float4, uchar, etc.) are built-in to NVRTC and don't need these
+// headers
+#define _LIBCUDACXX___TUPLE_VECTOR_TYPES_H // Prevent vector_types.h inclusion
+
 using int8_t = signed char;
 using uint8_t = unsigned char;
 using int16_t = signed short;
@@ -66,6 +71,24 @@ template <class T> struct is_same<T, T> : true_type {};
 
 template <class T, class U>
 inline constexpr bool is_same_v = is_same<T, U>::value;
+
+template <class T> struct is_void : false_type {};
+
+template <> struct is_void<void> : true_type {};
+template <> struct is_void<const void> : true_type {};
+template <> struct is_void<volatile void> : true_type {};
+template <> struct is_void<const volatile void> : true_type {};
+
+template <class T> inline constexpr bool is_void_v = is_void<T>::value;
+
+template <class T> struct is_pointer : false_type {};
+
+template <class T> struct is_pointer<T *> : true_type {};
+template <class T> struct is_pointer<T *const> : true_type {};
+template <class T> struct is_pointer<T *volatile> : true_type {};
+template <class T> struct is_pointer<T *const volatile> : true_type {};
+
+template <class T> inline constexpr bool is_pointer_v = is_pointer<T>::value;
 
 namespace index_sequence_impl {
 
@@ -118,6 +141,36 @@ template <bool B, class T = void> struct enable_if {};
 template <class T> struct enable_if<true, T> {
   using type = T;
 };
+
+template <class T> struct remove_extent {
+  using type = T;
+};
+
+template <class T> struct remove_extent<T[]> {
+  using type = T;
+};
+
+template <class T, size_t N> struct remove_extent<T[N]> {
+  using type = T;
+};
+
+template <class T> using remove_extent_t = typename remove_extent<T>::type;
+
+template <class T, unsigned I = 0>
+struct extent : integral_constant<size_t, 0> {};
+
+template <class T> struct extent<T[], 0> : integral_constant<size_t, 0> {};
+
+template <class T, unsigned I> struct extent<T[], I> : extent<T, I - 1> {};
+
+template <class T, size_t N>
+struct extent<T[N], 0> : integral_constant<size_t, N> {};
+
+template <class T, size_t N, unsigned I>
+struct extent<T[N], I> : extent<T, I - 1> {};
+
+template <class T, unsigned I = 0>
+inline constexpr size_t extent_v = extent<T, I>::value;
 } // namespace std
 
 #endif

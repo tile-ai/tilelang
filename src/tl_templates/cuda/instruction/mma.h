@@ -4,8 +4,10 @@
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
 
+#ifndef __CUDACC_RTC__
 #include <type_traits>
 #include <utility>
+#endif
 
 namespace tl {
 

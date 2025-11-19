@@ -99,6 +99,8 @@ def flashattn_fwd(
                 T.copy(V[bz, by // groups, k * block_N:(k + 1) * block_N, :], V_shared)
                 T.copy(scores_max, scores_max_prev)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                for i in T.Parallel(block_M):
+                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
                 # To do causal softmax, we need to set the scores_max to 0 if it is -inf
                 # This process is called Check_inf in FlashAttention3 code, and it only need to be done
                 # NOTE(wt): check_inf is necessary for sliding window attention.

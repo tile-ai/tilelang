@@ -273,8 +273,8 @@ public:
                                 tfloat32_t, B_type_cute>::type;
   using C_type = C_type_raw;
 
-  using Instruction =
-      DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n, N>;
+  using Instruction = DispatchInstruction<A_type_raw, B_type_raw, C_type_raw,
+                                          num_warp_m, num_warp_n, N>;
 
   using OperandATraits = OperandTraits<sizeof_bits<A_type>::value, M, K,
                                        !trans_A, num_warp_m, lda>;

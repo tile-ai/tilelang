@@ -203,12 +203,12 @@ void CodeGenTileLangCPP::PrintFuncCall(const std::string &packed_func_name,
   this->PrintIndent();
   std::string ret_val = name_supply_->FreshName("ret_val");
   std::string ret_type_code = name_supply_->FreshName("ret_type_code");
-  this->stream << "TVMValue " << ret_val << ";\n";
+  this->stream << "TVMFFIAny " << ret_val << ";\n";
   this->PrintIndent();
   this->stream << "int " << ret_type_code << ";\n";
   this->PrintIndent();
   this->stream << "if (TVMFuncCall(" << packed_func_name << ", "
-               << "(TVMValue*) stack_value"
+               << "(TVMFFIAny*) stack_value"
                << ", "
                << "(int*) stack_tcode"
                << ", " << num_args << ", "
@@ -228,13 +228,13 @@ void CodeGenTileLangCPP::PrintFuncCallC(
   this->PrintIndent();
   std::string ret_val = name_supply_->FreshName("ret_val");
   std::string ret_type_code = name_supply_->FreshName("ret_type_code");
-  this->stream << "TVMValue " << ret_val << ";\n";
+  this->stream << "TVMFFIAny " << ret_val << ";\n";
   this->PrintIndent();
   this->stream << "int " << ret_type_code << ";\n";
   this->PrintIndent();
 
   this->stream << "if (" << packed_func_name << "( "
-               << "(TVMValue*) stack_value "
+               << "(TVMFFIAny*) stack_value "
                << ", "
                << "(int*) stack_tcode"
                << ", " << num_args << ", "

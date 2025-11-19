@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 """Util to invoke C/C++ compilers in the system."""
-from __future__ import annotations
 import functools
 import os
 import shutil
