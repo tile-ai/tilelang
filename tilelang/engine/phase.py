@@ -73,6 +73,7 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     in Python side instead of let the error dive into complicate TVM/C++ stack.
     """
 
+    # Check if there are any invalid nested loops.
     tilelang.analysis.NestedLoopChecker()(mod)
 
 
