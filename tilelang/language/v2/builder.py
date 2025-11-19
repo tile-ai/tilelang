@@ -19,6 +19,7 @@ try:
 except ImportError:  # Python < 3.11 for Self, < 3.10 for ParamSpec
     from typing_extensions import ParamSpec, Self
 from . import dtypes as dt
+from . import utils
 import threading
 import logging
 
@@ -579,22 +580,8 @@ def get_type_hints(func):
     # Build eval namespaces from function globals plus captured closure variables
     # This lets annotations reference symbols like `n`, `h`, or dtype vars
     # defined in the outer scope of a nested function.
-    globalns = dict(getattr(func, '__globals__', {}))
-    localns = dict(globalns)
-    try:
-        freevars = getattr(func.__code__, 'co_freevars', ())
-        cells = getattr(func, '__closure__', ()) or ()
-        closure_bindings = {
-            name: cell.cell_contents for name, cell in zip(freevars, cells) if name not in localns
-        }
-        if closure_bindings:
-            localns.update(closure_bindings)
-            # Also update globals so ForwardRef eval sees them uniformly
-            globalns.update(closure_bindings)
-    except Exception:
-        # Be permissive: absence or access issues with closure shouldn't crash
-        pass
-
+    globalns = func.__globals__
+    localns = utils.get_func_nonlocals(func)
     for name, value in annot.items():
         if name == 'return':
             continue
@@ -604,6 +591,7 @@ def get_type_hints(func):
         if value is None:
             value = type(None)
         if isinstance(value, str):
+            # if annotation value is string, it may be a ForwardRef
             # Handle simple dtype aliases like T.float32 appearing as strings
             # Evaluate directly only when it matches known dtypes
             try:
@@ -617,7 +605,9 @@ def get_type_hints(func):
                 except Exception:
                     pass
             value = ForwardRef(value, is_argument=True, is_class=False)
-        hints[name] = _eval_type(value, globalns=globalns, localns=localns)
+            hints[name] = _eval_type(value, globalns=globalns, localns=localns)
+        else:
+            hints[name] = value
     return hints
 
 
