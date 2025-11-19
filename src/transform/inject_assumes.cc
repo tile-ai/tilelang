@@ -6,6 +6,7 @@
 #include "tvm/node/structural_hash.h"
 #include "tvm/tir/builtin.h"
 #include "tvm/tir/expr.h"
+#include "tvm/tir/op.h"
 #include "tvm/tir/stmt.h"
 #include "tvm/tir/stmt_functor.h"
 #include "tvm/tir/transform.h"
@@ -62,7 +63,8 @@ private:
     Stmt build(Stmt body) {
       auto analyzer = arith::Analyzer{};
       for (const auto &e : items) {
-        auto simplified = analyzer.Simplify(GT(e.expr, 0));
+        auto simplified =
+            analyzer.Simplify(GT(e.expr, make_zero(e.expr->dtype)));
         std::stringstream ss;
         ss << "Buffer shape should be greater than 0: shape `" << e.expr
            << "` from buffer ";

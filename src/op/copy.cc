@@ -1504,7 +1504,12 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   }
 
   auto inner_box_dim = as_const_int(desc.smem_box[0]);
-  ICHECK(inner_box_dim != nullptr);
+  if (inner_box_dim == nullptr) {
+    LOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
+                 << " can only be a constant integer for TMA bulk copy, "
+                    "fallback to normal copy";
+    return LowerNormalCopy(T, analyzer);
+  }
   int instruction_dim = *inner_box_dim;
   if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
     instruction_dim = 64 / src->dtype.bytes();

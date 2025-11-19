@@ -77,7 +77,9 @@ def flash_attention(
 
             # Compute the maximum value per row on dimension 1 (block_N)
             T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-
+            for i in T.Parallel(block_M):
+                scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+                
             # Compute the factor by which we need to rescale previous partial sums
             for i in T.Parallel(block_M):
                 scores_scale[i] = T.exp2(scores_max_prev[i] - scores_max[i])

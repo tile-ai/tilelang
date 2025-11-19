@@ -14,6 +14,7 @@
 #include "../op/parallel.h"
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
+#include "region.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -21,10 +22,54 @@ namespace tl {
 
 using namespace tir;
 
+// Normalize an argument (BufferRegion/BufferLoad/tl.region)
+// to BufferRegion so Reduce can uniformly consume regions.
+static BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
+                                            const BufferMap &vmap) {
+  // Case 1: Already a BufferRegion
+  if (arg->IsInstance<BufferRegionNode>()) {
+    return Downcast<BufferRegion>(arg);
+  }
+
+  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
+  // extent=1)
+  if (const auto *load = arg.as<BufferLoadNode>()) {
+    Array<Range> ranges;
+    for (const PrimExpr &index : load->indices) {
+      if (const auto *ramp = index.as<RampNode>()) {
+        ICHECK(ramp->stride.as<IntImmNode>()) << "Ramp stride must be IntImm";
+        ICHECK_EQ(ramp->stride.as<IntImmNode>()->value, 1)
+            << "Only stride-1 Ramp is supported in region conversion";
+        ICHECK(ramp->lanes.as<IntImmNode>())
+            << "Scalable vector lanes not supported in region conversion";
+        ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
+      } else {
+        ranges.push_back(Range::FromMinExtent(index, 1));
+      }
+    }
+    return BufferRegion(load->buffer, ranges);
+  }
+
+  // Case 3: Call nodes (only tl.region)
+  if (const auto *call = arg.as<CallNode>()) {
+    // tl.region(...) — reconstruct via RegionOp
+    if (call->op.same_as(RegionOp::Get())) {
+      RegionOp region(call->args, vmap);
+      return BufferRegion(region->GetBuffer(), region->GetRanges());
+    }
+  }
+
+  LOG(FATAL) << "Unsupported argument for BufferRegion in reduce: " << arg;
+  throw; // Unreachable
+}
+
 ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<ReduceOpNode> node = tvm::ffi::make_object<ReduceOpNode>();
-  node->src = vmap[GetVarFromAccessPtr(args[0])];
-  node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  // Accept BufferRegion/BufferLoad/tl.region for src/dst
+  node->srcRegion_ = NormalizeToBufferRegion(args[0], vmap);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1], vmap);
+  node->src = node->srcRegion_->buffer;
+  node->dst = node->dstRegion_->buffer;
   std::string reduce_type = args[2].as<StringImm>().value()->value;
   node->dim = args[3].as<IntImm>().value()->value;
   node->type = ReduceType(reduce_type);
@@ -369,6 +414,7 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
                                     InferLevel level) const {
   if (level >= InferLevel::kStrict)
     return {};
+
   if (src.scope() == "local.fragment" && dst.scope() == "local.fragment" &&
       T.layout_map.count(src)) {
     auto src_layout = T.layout_map[src].as<Fragment>().value();
@@ -422,6 +468,7 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
         Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, std::nullopt)
             ->CondenseReplicateVar()
             ->BindThreadRange(T.thread_bounds);
+
     if (!T.layout_map.count(dst))
       return {{dst, dst_layout}};
     else {

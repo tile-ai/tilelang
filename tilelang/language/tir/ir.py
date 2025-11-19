@@ -1,4 +1,3 @@
-from __future__ import annotations
 import tvm.script.ir_builder.tir.ir as _ir
 from tvm.script.ir_builder.tir import frame
 from tvm.tir import PrimExpr

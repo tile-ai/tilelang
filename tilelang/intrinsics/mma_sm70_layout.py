@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-
 def shared_16x4_to_mma_a_32x4_layout(row, col, rep):
     tid = (row % 4) + 16 * ((row // 4) % 2) + 4 * (row // 8) + 8 * rep
     local_id = col

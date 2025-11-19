@@ -106,8 +106,8 @@ def tilelang_kernel_fwd(
                     T.copy(K[i_b, i_s:i_s + BS, i_h, :], K_shared)
 
                     if is_causal:
-                        for i, j in T.Parallel(G, BS):
-                            acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0,
+                        for k, j in T.Parallel(G, BS):
+                            acc_s[k, j] = T.if_then_else(i_t >= (i_s + j), 0,
                                                          -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
@@ -124,18 +124,18 @@ def tilelang_kernel_fwd(
                     T.copy(scores_max, scores_max_prev)
                     T.fill(scores_max, -T.infinity(accum_dtype))
                     T.reduce_max(acc_s, scores_max, dim=1, clear=True)
-                    for i in T.Parallel(G):
-                        scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-                    for i, j in T.Parallel(G, BS):
-                        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                    for k in T.Parallel(G):
+                        scores_scale[k] = T.exp2(scores_max_prev[k] * scale - scores_max[k] * scale)
+                    for k, j in T.Parallel(G, BS):
+                        acc_s[k, j] = T.exp2(acc_s[k, j] * scale - scores_max[k] * scale)
                     T.reduce_sum(acc_s, scores_sum, dim=1)
-                    for i in T.Parallel(G):
-                        logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                    for k in T.Parallel(G):
+                        logsum[k] = logsum[k] * scores_scale[k] + scores_sum[k]
                     T.copy(acc_s, acc_s_cast)
 
                     # Rescale
-                    for i, j in T.Parallel(G, BV):
-                        acc_o[i, j] *= scores_scale[i]
+                    for k, j in T.Parallel(G, BV):
+                        acc_o[k, j] *= scores_scale[k]
 
                     # V * softmax(Q * K)
                     T.copy(V[i_b, i_s:i_s + BS, i_h, i_v * BV:(i_v + 1) * BV], V_shared)
@@ -465,8 +465,8 @@ def tilelang_kernel_bwd_dqkv(
                     T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
                     # [G]
                     T.copy(Delta_slc[i_b, i, i_h * G:(i_h + 1) * G], delta)
-                    for i, j in T.Parallel(BS, G):
-                        dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
+                    for _i, _j in T.Parallel(BS, G):
+                        dsT_cast[_i, _j] = qkT[_i, _j] * (dsT[_i, _j] - delta[_j]) * sm_scale
 
                     # [BS, G] @ [G, BK] -> [BS, BK]
                     T.gemm(dsT_cast, Q_shared, dk, policy=T.GemmWarpPolicy.FullRow)

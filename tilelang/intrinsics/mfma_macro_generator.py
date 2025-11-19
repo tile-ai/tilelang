@@ -374,8 +374,6 @@ class MatrixCoreIntrinEmitter:
         a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
         b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0
 
-        print(a_local_stride, b_local_stride)
-
         @T.macro
         def _warp_mfma(A_local_buf, B_local_buf, C_local_buf):
             for kp, i, j in T.grid(k_pack, warp_rows, warp_cols):
@@ -678,33 +676,26 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         is_m_first: bool | None = False,
         a_preshuffle: bool | None = False,
         b_preshuffle: bool | None = False,
+        thread_var: Var | None = None,
     ):
-
-        self.a_dtype = a_dtype
-        self.b_dtype = b_dtype
-        self.accum_dtype = accum_dtype
-        self.a_transposed = a_transposed
-        self.b_transposed = b_transposed
-        # Hint Information
-        self.block_row_warps = block_row_warps
-        self.block_col_warps = block_col_warps
-        self.warp_row_tiles = warp_row_tiles
-        self.warp_col_tiles = warp_col_tiles
-        self.chunk = chunk
-        self._initialize_k_dim(a_dtype)
-        self._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
-        self._initialize_local_size(self.M_DIM, self.N_DIM, self.k_dim, self.WARP_SIZE)
-        self._initialize_mfma_prefix(self.k_dim)
-        self._initialize_micro_size(self.M_DIM, self.N_DIM, self.k_dim)
-        self._initialize_k_pack(k_pack)
-        self._initialize_is_m_first(is_m_first)
+        super().__init__(
+            a_dtype=a_dtype,
+            b_dtype=b_dtype,
+            accum_dtype=accum_dtype,
+            a_transposed=a_transposed,
+            b_transposed=b_transposed,
+            block_row_warps=block_row_warps,
+            block_col_warps=block_col_warps,
+            warp_row_tiles=warp_row_tiles,
+            warp_col_tiles=warp_col_tiles,
+            chunk=chunk,
+            reduce_k=reduce_k,
+            num_elems_per_byte=num_elems_per_byte,
+            k_pack=k_pack,
+            is_m_first=is_m_first,
+            thread_var=thread_var,
+        )
         self._initialize_preshuffle(a_preshuffle, b_preshuffle)
-
-        self.warp_rows = warp_row_tiles // self.micro_size_x
-        self.warp_cols = warp_col_tiles // self.micro_size_y
-        self.reduce_k = reduce_k
-        self.threads = (self.WARP_SIZE * (block_row_warps * block_col_warps) * reduce_k)
-        self.num_elems_per_byte = num_elems_per_byte
 
     def _initialize_preshuffle(self, a_preshuffle: bool, b_preshuffle: bool):
         if a_preshuffle is not None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from tvm.tir import Buffer, BufferLoad, BufferRegion, PrimExpr
 from functools import reduce
-from tvm import IRModule
+from tvm import IRModule, DataType
 from tvm.tir import PrimFunc
 from tvm import ir, tir
 
@@ -349,6 +349,17 @@ def retrieve_offset(obj: Buffer | BufferRegion | BufferLoad) -> list:
     raise ValueError(f"Unsupported retrieve_offset argument type: {type(obj)} for object {obj}")
 
 
+def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
+    """
+    Compute the number of bits in a Buffer (shape with dtype)."""
+    if len(shape) == 0:
+        return tir.IntImm("int32", 1)
+    result = shape[0]
+    for i in range(1, len(shape)):
+        result = result * shape[i]
+    return result * DataType(dtype).bits
+
+
 def prim_expr_equal(lhs, rhs) -> bool:
     """
     Robust equality for PrimExpr shapes/extents.
@@ -365,6 +376,52 @@ def prim_expr_equal(lhs, rhs) -> bool:
     if ir.structural_equal(lhs, rhs):
         return True
     return tir.analysis.expr_deep_equal(lhs, rhs)
+
+
+def legalize_pairwise_extents(src_extents: list, dst_extents: list) -> tuple[list, list]:
+    """
+    Right-align and broadcast two extent lists to be mutually compatible.
+
+    Early-exit rule:
+    - If the number of non-1 dimensions in `src_extents` equals that in `dst_extents`,
+      no adjustment is made; the original extents are returned unchanged. This
+      preserves the per-dimension iteration mapping (one loop var per non-1 dim)
+      and avoids creating extra varying axes on either side.
+
+    Otherwise, for each pair of tail-aligned dimensions (x, y):
+      - if x == y: keep both
+      - elif x == 1: set x = y
+      - elif y == 1: set y = x
+      - else: promote both to tir.max(x, y) to handle dynamic-vs-static safely
+
+    Leading unmatched dimensions are kept as-is.
+
+    Returns a tuple of new lists (src_new, dst_new).
+    """
+    a = list(src_extents)
+    b = list(dst_extents)
+
+    # If both sides have the same number of non-1 extents, don't re-broadcast.
+    def _num_non_one(exts: list) -> int:
+        return sum(0 if prim_expr_equal(x, 1) else 1 for x in exts)
+
+    if _num_non_one(a) == _num_non_one(b):
+        return a, b
+    k = min(len(a), len(b))
+    for i in range(1, k + 1):
+        x, y = a[-i], b[-i]
+        if prim_expr_equal(x, y):
+            continue
+        elif prim_expr_equal(x, 1):
+            a[-i] = y
+        elif prim_expr_equal(y, 1):
+            b[-i] = x
+        else:
+            # Dynamic mismatch: promote to max so downstream clamping/predicates remain safe
+            m = tir.max(x, y)
+            a[-i] = m
+            b[-i] = m
+    return a, b
 
 
 def is_full_region(buffer_region: BufferRegion) -> bool:

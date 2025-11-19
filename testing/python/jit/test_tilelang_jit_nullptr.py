@@ -83,28 +83,27 @@ def tensor_null_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_
 
 
 def run_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-    func = ptr_null_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
+    kernel = ptr_null_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
 
     a = torch.randn(M, K, device="cuda", dtype=map_torch_type(dtype))
     b = torch.randn(N, K, device="cuda", dtype=map_torch_type(dtype))
     c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))
     d = torch.randn(N, device="cuda", dtype=map_torch_type(accum_dtype))
-
-    func(a, b, c, None, M, N, K, False)
+    kernel(a, b, c, None, M, N, K, False)
 
     ref_no_bias = (a @ b.T).to(map_torch_type(accum_dtype))
     ref_with_bias = ref_no_bias + d
 
     torch.testing.assert_close(c, ref_no_bias, atol=1e-2, rtol=1e-2)
 
-    func(a, b, c, d, M, N, K, True)
+    kernel(a, b, c, d, M, N, K, True)
 
     torch.testing.assert_close(c, ref_with_bias, atol=1e-2, rtol=1e-2)
 
-    func = tensor_null_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
-    func(a, b, c, None, False)
+    kernel = tensor_null_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
+    kernel(a, b, c, None, False)
     torch.testing.assert_close(c, ref_no_bias, atol=1e-2, rtol=1e-2)
-    func(a, b, c, d, True)
+    kernel(a, b, c, d, True)
     torch.testing.assert_close(c, ref_with_bias, atol=1e-2, rtol=1e-2)
 
 
