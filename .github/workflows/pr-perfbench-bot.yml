@@ -16,9 +16,7 @@ env:
   PYTHONDEVMODE: "1"
   PYTHONUNBUFFERED: "1"
   PYTHONPATH: "" # explicit cleanup
-  PIP_USER: "0"
-  PIP_NO_USER: "1"
-  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_USER: "" # explicit cleanup
   COLUMNS: "100"
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
@@ -55,8 +53,11 @@ jobs:
         run: |
           python -m venv tll
           source tll/bin/activate
-          pip install -r requirements-test.txt
-          pip install .
+          export PYTHONUSERBASE=""           # ← 强制禁用 pip --user
+          pip config unset global.user       || true
+          pip config unset user.user         || true
+          pip install --no-user -r requirements-test.txt
+          pip install --no-user .
 
       - name: Install original version
         run: |
@@ -66,8 +67,11 @@ jobs:
           git checkout main
           python -m venv tl
           source tl/bin/activate
-          pip install -r requirements-test.txt
-          pip install .
+          export PYTHONUSERBASE=""           
+          pip config unset global.user || true
+          pip config unset user.user || true
+          pip install --no-user -r requirements-test.txt
+          pip install --no-user .
 
       - name: Run performance test
         id: perfbench
