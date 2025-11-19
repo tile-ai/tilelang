@@ -29,6 +29,14 @@ __device__ void debug_print_var<signed char>(const char *msg, signed char var) {
          threadIdx.z, var);
 }
 
+// Specialization for plain char type
+template <> __device__ void debug_print_var<char>(const char *msg, char var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=char "
+         "value=%d\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, (int)var);
+}
+
 // Specialization for unsigned char type
 template <>
 __device__ void debug_print_var<unsigned char>(const char *msg,
@@ -56,6 +64,14 @@ __device__ void debug_print_var<unsigned int>(const char *msg,
          "value=%u\n",
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, var);
+}
+
+// Specialization for bool type
+template <> __device__ void debug_print_var<bool>(const char *msg, bool var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=bool "
+         "value=%s\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, var ? "true" : "false");
 }
 
 // Specialization for float type
