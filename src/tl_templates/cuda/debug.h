@@ -66,6 +66,84 @@ __device__ void debug_print_var<unsigned int>(const char *msg,
          threadIdx.z, var);
 }
 
+// Specialization for short type
+template <> __device__ void debug_print_var<short>(const char *msg, short var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=short "
+         "value=%d\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, (int)var);
+}
+
+// Specialization for unsigned short type
+template <>
+__device__ void debug_print_var<unsigned short>(const char *msg,
+                                                unsigned short var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=unsigned "
+      "short value=%u\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, (unsigned int)var);
+}
+
+// Specialization for long type
+template <> __device__ void debug_print_var<long>(const char *msg, long var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=long "
+         "value=%ld\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, var);
+}
+
+// Specialization for unsigned long type
+template <>
+__device__ void debug_print_var<unsigned long>(const char *msg,
+                                               unsigned long var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=unsigned "
+      "long value=%lu\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, var);
+}
+
+// Specialization for long long type
+template <>
+__device__ void debug_print_var<long long>(const char *msg, long long var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=long "
+         "long value=%lld\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, var);
+}
+
+// Specialization for unsigned long long type
+template <>
+__device__ void debug_print_var<unsigned long long>(const char *msg,
+                                                    unsigned long long var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=unsigned "
+      "long long value=%llu\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, var);
+}
+
+// Specialization for int64_t type
+template <>
+__device__ void debug_print_var<int64_t>(const char *msg, int64_t var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=int64_t "
+      "value=%lld\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, (long long)var);
+}
+
+// Specialization for uint64_t type
+template <>
+__device__ void debug_print_var<uint64_t>(const char *msg, uint64_t var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=uint64_t "
+      "value=%llu\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, (unsigned long long)var);
+}
+
 // Specialization for bool type
 template <> __device__ void debug_print_var<bool>(const char *msg, bool var) {
   printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=bool "
@@ -186,6 +264,17 @@ debug_print_buffer_value<unsigned int>(const char *msg, const char *buf_name,
          threadIdx.z, buf_name, index, var);
 }
 
+// Specialization for bool type
+template <>
+__device__ void debug_print_buffer_value<bool>(const char *msg,
+                                               const char *buf_name, int index,
+                                               bool var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=bool value=%s\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, var ? "true" : "false");
+}
+
 // Specialization for float type
 template <>
 __device__ void debug_print_buffer_value<float>(const char *msg,
@@ -272,6 +361,39 @@ __device__ void debug_print_buffer_value<int16_t>(const char *msg,
          "index=%d, dtype=int16_t value=%d\n",
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, buf_name, index, (int32_t)var);
+}
+
+// Specialization for uint16 type
+template <>
+__device__ void debug_print_buffer_value<uint16_t>(const char *msg,
+                                                   const char *buf_name,
+                                                   int index, uint16_t var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=uint16_t value=%u\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, (unsigned int)var);
+}
+
+// Specialization for int64 type
+template <>
+__device__ void debug_print_buffer_value<int64_t>(const char *msg,
+                                                  const char *buf_name,
+                                                  int index, int64_t var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=int64_t value=%lld\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, (long long)var);
+}
+
+// Specialization for uint64 type
+template <>
+__device__ void debug_print_buffer_value<uint64_t>(const char *msg,
+                                                   const char *buf_name,
+                                                   int index, uint64_t var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=uint64_t value=%llu\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, (unsigned long long)var);
 }
 
 TL_DEVICE void device_assert(bool cond) { assert(cond); }
