@@ -12,7 +12,11 @@ using cutlass::bfloat16_t;
 using cutlass::half_t;
 
 #define TL_DEVICE __forceinline__ __device__
-
+#define TL_NOT_IMPLEMENTED()                                                   \
+  {                                                                            \
+    printf("%s not implemented\n", __PRETTY_FUNCTION__);                       \
+    asm volatile("brkpt;\n");                                                  \
+  }
 template <typename T> struct normalize_atomic_type {
   using type = T;
 };
@@ -63,8 +67,12 @@ TL_DEVICE void AtomicMax(T1 &ref, T2 val,
       }
     }
   } else {
+#if CUDART_VERSION >= 11080
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+#else
+    TL_NOT_IMPLEMENTED();
+#endif
   }
 }
 
@@ -89,9 +97,13 @@ TL_DEVICE T1 AtomicMaxRet(T1 &ref, T2 val,
     }
     return static_cast<T1>(*reinterpret_cast<T1 *>(&old_val_ushort));
   } else {
+#if CUDART_VERSION >= 11080
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     return static_cast<T1>(
         aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+#else
+    TL_NOT_IMPLEMENTED();
+#endif
   }
 }
 
@@ -117,8 +129,13 @@ TL_DEVICE void AtomicMin(T1 &ref, T2 val,
       }
     }
   } else {
+#if CUDART_VERSION >= 11080
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-    aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+    return static_cast<T1>(
+        aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+#else
+    TL_NOT_IMPLEMENTED();
+#endif
   }
 }
 
@@ -143,9 +160,13 @@ TL_DEVICE T1 AtomicMinRet(T1 &ref, T2 val,
     }
     return static_cast<T1>(*reinterpret_cast<T1 *>(&old_val_ushort));
   } else {
+#if CUDART_VERSION >= 11080
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     return static_cast<T1>(
         aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+#else
+    TL_NOT_IMPLEMENTED();
+#endif
   }
 }
 
@@ -216,8 +237,12 @@ TL_DEVICE void AtomicAdd(T1 &ref, T2 val,
       }
     }
   } else {
+#if CUDART_VERSION >= 11080
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     aref.fetch_add(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+#else
+    TL_NOT_IMPLEMENTED();
+#endif
   }
 }
 
@@ -290,9 +315,13 @@ TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val,
       }
     }
   } else {
+#if CUDART_VERSION >= 11080
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
     return static_cast<T1>(
         aref.fetch_add(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+#else
+    TL_NOT_IMPLEMENTED();
+#endif
   }
 }
 
@@ -618,13 +647,21 @@ AtomicAddx4Ret(float *ref, float *val,
 #endif
 
 template <typename T> TL_DEVICE T AtomicLoad(T &ref, int memory_order) {
+#if CUDART_VERSION >= 11080
   cuda::atomic_ref<T, cuda::thread_scope_device> aref(ref);
   return aref.load(cuda::memory_order(memory_order));
+#else
+  TL_NOT_IMPLEMENTED();
+#endif
 }
 
 template <typename T1, typename T2>
 TL_DEVICE void AtomicStore(T1 &ref, T2 value, int memory_order) {
   using NT1 = typename normalize_atomic_type<T1>::type;
+#if CUDART_VERSION >= 11080
   cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(ref);
   aref.store(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+#else
+  TL_NOT_IMPLEMENTED();
+#endif
 }
