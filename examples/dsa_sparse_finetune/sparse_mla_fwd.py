@@ -6,6 +6,7 @@ from index import prepare_token_indices
 
 from utils import assert_tensors_similar
 
+
 @tilelang.jit(
     out_idx=[-2, -1],
     pass_configs={
@@ -75,13 +76,13 @@ def sparse_mla_fwd(
 
     @T.prim_func
     def main(
-        Q: T.Tensor(q_shape, dtype),  # type: ignore
-        KV: T.Tensor(kv_shape, dtype),  # type: ignore
-        Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
-        Offsets: T.Tensor(offsets_shape, indices_dtype),  # type: ignore
-        TokenIndices: T.Tensor(token_indices_shape, indices_dtype),  # type: ignore
-        Output: T.Tensor(o_shape, dtype),  # type: ignore
-        Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
+            Q: T.Tensor(q_shape, dtype),  # type: ignore
+            KV: T.Tensor(kv_shape, dtype),  # type: ignore
+            Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
+            Offsets: T.Tensor(offsets_shape, indices_dtype),  # type: ignore
+            TokenIndices: T.Tensor(token_indices_shape, indices_dtype),  # type: ignore
+            Output: T.Tensor(o_shape, dtype),  # type: ignore
+            Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
     ):
         with T.Kernel(
                 seq_len * REPLICATE_H, kv_group, threads=threads) as (
@@ -123,14 +124,15 @@ def sparse_mla_fwd(
             for i_i in T.Pipelined(NI, num_stages=num_stages):
 
                 for bi_i in T.Parallel(BI):
-                    mask[bi_i] = (Indices[bos + s_i, g_i, i_i * BI + bi_i] <= max_kv_i) & (Indices[bos + s_i, g_i, i_i * BI + bi_i] != -1)
+                    mask[bi_i] = (Indices[bos + s_i, g_i, i_i * BI + bi_i] <= max_kv_i) & (
+                        Indices[bos + s_i, g_i, i_i * BI + bi_i] != -1)
 
                 for bi_i, d_i in T.Parallel(BI, D):
                     KV_shared[bi_i, d_i] = KV[bos + Indices[bos + s_i, g_i, i_i * BI + bi_i], g_i,
                                               d_i]
                 for bi_i, d_i in T.Parallel(BI, D_tail):
-                    K_tail_shared[bi_i, d_i] = KV[bos + Indices[bos + s_i, g_i, i_i * BI + bi_i], g_i,
-                                                  D + d_i]
+                    K_tail_shared[bi_i, d_i] = KV[bos + Indices[bos + s_i, g_i, i_i * BI + bi_i],
+                                                  g_i, D + d_i]
 
                 for h_i, bi_i in T.Parallel(H_per_block, BI):
                     acc_s[h_i, bi_i] = T.if_then_else(mask[bi_i], 0, -T.infinity(acc_s.dtype))

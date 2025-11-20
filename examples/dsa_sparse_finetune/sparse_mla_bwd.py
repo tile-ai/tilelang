@@ -25,9 +25,9 @@ def preprocess(
 
     @T.prim_func
     def preprocess_kernel(
-        O: T.Tensor(shape, dtype),
-        dO: T.Tensor(shape, dtype),
-        Delta: T.Tensor([S, H], accum_dtype),
+            O: T.Tensor(shape, dtype),
+            dO: T.Tensor(shape, dtype),
+            Delta: T.Tensor([S, H], accum_dtype),
     ):
         with T.Kernel(H, T.ceildiv(S, block_ND)) as (bx, by):
             o = T.alloc_fragment([block_ND, block_ND], accum_dtype)
@@ -36,12 +36,9 @@ def preprocess(
             acc = T.alloc_fragment([block_ND, block_ND], accum_dtype)
             T.clear(acc)
             for k in T.Pipelined(T.ceildiv(D, block_ND), num_stages=num_stages):
-                T.copy(
-                    O[by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND],
-                    o)
-                T.copy(
-                    dO[by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND],
-                    do)
+                T.copy(O[by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND], o)
+                T.copy(dO[by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND],
+                       do)
                 for i, j in T.Parallel(block_ND, block_ND):
                     acc[i, j] += o[i, j] * do[i, j]
             T.reduce_sum(acc, delta, 1)
@@ -68,8 +65,8 @@ def postprocess(
 
     @T.prim_func
     def postprocess_kernel(
-        dKV: T.Tensor(dkv_shape, accum_dtype),
-        dKV_out: T.Tensor(dkv_shape, dtype),
+            dKV: T.Tensor(dkv_shape, accum_dtype),
+            dKV_out: T.Tensor(dkv_shape, dtype),
     ):
         with T.Kernel(T.ceildiv(S_kv, block_N), kv_group, threads=threads) as (bx, by):
             T.copy(
@@ -168,7 +165,7 @@ def bwd(
             acc_dkv_shared = T.view(KV_shared, shape=[BS // split_store, D], dtype=accum_dtype)
             acc_dkv_tail_shared = T.view(
                 KV_tail_shared, shape=[BS // split_store, D_tail], dtype=accum_dtype)
-            
+
             b_i, s_i = TokenIndices[b_s_i, 0], TokenIndices[b_s_i, 1]
             bos, eos = Offsets[b_i], Offsets[b_i + 1]
 
@@ -190,7 +187,8 @@ def bwd(
             for i_i in T.Pipelined(NS, num_stages=num_stages):
                 # Check which indices are valid
                 for bi_i in T.Parallel(BS):
-                    mask[bi_i] = (Indices[bos + s_i, bz, i_i * BS + bi_i] <= max_kv_i) & (Indices[bos + s_i, bz, i_i * BS + bi_i] != -1)
+                    mask[bi_i] = (Indices[bos + s_i, bz, i_i * BS + bi_i] <= max_kv_i) & (
+                        Indices[bos + s_i, bz, i_i * BS + bi_i] != -1)
 
                 # Compute attention scores
                 for h_i, bi_i in T.Parallel(padded_H, BS):
@@ -198,14 +196,15 @@ def bwd(
 
                 # Load KV, V for this block of indices
                 for bi_i, d_i in T.Parallel(BS, D):
-                    KV_shared[bi_i, d_i] = KV[bos + Indices[bos + s_i, bz, i_i * BS + bi_i], bz, d_i]
+                    KV_shared[bi_i, d_i] = KV[bos + Indices[bos + s_i, bz, i_i * BS + bi_i], bz,
+                                              d_i]
 
                 T.gemm(
                     Q_shared, KV_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
 
                 for bi_i, d_i in T.Parallel(BS, D_tail):
-                    KV_tail_shared[bi_i, d_i] = KV[bos + Indices[bos + s_i, bz, i_i * BS + bi_i], bz,
-                                                   D + d_i]
+                    KV_tail_shared[bi_i, d_i] = KV[bos + Indices[bos + s_i, bz, i_i * BS + bi_i],
+                                                   bz, D + d_i]
                 T.gemm(
                     Q_tail_shared,
                     KV_tail_shared,
@@ -215,7 +214,7 @@ def bwd(
 
                 for h_i, bi_i in T.Parallel(padded_H, BS):
                     acc_p[h_i, bi_i] = T.exp(acc_p[h_i, bi_i] * sm_scale -
-                                              Lse[bos + s_i, bz * padded_H + h_i])
+                                             Lse[bos + s_i, bz * padded_H + h_i])
 
                 T.copy(acc_p, P_shared_cast)
 
@@ -270,14 +269,16 @@ def bwd(
 
                     for bi_i, d_i in T.Parallel(BS // split_store, D // 4):
                         T.atomic_addx4(
-                            dKV[bos + Indices[bos + s_i, bz, i_i * BS + bi_i + s * (BS // split_store)],
-                                bz, d_i * 4], acc_dkv_shared[bi_i, d_i * 4])
+                            dKV[bos + Indices[bos + s_i, bz, i_i * BS + bi_i + s *
+                                              (BS // split_store)], bz, d_i * 4],
+                            acc_dkv_shared[bi_i, d_i * 4])
 
                     # Atomically update dKV, dKV_tail tensors
                     for bi_i, d_i in T.Parallel(BS // split_store, D_tail // 4):
                         T.atomic_addx4(
-                            dKV[bos + Indices[bos + s_i, bz, i_i * BS + bi_i + s * (BS // split_store)],
-                                bz, D + d_i * 4], acc_dkv_tail_shared[bi_i, d_i * 4])
+                            dKV[bos + Indices[bos + s_i, bz, i_i * BS + bi_i + s *
+                                              (BS // split_store)], bz, D + d_i * 4],
+                            acc_dkv_tail_shared[bi_i, d_i * 4])
 
             # Store the accumulated dQ
             T.copy(acc_dq, dQ_shared)
@@ -332,7 +333,15 @@ def sparse_mla_bwd(q,
     return dq, dkv
 
 
-def ref_sparse_mla_bwd_interface(q, kv, o, do, indices, lse, offsets, sm_scale=None, is_casual=True):
+def ref_sparse_mla_bwd_interface(q,
+                                 kv,
+                                 o,
+                                 do,
+                                 indices,
+                                 lse,
+                                 offsets,
+                                 sm_scale=None,
+                                 is_casual=True):
     from sparse_mla_fwd import ref_sparse_mla_fwd_interface
     q = q.detach().clone()
     kv = kv.detach().clone()

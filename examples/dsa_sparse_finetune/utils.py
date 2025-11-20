@@ -1,17 +1,19 @@
 import torch
 
+
 def get_abs_err(y, x):
     x = x.to(torch.float32)
     y = y.to(torch.float32)
-    return (x-y).flatten().abs().max().item()
+    return (x - y).flatten().abs().max().item()
 
 
 def get_err_ratio(y, x):
     x = x.to(torch.float32)
     y = y.to(torch.float32)
-    err = (x-y).flatten().square().mean().sqrt().item()
+    err = (x - y).flatten().square().mean().sqrt().item()
     base = (x).flatten().square().mean().sqrt().item()
     return err / base
+
 
 def calculate_tensor_similarity(x, y, name="tensor"):
     """
