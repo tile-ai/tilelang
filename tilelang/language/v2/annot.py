@@ -482,9 +482,9 @@ class DynAnnot(Value):
     def __getitem__(self, params):
         if not isinstance(params, tuple):
             params = (params,)
-        name = None
+        dtype = None
         if len(params) == 1:
-            dtype, = params
+            name, = params
         if len(params) == 2:
             dtype, name = params
         dtype = _canonicalize_dtype(dtype) or dt.int32
@@ -620,7 +620,7 @@ if TYPE_CHECKING:
     class SharedBuffer(Generic[_Shape, _DType], Buffer[_Shape, _DType]):
         pass
 
-    class dyn(Generic[_DType], tir.Var):
+    class dyn(tir.Var):
 
         def __new__(cls, dtype: _DType = "float32", name: str | None = None) -> dyn[_DType]:
             ...

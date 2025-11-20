@@ -431,6 +431,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             return kernel
 
 
+ExecutionBackend = Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"]
+
+
 @overload
 def jit(func: Callable[_P, PrimFunc[_KP, _T]]) -> JITImpl[_P, _KP, _T, JITKernel[_KP, _T]]:
     ...
@@ -442,8 +445,7 @@ def jit(
     out_idx: Any = None,
     target: str | Target = "auto",
     target_host: str | Target = None,
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc",
-                               "torch"] = "auto",
+    execution_backend: ExecutionBackend = "auto",
     verbose: bool = False,
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
@@ -458,8 +460,7 @@ def jit(  # This is the new public interface
         out_idx: Any = None,
         target: str | Target = "auto",
         target_host: str | Target = None,
-        execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc",
-                                   "torch"] = "auto",
+        execution_backend: ExecutionBackend = "auto",
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
         debug_root_path: str | None = None,
@@ -535,7 +536,7 @@ def jit2(
     out_idx: Any = None,
     target: str | Target = "auto",
     target_host: str | Target = None,
-    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+    execution_backend: ExecutionBackend = "auto",
     verbose: bool = False,
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
@@ -549,7 +550,7 @@ def jit2(
     *,  # Indicates subsequent arguments are keyword-only
     target: str | Target = "auto",
     target_host: str | Target = None,
-    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+    execution_backend: ExecutionBackend = "auto",
     verbose: bool = False,
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
