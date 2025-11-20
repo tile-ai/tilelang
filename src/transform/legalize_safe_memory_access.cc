@@ -109,13 +109,16 @@ struct GlobalMemChecker : public StmtExprVisitor {
       PrimExpr index = indices[i];
       PrimExpr shape_dim = buffer->shape[i];
 
-      bool has_variable = false;
+      bool is_index_constant = true;
       PostOrderVisit(index, [&](const ObjectRef &obj) {
         if (const VarNode *v = obj.as<VarNode>()) {
-          has_variable = true;
+          is_index_constant = false;
+        }
+        if (const BufferLoadNode *v = obj.as<BufferLoadNode>()) {
+          is_index_constant = false;
         }
       });
-      if (!has_variable) {
+      if (is_index_constant) {
         // If index is a constant, we can skip the check
         continue;
       }
@@ -145,18 +148,16 @@ private:
   bool recursively_collect_conds_;
 };
 
-class SafeMemorysRewriter : public StmtExprMutator {
-  arith::Analyzer *analyzer_;
-
+class SafeMemorysRewriter : public IRMutatorWithAnalyzer {
 public:
   explicit SafeMemorysRewriter(Map<Buffer, PrimExpr> annotated_safe_value_map,
                                arith::Analyzer *analyzer)
-      : annotated_safe_value_map_(std::move(annotated_safe_value_map)),
-        analyzer_(analyzer) {}
+      : arith::IRMutatorWithAnalyzer(analyzer),
+        annotated_safe_value_map_(std::move(annotated_safe_value_map)) {}
 
 private:
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+    auto load = Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
 
     // For Load/Store, we only check the current node, not its children.
     // Since rewriter will recursively visit children.
@@ -181,7 +182,7 @@ private:
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     // Check if the buffer is in global scope
-    auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
     GlobalMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     checker(store);
@@ -226,7 +227,7 @@ private:
   // directly applying the boundary constraints of all parameters to the
   // statement. While not entirely precise, it addresses most common scenarios.
   Stmt VisitStmt_(const EvaluateNode *op) final {
-    auto evaluate = Downcast<Evaluate>(op);
+    auto evaluate = Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
     if (const CallNode *call_op = op->value.as<CallNode>()) {
       auto call = Downcast<Call>(op->value);
