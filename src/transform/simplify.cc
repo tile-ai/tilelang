@@ -465,7 +465,7 @@ private:
     return std::move(store);
   }
 
-  Stmt VisitStmt_(const AttrStmtNode* op) override {
+  Stmt VisitStmt_(const AttrStmtNode *op) override {
     if (op->attr_key == "tl.assume") {
       PrimExpr condition = this->VisitExpr(Downcast<PrimExpr>(op->node));
       auto n = CopyOnWrite(op);
