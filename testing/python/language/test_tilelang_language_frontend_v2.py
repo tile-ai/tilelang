@@ -361,5 +361,39 @@ def test_while_loop():
     assert A[0].item() == sum(range(10)), f"Expected {sum(range(10))}, but got {A[0].item()}"
 
 
+def test_var_macro():
+    try:
+
+        @T.macro
+        def macro_with_var(x: T.Var):
+            x = 1  # noqa: F841
+
+        @T.prim_func
+        def prim_call_macro():
+            with T.Kernel(1):
+                x = T.alloc_var(T.int32)
+                macro_with_var(x)
+
+        assert 'x[0] = 1' in prim_call_macro.script()
+    finally:
+        pass
+
+    try:
+
+        @T.macro
+        def macro_with_var(x: T.Var):
+            x = 1  # noqa: F841
+
+        @T.prim_func
+        def prim_call_macro():
+            with T.Kernel(1):
+                x = 1
+                macro_with_var(x)
+
+        raise RuntimeError("Expect to report an error, x should not be passed as T.Var")
+    except ValueError:
+        pass
+
+
 if __name__ == '__main__':
     tilelang.testing.main()
