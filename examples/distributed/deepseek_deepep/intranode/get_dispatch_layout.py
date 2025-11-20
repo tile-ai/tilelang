@@ -1,12 +1,14 @@
 # For intranode only
+# This op is non-distributed
+import os, sys
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder to path
+
 import torch
 import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
 from typing import Tuple
 from argparse import ArgumentParser
-import os, sys
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from utils import gen_inputs  # noqa: F403
 
 
@@ -91,16 +93,13 @@ def get_dispatch_layout_kernel(
             expert_begin_idx = T.alloc_local([1], "int32")
             expert_begin_idx[0] = bid * experts_per_sm
             expert_end_idx = T.alloc_local([1], "int32")
-            expert_end_idx[0] = expert_begin_idx[0] + experts_per_sm
-            if expert_end_idx[0] > num_experts:
-                expert_end_idx[0] = num_experts  # tl does not support min/max
+            expert_end_idx[0] = T.min(expert_begin_idx[0] + experts_per_sm, num_experts)
 
             if expert_begin_idx[0] < expert_end_idx[0]:
-                for i in T.serial(0, T.ceildiv(num_tokens - tid,
-                                               threads)):  # tl does not support strided loop
+                for i in T.serial(tid, num_tokens, threads):
                     for j in T.serial(0, num_topk):
                         expert_idx = T.alloc_local([1], "int32")
-                        expert_idx[0] = T.cast(topk_idx[tid + i * threads, j], "int32")
+                        expert_idx[0] = T.cast(topk_idx[i, j], "int32")
                         if expert_begin_idx[0] <= expert_idx[0] and expert_idx[0] < expert_end_idx[
                                 0]:
                             tokens_per_expert_per_thread[tid,
@@ -119,9 +118,7 @@ def get_dispatch_layout_kernel(
             rank_begin_idx = T.alloc_local([1], "int32")
             rank_begin_idx[0] = (bid - sm_begin[0]) * ranks_per_sm
             rank_end_idx = T.alloc_local([1], "int32")
-            rank_end_idx[0] = rank_begin_idx[0] + ranks_per_sm
-            if rank_end_idx[0] > num_ranks:
-                rank_end_idx[0] = num_ranks  # tl does not support min/max
+            rank_end_idx[0] = T.min(rank_begin_idx[0] + ranks_per_sm, num_ranks)
 
             if rank_begin_idx[0] >= 0 and rank_begin_idx[0] < rank_end_idx[0]:
                 tokens_per_rank_per_thread = T.alloc_shared([threads, ranks_per_sm], "int32")
@@ -132,15 +129,14 @@ def get_dispatch_layout_kernel(
                 expert_end = T.alloc_local([1], "int32")
                 expert_end[0] = rank_end_idx[0] * experts_per_rank
 
-                for i in T.serial(0, T.ceildiv(num_tokens - tid,
-                                               threads)):  # tl does not support strided loop
+                for i in T.serial(tid, num_tokens, threads):
                     is_in_rank = T.alloc_local([ranks_per_sm], "int32")
                     T.clear(is_in_rank)
 
                     for j in T.serial(0, num_topk):
                         expert_idx = T.alloc_local([1], "int32")
                         rank_idx = T.alloc_local([1], "int32")
-                        expert_idx[0] = T.cast(topk_idx[tid + i * threads, j], "int32")
+                        expert_idx[0] = T.cast(topk_idx[i, j], "int32")
                         if expert_begin[0] <= expert_idx[0] and expert_idx[0] < expert_end[0]:
                             rank_idx[0] = expert_idx[0] // experts_per_rank - rank_begin_idx[0]
 
@@ -148,10 +144,10 @@ def get_dispatch_layout_kernel(
 
                     for j in T.serial(rank_begin_idx[0], rank_end_idx[0]):
                         if is_in_rank[j - rank_begin_idx[0]] > 0:
-                            is_token_in_rank[tid + i * threads, j] = True
+                            is_token_in_rank[i, j] = True
                             tokens_per_rank_per_thread[tid, j - rank_begin_idx[0]] += 1
                         else:
-                            is_token_in_rank[tid + i * threads, j] = False
+                            is_token_in_rank[i, j] = False
 
                 if rank_begin_idx[0] + tid < rank_end_idx[0]:
                     sum = T.alloc_local([1], "int32")
