@@ -81,13 +81,10 @@ def flashattn_fwd(
                 sinks[i] = Sinks[by]
 
             end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
-            start = T.alloc_local([1], 'int32')
-            if window_size is not None:
-                start[0] = T.max(0, (bx * block_M - window_size) // block_N)
-            else:
-                start[0] = 0
+            start = T.max(0,
+                          (bx * block_M - window_size) // block_N) if window_size is not None else 0
 
-            for k in T.Pipelined(start[0], end, num_stages=num_stages):
+            for k in T.Pipelined(start, end, num_stages=num_stages):
                 T.copy(K[bz, by // groups, k * block_N:(k + 1) * block_N, :], K_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     q_idx = bx * block_M + i
@@ -102,6 +99,8 @@ def flashattn_fwd(
                 T.copy(V[bz, by // groups, k * block_N:(k + 1) * block_N, :], V_shared)
                 T.copy(scores_max, scores_max_prev)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                for i in T.Parallel(block_M):
+                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
                 # To do causal softmax, we need to set the scores_max to 0 if it is -inf
                 # This process is called Check_inf in FlashAttention3 code, and it only need to be done
                 # NOTE(wt): check_inf is necessary for sliding window attention.
@@ -266,14 +265,11 @@ def flashattn_bwd(batch,
             T.clear(dk)
 
             loop_st = T.floordiv(by * block_M, block_N)
-            loop_ed = T.alloc_local([1], 'int32')
-            if window_size is not None:
-                loop_ed[0] = T.min(
-                    T.ceildiv((by + 1) * block_M + window_size, block_N),
-                    T.ceildiv(seq_len, block_N))
-            else:
-                loop_ed[0] = T.ceildiv(seq_len, block_N)
-            for k in T.Pipelined(loop_st, loop_ed[0], num_stages=num_stages):
+            loop_ed = T.min(
+                T.ceildiv((by + 1) * block_M + window_size, block_N), T.ceildiv(
+                    seq_len, block_N)) if window_size is not None else T.ceildiv(seq_len, block_N)
+
+            for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
                 T.copy(Q[bz, bx, k * block_N:(k + 1) * block_N, :], q)
                 T.clear(qkT)
                 T.gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -444,7 +440,7 @@ def main(BATCH: int = 1,
          N_CTX: int = 512,
          D_HEAD: int = 64,
          groups: int = 2,
-         window_size: int | None = None,
+         window_size: Optional[int] = None,
          dtype: str = "float16"):
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:

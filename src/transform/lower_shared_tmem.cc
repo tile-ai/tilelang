@@ -88,6 +88,8 @@ private:
     Array<Var> new_data_vars;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
+      if (var_remap_.count(data))
+        continue;
       auto new_data =
           Var(data->name_hint, PointerType(PrimType(tmem_dtype_), "shared"));
       var_remap_.Set(data, new_data);
@@ -107,6 +109,7 @@ private:
                                buffer->buffer_type);
       new_buffers.push_back(new_buffer);
       buffer_remap_.Set(buffer, new_buffer);
+      buffer_data_to_buffer_.Set(new_data, new_buffer);
     }
 
     // remove the tmem buffers
@@ -255,7 +258,15 @@ private:
           op->dtype, op->op,
           {op->args[0], new_data, op->args[2], op->args[3], op->args[4]});
     }
-    return StmtExprMutator::VisitExpr_(op);
+    auto expr = StmtExprMutator::VisitExpr_(op);
+    return expr;
+  }
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    Var var = tvm::ffi::GetRef<Var>(op);
+    if (var_remap_.count(var)) {
+      return var_remap_[var];
+    }
+    return var;
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {

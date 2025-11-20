@@ -35,5 +35,31 @@ TVM_REGISTER_OP("tl.pow_of_int")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "pow_of_int")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", pow_of_int_op);
 
+PrimExpr infinity_op(PrimExpr args) {
+  const CallNode *call = args.as<CallNode>();
+  CHECK(call != nullptr);
+  const DataType &dtype = call->dtype;
+  ICHECK_EQ(dtype.lanes(), 1);
+
+  // NOTE(wt): Codegen for PrintConst:Inf will handle this based on dtype
+  if (dtype.is_float()) {
+    if (dtype.bits() == 64 || dtype.bits() == 32 || dtype.bits() == 16) {
+      return FloatImm(dtype, std::numeric_limits<float>::infinity(),
+                      call->span);
+    }
+  } else if (dtype.is_bfloat16()) {
+    return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
+  }
+  LOG(FATAL) << "Cannot decide infinity for type " << dtype;
+  throw; // Unreachable, keeps compiler happy
+}
+
+TVM_REGISTER_OP("tl.infinity")
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "infinity")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", infinity_op);
+
 } // namespace tl
 } // namespace tvm

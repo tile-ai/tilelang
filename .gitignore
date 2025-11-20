@@ -102,3 +102,9 @@ tilelang/jit/adapter/cython/.cycache
 # CMake
 cmake-build/
 cmake-build-*/
+
+# Git version for sdist
+.git_commit.txt
+
+# pre-commit cache
+.pre-commit-cache/*

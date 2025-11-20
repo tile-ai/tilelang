@@ -27,7 +27,11 @@ class MetalKernelAdapter(BaseKernelAdapter):
         #  compile_flags: Optional[List[str]] = None
     ):
         self.kernel_global_source = kernel_global_source
-        self.kernel_name = func_or_mod.__name__ + '_kernel'
+        if isinstance(func_or_mod, tir.PrimFunc):
+            func_name = func_or_mod.attrs['global_symbol']
+        else:
+            func_name = func_or_mod.__name__
+        self.kernel_name = func_name + '_kernel'
         self.verbose = verbose
 
         self.block_info = [1, 1, 1]
@@ -43,7 +47,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
                     self.grid_info["xyz".index(tag[-1])] = extent
             break
         else:
-            raise AssertionError(f'no kernel with name {func_or_mod.__name__}')
+            raise AssertionError(f'no kernel with name {func_name}')
 
         # print(self.block_info, self.grid_info)
         super().__init__(func_or_mod, result_idx=result_idx, params=params)

@@ -93,7 +93,8 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   }
   for (int i = 0; i < old_loop_depth; i++) {
     const ForNode *loop = body.as<ForNode>();
-    ICHECK(loop != nullptr);
+    ICHECK(loop != nullptr)
+        << "No extra statements are allowed between nested parallel loops.";
     vmap.Set(loop->loop_var, indices[i]);
     loop_mins.push_back(loop->min);
     loop_extents.push_back(loop->extent);

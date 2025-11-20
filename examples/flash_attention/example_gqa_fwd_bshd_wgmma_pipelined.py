@@ -63,7 +63,9 @@ def flashattn(
                 acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
                                              -T.infinity(acc_s.dtype))
         else:
-            T.clear(acc_s)
+            for i, j in T.Parallel(block_M, block_N):
+                acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype),
+                                             0)
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
@@ -92,6 +94,8 @@ def flashattn(
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+        for i in T.Parallel(block_M):
+            scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
         # To do causal softmax, we need to set the scores_max to 0 if it is -inf
         # This process is called Check_inf in FlashAttention3 code, and it only need to be done
         # in the first ceil_div(kBlockM, kBlockN) steps.
@@ -152,7 +156,7 @@ def flashattn(
                     num_stages=num_stages,
                     order=[-1, 0, 3, 1, -1, 2],
                     stage=[-1, 0, 0, 1, -1, 1],
-                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]):
+                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10, 11], [12], [13], [14]]):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
                         logsum)

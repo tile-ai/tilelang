@@ -85,7 +85,7 @@ export PIP_USER=0
 
 # If pre-commit is not installed, install it.
 if ! python3 -m pre_commit --version &>/dev/null; then
-    python3 -m pip install pre-commit
+    python3 -m pip install pre-commit --user
 fi
 
 echo 'tile-lang pre-commit: Check Start'
@@ -115,7 +115,7 @@ echo 'tile-lang clang-tidy: Check Start'
 if [[ -x "$(command -v run-clang-tidy)" ]]; then
     # Check if clang-tidy is available
     if [[ ! -x "$(command -v clang-tidy)" ]]; then
-        python3 -m pip install --upgrade --requirements "${ROOT}/requirements-lint.txt"
+        python3 -m pip install --upgrade --requirements "${ROOT}/requirements-lint.txt" --user
     fi
     # Get clang-tidy version
     CLANG_TIDY_VERSION="$(clang-tidy --version | head -n1 | awk '{print $4}')"

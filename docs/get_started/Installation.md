@@ -8,25 +8,25 @@
 - **Python Version**: >= 3.8
 - **CUDA Version**: 12.0 <= CUDA < 13
 
-The easiest way to install **tile-lang** is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
+The easiest way to install tilelang is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
 
 ```bash
 pip install tilelang
 ```
 
-Alternatively, you may choose to install **tile-lang** using prebuilt packages available on the Release Page:
+Alternatively, you may choose to install tilelang using prebuilt packages available on the Release Page:
 
 ```bash
 pip install tilelang-0.0.0.dev0+ubuntu.20.4.cu120-py3-none-any.whl
 ```
 
-To install the latest version of **tile-lang** from the GitHub repository, you can run the following command:
+To install the latest version of tilelang from the GitHub repository, you can run the following command:
 
 ```bash
 pip install git+https://github.com/tile-ai/tilelang.git
 ```
 
-After installing **tile-lang**, you can verify the installation by running:
+After installing tilelang, you can verify the installation by running:
 
 ```bash
 python -c "import tilelang; print(tilelang.__version__)"
@@ -40,18 +40,18 @@ python -c "import tilelang; print(tilelang.__version__)"
 - **Python Version**: >= 3.8
 - **CUDA Version**: >= 10.0
 
-```bash
-docker run -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.01-py3
-```
+If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. This section focuses on building from source on a native Linux environment.
 
-To build and install **tile-lang** directly from source, follow these steps. This process requires certain pre-requisites from Apache TVM, which can be installed on Ubuntu/Debian-based systems using the following commands:
+First, install the OS-level prerequisites on Ubuntu/Debian-based systems using the following commands:
 
 ```bash
 apt-get update
 apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-essential cmake libedit-dev
 ```
 
-After installing the prerequisites, you can clone the **tile-lang** repository and install it using pip:
+Then, clone the tilelang repository and install it using pip. The `-v` flag enables verbose output during the build process.
+
+> **Note**: Use the `--recursive` flag to include necessary submodules. Tilelang currently depends on a customized version of TVM, which is included as a submodule. If you prefer [Building with Existing TVM Installation](#using-existing-tvm), you can skip cloning the TVM submodule (but still need other dependencies).
 
 ```bash
 git clone --recursive https://github.com/tile-ai/tilelang.git
@@ -59,11 +59,17 @@ cd tilelang
 pip install . -v
 ```
 
-If you want to install **tile-lang** in development mode, you can run the following command:
+If you want to install tilelang in development mode, you can use the `-e` flag so that any changes to the Python files will be reflected immediately without reinstallation.
 
 ```bash
 pip install -e . -v
 ```
+
+> **Note**: changes to C++ files require rebuilding the tilelang C++ library. See [Faster Rebuild for Developers](#faster-rebuild-for-developers) below. A default `build` directory will be created if you use `pip install`, so you can also directly run `make` in the `build` directory to rebuild it as [Working from Source via PYTHONPATH](#working-from-source-via-pythonpath) suggested below.
+
+(working-from-source-via-pythonpath)=
+
+### Working from Source via `PYTHONPATH`
 
 If you prefer to work directly from the source tree via `PYTHONPATH`, make sure the native extension is built first:
 
@@ -85,17 +91,21 @@ Some useful CMake options you can toggle while configuring:
 - `-DUSE_ROCM=ON` selects ROCm support when building on AMD GPUs.
 - `-DNO_VERSION_LABEL=ON` disables the backend/git suffix in `tilelang.__version__`.
 
-We currently provide four methods to install **tile-lang**:
+(using-existing-tvm)=
 
-1. [Install Using Docker](#install-method-1) (Recommended)
-2. [Install from Source (using the bundled TVM submodule)](#install-method-2)
-3. [Install from Source (using your own TVM installation)](#install-method-3)
+### Building with Existing TVM Installation
 
-(install-method-1)=
+If you already have a compatible TVM installation, use the `TVM_ROOT` environment variable to specify the location of your existing TVM repository when building tilelang:
 
-### Method 1: Install Using Docker (Recommended)
+```bash
+TVM_ROOT=<your-tvm-repo> pip install . -v
+```
 
-For users who prefer a containerized environment with all dependencies pre-configured, **tile-lang** provides Docker images for different CUDA versions. This method is particularly useful for ensuring consistent environments across different systems and is the **recommended approach** for most users.
+(install-using-docker)=
+
+## Install Using Docker
+
+For users who prefer a containerized environment with all dependencies pre-configured, tilelang provides Docker images for different CUDA versions. This method is particularly useful for ensuring consistent environments across different systems.
 
 **Prerequisites:**
 - Docker installed on your system
@@ -142,82 +152,17 @@ docker run -itd \
 - `--name tilelang_b200`: Assigns a name to the container for easy management
 - `/bin/zsh`: Uses zsh as the default shell
 
-4. **Access the Container**:
+4. **Access the Container and Verify Installation**:
 
 ```bash
 docker exec -it tilelang_b200 /bin/zsh
-```
-
-5. **Verify Installation**:
-
-Once inside the container, verify that **tile-lang** is working correctly:
-
-```bash
+# Inside the container:
 python -c "import tilelang; print(tilelang.__version__)"
-```
-
-You can now run TileLang examples and develop your applications within the containerized environment. The Docker image comes with all necessary dependencies pre-installed, including CUDA toolkit, TVM, and TileLang itself.
-
-**Example Usage:**
-
-After accessing the container, you can run TileLang examples:
-
-```bash
-cd /home/tilelang/examples
-python elementwise/test_example_elementwise.py
-```
-
-This Docker-based installation method provides a complete, isolated environment that works seamlessly on systems with compatible NVIDIA GPUs like the B200, ensuring optimal performance for TileLang applications.
-
-(install-method-2)=
-
-### Method 2: Install from Source (Using the Bundled TVM Submodule)
-
-If you already have a compatible TVM installation, follow these steps:
-
-1. **Clone the Repository**:
-
-```bash
-git clone --recursive https://github.com/tile-ai/tilelang
-cd tilelang
-```
-
-**Note**: Use the `--recursive` flag to include necessary submodules.
-
-2. **Configure Build Options**:
-
-Create a build directory and specify your existing TVM path:
-
-```bash
-pip install . -v
-```
-
-(install-method-3)=
-
-### Method 3: Install from Source (Using Your Own TVM Installation)
-
-If you prefer to use the built-in TVM version, follow these instructions:
-
-1. **Clone the Repository**:
-
-```bash
-git clone --recursive https://github.com/tile-ai/tilelang
-cd tilelang
-```
-
-**Note**: Ensure the `--recursive` flag is included to fetch submodules.
-
-2. **Configure Build Options**:
-
-Copy the configuration file and enable the desired backends (e.g., LLVM and CUDA):
-
-```bash
-TVM_ROOT=<your-tvm-repo> pip install . -v
 ```
 
 ## Install with Nightly Version
 
-For users who want access to the latest features and improvements before official releases, we provide nightly builds of **tile-lang**.
+For users who want access to the latest features and improvements before official releases, we provide nightly builds of tilelang.
 
 ```bash
 pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
@@ -253,23 +198,28 @@ Set `NO_TOOLCHAIN_VERSION=ON` to disable this.
 ### Run-time environment variables
 
 <!-- TODO: tvm -->
+TODO
 
-## IDE Configs
+## Other Tips
 
-Building tilelang locally will automatically `compile_commands.json` file in `build` dir.
+### IDE Configs
+
+Building tilelang locally will automatically generate a `compile_commands.json` file in `build` dir.
 VSCode with clangd and [clangd extension](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd) should be able to index that without extra configuration.
 
-## Compile cache
+### Compile Cache
 
-`ccache` will be automatically used if found.
+The default path of the compile cache is `~/.tilelang/cache`. `ccache` will be automatically used if found.
 
-## Repairing wheels
+### Repairing Wheels
 
 If you plan to use your wheel in other environment,
-it's recommend to use auditwheel (on Linux) or delocate (on Darwin)
+it's recommended to use auditwheel (on Linux) or delocate (on Darwin)
 to repair them.
 
-## Faster rebuild for developers
+(faster-rebuild-for-developers)=
+
+### Faster Rebuild for Developers
 
 `pip install` introduces extra [un]packaging and takes ~30 sec to complete,
 even if no source change.

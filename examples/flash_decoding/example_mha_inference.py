@@ -70,6 +70,8 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+        for i in T.Parallel(block_M):
+            scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
         # To do causal softmax, we need to set the scores_max to 0 if it is -inf
         # This process is called Check_inf in FlashAttention3 code, and it only need to be done
         # in the first ceil_div(kBlockM, kBlockN) steps.
@@ -302,9 +304,7 @@ def flash_split_ref(Q, K, V, causal):
                                              3), gacc_o.to(torch.float16).permute(1, 2, 3, 0, 4)
 
 
-def main():
-    BATCH, H, Q_CTX, KV_CTX, D_HEAD = 1, 32, 128, 8192, 128
-    causal = False
+def main(BATCH=1, H=32, Q_CTX=128, KV_CTX=8192, D_HEAD=128, causal=False):
     flops_per_matmul = 2.0 * BATCH * H * Q_CTX * KV_CTX * D_HEAD
     total_flops = 2 * flops_per_matmul
     if causal:

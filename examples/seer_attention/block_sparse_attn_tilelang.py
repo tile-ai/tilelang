@@ -62,6 +62,8 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
             T.copy(scores_max, scores_max_prev)
             T.fill(scores_max, -T.infinity(accum_dtype))
             T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+            for i in T.Parallel(block_M):
+                scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
             # To do causal softmax, we need to set the scores_max to 0 if it is -inf
             # This process is called Check_inf in FlashAttention3 code, and it only need to be done
             # in the first ceil_div(kBlockM, kBlockN) steps.

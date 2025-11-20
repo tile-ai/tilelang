@@ -4,17 +4,24 @@ This module provides functionality for auto-tuning tilelang programs, including 
 and performance optimization through configuration search.
 """
 from __future__ import annotations
+from dataclasses import dataclass
 
 import tilelang
 from tilelang import tvm as tvm
+from tilelang.jit import JITImpl
+from tilelang.jit.kernel import JITKernel
 from tvm.tir import PrimFunc, Var
 from tvm.target import Target
 import inspect
 from functools import partial
-from typing import (Callable, Literal, Any, overload)
-from tqdm import tqdm
+from typing import (Callable, Generic, Literal, Any, TypeVar)
+# Python 3.9 compatibility for ParamSpec
+try:
+    from typing import ParamSpec
+except ImportError:  # Python < 3.10
+    from typing_extensions import ParamSpec
+from tqdm.auto import tqdm
 import logging
-import functools
 import concurrent.futures
 import torch
 import os
@@ -30,7 +37,6 @@ from tilelang import env
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.utils.target import determine_target
-from tilelang.jit.param import _P, _RProg
 from tilelang import __version__
 
 
@@ -133,8 +139,9 @@ class AutoTuner:
 
     def set_compile_args(self,
                          out_idx: list[int] | int | None = None,
-                         target: Literal['auto', 'cuda', 'hip'] = 'auto',
-                         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+                         target: Literal['auto', 'cuda', 'hip', 'metal'] = 'auto',
+                         execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc",
+                                                    "torch"] = "auto",
                          target_host: str | Target = None,
                          verbose: bool = False,
                          pass_configs: dict[str, Any] | None = None):
@@ -151,10 +158,15 @@ class AutoTuner:
         Returns:
             AutoTuner: Self for method chaining.
         """
+        # Normalize target to a concrete TVM Target and resolve execution backend
+        t = Target(determine_target(target))
+        from tilelang.jit.execution_backend import resolve_execution_backend
+        resolved_backend = resolve_execution_backend(execution_backend, t)
+
         self.compile_args = CompileArgs(
             out_idx=out_idx,
-            target=Target(determine_target(target)),
-            execution_backend=execution_backend,
+            target=t,
+            execution_backend=resolved_backend,
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs)
@@ -229,7 +241,8 @@ class AutoTuner:
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
-    def generate_cache_key(self, parameters: dict[str, Any]) -> AutotuneResult | None:
+    def generate_cache_key(self, parameters: dict[str, Any],
+                           extra_parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process.
         """
 
@@ -255,6 +268,7 @@ class AutoTuner:
         key_data = {
             "version": __version__,
             "op_parameters": tuple(op_parameters),
+            "extra_parameters": extra_parameters,
             "func_source": func_source,
             "configs": self.configs,
             "compile_args": hash(self.compile_args),
@@ -287,10 +301,28 @@ class AutoTuner:
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
 
+        # NOTE(chaofan):  We need to extract some parameters from the closure.
+        # Consider the case:
+        #   def gemm(M, N, K):
+        #       def kernel(...)
+        # If we only extract source, M/N/K will be symbolic and there will be cache problem.
+        extra_parameters: dict[str, Any] = {}
+        cells = self.fn.__closure__
+        var_names = self.fn.__code__.co_freevars
+        if cells is not None:
+            assert len(var_names) == len(cells), "Number of free variables does not match"
+            for var_name, cell in zip(var_names, cells):
+                if var_name in parameters:
+                    continue
+                # Cell content must be serializable
+                assert isinstance(cell.cell_contents, (int, float, str, bool, type(None))), \
+                    f"Cell contents {cell.cell_contents} is not serializable: {type(cell.cell_contents)}"
+                extra_parameters[var_name] = cell.cell_contents
+
         if isinstance(self.configs, Callable):
             self.configs = self.configs(*self._kernel_parameters)
 
-        key = self.generate_cache_key(parameters)
+        key = self.generate_cache_key(parameters, extra_parameters)
 
         with self._lock:
             if env.is_cache_enabled():
@@ -524,12 +556,12 @@ class AutoTuner:
                 # latency, ref_latency = target_fn(jit_kernel)
                 latency, ref_latency = run_with_timeout(target_fn, timeout, jit_kernel)
             except TimeoutException:
-                logger.info(
+                logger.warning(
                     f"A timeout occurred while testing config {config}, checkout autotuner.log for more details"
                 )
                 continue
             except Exception:
-                logger.info(
+                logger.warning(
                     f"An error occurred while testing config {config}, checkout autotuner.log for more details"
                 )
                 logger.debug(f"Error: {traceback.format_exc()}")
@@ -565,7 +597,7 @@ class AutoTuner:
             func=best_kernel.prim_func,
             kernel=best_kernel)
 
-        if self.compile_args.execution_backend in ("dlpack", "torch"):
+        if self.compile_args.execution_backend in ("torch"):
             logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:
@@ -585,9 +617,13 @@ class AutoTuner:
         return self.run()
 
 
-class _AutoTunerImplementation:
-    # Overload __init__ to help type checkers understand the effect of return_program
-    # The '-> None' is for __init__ itself. The crucial part is Literal for return_program.
+_P = ParamSpec('_P')
+_T = TypeVar('_T')
+
+
+@dataclass
+class AutoTuneImpl(Generic[_P, _T]):
+    jit_impl: JITImpl
 
     warmup: int = 25
     rep: int = 100
@@ -603,125 +639,51 @@ class _AutoTunerImplementation:
     manual_check_prog: Callable = None
     cache_input_tensors: bool = False
 
-    def __init__(self,
-                 configs: dict | Callable,
-                 warmup: int = 25,
-                 rep: int = 100,
-                 timeout: int = 100,
-                 supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
-                 ref_prog: Callable = None,
-                 supply_prog: Callable = None,
-                 rtol: float = 1e-2,
-                 atol: float = 1e-2,
-                 max_mismatched_ratio: float = 0.01,
-                 skip_check: bool = False,
-                 manual_check_prog: Callable = None,
-                 cache_input_tensors: bool = False) -> None:
-        """Initialize the AutoTunerImplementation.
+    def __post_init__(self):
+        self._tuner_cache = {}
 
-        Args:
-            configs: Configuration space to explore during auto-tuning.
-            warmup: Number of warmup iterations before timing.
-            rep: Number of repetitions for timing measurements.
-            timeout: Maximum time (in seconds) allowed for each configuration.
-            supply_type: Strategy for generating input tensors (random/zeros/etc)
-            ref_prog: Reference implementation for validation
-            supply_prog: Custom function to provide input tensors
-            rtol: Relative tolerance for numerical validation
-            atol: Absolute tolerance for numerical validation
-            max_mismatched_ratio: Allowed percentage of mismatched values
-            skip_check: Bypass validation against reference implementation
-            manual_check_prog: Custom validation function
-            cache_input_tensors: Reuse input tensors across trials
-        """
-        # Configuration and benchmarking parameters
-        self.configs = configs  # Search space of tuning configurations
-        self.warmup = warmup  # Warmup iterations for stable measurements
-        self.rep = rep  # Measurement repetitions for statistics
-        self.timeout = timeout  # Per-configuration timeout threshold
+    def get_tunner(self):
+        autotuner = AutoTuner(
+            self.jit_impl.func, configs=self.configs).set_profile_args(
+                supply_type=self.supply_type,
+                ref_prog=self.ref_prog,
+                supply_prog=self.supply_prog,
+                rtol=self.rtol,
+                atol=self.atol,
+                max_mismatched_ratio=self.max_mismatched_ratio,
+                skip_check=self.skip_check,
+                manual_check_prog=self.manual_check_prog,
+                cache_input_tensors=self.cache_input_tensors,
+            ).set_compile_args(
+                out_idx=self.jit_impl.out_idx,
+                execution_backend=self.jit_impl.execution_backend,
+                target=self.jit_impl.target,
+                target_host=self.jit_impl.target_host,
+                verbose=self.jit_impl.verbose,
+                pass_configs=self.jit_impl.pass_configs,
+            )
+        autotuner.run = partial(autotuner.run, self.warmup, self.rep, self.timeout)
+        return autotuner
 
-        # Tensor handling and validation setup
-        self.supply_type = supply_type  # Input tensor generation strategy
-        self.ref_prog = ref_prog  # Ground truth implementation
-        self.supply_prog = supply_prog  # Custom input data provider
-        self.rtol = rtol  # Relative error tolerance
-        self.atol = atol  # Absolute error tolerance
-        self.max_mismatched_ratio = max_mismatched_ratio  # Allowed mismatch
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
+        key_args_tuple = args
+        key_kwargs_tuple = tuple(sorted(kwargs.items()))
+        key = (key_args_tuple, key_kwargs_tuple)
+        if key not in self._tuner_cache:
 
-        # Validation control flags
-        self.skip_check = skip_check  # Bypass accuracy verification
-        self.manual_check_prog = manual_check_prog  # Custom validation
-        self.cache_input_tensors = cache_input_tensors  # Reuse inputs
+            def jit_compile(**config_arg):
+                return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
 
-        # Cache for storing tuned kernel implementations
-        self._tuner_cache: dict[tuple, tilelang.JITKernel] = {}  # (args, kwargs) -> compiled kernel
-
-    # This tells the type checker what the *wrapper* function will return.
-    # this is for linting, please do not remove it.
-    @overload
-    def __call__(self, fn: Callable[_P, _RProg]) -> Callable[_P, tuple[_RProg, AutotuneResult]]:
-        ...
-
-    @overload
-    def __call__(self, fn: Callable[_P, _RProg]) -> Callable[_P, AutotuneResult]:
-        ...
-
-    # Actual implementation of __call__
-    def __call__(self, fn: Callable[_P, _RProg]) -> Callable[_P, Any]:
-        warmup = self.warmup
-        rep = self.rep
-        timeout = self.timeout
-
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-
-            key_args_tuple = args
-            key_kwargs_tuple = tuple(sorted(kwargs.items()))
-            key = (key_args_tuple, key_kwargs_tuple)
-
-            if key not in self._tuner_cache:
-
-                def jit_compile(**config_arg):
-                    return fn(*args, **kwargs, __tune_params=config_arg)
-
-                compile_arguments = fn(__return_compile_arguments=True)
-
-                autotuner = AutoTuner(
-                    fn, configs=self.configs).set_profile_args(
-                        supply_type=self.supply_type,
-                        ref_prog=self.ref_prog,
-                        supply_prog=self.supply_prog,
-                        rtol=self.rtol,
-                        atol=self.atol,
-                        max_mismatched_ratio=self.max_mismatched_ratio,
-                        skip_check=self.skip_check,
-                        manual_check_prog=self.manual_check_prog,
-                        cache_input_tensors=self.cache_input_tensors,
-                    ).set_compile_args(
-                        out_idx=compile_arguments['out_idx'],
-                        execution_backend=compile_arguments['execution_backend'],
-                        target=compile_arguments['target'],
-                        target_host=compile_arguments['target_host'],
-                        verbose=compile_arguments['verbose'],
-                        pass_configs=compile_arguments['pass_configs'],
-                    )
-
-                autotuner.jit_compile = jit_compile
-                autotuner.set_kernel_parameters(key, inspect.signature(fn).parameters)
-
-                autotuner.run = partial(autotuner.run, warmup, rep, timeout)
-
-                artifact = autotuner.run()
-
-                self._tuner_cache[key] = artifact.kernel
-
-            return self._tuner_cache[key]
-
-        return wrapper
+            autotuner = self.get_tunner()
+            autotuner.jit_compile = jit_compile
+            autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+            artifact = autotuner.run()
+            self._tuner_cache[key] = artifact.kernel
+        return self._tuner_cache[key]
 
 
 def autotune(  # This is the new public interface
-    func: Callable[_P, _RProg] | PrimFunc | None = None,
+    func: Callable[_P, _T] | PrimFunc | None = None,
     *,  # Indicates subsequent arguments are keyword-only
     configs: dict | Callable,
     # profile arguments
@@ -772,8 +734,9 @@ def autotune(  # This is the new public interface
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["dlpack", "ctypes", "cython"], optional
-        Backend for kernel execution and argument passing. Defaults to "cython".
+    execution_backend : Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+        Backend for kernel execution and argument passing. Use "auto" to pick a sensible
+        default per target (cuda->tvm_ffi, metal->torch, others->cython).
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.
     pass_configs : Optional[Dict[str, Any]], optional
@@ -795,22 +758,26 @@ def autotune(  # This is the new public interface
     elif isinstance(func, PrimFunc):
         raise ValueError("Use tilelang.jit to decorate prim_func is not supported yet.")
     else:
-        # Case 2: Used as @autotune(...) to configure, or func_or_out_idx is meant as out_idx.
-        # Create a _AutoTunerImplementation instance with the provided/defaulted arguments.
-        # This instance is a decorator that will be applied to the function later.
-        configured_decorator = _AutoTunerImplementation(
-            configs=configs,
-            warmup=warmup,
-            rep=rep,
-            timeout=timeout,
-            supply_type=supply_type,
-            ref_prog=ref_prog,
-            supply_prog=supply_prog,
-            rtol=rtol,
-            atol=atol,
-            max_mismatched_ratio=max_mismatched_ratio,
-            skip_check=skip_check,
-            manual_check_prog=manual_check_prog,
-            cache_input_tensors=cache_input_tensors,
-        )
-        return configured_decorator
+
+        def decorator(impl):
+            assert isinstance(
+                impl, JITImpl
+            ), "The @autotune decorator can only be applied to @tilelang.jit decorated instances."
+            return AutoTuneImpl(
+                jit_impl=impl,
+                configs=configs,
+                warmup=warmup,
+                rep=rep,
+                timeout=timeout,
+                supply_type=supply_type,
+                ref_prog=ref_prog,
+                supply_prog=supply_prog,
+                rtol=rtol,
+                atol=atol,
+                max_mismatched_ratio=max_mismatched_ratio,
+                skip_check=skip_check,
+                manual_check_prog=manual_check_prog,
+                cache_input_tensors=cache_input_tensors,
+            )
+
+        return decorator

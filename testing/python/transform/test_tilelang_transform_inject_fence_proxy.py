@@ -159,8 +159,8 @@ def test_wgmma_marked_async():
     def before():
         with T.Kernel(1):
             A_shared = T.decl_buffer((1,), "float16", scope="shared")
-            desc_a = T.decl_buffer((1,), "uint64", scope="local.descriptor")
-            desc_b = T.decl_buffer((1,), "uint64", scope="local.descriptor")
+            desc_a = T.decl_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+            desc_b = T.decl_buffer((1,), "uint64", scope="local.descriptor.wgmma")
             C_local = T.decl_buffer((32,), "float16", scope="local")
             A_shared[0] = T.float16(0)
             T.warpgroup_arrive()

@@ -14,6 +14,7 @@
 #include "../op/parallel.h"
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
+#include "region.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -21,10 +22,54 @@ namespace tl {
 
 using namespace tir;
 
+// Normalize an argument (BufferRegion/BufferLoad/tl.region)
+// to BufferRegion so Reduce can uniformly consume regions.
+static BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
+                                            const BufferMap &vmap) {
+  // Case 1: Already a BufferRegion
+  if (arg->IsInstance<BufferRegionNode>()) {
+    return Downcast<BufferRegion>(arg);
+  }
+
+  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
+  // extent=1)
+  if (const auto *load = arg.as<BufferLoadNode>()) {
+    Array<Range> ranges;
+    for (const PrimExpr &index : load->indices) {
+      if (const auto *ramp = index.as<RampNode>()) {
+        ICHECK(ramp->stride.as<IntImmNode>()) << "Ramp stride must be IntImm";
+        ICHECK_EQ(ramp->stride.as<IntImmNode>()->value, 1)
+            << "Only stride-1 Ramp is supported in region conversion";
+        ICHECK(ramp->lanes.as<IntImmNode>())
+            << "Scalable vector lanes not supported in region conversion";
+        ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
+      } else {
+        ranges.push_back(Range::FromMinExtent(index, 1));
+      }
+    }
+    return BufferRegion(load->buffer, ranges);
+  }
+
+  // Case 3: Call nodes (only tl.region)
+  if (const auto *call = arg.as<CallNode>()) {
+    // tl.region(...) — reconstruct via RegionOp
+    if (call->op.same_as(RegionOp::Get())) {
+      RegionOp region(call->args, vmap);
+      return BufferRegion(region->GetBuffer(), region->GetRanges());
+    }
+  }
+
+  LOG(FATAL) << "Unsupported argument for BufferRegion in reduce: " << arg;
+  throw; // Unreachable
+}
+
 ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<ReduceOpNode> node = tvm::ffi::make_object<ReduceOpNode>();
-  node->src = vmap[GetVarFromAccessPtr(args[0])];
-  node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  // Accept BufferRegion/BufferLoad/tl.region for src/dst
+  node->srcRegion_ = NormalizeToBufferRegion(args[0], vmap);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1], vmap);
+  node->src = node->srcRegion_->buffer;
+  node->dst = node->dstRegion_->buffer;
   std::string reduce_type = args[2].as<StringImm>().value()->value;
   node->dim = args[3].as<IntImm>().value()->value;
   node->type = ReduceType(reduce_type);
@@ -104,7 +149,7 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &lhs,
   } else if (type->isMin()) {
     return Min(lhs, rhs);
   } else if (type->isAbsMax()) {
-    return Max(Max(lhs, rhs), -Min(lhs, rhs));
+    return Max(tvm::abs(lhs), tvm::abs(rhs));
   } else if (type->isBitAnd()) {
     return lhs & rhs;
   } else if (type->isBitOr()) {
@@ -360,70 +405,6 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return body;
   }
 
-  auto is_shared_scope = [](const std::string &scope) {
-    return scope == "shared" || scope == "shared.dyn";
-  };
-
-  if (is_shared_scope(src_scope) && is_shared_scope(dst_scope)) {
-    Buffer src_buffer = get_buffer(this->src);
-    Buffer dst_buffer = get_buffer(this->dst);
-
-    size_t src_dim = src_buffer->shape.size();
-    size_t dst_dim = dst_buffer->shape.size();
-    bool is_1d_reduce = (src_dim == dst_dim && dst_dim == 1);
-    if (!is_1d_reduce) {
-      ICHECK_EQ(src_dim, dst_dim + 1) << "Reduce dimension mismatch.";
-    } else {
-      ICHECK_EQ(dst_dim, 1U) << "Expect scalar layout for 1D reduce.";
-    }
-
-    auto thread_extent = as_const_int(T.thread_bounds->extent);
-    ICHECK(thread_extent)
-        << "Shared-memory reduce requires static thread extent.";
-    int threads = *thread_extent;
-
-    if (TargetIsCuda(T.target)) {
-      ICHECK_EQ(threads % 32, 0)
-          << "Shared reduce expects blockDim.x to be a multiple of 32 on CUDA.";
-    } else if (TargetIsRocm(T.target)) {
-      ICHECK_EQ(threads % 64, 0)
-          << "Shared reduce expects blockDim.x to be a multiple of 64 on HIP.";
-    }
-
-    bool use_abs = this->type->isAbsSum() || this->type->isAbsMax();
-    bool need_accumulate =
-        (!this->clear) && (this->type->isSum() || this->type->isAbsSum() ||
-                           this->type->isBitAnd() || this->type->isBitOr() ||
-                           this->type->isBitXor());
-
-    PrimExpr reduce_extent = src_buffer->shape[this->dim];
-    PrimExpr tail_extent = make_const(DataType::Int(32), 1);
-    for (size_t i = this->dim + 1; i < src_dim; ++i) {
-      tail_extent = analyzer->Simplify(tail_extent * src_buffer->shape[i]);
-    }
-
-    PrimExpr total_dest = make_const(DataType::Int(32), 1);
-    for (size_t i = 0; i < dst_dim; ++i) {
-      total_dest = analyzer->Simplify(total_dest * dst_buffer->shape[i]);
-    }
-
-    std::stringstream ss;
-    std::string reducer = this->MakeCodegenReducer();
-    ss << "tl::SharedReduceWarp<" << reducer << ", " << threads << ", "
-       << (use_abs ? "true" : "false") << ", "
-       << (need_accumulate ? "true" : "false") << ">::run";
-
-    Array<PrimExpr> call_args = {StringImm(ss.str()),
-                                 src_buffer.access_ptr(1),
-                                 dst_buffer.access_ptr(3),
-                                 cast(DataType::Int(32), total_dest),
-                                 cast(DataType::Int(32), reduce_extent),
-                                 cast(DataType::Int(32), tail_extent),
-                                 this->MakeInitValue()};
-
-    return Evaluate(Call(dst_buffer->dtype, builtin::call_extern(), call_args));
-  }
-
   LOG(FATAL) << "Reduce for buffers in scope (" << src_scope << ", "
              << dst_scope << ") is not implemented.";
   return Stmt();
@@ -433,6 +414,7 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
                                     InferLevel level) const {
   if (level >= InferLevel::kStrict)
     return {};
+
   if (src.scope() == "local.fragment" && dst.scope() == "local.fragment" &&
       T.layout_map.count(src)) {
     auto src_layout = T.layout_map[src].as<Fragment>().value();
@@ -453,10 +435,40 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
     }
     auto thd = src_layout->ForwardThread(
         fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
+
+    // Ensure the thread count is divisible by the replicate extent.
+    // Otherwise, we cannot infer a valid fragment<->fragment layout.
+    {
+      arith::Analyzer analyzer;
+      PrimExpr num_threads = T.thread_bounds->extent;
+      // Though the dest_buffer_rep_extent will be compressed at
+      // CondenseReplicateVar, we need to check the divisibility here to avoid
+      // the issue that the thread count is not divisible by the replicate
+      // extent.
+      if (!analyzer.CanProve(FloorMod(num_threads, dest_buffer_rep_extent) ==
+                             0) &&
+          !analyzer.CanProve(FloorMod(dest_buffer_rep_extent, num_threads) ==
+                             0)) {
+        ICHECK(false) << "ReduceOp fragment layout inference failed: "
+                         "num_threads % replicate_extent != 0. "
+                      << "This mapping requires the block's thread count to be "
+                         "divisible by the "
+                      << "replicate extent. "
+                      << "Try one of: (1) choose a thread block size divisible "
+                         "by replicate_extent; "
+                      << "(2) pick a different reduce dimension or adjust the "
+                         "source fragment layout; "
+                      << "Details: num_threads=" << num_threads
+                      << ", replicate_extent=" << indice_rep_extent
+                      << ", src=" << src << ", dst=" << dst;
+      }
+    }
+
     Fragment dst_layout =
         Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, std::nullopt)
             ->CondenseReplicateVar()
             ->BindThreadRange(T.thread_bounds);
+
     if (!T.layout_map.count(dst))
       return {{dst, dst_layout}};
     else {

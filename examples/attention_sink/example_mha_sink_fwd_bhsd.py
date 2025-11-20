@@ -95,6 +95,8 @@ def flashattn(
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+        for i in T.Parallel(block_M):
+            scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
         # To do causal softmax, we need to set the scores_max to 0 if it is -inf
         # This process is called Check_inf in FlashAttention3 code, and it only need to be done
         # NOTE(wt): check_inf is necessary for sliding window attention.
@@ -162,13 +164,10 @@ def flashattn(
             end = T.min(
                 T.ceildiv(seq_kv, block_N), T.ceildiv((bx + 1) * block_M + past_len, block_N))
 
-            start = T.alloc_local([1], 'int32')
-            if window_size is not None:
-                start[0] = T.max(0, (bx * block_M + past_len - window_size) // block_N)
-            else:
-                start[0] = 0
+            start = T.max(0, (bx * block_M + past_len - window_size) //
+                          block_N) if window_size is not None else 0
 
-            for k in T.Pipelined(start[0], end, num_stages=num_stages):
+            for k in T.Pipelined(start, end, num_stages=num_stages):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
                         logsum)
@@ -253,7 +252,7 @@ def main(batch: int = 1,
          seq_q: int = 256,
          seq_kv: int = 256,
          dim: int = 128,
-         window_size: int | None = None,
+         window_size: Optional[int] = None,
          dtype: str = "float16",
          tune: bool = False):
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]

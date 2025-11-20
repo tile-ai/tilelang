@@ -7,8 +7,6 @@ import tilelang
 import tilelang.language as T
 from tilelang.engine.callback import register_cuda_postproc_callback  # noqa: F401
 
-print(tilelang.__file__)
-
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
@@ -21,7 +19,7 @@ except ImportError:
     fla = None
 
 import torch
-from utils import *
+from test_utils import assert_similar
 
 torch.random.manual_seed(0)
 # torch.set_printoptions(profile="full")
@@ -256,8 +254,9 @@ def tilelang_chunk_o_bwd_dqkwg(
                     # for i_kv in T.Parallel(block_DK * block_DV):
                     #     dg_last_fragment[i_kv] = h_shared[i_kv // block_DV, i_kv % block_DV] * dh_shared[i_kv // block_DV, i_kv % block_DV]
                     for i_kv in T.Parallel(block_DK * block_DV):
-                        i_k, i_v = i_kv // block_DV, i_kv % block_DV
-                        dg_last_fragment[i_kv] = h_shared[i_k, i_v] * dh_shared[i_k, i_v]
+                        dg_last_fragment[i_kv] = h_shared[i_kv // block_DV, i_kv %
+                                                          block_DV] * dh_shared[i_kv // block_DV,
+                                                                                i_kv % block_DV]
                     T.reduce_sum(dg_last_fragment, dg_last_fragment_scalar, dim=-1, clear=False)
                     dg_last_local[0] += dg_last_fragment_scalar[0]
 
@@ -469,7 +468,6 @@ def run_test(
     kernel = tilelang_chunk_o_bwd_dqkwg(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
                                         gate_dtype, state_dtype, chunk_size, scale, use_g, use_dw,
                                         block_DK, block_DV, threads, num_stages)
-    print(kernel.get_kernel_source())
     dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = kernel(Q, K, V, h, G, dO, dh, dv, W)
 
     if use_g:

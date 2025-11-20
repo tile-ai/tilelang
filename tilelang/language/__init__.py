@@ -8,9 +8,9 @@ from __future__ import annotations
 # upstream tir script is fully compatible
 from tvm.script.parser.tir import *
 from . import overrides as _overrides  # noqa: F401
-from .tir import (
-    prim_func,  # noqa: F401
-)
+
+# from .tir import prim_func, macro,  # noqa: F401
+from .v2 import *  # noqa: F401
 from .tir.ir import *  # noqa: F401
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .proxy import (
@@ -23,9 +23,7 @@ from .proxy import (
     SharedBuffer,  # noqa: F401
     LocalBuffer,  # noqa: F401
 )
-from .parallel import Parallel  # noqa: F401
-from .pipeline import Pipelined  # noqa: F401
-from .persistent import Persistent  # noqa: F401
+from .loop import serial, Parallel, Persistent, Pipelined  # noqa: F401
 from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
@@ -46,9 +44,12 @@ from .allocate import (
     alloc_tmem,  # noqa: F401
     alloc_reducer,  # noqa: F401
     alloc_descriptor,  # noqa: F401
+    alloc_wgmma_desc,  # noqa: F401
+    alloc_tcgen05_smem_desc,  # noqa: F401
+    alloc_tcgen05_instr_desc,  # noqa: F401
 )
 from .copy import copy, c2d_im2col  # noqa: F401
-from .gemm import GemmWarpPolicy, gemm, gemm_v2  # noqa: F401
+from .gemm import GemmWarpPolicy, gemm, gemm_v1, gemm_v2  # noqa: F401
 from .experimental.gemm_sp import gemm_sp  # noqa: F401
 from .fill import fill, clear  # noqa: F401
 from .reduce import (

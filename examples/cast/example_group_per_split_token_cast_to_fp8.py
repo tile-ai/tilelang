@@ -161,7 +161,9 @@ def ref_program(x: torch.Tensor, batch_sizes: torch.Tensor) -> \
     return x_fp8
 
 
-def main(M=8192, N=8192, BG=2, blk_m=8):
+def main(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
+    if batch_sizes is None:
+        batch_sizes = [2048, 6144]
     if dtype == "float":
         x = torch.randn(M, N, device="cuda", dtype=torch.float32)
     elif dtype == "float16":
@@ -170,7 +172,7 @@ def main(M=8192, N=8192, BG=2, blk_m=8):
         x = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
-    batch_sizes = torch.tensor([2048, 6144], device="cuda", dtype=torch.int32)
+    batch_sizes = torch.tensor(batch_sizes, device="cuda", dtype=torch.int32)
     M_max = int(ceil_div(batch_sizes.max(), 128) * 128)
 
     print("batch_sizes:", batch_sizes)

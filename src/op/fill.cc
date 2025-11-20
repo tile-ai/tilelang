@@ -17,6 +17,7 @@
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "builtin.h"
+#include "region.h"
 
 namespace tvm {
 namespace tl {
@@ -62,7 +63,30 @@ using namespace tir;
 Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
 
-  if (args[0]->IsInstance<BufferLoadNode>()) {
+  // Case 1: Region descriptor call (tl.region)
+  if (const auto *call = args[0].as<CallNode>()) {
+    if (call->op.same_as(RegionOp::Get())) {
+      auto region = RegionOp(call->args, vmap);
+      node->dst = region->GetBuffer();
+      node->region = region->GetRanges();
+    } else if (call->op.same_as(builtin::tvm_access_ptr())) {
+      node->dst = vmap[GetVarFromAccessPtr(args[0])];
+      for (int i = 0; i < node->dst->shape.size(); i++) {
+        node->region.push_back(Range(0, node->dst->shape[i]));
+      }
+    } else {
+      ICHECK(false) << "Unsupported call op in tl.fill: "
+                    << Downcast<Op>(call->op)->name;
+    }
+
+    // Case 2: Explicit BufferRegion (legacy path)
+  } else if (args[0]->IsInstance<BufferRegionNode>()) {
+    auto region = Downcast<BufferRegion>(args[0]);
+    node->dst = region->buffer;
+    node->region = region->region;
+
+    // Case 3: Vector/scalar region expressed via BufferLoad indices
+  } else if (args[0]->IsInstance<BufferLoadNode>()) {
     auto buffer_load = Downcast<BufferLoad>(args[0]);
     for (const auto &index : buffer_load->indices) {
       if (const auto *ramp = index.as<RampNode>()) {
@@ -77,6 +101,7 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
       }
     }
     node->dst = buffer_load->buffer;
+    // Case 4: Access pointer, fill the full buffer
   } else {
     node->dst = vmap[GetVarFromAccessPtr(args[0])];
     for (int i = 0; i < node->dst->shape.size(); i++) {
@@ -95,14 +120,19 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
       << " != " << node->dst->shape.size();
   for (int i = 0; i < node->region.size(); i++) {
     // bound check if region is static
-    if (node->region[i]->min.as<IntImm>()) {
-      int64_t min = Downcast<IntImm>(node->region[i]->min)->value;
+    if (const auto *min_imm = node->region[i]->min.as<IntImmNode>()) {
+      int64_t min = min_imm->value;
       ICHECK_GE(min, 0) << "region[" << i << "] = " << min << " < 0";
     }
-    if (node->region[i]->extent.as<IntImm>()) {
-      int64_t extent = Downcast<IntImm>(node->region[i]->extent)->value;
-      ICHECK_LE(extent, Downcast<IntImm>(node->dst->shape[i])->value)
-          << "region[" << i << "] = " << extent << " > " << node->dst->shape[i];
+    if (const auto *extent_imm = node->region[i]->extent.as<IntImmNode>()) {
+      // Only perform the upper-bound check when the destination shape
+      // extent is also statically known. If the shape is symbolic (e.g., Var),
+      // skip this static check to avoid invalid downcasts.
+      if (const auto *shape_imm = node->dst->shape[i].as<IntImmNode>()) {
+        ICHECK_LE(extent_imm->value, shape_imm->value)
+            << "region[" << i << "] = " << extent_imm->value << " > "
+            << node->dst->shape[i];
+      }
     }
   }
   data_ = std::move(node);
@@ -140,7 +170,8 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   for (int i = 0; i < ndim; i++) {
     Var var = Var(std::string{char('i' + i)}, region[i]->extent->dtype);
     loop_vars.push_back({region[i], var, IterVarType::kDataPar});
-    dst_indices.push_back(var);
+    // Offset the loop induction variable by region min to honor sliced regions
+    dst_indices.push_back(region[i]->min + var);
   }
   Stmt body = BufferStore(dst, value, dst_indices);
   for (int i = ndim - 1; i >= 0; i--) {
@@ -202,6 +233,7 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return vectorized_thread_loop;
   } else {
     LOG(FATAL) << "Unsupported scope " << dst.scope();
+    return Stmt();
   }
 }
 

@@ -40,6 +40,11 @@ using namespace tir;
 using namespace ffi;
 namespace software_pipeline {
 
+struct LetWrapper {
+  Var var;
+  PrimExpr value;
+};
+
 /*!
  * \brief Create a block and infer the access region with the given body.
  *
@@ -233,10 +238,12 @@ class PipelineRewriter : public StmtExprMutator {
 public:
   PipelineRewriter(Map<Var, Buffer> buffer_data_to_buffer,
                    const Array<Buffer> &pipeline_allocs,
-                   const For &pipeline_loop, const PipelineInfo &pipeline_info)
+                   const For &pipeline_loop, const PipelineInfo &pipeline_info,
+                   const std::vector<LetWrapper> &loop_var_let_wrappers)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), pipeline_loop_(pipeline_loop),
-        pipeline_info_(pipeline_info) {}
+        pipeline_info_(pipeline_info),
+        loop_var_let_wrappers_(loop_var_let_wrappers) {}
 
   Stmt BuildPipeline() {
     // Step 1: Analyze accesses to the buffers in the pipeline and compute the
@@ -677,6 +684,20 @@ private:
       new_block = Downcast<Block>(Substitute(
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
 
+      // If there were Let-wrappers outside the original pipeline body that
+      // depended on the pipeline loop var, push them into each rewritten
+      // block with the correct per-block substitution.
+      if (!loop_var_let_wrappers_.empty()) {
+        BlockNode *n = new_block.CopyOnWrite();
+        Stmt inner = n->body;
+        for (const auto &lw : loop_var_let_wrappers_) {
+          PrimExpr substituted = Substitute(
+              lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
+          inner = LetStmt(lw.var, substituted, inner);
+        }
+        n->body = inner;
+      }
+
       if (pipeline_info_[block].async) {
         auto &local_state = async_states_local[stage];
         local_state.producer_head = normalized_access_index;
@@ -738,6 +759,7 @@ private:
   Map<Buffer, Buffer> buffer_remap_;
   Array<Block> ordered_stmts_;
   std::map<int, AsyncStateGlobal> async_states;
+  std::vector<LetWrapper> loop_var_let_wrappers_;
 };
 
 /*!
@@ -865,6 +887,7 @@ private:
 
     const SeqStmtNode *pipeline_body_seq = nullptr;
     std::vector<std::function<Stmt(Stmt)>> rewrap_fns;
+    std::vector<LetWrapper> loop_var_let_wrappers;
     auto append_attr_wrapper = [&rewrap_fns](const AttrStmtNode *attr) {
       Any node = attr->node;
       String attr_key = attr->attr_key;
@@ -897,14 +920,25 @@ private:
           continue;
         }
         if (const auto *let_stmt = current.as<LetStmtNode>()) {
-          Var var = let_stmt->var;
-          PrimExpr value = let_stmt->value;
-          Span span = let_stmt->span;
-          rewrap_fns.emplace_back([var = std::move(var),
-                                   value = std::move(value),
-                                   span](Stmt body) -> Stmt {
-            return LetStmt(var, value, body, span);
-          });
+          // If this Let value uses the pipeline loop var, record it and push
+          // inside each rewritten block later so the loop var can be
+          // substituted with the correct per-iteration index. Otherwise, keep
+          // it as a normal wrapper.
+          bool uses_loop_var = UsesVar(
+              let_stmt->value,
+              [v = op->loop_var.get()](const VarNode *vn) { return vn == v; });
+          if (uses_loop_var) {
+            loop_var_let_wrappers.push_back({let_stmt->var, let_stmt->value});
+          } else {
+            Var var = let_stmt->var;
+            PrimExpr value = let_stmt->value;
+            Span span = let_stmt->span;
+            rewrap_fns.emplace_back([var = std::move(var),
+                                     value = std::move(value),
+                                     span](Stmt body) -> Stmt {
+              return LetStmt(var, value, body, span);
+            });
+          }
           current = let_stmt->body;
           continue;
         }
@@ -982,7 +1016,8 @@ private:
 
     // Step 4: Rewrite the pipeline body.
     Stmt pipeline = PipelineRewriter(buffer_data_to_buffer_, pipeline_allocs,
-                                     tvm::ffi::GetRef<For>(op), pipeline_info)
+                                     tvm::ffi::GetRef<For>(op), pipeline_info,
+                                     loop_var_let_wrappers)
                         .BuildPipeline();
     auto apply_wrappers = [&](Stmt stmt) {
       for (auto it = rewrap_fns.rbegin(); it != rewrap_fns.rend(); ++it) {

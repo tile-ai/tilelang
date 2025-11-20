@@ -267,9 +267,9 @@ cdef class CythonKernelWrapper:
         # Add dynamic dimension values to kernel arguments
         for _, (ref_id, buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
             if ref_id == 0:
-                call_args.append(tensor_list[buffer_idx].shape[shape_idx])
+                call_args.append(ctypes.c_int64(tensor_list[buffer_idx].shape[shape_idx]))
             else:
-                call_args.append(tensor_list[buffer_idx].stride(shape_idx))
+                call_args.append(ctypes.c_int64(tensor_list[buffer_idx].stride(shape_idx)))
 
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))

@@ -59,23 +59,3 @@ def convert_func(tvm_func, tensor_type, to_dlpack_func):
         return tvm_func(*args)
 
     return _wrapper
-
-
-def to_pytorch_func(tvm_func):
-    """Convert a tvm function into one that accepts PyTorch tensors
-
-    Parameters
-    ----------
-    tvm_func: Function
-        Built tvm function operating on arrays
-
-    Returns
-    -------
-    wrapped_func: Function
-        Wrapped tvm function that operates on PyTorch tensors
-    """
-    # pylint: disable=import-outside-toplevel
-    import torch
-    import torch.utils.dlpack
-
-    return convert_func(tvm_func, torch.Tensor, torch.utils.dlpack.to_dlpack)

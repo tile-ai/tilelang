@@ -8,6 +8,7 @@ from .mma_layout import (
     ldmatrix_32x16_to_shared_16x32_layout_a,
     ldmatrix_32x16_to_shared_16x32_layout_b,
     mma_store_32x8_to_shared_16x16_layout,
+    mma_store_32x2_to_shared_8x8_layout_fp64,
 )
 from .mfma_layout import (thread_id_shared_access_64x4_to_16x16_layout_C_n_m)
 
@@ -80,6 +81,10 @@ def shared_32x16_to_mma_32x16_layout(i, j):
 
 def mma_store_index_map(thread_id, local_id):
     return mma_store_32x8_to_shared_16x16_layout(thread_id, local_id)
+
+
+def mma_store_index_map_fp64(thread_id, local_id):
+    return mma_store_32x2_to_shared_8x8_layout_fp64(thread_id, local_id)
 
 
 def mfma_store_index_map(thread_id, local_id):

@@ -33,7 +33,7 @@ class CompileArgs:
     """Compile arguments for the auto-tuner. Detailed description can be found in `tilelang.jit.compile`.
     Attributes:
         out_idx: List of output tensor indices.
-        execution_backend: Execution backend to use for kernel execution (default: "cython").
+        execution_backend: Execution backend to use for kernel execution (default: "auto").
         target: Compilation target, either as a string or a TVM Target object (default: "auto").
         target_host: Target host for cross-compilation (default: None).
         verbose: Whether to enable verbose output (default: False).
@@ -42,7 +42,7 @@ class CompileArgs:
     """
 
     out_idx: list[int] | int | None = None
-    execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython"
+    execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "auto"
     target: Literal['auto', 'cuda', 'hip'] = 'auto'
     target_host: str | Target = None
     verbose: bool = False
@@ -208,7 +208,7 @@ class AutotuneResult:
         target: str | Target = "auto",
         target_host: str | Target = None,
         out_idx: list[int] | int | None = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "tvm_ffi",
         pass_configs: dict = None,
         func: Callable = None,
         verbose: bool = False,

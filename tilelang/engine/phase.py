@@ -67,6 +67,17 @@ def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
     return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
 
 
+def PreLowerSemanticCheck(mod: IRModule) -> None:
+    """
+    Check whether the module is valid before lowering. If not, raise a user-friendly error
+    in Python side instead of letting the error dive into the complicated TVM/C++ stack.
+    Note: This is a validation-only pipeline of passes and does not modify or return the module.
+    """
+
+    # Check if there are any invalid nested loops.
+    tilelang.analysis.NestedLoopChecker()(mod)
+
+
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     """
@@ -96,6 +107,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.LetInline()(mod)
     # Add wrapper for single buf store
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
+    # Normalize negative indices to canonical non-negative form
+    mod = tilelang.transform.LegalizeNegativeIndex()(mod)
     # Inject assumes to speedup tvm prover
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
@@ -118,8 +131,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # TODO(lei): return to tir pass when kSymbolicBound simplification
     # is merged into tvm.
     mod = tilelang.transform.Simplify()(mod)
-    # Try to vectorize loop with dynamic shape
-    mod = tilelang.transform.LoopVectorizeDynamic()(mod)
     return mod
 
 
