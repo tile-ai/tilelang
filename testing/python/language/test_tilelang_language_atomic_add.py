@@ -377,5 +377,6 @@ def test_atomic_return_prev():
 def test_tile_atomic_add():
     run_tile_atomic_add(8, 128, 128, 32, 32)
 
+
 if __name__ == "__main__":
     tilelang.testing.main()
