@@ -233,18 +233,79 @@ TileOperator GetOpNode::Clone() const {
   return GetOp(node);
 }
 
-TIR_REGISTER_TL_OP(PutOp, put)
-    .set_num_inputs(6)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+StOp::StOp(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<StOpNode> node = make_object<StOpNode>();
+  node->dst = args[0];
+  ICHECK(node->dst.as<CallNode>()) << "dst must be a call node";
+  ICHECK(node->dst.as<CallNode>()->op.same_as(builtin::address_of()))
+      << "dst must be address_of op";
+
+  node->value = args[1];
+  node->sem = args[2].as<StringImm>().value()->value;
+  node->scope = args[3].as<StringImm>().value()->value;
+  node->dst_pe = args[4];
+  data_ = std::move(node);
+  (void)vmap;
+}
+
+bool StOpNode::is_distributed() const {
+  return !(dst_pe->IsInstance<IntImmNode>() && dst_pe.as<IntImmNode>()->value == -1);
+}
+
+Stmt StOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  (void)analyzer;
+  (void)T;
+  Array<PrimExpr> new_args;
+  std::stringstream ss;
+  
+  // Build function name: tl::st_<sem>_<scope>
+  ss << "tl::st_" << sem << "_" << scope;
+  
+  new_args.push_back(StringImm(ss.str()));
+  if (is_distributed()) {
+    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
+    PrimExpr local_base_ptr =
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
+    PrimExpr offset_to_base =
+        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {dst}),
+            local_base_ptr);
+    new_args.push_back(
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
+        offset_to_base);
+  } else {
+    new_args.push_back(dst);
+  }
+  new_args.push_back(value);
+  
+  auto st = Call(DataType::Handle(), builtin::call_extern(), new_args);
+  return Evaluate(st);
+}
+
+LayoutMap StOpNode::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
+  (void)T;
+  (void)level;
+  return {};
+}
+
+TileOperator StOpNode::Clone() const {
+  auto node = make_object<StOpNode>(*this);
+  return StOp(node);
+}
 
 TIR_REGISTER_TL_OP(GetOp, get)
     .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_REGISTER_TL_OP(StOp, st)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TVM_FFI_STATIC_INIT_BLOCK({ PutOpNode::RegisterReflection(); });
 TVM_FFI_STATIC_INIT_BLOCK({ GetOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK({ StOpNode::RegisterReflection(); });
 
 } // namespace tl
 } // namespace tvm

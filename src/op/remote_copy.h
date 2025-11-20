@@ -200,6 +200,62 @@ public:
   static const Op &Get();
 };
 
+class StOpNode : public TileOperatorNode {
+public:
+  PrimExpr dst;           ///< Destination address
+  PrimExpr value;         ///< Value to store
+  PrimExpr dst_pe;        ///< Destination processing element (optional)
+  std::string scope;      ///< Scope: {warp, block}
+  std::string sem;        ///< Semantic: {relaxed, release}
+
+  bool is_distributed() const;
+
+  static constexpr const char *_type_key = "tl.StOp";
+  TVM_DECLARE_FINAL_OBJECT_INFO(StOpNode, TileOperatorNode);
+
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
+  static const Op &Get();
+  TileOperator Clone() const override;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<StOpNode>()
+        .def_ro("dst", &StOpNode::dst)
+        .def_ro("value", &StOpNode::value)
+        .def_ro("dst_pe", &StOpNode::dst_pe)
+        .def_ro("scope", &StOpNode::scope)
+        .def_ro("sem", &StOpNode::sem);
+  }
+
+  bool SEqualReduce(const StOpNode *other, SEqualReducer equal) const {
+    return equal(dst, other->dst) &&
+           equal(value, other->value) &&
+           equal(dst_pe, other->dst_pe) &&
+           scope == other->scope &&
+           sem == other->sem;
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(dst);
+    hash_reduce(value);
+    hash_reduce(dst_pe);
+    hash_reduce(scope);
+    hash_reduce(sem);
+  }
+
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
+};
+
+class StOp : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(StOp, TileOperator, StOpNode);
+  TVM_DLL StOp(Array<PrimExpr> args, BufferMap vmap);
+  static const Op &Get();
+};
+
 } // namespace tl
 } // namespace tvm
 

@@ -1522,12 +1522,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                             op->args[3].as<StringImmNode>()->value;
     os << func_name << "(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
-  } else if (op->op.same_as(tl::st())) {
-    this->PrintIndent();
-    std::string func_name = "tl::st_" + op->args[2].as<StringImmNode>()->value +
-                            "_" + op->args[3].as<StringImmNode>()->value;
-    this->stream << func_name << "(" << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::get_clock())) {
     os << "get_clock()";
   } else if (op->op.same_as(tl::loop_break())) {

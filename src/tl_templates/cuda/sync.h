@@ -186,32 +186,156 @@ template <typename T> TL_DEVICE void wait_eq(void *barrier, T val = 1) {
   }
 }
 
-TL_DEVICE void st_release_gpu(uint32_t *ptr, uint32_t value) {
-  asm volatile("st.release.gpu.global.b32 [%0], %1;"
-               :
-               : "l"(ptr), "r"(value)
-               : "memory");
+template <typename P, typename T>
+TL_DEVICE void st_release_gpu(P ptr, T value) {
+  static_assert(sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8);
+  static_assert(std::is_pointer_v<P> || std::is_same_v<P, uint64_t>);
+  T *ptr_ = reinterpret_cast<T *>(ptr);
+
+  if constexpr (sizeof(T) == 2) {
+    asm volatile("st.release.gpu.global.b16 [%0], %1;"
+                 :
+                 : "l"(ptr_), "h"(value)
+                 : "memory");
+  } else if constexpr (sizeof(T) == 4) {
+    if constexpr (std::is_floating_point_v<T>) {
+      asm volatile("st.release.gpu.global.b32 [%0], %1;"
+                   :
+                   : "l"(ptr_), "f"(value)
+                   : "memory");
+    } else {
+      asm volatile("st.release.gpu.global.b32 [%0], %1;"
+                   :
+                   : "l"(ptr_), "r"(value)
+                   : "memory");
+    }
+  } else {
+    if constexpr (std::is_floating_point_v<T>) {
+      asm volatile("st.release.gpu.global.b64 [%0], %1;"
+                   :
+                   : "l"(ptr_), "d"(value)
+                   : "memory");
+    } else {
+      asm volatile("st.release.gpu.global.b64 [%0], %1;"
+                   :
+                   : "l"(ptr_), "l"(value)
+                   : "memory");
+    }
+  }
 }
 
-TL_DEVICE void st_relaxed_gpu(uint32_t *ptr, uint32_t value) {
-  asm volatile("st.relaxed.gpu.global.b32 [%0], %1;"
-               :
-               : "l"(ptr), "r"(value)
-               : "memory");
+template <typename P, typename T>
+TL_DEVICE void st_relaxed_gpu(P ptr, T value) {
+  static_assert(sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8);
+  static_assert(std::is_pointer_v<P> || std::is_same_v<P, uint64_t>);
+  T *ptr_ = reinterpret_cast<T *>(ptr);
+
+  if constexpr (sizeof(T) == 2) {
+    asm volatile("st.relaxed.gpu.global.b16 [%0], %1;"
+                 :
+                 : "l"(ptr_), "h"(value)
+                 : "memory");
+  } else if constexpr (sizeof(T) == 4) {
+    if constexpr (std::is_floating_point_v<T>) {
+      asm volatile("st.relaxed.gpu.global.b32 [%0], %1;"
+                   :
+                   : "l"(ptr_), "f"(value)
+                   : "memory");
+    } else {
+      asm volatile("st.relaxed.gpu.global.b32 [%0], %1;"
+                   :
+                   : "l"(ptr_), "r"(value)
+                   : "memory");
+    }
+  } else {
+    if constexpr (std::is_floating_point_v<T>) {
+      asm volatile("st.relaxed.gpu.global.b64 [%0], %1;"
+                   :
+                   : "l"(ptr_), "d"(value)
+                   : "memory");
+    } else {
+      asm volatile("st.relaxed.gpu.global.b64 [%0], %1;"
+                   :
+                   : "l"(ptr_), "l"(value)
+                   : "memory");
+    }
+  }
 }
 
-TL_DEVICE void st_release_sys(uint32_t *ptr, uint32_t value) {
-  asm volatile("st.release.sys.global.b32 [%0], %1;"
-               :
-               : "l"(ptr), "r"(value)
-               : "memory");
+template <typename P, typename T>
+TL_DEVICE void st_release_sys(P ptr, T value) {
+  static_assert(sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8);
+  static_assert(std::is_pointer_v<P> || std::is_same_v<P, uint64_t>);
+  T *ptr_ = reinterpret_cast<T *>(ptr);
+
+  if constexpr (sizeof(T) == 2) {
+    asm volatile("st.release.sys.global.b16 [%0], %1;"
+                 :
+                 : "l"(ptr_), "h"(value)
+                 : "memory");
+  } else if constexpr (sizeof(T) == 4) {
+    if constexpr (std::is_floating_point_v<T>) {
+      asm volatile("st.release.sys.global.b32 [%0], %1;"
+                   :
+                   : "l"(ptr_), "f"(value)
+                   : "memory");
+    } else {
+      asm volatile("st.release.sys.global.b32 [%0], %1;"
+                   :
+                   : "l"(ptr_), "r"(value)
+                   : "memory");
+    }
+  } else {
+    if constexpr (std::is_floating_point_v<T>) {
+      asm volatile("st.release.sys.global.b64 [%0], %1;"
+                   :
+                   : "l"(ptr_), "d"(value)
+                   : "memory");
+    } else {
+      asm volatile("st.release.sys.global.b64 [%0], %1;"
+                   :
+                   : "l"(ptr_), "l"(value)
+                   : "memory");
+    }
+  }
 }
 
-TL_DEVICE void st_relaxed_sys(uint32_t *ptr, uint32_t value) {
-  asm volatile("st.relaxed.sys.global.b32 [%0], %1;"
-               :
-               : "l"(ptr), "r"(value)
-               : "memory");
+template <typename P, typename T>
+TL_DEVICE void st_relaxed_sys(P ptr, T value) {
+  static_assert(sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8);
+  static_assert(std::is_pointer_v<P> || std::is_same_v<P, uint64_t>);
+  T *ptr_ = reinterpret_cast<T *>(ptr);
+
+  if constexpr (sizeof(T) == 2) {
+    asm volatile("st.relaxed.sys.global.b16 [%0], %1;"
+                 :
+                 : "l"(ptr_), "h"(value)
+                 : "memory");
+  } else if constexpr (sizeof(T) == 4) {
+    if constexpr (std::is_floating_point_v<T>) {
+      asm volatile("st.relaxed.sys.global.b32 [%0], %1;"
+                   :
+                   : "l"(ptr_), "f"(value)
+                   : "memory");
+    } else {
+      asm volatile("st.relaxed.sys.global.b32 [%0], %1;"
+                   :
+                   : "l"(ptr_), "r"(value)
+                   : "memory");
+    }
+  } else {
+    if constexpr (std::is_floating_point_v<T>) {
+      asm volatile("st.relaxed.sys.global.b64 [%0], %1;"
+                   :
+                   : "l"(ptr_), "d"(value)
+                   : "memory");
+    } else {
+      asm volatile("st.relaxed.sys.global.b64 [%0], %1;"
+                   :
+                   : "l"(ptr_), "l"(value)
+                   : "memory");
+    }
+  }
 }
 
 } // namespace tl

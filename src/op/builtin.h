@@ -545,14 +545,6 @@ TVM_DLL const Op &atomicadd_elem_op();
  */
 TVM_DLL const Op &atom_add();
 
-/*!
- * \brief tilelang intrinsic for atomic store with semantic.
- *
- *  This op is used to represent an atomic store operation with semantic in
- * tilelang.
- */
-TVM_DLL const Op &st();
-
 } // namespace tl
 } // namespace tvm
 
