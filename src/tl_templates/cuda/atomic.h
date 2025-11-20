@@ -131,8 +131,7 @@ TL_DEVICE void AtomicMin(T1 &ref, T2 val,
   } else {
 #if CUDART_VERSION >= 11080
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-    return static_cast<T1>(
-        aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+    aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
 #else
     TL_NOT_IMPLEMENTED();
 #endif

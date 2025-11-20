@@ -374,10 +374,8 @@ def test_atomic_return_prev():
     run_atomic_return_prev(32, 32, 8, 8)
 
 
-# TODO(lei): test failed and this is experimental
-# CC @dyq
-# def test_tile_atomic_add():
-#     run_tile_atomic_add(8, 128, 128, 32, 32)
+def test_tile_atomic_add():
+    run_tile_atomic_add(8, 128, 128, 32, 32)
 
 if __name__ == "__main__":
     tilelang.testing.main()
