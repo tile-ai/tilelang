@@ -24,6 +24,8 @@ FUNCTION_PATH = "function.pkl"
 LATENCY_PATH = "latency.json"
 KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
+HOST_KERNEL_PATH = "host_kernel.cu"
+DEVICE_KERNEL_PATH = "device_kernel.cu"
 KERNEL_LIB_PATH = "kernel_lib.so"
 PARAMS_PATH = "params.pkl"
 
@@ -172,7 +174,7 @@ class AutotuneResult:
         except Exception as e:
             logger.error(f"Error saving kernel source code to disk: {e}")
 
-        # Save wrapped kernel source code
+        # Save wrapped kernel source code (for backward compatibility)
         try:
             wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
             if verbose:
@@ -181,6 +183,42 @@ class AutotuneResult:
                 f.write(kernel.get_kernel_source())
         except Exception as e:
             logger.error(f"Error saving wrapped kernel source code to disk: {e}")
+
+        # Save host and device kernel source separately
+        try:
+            # Try to get host and device source from adapter
+            adapter = kernel.adapter
+            if hasattr(adapter, 'get_host_source') and hasattr(adapter, 'get_device_source'):
+                host_source = adapter.get_host_source()
+                device_source = adapter.get_device_source()
+                
+                host_kernel_path = os.path.join(cache_path, HOST_KERNEL_PATH)
+                if verbose:
+                    logger.debug(f"Saving host kernel source code to file: {host_kernel_path}")
+                with open(host_kernel_path, "w") as f:
+                    f.write(host_source)
+                
+                device_kernel_path = os.path.join(cache_path, DEVICE_KERNEL_PATH)
+                if verbose:
+                    logger.debug(f"Saving device kernel source code to file: {device_kernel_path}")
+                with open(device_kernel_path, "w") as f:
+                    f.write(device_source)
+            elif hasattr(adapter, 'host_kernel_source') and hasattr(adapter, 'device_kernel_source'):
+                # Fallback: use adapter attributes directly
+                if adapter.host_kernel_source and adapter.device_kernel_source:
+                    host_kernel_path = os.path.join(cache_path, HOST_KERNEL_PATH)
+                    if verbose:
+                        logger.debug(f"Saving host kernel source code to file: {host_kernel_path}")
+                    with open(host_kernel_path, "w") as f:
+                        f.write(adapter.host_kernel_source)
+                    
+                    device_kernel_path = os.path.join(cache_path, DEVICE_KERNEL_PATH)
+                    if verbose:
+                        logger.debug(f"Saving device kernel source code to file: {device_kernel_path}")
+                    with open(device_kernel_path, "w") as f:
+                        f.write(adapter.device_kernel_source)
+        except Exception as e:
+            logger.warning(f"Error saving host/device kernel source code to disk: {e}")
 
         # Save kernel library
         try:
@@ -233,17 +271,46 @@ class AutotuneResult:
         if not os.path.exists(cache_path):
             return None
 
-        kernel_global_source: str | None = None
+        host_kernel_source: str | None = None
+        device_kernel_source: str | None = None
         kernel_params: list[KernelParam] | None = None
 
+        # Try to load host and device kernel source separately (preferred)
         try:
-            wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
-            if verbose:
-                logger.debug(f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
-            with open(wrapped_kernel_path) as f:
-                kernel_global_source = f.read()
+            host_kernel_path = os.path.join(cache_path, HOST_KERNEL_PATH)
+            device_kernel_path = os.path.join(cache_path, DEVICE_KERNEL_PATH)
+            if os.path.exists(host_kernel_path) and os.path.exists(device_kernel_path):
+                if verbose:
+                    logger.debug(f"Loading host kernel source code from file: {host_kernel_path}")
+                with open(host_kernel_path) as f:
+                    host_kernel_source = f.read()
+                if verbose:
+                    logger.debug(f"Loading device kernel source code from file: {device_kernel_path}")
+                with open(device_kernel_path) as f:
+                    device_kernel_source = f.read()
         except Exception as e:
-            logger.error(f"Error loading wrapped kernel source code from disk: {e}")
+            logger.warning(f"Error loading host/device kernel source code from disk: {e}")
+
+        # Fallback: try to load wrapped kernel and split it (for backward compatibility)
+        if not host_kernel_source or not device_kernel_source:
+            try:
+                wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
+                if os.path.exists(wrapped_kernel_path):
+                    if verbose:
+                        logger.debug(f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
+                    with open(wrapped_kernel_path) as f:
+                        wrapped_source = f.read()
+                    # Try to split wrapped source (format: device_source + "\n\n" + host_source)
+                    if "\n\n" in wrapped_source:
+                        parts = wrapped_source.split("\n\n", 1)
+                        device_kernel_source = parts[0]
+                        host_kernel_source = parts[1] if len(parts) > 1 else ""
+                    else:
+                        # If no separator, assume it's all device source
+                        device_kernel_source = wrapped_source
+                        host_kernel_source = ""
+            except Exception as e:
+                logger.error(f"Error loading wrapped kernel source code from disk: {e}")
 
         kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
 
@@ -257,10 +324,11 @@ class AutotuneResult:
         except Exception as e:
             logger.error(f"Error loading kernel parameters from disk: {e}")
 
-        if kernel_global_source and kernel_params:
+        if host_kernel_source is not None and device_kernel_source is not None and kernel_params:
             return JITKernel.from_database(
                 func=func,
-                kernel_global_source=kernel_global_source,
+                host_kernel_source=host_kernel_source,
+                device_kernel_source=device_kernel_source,
                 kernel_lib_path=kernel_lib_path,
                 params=kernel_params,
                 target=target,

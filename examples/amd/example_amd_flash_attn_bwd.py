@@ -428,7 +428,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
             delta_shared = T.alloc_shared([block_N], accum_dtype)
             ds_shared = T.alloc_shared([block_M, block_N], dtype)
 
-            p_cast = T.alloc_fragment([block_M, block_N], dtype)
             qkT = T.alloc_fragment([block_M, block_N], accum_dtype)
             P_acc = T.alloc_fragment([block_M, block_N], accum_dtype)
             dP = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -473,27 +472,35 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                                 kv_offset + i <= k * block_N + j, P_acc[i, j], 0.0)
 
                     T.copy(dO[bz, k * block_N:(k + 1) * block_N, q_head, :], do_shared)
-                    T.clear(dP)
+                    T.copy(Delta[bz, q_head, k * block_N:(k + 1) * block_N], delta_shared)
 
+                    # Optimized GEMM order: Compute dV first (GEMM1), then dP (GEMM2)
+                    # This improves V_fragment reuse since it's already in registers
+                    # GEMM1: P^T @ dO = dV (compute dV first)
+                    P_cast = T.alloc_fragment([block_M, block_N], dtype)
+                    for i, j in T.Parallel(block_M, block_N):
+                        P_cast[i, j] = T.cast(P_acc[i, j], dtype)
+                    T.gemm(P_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
+
+                    # GEMM2: dO @ V^T = dP (compute dP after dV, reusing V_fragment in registers)
+                    T.clear(dP)
                     T.gemm(V_fragment,
                            do_shared,
                            dP,
                            transpose_B=True,
                            policy=T.GemmWarpPolicy.FullRow)
 
-                    T.copy(P_acc, p_cast)
-                    T.gemm(p_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
-
-                    T.copy(Delta[bz, q_head, k * block_N:(k + 1) * block_N], delta_shared)
-
                     # Compute ds = P * (dP - delta) * sm_scale for dk and dq computation
-                    # First compute in fragment, then copy to shared memory (following standard implementation pattern)
+                    # Create ds_compute fragment directly in loop to avoid layout conflict
+                    ds_compute = T.alloc_fragment([block_M, block_N], dtype)
                     for i, j in T.Parallel(block_M, block_N):
-                        p_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
+                        ds_compute[i, j] = T.cast(P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale, dtype)
 
-                    T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
+                    # Compute dK: ds^T @ Q = dK
+                    T.gemm(ds_compute, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
 
-                    T.copy(p_cast, ds_shared)
+                    # Compute dQ: ds @ K = dQ (using shared memory for K)
+                    T.copy(ds_compute, ds_shared)
                     T.clear(dq)
                     T.gemm(ds_shared, K_shared, dq, transpose_A=True)
                     for i, j in T.Parallel(block_N, dim):
