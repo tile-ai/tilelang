@@ -15,7 +15,7 @@ def barrier_all_blocks_sys_kernel(num_local_rank,):
     @T.prim_func
     def main(barrier: T.Tensor((num_local_rank), "int32"),):
         with T.Kernel(1, threads=32):
-            T.barrier_all_blocks_sys(barrier)
+            T.barrier_blocks(barrier)
 
     return main
 

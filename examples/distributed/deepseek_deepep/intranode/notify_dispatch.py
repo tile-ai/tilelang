@@ -50,7 +50,7 @@ def notify_dispatch_kernel(
 
             if bx == 0:
                 # Barrier first 
-                T.barrier_all_blocks_sys(barrier_signal)
+                T.sync_blocks(barrier_signal)
 
                 # `per_rank_buffer[rank][i, j]` means the number of tokens from rank i to rank j
                 # `per_expert_buffer[rank][i, j]` means the number of tokens from rank i to local expert j
@@ -59,7 +59,7 @@ def notify_dispatch_kernel(
                     for i in T.serial(num_local_experts):
                         T.st(per_expert_buffer[rank, i], num_tokens_per_expert[tx * num_local_experts + i], dst_pe=tx)
                 
-                T.barrier_all_blocks_sys(barrier_signal)
+                T.barrier_blocks(barrier_signal)
 
                 # Sum per-rank cnts and pre-compute the prefix sum for data sending
                 if tx < num_ranks:
@@ -81,8 +81,8 @@ def notify_dispatch_kernel(
                 # Copy rank size prefix matrix to another tensor                
                 T.copy(per_rank_buffer, rank_prefix_matrix)
 
-                #? We don't cleanup the buffer for later use, as it is one time used?
-                T.barrier_all_blocks_sys(barrier_signal)
+                # We don't cleanup the buffer for later use, as it is one time used?
+                T.barrier_blocks(barrier_signal)
             else:
                 dst_rank = bx - 1
                 for channel_id in T.serial(warp_id, num_channels, num_warps):

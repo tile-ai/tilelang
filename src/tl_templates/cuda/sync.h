@@ -149,21 +149,25 @@ TL_DEVICE void sync_grid(uint32_t *barrier) {
   sync_grids_wait(token, barrier);
 }
 
-// Synchronize all blocks at a system-level barrier
-// TODO(wt): Add sync-only option and timeout handling
+// Sync blocks at a system-level barrier with an optinal fence
+// TODO(wt): Add timeout handling
 
-TL_DEVICE void barrier_all_blocks_sys(int offset, int rank, int num_ranks) {
+template <bool need_fence = true>
+TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 // Macro to compute the barrier pointer for a given target rank
-#define BARRIER_PTR(tgt_rank)                                                  \
+#define BARRIER_PTR(tgt_rank) \
   (reinterpret_cast<int32_t *>(get_remote_base_ptr(tgt_rank) + offset))
+#define FINISHED_SUM_TAG (1024)
 
-  memory_fence_sys();
-  __syncthreads();
-
+  if constexpr (need_fence) {
+    memory_fence_sys();
+    __syncthreads();
+  }
+  
   int tid = threadIdx.x;
   if (tid < num_ranks) {
-    atomicAdd_system(BARRIER_PTR(rank) + tid, 1);
-    atomicAdd_system(BARRIER_PTR(tid) + rank, -1);
+    atomicAdd_system(BARRIER_PTR(rank) + tid, FINISHED_SUM_TAG);
+    atomicSub_system(BARRIER_PTR(tid) + rank, FINISHED_SUM_TAG);
   }
 
   while (true) {
@@ -176,6 +180,7 @@ TL_DEVICE void barrier_all_blocks_sys(int offset, int rank, int num_ranks) {
   __syncthreads();
 
 #undef BARRIER_PTR
+#undef FINISHED_SUM_TAG
 }
 
 template <typename T> TL_DEVICE void wait_eq(void *barrier, T val = 1) {

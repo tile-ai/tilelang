@@ -63,18 +63,19 @@ TVM_DLL const Op &sync_grid();
 /*!
  * \brief Synchronize all blocks at a system-level barrier
  *
- * void barrier_all_blocks_sys(barrier, rank, num_ranks)
+ * void barrier_blocks(barrier, rank, num_ranks)
  *
  */
-class BarrierAllBlocksSysOpNode : public TileOperatorNode {
+class BarrierBlocksOpNode : public TileOperatorNode {
 public:
   PrimExpr local_bar_addr;       ///< Address expression for the local barrier
   PrimExpr offset;               ///< Byte offset within the barrier buffer
   Buffer local_bar;              ///< Local barrier buffer reference
   Array<PrimExpr> local_indices; ///< Indices used to access the barrier buffer
+  bool need_fence;              ///< Whether need sys-level fence
 
-  static constexpr const char *_type_key = "tl.BarrierAllBlocksSysOp";
-  TVM_DECLARE_FINAL_OBJECT_INFO(BarrierAllBlocksSysOpNode, TileOperatorNode);
+  static constexpr const char *_type_key = "tl.BarrierBlocksOp";
+  TVM_DECLARE_FINAL_OBJECT_INFO(BarrierBlocksOpNode, TileOperatorNode);
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
@@ -84,14 +85,14 @@ public:
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<BarrierAllBlocksSysOpNode>()
-        .def_ro("local_bar_addr", &BarrierAllBlocksSysOpNode::local_bar_addr)
-        .def_ro("offset", &BarrierAllBlocksSysOpNode::offset)
-        .def_ro("local_bar", &BarrierAllBlocksSysOpNode::local_bar)
-        .def_ro("local_indices", &BarrierAllBlocksSysOpNode::local_indices);
+    refl::ObjectDef<BarrierBlocksOpNode>()
+        .def_ro("local_bar_addr", &BarrierBlocksOpNode::local_bar_addr)
+        .def_ro("offset", &BarrierBlocksOpNode::offset)
+        .def_ro("local_bar", &BarrierBlocksOpNode::local_bar)
+        .def_ro("local_indices", &BarrierBlocksOpNode::local_indices);
   }
 
-  bool SEqualReduce(const BarrierAllBlocksSysOpNode *other,
+  bool SEqualReduce(const BarrierBlocksOpNode *other,
                     SEqualReducer equal) const {
     return equal(local_bar_addr, other->local_bar_addr) &&
            equal(offset, other->offset) && equal(local_bar, other->local_bar) &&
@@ -115,13 +116,13 @@ private:
 };
 
 /*!
- * \brief Wrapper for the BarrierAllBlocksSys operator
+ * \brief Wrapper for the BarrierBlocks operator
  */
-class BarrierAllBlocksSysOp : public TileOperator {
+class BarrierBlocksOp : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(BarrierAllBlocksSysOp, TileOperator,
-                                BarrierAllBlocksSysOpNode);
-  TVM_DLL BarrierAllBlocksSysOp(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DEFINE_OBJECT_REF_METHODS(BarrierBlocksOp, TileOperator,
+                                BarrierBlocksOpNode);
+  TVM_DLL BarrierBlocksOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };
 
