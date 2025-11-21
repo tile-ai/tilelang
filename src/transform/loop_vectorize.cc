@@ -72,8 +72,6 @@ private:
 
 class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
-  VectorizePlanner()
-      : arith::IRMutatorWithAnalyzer(&owned_analyzer_), owned_analyzer_() {}
   explicit VectorizePlanner(arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer) {}
 
@@ -204,9 +202,6 @@ private:
   const ForNode *inner_for_{};
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
-
-private:
-  arith::Analyzer owned_analyzer_;
 };
 
 class VectorizeRewriter : public StmtExprMutator {
@@ -249,7 +244,10 @@ private:
   const int vector_size_;
 };
 
-int GetVectorizeSize(const For &loop) { return VectorizePlanner().Plan(loop); }
+int GetVectorizeSize(const For &loop) {
+  arith::Analyzer analyzer;
+  return VectorizePlanner(&analyzer).Plan(loop);
+}
 
 int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer) {
   return VectorizePlanner(analyzer).Plan(loop);
@@ -326,7 +324,8 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
 
 For VectorizeLoop(const For &loop, int vectorize_hint) {
   if (vectorize_hint <= 0) {
-    VectorizePlanner planner;
+    arith::Analyzer analyzer;
+    VectorizePlanner planner(&analyzer);
     vectorize_hint = planner.Plan(loop);
   }
   if (vectorize_hint == 1)
