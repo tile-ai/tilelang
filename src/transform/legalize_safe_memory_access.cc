@@ -31,23 +31,9 @@ public:
 
 private:
   void VisitStmt_(const ForNode *op) final {
-    has_child_for_ = false;
-    bool parent_has_child_for = parent_has_child_for_;
-    parent_has_child_for_ = false;
-
     StmtVisitor::VisitStmt(op->body);
-
-    if (!has_child_for_) {
-      leaf_for_nodes.push_back(tvm::ffi::GetRef<For>(op));
-    }
-
-    parent_has_child_for_ = parent_has_child_for;
-    parent_has_child_for_ = true;
+    leaf_for_nodes.push_back(tvm::ffi::GetRef<For>(op));
   }
-
-private:
-  bool has_child_for_ = false;
-  bool parent_has_child_for_ = false;
 };
 
 // GlobalMemChecker for a BufferLoad/BufferStore node:
@@ -227,7 +213,7 @@ private:
   // directly applying the boundary constraints of all parameters to the
   // statement. While not entirely precise, it addresses most common scenarios.
   Stmt VisitStmt_(const EvaluateNode *op) final {
-    auto evaluate = Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
+    auto evaluate = Downcast<Evaluate>(op);
 
     if (const CallNode *call_op = op->value.as<CallNode>()) {
       auto call = Downcast<Call>(op->value);
