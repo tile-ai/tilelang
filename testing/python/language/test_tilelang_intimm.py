@@ -2,12 +2,13 @@ import tilelang
 import tilelang.testing
 import tilelang.language as T
 
+
 def test_tilelang_intimm():
     T.int32(0x7fffffff)
-    T.int32(-0x7fffffff-1)
+    T.int32(-0x7fffffff - 1)
     T.uint32(0xffffffff)
     T.int64(0x7fffffffffffffff)
-    T.int64(-0x7fffffffffffffff-1)
+    T.int64(-0x7fffffffffffffff - 1)
     T.uint64(0xffffffffffffffff)
 
     a = T.int32()
