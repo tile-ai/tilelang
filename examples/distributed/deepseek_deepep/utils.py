@@ -1,7 +1,7 @@
 from typing import Union, Tuple
 import torch
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Pre-defined constants in DeepEP
 NUM_MAX_NVL_PEERS = 8  # Maximum number of NVLink peers per GPU
@@ -15,15 +15,19 @@ num_sms: int = 20
 
 @dataclass
 class Config:
+    num_sms : int  # the SMs used in high-throughput kernels
     num_max_nvl_chunked_send_tokens : int
     num_max_nvl_chunked_recv_tokens : int
     num_max_rdma_chunked_send_tokens : int
     num_max_rdma_chunked_recv_tokens : int
 
-    num_sms : int = 20  # the SMs used in high-throughput kernels
+    num_channels: int = field(init=False)
+
 
     def __post_init__(self):
         assert self.num_sms % 2 == 0, "num_sms must be even"
+        self.num_channels = self.num_sms // 2
+        # 1 sm for send, 1 sm for recv in each channel
     
     @staticmethod
     def get_dispatch_config(num_ranks: int) -> 'Config':

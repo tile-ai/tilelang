@@ -1,5 +1,7 @@
 # For intranode only
 # This op is non-distributed
+### python get_dispatch_layout.py
+
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder to path
 
@@ -78,7 +80,7 @@ def get_dispatch_layout_kernel(
     experts_per_rank = num_experts // num_ranks
 
     @T.prim_func
-    def main(
+    def get_dispatch_layout_main(
             topk_idx: T.Tensor([num_tokens, num_topk], "int64"),  # type: ignore
             num_tokens_per_rank: T.Tensor([num_ranks], "int32"),  # type: ignore
             num_tokens_per_expert: T.Tensor([num_experts], "int32"),  # type: ignore
@@ -156,7 +158,7 @@ def get_dispatch_layout_kernel(
                         sum[0] += tokens_per_rank_per_thread[i, tid]
                     num_tokens_per_rank[rank_begin_idx[0] + tid] = sum[0]
 
-    return main
+    return get_dispatch_layout_main
 
 
 def test_get_dispatch_layout(
@@ -187,7 +189,7 @@ def test_get_dispatch_layout(
 
     num_tokens_per_rank, _, num_tokens_per_expert, is_token_in_rank = get_dispatch_layout(topk_idx, num_experts, num_ranks)
 
-    assert torch.allclose(num_tokens_per_expert, ref_num_tokens_per_expert), \
+    assert torch.equal(num_tokens_per_expert, ref_num_tokens_per_expert), \
         f"num_tokens_per_expert mismatch, max err: {(num_tokens_per_expert - ref_num_tokens_per_expert).abs().max()}"
 
     assert torch.equal(is_token_in_rank, ref_is_token_in_rank), \
@@ -196,7 +198,7 @@ def test_get_dispatch_layout(
     assert torch.equal(num_tokens_per_rank, ref_num_tokens_per_rank), \
         f"num_tokens_per_rank mismatch, max err: {(num_tokens_per_rank - ref_num_tokens_per_rank).abs().max()}"
 
-    print("All checks passed.✅")
+    print("All checks passed for TileScale get_dispatch_layout.✅")
 
     # Benchmark
     t1 = do_bench(lambda: buffer.get_dispatch_layout(topk_idx, num_experts, None, False, False))
