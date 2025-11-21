@@ -394,6 +394,64 @@ def test_var_macro():
     except ValueError:
         pass
 
+    try:
+
+        @T.macro
+        def macro_with_var(x: T.Ref):
+            x = 1  # noqa: F841
+
+        @T.prim_func
+        def prim_call_macro():
+            with T.Kernel(1):
+                x = T.alloc_var(T.int32)
+                macro_with_var(x)
+
+        assert 'x[0] = 1' in prim_call_macro.script()
+    finally:
+        pass
+
+    try:
+
+        @T.macro
+        def macro_with_var(x: T.Ref):
+            x = 1  # noqa: F841
+
+        @T.prim_func
+        def prim_call_macro():
+            with T.Kernel(1):
+                x = 1
+                macro_with_var(x)
+
+        raise RuntimeError("Expect to report an error, x should not be passed as T.Var")
+    except ValueError:
+        pass
+
+
+def frame_inside_macro():
+
+    @tilelang.jit
+    def get_sample_kernel():
+
+        @T.macro
+        def transform(x):
+            return x + 1
+
+        @T.prim_func
+        def sample_kernel(
+            num_blocks: T.int32,
+            idx_out: T.Tensor[(32,), T.int32],
+        ):
+            with T.Kernel(num_blocks, threads=32) as block_idx:  # noqa: F841
+                fragment = T.alloc_fragment(32, 'int32')
+                T.copy(idx_out, fragment)
+
+                for i in T.Parallel(32):
+                    idx_out[i] = transform(fragment[i])
+
+        return sample_kernel
+
+    kernel = get_sample_kernel()  # noqa: F841
+
 
 if __name__ == '__main__':
     tilelang.testing.main()

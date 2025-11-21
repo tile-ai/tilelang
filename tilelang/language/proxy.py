@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 from __future__ import annotations
 
-from typing import Any, SupportsIndex, TYPE_CHECKING
+from typing import Any, SupportsIndex, TYPE_CHECKING, Generic, TypeVar
 from collections.abc import Sequence
 from typing_extensions import Self
 
@@ -263,12 +263,20 @@ if TYPE_CHECKING:
 
     class LocalBuffer(BaseTensor):
         ...
+
+    _T = TypeVar('_T')
+
+    class Ref(Generic[_T], tir.Var):
+        ...
 else:
     Tensor = TensorProxy()  # pylint: disable=invalid-name
     StridedTensor = StridedTensorProxy()  # pylint: disable=invalid-name
     FragmentBuffer = FragmentBufferProxy()  # pylint: disable=invalid-name
     SharedBuffer = SharedBufferProxy()  # pylint: disable=invalid-name
     LocalBuffer = LocalBufferProxy()  # pylint: disable=invalid-name
+
+    class Ref:
+        ...
 
 
 def ptr(dtype: str | None = None,

@@ -22,6 +22,7 @@ from .proxy import (
     FragmentBuffer,  # noqa: F401
     SharedBuffer,  # noqa: F401
     LocalBuffer,  # noqa: F401
+    Ref,  # noqa: F401
 )
 from .loop import serial, Parallel, Persistent, Pipelined  # noqa: F401
 from .frame import has_let_value, get_let_value  # noqa: F401
