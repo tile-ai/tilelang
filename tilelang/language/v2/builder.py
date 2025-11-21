@@ -395,7 +395,6 @@ class Builder(BaseBuilder):
             frame = tir.LetStmt(value)
             var = frame.var
             IRBuilder.name(name, var)
-            print('Enter: ', frame)
             return self.enter_frame(frame)
 
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):
