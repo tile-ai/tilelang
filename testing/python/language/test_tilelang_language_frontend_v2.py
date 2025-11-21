@@ -396,6 +396,7 @@ def test_var_macro():
 
 
 def frame_inside_macro():
+
     @tilelang.jit
     def get_sample_kernel():
 
@@ -406,7 +407,7 @@ def frame_inside_macro():
         @T.prim_func
         def sample_kernel(
             num_blocks: T.int32,
-            idx_out: T.Tensor[(32, ), 'int32'],
+            idx_out: T.Tensor[(32,), 'int32'],
         ):
             with T.Kernel(num_blocks, threads=32) as block_idx:
                 fragment = T.alloc_fragment(32, 'int32')
@@ -417,7 +418,7 @@ def frame_inside_macro():
 
         return sample_kernel
 
-    kernel = get_sample_kernel()
+    kernel = get_sample_kernel()  # noqa: F841
 
 
 if __name__ == '__main__':

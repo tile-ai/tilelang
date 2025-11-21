@@ -79,6 +79,7 @@ class Frame:
 class MacroFrame(Frame):
     ...
 
+
 class ExitedMacro(Frame):
     ...
 
