@@ -475,7 +475,11 @@ class Builder(BaseBuilder):
         return self.unwrap_value(value)
 
     def macro_arg(self, name, value):
-        if self.arg_annotations.get(name, None) is Var:
+        from tilelang.language.proxy import Ref
+        annot_value = self.arg_annotations.get(name, None)
+        if annot_value is Var or annot_value is Ref:
+            if annot_value is Var:
+                logger.warning('Use `T.Var` as macro annotations is deprecated, please use `T.Ref`')
             is_var = isinstance(value, tvm.tir.BufferLoad) and value.buffer.scope() == 'local.var'
             if not is_var:
                 raise ValueError(
