@@ -98,7 +98,7 @@ private:
     inner_for_ = node;
     bool contains_nested_for = false;
     // Must analysis vectorization on the innermost loop
-    PostOrderVisit(Downcast<Stmt>(node), [&](const ObjectRef &obj) {
+    PostOrderVisit(Downcast<Stmt>(node->body), [&](const ObjectRef &obj) {
       if (obj.as<ForNode>()) {
         contains_nested_for = true;
       }
