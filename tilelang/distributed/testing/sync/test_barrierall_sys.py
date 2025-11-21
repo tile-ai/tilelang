@@ -40,7 +40,7 @@ def get_test_barrierall_sys_kernel(num_ranks: int, blocks: int, threads: int):
                     src=T.address_of(A),
                     dst=T.address_of(B[bid, 0]),
                     size=threads,
-                    src_pe=rank[0] ^ 1,
+                    dst_pe=rank[0] ^ 1,
                     unroll_factor=4)
 
     return main
