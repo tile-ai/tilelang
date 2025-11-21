@@ -204,7 +204,7 @@ private:
   const ForNode *inner_for_{};
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
-  
+
 private:
   arith::Analyzer owned_analyzer_;
 };
