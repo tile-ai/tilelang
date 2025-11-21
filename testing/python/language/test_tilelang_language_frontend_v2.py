@@ -407,9 +407,9 @@ def frame_inside_macro():
         @T.prim_func
         def sample_kernel(
             num_blocks: T.int32,
-            idx_out: T.Tensor[(32,), 'int32'],
+            idx_out: T.Tensor[(32,), T.int32],
         ):
-            with T.Kernel(num_blocks, threads=32) as block_idx:
+            with T.Kernel(num_blocks, threads=32) as block_idx:  # noqa: F841
                 fragment = T.alloc_fragment(32, 'int32')
                 T.copy(idx_out, fragment)
 

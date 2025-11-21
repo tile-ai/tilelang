@@ -80,7 +80,7 @@ class MacroFrame(Frame):
     ...
 
 
-class ExitedMacro(Frame):
+class ExitedMacroFrame(Frame):
     ...
 
 
@@ -169,9 +169,21 @@ class Builder(BaseBuilder):
         self.name_inside_frame = {}
         self.arg_annotations = annotations or {}
         pos = len(self.frames)
+        # here we add a ExitedMacroFrame to preserve the frame stack inside macro
+        # because macro may bind some variable, and return it
+        #
+        # ```py
+        # @T.macro
+        # def foo(x):
+        #    y = x + 1
+        #    return y
+        # @T.prim_func
+        # def bar():
+        #    c = foo(1) # macro generates let y = x + 1
+        #    d = c # d = c should lay inside frame of `let y = x + 1`
         self.frames.append(MacroFrame())
         yield
-        self.frames[pos] = ExitedMacro()
+        self.frames[pos] = ExitedMacroFrame()
         self.name_inside_frame, self.arg_annotations = save
 
     def get(self):
