@@ -79,6 +79,9 @@ class Frame:
 class MacroFrame(Frame):
     ...
 
+class ExitedMacro(Frame):
+    ...
+
 
 class BoolOpFrame(Frame):
     ...
@@ -164,8 +167,10 @@ class Builder(BaseBuilder):
         save = self.name_inside_frame, self.arg_annotations
         self.name_inside_frame = {}
         self.arg_annotations = annotations or {}
-        with self.with_frame(MacroFrame()):
-            yield
+        pos = len(self.frames)
+        self.frames.append(MacroFrame())
+        yield
+        self.frames[pos] = ExitedMacro()
         self.name_inside_frame, self.arg_annotations = save
 
     def get(self):
@@ -377,6 +382,7 @@ class Builder(BaseBuilder):
             frame = tir.LetStmt(value)
             var = frame.var
             IRBuilder.name(name, var)
+            print('Enter: ', frame)
             return self.enter_frame(frame)
 
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):

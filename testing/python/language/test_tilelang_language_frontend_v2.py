@@ -395,5 +395,30 @@ def test_var_macro():
         pass
 
 
+def frame_inside_macro():
+    @tilelang.jit
+    def get_sample_kernel():
+
+        @T.macro
+        def transform(x):
+            return x + 1
+
+        @T.prim_func
+        def sample_kernel(
+            num_blocks: T.int32,
+            idx_out: T.Tensor[(32, ), 'int32'],
+        ):
+            with T.Kernel(num_blocks, threads=32) as block_idx:
+                fragment = T.alloc_fragment(32, 'int32')
+                T.copy(idx_out, fragment)
+
+                for i in T.Parallel(32):
+                    idx_out[i] = transform(fragment[i])
+
+        return sample_kernel
+
+    kernel = get_sample_kernel()
+
+
 if __name__ == '__main__':
     tilelang.testing.main()
