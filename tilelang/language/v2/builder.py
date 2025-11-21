@@ -335,7 +335,7 @@ class Builder(BaseBuilder):
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
             if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                 logger.warning(
-                    f'Variable `{name}` shadows another declared value, Are you forgetting to allocate it as a var?',
+                    f'Variable `{name}` is declared twice, are you looking for a T.alloc_var?',
                     stack_info=True,
                     stacklevel=2,
                 )
