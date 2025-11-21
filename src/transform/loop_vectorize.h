@@ -35,7 +35,12 @@ using namespace tir;
 
 int GetVectorizeSize(const For &loop);
 
+int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer);
+
 For VectorizeLoop(const For &loop, int vectorize_hint = -1);
+
+For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
+                  int vectorize_hint = -1);
 
 // Can prove expr is independent with var, i.e. the value of expr doesn't change
 // when var changes
