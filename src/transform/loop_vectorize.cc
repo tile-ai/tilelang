@@ -72,7 +72,8 @@ private:
 
 class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
-  VectorizePlanner() : arith::IRMutatorWithAnalyzer(new arith::Analyzer()) {}
+  VectorizePlanner()
+      : arith::IRMutatorWithAnalyzer(&owned_analyzer_), owned_analyzer_() {}
   explicit VectorizePlanner(arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer) {}
 
@@ -203,6 +204,9 @@ private:
   const ForNode *inner_for_{};
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
+  
+private:
+  arith::Analyzer owned_analyzer_;
 };
 
 class VectorizeRewriter : public StmtExprMutator {
