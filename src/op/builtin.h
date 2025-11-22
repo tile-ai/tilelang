@@ -595,7 +595,6 @@ TVM_DLL const Op &warp_reduce_bitand();
  * \brief tilelang intrinsic for warp reduction bitor.
  */
 TVM_DLL const Op &warp_reduce_bitor();
- 
 
 } // namespace tl
 } // namespace tvm
