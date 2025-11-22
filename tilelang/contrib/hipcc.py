@@ -61,7 +61,8 @@ def compile_hip(code,
 
     file_target = path_target if path_target else temp_target
     cmd = ["hipcc"]
-    cmd += ["-O3", '-c']
+    cmd += ["-O1", '-c']
+    cmd += ["-Wno-invalid-constexpr"]
     if isinstance(arch, str):
         cmd += [f"--offload-arch={arch}"]
     if target_format == "hsaco":
