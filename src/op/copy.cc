@@ -852,7 +852,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
   auto par_op = ParallelOp(transformed_loop);
 
   if (is_cpu_target) {
-    vectorized_thread_loop = VectorizeLoop(transformed_loop);
+    vectorized_thread_loop = VectorizeLoop(transformed_loop, analyzer);
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
@@ -865,7 +865,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
     auto thread_var = T.thread_var;
     auto thread_loop =
         PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-    vectorized_thread_loop = VectorizeLoop(thread_loop);
+    vectorized_thread_loop = VectorizeLoop(thread_loop, analyzer);
   }
 
   if (par_op->GetPredicate(T.thread_var).defined()) {

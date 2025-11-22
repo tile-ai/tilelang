@@ -45,7 +45,7 @@ struct VectorizePlanResult {
   PrimExpr condition;
 };
 
-class VectorizeFindGlobalAccess : public arith::IRVisitorWithAnalyzer {
+class VectorizeFindGlobalAccess : public StmtExprVisitor {
 public:
   VectorizeFindGlobalAccess() = default;
 
@@ -60,19 +60,20 @@ private:
   void VisitStmt_(const BufferStoreNode *node) final {
     if (node->buffer.scope() == "global")
       has_global_access_ = true;
-    return arith::IRVisitorWithAnalyzer::VisitStmt_(node);
+    return StmtExprVisitor::VisitStmt_(node);
   }
 
   void VisitExpr_(const BufferLoadNode *node) final {
     if (node->buffer.scope() == "global")
       has_global_access_ = true;
-    return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
+    return StmtExprVisitor::VisitExpr_(node);
   }
 };
 
-class VectorizePlanner : public arith::IRVisitorWithAnalyzer {
+class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
-  VectorizePlanner() = default;
+  explicit VectorizePlanner(arith::Analyzer *analyzer)
+      : arith::IRMutatorWithAnalyzer(analyzer) {}
 
   int Plan(const For &node) {
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
@@ -92,21 +93,31 @@ public:
   }
 
 private:
-  void VisitStmt_(const ForNode *node) final {
+  Stmt VisitStmt_(const ForNode *node) final {
     inner_for_ = node;
-    auto extent_ptr = as_const_int(analyzer_.Simplify(node->extent));
-    // Here I disable dynamic shape completely,
-    //   In order to do it, the Planner should accept an analyzer with
-    //   arithmetic info outside to prove the dividiblity of vector size
-    if (!extent_ptr) {
-      vector_size_ = 1;
-      return;
+    bool contains_nested_for = false;
+    // Must analysis vectorization on the innermost loop
+    PostOrderVisit(Downcast<Stmt>(node->body), [&](const ObjectRef &obj) {
+      if (obj.as<ForNode>()) {
+        contains_nested_for = true;
+      }
+    });
+
+    if (!contains_nested_for) {
+      auto extent_ptr = as_const_int(analyzer_->Simplify(node->extent));
+      // Here I disable dynamic shape completely,
+      //   In order to do it, the Planner should accept an analyzer with
+      //   arithmetic info outside to prove the dividiblity of vector size
+      if (!extent_ptr) {
+        vector_size_ = 1;
+        return ffi::GetRef<Stmt>(node);
+      }
+      vector_size_ = arith::ZeroAwareGCD(vector_size_, *extent_ptr);
     }
-    vector_size_ = arith::ZeroAwareGCD(vector_size_, *extent_ptr);
-    arith::IRVisitorWithAnalyzer::VisitStmt_(node);
+    return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
-  void VisitExpr_(const BufferLoadNode *node) final {
+  PrimExpr VisitExpr_(const BufferLoadNode *node) final {
     if (node->buffer.scope() == "shared" || node->buffer.scope() == "global" ||
         node->buffer.scope() == "shared.dyn")
       has_nonlocal_memory_access_ = true;
@@ -115,43 +126,44 @@ private:
       // constant buffer that tl hack to use as local register.
       auto boundary_check = node->buffer->shape[0].as<IntImmNode>();
       if (boundary_check && boundary_check->value == 1) {
-        return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
+        return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
       }
     }
     UpdateVectorSize(node->indices, node->buffer);
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
-  void VisitStmt_(const BufferStoreNode *node) final {
+  Stmt VisitStmt_(const BufferStoreNode *node) final {
     if (node->buffer.scope() == "shared" || node->buffer.scope() == "global" ||
         node->buffer.scope() == "shared.dyn")
       has_nonlocal_memory_access_ = true;
     UpdateVectorSize(node->indices, node->buffer);
-    return arith::IRVisitorWithAnalyzer::VisitExpr(node->value);
+    return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
-  void VisitStmt_(const IfThenElseNode *node) final {
+  Stmt VisitStmt_(const IfThenElseNode *node) final {
     CheckConditionVectorized(node->condition);
-    return arith::IRVisitorWithAnalyzer::VisitStmt_(node);
+    return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
-  void VisitExpr_(const CallNode *node) final {
+  PrimExpr VisitExpr_(const CallNode *node) final {
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
     } else if (node->op == builtin::call_extern()) {
       // do not vectorize extern calls
       vector_size_ = 1;
     }
-    return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
   void CheckConditionVectorized(const PrimExpr &cond) {
     // TODO: perform some checks here
   }
 
-  void VisitExpr_(const CastNode *node) final {
+  PrimExpr VisitExpr_(const CastNode *node) final {
     vector_size_ = arith::ZeroAwareGCD(
         vector_load_bits_max_ / node->dtype.bits(), vector_size_);
-    return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
   void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer) {
@@ -171,19 +183,16 @@ private:
     for (int i = 0; i < indices.size(); ++i) {
       elem_offset += indices[i] * strides[i];
     }
-
     // 2. If element offset is independent with loop_var, ignore it
-    if (CanProveIndependent(elem_offset, inner_for_->loop_var, &analyzer_)) {
+    if (CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_)) {
       return;
     }
-
     // 3. Tight vectorize bound
     vector_size_ = arith::ZeroAwareGCD(vector_size_, vector_load_bits_max_ /
                                                          buffer->dtype.bits());
-
     // 4. Try to vectorize buffer load
     while (!IndiceCanVectorize(elem_offset, inner_for_->loop_var,
-                               inner_for_->extent, vector_size_, &analyzer_)) {
+                               inner_for_->extent, vector_size_, analyzer_)) {
       vector_size_ /= 2;
     }
   }
@@ -235,7 +244,14 @@ private:
   const int vector_size_;
 };
 
-int GetVectorizeSize(const For &loop) { return VectorizePlanner().Plan(loop); }
+int GetVectorizeSize(const For &loop) {
+  arith::Analyzer analyzer;
+  return VectorizePlanner(&analyzer).Plan(loop);
+}
+
+int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer) {
+  return VectorizePlanner(analyzer).Plan(loop);
+}
 
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer) {
@@ -274,10 +290,10 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
   if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_size_for_iter),
                                0))
     return false;
-
+  auto simplified_expr = analyzer->Simplify(Substitute(expr, {{var, zero}}));
   // The base offset must be divisible
-  if (!analyzer->CanProveEqual(
-          FloorMod(Substitute(expr, {{var, zero}}), target_size_for_expr), 0)) {
+  if (!analyzer->CanProveEqual(FloorMod(simplified_expr, target_size_for_expr),
+                               zero)) {
     return false;
   }
 
@@ -308,7 +324,20 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
 
 For VectorizeLoop(const For &loop, int vectorize_hint) {
   if (vectorize_hint <= 0) {
-    VectorizePlanner planner;
+    arith::Analyzer analyzer;
+    VectorizePlanner planner(&analyzer);
+    vectorize_hint = planner.Plan(loop);
+  }
+  if (vectorize_hint == 1)
+    return loop;
+  auto rewriter = VectorizeRewriter(vectorize_hint);
+  return Downcast<For>(rewriter(loop));
+}
+
+For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
+                  int vectorize_hint) {
+  if (vectorize_hint <= 0) {
+    VectorizePlanner planner(analyzer);
     vectorize_hint = planner.Plan(loop);
   }
   if (vectorize_hint == 1)

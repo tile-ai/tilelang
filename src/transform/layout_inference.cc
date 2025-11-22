@@ -12,6 +12,7 @@
 #include <tvm/tir/utils.h>
 
 #include <algorithm>
+#include <memory>
 #include <queue>
 
 #include "../layout/utils.h"
@@ -85,6 +86,7 @@ public:
     auto &next = infer_list_[cur_infer_id];
     auto iter_var = thread_var_vec_[cur_infer_id];
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
+    arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
     auto buffer_oob = buffer_oob_vec_[cur_infer_id];
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
@@ -108,7 +110,7 @@ public:
     // Run InferLayout
     auto updates =
         next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
-                                          &analyzer_, buffer_oob},
+                                          cur_analyzer, buffer_oob},
                           level);
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
@@ -265,6 +267,9 @@ public:
            "length.";
     ICHECK_EQ(thread_bounds_vec_.size(), infer_list_.size())
         << "Size mismatch: thread_bounds_vec_ and infer_list_ must match in "
+           "length.";
+    ICHECK_EQ(analyzer_vec_.size(), infer_list_.size())
+        << "Size mismatch: analyzer_vec_ and infer_list_ must match in "
            "length.";
     ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
@@ -452,6 +457,7 @@ private:
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
+      analyzer_vec_.push_back(analyzer_.Clone());
 
       // Compute buffer oob for each buffer in the op
       if (const auto *copy = p.as<CopyNode>()) {
@@ -542,6 +548,7 @@ private:
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
+      analyzer_vec_.push_back(analyzer_.Clone());
       buffer_oob_vec_.push_back(false);
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
@@ -683,6 +690,7 @@ private:
                                 IterVarType::kDataPar);
   std::vector<IterVar> thread_var_vec_;
   std::vector<Range> thread_bounds_vec_;
+  std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
   std::vector<bool> buffer_oob_vec_;
   Target target_;
   LayoutMap annotated_layout_map_;
@@ -1024,7 +1032,7 @@ private:
       });
 
       if ((has_non_local || has_cast_operations) && !has_reducer) {
-        for_node = VectorizeLoop(for_node);
+        for_node = VectorizeLoop(for_node, analyzer_);
       }
 
       if (result_.predicate_map.count(root) && parallel_loop) {
