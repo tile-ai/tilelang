@@ -42,7 +42,7 @@ setup(
             name="tilescale_ext._C",
             sources=[
                 "ts_ext_bindings.cpp",
-                "tensor_from_ptr.cpp",
+                "tensor.cpp",
                 "ipc_ops.cpp",
             ],
             include_dirs=include_dirs,

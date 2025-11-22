@@ -13,6 +13,8 @@ torch::Tensor tensor_from_ptr(uint64_t ptr_val, std::vector<int64_t> shape,
 torch::Tensor create_tensor(const std::vector<int64_t> &shape,
                             c10::ScalarType dtype);
 
+torch::Tensor get_device_tensor(torch::Tensor tensor);
+
 pybind11::bytearray create_ipc_handle(void *ptr);
 
 void sync_ipc_handles(

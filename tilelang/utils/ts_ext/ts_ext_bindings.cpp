@@ -22,6 +22,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       },
       py::arg("shape"), py::arg("dtype"));
 
+  m.def("get_device_tensor", &get_device_tensor, py::arg("tensor"));
+
   m.def(
       "_create_ipc_handle",
       [](uintptr_t ptr_value) {

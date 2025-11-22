@@ -19,39 +19,9 @@
 #include <vector>
 
 #include "ts_ext_ops.h"
+#include "exception.h"
 
 namespace py = pybind11;
-
-class EPException : public std::exception {
-  std::string message;
-
-public:
-  EPException(const char *name, const char *file, int line,
-              const std::string &error) {
-    message = std::string("Failed: ") + name + " error " + file + ":" +
-              std::to_string(line) + " '" + error + "'";
-  }
-  const char *what() const noexcept override { return message.c_str(); }
-};
-
-#ifndef EP_HOST_ASSERT
-#define EP_HOST_ASSERT(cond)                                                   \
-  do {                                                                         \
-    if (!(cond)) {                                                             \
-      throw EPException("Assertion", __FILE__, __LINE__, #cond);               \
-    }                                                                          \
-  } while (0)
-#endif
-
-#ifndef CUDA_CHECK
-#define CUDA_CHECK(cmd)                                                        \
-  do {                                                                         \
-    cudaError_t e = (cmd);                                                     \
-    if (e != cudaSuccess) {                                                    \
-      throw EPException("CUDA", __FILE__, __LINE__, cudaGetErrorString(e));    \
-    }                                                                          \
-  } while (0)
-#endif
 
 static size_t numel_of(const std::vector<int64_t> &shape) {
   return std::accumulate(shape.begin(), shape.end(), size_t{1},
@@ -105,15 +75,15 @@ void sync_ipc_handles(
   const int num = (int)device_ids.size();
   const int rdma_rank = 0;
 
-  EP_HOST_ASSERT((size_t)num == all_gathered_handles.size());
+  TS_HOST_ASSERT((size_t)num == all_gathered_handles.size());
 
   std::vector<cudaIpcMemHandle_t> ipc_handles(num);
   std::vector<void *> buffer_ptrs(num, nullptr);
 
   for (int i = 0, offset = rdma_rank * num; i < num; ++i) {
-    EP_HOST_ASSERT(all_gathered_handles[offset + i].has_value());
+    TS_HOST_ASSERT(all_gathered_handles[offset + i].has_value());
     std::string s = (std::string)all_gathered_handles[offset + i].value();
-    EP_HOST_ASSERT(s.size() == CUDA_IPC_HANDLE_SIZE);
+    TS_HOST_ASSERT(s.size() == CUDA_IPC_HANDLE_SIZE);
     if (offset + i != rank) {
       std::memcpy(ipc_handles[i].reserved, s.data(), CUDA_IPC_HANDLE_SIZE);
       CUDA_CHECK(cudaIpcOpenMemHandle(&buffer_ptrs[i], ipc_handles[i],

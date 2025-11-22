@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "ts_ext_ops.h"
+#include "exception.h"
 
 static int64_t safe_mul_int64(int64_t a, int64_t b) {
   if (a == 0 || b == 0)
@@ -83,4 +84,12 @@ torch::Tensor tensor_from_ptr(uint64_t ptr_val, std::vector<int64_t> shape,
   } else {
     return at::from_blob(data_ptr, shape, deleter, options);
   }
+}
+
+torch::Tensor get_device_tensor(torch::Tensor tensor) {
+  void* device_ptr = nullptr;
+  CUDA_CHECK(cudaHostGetDevicePointer(&device_ptr, tensor.data_ptr(), 0));
+  std::vector<int64_t> shape(tensor.sizes().begin(), tensor.sizes().end());
+  std::string dtype_name(tensor.dtype().name());
+  return tensor_from_ptr(reinterpret_cast<uint64_t>(device_ptr), shape, dtype_name, tensor.device().index(), false);
 }
