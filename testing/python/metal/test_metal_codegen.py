@@ -5,7 +5,7 @@ import tilelang.language as T
 import torch
 
 
-@tilelang.jit(execution_backend='torch')
+@tilelang.jit(execution_backend='tvm_ffi')
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float32", accum_dtype="float"):
 
     @T.prim_func
