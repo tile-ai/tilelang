@@ -325,3 +325,83 @@ def finalize_reducer(reducer: tir.Buffer):
         tir.op.Op.get("tl.finalize_reducer"),
         reducer.access_ptr("w"),
     )
+
+
+def warp_reduce_sum(value: tir.PrimExpr):
+    """Perform warp reduction sum on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the sum of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced sum value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_sum"), value)
+
+
+def warp_reduce_max(value: tir.PrimExpr):
+    """Perform warp reduction max on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the max of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced max value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_max"), value)
+
+
+def warp_reduce_min(value: tir.PrimExpr):
+    """Perform warp reduction min on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the min of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced min value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_min"), value)
+
+
+def warp_reduce_bitand(value: tir.PrimExpr):
+    """Perform warp reduction bitwise-and on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the bitwise-and of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced bitwise-and value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_bitand"), value)
+
+
+def warp_reduce_bitor(value: tir.PrimExpr):
+    """Perform warp reduction bitwise-or on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the bitwise-or of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced bitwise-or value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_bitor"), value)
