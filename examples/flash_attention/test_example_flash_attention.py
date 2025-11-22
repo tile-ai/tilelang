@@ -99,5 +99,65 @@ def test_example_mha_fwd_varlen():
     example_mha_fwd_varlen.main(batch=4, heads=16, seq_len=512, dim=64)
 
 
+# Additional causal tests
+
+
+@tilelang.testing.requires_cuda
+def test_example_gqa_fwd_bshd_causal():
+    example_gqa_fwd_bshd.main(
+        batch=1, heads=16, seq_len=512, dim=128, is_causal=True, groups=16, tune=False)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_example_gqa_fwd_bshd_wgmma_pipelined_causal():
+    example_gqa_fwd_bshd_wgmma_pipelined.main(
+        batch=1, heads=16, seq_len=512, dim=128, is_causal=True, groups=16, tune=False)
+
+
+@tilelang.testing.requires_cuda
+def test_example_mha_fwd_bhsd_causal():
+    example_mha_fwd_bhsd.main(batch=1, heads=32, seq_q=256, seq_kv=256, dim=128, is_causal=True)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_example_mha_fwd_bshd_wgmma_pipelined_causal():
+    example_mha_fwd_bshd_wgmma_pipelined.main(batch=1, heads=32, seq_len=256, is_causal=True)
+
+
+@tilelang.testing.requires_cuda
+def test_example_mha_fwd_bshd_causal():
+    example_mha_fwd_bshd.main(batch=1, seq_len=256, is_causal=True)
+
+
+@tilelang.testing.requires_cuda
+def test_example_mha_bwd_causal():
+    example_mha_bwd_bshd.main(
+        BATCH=1,
+        H=16,
+        N_CTX=256,
+        D_HEAD=64,
+        causal=True,
+    )
+
+
+@tilelang.testing.requires_cuda
+def test_example_mha_bwd_bhsd_causal():
+    example_mha_bwd_bhsd.main(
+        BATCH=1,
+        H=16,
+        N_CTX=256,
+        D_HEAD=64,
+        causal=True,
+    )
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_example_mha_bwd_wgmma_pipelined_causal():
+    example_mha_bwd_bshd_wgmma_pipelined.main(BATCH=1, H=32, N_CTX=128, D_HEAD=64, causal=True)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
