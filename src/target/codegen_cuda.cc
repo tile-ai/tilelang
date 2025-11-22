@@ -287,6 +287,10 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <cooperative_groups.h>\n";
   }
 
+  if (need_random_h_) {
+    decl_stream << "#include <tl_templates/cuda/random.h>\n";
+  }
+
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
   if (enable_sparse_gemm_) {
     decl_stream << "#include <tl_templates/cuda/gemm_sp.h>\n";
@@ -2609,6 +2613,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::philox_rand())) {
+    need_random_h_ = true;
+    print_extern_call_stmt("tl::philox_rand");
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
