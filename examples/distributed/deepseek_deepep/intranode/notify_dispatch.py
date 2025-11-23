@@ -10,7 +10,7 @@ import tilelang.language as T
 import torch
 from argparse import ArgumentParser
 from tilelang.distributed.utils import init_dist
-from utils import gen_inputs  # noqa: F403
+from utils import gen_inputs, create_moe_recv_counters  # noqa: F403
 
 from get_dispatch_layout import get_dispatch_layout
 
@@ -81,7 +81,7 @@ def notify_dispatch_kernel(
                 # Copy rank size prefix matrix to another tensor                
                 T.copy(per_rank_buffer, rank_prefix_matrix)
 
-                # We don't cleanup the buffer for later use, as it is one time used?
+                #? We don't cleanup the buffer for later use, as it is one time used?
                 T.barrier_blocks(barrier_signal)
             else:
                 dst_rank = bx - 1
@@ -94,7 +94,7 @@ def notify_dispatch_kernel(
                     for i in T.serial(token_start_idx + lane_id, token_end_idx, 32):
                         cnt[0] += is_token_in_rank[i, dst_rank]
                     cnt[0] = T.warp_reduce_sum(cnt[0])
-                    if lane_id == 0:  # todo: replace with elect_one_sync() for sm90
+                    if T.elect_one_sync():
                         channel_prefix_matrix[dst_rank, channel_id] = cnt[0]
                 T.sync_threads()
 
@@ -195,6 +195,35 @@ def notify_dispatch(
     return rank_prefix_matrix, channel_prefix_matrix
 
 
+@tilelang.jit
+def cached_notify_dispatch(
+    rank: int,
+    num_ranks: int,
+    num_experts: int,
+    num_tokens: int,
+    num_channels: int,
+    expert_alignment: int,
+):
+    
+    threads = 128
+
+    @T.prim_func
+    def cached_notify_dispatch_main(
+        rank_prefix_matrix: T.Tensor((num_ranks, num_ranks), 'int32'),
+        per_rank_buffer: T.Tensor((num_ranks, num_ranks), 'int32'),
+        barrier_signal: T.Tensor((num_ranks,), 'int32'),
+    ):
+        with T.Kernel(1, threads=threads):
+            tx = T.get_thread_binding()
+
+            T.sync_blocks(barrier_signal)
+            T.copy(rank_prefix_matrix, per_rank_buffer)
+            #? We don't cleanup the buffer for later use, as it is one time used?
+            T.barrier_blocks(barrier_signal)
+
+    return cached_notify_dispatch_main
+
+
 # todo: impl cached_notify_dispatch
 
 
@@ -243,10 +272,7 @@ def test_notify_dispatch(
     ref_rank_prefix_matrix, ref_channel_prefix_matrix = handle[:2]
 
     # create buffers in need
-    moe_recv_counter_mapped = torch.empty([1], dtype=torch.int64, device='cuda')
-    moe_recv_counter_mapped[0] = -1
-    moe_recv_expert_counter_mapped = torch.empty([num_local_experts], dtype=torch.int32, device='cuda')
-    moe_recv_expert_counter_mapped.fill_(-1)
+    moe_recv_counter_mapped, moe_recv_expert_counter_mapped = create_moe_recv_counters(num_ranks)[3:5]
 
     per_rank_buffer = tilelang.tensor((num_ranks, num_ranks), dtype=torch.int32, device='cuda', allocator=allocator).zero_()
     per_expert_buffer = tilelang.tensor((num_ranks, num_local_experts), dtype=torch.int32, device='cuda', allocator=allocator).zero_()

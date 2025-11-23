@@ -2,6 +2,7 @@ from typing import Union, Tuple
 import torch
 import os
 from dataclasses import dataclass, field
+from tilelang.distributed.utils import get_device_tensor
 
 # Pre-defined constants in DeepEP
 NUM_MAX_NVL_PEERS = 8  # Maximum number of NVLink peers per GPU
@@ -177,16 +178,35 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
 
 
 # Check: csrc/deep_ep.cpp:Buffer::Buffer
-def create_moe_recv_counters(num_ranks: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def create_moe_recv_counters(num_ranks: int):
+    """Create MoE receive counters.
+    All allocated tensors are initialized with -1.
+    
+    Args:
+        num_ranks: the number of ranks.
+
+    Returns:
+        moe_recv_counter: the MoE counter, allocated on pinned host memory.
+        moe_recv_expert_counter: the MoE expert-level counter, allocated on pinned host memory.
+        moe_recv_rdma_counter: the MoE RDMA-level counter, allocated on pinned host memory.
+
+        moe_recv_counter_mapped: the MoE counter on device, mapped from the pinned host memory.
+        moe_recv_expert_counter_mapped: the MoE expert-level counter on device, mapped from the pinned host memory.
+        moe_recv_rdma_counter_mapped: the MoE RDMA-level counter on device, mapped from the pinned host memory.
+    """
     num_rdma_ranks = max(1, num_ranks // NUM_MAX_NVL_PEERS)  # noqa: F841
     num_nvl_ranks = min(num_ranks, NUM_MAX_NVL_PEERS)  # noqa: F841
 
     moe_recv_counter = torch.tensor(
-        -1, dtype=torch.int64, device='cuda', pin_memory=True)  # MoE counter
+        -1, dtype=torch.int64, pin_memory=True)  # MoE counter
     moe_recv_expert_counter = torch.tensor(
-        [-1] * NUM_MAX_LOCAL_EXPERTS, dtype=torch.int32, device='cuda',
+        [-1] * NUM_MAX_LOCAL_EXPERTS, dtype=torch.int32,
         pin_memory=True)  # MoE expert-level counter
     moe_recv_rdma_counter = torch.tensor(
-        -1, dtype=torch.int, device='cuda', pin_memory=True)  # MoE RDMA-level counter
+        -1, dtype=torch.int32, pin_memory=True)  # MoE RDMA-level counter
 
-    return moe_recv_counter, moe_recv_expert_counter, moe_recv_rdma_counter
+    moe_recv_counter_mapped = get_device_tensor(moe_recv_counter)
+    moe_recv_expert_counter_mapped = get_device_tensor(moe_recv_expert_counter)
+    moe_recv_rdma_counter_mapped = get_device_tensor(moe_recv_rdma_counter)
+    return moe_recv_counter, moe_recv_expert_counter, moe_recv_rdma_counter, \
+        moe_recv_counter_mapped, moe_recv_expert_counter_mapped, moe_recv_rdma_counter_mapped
