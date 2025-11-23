@@ -570,6 +570,11 @@ TVM_DLL const Op &warp_reduce_bitand();
  */
 TVM_DLL const Op &warp_reduce_bitor();
 
+/*!
+ * \brief tilelang intrinsic for electing exactly one lane within a logical thread group.
+ */
+TVM_DLL const Op &elect_one_sync();
+
 } // namespace tl
 } // namespace tvm
 

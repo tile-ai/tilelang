@@ -6,7 +6,7 @@ from tilelang.language import ptx_arrive_barrier, evaluate, address_of
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import tir
-from typing import Any
+from typing import Any, Literal, str
 import tilelang.language as T
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
@@ -749,8 +749,8 @@ def atom_add(barrier: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = 
 def st(
     dst: PrimExpr, 
     value: PrimExpr, 
-    scope: str = "gpu", 
-    sem: str = "relaxed",
+    scope: Literal["gpu", "sys"] = "gpu", 
+    sem: Literal["relaxed", "release"] = "relaxed",
     dst_pe: tir.PrimExpr | tir.IntImm | None = -1, 
 ):
     """Store a value to a given address with specified scope, semantic, and optional destination PE.
@@ -769,3 +769,9 @@ def st(
     assert scope in ["gpu", "sys"], "Scope must be one of 'gpu', or 'sys'."
     assert sem in ["relaxed", "release"], "Semantic must be one of 'relaxed', or 'release'."
     return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(dst), value, sem, scope, dst_pe)
+
+
+def elect_one_sync():
+    """Efficiently elect exactly one lane within a logical thread group.
+    """
+    return tir.call_intrin("bool", tir.op.Op.get("tl.elect_one_sync"))

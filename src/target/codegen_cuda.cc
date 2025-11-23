@@ -2363,6 +2363,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::elect_one_sync())) {
+    os << "cute::elect_one_sync()";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
