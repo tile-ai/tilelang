@@ -1,4 +1,3 @@
-import pytest
 import torch
 
 import tilelang
@@ -12,10 +11,7 @@ def get_kernel(reduce_op: str, dtype: str):
     assert reduce_op in ["sum", "max", "min", "bitand", "bitor"]
 
     @T.prim_func
-    def main(
-            x: T.Tensor((32), dtype)
-
-    ):
+    def main(x: T.Tensor((32), dtype)):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding(0)
             local_val = T.alloc_local([1], dtype)
@@ -32,6 +28,7 @@ def get_kernel(reduce_op: str, dtype: str):
             elif reduce_op == "bitor":
                 reduced_val[0] = T.warp_reduce_bitor(local_val[0])
             x[tx] = reduced_val[0]
+
     return main
 
 
