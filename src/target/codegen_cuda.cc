@@ -290,6 +290,7 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (use_distributed_) {
     decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
     decl_stream << "#include <tl_templates/cuda/sync.h>\n";
+    decl_stream << "#include <tl_templates/cuda/ldst.h>\n";
   }
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
@@ -2365,6 +2366,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << PrintExpr(op->args[1]) << ")";
   } else if (op->op.same_as(tl::elect_one_sync())) {
     os << "cute::elect_one_sync()";
+  } else if (op->op.same_as(tl::sync_warp())) {
+    os << "__syncwarp()";
+  } else if (op->op.same_as(tl::loop_continue())) {
+    os << "continue";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

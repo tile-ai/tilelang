@@ -575,6 +575,16 @@ TVM_DLL const Op &warp_reduce_bitor();
  */
 TVM_DLL const Op &elect_one_sync();
 
+/*!
+ * \brief tilelang intrinsic for synchronizing all threads in a warp.
+ */
+TVM_DLL const Op &sync_warp();
+
+/*!
+ * \brief tilelang intrinsic for continuing the innermost loop.
+ */
+TVM_DLL const Op &loop_continue();
+
 } // namespace tl
 } // namespace tvm
 

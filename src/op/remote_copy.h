@@ -205,8 +205,9 @@ public:
   PrimExpr dst;           ///< Destination address
   PrimExpr value;         ///< Value to store
   PrimExpr dst_pe;        ///< Destination processing element (optional)
-  std::string scope;      ///< Scope: {warp, block}
-  std::string sem;        ///< Semantic: {relaxed, release}
+  int scope;
+  int sem;
+  int na;
 
   bool is_distributed() const;
 
@@ -226,7 +227,8 @@ public:
         .def_ro("value", &StOpNode::value)
         .def_ro("dst_pe", &StOpNode::dst_pe)
         .def_ro("scope", &StOpNode::scope)
-        .def_ro("sem", &StOpNode::sem);
+        .def_ro("sem", &StOpNode::sem)
+        .def_ro("na", &StOpNode::na);
   }
 
   bool SEqualReduce(const StOpNode *other, SEqualReducer equal) const {
@@ -234,7 +236,8 @@ public:
            equal(value, other->value) &&
            equal(dst_pe, other->dst_pe) &&
            scope == other->scope &&
-           sem == other->sem;
+           sem == other->sem &&
+           na == other->na;
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -243,6 +246,7 @@ public:
     hash_reduce(dst_pe);
     hash_reduce(scope);
     hash_reduce(sem);
+    hash_reduce(na);
   }
 
   static constexpr bool _type_has_method_sequal_reduce = true;
@@ -255,6 +259,71 @@ public:
   TVM_DLL StOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };
+
+class LdOpNode : public TileOperatorNode {
+  public:
+    PrimExpr src;           ///< Source address
+    PrimExpr value;         ///< Value to store
+    PrimExpr src_pe;        ///< Source PE (optional)
+    int scope;
+    int sem;
+    int na;
+    int nc;
+  
+    bool is_distributed() const;
+  
+    static constexpr const char *_type_key = "tl.LdOp";
+    TVM_DECLARE_FINAL_OBJECT_INFO(LdOpNode, TileOperatorNode);
+  
+    Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+    LayoutMap InferLayout(const LayoutInferArgs &T,
+                          InferLevel level) const override;
+    static const Op &Get();
+    TileOperator Clone() const override;
+  
+    static void RegisterReflection() {
+      namespace refl = tvm::ffi::reflection;
+      refl::ObjectDef<LdOpNode>()
+          .def_ro("src", &LdOpNode::src)
+          .def_ro("value", &LdOpNode::value)
+          .def_ro("src_pe", &LdOpNode::src_pe)
+          .def_ro("scope", &LdOpNode::scope)
+          .def_ro("sem", &LdOpNode::sem)
+          .def_ro("na", &LdOpNode::na)
+          .def_ro("nc", &LdOpNode::nc);
+    }
+  
+    bool SEqualReduce(const LdOpNode *other, SEqualReducer equal) const {
+      return equal(src, other->src) &&
+             equal(value, other->value) &&
+             equal(src_pe, other->src_pe) &&
+             scope == other->scope &&
+             sem == other->sem &&
+             na == other->na &&
+             nc == other->nc;
+    }
+  
+    void SHashReduce(SHashReducer hash_reduce) const {
+      hash_reduce(src);
+      hash_reduce(value);
+      hash_reduce(src_pe);
+      hash_reduce(scope);
+      hash_reduce(sem);
+      hash_reduce(na);
+      hash_reduce(nc);
+    }
+  
+    static constexpr bool _type_has_method_sequal_reduce = true;
+    static constexpr bool _type_has_method_shash_reduce = true;
+  };
+  
+class LdOp : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(LdOp, TileOperator, LdOpNode);
+  TVM_DLL LdOp(Array<PrimExpr> args, BufferMap vmap);
+  static const Op &Get();
+};
+  
 
 } // namespace tl
 } // namespace tvm
