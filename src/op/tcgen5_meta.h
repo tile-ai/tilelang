@@ -42,12 +42,12 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
     } else if (M % 64 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 16, false, false);
+          SUCCESS(64, atom_n, 16, true, false);
       FAIL;
     } else if (M % 32 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 16, false, false);
+          SUCCESS(32, atom_n, 16, true, false);
       FAIL;
     } else {
       FAIL;
