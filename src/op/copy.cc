@@ -852,9 +852,10 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
   auto par_op = ParallelOp(transformed_loop);
 
   if (is_cpu_target || dst.scope() == "local" || src.scope() == "local") {
-    if(src.scope() == "local" && dst.scope() != "local") {
-      LOG(WARNING) << "Copy from local buffer `" << src->name << "` to " << dst.scope() << " buffer `"
-                   << dst->name << "` may cause conflicted write.";
+    if (src.scope() == "local" && dst.scope() != "local") {
+      LOG(WARNING) << "Copy from local buffer `" << src->name << "` to "
+                   << dst.scope() << " buffer `" << dst->name
+                   << "` may cause conflicted write.";
     }
     vectorized_thread_loop = VectorizeLoop(transformed_loop);
   } else {
