@@ -169,11 +169,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
         meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
-        if len(meta) != 5:
+        if len(meta) != 3:
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
                 f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}")
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
+        atom_m, atom_n, atom_k = (int(x) for x in meta)
+        enable_ws = atom_m != 128
 
         # by default, we utilize non-swizzle layout offset
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim *
@@ -381,10 +382,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         k = int(self.chunk)
 
         meta = self.get_tcgen5_mma_meta(m, n, k)
-        if len(meta) != 5:
+        if len(meta) != 3:
             raise ValueError(f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, "
                              f"A dtype={self.a_dtype}, accum dtype={self.accum_dtype}")
-        atom_m, atom_n, _, _, _ = (int(x) for x in meta)
+        atom_m, atom_n, _ = (int(x) for x in meta)
 
         if m % atom_m != 0 or n % atom_n != 0:
             raise ValueError(

@@ -1117,11 +1117,6 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   bool is_ld = false; // tcgen05.ld (tensor memory -> register)
   bool is_st = false; // tcgen05.st (register -> tensor memory)
   bool is_cp = false; // tcgen05.cp (shared memory -> tensor memory)
-  bool src_needs_pack =
-      16 == src->dtype.bits(); // if needs .pack::16b when is_ld
-  bool dst_needs_unpack =
-      16 == dst->dtype.bits(); // if needs .unpack::16b when is_st
-
   if (src.scope() == "shared.tmem" && dst.scope() == "local.fragment") {
     is_ld = true;
   } else if (src.scope() == "local.fragment" && dst.scope() == "shared.tmem") {
@@ -1129,8 +1124,9 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   } else if (src.scope() == "shared.dyn" && dst.scope() == "shared.tmem") {
     is_cp = true;
   } else {
-    ICHECK(0) << "Unsupported tensor memory copy: " << "src scope = "
-              << src.scope() << ", dst scope = " << dst.scope();
+    ICHECK(0) << "Unsupported tensor memory copy: "
+              << "src scope = " << src.scope()
+              << ", dst scope = " << dst.scope();
   }
   // Currently tcgen05.cp is not supported
   // TODO (mzw) Support tcgen05.cp
@@ -1250,10 +1246,8 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
               : relative_wg_idx * (num_chunks_each_wg * meta.width);
       have_succeeded = true;
       Array<PrimExpr> args;
-      const char *bool_str = src_needs_pack ? "true" : "false";
       args.push_back(StringImm(meta.intrinsics_name + "<" +
-                               std::to_string(num_chunks_each_wg) + ", " +
-                               bool_str + ">"));
+                               std::to_string(num_chunks_each_wg) + ">"));
       args.push_back(
           BufferLoad(src, {(int)logical_row_min,
                            (int)logical_col_min})); // Will be translated later
