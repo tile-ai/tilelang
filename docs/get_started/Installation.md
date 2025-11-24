@@ -93,13 +93,15 @@ Some useful CMake options you can toggle while configuring:
 
 (using-existing-tvm)=
 
-### Building with Existing TVM Installation
+### Building with Customized TVM Path
 
-If you already have a compatible TVM installation, use the `TVM_ROOT` environment variable to specify the location of your existing TVM repository when building tilelang:
+If you already have a TVM codebase, use the `TVM_ROOT` environment variable to specify the location of your existing TVM repository when building tilelang:
 
 ```bash
 TVM_ROOT=<your-tvm-repo> pip install . -v
 ```
+
+> **Note**: This will still rebuild the TVM-related libraries (stored in `TL_LIBS`). And this method often leads to some path issues. Check `env.py` to see some environment variables which are not set properly.
 
 (install-using-docker)=
 
@@ -197,8 +199,7 @@ Set `NO_TOOLCHAIN_VERSION=ON` to disable this.
 
 ### Run-time environment variables
 
-<!-- TODO: tvm -->
-TODO
+Please refer to the `env.py` file for a full list of supported run-time environment variables.
 
 ## Other Tips
 
