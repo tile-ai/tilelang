@@ -16,6 +16,7 @@
 #include "../transform/loop_partition.h"
 #include "region.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm/tir/stmt.h"
 
 namespace tvm {
 namespace tl {
@@ -57,10 +58,56 @@ static BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
       RegionOp region(call->args, vmap);
       return BufferRegion(region->GetBuffer(), region->GetRanges());
     }
+    // builtin.tvm_access_ptr(...) — map var to Buffer and take full region
+    if (call->op.same_as(builtin::tvm_access_ptr())) {
+      Var var = Downcast<Var>(call->args[1]);
+      Buffer buf = vmap[var];
+      Array<Range> ranges;
+      for (PrimExpr extent : buf->shape) {
+        ranges.push_back(Range(IntImm(extent->dtype, 0), extent));
+      }
+      return BufferRegion(buf, ranges);
+    }
   }
 
   LOG(FATAL) << "Unsupported argument for BufferRegion in reduce: " << arg;
   throw; // Unreachable
+}
+
+// Build a tvm_access_ptr(handle) to the start of the 2D tile within a
+// BufferRegion. Offset is computed from all but the last two dimensions; extent
+// is the product of the last two extents. rw_mask: 1=read, 2=write,
+// 3=readwrite.
+static PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
+                                        int rw_mask) {
+  Buffer buf = region->buffer;
+  int ndim = static_cast<int>(buf->shape.size());
+  ICHECK(ndim >= 2) << "GEMM expects buffers with at least 2 dims";
+
+  // Compute row-major strides
+  std::vector<PrimExpr> strides(ndim);
+  PrimExpr one = make_const(buf->shape[0].dtype(), 1);
+  PrimExpr cur = one;
+  for (int i = ndim - 1; i >= 0; --i) {
+    strides[i] = cur;
+    cur = cur * buf->shape[i];
+  }
+
+  // Offset: sum_{i in [0..ndim-3]} min_i * stride_i
+  PrimExpr offset = make_const(buf->shape[0].dtype(), 0);
+  for (int i = 0; i < ndim - 2; ++i) {
+    offset = offset + region->region[i]->min * strides[i];
+  }
+
+  // Extent: last two extents product (elements)
+  PrimExpr extent =
+      region->region[ndim - 2]->extent * region->region[ndim - 1]->extent;
+
+  // ptype and return handle
+  PrimExpr ptype = tir::TypeAnnotation(buf->dtype);
+  Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
+                           IntImm(DataType::Int(32), rw_mask)};
+  return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 
 ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
@@ -231,6 +278,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto dst_scope = this->dst.scope();
 
   if (src_scope == "local.fragment" && dst_scope == "local.fragment") {
+
     Buffer src_buffer = get_buffer(this->src);
     Buffer dst_buffer = get_buffer(this->dst);
     Fragment src_layout = T.layout_map[this->src].as<Fragment>().value();
@@ -518,6 +566,16 @@ TIR_REGISTER_TL_OP(ReduceOp, reduce)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// Normalize "Buffer" to BufferRegion. Use the shape of the buffer as the
+// ranges.
+static BufferRegion ConvertBufferToBufferRegion(const Buffer &buf) {
+  Array<Range> ranges;
+  for (PrimExpr extent : buf->shape) {
+    ranges.push_back(Range(IntImm(extent->dtype, 0), extent));
+  }
+  return BufferRegion(buf, ranges);
+}
+
 CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
   /// CumSum constructor arguments:
   /// - src: input buffer
@@ -526,11 +584,19 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
   /// - reverse: whether to cumsum in reverse order
   CHECK_EQ(args.size(), 4);
   ObjectPtr<CumSumOpNode> node = tvm::ffi::make_object<CumSumOpNode>();
-  node->src = vmap[GetVarFromAccessPtr(args[0])];
-  node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  // node->src = vmap[GetVarFromAccessPtr(args[0])];
+  // node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  node->srcRegion_ = NormalizeToBufferRegion(args[0], vmap);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1], vmap);
+  node->src = node->srcRegion_->buffer;
+  node->dst = node->dstRegion_->buffer;
   node->dim = args[2].as<IntImm>().value()->value;
   node->reverse = args[3].as<Bool>().value();
-  CHECK_LT(node->dim, static_cast<int>(node->src->shape.size()));
+  CHECK_LT(node->dim, static_cast<int>(node->src->shape.size()))
+      << "The dim of cumsum should be less than the number of dimensions. Got "
+         "dim="
+      << node->dim << ", but src has " << node->src->shape.size() << " dims.";
+
   data_ = std::move(node);
 }
 
@@ -546,18 +612,22 @@ Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto threads = T.thread_bounds->extent;
     Array<PrimExpr> args;
     int ndim = static_cast<int>(src->shape.size());
+
+    // Build access pointers from regions locally
+    PrimExpr srcPtr = MakeAccessPtrFromRegion(srcRegion_, 1);
+    PrimExpr dstPtr = MakeAccessPtrFromRegion(dstRegion_, 2);
+
     if (ndim == 1) {
       ICHECK_EQ(dim, 0) << "Cumulative sum over a 1D buffer only supports dim "
                            "= 0.";
       ss << "tl::CumSum1D<" << threads << ", " << (reverse ? "true" : "false")
          << ">::run";
-      args = {StringImm(ss.str()), src.access_ptr(1), dst.access_ptr(3),
-              src->shape[0]};
+      args = {StringImm(ss.str()), srcPtr, dstPtr, src->shape[0]};
     } else if (ndim == 2) {
       ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
          << (reverse ? "true" : "false") << ">::run";
-      args = {StringImm(ss.str()), src.access_ptr(1), dst.access_ptr(3),
-              src->shape[0], src->shape[1]};
+      args = {StringImm(ss.str()), srcPtr, dstPtr, src->shape[0],
+              src->shape[1]};
     } else {
       LOG(FATAL) << "CumSum currently supports only 1D or 2D buffers, got "
                  << ndim << "D.";
