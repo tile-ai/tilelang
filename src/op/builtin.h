@@ -585,6 +585,16 @@ TVM_DLL const Op &sync_warp();
  */
 TVM_DLL const Op &loop_continue();
 
+/*!
+ * \brief tilelang intrinsic for checking if any lane in the warp has a true value.
+ */
+TVM_DLL const Op &warp_any();
+
+/*!
+ * \brief tilelang intrinsic for checking if all lanes in the warp have a true value.
+ */
+TVM_DLL const Op &warp_all();
+
 } // namespace tl
 } // namespace tvm
 

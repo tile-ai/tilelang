@@ -2370,6 +2370,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << "__syncwarp()";
   } else if (op->op.same_as(tl::loop_continue())) {
     os << "continue";
+  } else if (op->op.same_as(tl::warp_any())) {
+    os << "__any_sync(" << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_all())) {
+    os << "__all_sync(" << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[0]) << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

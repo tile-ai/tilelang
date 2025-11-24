@@ -822,3 +822,29 @@ def sync_warp():
 def loop_continue():
     """Continue the innermost loop."""
     return tir.call_intrin("handle", tir.op.Op.get("tl.loop_continue"))
+
+
+def warp_any(value, mask = -1):
+    """Check if any lane in the warp has a true value.
+    
+    Args:
+        value (int): The value to vote.
+        mask (uint32): The mask to use, default is 0xFFFFFFFF(-1), which means all lanes.
+
+    Returns:
+        result (int): The result of the vote.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.warp_any"), value, mask)
+
+
+def warp_all(value, mask = -1):
+    """Check if all lane in the warp have a true value.
+    
+    Args:
+        value (int): The value to vote.
+        mask (uint32): The mask to use, default is 0xFFFFFFFF(-1), which means all lanes.
+
+    Returns:
+        result (int): The result of the vote.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.warp_all"), value, mask)
