@@ -260,7 +260,7 @@ def test_atomic_addx2():
     run_atomic_addx2(32, 64, 8, 16)
 
 
-@tilelang.jit(debug_root_path="./testing/python/language")
+@tilelang.jit
 def atomic_different_memory_orders_program(M, N, block_M, block_N, dtype="float"):
 
     @T.prim_func
