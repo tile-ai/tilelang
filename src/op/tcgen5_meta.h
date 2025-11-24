@@ -9,22 +9,64 @@
 #include <vector>
 
 namespace tvm {
+/**
+ * Selects tile (atom) sizes and feature flags for TCGEN5 MMA given matrix shapes and dtypes.
+ *
+ * Determines whether a TCGEN5 MMA configuration exists for the provided M, N, K and
+ * operand/accumulator data types. On success returns a TCGEN5MMAMeta describing
+ * atom_m, atom_n, atom_k, and the flags `enable_ws` and `enable_2cta`.
+ *
+ * @param M Number of rows of the A/C result.
+ * @param N Number of columns of the B/C result.
+ * @param K Inner reduction dimension.
+ * @param ab_dtype Data type of A and B operands.
+ * @param c_dtype Data type of the accumulator / C.
+ * @returns `std::pair<bool, TCGEN5MMAMeta>` where the `first` element is `true` and the
+ *          `second` element contains a valid configuration on success; `first` is `false`
+ *          and `second` is zero-initialized (all fields false/0) on failure.
+ */
+
+/**
+ * Build a 32-bit TCGEN5 MMA instruction descriptor encoding data formats, tile dims,
+ * memory layout flags, and sign/scale indicators.
+ *
+ * The descriptor packs fields as follows (bit ranges): c_format [4-5], a_format [7-9],
+ * b_format [10-12], a_neg [13], b_neg [14], a_major [15], b_major [16], n_dim [17-22],
+ * m_dim [24-28], max_shift [30-31], with several reserved/zero bits.
+ *
+ * Preconditions: atom_m must be divisible by 16, atom_n must be divisible by 8, atom_k must
+ * be either 16 or 32, and scale_in_a/scale_in_b must be either +1 or -1.
+ *
+ * @param atom_m Tile size in M dimension (must be divisible by 16).
+ * @param atom_n Tile size in N dimension (must be divisible by 8).
+ * @param atom_k Tile size in K dimension (supported: 16 or 32).
+ * @param ab_dtype Data type of A and B operands (affects a_format/b_format encoding).
+ * @param c_dtype Accumulator / C data type (affects c_format encoding).
+ * @param a_is_k_major True if A is K-major (storage along K), false if M-major.
+ * @param b_is_k_major True if B is K-major (storage along K), false if N-major.
+ * @param scale_in_a Either +1 or -1; -1 sets the sign/negation bit for A.
+ * @param scale_in_b Either +1 or -1; -1 sets the sign/negation bit for B.
+ * @returns A uint32_t descriptor encoding the specified formats, dimensions, and flags.
+ */
 namespace tl {
 
 using runtime::DataType;
 
 struct TCGEN5MMAMeta {
   int atom_m, atom_n, atom_k;
+  bool enable_ws, enable_2cta;
 };
 
 inline std::pair<bool, TCGEN5MMAMeta>
 GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
 #define FAIL                                                                   \
-  return { false, TCGEN5MMAMeta{0, 0, 0} }
-#define SUCCESS(atom_m, atom_n, atom_k)                                        \
   return {                                                                     \
-    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
+    false, TCGEN5MMAMeta { 0, 0, 0, false, false }                             \
+  }
+#define SUCCESS(atom_m, atom_n, atom_k, use_ws, use_2cta)                      \
+  return {                                                                     \
+    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k, use_ws, use_2cta }           \
   }
   std::vector<int> ws_valid_atom_ns = {256, 128, 64};
   if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
@@ -34,39 +76,52 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
     if (M % 128 == 0) {
       for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
         if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 16);
+          SUCCESS(128, atom_n, 16, false, false);
       FAIL;
     } else if (M % 64 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 16);
+          SUCCESS(64, atom_n, 16, true, false);
       FAIL;
     } else if (M % 32 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 16);
+          SUCCESS(32, atom_n, 16, true, false);
       FAIL;
     } else {
       FAIL;
     }
-  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e5m2()) &&
-             (c_dtype.is_float() && c_dtype.bits() == 32)) {
+  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e4m3() ||
+              ab_dtype.is_float8_e5m2() || ab_dtype.is_float8_e5m2fnuz() ||
+              ab_dtype.is_float6_e2m3fn() || ab_dtype.is_float6_e3m2fn() ||
+              ab_dtype.is_float4_e2m1fn()) &&
+             ((c_dtype.is_float() && c_dtype.bits() == 32) ||
+              (c_dtype.is_float16() && c_dtype.bits() == 16))) {
     if (K % 32 != 0)
       FAIL;
     if (M % 128 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 32, true, false);
       for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
         if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32);
+          SUCCESS(128, atom_n, 32, false, true);
+      for (int atom_n = 256; atom_n >= 8; atom_n -= 8)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 32, false, false);
       FAIL;
     } else if (M % 64 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 32);
+          SUCCESS(64, atom_n, 32, true, false);
+      for (int atom_n = 256; atom_n >= 8; atom_n -= 8)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 32, false, false);
       FAIL;
     } else if (M % 32 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 32);
+          SUCCESS(32, atom_n, 32, true, false);
       FAIL;
     } else {
       FAIL;

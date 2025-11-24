@@ -417,6 +417,42 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         });
 }
 
+/**
+ * @brief Query TCGEN5 MMA metadata for a candidate GEMM tile shape and dtypes.
+ *
+ * Given M, N, K and the operand/result data types, returns encoding metadata
+ * describing the TCGEN5 micro-tile if supported.
+ *
+ * @param M Tile M dimension.
+ * @param N Tile N dimension.
+ * @param K Tile K dimension.
+ * @param ab_dtype Data type of A and B operands.
+ * @param c_dtype Data type of the accumulation/result C.
+ * @return Array<Integer> If unsupported, returns an empty array. If supported,
+ *   returns five integers in order: `atom_m`, `atom_n`, `atom_k`, `enable_ws`,
+ *   and `enable_2cta`. `atom_*` are the atom sizes for each dimension; `enable_ws`
+ *   is 1 when workspace mode is enabled for this configuration, 0 otherwise;
+ *   `enable_2cta` is 1 when a two-CTA dispatch is enabled, 0 otherwise.
+ */
+
+/**
+ * @brief Obtain the encoded TCGEN5 instruction descriptor for a specific atom and layout.
+ *
+ * Constructs and returns the 32-bit descriptor that encodes a TCGEN5 instruction
+ * variant for the provided atom sizes, data types, operand-major orientations,
+ * and scaling parameters.
+ *
+ * @param atom_m Atom size along M.
+ * @param atom_n Atom size along N.
+ * @param atom_k Atom size along K.
+ * @param ab_dtype Data type of A and B operands.
+ * @param c_dtype Data type of the accumulation/result C.
+ * @param a_is_k_major True when A is k-major (major axis is K).
+ * @param b_is_k_major True when B is k-major (major axis is K).
+ * @param scale_in_a Scaling factor applied to A (integer encoding).
+ * @param scale_in_b Scaling factor applied to B (integer encoding).
+ * @return Integer 32-bit encoded instruction descriptor as a signed integer.
+ */
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def(
@@ -428,6 +464,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
           result.push_back(Integer(meta.atom_m));
           result.push_back(Integer(meta.atom_n));
           result.push_back(Integer(meta.atom_k));
+          result.push_back(Integer(meta.enable_ws));
+          result.push_back(Integer(meta.enable_2cta));
         }
         return result;
       });

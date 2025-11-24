@@ -144,7 +144,20 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                    mbar,
                    clear_accum: PrimExpr = False):
 
-        if is_tensor_memory(A_buf):
+        """
+                   Emit TCGEN5 warp-level MMA instructions into the TIR using the provided A, B, and accumulator buffers.
+                   
+                   This routine prepares TCGEN5-specific descriptor and layout metadata (including swizzle modes, byte offsets, and instruction descriptor), and then emits a warp-scoped macro that performs the tiled MMA loop over K, invoking the low-level PTX MMA intrinsic for each micro-tile. It supports tensor-memory (delegates to tcgen05mma_rs) and shared-memory inputs, and respects the clear_accum flag to zero accumulators on the first K-iteration.
+                   
+                   Parameters:
+                       A_buf: Buffer or a BufferLoad/BufferRegion representing the A operand in shared or tensor memory.
+                       B_buf: Buffer or a BufferLoad/BufferRegion representing the B operand in shared or tensor memory.
+                       C_local_buf: Buffer holding the accumulator tiles in local memory.
+                       mbar: Barrier/notification handle used to synchronize the warp-level MMA arrival.
+                       clear_accum: Predicate indicating whether accumulators should be cleared on the first K-iteration (True to clear).
+                   
+                   """
+                   if is_tensor_memory(A_buf):
             return self.tcgen05mma_rs(A_buf, B_buf, C_local_buf, clear_accum)
 
         accum_dtype = self.accum_dtype
@@ -169,12 +182,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
         meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
-        if len(meta) != 3:
+        if len(meta) != 5:
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
                 f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}")
-        atom_m, atom_n, atom_k = (int(x) for x in meta)
-        enable_ws = atom_m != 128
+        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
 
         # by default, we utilize non-swizzle layout offset
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim *
@@ -354,23 +366,17 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def make_mma_store_layout(self, tmem_buf: Buffer) -> Layout:
         """
-        Create the TCGEN5 tensor-memory layout used to store MMA accumulators.
-
-        Parameters
-        ----------
-        tmem_buf : tir.Buffer
-            The local buffer representing tensormemory of a mma's output
-
-        Returns
-        -------
-        Layout
-            Layout object describing how logical (i, j) coordinates map to the
-            swizzled tensor-memory offsets required by TCGEN5MMA.
-
-        Raises
-        ------
-        AssertionError
-            If `tmem_buf` is not detected to be a tensor-memory buffer.
+        Constructs a Layout that maps MMA accumulator logical indices (i, j) to TCGEN5 tensor-memory coordinates.
+        
+        Parameters:
+            tmem_buf (tir.Buffer): 2-D tensor-memory buffer used to store MMA accumulators.
+        
+        Returns:
+            Layout: A layout object that maps logical (i, j) accumulator coordinates to 2-D tensor-memory coordinates required by TCGEN5 MMA stores.
+        
+        Raises:
+            AssertionError: If `tmem_buf` is not located in tensor memory.
+            ValueError: If `tmem_buf` is not 2-D, if the TCGEN5 MMA configuration is unsupported for the buffer's (M, N, K), or if M/N are not multiples of the atom sizes required by TCGEN5.
         """
         assert is_tensor_memory(tmem_buf), "tmem_buf must reside in tensor memory (shared.tmem)"
         if len(tmem_buf.shape) != 2:
@@ -382,10 +388,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         k = int(self.chunk)
 
         meta = self.get_tcgen5_mma_meta(m, n, k)
-        if len(meta) != 3:
+        if len(meta) != 5:
             raise ValueError(f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, "
                              f"A dtype={self.a_dtype}, accum dtype={self.accum_dtype}")
-        atom_m, atom_n, _ = (int(x) for x in meta)
+        atom_m, atom_n, _, _, _ = (int(x) for x in meta)
 
         if m % atom_m != 0 or n % atom_n != 0:
             raise ValueError(

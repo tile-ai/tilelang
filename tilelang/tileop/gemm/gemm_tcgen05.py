@@ -59,6 +59,29 @@ class GemmTCGEN5(GemmBase):
         return {}
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
+        """
+        Lower the configured GEMM into a TCGEN5 MMA TIR primitive with layout and scope validation.
+        
+        Configures a TensorCoreIntrinEmitter for the instance geometry, optionally applies shared layouts
+        from layout_map, and performs strict checks on memory scopes, accumulator dtype, mbarrier pointer,
+        wg_wait, and C coordinates. Returns a simplified prim_func that invokes the TCGEN5 MMA intrinsic
+        when the thread group matches the emitter's execution condition.
+        
+        Parameters:
+            layout_map (dict): Optional mapping from buffer objects to inferred/layout descriptors used to
+                assign A/B shared layouts before lowering.
+            target (tvm.target.Target): Compilation target used to compute warp partitioning.
+            thread_nums (int): Total number of threads available for the kernel (used to partition warps).
+            thread_var (tir.Var): TIR thread index variable referenced inside the produced prim_func.
+        
+        Returns:
+            tvm.tir.PrimFunc: A simplified prim_func (wrapped by _Simplify) that executes the TCGEN5 MMA
+            intrinsic for this GEMM configuration.
+        
+        Raises:
+            ValueError: If GEMM type is not gemm_ss, if A/B/C scopes are unsupported, if wg_wait != -1,
+                if mbarptr is invalid (0), if C coordinates are not 2D, or if accumulator dtype is unsupported.
+        """
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
                                                             True)
         warp_row_tiles = int(self.M // m_warp)
@@ -85,6 +108,9 @@ class GemmTCGEN5(GemmBase):
             raise ValueError(f"TCGEN5MMA currently only supports gemm_ss, got "
                              f"A scope {self.A.scope()}, B scope {self.B.scope()}")
 
+        atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.get_tcgen5_mma_meta(
+            self.M, self.N, self.K)
+
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
             raise ValueError(f"Unsupported A scope for TCGEN5MMA: {self.A.scope()}")
         if self.B.scope() not in {"shared", "shared.dyn"}:
@@ -103,7 +129,7 @@ class GemmTCGEN5(GemmBase):
             raise ValueError("TCGEN5MMA expects 2D coordinates for C buffer access")
 
         accum_dtype = str(self.C.dtype)
-        if accum_dtype != "float32":
+        if accum_dtype not in ["float32", 'float16']:
             raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
 
         A_shared = self.ARegion

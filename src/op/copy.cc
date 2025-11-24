@@ -852,7 +852,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
   auto par_op = ParallelOp(transformed_loop);
 
   if (is_cpu_target) {
-    vectorized_thread_loop = VectorizeLoop(transformed_loop, analyzer);
+    vectorized_thread_loop = VectorizeLoop(transformed_loop);
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
@@ -865,7 +865,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
     auto thread_var = T.thread_var;
     auto thread_loop =
         PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-    vectorized_thread_loop = VectorizeLoop(thread_loop, analyzer);
+    vectorized_thread_loop = VectorizeLoop(thread_loop);
   }
 
   if (par_op->GetPredicate(T.thread_var).defined()) {
@@ -1082,28 +1082,20 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 }
 
 /**
- * @brief Lower tensor memory copy operations (tcgen05.ld/st/cp).
+ * @brief Lower tensor-memory copy operations for SM100/Blackwell tmem intrinsics.
  *
- * Handles copy operations involving shared.tmem buffers (tensor memory on
- * SM100/Blackwell). Supports three types of tensor memory copies:
- * - tcgen05.ld: tensor memory -> register (local.fragment)
- * - tcgen05.st: register (local.fragment) -> tensor memory
- * - tcgen05.cp: shared memory -> tensor memory
+ * Validates tensor-memory-related buffer scopes and layouts for 2-D copies, selects
+ * a matching tcgen05 instruction variant when possible, and emits the corresponding
+ * PTX intrinsic call for the lowered operation.
  *
- * The function validates buffer scopes, extracts 2D loop structure, performs
- * layout compatibility checks, selects an appropriate TCGEN05 instruction
- * variant based on data width and thread count, and emits the corresponding PTX
- * intrinsic call.
+ * Only the tcgen05.ld (tensor memory -> register / local.fragment) path is supported;
+ * tcgen05.st and tcgen05.cp are intentionally unsupported and will trigger a failure.
  *
- * Currently only tcgen05.ld is fully supported; st/cp will trigger an ICHECK
- * failure.
- *
- * @param T Lowering context (target, thread bounds, layout maps, buffer
- * remaps).
- * @param analyzer Arithmetic analyzer for proving bounds and simplifying
- * expressions.
- * @return Stmt The lowered tensor memory copy statement, or an empty Stmt if
- * this copy does not involve tensor memory.
+ * @param T Lowering context containing target information, thread bounds, layout maps,
+ *          and buffer remappings used during lowering.
+ * @param analyzer Arithmetic analyzer used to prove and simplify bounds and equalities.
+ * @return Stmt The emitted lowered statement invoking the chosen tcgen05 intrinsic,
+ *         or an empty Stmt if neither source nor destination involve tensor memory.
  */
 Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
                              arith::Analyzer *analyzer) const {
@@ -1117,6 +1109,11 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   bool is_ld = false; // tcgen05.ld (tensor memory -> register)
   bool is_st = false; // tcgen05.st (register -> tensor memory)
   bool is_cp = false; // tcgen05.cp (shared memory -> tensor memory)
+  bool src_needs_pack =
+      16 == src->dtype.bits(); // if needs .pack::16b when is_ld
+  bool dst_needs_unpack =
+      16 == dst->dtype.bits(); // if needs .unpack::16b when is_st
+
   if (src.scope() == "shared.tmem" && dst.scope() == "local.fragment") {
     is_ld = true;
   } else if (src.scope() == "local.fragment" && dst.scope() == "shared.tmem") {
@@ -1124,9 +1121,8 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   } else if (src.scope() == "shared.dyn" && dst.scope() == "shared.tmem") {
     is_cp = true;
   } else {
-    ICHECK(0) << "Unsupported tensor memory copy: "
-              << "src scope = " << src.scope()
-              << ", dst scope = " << dst.scope();
+    ICHECK(0) << "Unsupported tensor memory copy: " << "src scope = "
+              << src.scope() << ", dst scope = " << dst.scope();
   }
   // Currently tcgen05.cp is not supported
   // TODO (mzw) Support tcgen05.cp
@@ -1246,8 +1242,10 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
               : relative_wg_idx * (num_chunks_each_wg * meta.width);
       have_succeeded = true;
       Array<PrimExpr> args;
+      const char *bool_str = src_needs_pack ? "true" : "false";
       args.push_back(StringImm(meta.intrinsics_name + "<" +
-                               std::to_string(num_chunks_each_wg) + ">"));
+                               std::to_string(num_chunks_each_wg) + ", " +
+                               bool_str + ">"));
       args.push_back(
           BufferLoad(src, {(int)logical_row_min,
                            (int)logical_col_min})); // Will be translated later
