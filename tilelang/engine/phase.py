@@ -75,7 +75,7 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     """
 
     # Debug
-    tilelang.analysis.ASTPrinter()(mod)
+    # tilelang.analysis.ASTPrinter()(mod)
 
     # Check if there are any invalid nested loops.
     tilelang.analysis.NestedLoopChecker()(mod)
@@ -226,7 +226,5 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
 
     # Transform threadblock to persistent threadblock
     mod = tilelang.transform.PersistThreadblock()(mod)
-
-    print(mod)
 
     return mod
