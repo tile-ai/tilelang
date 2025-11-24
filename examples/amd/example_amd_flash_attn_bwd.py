@@ -355,6 +355,30 @@ def get_bwd_configs():
     configs = []
     for m, n, stages, t, r, p in itertools.product(block_M, block_N, num_stages, threads,
                                                    enable_rasterization, panel_size):
+        # Filter out invalid configurations that may cause divide-by-zero errors
+        # 1. Basic validation
+        if m <= 0 or n <= 0 or t <= 0:
+            continue
+        # 2. threads must be a multiple of 32 (warp size)
+        if t % 32 != 0:
+            continue
+        # 3. Avoid configurations where threads is too large relative to block sizes
+        #    TileLang internally distributes threads across work dimensions.
+        #    When threads >> block sizes, internal division calculations may cause divide-by-zero.
+        #    Conservative heuristic: threads should not exceed reasonable multiples of block sizes
+        min_block = min(m, n)
+        max_block = max(m, n)
+        # For very large thread counts (>= 1024), require larger minimum block size
+        if t >= 1024 and min_block < 32:
+            continue
+        # For large thread counts (>= 512), be more conservative
+        if t >= 512 and min_block < 16:
+            continue
+        # General rule: threads should not exceed 64x the minimum block size
+        # This prevents internal thread distribution calculations from dividing by zero
+        if t > min_block * 64:
+            continue
+        
         configs.append({
             "block_M": m,
             "block_N": n,
@@ -367,6 +391,9 @@ def get_bwd_configs():
     return configs
 
 
+# NOTE: This function is kept for reference but is no longer used.
+# Delta computation has been integrated into flashattn_bwd kernel
+# to eliminate a separate kernel launch and improve data locality.
 @tilelang.jit(out_idx=[2])
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     dtype = "float16"
@@ -409,10 +436,9 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
     def flash_bwd_kernel(Q: T.Tensor(q_shape,
                                      dtype), K: T.Tensor(kv_shape,
                                                          dtype), V: T.Tensor(kv_shape, dtype),
-                         dO: T.Tensor(q_shape, dtype), lse: T.Tensor([batch, heads, seq_len],
-                                                                     accum_dtype),
-                         Delta: T.Tensor([batch, heads, seq_len],
-                                         accum_dtype),
+                         O: T.Tensor(q_shape, dtype), dO: T.Tensor(q_shape, dtype),
+                         lse: T.Tensor([batch, heads, seq_len], accum_dtype),
+                         Delta: T.Tensor([batch, heads, seq_len], accum_dtype),
                          dQ_partial: T.Tensor([batch, T.ceildiv(seq_len, block_M), seq_len, heads,
                                                dim], dtype),
                          dK: T.Tensor(kv_shape, accum_dtype), dV: T.Tensor(kv_shape, accum_dtype)):
@@ -424,6 +450,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
             V_fragment = T.alloc_fragment([block_M, dim], dtype)
             q_shared = T.alloc_shared([block_N, dim], dtype)
             do_shared = T.alloc_shared([block_N, dim], dtype)
+            o_shared = T.alloc_shared([block_N, dim], dtype)
             lse_shared = T.alloc_shared([block_N], accum_dtype)
             delta_shared = T.alloc_shared([block_N], accum_dtype)
             ds_shared = T.alloc_shared([block_M, block_N], dtype)
@@ -451,8 +478,25 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                 if q_head >= heads:
                     continue
 
+                # Compute Delta on first iteration, reusing loaded dO
+                # This eliminates the need for a separate Delta kernel launch
+                # We compute Delta for each block and write to global memory, then reuse in subsequent iterations
                 for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
                     T.copy(Q[bz, k * block_N:(k + 1) * block_N, q_head, :], q_shared)
+                    T.copy(dO[bz, k * block_N:(k + 1) * block_N, q_head, :], do_shared)
+                    
+                    # Compute Delta = sum(O * dO) along dim dimension for this block
+                    # This is computed every iteration but only written once per block
+                    T.copy(O[bz, k * block_N:(k + 1) * block_N, q_head, :], o_shared)
+                    delta_acc = T.alloc_fragment([block_N], accum_dtype)
+                    T.clear(delta_acc)
+                    for i, j in T.Parallel(block_N, dim):
+                        delta_acc[i] += T.cast(o_shared[i, j] * do_shared[i, j], accum_dtype)
+                    
+                    # Write Delta to global memory and load to shared for use in this iteration
+                    T.copy(delta_acc, Delta[bz, q_head, k * block_N:(k + 1) * block_N])
+                    T.copy(delta_acc, delta_shared)
+                    
                     T.clear(qkT)
 
                     T.gemm(K_shared,
@@ -470,9 +514,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                         for i, j in T.Parallel(block_M, block_N):
                             P_acc[i, j] = T.if_then_else(
                                 kv_offset + i <= k * block_N + j, P_acc[i, j], 0.0)
-
-                    T.copy(dO[bz, k * block_N:(k + 1) * block_N, q_head, :], do_shared)
-                    T.copy(Delta[bz, q_head, k * block_N:(k + 1) * block_N], delta_shared)
 
                     # Optimized GEMM order: Compute dV first (GEMM1), then dP (GEMM2)
                     # This improves V_fragment reuse since it's already in registers
@@ -669,10 +710,6 @@ def main(batch: int = 1,
 
     o_tl, lse_tl = fwd_kernel(q, k, v)
 
-    bwd_prep = flashattn_bwd_preprocess(batch, heads, seq_len, dim)
-    dump_kernel_artifacts(bwd_prep, dump_dir, "flashattn_bwd_preprocess")
-    delta_tl = bwd_prep(o_tl, dO)
-
     print("\nStarting FlashAttention-V2 backward pass autotuning...")
     bwd_kernel = flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups)
     if bwd_kernel is None or bwd_kernel.config is None:
@@ -685,13 +722,16 @@ def main(batch: int = 1,
     block_M = bwd_kernel.config["block_M"]
     num_kv_tiles = math.ceil(seq_len / block_M)
 
+    # Delta is now computed inside the main kernel, but we need to allocate it
+    delta_tl = torch.zeros((batch, heads, seq_len), dtype=torch.float32, device=device)
     dQ_partial = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
                               dtype=torch.float16,
                               device=device)
     dK_tl = torch.zeros_like(k, dtype=torch.float32)
     dV_tl = torch.zeros_like(v, dtype=torch.float32)
 
-    bwd_kernel(q, k, v, dO, lse_tl, delta_tl, dQ_partial, dK_tl, dV_tl)
+    # O is now passed to the kernel for Delta computation
+    bwd_kernel(q, k, v, o_tl, dO, lse_tl, delta_tl, dQ_partial, dK_tl, dV_tl)
 
     reduce_kernel = flashattn_bwd_reduce_dq(batch, num_kv_tiles, seq_len, heads, dim)
     dump_kernel_artifacts(reduce_kernel, dump_dir, "flashattn_bwd_reduce_dq")
@@ -752,15 +792,16 @@ def main(batch: int = 1,
     def run_complete_fwd_bwd():
         o_tl_bench, lse_tl_bench = fwd_kernel(q, k, v)
 
-        delta_tl_bench = bwd_prep(o_tl_bench, dO)
-
+        # Delta is now computed inside the main kernel
+        delta_tl_bench = torch.zeros((batch, heads, seq_len), dtype=torch.float32, device=device)
         dQ_partial_bench = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
                                        dtype=torch.float16,
                                        device=device)
         dK_bench = torch.zeros_like(k, dtype=torch.float32)
         dV_bench = torch.zeros_like(v, dtype=torch.float32)
-        bwd_kernel(q, k, v, dO, lse_tl_bench, delta_tl_bench, dQ_partial_bench, dK_bench,
-                   dV_bench)
+        # O is now passed to the kernel for Delta computation
+        bwd_kernel(q, k, v, o_tl_bench, dO, lse_tl_bench, delta_tl_bench, dQ_partial_bench,
+                   dK_bench, dV_bench)
         dQ_bench = reduce_kernel(dQ_partial_bench)
 
         post_kernel(dQ_bench)
