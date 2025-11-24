@@ -82,26 +82,33 @@ static PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
                                         int rw_mask) {
   Buffer buf = region->buffer;
   int ndim = static_cast<int>(buf->shape.size());
-  ICHECK(ndim >= 2) << "GEMM expects buffers with at least 2 dims";
+  ICHECK(ndim == 1 || ndim == 2) << "Cumsum expects buffers with 1 or 2 dims";
 
-  // Compute row-major strides
-  std::vector<PrimExpr> strides(ndim);
-  PrimExpr one = make_const(buf->shape[0].dtype(), 1);
-  PrimExpr cur = one;
-  for (int i = ndim - 1; i >= 0; --i) {
-    strides[i] = cur;
-    cur = cur * buf->shape[i];
+  PrimExpr offset, extent;
+  if (ndim == 1) {
+    // Simple 1D region: offset and extent come from the single axis.
+    auto axis = region->region[0];
+    offset = axis->min;
+    extent = axis->extent;
+  } else {
+    // Compute row-major strides for ndim >= 2
+    std::vector<PrimExpr> strides(ndim);
+    PrimExpr one = make_const(buf->shape[0].dtype(), 1);
+    PrimExpr cur = one;
+    for (int i = ndim - 1; i >= 0; --i) {
+      strides[i] = cur;
+      cur = cur * buf->shape[i];
+    }
+    // Offset: sum_{i in [0..ndim-3]} min_i * stride_i
+    offset = make_const(buf->shape[0].dtype(), 0);
+    for (int i = 0; i < ndim - 2; ++i) {
+      offset = offset + region->region[i]->min * strides[i];
+    }
+
+    // Extent: last two extents product (elements)
+    extent =
+        region->region[ndim - 2]->extent * region->region[ndim - 1]->extent;
   }
-
-  // Offset: sum_{i in [0..ndim-3]} min_i * stride_i
-  PrimExpr offset = make_const(buf->shape[0].dtype(), 0);
-  for (int i = 0; i < ndim - 2; ++i) {
-    offset = offset + region->region[i]->min * strides[i];
-  }
-
-  // Extent: last two extents product (elements)
-  PrimExpr extent =
-      region->region[ndim - 2]->extent * region->region[ndim - 1]->extent;
 
   // ptype and return handle
   PrimExpr ptype = tir::TypeAnnotation(buf->dtype);

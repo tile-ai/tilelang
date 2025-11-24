@@ -246,8 +246,8 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.cumsum"),
-        buffer_to_tile_region(cumsum_smem),
-        buffer_to_tile_region(cumsum_smem),
+        buffer_to_tile_region(cumsum_smem, "r"),
+        buffer_to_tile_region(cumsum_smem, "w"),
         dim,
         reverse,
     )

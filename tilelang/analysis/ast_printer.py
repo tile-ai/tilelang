@@ -1,6 +1,5 @@
 from tvm import tir
-from tvm.tir import (
-    PrimFunc,)
+from tvm.tir import PrimFunc
 from tvm.tir.transform import prim_func_pass
 from tvm.tir.stmt_functor import ir_transform
 
