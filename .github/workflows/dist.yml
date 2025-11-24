@@ -1,5 +1,6 @@
 name: Dist
 on:
+  workflow_dispatch:
   schedule:
     # gemini said this is 6:00 china time
     - cron: "0 22 * * *"
