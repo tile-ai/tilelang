@@ -800,6 +800,7 @@ class TensorCoreIntrinEmitter:
             forward_index_fn=forward_index,
         )
 
+    @staticmethod
     def _legalize_to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
         """
         Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
