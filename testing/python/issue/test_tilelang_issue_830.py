@@ -66,6 +66,7 @@ def _empty_kernel_with_binding_variants(use_tuple_binding: bool = False):
 
     return kernel_with_tuple_kernel_binding if use_tuple_binding else kernel_with_scalar_kernel_binding
 
+
 @tilelang.testing.requires_cuda
 def test_empty_kernel_with_binding_variants():
     torch.cuda.set_device(0)
