@@ -145,7 +145,7 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
     buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
         if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
-            block_attr({"tl.local_var_init": {buffer.data: parsed_init}})
+            block_attr({"tl.local_var_init": {buffer.data: tl_dtype(dtype)(parsed_init)}})
         else:
             T.buffer_store(buffer, parsed_init, 0)
     return buffer

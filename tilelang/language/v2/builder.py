@@ -84,6 +84,10 @@ class MacroFrame(Frame):
     ...
 
 
+class ExitedMacroFrame(Frame):
+    ...
+
+
 class BoolOpFrame(Frame):
     ...
 
@@ -150,14 +154,11 @@ def is_var(v: Any) -> bool:
 
 class Builder(BaseBuilder):
 
-    def __init__(self, func_annot: FuncAnnot = None):
+    def __init__(self):
         self.frames: list[AnyFrame] = []
         self.ir_builder = IRBuilder()
         self.name_inside_frame: dict[str, AnyFrame] = {}
-        self.func_annot = func_annot
-        self.arg_vt = ArgVarTable()
-        self.out_tensor_cnt = 0
-        self.out_idx = []
+        self.arg_annotations = {}
 
     @classmethod
     def current(cls) -> Self:
@@ -175,16 +176,31 @@ class Builder(BaseBuilder):
             raise RuntimeError('Not all tensor allocated from `T.empty` are returned')
 
     @contextmanager
-    def macro(self, name=None):
+    def macro(self, name=None, annotations=None):
         if self.find_frame_idx(BoolOpFrame) is not None:
             raise RuntimeError(
                 f"Macro `{name}` is used inside boolean expressions, "
                 "please use `if` to replace `M and M`, `M or M`, `M if xxx else M` constructs")
-        save = self.name_inside_frame
+        save = self.name_inside_frame, self.arg_annotations
         self.name_inside_frame = {}
-        with self.with_frame(MacroFrame()):
-            yield
-        self.name_inside_frame = save
+        self.arg_annotations = annotations or {}
+        pos = len(self.frames)
+        # here we add a ExitedMacroFrame to preserve the frame stack inside macro
+        # because macro may bind some variable, and return it
+        #
+        # ```py
+        # @T.macro
+        # def foo(x):
+        #    y = x + 1
+        #    return y
+        # @T.prim_func
+        # def bar():
+        #    c = foo(1) # macro generates let y = x + 1
+        #    d = c # d = c should lay inside frame of `let y = x + 1`
+        self.frames.append(MacroFrame())
+        yield
+        self.frames[pos] = ExitedMacroFrame()
+        self.name_inside_frame, self.arg_annotations = save
 
     def get(self):
         return self.ir_builder.get()
@@ -335,9 +351,18 @@ class Builder(BaseBuilder):
         self.check_continue_break()
         locals = self.get_parent_locals()
         orig_value = locals.get(name, None)
-
-        # 1. Determine whether the bind is a var assign
-        if is_var(orig_value) and not is_var(value):
+        # if orig_value is a local.var, we use buffer_store to modify it immutably
+        #   however, if rvalue is not a PrimExpr, such as buffer,
+        #   we should not use buffer_store, and bind it instead
+        #   ```py
+        #   a = tl.alloc_var('float32')  # bind var `a`
+        #   a = tl.alloc_var('float32')  # bind a new var `a_1`
+        #   a = tl.alloc_shared((1,), T.float32) # bind a to new buffer
+        #   b = a                        # get value of var `b = a_1[0]``
+        #   c = tl.alloc_var('float32')  # bind var `c`
+        #   c = a                        # get and assign `c[0] = a_1[0]`
+        #   ```
+        if is_var(orig_value) and isinstance(value, (int, float, PrimExpr)):
             tir.buffer_store(orig_value, value, 0)
             return orig_value
 
@@ -359,7 +384,7 @@ class Builder(BaseBuilder):
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
             if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                 logger.warning(
-                    f'Variable `{name}` shadows another declared value, Are you forgetting to allocate it as a var?',
+                    f'Variable `{name}` is declared twice, are you looking for a T.alloc_var?',
                     stack_info=True,
                     stacklevel=2,
                 )
@@ -531,25 +556,37 @@ class Builder(BaseBuilder):
                 )
         return self.unwrap_value(value)
 
+    def macro_arg(self, name, value):
+        from tilelang.language.proxy import Ref
+        annot_value = self.arg_annotations.get(name, None)
+        if annot_value is Var or annot_value is Ref:
+            if annot_value is Var:
+                logger.warning('Use `T.Var` as macro annotations is deprecated, please use `T.Ref`')
+            is_var = isinstance(value, tvm.tir.BufferLoad) and value.buffer.scope() == 'local.var'
+            if not is_var:
+                raise ValueError(
+                    f'Argument `{name}` is expected to be a variable allocated by `T.alloc_var`, but got {value}({type(value)})'
+                )
+            return value.buffer
+        elif isinstance(value, (PrimExpr, int, float)):
+            return self.bind(name, value)
+        else:
+            return value
+
+    def prim_func_arg(self, name, value):
+        if isinstance(value, (Buffer, Var)):
+            return tir.arg(name, value)
+        elif value is self.empty:
+            raise ValueError(f'Argument `{name}` is not annotated')
+        else:
+            raise TypeError(
+                f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
+
     def arg(self, name, value):
         if self.find_frame_idx(MacroFrame) is not None:
-            if isinstance(value, (PrimExpr, int, float)):
-                return self.bind(name, value)
-            else:
-                return value
-        if self.func_annot is None:
-            raise RuntimeError('Tilelang fail to get function annotation info, '
-                               'this is an internal bug, please report to developers.')
-        return self.func_annot.create_argument(name, value, self.arg_vt)
-        # if isinstance(value, (Buffer, Var)):
-        #     return tir.arg(name, value)
-        # elif value is self.empty:
-        #     raise ValueError(f'Argument `{name}` is not annotated')
-        # elif isinstance(value, Hashable):
-        #     return value
-        # else:
-        #     raise TypeError(
-        #         f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
+            return self.macro_arg(name, value)
+        else:
+            return self.prim_func_arg(name, value)
 
     def override(self, name: str):
         from tilelang.language import serial
@@ -617,6 +654,7 @@ class Macro(Generic[_P, _T]):
     name: str
     orig_func: Callable[_P, _T]
     ir_gen: IRGenerator[_P, _T]
+    annotations: dict[str, Any]
 
     @property
     def source(self) -> str:
@@ -624,7 +662,7 @@ class Macro(Generic[_P, _T]):
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _T:
         builder = Builder.current()
-        with builder.macro(self.name):
+        with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res
 
@@ -662,7 +700,9 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
     """
 
     def impl(func: Callable[_P, _T]) -> Macro[_P, _T]:
-        return Macro(name=func.__name__, orig_func=func, ir_gen=mutate(func))
+        annotations = get_type_hints(func)
+        return Macro(
+            name=func.__name__, orig_func=func, ir_gen=mutate(func), annotations=annotations)
 
     return impl(func) if func is not None else impl
 

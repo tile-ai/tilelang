@@ -78,7 +78,7 @@ def compile_cuda(code,
         out_file.write(code)
 
     file_target = path_target if path_target else temp_target
-    cmd = ["nvcc"]
+    cmd = [get_nvcc_compiler()]
     cmd += [f"--{target_format}", "-O3"]
     if kernels_output_dir is not None:
         cmd += ["-lineinfo"]
@@ -330,13 +330,6 @@ def get_cuda_version(cuda_path=None):
         version_str = [f[1:] for f in release_fields if f.startswith("V")][0]
         return tuple(int(field) for field in version_str.split("."))
     raise RuntimeError("Cannot read cuda version file")
-
-
-@tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
-def tilelang_callback_cuda_compile(code, target):  # pylint: disable=unused-argument
-    """use nvcc to generate fatbin code for better optimization"""
-    ptx = compile_cuda(code, target_format="fatbin")
-    return ptx
 
 
 @tvm_ffi.register_global_func("tilelang_callback_libdevice_path", override=True)

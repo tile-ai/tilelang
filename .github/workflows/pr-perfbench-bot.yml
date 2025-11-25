@@ -33,7 +33,7 @@ jobs:
     runs-on: [self-hosted, nvidia]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: refs/pull/${{ github.event.issue.number }}/merge
           fetch-depth: 0

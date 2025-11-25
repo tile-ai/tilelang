@@ -465,6 +465,16 @@ private:
     return std::move(store);
   }
 
+  Stmt VisitStmt_(const AttrStmtNode *op) override {
+    if (op->attr_key == "tl.assume") {
+      PrimExpr condition = this->VisitExpr(Downcast<PrimExpr>(op->node));
+      auto n = CopyOnWrite(op);
+      n->node = std::move(condition);
+      return Parent::VisitStmt_(n.get());
+    }
+    return Parent::VisitStmt_(op);
+  }
+
 private:
   bool ArrayDeepEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs) {
     if (lhs.size() != rhs.size()) {

@@ -97,8 +97,12 @@ _STR_TO_TVM_DTYPE_CALL = {
     'float8_e8m0fnu': 'Float8E8M0FNU'
 }
 
+int_ = int
+
 
 def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var:
+    if isinstance(expr, int_):
+        return tvm.tir.const(expr, dtype=self)
     if self in _STR_TO_TVM_DTYPE_CALL:
         attr = _STR_TO_TVM_DTYPE_CALL[self]
         call = getattr(tb_ffi, attr, None)
@@ -160,6 +164,10 @@ if TYPE_CHECKING:
     class int16(dtype): ...
     class int32(dtype): ...
     class int64(dtype): ...
+    class int8x2(dtype): ...
+    class int16x2(dtype): ...
+    class int32x2(dtype): ...
+    class int64x2(dtype): ...
     class int8x4(dtype): ...
     class int16x4(dtype): ...
     class int32x4(dtype): ...
@@ -184,6 +192,10 @@ if TYPE_CHECKING:
     class uint16(dtype): ...
     class uint32(dtype): ...
     class uint64(dtype): ...
+    class uint8x2(dtype): ...
+    class uint16x2(dtype): ...
+    class uint32x2(dtype): ...
+    class uint64x2(dtype): ...
     class uint8x4(dtype): ...
     class uint16x4(dtype): ...
     class uint32x4(dtype): ...
@@ -317,6 +329,10 @@ else:
     int16 = dtype('int16')
     int32 = dtype('int32')
     int64 = dtype('int64')
+    int8x2 = dtype('int8x2')
+    int16x2 = dtype('int16x2')
+    int32x2 = dtype('int32x2')
+    int64x2 = dtype('int64x2')
     int8x4 = dtype('int8x4')
     int16x4 = dtype('int16x4')
     int32x4 = dtype('int32x4')
@@ -341,6 +357,10 @@ else:
     uint16 = dtype('uint16')
     uint32 = dtype('uint32')
     uint64 = dtype('uint64')
+    uint8x2 = dtype('uint8x2')
+    uint16x2 = dtype('uint16x2')
+    uint32x2 = dtype('uint32x2')
+    uint64x2 = dtype('uint64x2')
     uint8x4 = dtype('uint8x4')
     uint16x4 = dtype('uint16x4')
     uint32x4 = dtype('uint32x4')
@@ -473,6 +493,10 @@ _all_dtypes = {
     'int16',
     'int32',
     'int64',
+    'int8x2',
+    'int16x2',
+    'int32x2',
+    'int64x2',
     'int8x4',
     'int16x4',
     'int32x4',
@@ -497,6 +521,10 @@ _all_dtypes = {
     'uint16',
     'uint32',
     'uint64',
+    'uint8x2',
+    'uint16x2',
+    'uint32x2',
+    'uint64x2',
     'uint8x4',
     'uint16x4',
     'uint32x4',

@@ -22,6 +22,7 @@ from .v2.annot import (
     SharedBuffer,  # noqa: F401
     LocalBuffer,  # noqa: F401
     dyn,  # noqa: F401
+    Ref,  # noqa: F401
 )
 # from .proxy import (
 #     ptr,  # noqa: F401
@@ -75,6 +76,11 @@ from .reduce import (
     reduce_bitxor,  # noqa: F401
     cumsum,  # noqa: F401
     finalize_reducer,  # noqa: F401
+    warp_reduce_sum,  # noqa: F401
+    warp_reduce_max,  # noqa: F401
+    warp_reduce_min,  # noqa: F401
+    warp_reduce_bitand,  # noqa: F401
+    warp_reduce_bitor,  # noqa: F401
 )
 from .print import print, device_assert  # noqa: F401
 from .customize import (

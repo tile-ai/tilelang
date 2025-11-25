@@ -29,8 +29,14 @@
 #include <tvm/tir/op.h>
 
 #include <sstream>
+#include <unordered_set>
 
 #include "tir/transforms/ir_utils.h"
+#include "tvm/arith/int_solver.h"
+#include "tvm/ffi/cast.h"
+#include "tvm/ffi/container/array.h"
+#include "tvm/tir/stmt.h"
+#include "tvm/tir/stmt_functor.h"
 
 namespace tvm {
 namespace tl {
@@ -51,6 +57,26 @@ void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
   }
 }
 
+std::vector<Var> ArgBinder::getUndefVars(const std::vector<PrimExpr> &args) {
+  std::unordered_set<const VarNode *> visit;
+  std::vector<Var> res;
+  for (const auto &arg : args) {
+    PostOrderVisit(arg, [&](ObjectRef r) {
+      if (auto var = r.as<VarNode>()) {
+        if (!visit.count(var)) {
+          visit.insert(var);
+        }
+        auto it = def_map_->find(var);
+        if (it == def_map_->end()) {
+          // res.push_back(var);
+          res.push_back(ffi::GetRef<Var>(var));
+        }
+      }
+    });
+  }
+  return res;
+}
+
 bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
                              const std::string &arg_name, bool with_lets,
                              const PrimExpr &nullable_guard) {
@@ -60,20 +86,23 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
     // is_null || basic
     return Or(nullable_guard, basic);
   };
-
   ICHECK_EQ(arg.dtype(), value.dtype()) << "arg " << arg << " value " << value;
+  auto BindVar = [&](const VarNode *v, PrimExpr value) {
+    auto v_arg = ffi::GetRef<Var>(v);
+    defs_.emplace_back(v_arg);
+    if (with_lets) {
+      (*def_map_)[v] = value;
+      init_nest_.emplace_back(LetStmt(v_arg, value, Evaluate(0)));
+    } else {
+      (*def_map_)[v] = value;
+    }
+  };
+  // 1. simple binding var = value
   if (const VarNode *v = arg.as<VarNode>()) {
     auto it = def_map_->find(v);
     if (it == def_map_->end()) {
+      BindVar(v, value);
       // First time binding: identical behavior as Bind_
-      Var v_arg = Downcast<Var>(arg);
-      defs_.emplace_back(v_arg);
-      if (with_lets) {
-        (*def_map_)[v] = arg;
-        init_nest_.emplace_back(LetStmt(v_arg, value, Evaluate(0)));
-      } else {
-        (*def_map_)[v] = value;
-      }
       return true;
     } else {
       // Second or later binding: add is_null short-circuit
@@ -81,7 +110,34 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
       BinderAddAssert(&analyzer_, cond, arg_name, &asserts_);
     }
   } else {
-    // For non-Var expressions, also add is_null short-circuit
+    // 2. complex binding expr = value
+    //  get undefined variables
+    auto undefs = ffi::Array<Var>(getUndefVars({arg}));
+    if (!undefs.empty()) {
+      // if value is not integer, such as float, we are unable to solve it
+      if (!value.dtype().is_int() && !value.dtype().is_uint()) {
+        LOG(FATAL) << "Unable to solve non-integer variables " << undefs
+                   << " from equation `" << value << "`";
+      }
+      arith::IntConstraints constraints(undefs, {}, {arg == value});
+      auto sol = arith::SolveLinearEquations(constraints);
+      if (!sol->dst->variables.empty()) {
+        LOG(FATAL) << "TVM is unable to solve variables " << undefs
+                   << " from equation " << constraints;
+      }
+      for (const auto &v : undefs) {
+        auto value_opt = sol->src_to_dst.Get(v);
+        ICHECK(value_opt->defined())
+            << "Unable to solve variable `" << v << "` from expression `"
+            << (arg == value) << "`";
+        auto value = ffi::GetRef<PrimExpr>(sol->src_to_dst.Get(v)->get());
+        BindVar(v.as<VarNode>(), value);
+      }
+    }
+    // we must add the assert again
+    //    because the solved expression may contain floordiv (e.g. 3 * m == n
+    //    ==>   m = n // 3) we re-compute the constraint to verify the solution
+    //    is correct
     PrimExpr cond = MakeGuarded(arg == value);
     BinderAddAssert(&analyzer_, cond, arg_name, &asserts_);
   }

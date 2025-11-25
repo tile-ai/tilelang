@@ -851,7 +851,12 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
   For vectorized_thread_loop;
   auto par_op = ParallelOp(transformed_loop);
 
-  if (is_cpu_target) {
+  if (is_cpu_target || dst.scope() == "local" || src.scope() == "local") {
+    if (src.scope() == "local" && dst.scope() != "local") {
+      LOG(WARNING) << "Copy from local buffer `" << src->name << "` to "
+                   << dst.scope() << " buffer `" << dst->name
+                   << "` may cause conflicted write.";
+    }
     vectorized_thread_loop = VectorizeLoop(transformed_loop);
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
@@ -865,7 +870,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
     auto thread_var = T.thread_var;
     auto thread_loop =
         PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-    vectorized_thread_loop = VectorizeLoop(thread_loop);
+    vectorized_thread_loop = VectorizeLoop(thread_loop, analyzer);
   }
 
   if (par_op->GetPredicate(T.thread_var).defined()) {
