@@ -202,8 +202,8 @@ def atomic_add(dst: Buffer,
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
-    value = to_buffer_region(value, src_extent)
-    dst = to_buffer_region(dst, dst_extent)
+    value = to_buffer_region(value, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     # Note: tile-region-based atomic operations don't support return_prev yet
     # This would need to be implemented in the tile runtime

@@ -70,8 +70,8 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
     # Use legalized extents for src and dst respectively.
-    src = to_buffer_region(src, src_extent)
-    dst = to_buffer_region(dst, dst_extent)
+    src = to_buffer_region(src, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     if coalesced_width is None:
         coalesced_width = -1  # PrimExpr can not be None
