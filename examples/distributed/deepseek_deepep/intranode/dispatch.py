@@ -19,11 +19,12 @@ from get_dispatch_layout import get_dispatch_layout
 from notify_dispatch import notify_dispatch
 
 tilelang.disable_cache()
+os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
 @tilelang.jit(
     pass_configs={"tl.disable_tma_lower": True,  # enable TMA later
-        "tl.disable_warp_specialized": True}, debug_root_path='/root/workspace/wt/debug/dispatch')
+        "tl.disable_warp_specialized": True})
 def dispatch_kernel(
     rank, num_ranks, 
     num_tokens, 
@@ -120,7 +121,7 @@ def dispatch_kernel(
                             num_max_send_tokens+cached_channel_tail_idx-num_recv_buffer_tokens,
                             responsible_rank)
                     T.sync_warp()
-                    # T.print(token_idx, 'start sender mainloop')
+
                     chunk_token_idx = T.alloc_var('int32')
                     chunk_token_idx = 0
                     while chunk_token_idx < num_max_send_tokens and token_idx < token_end_idx:
@@ -144,15 +145,11 @@ def dispatch_kernel(
                         cached_channel_tail_idx += 1
                         if cached_channel_tail_idx % num_warps_per_rank == send_warp_id_in_rank:
                             # copy data, all are remote copy
-                            # 1. copy data
-                            # todo: support ld_nc and st_na
+                            # 1. copy data (why useless???)
                             T.put_warp(T.address_of(x[token_idx, 0]), 
                             T.address_of(channel_x_buffers[responsible_channel, rank, dst_slot_idx, 0]), 
-                            hidden, 
-                            responsible_rank, 5)
-                            # T.copy(x[token_idx, :], channel_x_buffers[responsible_channel, rank, dst_slot_idx, :],
-                            #     dst_pe=responsible_rank)  #! we need this feature, but it's in another pr
-
+                            hidden, dst_pe=responsible_rank, unroll_factor=4)
+                           
                             # 2. copy src idx
                             if T.elect_one_sync():
                                 T.st(channel_src_idx_buffers[responsible_channel, rank, dst_slot_idx], token_idx,
@@ -248,8 +245,8 @@ def dispatch_kernel(
                         T.put_warp(T.address_of(channel_x_buffers[responsible_channel, responsible_rank, token_idx_in_buffer, 0]),
                             T.address_of(recv_x[total_offset+chunk_idx, 0]),
                             hidden,
-                            rank, 
-                            5)
+                            -1, 
+                            4)
                     
                     # 2. recv src_idx
                     for chunk_idx in T.serial(cached_channel_head_idx+recv_thread_id_in_rank,
@@ -279,8 +276,6 @@ def dispatch_kernel(
                     
                     # Exit
                     num_tokens_to_recv -= num_cur_recv_tokens
-                    if bx == 0 and tx == rank:
-                        T.print(num_tokens_to_recv)
                     
             # todo: support num_worst_tokens > 0 later
     
@@ -382,7 +377,6 @@ def intranode_dispatch(
     torch.cuda.synchronize()  # todo: replace it with host-side wait_ne
 
     num_recv_tokens = moe_recv_counter_mapped.item()
-    assert num_recv_tokens >= 0
     num_recv_tokens_per_expert_list = moe_recv_expert_counter_mapped.tolist()
 
     # create normal buffers
@@ -399,9 +393,9 @@ def intranode_dispatch(
     channel_end_offset = tilelang.tensor(
         [config.num_channels, num_ranks], dtype=torch.int32, device='cuda', allocator=allocator).zero_()
     channel_head_idx = tilelang.tensor(
-        [config.num_channels, num_ranks], dtype=torch.int32, device='cuda', allocator=allocator).zero_()
+        [config.num_channels, num_ranks], dtype=torch.int32, device='cuda', allocator=allocator).zero_()    
     channel_tail_idx = tilelang.tensor(
-        [config.num_channels, num_ranks], dtype=torch.int32, device='cuda', allocator=allocator).zero_()
+        shape=[config.num_channels, num_ranks], dtype=torch.int32, device='cuda', allocator=allocator).zero_()
     channel_x_buffers = tilelang.tensor(
         [config.num_channels, num_ranks, config.num_max_nvl_chunked_recv_tokens, hidden], dtype=torch.bfloat16, device='cuda', allocator=allocator)
     channel_src_idx_buffers = tilelang.tensor(
@@ -470,7 +464,7 @@ def test_intranode_dispatch(
         raise ModuleNotFoundError("Please install DeepEP to run this test.")
 
     allocator = tilelang.get_allocator(
-        size=2**30,
+        size=2**33,
         device="cuda",
         is_distributed=True,
         local_rank=rank,
@@ -496,9 +490,9 @@ def test_intranode_dispatch(
     recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list = \
         intranode_dispatch(rank, allocator, x, None, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, None)
 
-    assert torch.equal(recv_x[0, :100], ref_recv_x[0, :100]), f'recv_x mismatch, max err: {(recv_x - ref_recv_x).abs().max()}'
-    assert torch.equal(recv_topk_idx[0], ref_recv_topk_idx[0]), f'recv_topk_idx mismatch, max err: {(recv_topk_idx - ref_recv_topk_idx).abs().max()}'
-    assert torch.equal(recv_topk_weights[0], ref_recv_topk_weights[0]), f'recv_topk_weights mismatch, max err: {(recv_topk_weights - ref_recv_topk_weights).abs().max()}'
+    assert torch.equal(recv_x, ref_recv_x), f'recv_x mismatch, max err: {(recv_x - ref_recv_x).abs().max()}'
+    assert torch.equal(recv_topk_idx, ref_recv_topk_idx), f'recv_topk_idx mismatch, max err: {(recv_topk_idx - ref_recv_topk_idx).abs().max()}'
+    assert torch.equal(recv_topk_weights, ref_recv_topk_weights), f'recv_topk_weights mismatch, max err: {(recv_topk_weights - ref_recv_topk_weights).abs().max()}'
     assert num_recv_tokens_per_expert_list == ref_num_recv_tokens_per_expert_list, 'num_recv_tokens_per_expert_list mismatch'
     print(f'[rank {rank}] All checks passed for TileScale intranode_dispatch. ✅')
 

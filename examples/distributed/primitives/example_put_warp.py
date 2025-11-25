@@ -15,8 +15,8 @@ def kernel_(M, num_rank, block_M, threads):
 
     @T.prim_func
     def main(
-            dst: T.Tensor((M), "float32"),
-            src: T.Tensor((M), "float32"),
+            dst: T.Tensor((M), "bfloat16"),
+            src: T.Tensor((M), "bfloat16"),
     ):
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as (bx):
             rank = T.alloc_local([1], "uint64")
@@ -55,8 +55,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if local_rank == 0:
         print(kernel.get_kernel_source())
 
-    src = tilelang.tensor((M), torch.float32, allocator=allocator).normal_()
-    dst = tilelang.tensor((M), torch.float32, allocator=allocator)
+    src = tilelang.tensor(shape=(M), dtype=torch.bfloat16, allocator=allocator).normal_()
+    dst = tilelang.tensor(shape=(M), dtype=torch.bfloat16, allocator=allocator)
 
     torch.cuda.synchronize()
     torch.distributed.barrier(group)

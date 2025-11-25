@@ -27,13 +27,14 @@ public:
   PrimExpr copy_size;          ///< Number of bytes/elements to copy
   PrimExpr dst_pe;             ///< Destination processing element (optional)
   int unroll_factor;           ///< Unroll factor for warp copies
-  bool is_symmetric{false};    ///< Whether remote copy is symmetric
   Buffer src_buffer;           ///< Source buffer reference
   Buffer dst_buffer;           ///< Destination buffer reference
   Array<PrimExpr> src_indices; ///< Source indices used for address computation
   Array<PrimExpr>
       dst_indices;   ///< Destination indices used for address computation
   std::string scope; ///< Scope: {warp, block}
+  
+  bool is_distributed() const;
 
   static constexpr const char *_type_key = "tl.PutOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(PutOpNode, TileOperatorNode);
@@ -52,7 +53,6 @@ public:
         .def_ro("copy_size", &PutOpNode::copy_size)
         .def_ro("dst_pe", &PutOpNode::dst_pe)
         .def_ro("unroll_factor", &PutOpNode::unroll_factor)
-        .def_ro("is_symmetric", &PutOpNode::is_symmetric)
         .def_ro("src_buffer", &PutOpNode::src_buffer)
         .def_ro("dst_buffer", &PutOpNode::dst_buffer)
         .def_ro("src_indices", &PutOpNode::src_indices)
@@ -67,7 +67,6 @@ public:
            equal(dst_offset, other->dst_offset) &&
            equal(copy_size, other->copy_size) && equal(dst_pe, other->dst_pe) &&
            equal(unroll_factor, other->unroll_factor) &&
-           equal(is_symmetric, other->is_symmetric) &&
            equal(src_buffer, other->src_buffer) &&
            equal(dst_buffer, other->dst_buffer) &&
            equal(src_indices, other->src_indices) &&
@@ -82,7 +81,6 @@ public:
     hash_reduce(copy_size);
     hash_reduce(dst_pe);
     hash_reduce(unroll_factor);
-    hash_reduce(is_symmetric);
     hash_reduce(src_buffer);
     hash_reduce(dst_buffer);
     hash_reduce(src_indices);
@@ -118,13 +116,14 @@ public:
   PrimExpr copy_size;          ///< Number of bytes/elements to copy
   PrimExpr src_pe;             ///< Source processing element (optional)
   int unroll_factor;           ///< Unroll factor for warp copies
-  bool is_symmetric{false};    ///< Whether remote copy is symmetric
   Buffer src_buffer;           ///< Source buffer reference
   Buffer dst_buffer;           ///< Destination buffer reference
   Array<PrimExpr> src_indices; ///< Source indices used for address computation
   Array<PrimExpr>
       dst_indices;   ///< Destination indices used for address computation
   std::string scope; ///< Scope: {warp, block}
+
+  bool is_distributed() const;
 
   static constexpr const char *_type_key = "tl.GetOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(GetOpNode, TileOperatorNode);
@@ -143,7 +142,6 @@ public:
         .def_ro("copy_size", &GetOpNode::copy_size)
         .def_ro("src_pe", &GetOpNode::src_pe)
         .def_ro("unroll_factor", &GetOpNode::unroll_factor)
-        .def_ro("is_symmetric", &GetOpNode::is_symmetric)
         .def_ro("src_buffer", &GetOpNode::src_buffer)
         .def_ro("dst_buffer", &GetOpNode::dst_buffer)
         .def_ro("src_indices", &GetOpNode::src_indices)
@@ -158,7 +156,6 @@ public:
            equal(dst_offset, other->dst_offset) &&
            equal(copy_size, other->copy_size) && equal(src_pe, other->src_pe) &&
            equal(unroll_factor, other->unroll_factor) &&
-           equal(is_symmetric, other->is_symmetric) &&
            equal(src_buffer, other->src_buffer) &&
            equal(dst_buffer, other->dst_buffer) &&
            equal(src_indices, other->src_indices) &&
@@ -173,7 +170,6 @@ public:
     hash_reduce(copy_size);
     hash_reduce(src_pe);
     hash_reduce(unroll_factor);
-    hash_reduce(is_symmetric);
     hash_reduce(src_buffer);
     hash_reduce(dst_buffer);
     hash_reduce(src_indices);

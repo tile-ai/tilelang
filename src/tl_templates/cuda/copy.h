@@ -111,6 +111,18 @@ template <> TL_DEVICE uint8_t ld_nc_global(const uint8_t *ptr) {
   return static_cast<uint8_t>(ret);
 }
 
+template <> TL_DEVICE int16_t ld_nc_global(const int16_t *ptr) {
+  uint16_t ret;
+  asm volatile(LD_NC_FUNC ".s16 %0, [%1];" : "=h"(ret) : "l"(ptr));
+  return static_cast<int16_t>(ret);
+}
+
+template <> TL_DEVICE uint16_t ld_nc_global(const uint16_t *ptr) {
+  uint16_t ret;
+  asm volatile(LD_NC_FUNC ".u16 %0, [%1];" : "=h"(ret) : "l"(ptr));
+  return ret;
+}
+
 template <> TL_DEVICE int ld_nc_global(const int *ptr) {
   int ret;
   asm volatile(LD_NC_FUNC ".s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
@@ -151,6 +163,14 @@ TL_DEVICE void st_na_global(const dtype_t *ptr, const dtype_t &value) {
       reinterpret_cast<const typename VecInt<sizeof(dtype_t)>::vec_t *>(ptr),
       *reinterpret_cast<const typename VecInt<sizeof(dtype_t)>::vec_t *>(
           &value));
+}
+
+template <> TL_DEVICE void st_na_global(const int16_t *ptr, const int16_t &value) {
+  asm volatile(ST_NA_FUNC ".s16 [%0], %1;" ::"l"(ptr), "h"(value));
+}
+
+template <> TL_DEVICE void st_na_global(const uint16_t *ptr, const uint16_t &value) {
+  asm volatile(ST_NA_FUNC ".u16 [%0], %1;" ::"l"(ptr), "h"(value));
 }
 
 template <> TL_DEVICE void st_na_global(const int *ptr, const int &value) {

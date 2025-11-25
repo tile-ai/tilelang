@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from tvm import tir
 from tvm.tir import address_of
-from tvm.tir import PrimExpr
+from tvm.tir import PrimExpr, IntImm
 from enum import Enum
 
 
@@ -22,7 +22,7 @@ def get_num_ranks():
 def put_warp(src: PrimExpr,
              dst: PrimExpr,
              size: PrimExpr,
-             dst_pe: PrimExpr | None = None,
+             dst_pe: PrimExpr | IntImm | None = -1,
              unroll_factor: int = 4):
     """Put to a remote buffer with unrolled loop.
 
@@ -35,8 +35,7 @@ def put_warp(src: PrimExpr,
             The size of the put in elements.
         dst_pe: PrimExpr | None
             The PE index of the destination.
-            If provided, the dst is a symmetric address, otherwise it is a UVA address.
-            If not provided, the dst is a UVA address and dst_pe is None.
+            -1 by default, which means local copy.
         unroll_factor: int
             The unroll factor
     """
@@ -47,7 +46,7 @@ def put_warp(src: PrimExpr,
 def get_warp(src: PrimExpr,
              dst: PrimExpr,
              size: PrimExpr,
-             src_pe: PrimExpr | None = None,
+             src_pe: PrimExpr | IntImm | None = -1,
              unroll_factor: int = 4):
     """Get from a remote buffer with unrolled loop.
 
@@ -60,8 +59,7 @@ def get_warp(src: PrimExpr,
             The size of the get in elements.
         src_pe: PrimExpr | None
             The PE index of the source.
-            If provided, the src is a symmetric address, otherwise it is a UVA address.
-            If not provided, the src is a UVA address and src_pe is None.
+            -1 by default, which means local copy.
         unroll_factor: int
             The unroll factor
     """
@@ -69,7 +67,10 @@ def get_warp(src: PrimExpr,
                            "warp")
 
 
-def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | None = None):
+def put_block(src: PrimExpr,
+              dst: PrimExpr,
+              size: PrimExpr,
+              dst_pe: PrimExpr | IntImm | None = -1):
     """Put to a remote buffer.
 
     Args:
@@ -81,15 +82,17 @@ def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | N
             The size of the put in elements.
         dst_pe: PrimExpr | None
             The PE index of the destination.
-            If provided, the dst is a symmetric address, otherwise it is a UVA address.
-            If not provided, the dst is a UVA address and dst_pe is None.
+            -1 by default, which means local copy.
     """
     return tir.call_intrin(
         "handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, 0, "block"
-    )  # NOTE(wt): unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
+    )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
-def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | None = None):
+def get_block(src: PrimExpr,
+              dst: PrimExpr,
+              size: PrimExpr,
+              src_pe: PrimExpr | IntImm | None = -1):
     """Get from a remote buffer.
 
     Args:
@@ -101,12 +104,12 @@ def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | N
             The size of the get in elements.
         src_pe: PrimExpr | None
             The PE index of the source.
-            If provided, the src is a symmetric address, otherwise it is a UVA address.
-            If not provided, the src is a UVA address and src_pe is None.
+            -1 by default, which means local copy.
     """
     return tir.call_intrin(
         "handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, 0, "block"
-    )  # NOTE(wt): unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
+    )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
+
 
 
 class BinaryRelation(Enum):

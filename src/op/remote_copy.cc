@@ -78,9 +78,12 @@ PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
   node->dst_pe = args[3];
   node->unroll_factor = args[4].as<IntImm>().value()->value;
   node->scope = args[5].as<StringImm>().value()->value;
-  node->is_symmetric = node->dst_pe.defined();
   data_ = std::move(node);
   (void)vmap;
+}
+
+bool PutOpNode::is_distributed() const {
+  return !(dst_pe->IsInstance<IntImmNode>() && dst_pe.as<IntImmNode>()->value == -1);
 }
 
 Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
@@ -96,7 +99,7 @@ Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   new_args.push_back(StringImm(ss.str()));
-  if (is_symmetric) {
+  if (is_distributed()) {
     PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
@@ -182,9 +185,12 @@ GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
   node->src_pe = args[3];
   node->unroll_factor = args[4].as<IntImm>().value()->value;
   node->scope = args[5].as<StringImm>().value()->value;
-  node->is_symmetric = node->src_pe.defined();
   data_ = std::move(node);
   (void)vmap;
+}
+
+bool GetOpNode::is_distributed() const {
+  return !(src_pe->IsInstance<IntImmNode>() && src_pe.as<IntImmNode>()->value == -1);
 }
 
 Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
@@ -202,9 +208,9 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   new_args.push_back(StringImm(ss.str()));
   PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
   new_args.push_back(dst_addr_expr); // Always dst first in tl_templates
-  if (is_symmetric) {
+  if (is_distributed()) {
     PrimExpr src_addr_expr = MakeRemappedAddress(T, src_buffer, src_indices);
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
+    PrimExpr local_rank = Call(DataType::In`t(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
     PrimExpr offset_to_base =
