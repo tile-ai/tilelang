@@ -323,7 +323,7 @@ def finalize_reducer(reducer: tir.Buffer):
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.finalize_reducer"),
-        reducer.access_ptr("w"),
+        buffer_to_tile_region(reducer, "w"),
     )
 
 

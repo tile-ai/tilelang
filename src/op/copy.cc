@@ -247,6 +247,7 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
                                  const Array<IterVar> &ivs,
                                  Array<PrimExpr> extents, int src_dst) const {
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
+
   Array<PrimExpr> cond_list;
   ICHECK(extents.size() == ranges.size()) << extents << " " << ranges;
   size_t idx = 0;
@@ -299,7 +300,6 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
-
   ICHECK(loop_vars.size() <= src_range.size())
       << "loop_vars.size() = " << loop_vars.size()
       << ", src_range.size() = " << src_range.size() << ", src = " << src->name

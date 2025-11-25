@@ -350,12 +350,12 @@ def main(do_bench: bool = True):
     parser.add_argument("--k", type=int, default=1024, help="Matrix dimension K")
     args, _ = parser.parse_known_args()
     N, K = args.n, args.k
-    check_correctness_and_bench(naive_gemv(N, K, 128, 128), N, K)
-    check_correctness_and_bench(naive_splitk_gemv(N, K, 32, 32), N, K)
-    check_correctness_and_bench(splitk_gemv(N, K, 32, 32, 32), N, K)
-    check_correctness_and_bench(splitk_gemv_vectorized(N, K, 2, 32), N, K)
-    check_correctness_and_bench(splitk_gemv_vectorized_tvm(N, K, 2, 32), N, K)
-    check_correctness_and_bench(gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K)
+    check_correctness_and_bench(naive_gemv(N, K, 128, 128), N, K, do_bench=do_bench)
+    check_correctness_and_bench(naive_splitk_gemv(N, K, 32, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(splitk_gemv(N, K, 32, 32, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(splitk_gemv_vectorized(N, K, 2, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(splitk_gemv_vectorized_tvm(N, K, 2, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K, do_bench=do_bench)
 
     print("Test passed!")
 

@@ -37,11 +37,14 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
     return BufferRegion(load->buffer, ranges);
   }
 
-  // Case 3: Other call nodes are unsupported here
-  if (arg.as<CallNode>()) {
+  // Case 3: tl.region(...) — reconstruct via RegionOp (bridge)
+  if (const auto *call = arg.as<CallNode>()) {
+    if (call->op.same_as(RegionOp::Get())) {
+      RegionOp region(call->args);
+      return BufferRegion(region->GetBuffer(), region->GetRanges());
+    }
     LOG(FATAL) << "Unsupported argument for BufferRegion (expect "
-                  "BufferLoad/BufferRegion)."
-               << " Please pass BufferLoad instead of region/access_ptr: "
+                  "BufferLoad/BufferRegion/tl.region): "
                << arg;
   }
 

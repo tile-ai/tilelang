@@ -14,6 +14,7 @@
 #include "../layout/layout.h"
 #include "../op/fill.h"
 #include "../op/finalize_reducer.h"
+#include "../op/region.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "layout_reducer.h"
 
@@ -276,6 +277,20 @@ private:
     if (op->op.same_as(Fill::Get())) {
       ICHECK(!op->args.empty());
       if (auto arg0_call = op->args[0].as<Call>()) {
+        // tl.region(...) — extract buffer var from its first arg
+        if (arg0_call.value()->op.same_as(RegionOp::Get())) {
+          ICHECK(!arg0_call.value()->args.empty());
+          if (auto bl = arg0_call.value()->args[0].as<BufferLoadNode>()) {
+            Var var = bl->buffer->data;
+            if (reducer_info_map_.count(var)) {
+              ICHECK(inside_reducer_range_.count(var) == 0)
+                  << "T.fill on reducer must be enclosed with a "
+                     "T.finalize_reducer before next.";
+              inside_reducer_range_.Set(var,
+                                        reducer_info_map_.Get(var).value());
+            }
+          }
+        }
         // builtin.tvm_access_ptr(...) — existing path (legacy)
         if (arg0_call.value()->op.same_as(builtin::tvm_access_ptr())) {
           ICHECK(arg0_call.value()->args.size() > 1);
@@ -303,6 +318,16 @@ private:
       Var var;
       if (auto bl = op->args[0].as<BufferLoadNode>()) {
         var = bl->buffer->data;
+      } else if (auto reg_call = op->args[0].as<Call>()) {
+        if (reg_call.value()->op.same_as(RegionOp::Get())) {
+          if (auto bl2 = reg_call.value()->args[0].as<BufferLoadNode>()) {
+            var = bl2->buffer->data;
+          } else {
+            LOG(FATAL) << "tl.region expects BufferLoad as first arg";
+          }
+        } else {
+          var = GetVarFromAccessPtr(op->args[0]);
+        }
       } else {
         var = GetVarFromAccessPtr(op->args[0]);
       }

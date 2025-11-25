@@ -1,5 +1,3 @@
-import tilelang.testing
-
 import example_gemv
 
 

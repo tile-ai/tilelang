@@ -63,33 +63,9 @@ using namespace tir;
 Fill::Fill(Array<PrimExpr> args) {
   ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
 
-  // Case 1: Explicit BufferRegion (legacy path)
-  if (args[0]->IsInstance<BufferRegionNode>()) {
-    auto region = Downcast<BufferRegion>(args[0]);
-    node->dst = region->buffer;
-    node->region = region->region;
-
-    // Case 2: Vector/scalar region expressed via BufferLoad indices
-  } else if (args[0]->IsInstance<BufferLoadNode>()) {
-    auto buffer_load = Downcast<BufferLoad>(args[0]);
-    for (const auto &index : buffer_load->indices) {
-      if (const auto *ramp = index.as<RampNode>()) {
-        CHECK(ramp->stride.as<IntImmNode>()->value == 1)
-            << "Only stride 1 ramps are supported";
-        const auto *lanes = ramp->lanes.as<IntImmNode>();
-        CHECK(lanes)
-            << "Scalable vectors not supported in BufferRegion conversion";
-        node->region.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
-      } else {
-        node->region.push_back(Range::FromMinExtent(index, 1));
-      }
-    }
-    node->dst = buffer_load->buffer;
-    // Case 3: Unsupported
-  } else {
-    ICHECK(false) << "Unsupported destination argument for tl.fill; expect"
-                  << " BufferLoad/BufferRegion";
-  }
+  BufferRegion region = NormalizeToBufferRegion(args[0]);
+  node->dst = region->buffer;
+  node->region = region->region;
 
   if (args[1]->dtype != node->dst->dtype) {
     node->value = Cast(node->dst->dtype, args[1]);

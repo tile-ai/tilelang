@@ -1,4 +1,3 @@
-import tilelang.testing
 import example_gemm_analyze
 import example_conv_analyze
 
@@ -14,4 +13,3 @@ def test_example_conv_analyze():
 if __name__ == "__main__":
     # tilelang.testing.main()
     test_example_gemm_analyze()
-

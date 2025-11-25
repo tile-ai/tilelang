@@ -2,8 +2,7 @@
 from __future__ import annotations
 from tvm import tir
 from tilelang.language import has_let_value, get_let_value
-from tilelang.utils.language import get_buffer_region_from_load
-from tilelang.utils.language import to_buffer_region
+from tilelang.utils.language import get_buffer_region_from_load, to_buffer_region
 
 
 def fill(buffer: tir.Buffer | tir.BufferRegion | tir.BufferLoad, value: tir.PrimExpr):
@@ -20,7 +19,21 @@ def fill(buffer: tir.Buffer | tir.BufferRegion | tir.BufferLoad, value: tir.Prim
     if isinstance(buffer, tir.Var) and has_let_value(buffer):
         buffer = get_let_value(buffer)
 
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fill"), to_buffer_region(buffer), value)
+    # Build tl.region as argument
+    if isinstance(buffer, tir.Buffer):
+        extents = list(buffer.shape)
+    elif isinstance(buffer, tir.BufferRegion):
+        extents = [r.extent for r in buffer.region]
+    elif isinstance(buffer, tir.BufferLoad):
+        region = get_buffer_region_from_load(buffer)
+        if region is not None:
+            extents = [r.extent for r in region.region]
+        else:
+            extents = [tir.IntImm("int32", 1) for _ in buffer.indices]
+    else:
+        extents = []
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fill"), to_buffer_region(buffer, extents),
+                           value)
 
 
 def clear(buffer: tir.Buffer | tir.Var):

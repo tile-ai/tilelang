@@ -35,13 +35,11 @@ using namespace tir;
  */
 FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args) {
   auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
-  // Accept BufferLoad to identify the reducer buffer
-  if (const auto *load = args[0].as<BufferLoadNode>()) {
-    node->reducer = load->buffer;
-  } else {
-    ICHECK(false)
-        << "Unsupported argument to finalize_reducer; expect BufferLoad.";
-  }
+  // Normalize any supported region expression
+  // (BufferRegion/BufferLoad/tl.region) to a BufferRegion, then take the
+  // underlying Buffer as reducer.
+  auto region = NormalizeToBufferRegion(args[0]);
+  node->reducer = region->buffer;
   node->op = (ReducerOpType)*as_const_int(args[1]);
   data_ = std::move(node);
 }

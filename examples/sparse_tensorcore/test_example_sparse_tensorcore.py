@@ -10,4 +10,5 @@ def test_tilelang_example_sparse_tensorcore():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_tilelang_example_sparse_tensorcore()

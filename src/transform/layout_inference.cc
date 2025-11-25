@@ -18,6 +18,7 @@
 #include "../layout/utils.h"
 #include "../op/copy.h"
 #include "../op/parallel.h"
+#include "../op/region.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -441,6 +442,8 @@ private:
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
           addToUseList(buffer.value());
+        } else if (auto buffer = getBufferFromRegion(arg)) {
+          addToUseList(buffer.value());
         }
       }
       // Compute thread_var_ and thread_bounds_
@@ -516,6 +519,18 @@ private:
         }
       }
       return std::nullopt;
+    }
+    return std::nullopt;
+  }
+
+  Optional<Buffer> getBufferFromRegion(const PrimExpr &expr) {
+    if (auto call = expr.as<CallNode>()) {
+      if (call->op.same_as(RegionOp::Get())) {
+        if (auto bl = call->args[0].as<BufferLoadNode>()) {
+          return bl->buffer;
+        }
+        return std::nullopt;
+      }
     }
     return std::nullopt;
   }

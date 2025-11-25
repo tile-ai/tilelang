@@ -41,4 +41,5 @@ def test_example_sparse_mla_bwd():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_example_sparse_mla_bwd()

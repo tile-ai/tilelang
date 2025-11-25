@@ -7,6 +7,7 @@
 #define TVM_TL_OP_UTILS_H_
 
 #include "./operator.h"
+#include "region.h"
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/op.h>
 
