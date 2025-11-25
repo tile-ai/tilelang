@@ -6,13 +6,11 @@ from tvm import tir
 from tvm.ir import Range
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.runtime import convert
-from .utils import (
-    mfma_store_index_map,
-    get_buffer_region_from_load,
-)
+from .utils import (mfma_store_index_map)
 from typing import Literal, Callable
 
 from tilelang.utils import is_fragment
+from tilelang.utils.language import get_buffer_region_from_load
 from .mfma_layout import (
     shared_16x4_to_local_64x1_layout_A,
     shared_4x16_to_local_64x1_layout_B,
