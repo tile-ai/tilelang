@@ -821,7 +821,13 @@ private:
               int64_t frag_reg_num = 1;
               for (auto i : frag.value()->OutputShape()) {
                 auto pci = as_const_int(i);
-                ICHECK(pci != nullptr);
+                ICHECK(pci != nullptr)
+                    << "Can not use non-constant range to "
+                       "iterate over a fragment/local "
+                       "buffer. Non-constant shape expr is: "
+                    << i
+                    << ". This is possibly because you use symbolic shape when "
+                       "accessing a fragment/local buffer.";
                 frag_reg_num *= *pci;
               }
               reg_num += frag_reg_num;

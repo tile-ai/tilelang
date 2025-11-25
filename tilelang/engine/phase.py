@@ -80,6 +80,9 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     # Check if there are any invalid nested loops.
     tilelang.analysis.NestedLoopChecker()(mod)
 
+    # Check if there are any invalid symbolic T.Parallel + fragment access.
+    tilelang.analysis.FragmentLoopChecker()(mod)
+
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
