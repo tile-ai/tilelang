@@ -35,7 +35,7 @@ static at::ScalarType dtype_from_string(const std::string &s) {
     return at::kUInt64;
   if (s == "int32" || s == "int")
     return at::kInt;
-  if (s == "int64" || s == "long")
+  if (s == "int64" || s == "long" || s == "long int")
     return at::kLong;
   if (s == "uint8" || s == "byte")
     return at::kByte;
@@ -43,7 +43,7 @@ static at::ScalarType dtype_from_string(const std::string &s) {
     return at::kChar;
   if (s == "bool")
     return at::kBool;
-  throw std::runtime_error("Unsupported dtype string: " + s);
+  throw std::runtime_error("Unsupported dtype string: '"+ s + "'");
 }
 
 torch::Tensor tensor_from_ptr(uint64_t ptr_val, std::vector<int64_t> shape,

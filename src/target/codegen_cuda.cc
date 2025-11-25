@@ -823,13 +823,13 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
     if (args.size() == 1) {
       this->stream << "__syncthreads();\n";
     } else if (args.size() == 2) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ">();\n";
+      std::string barrier_id = PrintExpr(args[1]);
+      this->stream << "tl::__sync_thread_partial(" << barrier_id << ");\n";
     } else if (args.size() == 3) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      auto thread_count = args[2].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ", "
-                   << thread_count << ">();\n";
+      std::string barrier_id = PrintExpr(args[1]);
+      std::string thread_count = PrintExpr(args[2]);
+      this->stream << "tl::__sync_thread_partial(" << barrier_id << ", "
+                   << thread_count << ");\n";
     } else {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();
@@ -1516,10 +1516,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::wait_eq())) {
     this->PrintIndent();
     this->stream << "tl::wait_eq(" << this->PrintExpr(op->args[0]) << ", "
-                 << this->PrintExpr(op->args[1]) << ");\n";
-  } else if (op->op.same_as(tl::wait_ne())) {
-    this->PrintIndent();
-    this->stream << "tl::wait_ne(" << this->PrintExpr(op->args[0]) << ", "
                  << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::atom_add())) {
     std::string func_name = "tl::ptx_atom_add_" +

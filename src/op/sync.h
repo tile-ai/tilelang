@@ -45,11 +45,64 @@ TVM_DLL const Op &wait_barrier_gpu();
 
 TVM_DLL const Op &wait_eq();
 
+
 /*!
- * \brief Wait until *addr != expected* for GPU-level synchronization
- * void wait_ne(addr, expected)
+ * \brief TileOperatorNode for wait operation.
+ *
+ * WaitOpNode represents a wait primitive,
+ * which waits until a condition on a memory address is met.
  */
-TVM_DLL const Op &wait_ne();
+class WaitOpNode : public TileOperatorNode {
+ public:
+  PrimExpr addr;             ///< The address to watch.
+  PrimExpr expected;         ///< The expected value to compare against.
+  PrimExpr peer;             ///< The peer to compare against.
+  int relation;               ///< The relation to compare against.
+
+  bool is_distributed() const;
+
+  static constexpr const char* _type_key = "tl.WaitOp";
+  TVM_DECLARE_FINAL_OBJECT_INFO(WaitOpNode, TileOperatorNode);
+
+  Stmt Lower(const LowerArgs& T, arith::Analyzer* analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs& T, InferLevel level) const override;
+  static const Op& Get();
+  TileOperator Clone() const override;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<WaitOpNode>()
+        .def_ro("addr", &WaitOpNode::addr)
+        .def_ro("expected", &WaitOpNode::expected)
+        .def_ro("peer", &WaitOpNode::peer)
+        .def_ro("relation", &WaitOpNode::relation);
+  }
+
+  bool SEqualReduce(const WaitOpNode* other, SEqualReducer equal) const {
+    return equal(addr, other->addr) && equal(expected, other->expected) &&
+           equal(peer, other->peer) && equal(relation, other->relation);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(addr);
+    hash_reduce(expected);
+    hash_reduce(peer);
+    hash_reduce(relation);
+  }
+
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
+};
+
+/*!
+ * \brief Wrapper for the WaitOp operator.
+ */
+class WaitOp : public TileOperator {
+ public:
+  TVM_DEFINE_OBJECT_REF_METHODS(WaitOp, TileOperator, WaitOpNode);
+  TVM_DLL WaitOp(Array<PrimExpr> args, BufferMap vmap);
+  static const Op& Get();
+};
 
 /*!
  * \brief Synchronize at a barrier for GPU-level synchronization

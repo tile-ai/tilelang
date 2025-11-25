@@ -55,9 +55,6 @@ TIR_DEFINE_TL_BUILTIN(wait_barrier_gpu)
 TIR_DEFINE_TL_BUILTIN(wait_eq).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(wait_ne).set_num_inputs(2).set_attr<TCallEffectKind>(
-    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
-
 TIR_DEFINE_TL_BUILTIN(sync_barrier_gpu)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -141,8 +138,68 @@ PrimExpr BarrierBlocksOpNode::MakeLocalBarAddr(const LowerArgs &T) const {
               {BufferLoad(buffer, local_indices)});
 }
 
+WaitOp::WaitOp(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<WaitOpNode> node = make_object<WaitOpNode>();
+  node->relation = args[0].as<IntImmNode>()->value;
+  node->addr = args[1];
+  node->expected = args[2];
+  node->peer = args[3];
+  data_ = std::move(node);
+  (void)vmap;
+}
+
+bool WaitOpNode::is_distributed() const {
+  return !(peer->IsInstance<IntImmNode>() && peer.as<IntImmNode>()->value == -1);
+}
+
+Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  (void)analyzer;
+  (void)T;
+  Array<PrimExpr> new_args;
+  std::stringstream ss;
+
+  // Map relation as int to literal_strings
+  const char* relation_str[] = {"eq", "ne", "ge", "le", "gt", "lt"};
+  ss << "tl::wait_" << relation_str[relation];
+  
+  new_args.push_back(StringImm(ss.str()));
+  if (is_distributed()) {
+    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
+    PrimExpr local_base_ptr =
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
+    PrimExpr offset_to_base =
+        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {addr}),
+            local_base_ptr);
+    new_args.push_back(
+        Call(DataType::Handle(), tl::get_remote_base_ptr(), {peer}) +
+        offset_to_base);
+  } else {
+    new_args.push_back(addr);
+  }
+  new_args.push_back(expected);
+  
+  auto wait = Call(DataType::Handle(), builtin::call_extern(), new_args);
+  return Evaluate(wait);
+}
+
+LayoutMap WaitOpNode::InferLayout(const LayoutInferArgs &T, InferLevel level) const {
+  (void)T;
+  (void)level;
+  return {};
+}
+
+TileOperator WaitOpNode::Clone() const {
+  auto node = make_object<WaitOpNode>(*this);
+  return WaitOp(node);
+}
+
 TIR_REGISTER_TL_OP(BarrierBlocksOp, barrier_blocks)
     .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_REGISTER_TL_OP(WaitOp, wait)
+    .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -156,6 +213,7 @@ TIR_DEFINE_TL_BUILTIN(fence_sys).set_num_inputs(0).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 TVM_FFI_STATIC_INIT_BLOCK({ BarrierBlocksOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK({ WaitOpNode::RegisterReflection(); });
 
 } // namespace tl
 } // namespace tvm

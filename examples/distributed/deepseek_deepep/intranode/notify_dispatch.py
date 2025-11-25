@@ -36,7 +36,7 @@ def notify_dispatch_kernel(
         num_tokens_per_rank: T.Tensor((num_ranks,), 'int32'),
         num_tokens_per_expert: T.Tensor((num_experts,), 'int32'),
         is_token_in_rank: T.Tensor((num_tokens, num_ranks), 'bool'),
-        moe_recv_counter_mapped: T.Tensor((1,), 'int64'),
+        moe_recv_counter_mapped: T.Tensor((1,), 'int32'),
         moe_recv_expert_counter_mapped: T.Tensor((num_local_experts,), 'int32'),
         per_rank_buffer: T.Tensor((num_ranks, num_ranks), 'int32'),
         per_expert_buffer: T.Tensor((num_ranks, num_local_experts), 'int32'),
@@ -272,7 +272,7 @@ def test_notify_dispatch(
     ref_rank_prefix_matrix, ref_channel_prefix_matrix = handle[:2]
 
     # create buffers in need
-    moe_recv_counter_mapped, moe_recv_expert_counter_mapped = create_moe_recv_counters(num_ranks)[3:5]
+    moe_recv_counter_mapped, moe_recv_expert_counter_mapped = create_moe_recv_counters(num_ranks, num_local_experts)[3:5]
 
     per_rank_buffer = tilelang.tensor((num_ranks, num_ranks), dtype=torch.int32, device='cuda', allocator=allocator).zero_()
     per_expert_buffer = tilelang.tensor((num_ranks, num_local_experts), dtype=torch.int32, device='cuda', allocator=allocator).zero_()
@@ -303,7 +303,6 @@ def test_notify_dispatch(
     print(f'[rank {rank}] All checks passed for TileScale notify_dispatch. ✅')
 
     # todo: benchmark
-
 
 def main(
     local_rank: int, num_local_ranks: int, args

@@ -295,11 +295,9 @@ template <int y = 1, typename T> TL_DEVICE T pow_of_int(T x) {
 
 // Thread partial barrier synchronization
 // https://docs.nvidia.com/cuda/parallel-thread-execution/#memory-consistency-model
-template <int barrier_id = 0, int thread_count = 0>
-TL_DEVICE void __sync_thread_partial() {
+TL_DEVICE void __sync_thread_partial(int barrier_id = 0, int thread_count = 0) {
   asm volatile("bar.sync %0, %1;" : : "r"(barrier_id), "r"(thread_count));
 }
-
 template <int layout_type = 0, int leading_byte_offset = 0,
           int stride_byte_offset = 0, typename T>
 TL_DEVICE void initialize_descriptor(GmmaDescriptor &descriptor,

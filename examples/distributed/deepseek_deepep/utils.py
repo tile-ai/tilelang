@@ -137,11 +137,11 @@ def gen_inputs(num_tokens: int, hidden: int, num_topk: int, num_experts: int, nu
         
     Returns:
         x: `[num_tokens, hidden]` with `torch.bfloat16`, the input to MoE layer.
-        topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
+        topk_idx: `[num_tokens, num_topk]` with `torch.int32`, the expert indices selected by each token,
             `-1` means no selections.
         topk_weights: `[num_tokens, num_topk]` with `torch.float32`, the weights corresponding to 
             each selected expert for each token.
-        rank_idx: `[num_tokens, num_topk]` with `torch.int64`, the rank indices corresponding to 
+        rank_idx: `[num_tokens, num_topk]` with `torch.int32`, the rank indices corresponding to 
             each selected expert, `-1` means no selections.
     """
     assert num_topk <= num_experts, "num_topk must be less than or equal to num_experts"
@@ -149,7 +149,7 @@ def gen_inputs(num_tokens: int, hidden: int, num_topk: int, num_experts: int, nu
 
     x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
-    topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1]
+    topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1].to(torch.int32)
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda')
     rank_idx = topk_idx // (num_experts // num_ranks)
     rank_idx.masked_fill_(topk_idx == -1, -1)
@@ -178,12 +178,13 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
 
 
 # Check: csrc/deep_ep.cpp:Buffer::Buffer
-def create_moe_recv_counters(num_ranks: int):
+def create_moe_recv_counters(num_ranks: int, num_local_experts: int):
     """Create MoE receive counters.
     All allocated tensors are initialized with -1.
     
     Args:
         num_ranks: the number of ranks.
+        num_local_experts: the number of local experts.
 
     Returns:
         moe_recv_counter: the MoE counter, allocated on pinned host memory.
@@ -194,16 +195,14 @@ def create_moe_recv_counters(num_ranks: int):
         moe_recv_expert_counter_mapped: the MoE expert-level counter on device, mapped from the pinned host memory.
         moe_recv_rdma_counter_mapped: the MoE RDMA-level counter on device, mapped from the pinned host memory.
     """
-    num_rdma_ranks = max(1, num_ranks // NUM_MAX_NVL_PEERS)  # noqa: F841
-    num_nvl_ranks = min(num_ranks, NUM_MAX_NVL_PEERS)  # noqa: F841
 
     moe_recv_counter = torch.tensor(
-        -1, dtype=torch.int64, pin_memory=True)  # MoE counter
+        [-1], dtype=torch.int32, pin_memory=True, device='cpu')  # MoE counter
     moe_recv_expert_counter = torch.tensor(
-        [-1] * NUM_MAX_LOCAL_EXPERTS, dtype=torch.int32,
-        pin_memory=True)  # MoE expert-level counter
+        [-1] * num_local_experts, dtype=torch.int32,
+        pin_memory=True, device='cpu')  # MoE expert-level counter
     moe_recv_rdma_counter = torch.tensor(
-        -1, dtype=torch.int32, pin_memory=True)  # MoE RDMA-level counter
+        -1, dtype=torch.int32, pin_memory=True, device='cpu')  # MoE RDMA-level counter
 
     moe_recv_counter_mapped = get_device_tensor(moe_recv_counter)
     moe_recv_expert_counter_mapped = get_device_tensor(moe_recv_expert_counter)

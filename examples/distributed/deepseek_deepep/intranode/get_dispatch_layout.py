@@ -21,7 +21,7 @@ def get_dispatch_layout(
     """Calculate the layout required for later communication.
 
     Arguments:
-        topk_idx: `[num_tokens, num_topk]`, dtype must be `torch.int64`, the expert indices selected by each token,
+        topk_idx: `[num_tokens, num_topk]`, dtype must be `torch.int32`, the expert indices selected by each token,
             `-1` means no selections.
         num_experts: the number of experts.
         num_ranks: the number of ranks.
@@ -35,7 +35,7 @@ def get_dispatch_layout(
     """
 
     # Check inputs
-    assert topk_idx.dtype == torch.int64, "topk_idx must be of dtype torch.int64"
+    assert topk_idx.dtype == torch.int32, "topk_idx must be of dtype torch.int32"
     assert topk_idx.ndim == 2, "topk_idx must be a 2D tensor"
     assert topk_idx.is_contiguous(), "topk_idx must be a contiguous tensor"
     assert num_experts > 0, "num_experts must be greater than 0"
@@ -81,7 +81,7 @@ def get_dispatch_layout_kernel(
 
     @T.prim_func
     def get_dispatch_layout_main(
-            topk_idx: T.Tensor([num_tokens, num_topk], "int64"),  # type: ignore
+            topk_idx: T.Tensor([num_tokens, num_topk], "int32"),  # type: ignore
             num_tokens_per_rank: T.Tensor([num_ranks], "int32"),  # type: ignore
             num_tokens_per_expert: T.Tensor([num_experts], "int32"),  # type: ignore
             is_token_in_rank: T.Tensor([num_tokens, num_ranks], "bool"),  # type: ignore

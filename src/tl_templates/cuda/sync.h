@@ -185,19 +185,51 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 }
 
 template <typename T> 
-TL_DEVICE void wait_eq(void *barrier, T val = 1) {
-  T *flag_ptr = reinterpret_cast<T *>(barrier);
+TL_DEVICE void wait_eq(void *ptr, T val) {
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
   while (ld_acquire(flag_ptr) != val);
 }
 
 template <typename T> 
-TL_DEVICE void wait_ne(void *barrier, T val = 0) {
-  T *flag_ptr = reinterpret_cast<T *>(barrier);
+TL_DEVICE void wait_ne(void *ptr, T val) {
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_volatile_global_acquire(flag_ptr) == val);
+  while (ld_volatile_global(flag_ptr) == val);
+}
+
+template <typename T>
+TL_DEVICE void wait_ge(void *ptr, T val) {
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global(flag_ptr) < val);
+}
+
+template <typename T>
+TL_DEVICE void wait_le(void *ptr, T val) {
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global(flag_ptr) > val);
+}
+
+template <typename T>
+TL_DEVICE void wait_gt(void *ptr, T val) {
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global(flag_ptr) <= val);
+}
+
+template <typename T>
+TL_DEVICE void wait_lt(void *ptr, T val) {
+  T *flag_ptr = reinterpret_cast<T *>(ptr);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global(flag_ptr) >= val);
 }
 
 } // namespace tl

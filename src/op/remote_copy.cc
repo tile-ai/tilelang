@@ -364,6 +364,11 @@ TileOperator LdOpNode::Clone() const {
   return LdOp(node);
 }
 
+TIR_REGISTER_TL_OP(PutOp, put)
+    .set_num_inputs(6)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_REGISTER_TL_OP(GetOp, get)
     .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",

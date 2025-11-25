@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from tvm import tir
+from tvm.tir import address_of
 from tvm.tir import PrimExpr
+from enum import Enum
 
 
 def get_rank():
@@ -105,3 +107,47 @@ def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | N
     return tir.call_intrin(
         "handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, 0, "block"
     )  # NOTE(wt): unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
+
+
+class BinaryRelation(Enum):
+    EQ = 0
+    NE = 1
+    GE = 2
+    LE = 3
+    GT = 4
+    LT = 5
+    
+    
+def wait_eq(barrier: PrimExpr, expected: PrimExpr):
+    """Wait until *barrier == expected* for GPU-level synchronization.
+    # todo: have different semantic compared to 3 fns below currently
+    Args:
+        barrier: The barrier to wait at
+        expected: The expected value to wait for
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_eq"), address_of(barrier), expected)
+
+
+def wait_ne(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr != expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.NE.value, address_of(ptr), expected, peer)
+
+
+def wait_ge(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr >= expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GE.value, address_of(ptr), expected, peer)
+
+
+def wait_le(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr <= expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LE.value, address_of(ptr), expected, peer)
+
+
+def wait_gt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr > expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GT.value, address_of(ptr), expected, peer)
+
+
+def wait_lt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until *ptr < expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LT.value, address_of(ptr), expected, peer)
