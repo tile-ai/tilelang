@@ -427,7 +427,7 @@ def test_var_macro():
         pass
 
 
-def frame_inside_macro():
+def test_frame_inside_macro():
 
     @tilelang.jit
     def get_sample_kernel():
@@ -451,6 +451,19 @@ def frame_inside_macro():
         return sample_kernel
 
     kernel = get_sample_kernel()  # noqa: F841
+
+
+def test_buffer_slice_step():
+    try:
+
+        @T.prim_func
+        def prim_buffer_slice_step(A: T.Buffer((10,), T.int32), B: T.Buffer((5,), T.int32)):
+            with T.Kernel(1):
+                B[0:5:2] = A[0:10:2]
+
+        raise AssertionError("Expect to report an error, buffer slice with step is not supported")
+    except RuntimeError:
+        pass
 
 
 if __name__ == '__main__':
