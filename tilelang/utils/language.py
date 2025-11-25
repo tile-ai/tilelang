@@ -194,6 +194,7 @@ def get_buffer_region_from_load(buffer_load: tir.BufferLoad,
 
 
 def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion | tir.Var,
+                     access_type: str = "rw",
                      extents: list[PrimExpr] | None = None) -> PrimExpr | BufferRegion:
     """
     Convert to/from the tl.region representation.
@@ -212,14 +213,14 @@ def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion | tir.Var,
         exts = [r.extent for r in obj.region]
         assert len(extents) == len(exts)
         exts = [tir.min(exts[i], extents[i]) for i in range(len(exts))]
-        return _make_region_call(tir.BufferLoad(obj.buffer, mins), "rw", *exts)
+        return _make_region_call(tir.BufferLoad(obj.buffer, mins), access_type, *exts)
     if isinstance(obj, tir.Buffer):
         mins = [tir.IntImm("int32", 0) for _ in obj.shape]
         if extents is None:
             ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
             return tir.BufferRegion(obj, ranges)
         exts = list(extents)
-        return _make_region_call(tir.BufferLoad(obj, mins), "rw", *exts)
+        return _make_region_call(tir.BufferLoad(obj, mins), access_type, *exts)
     if isinstance(obj, tir.BufferLoad):
         if extents is None:
             region = get_buffer_region_from_load(obj)
@@ -233,7 +234,7 @@ def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion | tir.Var,
         if len(obj.indices) > len(exts):
             exts = [tir.IntImm("int32", 1) for _ in range(len(obj.indices) - len(exts))] + exts
         assert len(obj.indices) == len(exts)
-        return _make_region_call(obj, "rw", *exts)
+        return _make_region_call(obj, access_type, *exts)
     raise ValueError(f"Unsupported argument type for to_buffer_region: {type(obj)}")
 
 

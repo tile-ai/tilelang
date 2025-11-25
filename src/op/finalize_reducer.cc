@@ -30,8 +30,6 @@ using namespace tir;
  * @param args TL operator arguments: expects at least two elements where
  *             `args[0]` is an access pointer identifying the reducer variable
  * and `args[1]` is an integer encoding a `ReducerOpType` (e.g., Sum/Max/Min).
- * @param vmap Mapping from variables to Buffers used to look up the reducer
- * Buffer.
  */
 FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args) {
   auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();

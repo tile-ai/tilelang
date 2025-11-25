@@ -85,10 +85,14 @@ std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
  */
 GemmSP::GemmSP(Array<PrimExpr> args) {
   ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
-  node->a_ = NormalizeToBufferRegion(args[0])->buffer;
-  node->e_ = NormalizeToBufferRegion(args[1])->buffer;
-  node->b_ = NormalizeToBufferRegion(args[2])->buffer;
-  node->c_ = NormalizeToBufferRegion(args[3])->buffer;
+  node->aRegion_ = NormalizeToBufferRegion(args[0]);
+  node->eRegion_ = NormalizeToBufferRegion(args[1]);
+  node->bRegion_ = NormalizeToBufferRegion(args[2]);
+  node->cRegion_ = NormalizeToBufferRegion(args[3]);
+  node->a_ = node->aRegion_->buffer;
+  node->e_ = node->eRegion_->buffer;
+  node->b_ = node->bRegion_->buffer;
+  node->c_ = node->cRegion_->buffer;
   node->transA_ = args[4].as<Bool>().value();
   node->transB_ = args[5].as<Bool>().value();
   node->m_ = args[6].as<IntImm>().value()->value;

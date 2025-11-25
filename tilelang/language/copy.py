@@ -8,7 +8,6 @@ from tilelang.utils.language import (
     legalize_pairwise_extents,
 )
 from tvm import ir, tir
-from tilelang.language.utils import buffer_to_tile_region
 
 
 def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
@@ -112,7 +111,7 @@ def c2d_im2col(img: tir.Buffer,
         eviction_policy = 0
     else:
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
-    img_region = buffer_to_tile_region(img, "r")
-    col_region = buffer_to_tile_region(col, "w")
+    img_region = to_buffer_region(img, access_type="r")
+    col_region = to_buffer_region(col, access_type="w")
     return tir.call_intrin("handle", tir.op.Op.get("tl.c2d_im2col"), img_region, col_region,
                            nhw_step, c_step, kernel, stride, dilation, pad, eviction_policy)

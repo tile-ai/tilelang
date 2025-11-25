@@ -45,8 +45,6 @@ using namespace tir;
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
  *      (optional) kPack (Int), (optional) wg_wait (Int)]
- * @param vmap Mapping from access pointer vars to Buffer objects used to
- *   resolve the Buffer corresponding to each pointer argument.
  *
  * @note If `kPack` is provided it must be 1 or 2; otherwise the constructor
  *       fails with an ICHECK (runtime assertion). No other validation is

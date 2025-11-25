@@ -127,7 +127,6 @@ template <typename T> static Array<T> ReverseArray(Array<T> array) {
  *   - args[1] is the destination Region call,
  *   - optional args[2..4] are coalesced width, disable_tma, and eviction
  * policy.
- * @param vmap Unused; kept for compatibility.
  */
 Copy::Copy(Array<PrimExpr> args) {
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
@@ -1721,20 +1720,21 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
  * GPU intrinsics.
  *
  * @param args Array of PrimExpr TL-call arguments (see list above).
- * @param vmap Mapping from original buffer variables to actual Buffer objects.
  */
 Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args) {
   ObjectPtr<Conv2DIm2ColOpNode> node =
       tvm::ffi::make_object<Conv2DIm2ColOpNode>();
-  node->src = NormalizeToBufferRegion(args[0])->buffer;
-  node->dst = NormalizeToBufferRegion(args[1])->buffer;
-  node->nhw_step = args[2];
-  node->c_step = args[3];
-  node->kernel = args[4].as<IntImm>().value()->value;
-  node->stride = args[5].as<IntImm>().value()->value;
-  node->dilation = args[6].as<IntImm>().value()->value;
-  node->padding = args[7].as<IntImm>().value()->value;
-  node->eviction_policy = args[8].as<IntImm>().value()->value;
+  node->srcRegion_ = NormalizeToBufferRegion(args[0]);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1]);
+  node->src_ = node->srcRegion_->buffer;
+  node->dst_ = node->dstRegion_->buffer;
+  node->nhw_step_ = args[2];
+  node->c_step_ = args[3];
+  node->kernel_ = args[4].as<IntImm>().value()->value;
+  node->stride_ = args[5].as<IntImm>().value()->value;
+  node->dilation_ = args[6].as<IntImm>().value()->value;
+  node->padding_ = args[7].as<IntImm>().value()->value;
+  node->eviction_policy_ = args[8].as<IntImm>().value()->value;
   data_ = std::move(node);
 }
 
@@ -1785,24 +1785,24 @@ TileOperator Conv2DIm2ColOpNode::Clone() const {
 Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
                                arith::Analyzer *analyzer) const {
   ICHECK(TargetIsHopper(T.target));
-  ICHECK(src.scope() == "global" &&
-         (dst.scope() == "shared.dyn" || dst.scope() == "shared"));
-  ICHECK(src->shape.size() == 4);
-  ICHECK(dst->shape.size() == 2);
-  ICHECK(src->dtype == dst->dtype);
+  ICHECK(src_.scope() == "global" &&
+         (dst_.scope() == "shared.dyn" || dst_.scope() == "shared"));
+  ICHECK(src_->shape.size() == 4);
+  ICHECK(dst_->shape.size() == 2);
+  ICHECK(src_->dtype == dst_->dtype);
   Layout shared_layout;
-  if (T.layout_map.count(dst)) {
-    shared_layout = T.layout_map[dst];
+  if (T.layout_map.count(dst_)) {
+    shared_layout = T.layout_map[dst_];
   }
 
   TMAIm2ColDesc desc;
-  desc.rank = src->shape.size();
-  desc.data_type = to_CUtensorMapDataType(src->dtype);
-  desc.global_addr = src->data;
-  desc.global_shape = ReverseArray(src->shape);
+  desc.rank = src_->shape.size();
+  desc.data_type = to_CUtensorMapDataType(src_->dtype);
+  desc.global_addr = src_->data;
+  desc.global_shape = ReverseArray(src_->shape);
 
-  if (!src->strides.empty()) {
-    desc.global_stride = ReverseArray(src->strides);
+  if (!src_->strides.empty()) {
+    desc.global_stride = ReverseArray(src_->strides);
   } else {
     // Create stride from shape
     PrimExpr stride = 1;
@@ -1816,13 +1816,13 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   // Make global stride in bytes
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return cast(DataType::Int(64), e) * src->dtype.bytes();
+    return cast(DataType::Int(64), e) * src_->dtype.bytes();
   });
-  desc.elem_stride = {1, stride, stride, 1};
-  desc.lower_corner = {-padding, -padding};
-  desc.upper_corner = {-padding, -padding};
-  desc.smem_box_pixel = Downcast<IntImm>(dst->shape[0])->value;
-  desc.smem_box_channel = Downcast<IntImm>(dst->shape[1])->value;
+  desc.elem_stride = {1, stride_, stride_, 1};
+  desc.lower_corner = {-padding_, -padding_};
+  desc.upper_corner = {-padding_, -padding_};
+  desc.smem_box_pixel = Downcast<IntImm>(dst_->shape[0])->value;
+  desc.smem_box_channel = Downcast<IntImm>(dst_->shape[1])->value;
   desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
   desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
@@ -1836,15 +1836,15 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
 
     if (StructuralEqual()(shared_layout,
                           makeQuarterBankSwizzleLayout(*stride, *continuous,
-                                                       dst->dtype.bits()))) {
+                                                       dst_->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
     } else if (StructuralEqual()(shared_layout, makeHalfBankSwizzleLayout(
                                                     *stride, *continuous,
-                                                    dst->dtype.bits()))) {
+                                                    dst_->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
     } else if (StructuralEqual()(shared_layout, makeFullBankSwizzleLayout(
                                                     *stride, *continuous,
-                                                    dst->dtype.bits()))) {
+                                                    dst_->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
       ICHECK(0) << "Cannot detect TMA layout.";
@@ -1863,43 +1863,43 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
       << "Currently can only support divisible channel case";
 
   global_coords.push_back(
-      FloorMod(c_step * desc.smem_box_channel, desc.global_shape[0]));
+      FloorMod(c_step_ * desc.smem_box_channel, desc.global_shape[0]));
   image_offset.push_back(
-      dilation *
-      FloorMod(FloorDiv(c_step * desc.smem_box_channel, desc.global_shape[0]),
-               kernel));
-  image_offset.push_back(dilation * FloorDiv(c_step * desc.smem_box_channel,
-                                             desc.global_shape[0] * kernel));
+      dilation_ *
+      FloorMod(FloorDiv(c_step_ * desc.smem_box_channel, desc.global_shape[0]),
+               kernel_));
+  image_offset.push_back(dilation_ * FloorDiv(c_step_ * desc.smem_box_channel,
+                                              desc.global_shape[0] * kernel_));
 
   PrimExpr h_dim =
-      FloorDiv(src->shape[1] + 2 * padding - (kernel - 1) * dilation - 1,
-               stride) +
+      FloorDiv(src_->shape[1] + 2 * padding_ - (kernel_ - 1) * dilation_ - 1,
+               stride_) +
       1;
   PrimExpr w_dim =
-      FloorDiv(src->shape[2] + 2 * padding - (kernel - 1) * dilation - 1,
-               stride) +
+      FloorDiv(src_->shape[2] + 2 * padding_ - (kernel_ - 1) * dilation_ - 1,
+               stride_) +
       1;
   global_coords.push_back(
-      stride * FloorMod(nhw_step * desc.smem_box_pixel, w_dim) - padding);
+      stride_ * FloorMod(nhw_step_ * desc.smem_box_pixel, w_dim) - padding_);
   global_coords.push_back(
-      stride *
-          FloorMod(FloorDiv(nhw_step * desc.smem_box_pixel, w_dim), h_dim) -
-      padding);
+      stride_ *
+          FloorMod(FloorDiv(nhw_step_ * desc.smem_box_pixel, w_dim), h_dim) -
+      padding_);
   global_coords.push_back(
-      FloorDiv(nhw_step * desc.smem_box_pixel, w_dim * h_dim));
+      FloorDiv(nhw_step_ * desc.smem_box_pixel, w_dim * h_dim));
 
   Array<PrimExpr> args;
   args.reserve(desc.rank * 2 + 2);
   args.push_back(create_desc);
   args.push_back(0); // mbar placeholder
-  auto dst_buffer = T.buffer_remap.count(dst) ? T.buffer_remap[dst] : dst;
+  auto dst_buffer = T.buffer_remap.count(dst_) ? T.buffer_remap[dst_] : dst_;
   auto shared_addr = dst_buffer.access_ptr(2);
   args.push_back(shared_addr);
   for (auto coord : global_coords)
     args.push_back(coord);
   for (auto offset : image_offset)
     args.push_back(offset);
-  args.push_back(this->eviction_policy);
+  args.push_back(this->eviction_policy_);
   Stmt tma_copy =
       IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
                  Evaluate(Call(DataType::Handle(), tma_load_im2col(), args)));

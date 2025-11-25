@@ -2,7 +2,7 @@
 from __future__ import annotations
 from tvm import tir
 from tilelang.language import copy, macro, alloc_shared, alloc_fragment
-from tilelang.language.utils import buffer_to_tile_region
+from tilelang.utils.language import to_buffer_region
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.script.ir_builder import IRBuilder
 
@@ -51,8 +51,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(red_frag_in, "r"),
-                buffer_to_tile_region(red_frag_out, "w"),
+                to_buffer_region(red_frag_in, access_type="r"),
+                to_buffer_region(red_frag_out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -66,8 +66,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(red_frag_in, "r"),
-                buffer_to_tile_region(out, "w"),
+                to_buffer_region(red_frag_in, access_type="r"),
+                to_buffer_region(out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -79,8 +79,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(buffer, "r"),
-                buffer_to_tile_region(red_frag_out, "w"),
+                to_buffer_region(buffer, access_type="r"),
+                to_buffer_region(red_frag_out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -90,8 +90,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(buffer, "r"),
-                buffer_to_tile_region(out, "w"),
+                to_buffer_region(buffer, access_type="r"),
+                to_buffer_region(out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -246,8 +246,8 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.cumsum"),
-        buffer_to_tile_region(cumsum_smem, "r"),
-        buffer_to_tile_region(cumsum_smem, "w"),
+        to_buffer_region(cumsum_smem, access_type="r"),
+        to_buffer_region(cumsum_smem, access_type="w"),
         dim,
         reverse,
     )
@@ -300,8 +300,8 @@ def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.cumsum"),
-        buffer_to_tile_region(src, "r"),
-        buffer_to_tile_region(dst, "w"),
+        to_buffer_region(src, access_type="r"),
+        to_buffer_region(dst, access_type="w"),
         dim,
         reverse,
     )
@@ -323,7 +323,7 @@ def finalize_reducer(reducer: tir.Buffer):
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.finalize_reducer"),
-        buffer_to_tile_region(reducer, "w"),
+        to_buffer_region(reducer, access_type="w"),
     )
 
 

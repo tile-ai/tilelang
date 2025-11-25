@@ -1,6 +1,6 @@
 from tilelang import tvm as tvm
 from tvm import tir
-from tvm.tir import PrimExpr, Buffer, BufferLoad, op
+from tvm.tir import PrimExpr, BufferLoad, op
 from tilelang import language as T
 
 
@@ -8,13 +8,6 @@ def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
     """Create a tl.region call for a BufferLoad and extents."""
     access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
     return T.call_intrin("handle", op.Op.get("tl.region"), buffer, access_type, *args)
-
-
-def buffer_to_tile_region(buffer: Buffer, access_type: str):
-    """Convert a buffer to a tl.region over the full shape."""
-    mins = [tir.IntImm("int32", 0) for _ in buffer.shape]
-    extents = list(buffer.shape)
-    return region(tir.BufferLoad(buffer, mins), access_type, *extents)
 
 
 def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: list[PrimExpr]):

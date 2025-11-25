@@ -52,8 +52,6 @@ using namespace tir;
  * value].
  *             - args[0]: destination access (BufferLoad or pointer expression).
  *             - args[1]: value to fill (scalar or vector).
- * @param vmap Mapping from buffer variables to Buffer objects; used to resolve
- * the destination when args[0] is not a BufferLoad.
  *
  * Notes:
  * - The constructor enforces constraints (e.g., stride == 1 ramps, constant
