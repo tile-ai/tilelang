@@ -32,14 +32,10 @@ repos:
         args: [--ignore-case]
         files: ^docs/spelling_wordlist\.txt$
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v21.1.2  # sync with requirements-lint.txt
+    rev: v21.1.6
     hooks:
       - id: clang-format
-        exclude: |
-          (?ix)(
-            ^.+\.(cu|cuh)$|
-            ^.+\.json$
-          )
+        types_or: [c++, c]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.3  # sync with requirements-lint.txt
     hooks:
