@@ -1,6 +1,7 @@
 /*!
  * \file tl/op/region.h
- * \brief Tile memory region descriptor op (bridge to carry BufferRegion via Call args).
+ * \brief Tile memory region descriptor op (bridge to carry BufferRegion via
+ * Call args).
  *
  * Why tl.region instead of passing BufferRegion directly?
  *
@@ -47,10 +48,12 @@ public:
    * transport metadata only and does not affect lowering.
    */
 
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.RegionOp", RegionOpNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.RegionOp", RegionOpNode,
+                                    TileOperatorNode);
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
 
   const Buffer &GetBuffer() const { return buffer_; }
   const Array<Range> &GetRanges() const { return ranges_; }
@@ -70,7 +73,8 @@ public:
 
 class RegionOp : public TileOperator {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(RegionOp, TileOperator, RegionOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(RegionOp, TileOperator,
+                                             RegionOpNode);
   /*!
    * Build a RegionOp from call arguments:
    * - args[0]: BufferLoad whose indices are per-axis minima.

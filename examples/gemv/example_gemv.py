@@ -355,7 +355,8 @@ def main(do_bench: bool = True):
     check_correctness_and_bench(splitk_gemv(N, K, 32, 32, 32), N, K, do_bench=do_bench)
     check_correctness_and_bench(splitk_gemv_vectorized(N, K, 2, 32), N, K, do_bench=do_bench)
     check_correctness_and_bench(splitk_gemv_vectorized_tvm(N, K, 2, 32), N, K, do_bench=do_bench)
-    check_correctness_and_bench(gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K, do_bench=do_bench)
+    check_correctness_and_bench(
+        gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K, do_bench=do_bench)
 
     print("Test passed!")
 

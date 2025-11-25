@@ -30,12 +30,12 @@ RegionOp::RegionOp(Array<PrimExpr> args) {
   for (size_t i = 0; i < ndim; i++) {
     PrimExpr index = load->indices[i];
     PrimExpr extent = args[2 + i];
-    if (const auto* ramp = index.as<RampNode>()) {
-      const auto* stride_imm = ramp->stride.as<IntImmNode>();
+    if (const auto *ramp = index.as<RampNode>()) {
+      const auto *stride_imm = ramp->stride.as<IntImmNode>();
       ICHECK(stride_imm && stride_imm->value == 1)
           << "RegionOp expects stride-1 Ramp for index";
-      if (const auto* lanes_imm = ramp->lanes.as<IntImmNode>()) {
-        if (const auto* ext_imm = extent.as<IntImmNode>()) {
+      if (const auto *lanes_imm = ramp->lanes.as<IntImmNode>()) {
+        if (const auto *ext_imm = extent.as<IntImmNode>()) {
           ICHECK_EQ(lanes_imm->value, ext_imm->value)
               << "Ramp lanes and provided extent must match";
         }
@@ -71,7 +71,8 @@ Stmt RegionOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(0);
 }
 
-LayoutMap RegionOpNode::InferLayout(const LayoutInferArgs &T, InferLevel level) const {
+LayoutMap RegionOpNode::InferLayout(const LayoutInferArgs &T,
+                                    InferLevel level) const {
   return {};
 }
 
@@ -83,9 +84,12 @@ const Op &RegionOp::Get() {
 TVM_REGISTER_OP("tl.region")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "region")
     .set_attr<OpBuilderFunc>("TLOpBuilder",
-                             [](Array<PrimExpr> args) { return RegionOp(args); })
+                             [](Array<PrimExpr> args) {
+                               return RegionOp(args);
+                             })
     .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kPure));
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
 
 TVM_FFI_STATIC_INIT_BLOCK() { RegionOpNode::RegisterReflection(); }
 
