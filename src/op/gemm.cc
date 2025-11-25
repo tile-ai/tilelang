@@ -80,11 +80,14 @@ Gemm::Gemm(Array<PrimExpr> args) {
   if (args.size() > 15) {
     node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
-  node->mbarPtr_ = args[16];
-  if (const auto *load = node->mbarPtr_.as<BufferLoadNode>()) {
-    node->mbar_ = load->buffer;
-  } else {
-    node->mbar_ = std::nullopt;
+  if (args.size() > 16) {
+    if (const auto *load = args[16].as<BufferLoadNode>()) {
+      node->mbarRegion_ =
+          NormalizeToBufferRegion(Downcast<BufferLoad>(args[16]));
+      node->mbar_ = node->mbarRegion_->buffer;
+    } else {
+      node->mbar_ = std::nullopt;
+    }
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
@@ -497,11 +500,13 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
     auto C_buffer = T.buffer_remap.count(c_) ? T.buffer_remap[c_] : c_;
     Array<PrimExpr> new_args;
+    auto mbarPtr =
+        MakeAccessPtrFromRegion(mbarRegion_, /*rw*/ 3, /*require_2d*/ true);
     new_args.push_back(StringImm(ss.str()));
     new_args.push_back(Aptr);
     new_args.push_back(Bptr);
     new_args.push_back(BufferLoad(C_buffer, cCoords_));
-    new_args.push_back(mbarPtr_);
+    new_args.push_back(mbarPtr);
     new_args.push_back(clearAccum_);
     auto new_call = Call(DataType::Handle(), builtin::call_extern(), new_args);
 
