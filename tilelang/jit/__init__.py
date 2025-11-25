@@ -25,7 +25,6 @@ except ImportError:  # Python < 3.10
 from tilelang import tvm as tvm
 from tilelang.language.v2 import PrimFunc, PrimFuncCreater, prim_func
 from tilelang.language.v2.annot import Annot
-from tilelang.jit.adapter.utils import is_metal_target
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
@@ -269,13 +268,13 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     compile_flags: list[str] | str | None
     func_source: str
     signature: inspect.Signature
-    call_through: bool
+    lazy_jit: bool
     # place func at the last element for better __repr__
     func: Callable[_P, _T] | PrimFunc[_KP, _T]
 
     @property
     def annot(self) -> dict[str, Annot]:
-        assert self.call_through, "annot is only support in @tilelang.jit2"
+        assert self.lazy_jit, "annot is only support in @tilelang.jit2"
         return self.func.func_annot.annots
 
     def __post_init__(self):
@@ -424,7 +423,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             kernel = self.compile(*args, **kwargs, **tune_params)
             self._kernel_cache[key] = kernel
 
-        if self.call_through:
+        if self.lazy_jit:
             args = self.func.func_annot.convert_to_kernel_args(*args, **kwargs, **tune_params)
             return kernel(*args)
         else:
@@ -517,7 +516,7 @@ def jit(  # This is the new public interface
             compile_flags=compile_flags,
             func_source=inspect.getsource(orig_func),
             signature=inspect.signature(orig_func),
-            call_through=False)
+            lazy_jit=False)
 
     if func is not None:
         return decorator(func)
@@ -526,12 +525,12 @@ def jit(  # This is the new public interface
 
 
 @overload
-def jit2(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]:
+def lazy_jit(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]:
     ...
 
 
 @overload
-def jit2(
+def lazy_jit(
     *,
     out_idx: Any = None,
     target: str | Target = "auto",
@@ -545,7 +544,7 @@ def jit2(
     ...
 
 
-def jit2(
+def lazy_jit(
     func: Callable[_P, _T] | PrimFunc | None = None,
     *,  # Indicates subsequent arguments are keyword-only
     target: str | Target = "auto",
@@ -571,16 +570,16 @@ def jit2(
         compile_flags=compile_flags)
 
     def decorator(func: Callable[_P, _T]):
-        pf: PrimFunc[_P, _T] | PrimFuncCreater[_P, _T] = prim_func(func, generator=None)
-        if isinstance(pf, PrimFunc):
-            compile_args.pop('debug_root_path', None)
-            return compile(pf, **compile_args)
-        else:
-            return JITImpl(
-                func=pf,
-                **compile_args,
-                func_source=inspect.getsource(pf.orig_func),
-                signature=inspect.signature(pf.orig_func),
-                call_through=True)
+        pf: PrimFunc[_P, _T] | PrimFuncCreater[_P, _T] = prim_func(func, generator=True)
+        # if isinstance(pf, PrimFunc):
+        #     compile_args.pop('debug_root_path', None)
+        #     return compile(pf, **compile_args)
+        # else:
+        return JITImpl(
+            func=pf,
+            **compile_args,
+            func_source=inspect.getsource(pf.orig_func),
+            signature=inspect.signature(pf.orig_func),
+            lazy_jit=True)
 
     return decorator(func) if func is not None else decorator

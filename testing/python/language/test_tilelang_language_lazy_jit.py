@@ -38,7 +38,7 @@ def _gemm_impl():
 
 def test_jit2_gemm_annot():
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def gemm(
         A: T.Tensor[[int, int], Any],
         B: T.Tensor[[int, int], Any],
@@ -72,7 +72,7 @@ def test_jit2_gemm_annot():
 
 def test_jit2_gemm_ptr():
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def gemm_ptr(
         A: T.ptr,
         B: T.ptr,
@@ -216,42 +216,42 @@ def test_jit2_many_annot():
             T.copy(A[bx * 128:bx * 128 + 128, by * 128:by * 128 + 128], B[bx * 128:bx * 128 + 128,
                                                                           by * 128:by * 128 + 128])
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy1(
         A: T.Tensor[[int, int], T.float32],
         B: T.Tensor[[int, int], T.float32],
     ):
         copy_impl(A, B)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy2(
         A: T.Tensor[[128, 128], T.float32],
         B: T.Tensor[[128, 128], T.float32],
     ):
         copy_impl(A, B)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy3(
         A: T.Tensor[[int, 128], T.float32],
         B: T.Tensor[[int, 128], T.float32],
     ):
         copy_impl(A, B)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy4(
         A: T.Tensor[[T.dyn, int], T.float32],
         B: T.Tensor[[T.dyn, int], T.float32],
     ):
         copy_impl(A, B)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy5(
         A: T.StridedTensor[[int, int], [int, int], T.float32],
         B: T.StridedTensor[[int, int], [int, int], T.float32],
     ):
         copy_impl(A, B)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy6(
         A: T.StridedTensor[[T.dyn, int], [int, int], T.float32],
         B: T.StridedTensor[[T.dyn, int], [int, int], T.float32],
@@ -287,31 +287,31 @@ def test_jit2_return():
                                                                           by * 128:by * 128 + 128])
         return B
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy0(A: T.Tensor[[int, int], Any]):
         return copy_impl(A)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy1(A: T.Tensor[[int, int], T.float32],):
         return copy_impl(A)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy2(A: T.Tensor[[128, 128], T.float32],):
         return copy_impl(A)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy3(A: T.Tensor[[int, 128], T.float32],):
         return copy_impl(A)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy4(A: T.Tensor[[T.dyn, int], T.float32],):
         return copy_impl(A)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy5(A: T.StridedTensor[[int, int], [int, int], T.float32],):
         return copy_impl(A)
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def copy6(A: T.StridedTensor[[T.dyn, int], [int, int], T.float32],):
         return copy_impl(A)
 
@@ -327,7 +327,7 @@ def test_jit2_return():
 
 def test_jit2_deepseek_deepgemm():
 
-    @tilelang.jit2
+    @tilelang.lazy_jit
     def deep_gemm(
         A: T.Tensor[[int, int], T.float8_e4m3],
         B: T.Tensor[[int, int], T.float8_e4m3],

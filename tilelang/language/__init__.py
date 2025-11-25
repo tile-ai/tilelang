@@ -22,7 +22,6 @@ from .v2.annot import (
     SharedBuffer,  # noqa: F401
     LocalBuffer,  # noqa: F401
     dyn,  # noqa: F401
-    Ref,  # noqa: F401
 )
 # from .proxy import (
 #     ptr,  # noqa: F401

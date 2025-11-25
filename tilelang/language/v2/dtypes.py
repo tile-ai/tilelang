@@ -140,6 +140,7 @@ def __dtype_new__(cls, value: AnyDType) -> dtype:
         expected = set(list(_DTYPE_TO_STR.keys()) + list(_DTYPE_TO_STR.values()))
         raise TypeError(f"Invalid DataType {value}({type(value)}), expect one of {expected}")
 
+
 dtype.__call__ = __dtype_call__
 dtype.__new__ = __dtype_new__
 

@@ -6,12 +6,14 @@ import inspect
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm_ffi.container import Map
 from tvm.ir.base import Span
+from tvm.ir.expr import Range
+from tvm.tir.stmt import BufferRegion
 from .ast import BaseBuilder, IRGenerator, eval_op, mutate
 from .utils import construct_strides
 import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
-from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
+from tvm.tir.expr import BufferLoad, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
 from collections.abc import Sequence
 from .annot import FuncAnnot, ArgVarTable, Annot
@@ -35,7 +37,9 @@ def unwrap_expr(expr) -> PrimExpr | int | float:
     '''
     if isinstance(expr, tir.meta_var):
         expr = expr.value
-    elif isinstance(expr, Buffer) and expr.scope() == 'local.var':
+    elif isinstance(expr, Ref):
+        return expr.load()
+    elif is_var(expr):
         expr = tir.BufferLoad(expr, indices=[0])
     elif isinstance(expr, (EqualOp, NotEqualOp)):
         expr = expr.asobject()
@@ -126,6 +130,21 @@ class OutTensor:
         return construct_strides(tuple(self.shape))
 
 
+@dataclass
+class Ref:
+    bufload: BufferLoad
+
+    @property
+    def buffer(self):
+        return self.bufload.buffer
+
+    def store(self, value):
+        tir.buffer_store(self.bufload.buffer, value, self.bufload.indices)
+
+    def load(self):
+        return self.bufload
+
+
 # Python 3.9 compatibility: avoid PEP 604 unions at runtime
 # Use tuple for isinstance checks and typing.Union for annotations/aliases
 ContinueOrBreak = (ContinueFrame, BreakFrame)
@@ -154,11 +173,15 @@ def is_var(v: Any) -> bool:
 
 class Builder(BaseBuilder):
 
-    def __init__(self):
+    def __init__(self, func_annot: FuncAnnot):
         self.frames: list[AnyFrame] = []
         self.ir_builder = IRBuilder()
         self.name_inside_frame: dict[str, AnyFrame] = {}
-        self.arg_annotations = {}
+        self.macro_arg_annot = {}
+        self.func_annot = func_annot
+        self.out_idx = []
+        self.out_tensor_cnt = 0
+        self.arg_vt = ArgVarTable()
 
     @classmethod
     def current(cls) -> Self:
@@ -181,9 +204,9 @@ class Builder(BaseBuilder):
             raise RuntimeError(
                 f"Macro `{name}` is used inside boolean expressions, "
                 "please use `if` to replace `M and M`, `M or M`, `M if xxx else M` constructs")
-        save = self.name_inside_frame, self.arg_annotations
+        save = self.name_inside_frame, self.macro_arg_annot
         self.name_inside_frame = {}
-        self.arg_annotations = annotations or {}
+        self.macro_arg_annot = annotations or {}
         pos = len(self.frames)
         # here we add a ExitedMacroFrame to preserve the frame stack inside macro
         # because macro may bind some variable, and return it
@@ -200,7 +223,7 @@ class Builder(BaseBuilder):
         self.frames.append(MacroFrame())
         yield
         self.frames[pos] = ExitedMacroFrame()
-        self.name_inside_frame, self.arg_annotations = save
+        self.name_inside_frame, self.macro_arg_annot = save
 
     def get(self):
         return self.ir_builder.get()
@@ -284,7 +307,8 @@ class Builder(BaseBuilder):
         elif isinstance(val, (Buffer, Var)):
             pass
         else:
-            raise RuntimeError(f"Tilelang doesn't know how to manipulate value: {val}({type(val)})")
+            logger.warning(
+                f"Unused return value: {val}({type(val)})", stack_info=True, stacklevel=2)
 
     def ctx_for(self, it):
         self.check_continue_break()
@@ -362,6 +386,9 @@ class Builder(BaseBuilder):
         #   c = tl.alloc_var('float32')  # bind var `c`
         #   c = a                        # get and assign `c[0] = a_1[0]`
         #   ```
+        if isinstance(orig_value, Ref) and isinstance(value, (int, float, PrimExpr)):
+            orig_value.store(value)
+            return orig_value
         if is_var(orig_value) and isinstance(value, (int, float, PrimExpr)):
             tir.buffer_store(orig_value, value, 0)
             return orig_value
@@ -455,7 +482,10 @@ class Builder(BaseBuilder):
 
     def aug_assign(self, op, target, aug_value):
         self.check_continue_break()
-        if is_var(target):
+        if isinstance(target, Ref):
+            target.store(eval_op(op, target.bufload, aug_value))
+            return target
+        elif is_var(target):
             tir.buffer_store(target, eval_op(op, target[0], aug_value), 0)
             return target
         elif isinstance(target, Buffer):
@@ -490,10 +520,12 @@ class Builder(BaseBuilder):
         else:
             return super().ifexp(cond, then, otherwise)
 
-    def ret(self, value):
+    def ret(self, value=None):
         self.check_continue_break()
         # handle return T.alloc_var()
-        if isinstance(value, tuple):
+        if value is None:
+            value = tuple()
+        elif isinstance(value, tuple):
             value = tuple(self.unwrap_value(v) for v in value)
         else:
             value = self.unwrap_value(value)
@@ -557,30 +589,41 @@ class Builder(BaseBuilder):
         return self.unwrap_value(value)
 
     def macro_arg(self, name, value):
-        from tilelang.language.proxy import Ref
-        annot_value = self.arg_annotations.get(name, None)
+        annot_value = self.macro_arg_annot.get(name, None)
         if annot_value is Var or annot_value is Ref:
             if annot_value is Var:
                 logger.warning('Use `T.Var` as macro annotations is deprecated, please use `T.Ref`')
-            is_var = isinstance(value, tvm.tir.BufferLoad) and value.buffer.scope() == 'local.var'
-            if not is_var:
-                raise ValueError(
-                    f'Argument `{name}` is expected to be a variable allocated by `T.alloc_var`, but got {value}({type(value)})'
-                )
-            return value.buffer
+            if isinstance(value, BufferLoad):
+                if is_var(value.buffer):
+                    return value.buffer
+                idx = [self.bind('_', idx) for idx in value.indices]
+                # indices = self.bind(f'_', value.indices)
+                return Ref(BufferLoad(value.buffer, indices=idx))
+            if isinstance(value, BufferRegion):
+                region = [
+                    Range(
+                        self.bind('_', x.begin),
+                        end=self.bind('_', x.end) if x.end is not None else None)
+                    for x in value.region
+                ]
+                return BufferRegion(value.buffer, region=region)
+            raise ValueError(
+                f'To pass as reference, argument `{name}` is expected to be a variable or a buffer region, but got {value}({type(value)})'
+            )
         elif isinstance(value, (PrimExpr, int, float)):
             return self.bind(name, value)
         else:
             return value
 
     def prim_func_arg(self, name, value):
-        if isinstance(value, (Buffer, Var)):
-            return tir.arg(name, value)
-        elif value is self.empty:
-            raise ValueError(f'Argument `{name}` is not annotated')
-        else:
-            raise TypeError(
-                f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
+        return self.func_annot.create_argument(name, value, self.arg_vt)
+        # if isinstance(value, (Buffer, Var)):
+        #     return tir.arg(name, value)
+        # elif value is self.empty:
+        #     raise ValueError(f'Argument `{name}` is not annotated')
+        # else:
+        #     raise TypeError(
+        #         f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
 
     def arg(self, name, value):
         if self.find_frame_idx(MacroFrame) is not None:
@@ -665,6 +708,12 @@ class Macro(Generic[_P, _T]):
         with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res
+
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return id(self) == id(other)
 
 
 def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:

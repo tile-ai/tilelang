@@ -91,7 +91,7 @@ def construct_strides(shape: tuple[Any, ...], allow_prim_expr: bool = True) -> t
     """Construct row-major strides from shape."""
     strides = []
     stride = 1
-    for s in shape:
+    for s in shape[::-1]:
         strides.append(stride)
         stride *= s
         if not allow_prim_expr and isinstance(stride, tir.PrimExpr):

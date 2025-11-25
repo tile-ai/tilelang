@@ -21,6 +21,7 @@ from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
 from tvm.tir.buffer import Buffer
 from tvm.tir.expr import FloatImm, IntImm
+from .v2.dtypes import dtype as tl_dtype
 from .v2.builder import OutTensor
 from .v2.annot import Tensor, SharedBuffer, LocalBuffer, FragmentBuffer
 
@@ -267,7 +268,19 @@ def alloc_tcgen05_instr_desc(dtype: str = "uint32"):
     return alloc_tcgen05_instruction_desc(dtype)
 
 
+@overload
+def empty(shape: tuple[Unpack[_Shapes]],
+          dtype: str = 'float32') -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
+    ...
+
+
 def empty(*shape: Unpack[_Shapes],
           dtype: str = 'float32') -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
-    """Create an empty tensor as output."""
-    return OutTensor(shape, dtype)
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+        return OutTensor(shape[0], dtype)
+    elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):
+        return OutTensor(shape[0], shape[1])
+    elif all([isinstance(x, (int, PrimExpr)) for x in shape]):
+        return OutTensor(shape, dtype)
+    else:
+        raise RuntimeError(f'Invalid shape {shape}')
