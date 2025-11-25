@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include "ldst.h"
 
 #define IS_MASTER_THREAD()                                                     \
   (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0)
@@ -55,7 +56,7 @@ TL_DEVICE int atomic_load_acquire_sys_s32(const int *ptr) {
   return ret;
 }
 
-TL_DEVICE int ld_volatile_global_s32(const int *ptr) {
+TL_DEVICE int ld_volatile_global(const int *ptr) {
   int ret;
   asm volatile("ld.volatile.global.s32 %0, [%1];\n" : "=r"(ret) : "l"(ptr));
   return ret;
@@ -172,7 +173,7 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 
   while (true) {
     int value =
-        tid < num_ranks ? ld_volatile_global_s32(BARRIER_PTR(rank) + tid) : 0;
+        tid < num_ranks ? ld_volatile_global(BARRIER_PTR(rank) + tid) : 0;
     if (__all_sync(0xffffffff, value <= 0)) {
       break;
     }
@@ -183,12 +184,20 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 #undef FINISHED_SUM_TAG
 }
 
-template <typename T> TL_DEVICE void wait_eq(void *barrier, T val = 1) {
+template <typename T> 
+TL_DEVICE void wait_eq(void *barrier, T val = 1) {
   T *flag_ptr = reinterpret_cast<T *>(barrier);
 // Spin-loop
 #pragma unroll 1
-  while (ld_acquire(flag_ptr) != val) {
-  }
+  while (ld_acquire(flag_ptr) != val);
+}
+
+template <typename T> 
+TL_DEVICE void wait_ne(void *barrier, T val = 0) {
+  T *flag_ptr = reinterpret_cast<T *>(barrier);
+// Spin-loop
+#pragma unroll 1
+  while (ld_volatile_global_acquire(flag_ptr) == val);
 }
 
 } // namespace tl

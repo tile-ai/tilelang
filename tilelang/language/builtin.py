@@ -604,6 +604,11 @@ def wait_eq(barrier: PrimExpr, expected: PrimExpr):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_eq"), address_of(barrier), expected)
 
 
+def wait_ne(ptr: PrimExpr, expected: PrimExpr):
+    """Wait until *ptr != expected using ld_volatile_global()"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_ne"), address_of(ptr), expected)
+
+
 def sync_barrier_gpu(barrier: PrimExpr):
     """Synchronize at a barrier for GPU-level synchronization.
 
@@ -847,4 +852,4 @@ def warp_all(value, mask = -1):
     Returns:
         result (int): The result of the vote.
     """
-    return tir.call_intrin("int32", tir.op.Op.get("tl.warp_all"), value, mask)
+    return tir.call_intrin("int32", tir.op
