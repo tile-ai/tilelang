@@ -4,7 +4,6 @@ from functools import reduce
 from tvm import IRModule, DataType
 from tvm.tir import PrimFunc
 from tvm import ir, tir
-
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.
 
@@ -204,7 +203,11 @@ def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion,
       if scalar, fall back to 1-sized ranges at given indices
     """
     if isinstance(obj, tir.BufferRegion):
-        assert extents is None, "extents should be None for BufferRegion"
+        if extents is not None:
+            # check region shape and extents are the same
+            assert len(obj.region) == len(extents), "region shape and extents should have the same length"
+            for i in range(len(obj.region)):
+                assert prim_expr_equal(obj.region[i].extent, extents[i]), "region extent and extents should be the same"
         return obj
     if isinstance(obj, tir.Buffer):
         mins = [tir.IntImm("int32", 0) for _ in obj.shape]

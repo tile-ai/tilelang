@@ -12,4 +12,6 @@ def test_example_conv_analyze():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_example_gemm_analyze()
+

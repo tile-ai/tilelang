@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from tilelang import tvm
 from tvm.tir.stmt_functor import ir_transform
 import logging
+from tilelang.utils.language import to_buffer_region
 # Configuration for different hardware architectures.
 # Each entry contains: (cores per SM, default clock (GHz), FLOPs per cycle, max SM count)
 ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128, 2.52, 2, 128)}
@@ -60,22 +61,22 @@ class Analyzer:
         Args:
             call: A TVM Call node representing the copy operation.
         """
-        src_buffer = call.args[0].args[0].buffer
-        dst_buffer = call.args[1].args[0].buffer
+        src_buffer = call.args[0].buffer
+        dst_buffer = call.args[1].buffer
 
         # Determine if the source or destination is a global buffer
         if src_buffer in self.global_buffers:
-            buffer_region = call.args[0]
+            buffer_region = to_buffer_region(call.args[0])
         elif dst_buffer in self.global_buffers:
-            buffer_region = call.args[1]
+            buffer_region = to_buffer_region(call.args[1])
         else:
             return
 
         # Calculate the number of elements being copied
         elements = 1
-        for r in range(2, len(buffer_region.args)):
-            elements *= buffer_region.args[r]
-        dtype_size = np.dtype(buffer_region.args[0].buffer.dtype).itemsize  # Size of the data type
+        for r in range(2, len(buffer_region.region)):
+            elements *= buffer_region.region[r].extent
+        dtype_size = np.dtype(buffer_region.buffer.dtype).itemsize  # Size of the data type
         bytes_transferred = elements * dtype_size  # Total bytes transferred
 
         # Account for loop and block dimensions

@@ -182,13 +182,7 @@ TileOperator CopyNode::Clone() const {
 Array<IterVar> CopyNode::MakeIterVars() const {
   Array<IterVar> loop_vars;
   size_t idx = 0;
-  LOG(INFO) << "src_range = " << src_range;
-  LOG(INFO) << "src_range.size() = " << src_range.size();
   for (size_t i = 0; i < src_range.size(); i++) {
-    LOG(INFO) << "src_range[" << i << "] = " << src_range[i];
-    LOG(INFO) << "src_range[" << i << "]->extent = " << src_range[i]->extent;
-    LOG(INFO) << "src_range[" << i
-              << "]->extent->dtype = " << src_range[i]->extent->dtype;
     if (is_one(src_range[i]->extent))
       continue;
     Var var = Var(std::string{char('i' + idx)}, src_range[i]->extent->dtype);
@@ -315,9 +309,7 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
       << "loop_vars.size() = " << loop_vars.size()
       << ", dst_range.size() = " << dst_range.size() << ", src = " << src->name
       << ", dst = " << dst->name;
-  LOG(INFO) << "loop_vars = " << loop_vars;
-  LOG(INFO) << "src_range = " << src_range;
-  LOG(INFO) << "dst_range = " << dst_range;
+
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
