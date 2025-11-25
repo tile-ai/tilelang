@@ -72,11 +72,10 @@ public:
 
 Var GetVarFromAccessPtr(const PrimExpr &expr);
 
-TileOperator ParseOperator(Call call, BufferMap vmap);
-TileOperator ParseOperator(Stmt stmt, BufferMap vmap);
+TileOperator ParseOperator(Call call);
+TileOperator ParseOperator(Stmt stmt);
 
-using OpBuilderFunc =
-    ffi::TypedFunction<TileOperator(Array<PrimExpr>, BufferMap)>;
+using OpBuilderFunc = ffi::TypedFunction<TileOperator(Array<PrimExpr>)>;
 
 #define TIR_REGISTER_TL_OP(Entry, OpName)                                      \
   const Op &Entry::Get() {                                                     \
@@ -85,10 +84,8 @@ using OpBuilderFunc =
   }                                                                            \
   TVM_REGISTER_OP("tl." #OpName)                                               \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)             \
-      .set_attr<OpBuilderFunc>("TLOpBuilder",                                  \
-                               [](Array<PrimExpr> args, BufferMap vmap) {      \
-                                 return Entry(args, vmap);                     \
-                               })
+      .set_attr<OpBuilderFunc>(                                                \
+          "TLOpBuilder", [](Array<PrimExpr> args) { return Entry(args); })
 
 } // namespace tl
 } // namespace tvm

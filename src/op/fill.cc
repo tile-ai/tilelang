@@ -17,7 +17,7 @@
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "builtin.h"
-#include "region.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
@@ -60,32 +60,16 @@ using namespace tir;
  * lanes) and will terminate (via CHECK/ICHECK) if inputs are unsupported or out
  * of bounds.
  */
-Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
+Fill::Fill(Array<PrimExpr> args) {
   ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
 
-  // Case 1: Region descriptor call (tl.region)
-  if (const auto *call = args[0].as<CallNode>()) {
-    if (call->op.same_as(RegionOp::Get())) {
-      auto region = RegionOp(call->args, vmap);
-      node->dst = region->GetBuffer();
-      node->region = region->GetRanges();
-    } else if (call->op.same_as(builtin::tvm_access_ptr())) {
-      node->dst = vmap[GetVarFromAccessPtr(args[0])];
-      for (int i = 0; i < node->dst->shape.size(); i++) {
-        node->region.push_back(Range(0, node->dst->shape[i]));
-      }
-    } else {
-      ICHECK(false) << "Unsupported call op in tl.fill: "
-                    << Downcast<Op>(call->op)->name;
-    }
-
-    // Case 2: Explicit BufferRegion (legacy path)
-  } else if (args[0]->IsInstance<BufferRegionNode>()) {
+  // Case 1: Explicit BufferRegion (legacy path)
+  if (args[0]->IsInstance<BufferRegionNode>()) {
     auto region = Downcast<BufferRegion>(args[0]);
     node->dst = region->buffer;
     node->region = region->region;
 
-    // Case 3: Vector/scalar region expressed via BufferLoad indices
+    // Case 2: Vector/scalar region expressed via BufferLoad indices
   } else if (args[0]->IsInstance<BufferLoadNode>()) {
     auto buffer_load = Downcast<BufferLoad>(args[0]);
     for (const auto &index : buffer_load->indices) {
@@ -101,12 +85,10 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
       }
     }
     node->dst = buffer_load->buffer;
-    // Case 4: Access pointer, fill the full buffer
+    // Case 3: Unsupported
   } else {
-    node->dst = vmap[GetVarFromAccessPtr(args[0])];
-    for (int i = 0; i < node->dst->shape.size(); i++) {
-      node->region.push_back(Range(0, node->dst->shape[i]));
-    }
+    ICHECK(false) << "Unsupported destination argument for tl.fill; expect"
+                  << " BufferLoad/BufferRegion";
   }
 
   if (args[1]->dtype != node->dst->dtype) {

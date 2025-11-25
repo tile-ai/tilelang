@@ -14,7 +14,6 @@
 #include "../layout/layout.h"
 #include "../op/fill.h"
 #include "../op/finalize_reducer.h"
-#include "../op/region.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "layout_reducer.h"
 
@@ -277,23 +276,8 @@ private:
     if (op->op.same_as(Fill::Get())) {
       ICHECK(!op->args.empty());
       if (auto arg0_call = op->args[0].as<Call>()) {
-        // Case 1: tl.region(...) — extract buffer var from its first arg
-        if (arg0_call.value()->op.same_as(RegionOp::Get())) {
-          ICHECK(!arg0_call.value()->args.empty());
-          if (auto bl = arg0_call.value()->args[0].as<BufferLoadNode>()) {
-            Var var = bl->buffer->data;
-            if (reducer_info_map_.count(var)) {
-              ICHECK(inside_reducer_range_.count(var) == 0)
-                  << "T.fill on reducer must be enclosed with a "
-                     "T.finalize_reducer "
-                     "before next.";
-              inside_reducer_range_.Set(var,
-                                        reducer_info_map_.Get(var).value());
-            }
-          }
-        }
-        // Case 2: builtin.tvm_access_ptr(...) — existing path
-        else if (arg0_call.value()->op.same_as(builtin::tvm_access_ptr())) {
+        // builtin.tvm_access_ptr(...) — existing path (legacy)
+        if (arg0_call.value()->op.same_as(builtin::tvm_access_ptr())) {
           ICHECK(arg0_call.value()->args.size() > 1);
           if (auto var = arg0_call.value()->args[1].as<Var>();
               var && reducer_info_map_.count(var.value())) {
@@ -305,10 +289,23 @@ private:
                 var.value(), reducer_info_map_.Get(var.value()).value());
           }
         }
+      } else if (auto bl = op->args[0].as<BufferLoadNode>()) {
+        Var var = bl->buffer->data;
+        if (reducer_info_map_.count(var)) {
+          ICHECK(inside_reducer_range_.count(var) == 0)
+              << "T.fill on reducer must be enclosed with a T.finalize_reducer "
+                 "before next.";
+          inside_reducer_range_.Set(var, reducer_info_map_.Get(var).value());
+        }
       }
     } else if (op->op.same_as(FinalizeReducerOp::Get())) {
       ICHECK(op->args.size() == 1);
-      auto var = GetVarFromAccessPtr(op->args[0]);
+      Var var;
+      if (auto bl = op->args[0].as<BufferLoadNode>()) {
+        var = bl->buffer->data;
+      } else {
+        var = GetVarFromAccessPtr(op->args[0]);
+      }
       ICHECK(inside_reducer_range_.count(var) == 1)
           << "T.finalize_reducer must have a pairing T.fill ahead of it, "
              "enclosing a reduction range.";

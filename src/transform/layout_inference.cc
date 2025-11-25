@@ -18,7 +18,6 @@
 #include "../layout/utils.h"
 #include "../op/copy.h"
 #include "../op/parallel.h"
-#include "../op/region.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -437,7 +436,7 @@ private:
     if (op->op.as<GlobalVarNode>())
       return;
 
-    auto p = ParseOperator(tvm::ffi::GetRef<Call>(op), GetBufferMap());
+    auto p = ParseOperator(tvm::ffi::GetRef<Call>(op));
     if (p.defined()) {
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
@@ -495,6 +494,9 @@ private:
   }
 
   Optional<Buffer> getBufferFromAccessPtr(const PrimExpr &expr) {
+    if (auto bl = expr.as<BufferLoadNode>()) {
+      return bl->buffer;
+    }
     auto call = expr.as<CallNode>();
     if (!call) {
       return std::nullopt;
@@ -514,8 +516,6 @@ private:
         }
       }
       return std::nullopt;
-    } else if (call->op.same_as(RegionOp::Get())) {
-      return call->args[0].as<BufferLoadNode>()->buffer;
     }
     return std::nullopt;
   }

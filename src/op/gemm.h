@@ -144,7 +144,7 @@ private:
 class Gemm : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Gemm, TileOperator, GemmNode);
-  TVM_DLL Gemm(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL Gemm(Array<PrimExpr> args);
   static const Op &Get();
 };
 

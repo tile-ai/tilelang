@@ -14,6 +14,7 @@
 #include "../target/utils.h"
 #include "builtin.h"
 #include "gemm.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
@@ -83,12 +84,12 @@ std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
  *
  * @note An ICHECK failure is raised if a provided kPack is not 1 or 2.
  */
-GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
+GemmSP::GemmSP(Array<PrimExpr> args) {
   ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
-  node->a_ = vmap[GetVarFromAccessPtr(args[0])];
-  node->e_ = vmap[GetVarFromAccessPtr(args[1])];
-  node->b_ = vmap[GetVarFromAccessPtr(args[2])];
-  node->c_ = vmap[GetVarFromAccessPtr(args[3])];
+  node->a_ = NormalizeToBufferRegion(args[0])->buffer;
+  node->e_ = NormalizeToBufferRegion(args[1])->buffer;
+  node->b_ = NormalizeToBufferRegion(args[2])->buffer;
+  node->c_ = NormalizeToBufferRegion(args[3])->buffer;
   node->transA_ = args[4].as<Bool>().value();
   node->transB_ = args[5].as<Bool>().value();
   node->m_ = args[6].as<IntImm>().value()->value;

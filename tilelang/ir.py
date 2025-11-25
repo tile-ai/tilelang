@@ -69,11 +69,6 @@ class CumSumOp(Node, Scriptable):
     ...
 
 
-@tvm_ffi.register_object("tl.RegionOp")
-class RegionOp(Node, Scriptable):
-    ...
-
-
 @tvm_ffi.register_object("tl.ReduceType")
 class ReduceType(Node, Scriptable):
     ...

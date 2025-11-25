@@ -159,7 +159,8 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
     return func
 
 
-def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> tir.BufferRegion | None:
+def get_buffer_region_from_load(buffer_load: tir.BufferLoad,
+                                extents: list[PrimExpr] | None = None) -> tir.BufferRegion | None:
     """
     Get the buffer region from a buffer load.
 
@@ -170,21 +171,30 @@ def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> tir.BufferRegion
     buffer, indices = buffer_load.buffer, buffer_load.indices
     regions = []
     found_ramp: bool = False
-    for indice in indices:
+
+    if extents is not None:
+        assert len(extents) == len(indices), "extents should have the same length as indices"
+    for i, indice in enumerate(indices):
         if isinstance(indice, tir.Ramp):
+            assert extents is None, "extents should be provided for BufferLoad with Ramp indices"
             regions.append(ir.Range.from_min_extent(indice.base, indice.lanes))
             found_ramp = True
         elif isinstance(indice, tir.PrimExpr):
-            regions.append(ir.Range.from_min_extent(indice, 1))
+            if extents is not None:
+                regions.append(ir.Range.from_min_extent(indice, extents[i]))
+                found_ramp = True
+            else:
+                regions.append(ir.Range.from_min_extent(indice, 1))
         else:
-            raise ValueError("Unsupported type: ", type(indice))
+            raise ValueError(f"Unsupported type: {type(indice)} for index {i}")
     if found_ramp:
         return tir.BufferRegion(buffer, regions)
     else:
         return None
 
 
-def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
+def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion,
+                     extents: list[PrimExpr] | None = None) -> BufferRegion:
     """
     Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
 
@@ -194,13 +204,16 @@ def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
       if scalar, fall back to 1-sized ranges at given indices
     """
     if isinstance(obj, tir.BufferRegion):
+        assert extents is None, "extents should be None for BufferRegion"
         return obj
     if isinstance(obj, tir.Buffer):
         mins = [tir.IntImm("int32", 0) for _ in obj.shape]
-        ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
+        if extents is None:
+            extents = obj.shape
+        ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, extents)]
         return tir.BufferRegion(obj, ranges)
     if isinstance(obj, tir.BufferLoad):
-        region = get_buffer_region_from_load(obj)
+        region = get_buffer_region_from_load(obj, extents)
         if region is not None:
             return region
         # Fallback: scalar load -> 1-sized ranges at indices

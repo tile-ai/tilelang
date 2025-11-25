@@ -1,97 +1,51 @@
 from tilelang import tvm as tvm
-from tvm import tir
-from tvm.tir import PrimExpr, Buffer, BufferLoad, op
-from tilelang import language as T
+from tvm import ir, tir
+from tvm.tir import PrimExpr, Buffer, BufferLoad
+from tilelang.utils.language import to_buffer_region
 
 
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
     """
-    Create a tile memory-region descriptor for a BufferLoad.
+    Construct a BufferRegion from a BufferLoad and extents.
 
-    Maps access_type ('r', 'w', 'rw') to the numeric codes expected by the `tl.region` intrinsic
-    (1, 2, 3 respectively) and returns a tir.Call representing the region with the provided extents.
-
-    Parameters:
-        buffer (tir.BufferLoad): The BufferLoad that identifies the underlying buffer and indices.
-        access_type (str): One of 'r', 'w', or 'rw' indicating read, write, or read-write access.
-        *args (tir.PrimExpr): Extent expressions for each region dimension.
-
-    Returns:
-        tir.Call: A call to the `tl.region` intrinsic describing the memory region.
-
-    Raises:
-        KeyError: If access_type is not one of 'r', 'w', or 'rw'.
+    Note: access_type is ignored in the new design; region carries no access mask.
     """
-    access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
-    return T.call_intrin("handle", op.Op.get("tl.region"), buffer, access_type, *args)
+    mins = list(buffer.indices)
+    extents = list(args)
+    assert len(mins) == len(extents), f"indices={mins}, extents={extents}"
+    ranges = [tir.Range.from_min_extent(m, e) for m, e in zip(mins, extents)]
+    return tir.BufferRegion(buffer.buffer, ranges)
 
 
 def buffer_to_tile_region(buffer: Buffer, access_type: str):
-    """Convert a TVM buffer to a tile region descriptor.
-
-    Args:
-        buffer (tir.Buffer): The buffer to convert
-        access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-
-    Returns:
-        tir.Call: A region descriptor covering the entire buffer
-    """
-    mins = [0 for _ in buffer.shape]
-    extents = [x for x in buffer.shape]
-    return region(T.BufferLoad(buffer, mins), access_type, *extents)
+    """Convert a TVM buffer to a full BufferRegion covering entire shape."""
+    return to_buffer_region(buffer)
 
 
 def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: list[PrimExpr]):
-    """Convert a buffer load operation to a tile region descriptor.
-
-    Args:
-        load (tir.BufferLoad): The buffer load operation
-        access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-        extents (List[tir.PrimExpr]): List of expressions defining the region size
-
-    Returns:
-        tir.Call: A region descriptor for the loaded area
-    """
-    indices = load.indices
-
+    """Convert a BufferLoad (+ extents) to a BufferRegion."""
+    indices = list(load.indices)
     if len(indices) > len(extents):
-        # (f"mismatch between indices and extents for buffer load {load}: indices = {indices}, extents = {extents}, "
-        # f"region will be expanded in the last 2 dimensions")
-        new_extents = []
-        for _ in range(len(indices) - len(extents)):
-            new_extents.append(1)
-        for extent in extents:
-            new_extents.append(extent)
-        extents = new_extents
+        extents = [1] * (len(indices) - len(extents)) + list(extents)
     assert len(indices) == len(extents), f"indices = {indices}, extents = {extents}"
-    return region(load, access_type, *extents)
+    ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(indices, extents)]
+    return tir.BufferRegion(load.buffer, ranges)
 
 
 def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str,
                                  extents: list[tir.PrimExpr]):
-    """Convert a buffer region to a tile region descriptor.
-
-    Args:
-        buffer_region (tir.BufferRegion): The buffer region to convert
-        access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-
-    Returns:
-        tir.Call: A region descriptor for the specified buffer region
-    """
-    mins = [x.min for x in buffer_region.region]
-    region_extents = [x.extent for x in buffer_region.region]
-    assert len(region_extents) >= len(
-        extents
-    ), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
-
-    # Clamp extents element-wise so that the produced region respects the
-    # requested copy/fill extent, supporting dynamic PrimExpr via tir.min.
+    """Clamp extents and return a BufferRegion."""
+    mins = [r.min for r in buffer_region.region]
+    region_extents = [r.extent for r in buffer_region.region]
+    assert len(region_extents) >= len(extents), (
+        f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
+    )
     clamped_extents = [
         tir.min(region_extents[i], extents[i]) if i < len(extents) else region_extents[i]
         for i in range(len(region_extents))
     ]
-
-    return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *clamped_extents)
+    ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, clamped_extents)]
+    return tir.BufferRegion(buffer_region.buffer, ranges)
 
 
 def index_to_coordinates(index, shape) -> list[PrimExpr]:

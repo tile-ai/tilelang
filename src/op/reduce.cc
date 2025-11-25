@@ -14,7 +14,6 @@
 #include "../op/parallel.h"
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
-#include "region.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/tir/stmt.h"
 #include "utils.h"
@@ -28,11 +27,11 @@ using namespace tir;
 
 // MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
 
-ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
+ReduceOp::ReduceOp(Array<PrimExpr> args) {
   ObjectPtr<ReduceOpNode> node = tvm::ffi::make_object<ReduceOpNode>();
-  // Accept BufferRegion/BufferLoad/tl.region for src/dst
-  node->srcRegion_ = NormalizeToBufferRegion(args[0], vmap);
-  node->dstRegion_ = NormalizeToBufferRegion(args[1], vmap);
+  // Accept BufferRegion/BufferLoad for src/dst
+  node->srcRegion_ = NormalizeToBufferRegion(args[0]);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1]);
   node->src = node->srcRegion_->buffer;
   node->dst = node->dstRegion_->buffer;
   std::string reduce_type = args[2].as<StringImm>().value()->value;
@@ -494,7 +493,7 @@ static BufferRegion ConvertBufferToBufferRegion(const Buffer &buf) {
   return BufferRegion(buf, ranges);
 }
 
-CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
+CumSumOp::CumSumOp(Array<PrimExpr> args) {
   /// CumSum constructor arguments:
   /// - src: input buffer
   /// - dst: output buffer
@@ -504,8 +503,8 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<CumSumOpNode> node = tvm::ffi::make_object<CumSumOpNode>();
   // node->src = vmap[GetVarFromAccessPtr(args[0])];
   // node->dst = vmap[GetVarFromAccessPtr(args[1])];
-  node->srcRegion_ = NormalizeToBufferRegion(args[0], vmap);
-  node->dstRegion_ = NormalizeToBufferRegion(args[1], vmap);
+  node->srcRegion_ = NormalizeToBufferRegion(args[0]);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1]);
   node->src = node->srcRegion_->buffer;
   node->dst = node->dstRegion_->buffer;
   node->dim = args[2].as<IntImm>().value()->value;

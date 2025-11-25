@@ -96,7 +96,7 @@ private:
 class GemmSP : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSP, TileOperator, GemmSPNode);
-  TVM_DLL GemmSP(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL GemmSP(Array<PrimExpr> args);
   static const Op &Get();
 };
 

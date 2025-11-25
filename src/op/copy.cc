@@ -16,7 +16,7 @@
 #include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
-#include "region.h"
+#include "utils.h"
 
 #include "../target/cuda.h"
 #include "../target/utils.h"
@@ -110,36 +110,33 @@ template <typename T> static Array<T> ReverseArray(Array<T> array) {
 /*!
  * \brief Construct a Copy operator node from call arguments and a buffer map.
  *
- * This constructor parses the first two entries of `args` as Call nodes
- * describing source and destination Regions (via RegionOp), extracts their
- * Buffers and Ranges, and stores them on the newly created CopyNode. It also
+ * This constructor parses the first two entries of `args` as regions
+ * (BufferLoad/BufferRegion), extracts their Buffers and Ranges, and stores
+ * them on the newly created CopyNode. It also
  * reads optional arguments:
  * - args[2] (IntImm): coalesced width (stored only if > 0),
  * - args[3] (Bool): disable TMA lowering flag,
  * - args[4] (IntImm): eviction policy.
  *
  * Preconditions:
- * - `args` must contain at least two Call-compatible PrimExpr entries
- * describing regions; an ICHECK will fail if they are not CallNodes.
+ * - `args` must contain at least two region-compatible PrimExpr entries
+ *   (BufferLoad/BufferRegion); ICHECK will fail otherwise.
  *
  * @param args Array of PrimExpr where:
  *   - args[0] is the source Region call,
  *   - args[1] is the destination Region call,
  *   - optional args[2..4] are coalesced width, disable_tma, and eviction
  * policy.
- * @param vmap BufferMap used to resolve RegionOp buffers and ranges.
+ * @param vmap Unused; kept for compatibility.
  */
-Copy::Copy(Array<PrimExpr> args, BufferMap vmap) {
+Copy::Copy(Array<PrimExpr> args) {
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
   for (int i = 0; i < 2; i++) {
-    auto expr = args[i];
-    auto call = expr.as<CallNode>();
-    ICHECK(call);
-    auto region = RegionOp(call->args, vmap);
-    rgs[i] = region->GetRanges();
-    bf[i] = region->GetBuffer();
+    auto region = NormalizeToBufferRegion(args[i]);
+    rgs[i] = region->region;
+    bf[i] = region->buffer;
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
@@ -185,7 +182,13 @@ TileOperator CopyNode::Clone() const {
 Array<IterVar> CopyNode::MakeIterVars() const {
   Array<IterVar> loop_vars;
   size_t idx = 0;
+  LOG(INFO) << "src_range = " << src_range;
+  LOG(INFO) << "src_range.size() = " << src_range.size();
   for (size_t i = 0; i < src_range.size(); i++) {
+    LOG(INFO) << "src_range[" << i << "] = " << src_range[i];
+    LOG(INFO) << "src_range[" << i << "]->extent = " << src_range[i]->extent;
+    LOG(INFO) << "src_range[" << i
+              << "]->extent->dtype = " << src_range[i]->extent->dtype;
     if (is_one(src_range[i]->extent))
       continue;
     Var var = Var(std::string{char('i' + idx)}, src_range[i]->extent->dtype);
@@ -312,7 +315,9 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
       << "loop_vars.size() = " << loop_vars.size()
       << ", dst_range.size() = " << dst_range.size() << ", src = " << src->name
       << ", dst = " << dst->name;
-
+  LOG(INFO) << "loop_vars = " << loop_vars;
+  LOG(INFO) << "src_range = " << src_range;
+  LOG(INFO) << "dst_range = " << dst_range;
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
@@ -1726,11 +1731,11 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
  * @param args Array of PrimExpr TL-call arguments (see list above).
  * @param vmap Mapping from original buffer variables to actual Buffer objects.
  */
-Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
+Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args) {
   ObjectPtr<Conv2DIm2ColOpNode> node =
       tvm::ffi::make_object<Conv2DIm2ColOpNode>();
-  node->src = vmap[GetVarFromAccessPtr(args[0])];
-  node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  node->src = NormalizeToBufferRegion(args[0])->buffer;
+  node->dst = NormalizeToBufferRegion(args[1])->buffer;
   node->nhw_step = args[2];
   node->c_step = args[3];
   node->kernel = args[4].as<IntImm>().value()->value;

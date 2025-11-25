@@ -12,7 +12,6 @@
 #include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
-#include "region.h"
 #include "tcgen5_meta.h"
 #include "utils.h"
 
@@ -53,12 +52,12 @@ using namespace tir;
  *       fails with an ICHECK (runtime assertion). No other validation is
  *       performed here.
  */
-GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
+GemmPy::GemmPy(Array<PrimExpr> args) {
   ObjectPtr<GemmPyNode> node = tvm::ffi::make_object<GemmPyNode>();
 
-  node->aRegion_ = NormalizeToBufferRegion(args[0], vmap);
-  node->bRegion_ = NormalizeToBufferRegion(args[1], vmap);
-  node->cRegion_ = NormalizeToBufferRegion(args[2], vmap);
+  node->aRegion_ = NormalizeToBufferRegion(args[0]);
+  node->bRegion_ = NormalizeToBufferRegion(args[1]);
+  node->cRegion_ = NormalizeToBufferRegion(args[2]);
 
   node->a_ = node->aRegion_->buffer;
   node->b_ = node->bRegion_->buffer;
@@ -84,8 +83,8 @@ GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
     node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
   node->mbarPtr_ = args[16];
-  if (node->mbarPtr_.as<CallNode>()) {
-    node->mbar_ = vmap[GetVarFromAccessPtr(node->mbarPtr_)];
+  if (const auto *load = node->mbarPtr_.as<BufferLoadNode>()) {
+    node->mbar_ = load->buffer;
   } else {
     node->mbar_ = std::nullopt;
   }

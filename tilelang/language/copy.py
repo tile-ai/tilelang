@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import Literal
 from tilelang import language as T
 from tilelang.utils.language import (
+    to_buffer_region,
     get_buffer_region_from_load,
     legalize_pairwise_extents,
 )
 from tvm import ir, tir
-from tilelang.language.utils import buffer_region_to_tile_region, buffer_load_to_tile_region
 
 
 def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
@@ -69,27 +69,9 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
     # - otherwise -> error
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
-    def _to_region(data, access_type, extent):
-        if isinstance(data, tir.Var) and T.has_let_value(data):
-            data = T.get_let_value(data)
-        if isinstance(data, tir.Buffer):
-            # Restrict a raw buffer to the computed copy extent by creating
-            # a BufferLoad at origin and passing the extents explicitly.
-            zeros = [tir.IntImm("int32", 0) for _ in extent]
-            return buffer_load_to_tile_region(tir.BufferLoad(data, zeros), access_type, extent)
-        elif isinstance(data, tir.BufferRegion):
-            return buffer_region_to_tile_region(data, access_type, extent)
-        elif isinstance(data, tir.BufferLoad):
-            region = get_buffer_region_from_load(data)
-            if region is None:
-                return buffer_load_to_tile_region(data, access_type, extent)
-            return buffer_region_to_tile_region(region, access_type, extent)
-        else:
-            return buffer_load_to_tile_region(data, access_type, extent)
-
     # Use legalized extents for src and dst respectively.
-    src = _to_region(src, "r", src_extent)
-    dst = _to_region(dst, "w", dst_extent)
+    src = to_buffer_region(src, src_extent)
+    dst = to_buffer_region(dst, dst_extent)
 
     if coalesced_width is None:
         coalesced_width = -1  # PrimExpr can not be None

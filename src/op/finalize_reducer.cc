@@ -12,6 +12,7 @@
 #include <tvm/tir/op_attr_types.h>
 
 #include "../target/utils.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
@@ -32,9 +33,15 @@ using namespace tir;
  * @param vmap Mapping from variables to Buffers used to look up the reducer
  * Buffer.
  */
-FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args, BufferMap vmap) {
+FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args) {
   auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
-  node->reducer = vmap[GetVarFromAccessPtr(args[0])];
+  // Accept BufferLoad to identify the reducer buffer
+  if (const auto *load = args[0].as<BufferLoadNode>()) {
+    node->reducer = load->buffer;
+  } else {
+    ICHECK(false)
+        << "Unsupported argument to finalize_reducer; expect BufferLoad.";
+  }
   node->op = (ReducerOpType)*as_const_int(args[1]);
   data_ = std::move(node);
 }
