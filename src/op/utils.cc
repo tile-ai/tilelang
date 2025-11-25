@@ -19,7 +19,8 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
     return Downcast<BufferRegion>(arg);
   }
 
-  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else extent=1)
+  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
+  // extent=1)
   if (const auto *load = arg.as<BufferLoadNode>()) {
     Array<Range> ranges;
     for (const PrimExpr &index : load->indices) {
@@ -89,7 +90,8 @@ PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
       offset = offset + region->region[i]->min * strides[i];
     }
     // Extent: last two extents product (elements)
-    extent = region->region[ndim - 2]->extent * region->region[ndim - 1]->extent;
+    extent =
+        region->region[ndim - 2]->extent * region->region[ndim - 1]->extent;
   }
 
   // ptype and return handle

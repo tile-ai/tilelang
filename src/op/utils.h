@@ -19,15 +19,15 @@ using namespace tir;
 // Normalize an argument (BufferRegion/BufferLoad/tl.region/tvm_access_ptr)
 // to BufferRegion so ops can uniformly consume regions.
 TVM_DLL BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
-                                            const BufferMap &vmap);
+                                             const BufferMap &vmap);
 
 // Build a tvm_access_ptr(handle) from a BufferRegion.
 // - If `require_2d` is true, checks buffer ndim >= 2.
 // - For 1D regions (when allowed), offset=min, extent=extent.
 // - For ndim >= 2, offset sums all but last two dims using row-major strides,
 //   extent is product of the last two extents.
-TVM_DLL PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
-                                         bool require_2d = false);
+TVM_DLL PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
+                                         int rw_mask, bool require_2d = false);
 
 } // namespace tl
 } // namespace tvm

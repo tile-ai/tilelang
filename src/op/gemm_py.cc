@@ -13,8 +13,8 @@
 
 #include "../target/utils.h"
 #include "region.h"
-#include "utils.h"
 #include "tcgen5_meta.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {

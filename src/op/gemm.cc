@@ -13,8 +13,8 @@
 
 #include "../target/utils.h"
 #include "region.h"
-#include "utils.h"
 #include "tcgen5_meta.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
@@ -453,9 +453,12 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
 
   // Build access pointers from regions locally
-  PrimExpr Aptr = MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
-  PrimExpr Bptr = MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
-  PrimExpr Cptr = MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
+  PrimExpr Aptr =
+      MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Bptr =
+      MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Cptr =
+      MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
 
   std::stringstream ss;
   std::string op_name;
