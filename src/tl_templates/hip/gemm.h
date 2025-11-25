@@ -182,17 +182,25 @@ public:
       for (int i = 0; i < warp_rows; i++) {
         const auto l = warp_m * warp_row_tiles + i * micro_size_x;
         const auto r = ki * (kPack * micro_size_k);
-        for (int local_id = 0; local_id < (kPack * local_size_a); local_id++) {
-          if constexpr (TransposeA) {
+        if constexpr (TransposeA) {
+          for (int local_id = 0; local_id < (kPack * local_size_a); local_id++) {
             auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
             A_local[i * kPack * local_size_a + local_id] =
                 A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
                     r + row, l + col)];
-          } else {
+          }
+        } else {
+          for (int local_id = 0; local_id < (kPack * local_size_a); local_id += (kPack * vec_size)) {
             auto [row, col] = reverse_index_map(lane_id, local_id);
-            A_local[i * kPack * local_size_a + local_id] =
-                A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
-                    l + row, r + col)];
+            if constexpr (kPack == 1) {
+              *(float32x2*)(&A_local[i * kPack * local_size_a + local_id]) =
+                *(float32x2*)(&A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
+                    l + row, r + col)]);
+            } else {
+              *(float32x4*)(&A_local[i * kPack * local_size_a + local_id]) =
+                *(float32x4*)(&A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
+                    l + row, r + col)]);
+            }
           }
         }
       }
@@ -200,13 +208,21 @@ public:
       for (int j = 0; j < warp_cols; j++) {
         const auto l = warp_n * warp_col_tiles + j * micro_size_y;
         const auto r = ki * (kPack * micro_size_k);
-        for (int local_id = 0; local_id < (kPack * local_size_b); local_id++) {
-          if constexpr (TransposeB) {
+        if constexpr (TransposeB) {
+          for (int local_id = 0; local_id < (kPack * local_size_b); local_id += (kPack * vec_size)) {
             auto [row, col] = reverse_index_map(lane_id, local_id);
-            B_local[j * kPack * local_size_b + local_id] =
-                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
-                    l + row, r + col)];
-          } else {
+            if constexpr (kPack == 1) {
+              *(float32x2*)(&B_local[j * kPack * local_size_b + local_id]) =
+                *(float32x2*)(&B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    l + row, r + col)]);
+            } else {
+              *(float32x4*)(&B_local[j * kPack * local_size_b + local_id]) =
+                *(float32x4*)(&B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    l + row, r + col)]);
+            }
+          }
+        } else {
+          for (int local_id = 0; local_id < (kPack * local_size_b); local_id++) {
             auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
             B_local[j * kPack * local_size_b + local_id] =
                 B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
@@ -257,13 +273,21 @@ public:
       for (int j = 0; j < warp_cols; j++) {
         const auto l = warp_n * warp_col_tiles + j * micro_size_y;
         const auto r = ki * kPack * micro_size_k;
-        for (int local_id = 0; local_id < kPack * local_size_b; local_id++) {
-          if constexpr (TransposeB) {
+        if constexpr (TransposeB) {
+          for (int local_id = 0; local_id < (kPack * local_size_b); local_id += (kPack * vec_size)) {
             auto [row, col] = reverse_index_map(lane_id, local_id);
-            B_local[j * kPack * local_size_b + local_id] =
-                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
-                    l + row, r + col)];
-          } else {
+            if constexpr (kPack == 1) {
+              *(float32x2*)(&B_local[j * kPack * local_size_b + local_id]) =
+                *(float32x2*)(&B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    l + row, r + col)]);
+            } else {
+              *(float32x4*)(&B_local[j * kPack * local_size_b + local_id]) =
+                *(float32x4*)(&B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    l + row, r + col)]);
+            }
+          }
+        } else {
+          for (int local_id = 0; local_id < (kPack * local_size_b); local_id++) {
             auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
             B_local[j * kPack * local_size_b + local_id] =
                 B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
