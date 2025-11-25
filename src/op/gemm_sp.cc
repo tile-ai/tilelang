@@ -80,7 +80,6 @@ std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
  * The populated GemmSPNode is stored in the instance's internal data_ pointer.
  *
  * @param args Positional TL call arguments in the above order.
- * @param vmap BufferMap mapping access pointers (from args) to Buffer objects.
  *
  * @note An ICHECK failure is raised if a provided kPack is not 1 or 2.
  */

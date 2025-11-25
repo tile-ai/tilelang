@@ -16,7 +16,7 @@ def _empty_kernel():
 
     return empty_kernel
 
-
+@tilelang.testing.requires_cuda
 def test_empty_kernel_lowering():
     # Ensure a valid CUDA runtime context is current on this thread for the
     # target device before using driver API calls. Without this, calls like

@@ -1,5 +1,4 @@
 import tilelang.testing
-
 import example_mla_decode
 
 
@@ -10,5 +9,4 @@ def test_example_mla_decode():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_example_mla_decode()
+    tilelang.testing.main()

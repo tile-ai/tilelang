@@ -35,8 +35,6 @@ using namespace tir;
  *             - args[0] is the source region call,
  *             - args[1] is the destination region call,
  *             - args[2] (optional) is an IntImm specifying coalesced width.
- * @param vmap Unused; kept for compatibility.
- *
  * Notes:
  * - The constructor checks that args[0] and args[1] are region-compatible.
  * - The constructed node is stored in this->data_.

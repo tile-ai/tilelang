@@ -24,8 +24,6 @@ using namespace tir;
  *
  * @param call The TIR Call whose operator and arguments will be used to build
  * the TileOperator.
- * @param vmap Buffer mapping passed through to the builder to resolve buffer
- * references.
  * @return TileOperator The constructed TileOperator, or a default (empty)
  * TileOperator if no builder exists.
  */
@@ -48,7 +46,6 @@ TileOperator ParseOperator(Call call) {
  * Otherwise returns a default-constructed (empty) TileOperator.
  *
  * @param stmt TIR statement to inspect; expected to be an Evaluate of a Call.
- * @param vmap Mapping of buffer variables used when building the operator.
  * @return TileOperator Parsed operator on success, or a default (empty)
  * TileOperator if `stmt` is not an Evaluate(Call).
  */
