@@ -9,7 +9,6 @@ from .utils import (
 from typing import Literal, Callable
 
 from tilelang.utils import is_fragment
-from tilelang.utils.language import to_buffer_region
 from .mfma_layout import (
     shared_16x4_to_local_64x1_layout_A,
     shared_4x16_to_local_64x1_layout_B,
@@ -268,7 +267,7 @@ class MatrixCoreIntrinEmitter:
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=False)
 
         # legalize shared buffer to region
-        A_region = to_buffer_region(A_shared_buf)
+        A_region = self._legalize_to_buffer_region(A_shared_buf)
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
@@ -314,7 +313,7 @@ class MatrixCoreIntrinEmitter:
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=True)
 
         # legalize shared buffer to region
-        B_region = to_buffer_region(B_shared_buf)
+        B_region = self._legalize_to_buffer_region(B_shared_buf)
         B_buf = B_region.buffer
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
