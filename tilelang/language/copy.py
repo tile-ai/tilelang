@@ -27,6 +27,22 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
 
     Returns:
         tir.Call: A handle to the copy operation
+
+    Range handling notes:
+    - Accepts `Buffer`/`BufferRegion`/`BufferLoad` on either side. Extents are
+      derived as follows: `Buffer -> shape`, `BufferRegion -> [r.extent]`,
+      `BufferLoad -> extents from its inferred/encoded region`.
+    - If both `src` and `dst` are scalar `BufferLoad` without region extents,
+      lowers to a direct store: `dst[...] = src`.
+    - If one side is missing extents, it is treated as all-ones with the other
+      side's rank to enable broadcasting.
+    - Extents are right-aligned and legalized via `legalize_pairwise_extents`:
+      per tail-dimension, equal keeps as-is, a `1` broadcasts to the other,
+      otherwise a conservative `tir.max` is used to remain safe for dynamic
+      shapes.
+    - The finalized extents are encoded with `tl.region` via `to_buffer_region`
+      and passed through to the backend; low-level loop construction and any
+      scope-specific decisions happen during lowering.
     """
     if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
         ir.assert_structural_equal(src.shape, dst.shape)
@@ -57,16 +73,11 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         return tir.BufferStore(dst.buffer, src, dst.indices)
 
     assert src_extent or dst_extent, "Can't deduce copy extents from args"
-    # Treat missing extent as length-matched ones to enable broadcasting logic.
+    # Treat missing extent as length-matched ones to enable broadcasting.
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
 
-    # Align and broadcast extents from the right (tail) side independently
-    # for src and dst, so we can pass them unchanged into _to_region.
-    # Rules per-dim from the right:
-    # - equal -> keep both
-    # - one is 1 -> set that side to the other side's dim
-    # - otherwise -> error
+    # Align and broadcast extents from the right (tail) side.
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
     # Use legalized extents for src and dst respectively.

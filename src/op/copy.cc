@@ -179,15 +179,56 @@ TileOperator CopyNode::Clone() const {
  * copy operation.
  */
 Array<IterVar> CopyNode::MakeIterVars() const {
+  // Choose the range set from the lowest-level memory scope between src and
+  // dst. Scope levels: global < shared/shared.dyn/shared.tmem < local.fragment
+  // (fragment)
+  auto scope_level = [](const Buffer &b) -> int {
+    String s = b.scope();
+    if (s == "local.fragment" || s == "local")
+      return 2;
+    if (s == "shared" || s == "shared.dyn" || s == "shared.tmem")
+      return 1;
+    // default to global level for unknown scopes
+    return 0;
+  };
+
+  int src_level = scope_level(src);
+  int dst_level = scope_level(dst);
+  bool base_is_src = (src_level >= dst_level);
+  const Array<Range> &base_ranges = base_is_src ? src_range : dst_range;
+
+  // Sanity check: when switching away from the original (src_range),
+  // ensure the chosen base ranges are not provably smaller than the original
+  // per dimension. This guards against generating undersized loop domains.
+  arith::Analyzer analyzer;
+  ICHECK(base_ranges.size() == src_range.size())
+      << "Loop range rank mismatch after scope-based selection: base rank = "
+      << base_ranges.size() << ", src rank = " << src_range.size()
+      << ", src = " << src->name << ", dst = " << dst->name
+      << ", base scope = " << (base_is_src ? src.scope() : dst.scope());
+  for (size_t i = 0; i < base_ranges.size(); ++i) {
+    PrimExpr base_ext = base_ranges[i]->extent;
+    PrimExpr src_ext = src_range[i]->extent;
+    // Only fail when it's provably smaller; allow unknown symbolic relations.
+    if (analyzer.CanProve(base_ext < src_ext)) {
+      ICHECK(0)
+          << "Selected loop range is smaller than original src range at dim "
+          << i << ": base(extent=" << base_ext
+          << ", scope=" << (base_is_src ? src.scope() : dst.scope())
+          << ") < src(extent=" << src_ext << ", scope=" << src.scope()
+          << ") for src=" << src->name << ", dst=" << dst->name;
+    }
+  }
+
   Array<IterVar> loop_vars;
   size_t idx = 0;
-  for (size_t i = 0; i < src_range.size(); i++) {
-    if (is_one(src_range[i]->extent))
+  for (size_t i = 0; i < base_ranges.size(); i++) {
+    if (is_one(base_ranges[i]->extent))
       continue;
-    Var var = Var(std::string{char('i' + idx)}, src_range[i]->extent->dtype);
+    Var var = Var(std::string{char('i' + idx)}, base_ranges[i]->extent->dtype);
     idx++;
     loop_vars.push_back(
-        {Range(0, src_range[i]->extent), var, IterVarType::kDataPar});
+        {Range(0, base_ranges[i]->extent), var, IterVarType::kDataPar});
   }
   return loop_vars;
 }
@@ -811,6 +852,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ICHECK(ldsm_copy.defined()) << "Failed to lower ptx matrix copy";
     return ldsm_copy;
   } else if (copy_inst == CopyInst::kNormal) {
+    LOG(INFO) << "Lowering normal copy";
     return LowerNormalCopy(T, analyzer);
   } else {
     LOG(FATAL) << "Unsupported copy inst " << static_cast<int>(copy_inst);
