@@ -416,7 +416,10 @@ class SparseTensorCoreIntrinEmitter:
                     rk * warp_k + ki * micro_size_k) // self.e_factor
                 for j in T.serial(local_size_e):
                     mi, mk = mma_load_layout(tx, j)
-                    E_local_buf[i * local_size_e + j] =  E_shared_buf[wk + mk, wi + mi] if trans else E_shared_buf[wi + mi, wk + mk]
+                    E_local_buf[i * local_size_e +
+                                j] = E_shared_buf[wk + mk,
+                                                  wi + mi] if trans else E_shared_buf[wi + mi,
+                                                                                      wk + mk]
 
         return _warp_ldmatrix_e(E_local_buf, E_shared_buf, ki, thread_binding, rk)
 
