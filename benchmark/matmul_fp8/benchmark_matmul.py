@@ -1,5 +1,6 @@
 import argparse
 import itertools
+import torch
 import logging
 import tilelang
 import tilelang.language as T
@@ -32,18 +33,25 @@ def ref_program(A, B):
 
 def get_configs(args, kwargs):
     """
-    Generate a list of configuration dictionaries that will be used for tuning.
-
-    Parameters
-    ----------
-    with_roller : bool
-        Whether to enable bitblas roller to deduce search spaces
-
-    Returns
-    -------
-    list of dict
-        Each configuration dict includes various block sizes, pipeline stages,
-        thread numbers, and other parameters to explore during autotuning.
+    Generate a list of autotuning configuration dictionaries for matrix multiplication.
+    
+    Parameters:
+        args (tuple): Positional arguments expected as (M, N, K, with_roller) where M, N, K are matrix dimensions and with_roller is a bool that selects roller-based hint generation when True.
+        kwargs (dict): Additional keyword arguments (currently unused).
+    
+    Returns:
+        list[dict]: A list of configuration dictionaries. Each dictionary contains keys:
+            - "block_M" (int): tile size for M dimension
+            - "block_N" (int): tile size for N dimension
+            - "block_K" (int): tile size for K dimension
+            - "num_stages" (int): number of pipeline stages
+            - "thread_num" (int): number of threads per block
+            - "k_pack" (int, optional): K packing factor (present in non-roller configs)
+            - "policy" (object): warp-level GEMM scheduling policy
+            - "enable_rasteration" (bool): whether rasterization is enabled
+    
+    Raises:
+        ValueError: If roller-based hint generation is selected but no roller hints are found.
     """
     M, N, K, with_roller = args[:4]
 
@@ -99,6 +107,7 @@ def get_configs(args, kwargs):
             block_K=[64, 128],
             num_stages=[0, 1, 2, 3],
             thread_num=[128, 256],
+            k_pack=[1, 2],
             policy=[T.GemmWarpPolicy.Square],
             enable_rasteration=[True, False],
         )
@@ -125,38 +134,34 @@ def matmul(
     block_K=None,
     num_stages=None,
     thread_num=None,
+    k_pack=None,
     policy=None,
     enable_rasteration=None,
 ):
     """
-    Create an autotuned matrix multiplication kernel for matrices of shape:
-      - A: (M, K)
-      - B: (N, K)
-      - C: (M, N)
-
-    Parameters
-    ----------
-    M : int
-        The dimension M of the matrix multiplication.
-    N : int
-        The dimension N of the matrix multiplication.
-    K : int
-        The dimension K of the matrix multiplication.
-
-    Returns
-    -------
-    (best_latency, best_config, ref_latency)
-        best_latency : float
-            The best latency found among the tuned configurations.
-        best_config : dict
-            The parameter configuration that yielded best_latency.
-        ref_latency : float
-            The baseline latency of the reference program (for computing speedup).
+    Create a JIT-able, block-structured TVM prim_func that implements an autotunable GEMM for A (M×K), B (N×K) and produces C (M×N).
+    
+    Parameters:
+        M (int): Rows of A and C.
+        N (int): Rows of B and columns of C.
+        K (int): Inner dimension shared by A and B.
+        with_roller (bool): Whether to generate tuning configs from the roller scheduler (controls autotuning source).
+        block_M (int, optional): Block size in the M dimension.
+        block_N (int, optional): Block size in the N dimension.
+        block_K (int, optional): Block size in the K dimension (tile depth).
+        num_stages (int, optional): Pipeline stage count for K-loop pipelining.
+        thread_num (int, optional): Number of threads per block (kernel launch threads).
+        k_pack (int, optional): Packing factor for the K dimension passed to the GEMM primitive.
+        policy (str or int, optional): GEMM scheduling/policy hint forwarded to T.gemm.
+        enable_rasteration (bool, optional): Enable swizzle/rasterization layout optimizations for shared C tiles.
+    
+    Returns:
+        T.prim_func: A TVM primitive function that implements the block-level GEMM kernel configured by the provided parameters.
     """
 
     # Use half-precision for input data to reduce memory bandwidth,
     # accumulate in float for better numerical accuracy
-    dtype = "float8_e4m3"
+    dtype = "float8_e4m3fnuz" if torch.version.hip is not None else "float8_e4m3"
     accum_dtype = "float"
 
     @T.prim_func
@@ -166,15 +171,14 @@ def matmul(
             C: T.Tensor((M, N), dtype),
     ):
         """
-        The compiled TVM function for block-level matrix multiplication.
-
-        - We divide the entire (M, N) domain into blocks of shape
-            (block_M, block_N).
-        - Each block has its own allocated shared memory for sub-blocks
-            of A and B.
-        - The partial results go into C_local, and then we copy them back
-            to global memory C.
-        """
+            Compute a block-tiled matrix multiplication and store the result in C.
+            
+            This kernel treats A as an M×K matrix and B as an N×K matrix, computes C = A @ B^T using block tiling over the (M, N) domain, and writes the resulting M×N outputs into the provided C buffer. The implementation is tiled and pipelined over the K dimension, uses shared and local fragments for accumulation, and respects the configured block sizes, number of pipeline stages, thread count, swizzle/rasterization layout, GEMM policy, and `k_pack` packing.
+            Parameters:
+                A (Tensor[M, K]): Left-hand input matrix.
+                B (Tensor[N, K]): Right-hand input matrix (rows correspond to columns in the multiply via transpose).
+                C (Tensor[M, N]): Output buffer that will be overwritten with the result.
+            """
         # Bind x-dimension to block index in N,
         #     y-dimension to block index in M.
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
@@ -210,6 +214,7 @@ def matmul(
                     C_local,
                     transpose_B=True,
                     policy=policy,
+                    k_pack=k_pack,
                 )
             # Write back the results from C_local to the global memory C
             T.copy(C_local, C_shared)

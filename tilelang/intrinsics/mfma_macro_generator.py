@@ -2,15 +2,14 @@ from __future__ import annotations
 from tilelang import tvm as tvm
 import tilelang.language as T
 from tvm import DataType
-from tvm import tir
-from tvm.ir import Range
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
+from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion
 from tvm.runtime import convert
-from .utils import (mfma_store_index_map)
+from .utils import (
+    mfma_store_index_map,)
 from typing import Literal, Callable
 
 from tilelang.utils import is_fragment
-from tilelang.utils.language import get_buffer_region_from_load
+from tilelang.utils.language import to_buffer_region
 from .mfma_layout import (
     shared_16x4_to_local_64x1_layout_A,
     shared_4x16_to_local_64x1_layout_B,
@@ -269,7 +268,7 @@ class MatrixCoreIntrinEmitter:
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=False)
 
         # legalize shared buffer to region
-        A_region = self._legalize_to_buffer_region(A_shared_buf)
+        A_region = to_buffer_region(A_shared_buf)
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
@@ -315,7 +314,7 @@ class MatrixCoreIntrinEmitter:
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=True)
 
         # legalize shared buffer to region
-        B_region = self._legalize_to_buffer_region(B_shared_buf)
+        B_region = to_buffer_region(B_shared_buf)
         B_buf = B_region.buffer
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
@@ -358,7 +357,19 @@ class MatrixCoreIntrinEmitter:
              B_local_buf: Buffer,
              C_local_buf: Buffer,
              k_inner: PrimExpr | None = 0):
-        warp_rows = self.warp_rows
+        """
+             Emit and invoke a warp-level MFMA operation that multiplies A and B local fragments and accumulates into the C local fragment.
+             
+             Parameters:
+                 A_local_buf (Buffer): Local fragment buffer for operand A (can be a fragment or plain buffer).
+                 B_local_buf (Buffer): Local fragment buffer for operand B (can be a fragment or plain buffer).
+                 C_local_buf (Buffer): Local fragment buffer for the accumulator/output; updated by the MFMA.
+                 k_inner (PrimExpr | None): Offset along the K reduction axis used to compute fragment strides; defaults to 0.
+             
+             Returns:
+                 The result of invoking the warp MFMA macro that performs the fused multiply-add and updates C_local_buf.
+             """
+             warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
         local_size_b = self.local_size_b
@@ -372,11 +383,21 @@ class MatrixCoreIntrinEmitter:
 
         a_is_fragment = is_fragment(A_local_buf)
         b_is_fragment = is_fragment(B_local_buf)
-        a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
-        b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0
+        a_local_stride: PrimExpr = k_inner * warp_rows * k_pack * local_size_a if a_is_fragment else 0
+        b_local_stride: PrimExpr = k_inner * warp_cols * k_pack * local_size_b if b_is_fragment else 0
 
         @T.macro
         def _warp_mfma(A_local_buf, B_local_buf, C_local_buf):
+            """
+            Perform the warp-level MFMA fused multiply-add that accumulates products of A and B fragments into C.
+            
+            This macro iterates over the packed K dimension and the warp tile rows and columns, invoking the MFMA intrinsic to multiply corresponding fragments from A_local_buf and B_local_buf and accumulate the result into C_local_buf in-place.
+            
+            Parameters:
+                A_local_buf: Local fragment buffer containing A tiles for this warp.
+                B_local_buf: Local fragment buffer containing B tiles for this warp.
+                C_local_buf: Local fragment buffer that receives the accumulated outputs (updated in place).
+            """
             for kp, i, j in T.grid(k_pack, warp_rows, warp_cols):
                 T.tvm_mfma(
                     mfma_suffix,
@@ -449,24 +470,19 @@ class MatrixCoreIntrinEmitter:
                               local_buf: Buffer,
                               matrix: Literal["A", "B"] = "A") -> T.Fragment:
         """
-        Create a layout function for storing MFMA results into a fragment buffer.
-
-        Parameters
-        ----------
-        local_buf : tir.Buffer
-            The local buffer representing a fragment of a matrix.
-
-        Returns
-        -------
-        T.Fragment
-            A fragment object that describes how threads and indices
-            in `local_buf` are laid out.
-
-        Raises
-        ------
-        AssertionError
-            If `local_buf` is not detected to be a fragment buffer.
-        """
+                              Constructs a Fragment that describes how an MFMA load maps fragment coordinates to threads and per-thread indices.
+                              
+                              Parameters:
+                                  local_buf (tir.Buffer): Local fragment buffer to describe; must be a fragment buffer.
+                                  matrix (Literal["A", "B"]): Which matrix layout to build — "A" for A-fragments or "B" for B-fragments.
+                              
+                              Returns:
+                                  T.Fragment: A fragment object that maps fragment (row, col) coordinates to a thread id and a local index within that thread.
+                              
+                              Raises:
+                                  AssertionError: If `local_buf` is not a fragment buffer.
+                                  ValueError: If `matrix` is not "A" or "B", or if the derived k_dim is unsupported.
+                              """
         from tilelang.utils import is_fragment
         assert matrix in ["A", "B"], "matrix should be either A or B"
         matrix_is_a: bool = matrix == "A"
@@ -537,13 +553,21 @@ class MatrixCoreIntrinEmitter:
 
         def forward_index(i: int, j: int) -> int:
             """
-            Given the row index `i` and column index `j` in the fragment,
+            Map a fragment coordinate (row, column) to the local linear index used by the inverse MFMA load layout.
+            
+            Parameters:
+                i (int): Row index within the fragment.
+                j (int): Column index within the fragment.
+            
+            Returns:
+                local_id (int): Linear local index corresponding to the fragment coordinate (i, j).
             """
             _, local_id = inverse_mfma_load_layout.map_indices([i, j])
             return local_id
 
         base_fragment = T.Fragment(
-            [micro_size_s, micro_size_r] if is_sr_axis_order else [micro_size_r, micro_size_s],
+            [micro_size_s, micro_size_r *
+             self.k_pack] if is_sr_axis_order else [micro_size_r * self.k_pack, micro_size_s],
             forward_thread_fn=forward_thread,
             forward_index_fn=forward_index,
         )
@@ -552,7 +576,7 @@ class MatrixCoreIntrinEmitter:
         chunk = self.chunk
 
         warp_s = warp_rows if matrix_is_a else warp_cols
-        warp_r = chunk // micro_size_r
+        warp_r = chunk // (micro_size_r * self.k_pack)
         block_s = block_row_warps if matrix_is_a else block_col_warps
         replicate = block_col_warps if matrix_is_a else block_row_warps
 
@@ -655,33 +679,6 @@ class MatrixCoreIntrinEmitter:
             forward_thread_fn=forward_thread,
             forward_index_fn=forward_index,
         )
-
-    @staticmethod
-    def _legalize_to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
-        """
-        Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
-
-        - Buffer -> full-region BufferRegion covering entire shape
-        - BufferRegion -> returned as-is
-        - BufferLoad -> best-effort convert via get_buffer_region_from_load;
-        if scalar, fall back to 1-sized ranges at given indices
-        """
-        if isinstance(obj, BufferRegion):
-            return obj
-        if isinstance(obj, Buffer):
-            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
-            ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
-            return BufferRegion(obj, ranges)
-        if isinstance(obj, BufferLoad):
-            region = get_buffer_region_from_load(obj)
-            if region is not None:
-                return region
-            # Fallback: scalar load -> 1-sized ranges at indices
-            mins = [idx for idx in obj.indices]
-            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
-            ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-            return BufferRegion(obj.buffer, ranges)
-        raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
 
 
 class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
