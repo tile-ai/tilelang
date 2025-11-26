@@ -94,9 +94,11 @@ class GemmTCGEN5(GemmBase):
         if self.wg_wait != -1:
             raise ValueError("TCGEN5MMA currently requires wg_wait == -1")
 
-        mbarptr = self.mbarptr
-        if mbarptr == 0:
-            raise ValueError("TCGEN5MMA requires a valid mbarrier pointer")
+        mbar = self.mbar
+        if mbar == 0:
+            raise ValueError("TCGEN5MMA requires a valid mbarrier")
+
+        mbarptr = mbar.access_ptr("rw")
 
         C_coords = self.C_coords
         if len(C_coords) != 2:
@@ -110,11 +112,10 @@ class GemmTCGEN5(GemmBase):
         B_shared = self.BRegion
         C_local = self.C
         clear_accum = self.clear_accum
-        mbar = self.mbarptr
 
         @T.prim_func
         def _gemm_ss() -> None:
             if thread_var // 32 == 0:
-                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbar, clear_accum)
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
         return _Simplify(_gemm_ss, inline_let=True)

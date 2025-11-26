@@ -80,11 +80,14 @@ GemmPy::GemmPy(Array<PrimExpr> args) {
   if (args.size() > 15) {
     node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
-  node->mbarPtr_ = args[16];
-  if (const auto *load = node->mbarPtr_.as<BufferLoadNode>()) {
-    node->mbar_ = load->buffer;
-  } else {
-    node->mbar_ = std::nullopt;
+  if (args.size() > 16) {
+    if (const auto *load = args[16].as<BufferLoadNode>()) {
+      node->mbarRegion_ =
+          NormalizeToBufferRegion(Downcast<BufferLoad>(args[16]));
+      node->mbar_ = node->mbarRegion_->buffer;
+    } else {
+      LOG(FATAL) << "mbar must be a BufferLoad";
+    }
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
