@@ -9,7 +9,7 @@ def test_assume_remove_boundary_check():
         N = T.dynamic('N')
 
         @T.prim_func
-        def main(A: T.Tensor((N,), "float32"), l : T.int32, r : T.int32):
+        def main(A: T.Tensor((N,), "float32"), l: T.int32, r: T.int32):
             with T.Kernel(1, threads=32) as _:
                 for i in T.serial(r - l + 1):
                     T.assume(l + i >= 0 and l + i < N)
