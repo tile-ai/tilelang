@@ -77,8 +77,8 @@ def make_cutlass_metadata_layout_sm90(buffer: tvm.tir.Buffer, mma_dtype: str, bl
         shape_i, shape_k = shape_ik[:3], shape_ik[3:]
         stride_i, stride_k = stride_ik[:3], stride_ik[3:]
     elif bits_map[mma_dtype] == 8:
-        shape_i, shape_k = [64], [BlockK]
-        stride_i, stride_k = [BlockK], [1]
+        shape_i, shape_k = [64], [block_k // 8]
+        stride_i, stride_k = [block_k // 8], [1]
     else:
         raise NotImplementedError(f"Unknown mma type {mma_dtype}")
 

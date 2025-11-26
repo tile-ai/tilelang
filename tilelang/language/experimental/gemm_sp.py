@@ -31,7 +31,6 @@ def gemm_sp(
         C (Union[tir.Buffer, tir.Var]): Output matrix for results
         transpose_A (bool, optional): Whether to transpose matrix A. Defaults to False.
         transpose_B (bool, optional): Whether to transpose matrix B. Defaults to False.
-        transpose_E (bool, optional): Whether to transpose matrix E. Defaults to False.
         policy (GemmWarpPolicy, optional): Warp execution policy. Defaults to GemmWarpPolicy.Square.
         clear_accum (bool, optional): Whether to clear accumulator before computation. Defaults to False.
         k_pack (int, optional): Number of k dimensions packed into a single warp. Defaults to 1.
