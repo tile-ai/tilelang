@@ -83,7 +83,6 @@ def test_assume_complex_indexing():
 
     jit_kernel = kernel_complex()
     source = jit_kernel.get_kernel_source()
-    print(source)
 
     assert ("if (" not in source)
 
