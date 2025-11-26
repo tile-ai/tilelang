@@ -865,12 +865,12 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
         << "CDNA gemm (FMMA) only supports C in local.fragment scope, got "
         << c_.scope();
     if (TargetIsDCU(T.target)) {
-      auto fragment =
-          makeGemmFragmentCDCU(m_, n_, m_ / warp_m, n_ / warp_n, c_->dtype.bits());
+      auto fragment = makeGemmFragmentCDCU(m_, n_, m_ / warp_m, n_ / warp_n,
+                                           c_->dtype.bits());
       results.Set(c_, fragment->BindThreadRange(thread_range));
     } else {
-      auto fragment =
-          makeGemmFragmentCCDNA(m_, n_, m_ / warp_m, n_ / warp_n, c_->dtype.bits());
+      auto fragment = makeGemmFragmentCCDNA(m_, n_, m_ / warp_m, n_ / warp_n,
+                                            c_->dtype.bits());
       results.Set(c_, fragment->BindThreadRange(thread_range));
     }
     if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
