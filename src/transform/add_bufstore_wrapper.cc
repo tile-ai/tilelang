@@ -230,11 +230,11 @@ private:
     VarSet thread_bound_variables =
         SetIntersection(used_variables, thread_binding_vars);
     // Only transform if not inside tile operations and no thread bindings
-    if (tile_operation_depth == 0 && thread_bound_variables.size() == 0) {
+    if (tile_operation_depth == 0 && thread_bound_variables.empty()) {
       std::pair<BufferSet, BufferSet> pair =
           AccessedBuffersCollector::Collect(ffi::GetRef<BufferStore>(op));
       // Skip if no fragment buffers are accessed
-      if (pair.second.size() == 0)
+      if (pair.second.empty())
         return ffi::GetRef<BufferStore>(op);
       // Validate fragment buffer indices - only index 0 is supported
       BufferIndicesMap buffer_indices =
