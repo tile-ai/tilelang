@@ -136,19 +136,21 @@ def test_fragment_non_zero_index_throws_error():
         frag_buf[2] = A[0]
 
     # This test should catch the ValueError
-    try:
-        # Apply the pass - should throw error
-        pass_instance = tl.transform.AddWrapperForSingleBufStore()
-        mod = tvm.IRModule.from_expr(invalid_func.with_attr("global_symbol", "main"))
-        transformed = pass_instance(mod)  # noqa: F841
-    except Exception as e:
-        error_msg = str(e)
-        assert any(msg in error_msg for msg in [
-            "non-zero index",
-            "fragment[0]",
-            "Fragment buffer access",
-            "not supported",
-        ]), f"Unexpected error message: {error_msg}"
+    import pytest
+
+    pass_instance = tl.transform.AddWrapperForSingleBufStore()
+    mod = tvm.IRModule.from_expr(invalid_func.with_attr("global_symbol", "main"))
+
+    with pytest.raises(Exception) as exc_info:
+        pass_instance(mod)
+
+    error_msg = str(exc_info.value)
+    assert any(msg in error_msg for msg in [
+        "non-zero index",
+        "fragment[0]",
+        "Fragment buffer access",
+        "not supported",
+    ]), f"Unexpected error message: {error_msg}"
 
 
 def test_mixed_fragment_and_shared_stores():
