@@ -4,6 +4,7 @@ import tilelang.testing
 
 
 def test_assume_remove_boundary_check():
+
     @tilelang.jit
     def kernel_with_assume():
         N = T.dynamic('N')
@@ -25,6 +26,7 @@ def test_assume_remove_boundary_check():
 
 
 def test_assume_enable_vectorization():
+
     @tilelang.jit
     def kernel_vectorize(M):
         N = T.dynamic('N')
@@ -55,6 +57,7 @@ def test_assume_enable_vectorization():
 
 
 def test_assume_complex_indexing():
+
     @tilelang.jit
     def kernel_complex():
         M = T.dynamic('M')
