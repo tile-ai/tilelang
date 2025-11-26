@@ -130,7 +130,6 @@ def matmul(
     k_pack=None,
     policy=None,
     enable_rasteration=None,
-
 ):
     """
     Create an autotuned matrix multiplication kernel for matrices of shape:
