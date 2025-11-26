@@ -85,8 +85,6 @@ GemmPy::GemmPy(Array<PrimExpr> args) {
       node->mbarRegion_ =
           NormalizeToBufferRegion(Downcast<BufferLoad>(args[16]));
       node->mbar_ = node->mbarRegion_->buffer;
-    } else {
-      LOG(FATAL) << "mbar must be a BufferLoad";
     }
   }
   node->cCoords_ = Array<PrimExpr>(
