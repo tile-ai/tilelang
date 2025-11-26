@@ -371,8 +371,8 @@ class MatrixCoreIntrinEmitter:
 
         a_is_fragment = is_fragment(A_local_buf)
         b_is_fragment = is_fragment(B_local_buf)
-        a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
-        b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0
+        a_local_stride: PrimExpr = k_inner * warp_rows * k_pack * local_size_a if a_is_fragment else 0
+        b_local_stride: PrimExpr = k_inner * warp_cols * k_pack * local_size_b if b_is_fragment else 0
 
         @T.macro
         def _warp_mfma(A_local_buf, B_local_buf, C_local_buf):
@@ -542,7 +542,8 @@ class MatrixCoreIntrinEmitter:
             return local_id
 
         base_fragment = T.Fragment(
-            [micro_size_s, micro_size_r] if is_sr_axis_order else [micro_size_r, micro_size_s],
+            [micro_size_s, micro_size_r *
+             self.k_pack] if is_sr_axis_order else [micro_size_r * self.k_pack, micro_size_s],
             forward_thread_fn=forward_thread,
             forward_index_fn=forward_index,
         )
@@ -551,7 +552,7 @@ class MatrixCoreIntrinEmitter:
         chunk = self.chunk
 
         warp_s = warp_rows if matrix_is_a else warp_cols
-        warp_r = chunk // micro_size_r
+        warp_r = chunk // (micro_size_r * self.k_pack)
         block_s = block_row_warps if matrix_is_a else block_col_warps
         replicate = block_col_warps if matrix_is_a else block_row_warps
 

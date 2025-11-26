@@ -28,6 +28,7 @@ class GemmMFMA(GemmBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
+            k_pack=self.k_pack,
         )
 
         if self.is_gemm_ss():
@@ -75,6 +76,7 @@ class GemmMFMA(GemmBase):
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
             thread_var=thread_var,
+            k_pack=self.k_pack,
         )
 
         in_dtype = self.in_dtype
@@ -110,11 +112,11 @@ class GemmMFMA(GemmBase):
                 B_shared into local fragments, then issues Matrix Core mfma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a * self.k_pack), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b * self.k_pack), in_dtype)
                 if clear_accum:
                     T.clear(C_buf)
-                for ki in T.serial(0, (block_K // micro_size_k)):
+                for ki in T.serial(0, (block_K // (micro_size_k * self.k_pack))):
                     # Load A into fragment
                     mfma_emitter.ldmatrix_a(
                         A_local,
@@ -145,12 +147,12 @@ class GemmMFMA(GemmBase):
                 B_shared into local fragments, then issues Matrix Core mfma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a * self.k_pack), in_dtype)
 
                 if clear_accum:
                     T.clear(C_buf)
 
-                for ki in T.serial(0, (block_K // micro_size_k)):
+                for ki in T.serial(0, (block_K // (micro_size_k * self.k_pack))):
 
                     # Load A into fragment
                     mfma_emitter.ldmatrix_a(
@@ -177,10 +179,10 @@ class GemmMFMA(GemmBase):
                 B_shared into local fragments, then issues Matrix Core mfma ops,
                 accumulating into C_local.
                 """
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b * self.k_pack), in_dtype)
                 if clear_accum:
                     T.clear(C_buf)
-                for ki in T.serial(0, (block_K // micro_size_k)):
+                for ki in T.serial(0, (block_K // (micro_size_k * self.k_pack))):
 
                     # Load B into fragment
                     mfma_emitter.ldmatrix_b(
@@ -207,7 +209,7 @@ class GemmMFMA(GemmBase):
                 accumulating into C_local.
                 """
 
-                for ki in T.serial(0, (block_K // micro_size_k)):
+                for ki in T.serial(0, (block_K // (micro_size_k * self.k_pack))):
                     # Perform Matrix Multiplication
                     mfma_emitter.mfma(A_buf, B_buf, C_buf, ki)
 
