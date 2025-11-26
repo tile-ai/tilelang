@@ -4,6 +4,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 from tilelang.engine.param import KernelParam
+import torch
 
 
 class BaseKernelAdapter(ABC):
@@ -46,11 +47,54 @@ class BaseKernelAdapter(ABC):
     def _convert_torch_func(self) -> callable:
         pass
 
+    # --- Common helpers to align with PyTorch stream/device semantics ---
+    @staticmethod
+    def get_current_stream_functor() -> Callable[[], int]:
+        """Return a callable that reads Torch's current CUDA stream pointer.
+
+        The returned lambda yields the raw CUDA stream handle of the current
+        PyTorch stream on the active device. It's a thunk (evaluated at call
+        time) so that any upstream stream guards are respected. If CUDA is
+        unavailable, it returns a lambda that yields 0.
+        """
+        if torch.cuda.is_available():
+            try:
+                torch.cuda._lazy_init()
+                current_device = torch._C._cuda_getDevice
+                get_stream = torch._C._cuda_getCurrentRawStream
+                return lambda: get_stream(current_device())
+            except Exception:
+                # Fallback to Python API if internal handles are unavailable
+                return lambda: int(torch.cuda.current_stream().cuda_stream)
+        # CPU or CUDA unavailable: no stream semantics
+        return lambda: 0
+
+    @staticmethod
+    def get_current_device_functor() -> Callable[[], torch.device]:
+        """Return a callable that yields Torch's current device.
+
+        Similar to the stream functor, we capture a callable that, when called,
+        fetches the current device according to PyTorch. On CPU or when CUDA is
+        unavailable, returns ``torch.device('cpu')``.
+        """
+        if torch.cuda.is_available():
+            try:
+                torch.cuda._lazy_init()
+                current_device = torch._C._cuda_getDevice
+                return lambda: torch.device("cuda", current_device())
+            except Exception:
+                return lambda: torch.device("cuda", torch.cuda.current_device())
+        # CPU fallback
+        return lambda: torch.device("cpu")
+
     def __call__(self, *args: Any, **kwds: Any) -> Any:
         return self.func(*args, **kwds)
 
-    def get_kernel_source(self) -> str:
-        return self.mod.imported_modules[0].get_source()
+    def get_kernel_source(self, kernel_only: bool = True) -> str:
+        if kernel_only:
+            return self.mod.imports[0].inspect_source()
+        else:
+            return self.mod.inspect_source() + "\n\n" + self.mod.imports[0].inspect_source()
 
     def _post_init(self):
         self.func = self._convert_torch_func()

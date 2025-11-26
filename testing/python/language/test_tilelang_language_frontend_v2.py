@@ -361,5 +361,123 @@ def test_while_loop():
     assert A[0].item() == sum(range(10)), f"Expected {sum(range(10))}, but got {A[0].item()}"
 
 
+def test_var_macro():
+    try:
+
+        @T.macro
+        def macro_with_var(x: T.Var):
+            x = 1  # noqa: F841
+
+        @T.prim_func
+        def prim_call_macro():
+            with T.Kernel(1):
+                x = T.alloc_var(T.int32)
+                macro_with_var(x)
+
+        assert 'x[0] = 1' in prim_call_macro.script()
+    finally:
+        pass
+
+    try:
+
+        @T.macro
+        def macro_with_var(x: T.Var):
+            x = 1  # noqa: F841
+
+        @T.prim_func
+        def prim_call_macro():
+            with T.Kernel(1):
+                x = 1
+                macro_with_var(x)
+
+        raise RuntimeError("Expect to report an error, x should not be passed as T.Var")
+    except ValueError:
+        pass
+
+    try:
+
+        @T.macro
+        def macro_with_var(x: T.Ref):
+            x = 1  # noqa: F841
+
+        @T.prim_func
+        def prim_call_macro():
+            with T.Kernel(1):
+                x = T.alloc_var(T.int32)
+                macro_with_var(x)
+
+        assert 'x[0] = 1' in prim_call_macro.script()
+    finally:
+        pass
+
+    try:
+
+        @T.macro
+        def macro_with_var(x: T.Ref):
+            x = 1  # noqa: F841
+
+        @T.prim_func
+        def prim_call_macro():
+            with T.Kernel(1):
+                x = 1
+                macro_with_var(x)
+
+        raise RuntimeError("Expect to report an error, x should not be passed as T.Var")
+    except ValueError:
+        pass
+
+
+def test_frame_inside_macro():
+
+    @tilelang.jit
+    def get_sample_kernel():
+
+        @T.macro
+        def transform(x):
+            return x + 1
+
+        @T.prim_func
+        def sample_kernel(
+            num_blocks: T.int32,
+            idx_out: T.Tensor[(32,), T.int32],
+        ):
+            with T.Kernel(num_blocks, threads=32) as block_idx:  # noqa: F841
+                fragment = T.alloc_fragment(32, 'int32')
+                T.copy(idx_out, fragment)
+
+                for i in T.Parallel(32):
+                    idx_out[i] = transform(fragment[i])
+
+        return sample_kernel
+
+    kernel = get_sample_kernel()  # noqa: F841
+
+
+def test_buffer_slice_step():
+    try:
+
+        @T.prim_func
+        def prim_buffer_slice_step(A: T.Buffer((10,), T.int32), B: T.Buffer((5,), T.int32)):
+            with T.Kernel(1):
+                B[0:5:2] = A[0:10:2]
+
+        raise AssertionError("Expect to report an error, buffer slice with step is not supported")
+    except RuntimeError:
+        pass
+
+
+def test_boolop():
+    a = Var('a', 'int32')
+    b = Var('b', 'int32')
+    c = Var('c', 'int32')
+    d = Var('d', 'int32')
+
+    @T.macro
+    def cond():
+        return not (a < b and b < c and a * d < b * d) or b * d < c * d
+
+    cond()
+
+
 if __name__ == '__main__':
     tilelang.testing.main()

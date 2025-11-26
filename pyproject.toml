@@ -104,6 +104,7 @@ tilelang = "tilelang"
 # TVM
 "tilelang/3rdparty/tvm/src" = "3rdparty/tvm/src"
 "tilelang/3rdparty/tvm/python" = "3rdparty/tvm/python"
+"tilelang/3rdparty/tvm/include" = "3rdparty/tvm/include"
 "tilelang/3rdparty/tvm/version.py" = "3rdparty/tvm/version.py"
 # CUTLASS
 "tilelang/3rdparty/cutlass/include" = "3rdparty/cutlass/include"

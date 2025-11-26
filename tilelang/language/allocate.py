@@ -13,8 +13,8 @@ Available allocation functions:
 Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
 """
-
 from __future__ import annotations
+
 from typing import overload, Literal
 from tilelang import tvm as tvm
 from tvm.script import tir as T
@@ -22,6 +22,7 @@ from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
 from tvm.tir.buffer import Buffer
 from tvm.tir.expr import FloatImm, IntImm
+from .v2.dtypes import dtype as tl_dtype
 
 
 def alloc_shared(shape, dtype, scope="shared.dyn"):
@@ -135,7 +136,7 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
     buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
         if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
-            block_attr({"tl.local_var_init": {buffer.data: parsed_init}})
+            block_attr({"tl.local_var_init": {buffer.data: tl_dtype(dtype)(parsed_init)}})
         else:
             T.buffer_store(buffer, parsed_init, 0)
     return buffer

@@ -156,13 +156,14 @@ def main():
     DO = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device='cuda')
 
     block_indices = torch.full((B, SEQ_LEN, H, S), SEQ_LEN, dtype=torch.long, device='cuda')
+    block_counts = torch.zeros((B, SEQ_LEN, H), dtype=torch.long, device='cuda')
     for b in range(B):
         for t in range(SEQ_LEN):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
                 block_indices[b, t, h, :len(i_i)] = i_i
+                block_counts[b, t, h] = (block_indices[b, t, h] != SEQ_LEN).sum().item()
     block_indices = block_indices.sort(-1)[0]
-    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN, H), device='cuda')
 
     out = kernel(Q, K, V, block_indices.to(torch.int32))
 

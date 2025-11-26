@@ -1,14 +1,13 @@
 """The language interface for tl programs."""
 from __future__ import annotations
-
 from typing import Literal
 from tilelang import language as T
 from tilelang.utils.language import (
+    to_buffer_region,
     get_buffer_region_from_load,
     legalize_pairwise_extents,
 )
 from tvm import ir, tir
-from tilelang.language.utils import buffer_region_to_tile_region, buffer_load_to_tile_region
 
 
 def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
@@ -28,6 +27,22 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
 
     Returns:
         tir.Call: A handle to the copy operation
+
+    Range handling notes:
+    - Accepts `Buffer`/`BufferRegion`/`BufferLoad` on either side. Extents are
+      derived as follows: `Buffer -> shape`, `BufferRegion -> [r.extent]`,
+      `BufferLoad -> extents from its inferred/encoded region`.
+    - If both `src` and `dst` are scalar `BufferLoad` without region extents,
+      lowers to a direct store: `dst[...] = src`.
+    - If one side is missing extents, it is treated as all-ones with the other
+      side's rank to enable broadcasting.
+    - Extents are right-aligned and legalized via `legalize_pairwise_extents`:
+      per tail-dimension, equal keeps as-is, a `1` broadcasts to the other,
+      otherwise a conservative `tir.max` is used to remain safe for dynamic
+      shapes.
+    - The finalized extents are encoded with `tl.region` via `to_buffer_region`
+      and passed through to the backend; low-level loop construction and any
+      scope-specific decisions happen during lowering.
     """
     if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
         ir.assert_structural_equal(src.shape, dst.shape)
@@ -58,39 +73,16 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         return tir.BufferStore(dst.buffer, src, dst.indices)
 
     assert src_extent or dst_extent, "Can't deduce copy extents from args"
-    # Treat missing extent as length-matched ones to enable broadcasting logic.
+    # Treat missing extent as length-matched ones to enable broadcasting.
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
 
-    # Align and broadcast extents from the right (tail) side independently
-    # for src and dst, so we can pass them unchanged into _to_region.
-    # Rules per-dim from the right:
-    # - equal -> keep both
-    # - one is 1 -> set that side to the other side's dim
-    # - otherwise -> error
+    # Align and broadcast extents from the right (tail) side.
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
-    def _to_region(data, access_type, extent):
-        if isinstance(data, tir.Var) and T.has_let_value(data):
-            data = T.get_let_value(data)
-        if isinstance(data, tir.Buffer):
-            # Restrict a raw buffer to the computed copy extent by creating
-            # a BufferLoad at origin and passing the extents explicitly.
-            zeros = [tir.IntImm("int32", 0) for _ in extent]
-            return buffer_load_to_tile_region(tir.BufferLoad(data, zeros), access_type, extent)
-        elif isinstance(data, tir.BufferRegion):
-            return buffer_region_to_tile_region(data, access_type, extent)
-        elif isinstance(data, tir.BufferLoad):
-            region = get_buffer_region_from_load(data)
-            if region is None:
-                return buffer_load_to_tile_region(data, access_type, extent)
-            return buffer_region_to_tile_region(region, access_type, extent)
-        else:
-            return buffer_load_to_tile_region(data, access_type, extent)
-
     # Use legalized extents for src and dst respectively.
-    src = _to_region(src, "r", src_extent)
-    dst = _to_region(dst, "w", dst_extent)
+    src = to_buffer_region(src, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     if coalesced_width is None:
         coalesced_width = -1  # PrimExpr can not be None
@@ -130,6 +122,7 @@ def c2d_im2col(img: tir.Buffer,
         eviction_policy = 0
     else:
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
-    return tir.call_intrin("handle", tir.op.Op.get("tl.c2d_im2col"), img.access_ptr("r"),
-                           col.access_ptr("w"), nhw_step, c_step, kernel, stride, dilation, pad,
-                           eviction_policy)
+    img_region = to_buffer_region(img, access_type="r")
+    col_region = to_buffer_region(col, access_type="w")
+    return tir.call_intrin("handle", tir.op.Op.get("tl.c2d_im2col"), img_region, col_region,
+                           nhw_step, c_step, kernel, stride, dilation, pad, eviction_policy)

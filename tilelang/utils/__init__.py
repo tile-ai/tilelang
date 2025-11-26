@@ -15,5 +15,6 @@ from .language import (
     retrive_ptr_from_buffer_region,  # noqa: F401
     is_full_region,  # noqa: F401
     to_buffer_region,  # noqa: F401
+    get_buffer_region_from_load,  # noqa: F401
 )
 from .deprecated import deprecated  # noqa: F401

@@ -55,10 +55,9 @@ block_M = 128
 block_N = 128
 block_K = 32
 
-# 1. Define the kernel (matmul) and compile/lower it into an executable module
+# Define the kernel (matmul) and compile/lower it into an executable module
 matmul_relu_kernel = matmul(M, N, K, block_M, block_N, block_K)
-
-# 3. Test the kernel in Python with PyTorch data
+# Test the kernel in Python with PyTorch data
 import torch
 
 # Create random input tensors on the GPU

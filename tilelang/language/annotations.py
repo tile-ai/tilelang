@@ -1,6 +1,4 @@
 """Annotation helpers exposed on the TileLang language surface."""
-from __future__ import annotations
-
 from typing import Callable
 
 from tilelang.layout import Layout

@@ -1,5 +1,6 @@
 import argparse
 import itertools
+import torch
 import logging
 import tilelang
 import tilelang.language as T
@@ -99,6 +100,7 @@ def get_configs(args, kwargs):
             block_K=[64, 128],
             num_stages=[0, 1, 2, 3],
             thread_num=[128, 256],
+            k_pack=[1, 2],
             policy=[T.GemmWarpPolicy.Square],
             enable_rasteration=[True, False],
         )
@@ -125,6 +127,7 @@ def matmul(
     block_K=None,
     num_stages=None,
     thread_num=None,
+    k_pack=None,
     policy=None,
     enable_rasteration=None,
 ):
@@ -156,7 +159,7 @@ def matmul(
 
     # Use half-precision for input data to reduce memory bandwidth,
     # accumulate in float for better numerical accuracy
-    dtype = "float8_e4m3"
+    dtype = "float8_e4m3fnuz" if torch.version.hip is not None else "float8_e4m3"
     accum_dtype = "float"
 
     @T.prim_func
@@ -210,6 +213,7 @@ def matmul(
                     C_local,
                     transpose_B=True,
                     policy=policy,
+                    k_pack=k_pack,
                 )
             # Write back the results from C_local to the global memory C
             T.copy(C_local, C_shared)

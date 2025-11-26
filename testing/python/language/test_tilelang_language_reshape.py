@@ -2,6 +2,7 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
 import torch
+import pytest
 
 
 def reshape_test(N, M, dtype):
@@ -260,6 +261,26 @@ def run_reduce_after_reshape(N, M, dtype):
 def test_reduce_after_reshape():
     run_reduce_after_reshape(1024, 32, "float32")
     run_reduce_after_reshape(2048, 64, "float16")
+
+
+def reshape_shape_mismatch_test(N, M, dtype):
+    import tilelang.language as T
+
+    @T.prim_func
+    def main(
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N // M, M), dtype),
+    ):
+        with T.Kernel(1) as _:
+            A_reshaped = T.reshape(A, [N // M, M + 1])
+            T.copy(A_reshaped, B)
+
+    return main
+
+
+def test_reshape_shape_mismatch():
+    with pytest.raises(AssertionError):
+        reshape_shape_mismatch_test(1024, 32, "float32")
 
 
 if __name__ == "__main__":

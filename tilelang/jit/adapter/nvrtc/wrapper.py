@@ -313,9 +313,9 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
-        for dyn_sym in dynamic_symbolic_set:
+        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
             if dyn_sym not in [arg["name"] for arg in function_args]:
-                function_args.append({"name": dyn_sym, "type": "ctypes.c_int"})
+                function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
 
         function_args.append(self.get_stream_type())
 

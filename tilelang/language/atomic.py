@@ -4,10 +4,9 @@
 from __future__ import annotations
 
 import tilelang.language as T
-from tvm import ir, tir
+from tvm import ir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
-from tilelang.language.utils import buffer_region_to_tile_region, buffer_load_to_tile_region
-from tilelang.utils.language import get_buffer_region_from_load, legalize_pairwise_extents
+from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 
 _MEMORY_ORDER_ID_MAP = {
     "relaxed": 0,
@@ -203,24 +202,8 @@ def atomic_add(dst: Buffer,
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
-    def _to_region(data, access_type, extent):
-        if isinstance(data, tir.Var) and T.has_let_value(data):
-            data = T.get_let_value(data)
-        if isinstance(data, tir.Buffer):
-            zeros = [tir.IntImm("int32", 0) for _ in extent]
-            return buffer_load_to_tile_region(tir.BufferLoad(data, zeros), access_type, extent)
-        elif isinstance(data, tir.BufferRegion):
-            return buffer_region_to_tile_region(data, access_type, extent)
-        elif isinstance(data, tir.BufferLoad):
-            region = get_buffer_region_from_load(data)
-            if region is None:
-                return buffer_load_to_tile_region(data, access_type, extent)
-            return buffer_region_to_tile_region(region, access_type, extent)
-        else:
-            return buffer_load_to_tile_region(data, access_type, extent)
-
-    value = _to_region(value, "r", src_extent)
-    dst = _to_region(dst, "w", dst_extent)
+    value = to_buffer_region(value, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     # Note: tile-region-based atomic operations don't support return_prev yet
     # This would need to be implemented in the tile runtime

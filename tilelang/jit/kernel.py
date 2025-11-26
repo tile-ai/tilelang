@@ -15,7 +15,7 @@ from tilelang import tvm
 from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
-                                  TorchDLPackKernelAdapter, MetalKernelAdapter)
+                                  TVMFFIKernelAdapter, MetalKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
@@ -55,7 +55,7 @@ class JITKernel(Generic[_P, _T]):
         self,
         func: PrimFunc = None,
         out_idx: list[int] | int = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "tvm_ffi",
         target: str | Target = "auto",
         target_host: str | Target = None,
         verbose: bool = False,
@@ -72,8 +72,8 @@ class JITKernel(Generic[_P, _T]):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
-            Execution backend to use for kernel execution (default: "cython").
+        execution_backend : Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+            Execution backend to use for kernel execution.
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
         target_host : Union[str, Target], optional
@@ -102,7 +102,7 @@ class JITKernel(Generic[_P, _T]):
 
         # Validate the execution backend.
         assert execution_backend in [
-            "dlpack",
+            "tvm_ffi",
             "ctypes",
             "cython",
             "nvrtc",
@@ -143,13 +143,14 @@ class JITKernel(Generic[_P, _T]):
     def from_database(
         cls,
         func: PrimFunc,
-        kernel_global_source: str,
+        host_kernel_source: str,
+        device_kernel_source: str,
         kernel_lib_path: str,
         params: list[KernelParam],
         target: str | Target,
         target_host: str | Target,
         out_idx: list[int] | int,
-        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"],
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"],
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):
@@ -172,7 +173,8 @@ class JITKernel(Generic[_P, _T]):
             params=params,
             result_idx=out_idx,
             target=target,
-            kernel_global_source=kernel_global_source,
+            host_kernel_source=host_kernel_source,
+            device_kernel_source=device_kernel_source,
             kernel_lib_path=kernel_lib_path,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
@@ -223,8 +225,8 @@ class JITKernel(Generic[_P, _T]):
         compile_flags = self.compile_flags
 
         # Compile the function with TVM, optimizing with shared memory lowering.
-        enable_host_codegen = execution_backend == "dlpack"
-        enable_device_compile = execution_backend == "dlpack"
+        enable_host_codegen = execution_backend == "tvm_ffi"
+        enable_device_compile = execution_backend == "tvm_ffi"
         with tvm.transform.PassContext(opt_level=3, config=pass_configs), self.target:
             artifact = tilelang.lower(
                 tilelang_func,
@@ -236,13 +238,23 @@ class JITKernel(Generic[_P, _T]):
         self.artifact = artifact
 
         # Create an adapter based on the specified execution backend.
-        if execution_backend == "dlpack":
-            # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
+        if execution_backend == "tvm_ffi":
+            # Use TVMFFIKernelAdapter for interoperability with PyTorch via DLPack.
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
-            assert tvm.runtime.enabled("llvm"), "DLPack backend requires LLVM runtime."
-            assert (artifact.rt_mod is not None), "DLPack backend requires a runtime module."
-            adapter = TorchDLPackKernelAdapter(
-                artifact.rt_mod, params=artifact.params, result_idx=out_idx)
+            assert (artifact.rt_mod is not None), "tvm_ffi backend requires a runtime module."
+            adapter = TVMFFIKernelAdapter(
+                params=artifact.params,
+                result_idx=out_idx,
+                target=target,
+                func_or_mod=tilelang_func,
+                host_mod=artifact.host_mod,
+                device_mod=artifact.device_mod,
+                rt_mod=artifact.rt_mod,
+                device_kernel_source=artifact.kernel_source,
+                verbose=verbose,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
         elif execution_backend == "ctypes":
             adapter = CtypesKernelAdapter(
                 params=artifact.params,
@@ -251,7 +263,7 @@ class JITKernel(Generic[_P, _T]):
                 func_or_mod=tilelang_func,
                 host_mod=artifact.host_mod,
                 device_mod=artifact.device_mod,
-                kernel_global_source=artifact.kernel_source,
+                device_kernel_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
@@ -264,7 +276,7 @@ class JITKernel(Generic[_P, _T]):
                 func_or_mod=tilelang_func,
                 host_mod=artifact.host_mod,
                 device_mod=artifact.device_mod,
-                kernel_global_source=artifact.kernel_source,
+                device_kernel_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
@@ -278,7 +290,7 @@ class JITKernel(Generic[_P, _T]):
                 func_or_mod=tilelang_func,
                 host_mod=artifact.host_mod,
                 device_mod=artifact.device_mod,
-                kernel_global_source=artifact.kernel_source,
+                device_kernel_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
@@ -308,7 +320,8 @@ class JITKernel(Generic[_P, _T]):
                                       result_idx: list[int] | int,
                                       target: str | Target,
                                       func_or_mod: PrimFunc | tvm.runtime.Module,
-                                      kernel_global_source: str,
+                                      host_kernel_source: str,
+                                      device_kernel_source: str,
                                       kernel_lib_path: str,
                                       pass_configs: dict[str, Any] | None = None,
                                       compile_flags: list[str] | None = None) -> BaseKernelAdapter:
@@ -316,15 +329,26 @@ class JITKernel(Generic[_P, _T]):
         execution_backend = self.execution_backend
 
         # Create an adapter based on the specified execution backend.
-        if execution_backend == "dlpack":
-            raise ValueError("DLPack backend is not supported for TileLang JIT.")
+        if execution_backend == "tvm_ffi":
+            adapter = TVMFFIKernelAdapter.from_database(
+                params=params,
+                result_idx=result_idx,
+                target=target,
+                func_or_mod=func_or_mod,
+                host_kernel_source=host_kernel_source,
+                device_kernel_source=device_kernel_source,
+                kernel_lib_path=kernel_lib_path,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
         elif execution_backend == "ctypes":
             adapter = CtypesKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
                 target=target,
                 func_or_mod=func_or_mod,
-                kernel_global_source=kernel_global_source,
+                host_kernel_source=host_kernel_source,
+                device_kernel_source=device_kernel_source,
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
@@ -335,7 +359,8 @@ class JITKernel(Generic[_P, _T]):
                 result_idx=result_idx,
                 target=target,
                 func_or_mod=func_or_mod,
-                kernel_global_source=kernel_global_source,
+                host_kernel_source=host_kernel_source,
+                device_kernel_source=device_kernel_source,
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
             )
@@ -346,7 +371,8 @@ class JITKernel(Generic[_P, _T]):
                 result_idx=result_idx,
                 target=target,
                 func_or_mod=func_or_mod,
-                kernel_global_source=kernel_global_source,
+                host_kernel_source=host_kernel_source,
+                device_kernel_source=device_kernel_source,
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
@@ -394,7 +420,7 @@ class JITKernel(Generic[_P, _T]):
         return Profiler(self.params, self.out_idx,
                         tensor_supply_type).with_default_adapter(self.adapter)
 
-    def get_kernel_source(self) -> str:
+    def get_kernel_source(self, kernel_only: bool = True) -> str:
         """
         Returns the source code of the compiled kernel function.
 
@@ -403,14 +429,17 @@ class JITKernel(Generic[_P, _T]):
         str
             The source code of the compiled kernel function.
         """
-        if self.execution_backend in {"ctypes", "cython", "nvrtc"}:
-            return self.adapter.get_kernel_source()
+        if self.execution_backend in {"ctypes", "cython", "nvrtc", "tvm_ffi"}:
+            return self.adapter.get_kernel_source(kernel_only=kernel_only)
         return self.artifact.kernel_source
 
     def get_host_source(self) -> str:
         """
         Returns the source code of the host function.
         """
+        if self.execution_backend in {"ctypes", "cython", "nvrtc", "tvm_ffi"}:
+            return self.adapter.get_host_source()
+        assert self.artifact.host_mod is not None, "host_mod is not available"
         return str(self.artifact.host_mod)
 
     def run_once(self, func: Callable | None = None) -> None:

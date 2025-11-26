@@ -314,9 +314,9 @@ else:
     if tvm_path not in sys.path:
         prepend_pythonpath(tvm_path)
         env.TVM_IMPORT_PYTHON_PATH = tvm_path
-
-    if os.environ.get("TVM_LIBRARY_PATH") is None:
-        os.environ['TVM_LIBRARY_PATH'] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
+# By default, the built TVM-related libraries are stored in TL_LIBS.
+if os.environ.get("TVM_LIBRARY_PATH") is None:
+    os.environ['TVM_LIBRARY_PATH'] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
 
 # Initialize CUTLASS paths
 if os.environ.get("TL_CUTLASS_PATH", None) is None:

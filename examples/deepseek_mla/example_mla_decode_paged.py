@@ -94,6 +94,8 @@ def mla_decode_tilelang(batch,
                                                      -T.infinity(accum_dtype), acc_s[i, j])
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_H):
+                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+                for i in T.Parallel(block_H):
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 for i, j in T.Parallel(block_H, block_N):
                     acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
@@ -176,6 +178,8 @@ def mla_decode_tilelang(batch,
                     acc_s[i, j] = T.if_then_else(start + k * block_N + j >= CACHE_SEQLENS[bx],
                                                  -T.infinity(accum_dtype), acc_s[i, j])
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                for i in T.Parallel(block_H):
+                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
                 for i in T.Parallel(block_H):
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 for i, j in T.Parallel(block_H, block_N):

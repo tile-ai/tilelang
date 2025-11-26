@@ -1645,10 +1645,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
-    this->stream << "cooperative_groups::grid_group grid = "
-                    "cooperative_groups::this_grid();\n";
-    this->PrintIndent();
-    this->stream << "grid.sync();\n";
+    this->stream << "cooperative_groups::this_grid().sync();\n";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
@@ -2612,6 +2609,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_sum())) {
+    os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_max())) {
+    os << "tl::warp_reduce_max(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_min())) {
+    os << "tl::warp_reduce_min(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitand())) {
+    os << "tl::warp_reduce_bitand(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitor())) {
+    os << "tl::warp_reduce_bitor(" << PrintExpr(op->args[0]) << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

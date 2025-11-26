@@ -24,7 +24,7 @@ import torch.nn.functional as F
 torch.random.manual_seed(0)
 # torch.set_printoptions(profile="full")
 
-from utils import *
+from test_utils import assert_similar
 
 
 def prepare_input(

@@ -1,5 +1,4 @@
 # Import necessary modules and classes
-from __future__ import annotations
 from abc import ABC, abstractmethod  # For defining abstract base classes
 from dataclasses import dataclass, field  # For defining data classes
 from ..arch import (  # Import architecture-related utilities and classes
@@ -42,7 +41,7 @@ class BaseTemplate(ABC):
         """
         pass
 
-    def with_arch(self, arch: TileDevice) -> BaseTemplate:
+    def with_arch(self, arch: TileDevice) -> 'BaseTemplate':
         """
         Sets the architecture for this template and returns itself.
 
@@ -110,7 +109,7 @@ class BaseTemplate(ABC):
         """
         raise NotImplementedError("initialize_function is not implemented")
 
-    def set_function(self, func: PrimFunc) -> BaseTemplate:
+    def set_function(self, func: PrimFunc) -> 'BaseTemplate':
         """
         Sets the function for this template and returns itself.
 
@@ -123,7 +122,7 @@ class BaseTemplate(ABC):
         self._func = func
         return self
 
-    def set_output_nodes(self, output_nodes: list[OutputNode]) -> BaseTemplate:
+    def set_output_nodes(self, output_nodes: list[OutputNode]) -> 'BaseTemplate':
         """
         Sets the output nodes for this template and returns itself.
 

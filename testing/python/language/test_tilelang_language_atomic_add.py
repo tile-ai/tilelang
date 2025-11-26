@@ -260,7 +260,7 @@ def test_atomic_addx2():
     run_atomic_addx2(32, 64, 8, 16)
 
 
-@tilelang.jit(debug_root_path="./testing/python/language")
+@tilelang.jit
 def atomic_different_memory_orders_program(M, N, block_M, block_N, dtype="float"):
 
     @T.prim_func
@@ -374,10 +374,9 @@ def test_atomic_return_prev():
     run_atomic_return_prev(32, 32, 8, 8)
 
 
-# TODO(lei): test failed and this is experimental
-# CC @dyq
-# def test_tile_atomic_add():
-#     run_tile_atomic_add(8, 128, 128, 32, 32)
+def test_tile_atomic_add():
+    run_tile_atomic_add(8, 128, 128, 32, 32)
+
 
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -1,5 +1,4 @@
 """Hint definition for schedule"""
-from __future__ import annotations
 from tvm import DataType
 from . import PrimFuncNode
 import numpy as np
@@ -218,7 +217,7 @@ class Hint:
         return dic
 
     @classmethod
-    def from_dict(cls, dic: dict) -> Hint:
+    def from_dict(cls, dic: dict) -> 'Hint':
         hint = cls()
         for k, v in dic.items():
             setattr(hint, k, v)

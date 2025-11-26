@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
@@ -19,6 +18,7 @@ try:
 except ImportError:  # Python < 3.11 for Self, < 3.10 for ParamSpec
     from typing_extensions import ParamSpec, Self
 from . import dtypes as dt
+from . import utils
 import threading
 import logging
 
@@ -77,6 +77,10 @@ class Frame:
 
 
 class MacroFrame(Frame):
+    ...
+
+
+class ExitedMacroFrame(Frame):
     ...
 
 
@@ -140,11 +144,11 @@ class Builder(BaseBuilder):
         self.frames: list[AnyFrame] = []
         self.ir_builder = IRBuilder()
         self.name_inside_frame: dict[str, AnyFrame] = {}
+        self.arg_annotations = {}
 
     @classmethod
     def current(cls) -> Self:
-        builder = thread_local_storage.builder
-        assert builder is not None, "No active Builder found in the current thread."
+        builder = getattr(thread_local_storage, 'builder', None)
         return builder
 
     @contextmanager
@@ -155,16 +159,31 @@ class Builder(BaseBuilder):
             yield
 
     @contextmanager
-    def macro(self, name=None):
+    def macro(self, name=None, annotations=None):
         if self.find_frame_idx(BoolOpFrame) is not None:
             raise RuntimeError(
                 f"Macro `{name}` is used inside boolean expressions, "
                 "please use `if` to replace `M and M`, `M or M`, `M if xxx else M` constructs")
-        save = self.name_inside_frame
+        save = self.name_inside_frame, self.arg_annotations
         self.name_inside_frame = {}
-        with self.with_frame(MacroFrame()):
-            yield
-        self.name_inside_frame = save
+        self.arg_annotations = annotations or {}
+        pos = len(self.frames)
+        # here we add a ExitedMacroFrame to preserve the frame stack inside macro
+        # because macro may bind some variable, and return it
+        #
+        # ```py
+        # @T.macro
+        # def foo(x):
+        #    y = x + 1
+        #    return y
+        # @T.prim_func
+        # def bar():
+        #    c = foo(1) # macro generates let y = x + 1
+        #    d = c # d = c should lay inside frame of `let y = x + 1`
+        self.frames.append(MacroFrame())
+        yield
+        self.frames[pos] = ExitedMacroFrame()
+        self.name_inside_frame, self.arg_annotations = save
 
     def get(self):
         return self.ir_builder.get()
@@ -313,32 +332,18 @@ class Builder(BaseBuilder):
         self.check_continue_break()
         locals = self.get_parent_locals()
         orig_value = locals.get(name, None)
-        # annotation like tl.float32
-        # temporarily disable annotation based var declaration, for better pull request separation
-        # if callable(annot):
-        #     annot_val = annot()
-        #     if isinstance(annot_val, tir.Var):
-        #         orig_value = tir.alloc_buffer((1,), dtype=annot_val.dtype, scope='local.var')
-        #         IRBuilder.name(name, orig_value)
-        #         if isinstance(value, EllipsisType) or value is self.empty:
-        #             return orig_value
-        #         elif isinstance(value, (int, float, IntImm, FloatImm)):
-        #             tir.block_attr(
-        #                 {'tl.local_var_init': {
-        #                     orig_value.data: tvm.runtime.convert(value)
-        #                 }})
-        #             return orig_value
         # if orig_value is a local.var, we use buffer_store to modify it immutably
-        #   however, if rvalue is also a local.var, this is a new binding,
+        #   however, if rvalue is not a PrimExpr, such as buffer,
         #   we should not use buffer_store, and bind it instead
         #   ```py
         #   a = tl.alloc_var('float32')  # bind var `a`
         #   a = tl.alloc_var('float32')  # bind a new var `a_1`
+        #   a = tl.alloc_shared((1,), T.float32) # bind a to new buffer
         #   b = a                        # get value of var `b = a_1[0]``
         #   c = tl.alloc_var('float32')  # bind var `c`
         #   c = a                        # get and assign `c[0] = a_1[0]`
         #   ```
-        if is_var(orig_value) and not is_var(value):
+        if is_var(orig_value) and isinstance(value, (int, float, PrimExpr)):
             tir.buffer_store(orig_value, value, 0)
             return orig_value
         res = self.bind_immutable(name, value)
@@ -347,7 +352,7 @@ class Builder(BaseBuilder):
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
             if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                 logger.warning(
-                    f'Variable `{name}` shadows another declared value, Are you forgetting to allocate it as a var?',
+                    f'Variable `{name}` is declared twice, are you looking for a T.alloc_var?',
                     stack_info=True,
                     stacklevel=2,
                 )
@@ -418,7 +423,7 @@ class Builder(BaseBuilder):
         else:
             return super().aug_assign_slice(op, target, sl, aug_value)
 
-    def boolop(self, op, left, right):
+    def boolop(self, op, left, right=None):
         left = unwrap_cond(left)
         if isinstance(left, PrimExpr):
             with self.with_frame(BoolOpFrame()):
@@ -426,6 +431,8 @@ class Builder(BaseBuilder):
                     return tir.And(left, right())
                 if op == 'Or':
                     return tir.Or(left, right())
+                if op == 'Not':
+                    return tir.Not(left)
             raise RuntimeError(f"Unsupported boolean operator: {op}")
         else:
             return super().boolop(op, left, right)
@@ -486,21 +493,37 @@ class Builder(BaseBuilder):
                 )
         return self.unwrap_value(value)
 
-    def arg(self, name, value):
-        if self.find_frame_idx(MacroFrame) is not None:
-            if isinstance(value, (PrimExpr, int, float)):
-                return self.bind(name, value)
-            else:
-                return value
+    def macro_arg(self, name, value):
+        from tilelang.language.proxy import Ref
+        annot_value = self.arg_annotations.get(name, None)
+        if annot_value is Var or annot_value is Ref:
+            if annot_value is Var:
+                logger.warning('Use `T.Var` as macro annotations is deprecated, please use `T.Ref`')
+            is_var = isinstance(value, tvm.tir.BufferLoad) and value.buffer.scope() == 'local.var'
+            if not is_var:
+                raise ValueError(
+                    f'Argument `{name}` is expected to be a variable allocated by `T.alloc_var`, but got {value}({type(value)})'
+                )
+            return value.buffer
+        elif isinstance(value, (PrimExpr, int, float)):
+            return self.bind(name, value)
+        else:
+            return value
+
+    def prim_func_arg(self, name, value):
         if isinstance(value, (Buffer, Var)):
             return tir.arg(name, value)
         elif value is self.empty:
             raise ValueError(f'Argument `{name}` is not annotated')
-        # elif isinstance(value, Hashable):
-        #     return value
         else:
             raise TypeError(
                 f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
+
+    def arg(self, name, value):
+        if self.find_frame_idx(MacroFrame) is not None:
+            return self.macro_arg(name, value)
+        else:
+            return self.prim_func_arg(name, value)
 
     def override(self, name: str):
         from tilelang.language import serial
@@ -533,14 +556,15 @@ class Macro(Generic[_P, _T]):
     name: str
     orig_func: Callable[_P, _T]
     ir_gen: IRGenerator[_P, _T]
+    annotations: dict[str, Any]
 
     @property
     def source(self) -> str:
         return self.ir_gen.source
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _T:
-        builder = Builder.current()
-        with builder.macro(self.name):
+        builder = Builder.current() or Builder()
+        with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res
 
@@ -578,7 +602,9 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
     """
 
     def impl(func: Callable[_P, _T]) -> Macro[_P, _T]:
-        return Macro(name=func.__name__, orig_func=func, ir_gen=mutate(func))
+        annotations = get_type_hints(func)
+        return Macro(
+            name=func.__name__, orig_func=func, ir_gen=mutate(func), annotations=annotations)
 
     return impl(func) if func is not None else impl
 
@@ -594,22 +620,27 @@ def get_type_hints(func):
     # Build eval namespaces from function globals plus captured closure variables
     # This lets annotations reference symbols like `n`, `h`, or dtype vars
     # defined in the outer scope of a nested function.
-    globalns = dict(getattr(func, '__globals__', {}))
-    localns = dict(globalns)
-    try:
-        freevars = getattr(func.__code__, 'co_freevars', ())
-        cells = getattr(func, '__closure__', ()) or ()
-        closure_bindings = {
-            name: cell.cell_contents for name, cell in zip(freevars, cells) if name not in localns
-        }
-        if closure_bindings:
-            localns.update(closure_bindings)
-            # Also update globals so ForwardRef eval sees them uniformly
-            globalns.update(closure_bindings)
-    except Exception:
-        # Be permissive: absence or access issues with closure shouldn't crash
-        pass
-
+    globalns = func.__globals__
+    # Here we add nonlocals into localns, to capture the parameters declared in the parent function
+    # ```py
+    # def foo():
+    #   n = 128 # n is nonlocal
+    #   def bar(
+    #       A: T.Tensor(n, T.float32) # we add nonlocal in its eval context
+    #   ):
+    #      for i in range(n): ...
+    # ```
+    #
+    # This is incomplete and buggy
+    #   the only bug scenario the function body doesn't use the the parameters
+    #   but such define-no-use scenario is very rare in writing kernels
+    #
+    # ```py
+    # def foo():
+    #   n = 128
+    #   def bar(A: T.Tensor((n,), T.float32)):
+    #     ... # empty function, do not use `n`
+    localns = utils.get_func_nonlocals(func)
     for name, value in annot.items():
         if name == 'return':
             continue
@@ -619,8 +650,10 @@ def get_type_hints(func):
         if value is None:
             value = type(None)
         if isinstance(value, str):
-            # Handle simple dtype aliases like T.float32 appearing as strings
-            # Evaluate directly only when it matches known dtypes
+            # if the annotation is string, is can be: (i) a T.float32 like annotations, (ii) a ForwardRef object
+            # typing doesn't handle (i), it will try to interpret T.float32
+            #    typing see: T.float32 is str('float32'), and there is no object named `flaot32` and give a NameError
+            # here we manually interpret it to return T.float32 object
             try:
                 _, v = value.split('.', maxsplit=1)
             except ValueError:
@@ -632,7 +665,9 @@ def get_type_hints(func):
                 except Exception:
                     pass
             value = ForwardRef(value, is_argument=True, is_class=False)
-        hints[name] = _eval_type(value, globalns=globalns, localns=localns)
+            hints[name] = _eval_type(value, globalns=globalns, localns=localns)
+        else:
+            hints[name] = value
     return hints
 
 

@@ -1,5 +1,3 @@
-import tilelang.testing
-
 import example_gemv
 
 
@@ -8,4 +6,4 @@ def test_example_gemv():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    test_example_gemv()

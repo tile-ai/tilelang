@@ -85,6 +85,9 @@ class GemmTCGEN5(GemmBase):
             raise ValueError(f"TCGEN5MMA currently only supports gemm_ss, got "
                              f"A scope {self.A.scope()}, B scope {self.B.scope()}")
 
+        atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.get_tcgen5_mma_meta(
+            self.M, self.N, self.K)
+
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
             raise ValueError(f"Unsupported A scope for TCGEN5MMA: {self.A.scope()}")
         if self.B.scope() not in {"shared", "shared.dyn"}:
@@ -94,27 +97,28 @@ class GemmTCGEN5(GemmBase):
         if self.wg_wait != -1:
             raise ValueError("TCGEN5MMA currently requires wg_wait == -1")
 
-        mbarptr = self.mbarptr
-        if mbarptr == 0:
-            raise ValueError("TCGEN5MMA requires a valid mbarrier pointer")
+        mbar = self.mbar
+        if mbar == 0:
+            raise ValueError("TCGEN5MMA requires a valid mbarrier")
+
+        mbarptr = mbar.access_ptr("rw")
 
         C_coords = self.C_coords
         if len(C_coords) != 2:
             raise ValueError("TCGEN5MMA expects 2D coordinates for C buffer access")
 
         accum_dtype = str(self.C.dtype)
-        if accum_dtype != "float32":
+        if accum_dtype not in ["float32", 'float16']:
             raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
 
         A_shared = self.ARegion
         B_shared = self.BRegion
         C_local = self.C
         clear_accum = self.clear_accum
-        mbar = self.mbarptr
 
         @T.prim_func
         def _gemm_ss() -> None:
             if thread_var // 32 == 0:
-                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbar, clear_accum)
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
         return _Simplify(_gemm_ss, inline_let=True)

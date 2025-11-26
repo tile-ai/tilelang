@@ -124,6 +124,10 @@ class GemmBase:
         return getattr(self.gemm_node, "mbarPtr", tvm.tir.const(0, "uint32"))
 
     @property
+    def mbar(self) -> tir.Buffer:
+        return getattr(self.gemm_node, "mbar", None)
+
+    @property
     def C_coords(self):
         coords = getattr(self.gemm_node, "cCoords", None)
         if coords is None or len(coords) == 0:

@@ -23,7 +23,6 @@ except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
 from tilelang.language.v2 import PrimFunc
-from tilelang.jit.adapter.utils import is_metal_target
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
@@ -46,7 +45,8 @@ _T = TypeVar('_T')
 def compile(
     func: PrimFunc[_KP, _T] = None,
     out_idx: list[int] | int | None = None,
-    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc",
+                               "torch"] = "auto",
     target: str | Target = "auto",
     target_host: str | Target | None = None,
     verbose: bool = False,
@@ -61,8 +61,9 @@ def compile(
         The TileLang TIR function to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
-    execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
-        Execution backend to use for kernel execution (default: "cython").
+    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+        Execution backend to use for kernel execution. Use "auto" to pick a sensible
+        default per target (cuda->tvm_ffi, metal->torch, others->cython).
     target : Union[str, Target], optional
         Compilation target, either as a string or a TVM Target object (default: "auto").
     target_host : Union[str, Target], optional
@@ -80,8 +81,19 @@ def compile(
     # This path is not a performance critical path, so we can afford to convert the target.
     target = Target(determine_target(target))
 
-    if is_metal_target(target):
-        assert execution_backend == 'torch', 'Currently metal target only support `tl.jit(execution_backend="torch")`'
+    # Resolve execution backend (handles aliases, auto, validation per target)
+    requested_backend = execution_backend
+    from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target
+    execution_backend = resolve_execution_backend(requested_backend, target)
+    if verbose:
+        allowed_now = allowed_backends_for_target(target, include_unavailable=False)
+        logger.info(
+            "Execution backend resolved -> '%s' (requested='%s', target='%s', allowed: %s)",
+            execution_backend,
+            requested_backend,
+            target.kind.name,
+            ", ".join(sorted(allowed_now)),
+        )
 
     return cached(
         func=func,
@@ -97,7 +109,8 @@ def compile(
 
 def par_compile(funcs: Iterable[PrimFunc[_KP, _T]],
                 out_idx: list[int] | int | None = None,
-                execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+                execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc",
+                                           "torch"] = "auto",
                 target: str | Target = "auto",
                 target_host: str | Target | None = None,
                 verbose: bool = False,
@@ -113,8 +126,9 @@ def par_compile(funcs: Iterable[PrimFunc[_KP, _T]],
         The TileLang TIR functions to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
-    execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
-        Execution backend to use for kernel execution (default: "cython").
+    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+        Execution backend to use for kernel execution. Use "auto" to pick a sensible
+        default per target (cuda->tvm_ffi, metal->torch, others->cython).
     target : Union[str, Target], optional
         Compilation target, either as a string or a TVM Target object (default: "auto").
     target_host : Union[str, Target], optional
@@ -165,7 +179,7 @@ def par_compile(funcs: Iterable[PrimFunc[_KP, _T]],
 class JITImpl(Generic[_P, _KP, _T]):
     func: Callable[_P, _T] | PrimFunc[_KP, _T]
     out_idx: list[int] | int | None
-    execution_backend: Literal["dlpack", "ctypes", "cython"]
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"]
     target: str | Target
     target_host: str | Target
     verbose: bool
@@ -286,7 +300,8 @@ def jit(
     out_idx: Any = None,
     target: str | Target = "auto",
     target_host: str | Target = None,
-    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc",
+                               "torch"] = "auto",
     verbose: bool = False,
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
@@ -301,7 +316,8 @@ def jit(  # This is the new public interface
         out_idx: Any = None,
         target: str | Target = "auto",
         target_host: str | Target = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+        execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc",
+                                   "torch"] = "auto",
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
         debug_root_path: str | None = None,
@@ -322,8 +338,9 @@ def jit(  # This is the new public interface
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
-        Backend for kernel execution and argument passing. Defaults to "cython".
+    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+        Backend for kernel execution and argument passing. Use "auto" to pick a sensible
+        default per target (cuda->tvm_ffi, metal->torch, others->cython).
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.
     pass_configs : Optional[Dict[str, Any]], optional

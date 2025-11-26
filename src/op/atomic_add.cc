@@ -5,7 +5,7 @@
  */
 
 #include "./atomic_add.h"
-#include "./region.h"
+#include "utils.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -26,32 +26,27 @@ using namespace tir;
  * @brief Construct an AtomicAdd operator from call arguments and a buffer map.
  *
  * Builds the internal AtomicAddNode, extracts the source and destination
- * regions and their backing Buffers from the first two call-style expressions
- * in `args` (via RegionOp), and stores them along with their ranges. If a third
- * argument is provided, it is interpreted as an integer immediate and stored as
- * the node's coalesced width.
+ * regions and their backing Buffers from the first two region-style expressions
+ * in `args` (BufferLoad/BufferRegion), and stores them along with their
+ * ranges. If a third argument is provided, it is interpreted as an integer
+ * immediate and stored as the node's coalesced width.
  *
  * @param args Call-style PrimExprs where:
  *             - args[0] is the source region call,
  *             - args[1] is the destination region call,
  *             - args[2] (optional) is an IntImm specifying coalesced width.
- * @param vmap Mapping from buffers used by RegionOp to concrete Buffer objects.
- *
  * Notes:
- * - The constructor checks that args[0] and args[1] are CallNodes.
+ * - The constructor checks that args[0] and args[1] are region-compatible.
  * - The constructed node is stored in this->data_.
  */
-AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
+AtomicAdd::AtomicAdd(Array<PrimExpr> args) {
   ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
   for (int i = 0; i < 2; i++) {
-    auto expr = args[i];
-    auto call = expr.as<CallNode>();
-    ICHECK(call);
-    auto region = RegionOp(call->args, vmap);
-    rgs[i] = region->GetRanges();
-    bf[i] = region->GetBuffer();
+    auto region = NormalizeToBufferRegion(args[i]);
+    rgs[i] = region->region;
+    bf[i] = region->buffer;
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);

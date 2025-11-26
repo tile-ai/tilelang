@@ -13,15 +13,30 @@ def debug_print_buffer(M=16, N=16, dtype="float16"):
             shared_buf = T.alloc_shared([M, N], dtype)
             T.print(shared_buf)
 
-    jit_kernel = tilelang.compile(program, target="cuda")
+    jit_kernel = tilelang.compile(program, target="cuda", execution_backend="tvm_ffi")
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 
 
 def test_debug_print_buffer():
-    debug_print_buffer(16, 16, dtype="float")
-    debug_print_buffer(16, 16, dtype="float16")
-    debug_print_buffer(16, 16, dtype="uint8")
+    debug_print_buffer(dtype='bool')
+    debug_print_buffer(dtype='int8')
+    debug_print_buffer(dtype='int16')
+    debug_print_buffer(dtype='int32')
+    debug_print_buffer(dtype='int64')
+    debug_print_buffer(dtype='uint8')
+    debug_print_buffer(dtype='uint16')
+    debug_print_buffer(dtype='uint32')
+    debug_print_buffer(dtype='uint64')
+    debug_print_buffer(dtype='float16')
+    debug_print_buffer(dtype='float32')
+    debug_print_buffer(dtype='float64')
+    debug_print_buffer(dtype='bfloat16')
+    debug_print_buffer(dtype='float8_e4m3')
+    debug_print_buffer(dtype='float8_e4m3fn')
+    debug_print_buffer(dtype='float8_e4m3fnuz')
+    debug_print_buffer(dtype='float8_e5m2')
+    debug_print_buffer(dtype='float8_e5m2fnuz')
 
 
 def debug_print_buffer_conditional(M=16, N=16):

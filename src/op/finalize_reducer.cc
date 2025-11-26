@@ -12,6 +12,7 @@
 #include <tvm/tir/op_attr_types.h>
 
 #include "../target/utils.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
@@ -29,12 +30,14 @@ using namespace tir;
  * @param args TL operator arguments: expects at least two elements where
  *             `args[0]` is an access pointer identifying the reducer variable
  * and `args[1]` is an integer encoding a `ReducerOpType` (e.g., Sum/Max/Min).
- * @param vmap Mapping from variables to Buffers used to look up the reducer
- * Buffer.
  */
-FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args, BufferMap vmap) {
+FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args) {
   auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
-  node->reducer = vmap[GetVarFromAccessPtr(args[0])];
+  // Normalize any supported region expression
+  // (BufferRegion/BufferLoad/tl.region) to a BufferRegion, then take the
+  // underlying Buffer as reducer.
+  auto region = NormalizeToBufferRegion(args[0]);
+  node->reducer = region->buffer;
   node->op = (ReducerOpType)*as_const_int(args[1]);
   data_ = std::move(node);
 }
