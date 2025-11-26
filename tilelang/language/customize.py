@@ -46,8 +46,9 @@ def reshape(src: Buffer, shape: list[PrimExpr]) -> Buffer:
     Returns:
         Buffer: A new buffer view with the specified shape
     """
-    assert prim_expr_equal(bits_product(shape, src.dtype),
-                           bits_product(src.shape, src.dtype)), "T.reshape/view shape check failed."
+    assert prim_expr_equal(
+        bits_product(shape, src.dtype), bits_product(src.shape, src.dtype)
+    ), f"T.reshape/view shape check failed. src {src} src.shape: {src.shape}, src.dtype: {src.dtype}, target shape: {shape}, target dtype: {src.dtype}"
     return T.Tensor(shape, src.dtype, src.data)
 
 

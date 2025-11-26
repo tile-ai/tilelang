@@ -200,24 +200,63 @@ Array<IterVar> CopyNode::MakeIterVars() const {
   // Sanity check: when switching away from the original (src_range),
   // ensure the chosen base ranges are not provably smaller than the original
   // per dimension. This guards against generating undersized loop domains.
+  // Improved logic: use two pointers to traverse both base_ranges and
+  // src_range, skipping dimensions with extent == 1. The number of non-1
+  // extents must match.
   arith::Analyzer analyzer;
-  ICHECK(base_ranges.size() == src_range.size())
-      << "Loop range rank mismatch after scope-based selection: base rank = "
-      << base_ranges.size() << ", src rank = " << src_range.size()
-      << ", src = " << src->name << ", dst = " << dst->name
-      << ", base scope = " << (base_is_src ? src.scope() : dst.scope());
-  for (size_t i = 0; i < base_ranges.size(); ++i) {
-    PrimExpr base_ext = base_ranges[i]->extent;
-    PrimExpr src_ext = src_range[i]->extent;
-    // Only fail when it's provably smaller; allow unknown symbolic relations.
-    if (analyzer.CanProve(base_ext < src_ext)) {
-      ICHECK(0)
-          << "Selected loop range is smaller than original src range at dim "
-          << i << ": base(extent=" << base_ext
-          << ", scope=" << (base_is_src ? src.scope() : dst.scope())
-          << ") < src(extent=" << src_ext << ", scope=" << src.scope()
-          << ") for src=" << src->name << ", dst=" << dst->name;
+
+  size_t base_dim = 0, src_dim = 0;
+  while (base_dim < base_ranges.size() && src_dim < src_range.size()) {
+    // Skip base extents that are 1
+    while (base_dim < base_ranges.size() &&
+           is_one(base_ranges[base_dim]->extent)) {
+      ++base_dim;
     }
+    // Skip src extents that are 1
+    while (src_dim < src_range.size() && is_one(src_range[src_dim]->extent)) {
+      ++src_dim;
+    }
+    // Both indices now at non-1, or at end
+    if (base_dim < base_ranges.size() && src_dim < src_range.size()) {
+      PrimExpr base_ext = base_ranges[base_dim]->extent;
+      PrimExpr src_ext = src_range[src_dim]->extent;
+      // Only fail if base extent is provably smaller than src extent
+      if (analyzer.CanProve(base_ext < src_ext)) {
+        std::ostringstream oss;
+        oss << "Selected loop range is smaller than original src range at "
+               "matched non-1 dimension: "
+            << "base(extent=" << base_ext
+            << ", scope=" << (base_is_src ? src.scope() : dst.scope())
+            << ", min=" << base_ranges[base_dim]->min
+            << ", base_dim=" << base_dim << ") < src(extent=" << src_ext
+            << ", min=" << src_range[src_dim]->min << ", src_dim=" << src_dim
+            << ", scope=" << src.scope() << ") for src=" << src->name
+            << ", dst=" << dst->name << "\n";
+        oss << "src buffer: " << src->name << ", scope=" << src.scope() << "\n";
+        oss << "dst buffer: " << dst->name << ", scope=" << dst.scope() << "\n";
+        oss << "base_ranges[" << base_dim
+            << "]: min=" << base_ranges[base_dim]->min
+            << ", extent=" << base_ext << "\n";
+        oss << "src_ranges[" << src_dim << "]: min=" << src_range[src_dim]->min
+            << ", extent=" << src_ext << "\n";
+        LOG(FATAL) << oss.str();
+      }
+      ++base_dim;
+      ++src_dim;
+    }
+  }
+
+  // Any remaining unmatched dimensions in either range must all have extent ==
+  // 1
+  while (base_dim < base_ranges.size()) {
+    ICHECK(is_one(base_ranges[base_dim]->extent))
+        << "base_ranges has extra non-1 extent at dim " << base_dim;
+    ++base_dim;
+  }
+  while (src_dim < src_range.size()) {
+    ICHECK(is_one(src_range[src_dim]->extent))
+        << "src_range has extra non-1 extent at dim " << src_dim;
+    ++src_dim;
   }
 
   Array<IterVar> loop_vars;
@@ -852,7 +891,6 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ICHECK(ldsm_copy.defined()) << "Failed to lower ptx matrix copy";
     return ldsm_copy;
   } else if (copy_inst == CopyInst::kNormal) {
-    LOG(INFO) << "Lowering normal copy";
     return LowerNormalCopy(T, analyzer);
   } else {
     LOG(FATAL) << "Unsupported copy inst " << static_cast<int>(copy_inst);
