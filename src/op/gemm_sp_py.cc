@@ -61,23 +61,24 @@ GemmSPPy::GemmSPPy(Array<PrimExpr> args, BufferMap vmap) {
   node->C = vmap[GetVarFromAccessPtr(node->Cptr)];
   node->trans_A = args[4].as<Bool>().value();
   node->trans_B = args[5].as<Bool>().value();
-  node->M = args[6].as<IntImm>().value()->value;
-  node->N = args[7].as<IntImm>().value()->value;
-  node->K = args[8].as<IntImm>().value()->value;
-  node->policy = GemmWarpPolicy(args[9].as<IntImm>().value()->value);
-  node->clear_accum = args[10].as<PrimExpr>().value();
-  node->stride_A = args[11].as<IntImm>().value()->value;
-  node->stride_B = args[12].as<IntImm>().value()->value;
-  node->offset_A = args[13].as<IntImm>().value()->value;
-  node->offset_B = args[14].as<IntImm>().value()->value;
-  if (args.size() > 15) {
-    node->kPack = args[15].as<IntImm>().value()->value;
+  node->trans_E = args[6].as<Bool>().value();
+  node->M = args[7].as<IntImm>().value()->value;
+  node->N = args[8].as<IntImm>().value()->value;
+  node->K = args[9].as<IntImm>().value()->value;
+  node->policy = GemmWarpPolicy(args[10].as<IntImm>().value()->value);
+  node->clear_accum = args[11].as<PrimExpr>().value();
+  node->stride_A = args[12].as<IntImm>().value()->value;
+  node->stride_B = args[13].as<IntImm>().value()->value;
+  node->offset_A = args[14].as<IntImm>().value()->value;
+  node->offset_B = args[15].as<IntImm>().value()->value;
+  if (args.size() > 16) {
+    node->kPack = args[16].as<IntImm>().value()->value;
     if (node->kPack != 1 && node->kPack != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
-  if (args.size() > 16) {
-    node->wg_wait = args[16].as<IntImm>().value()->value;
+  if (args.size() > 17) {
+    node->wg_wait = args[17].as<IntImm>().value()->value;
   }
   data_ = std::move(node);
 }

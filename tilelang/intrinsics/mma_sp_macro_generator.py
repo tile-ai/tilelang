@@ -139,6 +139,7 @@ class SparseTensorCoreIntrinEmitter:
         accum_dtype: str = "float16",
         a_transposed: bool = False,
         b_transposed: bool = False,
+        e_transposed: bool = False,
         block_row_warps: int = 2,
         block_col_warps: int = 2,
         warp_row_tiles: int = 8,
@@ -155,6 +156,7 @@ class SparseTensorCoreIntrinEmitter:
         self.accum_dtype = accum_dtype
         self.a_transposed = a_transposed
         self.b_transposed = b_transposed
+        self.e_transposed = e_transposed
         # Hint Information
         self.block_row_warps = block_row_warps
         self.block_col_warps = block_col_warps
@@ -362,6 +364,7 @@ class SparseTensorCoreIntrinEmitter:
         local_size_e = self.local_size_e
         a_dtype = self.a_dtype
         e_dtype = self.e_dtype
+        trans = self.e_transposed
         # ldmatrix cannot be used for int8 + trans case.
         # include/cutlass/gemm/warp/mma_tensor_op_tile_iterator_sparse.h
         ldmatrix_available = False  # TODO: use ldmatrix when possible
@@ -413,7 +416,7 @@ class SparseTensorCoreIntrinEmitter:
                     rk * warp_k + ki * micro_size_k) // self.e_factor
                 for j in T.serial(local_size_e):
                     mi, mk = mma_load_layout(tx, j)
-                    E_local_buf[i * local_size_e + j] = E_shared_buf[wi + mi, wk + mk]
+                    E_local_buf[i * local_size_e + j] =  E_shared_buf[wk + mk, wi + mi] if trans else E_shared_buf[wi + mi, wk + mk]
 
         return _warp_ldmatrix_e(E_local_buf, E_shared_buf, ki, thread_binding, rk)
 

@@ -24,7 +24,7 @@ public:
   tir::Buffer A, E, B, C;
   // pointer to the A, E, B, C
   PrimExpr Aptr, Eptr, Bptr, Cptr;
-  bool trans_A, trans_B;
+  bool trans_A, trans_B, trans_E;
   int M, N, K;
   int stride_A, stride_B;
   int offset_A, offset_B;
@@ -51,6 +51,7 @@ public:
         .def_ro("Cptr", &GemmSPPyNode::Cptr)
         .def_ro("trans_A", &GemmSPPyNode::trans_A)
         .def_ro("trans_B", &GemmSPPyNode::trans_B)
+        .def_ro("trans_E", &GemmSPPyNode::trans_E)
         .def_ro("M", &GemmSPPyNode::M)
         .def_ro("N", &GemmSPPyNode::N)
         .def_ro("K", &GemmSPPyNode::K)

@@ -50,6 +50,10 @@ class GemmSPBase:
         return self.gemm_sp_node.trans_B
 
     @property
+    def trans_E(self) -> bool:
+        return self.gemm_sp_node.trans_E
+
+    @property
     def e_dtype(self) -> str:
         return self.E.dtype
 
