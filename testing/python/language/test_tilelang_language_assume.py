@@ -20,7 +20,6 @@ def test_assume_remove_boundary_check():
 
     jit_kernel = kernel_with_assume()
     source = jit_kernel.get_kernel_source()
-    print(source)
 
     assert ("if (" not in source)
 
@@ -51,7 +50,6 @@ def test_assume_enable_vectorization():
 
     jit_kernel = kernel_vectorize(128)
     source = jit_kernel.get_kernel_source()
-    print(source)
 
     assert ("float4" in source) and ("if (" not in source)
 
