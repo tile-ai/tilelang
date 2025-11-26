@@ -148,8 +148,7 @@ class Builder(BaseBuilder):
 
     @classmethod
     def current(cls) -> Self:
-        builder = thread_local_storage.builder
-        assert builder is not None, "No active Builder found in the current thread."
+        builder = getattr(thread_local_storage, 'builder', None)
         return builder
 
     @contextmanager
@@ -424,7 +423,7 @@ class Builder(BaseBuilder):
         else:
             return super().aug_assign_slice(op, target, sl, aug_value)
 
-    def boolop(self, op, left, right):
+    def boolop(self, op, left, right=None):
         left = unwrap_cond(left)
         if isinstance(left, PrimExpr):
             with self.with_frame(BoolOpFrame()):
@@ -432,6 +431,8 @@ class Builder(BaseBuilder):
                     return tir.And(left, right())
                 if op == 'Or':
                     return tir.Or(left, right())
+                if op == 'Not':
+                    return tir.Not(left)
             raise RuntimeError(f"Unsupported boolean operator: {op}")
         else:
             return super().boolop(op, left, right)
@@ -562,7 +563,7 @@ class Macro(Generic[_P, _T]):
         return self.ir_gen.source
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _T:
-        builder = Builder.current()
+        builder = Builder.current() or Builder()
         with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res
