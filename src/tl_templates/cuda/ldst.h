@@ -11,6 +11,23 @@ enum class Scope { CTA, GPU, SYS };
 template <class> inline constexpr bool always_false_v = false;
 #endif
 
+// Type trait to detect bfloat16 types
+template <typename T>
+struct is_bfloat16 : std::false_type {};
+
+#ifdef __CUDA_BF16_TYPES_EXIST__
+template <>
+struct is_bfloat16<__nv_bfloat16> : std::true_type {};
+#endif
+
+// Detect cutlass bfloat16_t
+namespace cutlass { struct bfloat16_t; }
+template <>
+struct is_bfloat16<cutlass::bfloat16_t> : std::true_type {};
+
+template <typename T>
+inline constexpr bool is_bfloat16_v = is_bfloat16<T>::value;
+
 // Fallback template for unsupported configurations
 template <Semantic semantic, Scope scope, bool na>
 struct StImpl {
@@ -37,8 +54,14 @@ struct LdImpl {
     template <typename T> \
     TL_DEVICE static void execute(T *ptr, T value) { \
       if constexpr (sizeof(T) == 2) { \
-        asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT ".b16 [%0], %1;" \
-                     :: "l"(ptr), "h"(value) : "memory"); \
+        if constexpr (is_bfloat16_v<T>) { \
+          uint16_t value_bits = *reinterpret_cast<uint16_t*>(&value); \
+          asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT ".b16 [%0], %1;" \
+                       :: "l"(ptr), "h"(value_bits) : "memory"); \
+        } else { \
+          asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT ".b16 [%0], %1;" \
+                       :: "l"(ptr), "h"(value) : "memory"); \
+        } \
       } else if constexpr (sizeof(T) == 4) { \
         if constexpr (std::is_floating_point_v<T>) { \
           asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT ".b32 [%0], %1;" \
@@ -66,8 +89,15 @@ struct LdImpl {
     template <typename T> \
     TL_DEVICE static void execute(const T *ptr, T &value) { \
       if constexpr (sizeof(T) == 2) { \
-        asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".b16 %0, [%1];" \
-                     : "=h"(value) : "l"(ptr) : "memory"); \
+        if constexpr (is_bfloat16_v<T>) { \
+          uint16_t value_bits; \
+          asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".b16 %0, [%1];" \
+                       : "=h"(value_bits) : "l"(ptr) : "memory"); \
+          value = *reinterpret_cast<T*>(&value_bits); \
+        } else { \
+          asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".b16 %0, [%1];" \
+                       : "=h"(value) : "l"(ptr) : "memory"); \
+        } \
       } else if constexpr (sizeof(T) == 4) { \
         if constexpr (std::is_floating_point_v<T>) { \
           asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".b32 %0, [%1];" \

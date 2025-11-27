@@ -210,7 +210,7 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   new_args.push_back(dst_addr_expr); // Always dst first in tl_templates
   if (is_distributed()) {
     PrimExpr src_addr_expr = MakeRemappedAddress(T, src_buffer, src_indices);
-    PrimExpr local_rank = Call(DataType::In`t(64), tl::get_rank(), {});
+    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
     PrimExpr offset_to_base =

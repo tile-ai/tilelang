@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import tilelang
 from tilelang.autotuner import *
 import tilelang.language as T
+from tilelang.profiler import do_bench
 from argparse import ArgumentParser
 from typing import Any, Optional, Tuple, List
 from tilelang.distributed.utils import init_dist
@@ -18,7 +19,7 @@ from utils import Config, create_moe_recv_counters, gen_inputs  # noqa: F403
 from get_dispatch_layout import get_dispatch_layout
 from notify_dispatch import notify_dispatch
 
-tilelang.disable_cache()
+# tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
@@ -246,7 +247,7 @@ def dispatch_kernel(
                             T.address_of(recv_x[total_offset+chunk_idx, 0]),
                             hidden,
                             -1, 
-                            4)
+                            5)
                     
                     # 2. recv src_idx
                     for chunk_idx in T.serial(cached_channel_head_idx+recv_thread_id_in_rank,
@@ -330,6 +331,7 @@ def intranode_dispatch(
         num_recv_tokens_per_expert_list: Python list shaped `[num_local_experts]`, the received token count by
             each local expert, aligned to the input `expert_alignment`. If `num_worst_tokens` is specified, the list
             will be empty.
+        handle: the handle for combine, has `(rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)`.
     """
 
     assert handle is None  # Currently only support non-cached mode
@@ -384,7 +386,7 @@ def intranode_dispatch(
     recv_src_idx = torch.empty((num_recv_tokens,), dtype=torch.int32, device='cuda')
     recv_topk_idx = torch.empty((num_recv_tokens, num_topk), dtype=torch.int32, device='cuda')
     recv_topk_weights = torch.empty((num_recv_tokens, num_topk), dtype=torch.float32, device='cuda')
-    recv_channel_offset = torch.empty((num_ranks, config.num_channels), dtype=torch.int32, device='cuda')
+    recv_channel_prefix_matrix = torch.empty((num_ranks, config.num_channels), dtype=torch.int32, device='cuda')
     send_head = torch.empty((num_tokens, num_ranks), dtype=torch.int32, device='cuda')
 
     # create symm buffers
@@ -428,7 +430,7 @@ def intranode_dispatch(
         recv_src_idx,
         recv_topk_idx,
         recv_topk_weights,
-        recv_channel_offset,
+        recv_channel_prefix_matrix,
         send_head,
         x,
         topk_idx,
@@ -446,7 +448,13 @@ def intranode_dispatch(
         channel_topk_weights_buffers,
     )
 
-    return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list
+    handle = (rank_prefix_matrix, channel_prefix_matrix, 
+        recv_channel_prefix_matrix, recv_src_idx,
+        is_token_in_rank, send_head
+    )
+    symm_buffers = (channel_head_idx, channel_tail_idx, barrier_signal, channel_x_buffers, channel_src_idx_buffers, channel_topk_weights_buffers)
+    return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, symm_buffers  # todo: reconsider hierachy
+
 
 def test_intranode_dispatch(
     num_tokens: int,
@@ -483,20 +491,36 @@ def test_intranode_dispatch(
         print('intranode dispatch (notify_dispatch included...)')
     
     # golden
-    ref_recv_x, ref_recv_topk_idx, ref_recv_topk_weights, ref_num_recv_tokens_per_expert_list, _, _ = \
+    ref_recv_x, ref_recv_topk_idx, ref_recv_topk_weights, ref_num_recv_tokens_per_expert_list, ref_handle, _ = \
         buffer.dispatch(x, None, num_tokens_per_rank, None, is_token_in_rank, num_tokens_per_expert, topk_idx.to(torch.int64), topk_weights, expert_alignment)  # DeepEP requires int64 topk_idx``
 
     # ours
-    recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list = \
+    recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, _ = \
         intranode_dispatch(rank, allocator, x, None, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, None)
 
+    # check dispatch output
     assert torch.equal(recv_x, ref_recv_x), f'recv_x mismatch, max err: {(recv_x - ref_recv_x).abs().max()}'
     assert torch.equal(recv_topk_idx, ref_recv_topk_idx), f'recv_topk_idx mismatch, max err: {(recv_topk_idx - ref_recv_topk_idx).abs().max()}'
     assert torch.equal(recv_topk_weights, ref_recv_topk_weights), f'recv_topk_weights mismatch, max err: {(recv_topk_weights - ref_recv_topk_weights).abs().max()}'
     assert num_recv_tokens_per_expert_list == ref_num_recv_tokens_per_expert_list, 'num_recv_tokens_per_expert_list mismatch'
+    
+    # check handle
+    rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head = handle
+    ref_rank_prefix_matrix, ref_channel_prefix_matrix, ref_recv_channel_prefix_matrix, ref_recv_src_idx, ref_is_token_in_rank, ref_send_head = ref_handle
+    assert torch.equal(rank_prefix_matrix, ref_rank_prefix_matrix), f'rank_prefix_matrix mismatch, max err: {(rank_prefix_matrix - ref_rank_prefix_matrix).abs().max()}'
+    assert torch.equal(channel_prefix_matrix, ref_channel_prefix_matrix), f'channel_prefix_matrix mismatch, max err: {(channel_prefix_matrix - ref_channel_prefix_matrix).abs().max()}'
+    assert torch.equal(recv_channel_prefix_matrix, ref_recv_channel_prefix_matrix), f'recv_channel_prefix_matrix mismatch, max err: {(recv_channel_prefix_matrix - ref_recv_channel_prefix_matrix).abs().max()}'
+    assert torch.equal(recv_src_idx, ref_recv_src_idx), f'recv_src_idx mismatch, max err: {(recv_src_idx - ref_recv_src_idx).abs().max()}'
+    assert torch.equal(is_token_in_rank, ref_is_token_in_rank), f'is_token_in_rank mismatch, max err: {(is_token_in_rank - ref_is_token_in_rank).abs().max()}'
+    assert torch.equal(send_head, ref_send_head), f'send_head mismatch, max err: {(send_head - ref_send_head).abs().max()}'
+    
     print(f'[rank {rank}] All checks passed for TileScale intranode_dispatch. ✅')
 
-    # todo: benchmark
+    buffer.combine(
+        recv_x,
+        ref_handle,
+        recv_topk_weights,
+    )
 
 
 def main(local_rank: int, num_local_ranks: int, args):

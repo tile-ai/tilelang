@@ -287,7 +287,12 @@ void TileLangStorageAccessVisitor::VisitStmt_(const WhileNode *op) {
   if (!is_thread_invariant) {
     ++condition_counter_;
   }
+
+  allow_append_ = true;
   this->VisitExpr(op->condition);
+  curr_stmt_.access.clear();
+  allow_append_ = false;
+  
   scope_.push_back(std::vector<StmtEntry>());
   this->VisitStmt(op->body);
   StmtEntry s;

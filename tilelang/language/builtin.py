@@ -819,7 +819,7 @@ def warp_any(value, mask = -1):
     
     Args:
         value (int): The value to vote.
-        mask (uint32): The mask to use, default is 0xFFFFFFFF(-1), which means all lanes.
+        mask (uint32): The mask to use, default is 0xFFFFFFFF, which means all lanes.
 
     Returns:
         result (int): The result of the vote.

@@ -201,8 +201,14 @@ def test_get_dispatch_layout(
     print("All checks passed for TileScale get_dispatch_layout.✅")
 
     # Benchmark
-    t1 = do_bench(lambda: buffer.get_dispatch_layout(topk_idx, num_experts, None, False, False))
-    t2 = do_bench(lambda: get_dispatch_layout(topk_idx, num_experts, num_ranks))
+    t1 = do_bench(lambda: buffer.get_dispatch_layout(topk_idx, num_experts, None, False, False),
+        _n_warmup=1,
+        _n_repeat=1,
+    )
+    t2 = do_bench(lambda: get_dispatch_layout(topk_idx, num_experts, num_ranks),
+        _n_warmup=1,
+        _n_repeat=1,
+    )
     print(f"DeepEP: {t1:.3f} ms")
     print(f"TileScale: {t2:.3f} ms")
     print(f"Speedup: {t1 / t2:.2f}x")

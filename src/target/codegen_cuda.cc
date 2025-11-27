@@ -291,12 +291,6 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <tl_templates/cuda/distributed.h>\n";
     decl_stream << "#include <tl_templates/cuda/sync.h>\n";
     decl_stream << "#include <tl_templates/cuda/ldst.h>\n";
-  }
-  decl_stream << "#ifdef ENABLE_BF16\n";
-  decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
-  decl_stream << "#endif\n";
-
-  if (use_distributed_) {
     decl_stream << "uint64_t __constant__ meta_data[1024];\n";
   }
   decl_stream << "#ifdef ENABLE_BF16\n";
@@ -2048,30 +2042,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         os << ", ";
       }
     }
-    os << ")";
-  } else if (op->op.same_as(tl::PutmemWarp())) {
-    this->use_distributed_ = true;
-    this->use_nvshmem_ = true;
-    os << "nvshmemx_putmem_warp(";
-    this->PrintExpr(op->args[0], os);
-    os << ", ";
-    this->PrintExpr(op->args[1], os);
-    os << ", ";
-    this->PrintExpr(op->args[2], os);
-    os << ", ";
-    this->PrintExpr(op->args[3], os);
-    os << ")";
-  } else if (op->op.same_as(tl::PutmemNbiWarp())) {
-    this->use_distributed_ = true;
-    this->use_nvshmem_ = true;
-    os << "nvshmemx_putmem_nbi_warp(";
-    this->PrintExpr(op->args[0], os);
-    os << ", ";
-    this->PrintExpr(op->args[1], os);
-    os << ", ";
-    this->PrintExpr(op->args[2], os);
-    os << ", ";
-    this->PrintExpr(op->args[3], os);
     os << ")";
   } else if (op->op.same_as(tl::GetmemBlock())) {
     this->use_distributed_ = true;
