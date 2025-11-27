@@ -87,7 +87,6 @@ def plot_layout(layout: T.Fragment,
     spectral_camp = plt.get_cmap("hsv", warp_size * 6)
     for i in range(warp_size):
         colors[i] = spectral_camp(i * 6)
-    
 
     # Determine the number of rows and columns in the input shape
     nrows, ncols = input_shape
