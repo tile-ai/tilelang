@@ -298,6 +298,80 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   std::vector<std::pair<PrimExpr, Var>> var_def;
   std::vector<std::pair<Var, Buffer>> buffer_def;
 
+  // First, collect a reverse map from Buffer->data var to parameter var so we
+  // can detect whether a buffer is actually used by the function body. In
+  // addition, collect variables that appear in the buffer's shape/stride so we
+  // can consider uses of those symbols as a use of the buffer itself.
+  std::unordered_map<const VarNode *, const VarNode *> data_var2param;
+  std::unordered_map<const VarNode *, std::vector<const VarNode *>>
+      shape_var2params;
+  for (const auto &kv : func_ptr->buffer_map) {
+    const Var &param = kv.first;
+    const Buffer &buf = kv.second;
+    data_var2param[buf->data.get()] = param.get();
+    auto record_shape_vars = [&](const PrimExpr &e) {
+      PostOrderVisit(e, [&](const ObjectRef &n) {
+        if (const auto *v = n.as<VarNode>()) {
+          shape_var2params[v].push_back(param.get());
+        }
+      });
+    };
+    for (const PrimExpr &e : buf->shape)
+      record_shape_vars(e);
+    for (const PrimExpr &e : buf->strides)
+      record_shape_vars(e);
+    if (buf->elem_offset.defined())
+      record_shape_vars(buf->elem_offset);
+  }
+
+  // A visitor that marks a buffer as used when its underlying data var is
+  // referenced (e.g. BufferLoad/BufferStore or any direct var usage).
+  struct UsedBufferDetector : public StmtExprVisitor {
+    UsedBufferDetector(
+        const std::unordered_map<const VarNode *, const VarNode *> &data2param,
+        const std::unordered_map<const VarNode *, std::vector<const VarNode *>>
+            &shape2params)
+        : data2param(data2param), shape2params(shape2params) {}
+    void VisitExpr_(const VarNode *op) override {
+      auto it = data2param.find(op);
+      if (it != data2param.end()) {
+        used_params.insert(it->second);
+      }
+      auto it2 = shape2params.find(op);
+      if (it2 != shape2params.end()) {
+        for (const VarNode *p : it2->second) used_params.insert(p);
+      }
+      StmtExprVisitor::VisitExpr_(op);
+    }
+    void VisitStmt_(const BufferStoreNode *op) override {
+      auto it = data2param.find(op->buffer->data.get());
+      if (it != data2param.end()) {
+        used_params.insert(it->second);
+      }
+      StmtExprVisitor::VisitStmt_(op);
+    }
+    void VisitExpr_(const BufferLoadNode *op) override {
+      auto it = data2param.find(op->buffer->data.get());
+      if (it != data2param.end()) {
+        used_params.insert(it->second);
+      }
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    const std::unordered_map<const VarNode *, const VarNode *> &data2param;
+    const std::unordered_map<const VarNode *, std::vector<const VarNode *>>
+        &shape2params;
+    std::unordered_set<const VarNode *> used_params;
+  };
+
+  UsedBufferDetector detector(data_var2param, shape_var2params);
+  detector(func_ptr->body);
+
+  // Build the packed argument handling. While doing so, keep track of whether
+  // each parameter buffer is actually used. Unused input buffers can be
+  // nullable and do not require DLTensor field dereferences.
+  std::unordered_set<const VarNode *> used_param_buffers = detector.used_params;
+
   for (int i = 0; i < static_cast<int>(func_ptr->params.size()); ++i) {
     Var param = func_ptr->params[i];
     PrimExpr arg_value;
@@ -390,7 +464,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
 
   for (const auto &[var, buffer] : buffer_def) {
     binder.BindDLTensor(buffer, device_type, device_id, var,
-                        name_hint + "." + var->name_hint);
+                        name_hint + "." + var->name_hint, used_param_buffers.count(var.get()));
     arg_buffer_declarations.push_back(DeclBuffer(buffer, nop));
   }
   // reset global symbol to attach prefix

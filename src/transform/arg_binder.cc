@@ -276,7 +276,7 @@ inline PrimExpr TVMArrayGet(DataType t, Var arr,
 
 void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
                              const PrimExpr &device_id, const Var &handle,
-                             const std::string &arg_name) {
+                             const std::string &arg_name, bool is_used) {
   const DataType tvm_shape_type = DataType::ShapeIndex();
   const DataType tvm_ndim_type = DataType::Int(32);
   const Stmt nop = Evaluate(0);
@@ -285,11 +285,12 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
   // avoid dereferencing it by using expression-level conditionals and
   // short-circuiting guards in asserts. Cache the null check in a Let-bound
   // boolean so codegen does not repeat `(handle == NULL)` everywhere.
+  
   Var is_null_var(arg_name + "_is_null", DataType::Bool());
   init_nest_.emplace_back(
       LetStmt(is_null_var,
               Call(DataType::Bool(), builtin::isnullptr(), {handle}), nop));
-  const PrimExpr &is_null = is_null_var;
+  const PrimExpr &is_null = is_used ? const_false():is_null_var;
 
   // dimension checks
   PrimExpr v_ndim = TVMArrayGet(tvm_ndim_type, handle, builtin::kArrNDim);
