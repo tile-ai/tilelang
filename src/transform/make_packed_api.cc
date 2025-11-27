@@ -387,7 +387,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     DataType dtype = param.dtype();
     if (dtype.is_handle()) {
       std::ostringstream msg;
-      // Prefer the Buffer name if available; otherwise, fall back to param name (trim _handle).
+      // Prefer the Buffer name if available; otherwise, fall back to param name
+      // (trim _handle).
       std::string display_name;
       auto it_buf = func_ptr->buffer_map.find(param);
       if (it_buf != func_ptr->buffer_map.end()) {
@@ -479,7 +480,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   }
 
   for (const auto &[var, buffer] : buffer_def) {
-    // Prefer buffer data var name in diagnostics to avoid exposing low-level handle vars
+    // Prefer buffer data var name in diagnostics to avoid exposing low-level
+    // handle vars
     std::string display = name_hint + "." + buffer->data->name_hint;
     binder.BindDLTensor(buffer, device_type, device_id, var, display,
                         used_param_buffers.count(var.get()));

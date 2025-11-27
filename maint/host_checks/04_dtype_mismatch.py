@@ -15,7 +15,5 @@ def main():
     fn(a, b)
 
 
-
 if __name__ == "__main__":
     main()
-
