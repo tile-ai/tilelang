@@ -78,7 +78,7 @@ def quote_expr(expr: str, **kws) -> ast.expr:
 
 Operator = Literal['Add', 'Sub', 'Mult', 'MatMult', 'Div', 'Mod', 'Pow', 'LShift', 'RShift',
                    'BitOr', 'BitXor', 'BitAnd', 'FloorDiv']
-BoolOp = Literal['And', 'Or']
+BoolOp = Literal['And', 'Or', 'Not']
 
 
 def get_operator_name(operator: ast.operator) -> Operator:
@@ -217,11 +217,13 @@ class BaseBuilder:
     def aug_assign_slice(self, op: Operator, target: Any, sl: slice, aug_value: Any):
         eval_aug_assign(op, target, sl, aug_value)
 
-    def boolop(self, op: BoolOp, left: Any, right: Callable[[], Any]) -> Any:
+    def boolop(self, op: BoolOp, left: Any, right: Callable[[], Any] | None = None) -> Any:
         if op == 'And':
             return left and right()
         if op == 'Or':
             return left or right()
+        if op == 'Not':
+            return not left
         raise ValueError(f'Unknown boolop: {op}')
 
     def ifexp(self, cond: Any, then: Callable[[], Any], otherwise: Callable[[], Any]) -> Any:
@@ -516,6 +518,12 @@ class DSLMutator(ast.NodeTransformer):
                 span=node,
             )
         return last
+
+    def visit_UnaryOp(self, node: ast.UnaryOp):
+        node = self.generic_visit(node)
+        if isinstance(node.op, ast.Not):
+            return quote_expr("__tb.boolop('Not', operand)", operand=node.operand, span=node)
+        return node
 
     def visit_Compare(self, node: ast.Compare) -> ast.expr:
         node = self.generic_visit(node)

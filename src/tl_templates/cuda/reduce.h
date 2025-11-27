@@ -250,4 +250,35 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   }
 };
 
+template <typename T, typename ReduceOp>
+TL_DEVICE T warp_reduce(T value, ReduceOp op) {
+  constexpr uint32_t mask = 0xffffffff;
+  value = op(value, __shfl_xor_sync(mask, value, 16));
+  value = op(value, __shfl_xor_sync(mask, value, 8));
+  value = op(value, __shfl_xor_sync(mask, value, 4));
+  value = op(value, __shfl_xor_sync(mask, value, 2));
+  value = op(value, __shfl_xor_sync(mask, value, 1));
+  return value;
+}
+
+template <typename T> TL_DEVICE T warp_reduce_sum(T value) {
+  return warp_reduce<T>(value, SumOp());
+}
+
+template <typename T> TL_DEVICE T warp_reduce_max(T value) {
+  return warp_reduce<T>(value, MaxOp());
+}
+
+template <typename T> TL_DEVICE T warp_reduce_min(T value) {
+  return warp_reduce<T>(value, MinOp());
+}
+
+template <typename T> TL_DEVICE T warp_reduce_bitand(T value) {
+  return warp_reduce<T>(value, BitAndOp());
+}
+
+template <typename T> TL_DEVICE T warp_reduce_bitor(T value) {
+  return warp_reduce<T>(value, BitOrOp());
+}
+
 } // namespace tl

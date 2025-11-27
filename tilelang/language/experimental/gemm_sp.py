@@ -3,6 +3,7 @@ from __future__ import annotations
 from tilelang.primitives.gemm.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir
+from tilelang.utils.language import to_buffer_region
 
 
 def gemm_sp(
@@ -62,17 +63,18 @@ def gemm_sp(
     K_A = A_sparse.shape[0] if transpose_A else A_sparse.shape[1]
     K_B = B.shape[1] if transpose_B else B.shape[0]
     assert K_A * 2 == K_B, f"T.gemm_sp K shape check failed: K_A = {K_A}, K_B = {K_B}"
-    Aptr = A_sparse.access_ptr("r")
-    Bptr = B.access_ptr("r")
-    Cptr = C.access_ptr("rw")
-    Eptr = E.access_ptr("r")
+    # Build tl.region descriptors for operands
+    A_arg = to_buffer_region(A_sparse, access_type="r")
+    E_arg = to_buffer_region(E, access_type="r")
+    B_arg = to_buffer_region(B, access_type="r")
+    C_arg = to_buffer_region(C, access_type="rw")
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.gemm_sp"),
-        Aptr,
-        Eptr,
-        Bptr,
-        Cptr,
+        A_arg,
+        E_arg,
+        B_arg,
+        C_arg,
         transpose_A,
         transpose_B,
         M,

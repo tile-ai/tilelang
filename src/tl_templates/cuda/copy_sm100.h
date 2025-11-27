@@ -51,6 +51,21 @@ __device__ __forceinline__ void st_global_256(fp8_e4_32_t *ptr,
                :
                : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
 }
+__device__ __forceinline__ ulonglong4 ld_global_256(const fp8_e5_32_t *ptr) {
+  ulonglong4 ret;
+  asm volatile("ld.global.v4.u64 {%0, %1, %2, %3}, [%4];"
+               : "=l"(ret.x), "=l"(ret.y), "=l"(ret.z), "=l"(ret.w)
+               : "l"(ptr));
+  return ret;
+}
+
+__device__ __forceinline__ void st_global_256(fp8_e5_32_t *ptr,
+                                              fp8_e5_32_t &val8) {
+  ulonglong4 &val = *((ulonglong4 *)&val8);
+  asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
+               :
+               : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
+}
 
 __device__ __forceinline__ unsigned long long
 pack_bfloat16x4(const bfloat16_t x, const bfloat16_t y, const bfloat16_t z,
@@ -95,38 +110,38 @@ __device__ __forceinline__ void tcgen05_ld_core(uint32_t const &tmem_start_col,
   }
 }
 
-template <int N, typename dst_t>
+template <int N, bool pack16, typename dst_t>
 __device__ __forceinline__ void
 tcgen05_ld_32dp32bNx(uint32_t const &tmem_start_col,
                      uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
-  tcgen05_ld_core<tl::tmem_ld_32dp32bNx, 7, N>(tmem_start_col + tmem_col_offset,
-                                               dst_ptr);
-  tl::fence_view_async_tmem_load();
-}
-
-template <int N, typename dst_t>
-__device__ __forceinline__ void
-tcgen05_ld_32dp64bNx(uint32_t const &tmem_start_col,
-                     uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
-  tcgen05_ld_core<tl::tmem_ld_32dp64bNx, 7, N>(tmem_start_col + tmem_col_offset,
-                                               dst_ptr);
-  tl::fence_view_async_tmem_load();
-}
-
-template <int N, typename dst_t>
-__device__ __forceinline__ void
-tcgen05_ld_32dp128bNx(uint32_t const &tmem_start_col,
-                      uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
-  tcgen05_ld_core<tl::tmem_ld_32dp128bNx, 6, N>(
+  tcgen05_ld_core<tl::tmem_ld_32dp32bNx<pack16>, 7, N>(
       tmem_start_col + tmem_col_offset, dst_ptr);
   tl::fence_view_async_tmem_load();
 }
 
-template <int N, typename dst_t>
+template <int N, bool pack16, typename dst_t>
+__device__ __forceinline__ void
+tcgen05_ld_32dp64bNx(uint32_t const &tmem_start_col,
+                     uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+  tcgen05_ld_core<tl::tmem_ld_32dp64bNx<pack16>, 7, N>(
+      tmem_start_col + tmem_col_offset, dst_ptr);
+  tl::fence_view_async_tmem_load();
+}
+
+template <int N, bool pack16, typename dst_t>
+__device__ __forceinline__ void
+tcgen05_ld_32dp128bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+  tcgen05_ld_core<tl::tmem_ld_32dp128bNx<pack16>, 6, N>(
+      tmem_start_col + tmem_col_offset, dst_ptr);
+  tl::fence_view_async_tmem_load();
+}
+
+template <int N, bool pack16, typename dst_t>
 __device__ __forceinline__ void
 tcgen05_ld_32dp256bNx(uint32_t const &tmem_start_col,
                       uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
-  tcgen05_ld_core<tl::tmem_ld_32dp256bNx, 5, N>(
+  tcgen05_ld_core<tl::tmem_ld_32dp256bNx<pack16>, 5, N>(
       tmem_start_col + tmem_col_offset, dst_ptr);
   tl::fence_view_async_tmem_load();
 }

@@ -1,5 +1,6 @@
 name: Dist
 on:
+  workflow_dispatch:
   schedule:
     # gemini said this is 6:00 china time
     - cron: "0 22 * * *"
@@ -52,7 +53,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
           submodules: recursive
@@ -122,7 +123,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
           submodules: recursive
@@ -160,7 +161,7 @@ jobs:
           fi
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v3.2
+        uses: pypa/cibuildwheel@v3.3
         with:
           package-dir: .
           output-dir: wheelhouse
