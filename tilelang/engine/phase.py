@@ -225,6 +225,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
+    mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
 
     # Transform threadblock to persistent threadblock

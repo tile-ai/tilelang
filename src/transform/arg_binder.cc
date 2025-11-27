@@ -291,6 +291,12 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
       LetStmt(is_null_var,
               Call(DataType::Bool(), builtin::isnullptr(), {handle}), nop));
   const PrimExpr &is_null = is_used ? const_false() : is_null_var;
+  if (is_used) {
+    init_nest_.emplace_back(AssertStmt(
+        !is_null_var,
+        tvm::tir::StringImm(arg_name + " is expected to have non-NULL pointer"),
+        nop));
+  }
 
   // dimension checks
   PrimExpr v_ndim = TVMArrayGet(tvm_ndim_type, handle, builtin::kArrNDim);
