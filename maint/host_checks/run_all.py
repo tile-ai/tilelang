@@ -55,7 +55,7 @@ def main():
     # Summary
     print("\n=== Summary ===")
     counts = {"PASS": 0, "FAIL": 0, "SKIP": 0, "MISSING": 0}
-    for name, status, rc in results:
+    for name, status, _ in results:
         counts[status] = counts.get(status, 0) + 1
         print(f"{status:7} {name}")
 

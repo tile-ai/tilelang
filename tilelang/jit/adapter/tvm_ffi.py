@@ -166,8 +166,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             else:
                 expected_dtype_strs.append(None)
                 is_buffer_param.append(False)
-        # Global function name used in error messages
-        global_symbol = str(prim_func.attrs.get("global_symbol", "main"))
 
         # Map torch dtype to TVM-style dtype string
         def torch_dtype_to_tvm_str(dtype: torch.dtype) -> str:
