@@ -3,6 +3,8 @@
  * \brief Merge the If Stmt in SeqStmt
  */
 
+#include "merge_if_stmt.h"
+
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -20,23 +22,46 @@ using namespace tir;
 class MergeIfStmtRewriter : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f) {
-    auto rewriter = MergeIfStmtRewriter();
-    f.CopyOnWrite()->body = rewriter(f->body);
+    f.CopyOnWrite()->body = MergeIfStmtRewriter::Apply(f->body);
     return f;
+  }
+
+  static Stmt Apply(Stmt stmt) {
+    auto rewriter = MergeIfStmtRewriter();
+    return rewriter(stmt);
   }
 
 private:
   MergeIfStmtRewriter() = default;
 
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> new_seq;
+  void FlattenAppend(const Stmt &s, Array<Stmt> *out) {
+    if (const auto *seq = s.as<SeqStmtNode>()) {
+      for (const Stmt &e : seq->seq) {
+        FlattenAppend(e, out);
+      }
+    } else {
+      out->push_back(s);
+    }
+  }
 
+  Stmt VisitStmt_(const SeqStmtNode *op) final {
+    // First, recursively flatten nested SeqStmt so that
+    //   SeqStmt{ if, SeqStmt{ if, SeqStmt{ if } } }
+    // becomes a single-level sequence of [if, if, if].
+    Array<Stmt> flat_seq;
+    for (const Stmt &stmt : op->seq) {
+      Stmt new_stmt = this->VisitStmt(stmt);
+      FlattenAppend(new_stmt, &flat_seq);
+    }
+
+    // Then, merge consecutive IfThenElse (without else) that share the same
+    // condition.
+    Array<Stmt> new_seq;
     PrimExpr current_condition;
     Array<Stmt> current_if_bodies;
 
-    for (const Stmt &stmt : op->seq) {
-      Stmt new_stmt = this->VisitStmt(stmt);
-      if (const IfThenElseNode *if_node = new_stmt.as<IfThenElseNode>()) {
+    for (const Stmt &stmt : flat_seq) {
+      if (const auto *if_node = stmt.as<IfThenElseNode>()) {
         if (!if_node->else_case.defined()) {
           if (current_condition.defined() &&
               ExprDeepEqual()(current_condition, if_node->condition)) {
@@ -73,7 +98,7 @@ private:
         current_if_bodies.clear();
       }
 
-      new_seq.push_back(new_stmt);
+      new_seq.push_back(stmt);
     }
 
     if (!current_if_bodies.empty()) {
@@ -89,6 +114,12 @@ private:
     return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);
   }
 };
+
+PrimFunc MergeIfStmtSubstitute(PrimFunc &f) {
+  return MergeIfStmtRewriter::Substitute(f);
+}
+
+Stmt ApplyMergeIfStmt(Stmt stmt) { return MergeIfStmtRewriter::Apply(stmt); }
 
 using namespace tir::transform;
 tvm::transform::Pass MergeIfStmt() {

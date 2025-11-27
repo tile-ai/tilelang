@@ -39,6 +39,7 @@
 
 #include "../op/builtin.h"
 #include "arg_binder.h"
+#include "merge_if_stmt.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -436,7 +437,6 @@ PrimFunc MakePackedAPI(PrimFunc func) {
 
   func_ptr->buffer_map = ffi::Map<Var, Buffer>();
   func_ptr->ret_type = PrimType(DataType::Int(32));
-
   // return the function.
   return func;
 }
@@ -467,6 +467,7 @@ tvm::transform::Pass MakePackedAPI() {
           func.CopyOnWrite()->body = body.value();
         }
         func = MakePackedAPI(std::move(func));
+        func = MergeIfStmtSubstitute(func);
 
         if (!func.same_as(orig_func)) {
           updates->Add(gvar, func);
