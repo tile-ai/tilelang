@@ -5,11 +5,7 @@ import tilelang.language as T
 # @tilelang.jit(target="cuda")
 # target currently can be "cuda" or "hip" or "cpu".
 # if not specified, it will be inferred from the input tensors during compile time
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+@tilelang.jit
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
 
     @T.prim_func
@@ -17,7 +13,6 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((K, N), dtype),
             C: T.Tensor((M, N), dtype),
-        # D: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
@@ -31,7 +26,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             # Clear local accumulation
             T.clear(C_local)
 
-            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
                 # Copy tile of A
                 # This is a sugar syntax for parallelized copy
                 T.copy(A[by * block_M, ko * block_K], A_shared)
@@ -41,7 +36,11 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
                 # Perform a tile-level GEMM on the shared buffers
                 # Currently we dispatch to the cute/hip on Nvidia/AMD GPUs
-                T.gemm_v1(A_shared, B_shared, C_local)
+                T.gemm(A_shared, B_shared, C_local)
+
+            # relu
+            for i, j in T.Parallel(block_M, block_N):
+                C_local[i, j] = T.max(C_local[i, j], 0)
 
             # Copy result back to global memory
             T.copy(C_local, C[by * block_M, bx * block_N])
@@ -49,48 +48,37 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
     return matmul_relu_kernel
 
 
-tilelang.disable_cache()
-M = 16384  # M = T.dynamic("m") if you want to use dynamic shape
-N = 16384
-K = 16384
+M = 1024  # M = T.dynamic("m") if you want to use dynamic shape
+N = 1024
+K = 1024
 block_M = 128
 block_N = 128
 block_K = 32
 
 # Define the kernel (matmul) and compile/lower it into an executable module
 matmul_relu_kernel = matmul(M, N, K, block_M, block_N, block_K)
-print(matmul_relu_kernel.get_host_source())
-
 # Test the kernel in Python with PyTorch data
 import torch
 
 # Create random input tensors on the GPU
 a = torch.randn(M, K, device="cuda", dtype=torch.float16)
-a_1 = torch.randn(M, K + 1, device="cuda", dtype=torch.float16)
-a_c = torch.randn(M, K, device="cpu", dtype=torch.float16)
 b = torch.randn(K, N, device="cuda", dtype=torch.float16)
 c = torch.empty(M, N, device="cuda", dtype=torch.float16)
 
 # Run the kernel through the Profiler
-matmul_relu_kernel(a_1, b, c)
-
-# matmul_relu_kernel(None, b, c, None)
-
-# matmul_relu_kernel(a_c, b, c)
-
-# matmul_relu_kernel(a, b, c)
+matmul_relu_kernel(a, b, c)
 
 print(c)
 # Reference multiplication using PyTorch
 ref_c = torch.relu(a @ b)
 
 # Validate correctness
-# torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
-# print("Kernel output matches PyTorch reference.")
+torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+print("Kernel output matches PyTorch reference.")
 
 # 4. Retrieve and inspect the generated CUDA source (optional)
-cuda_source = matmul_relu_kernel.get_kernel_source()
-print("Generated CUDA kernel:\n", cuda_source)
+# cuda_source = matmul_relu_kernel.get_kernel_source()
+# print("Generated CUDA kernel:\n", cuda_source)
 
 # 5.Profile latency with kernel
 profiler = matmul_relu_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
