@@ -339,7 +339,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       }
       auto it2 = shape2params.find(op);
       if (it2 != shape2params.end()) {
-        for (const VarNode *p : it2->second) used_params.insert(p);
+        for (const VarNode *p : it2->second)
+          used_params.insert(p);
       }
       StmtExprVisitor::VisitExpr_(op);
     }
@@ -464,7 +465,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
 
   for (const auto &[var, buffer] : buffer_def) {
     binder.BindDLTensor(buffer, device_type, device_id, var,
-                        name_hint + "." + var->name_hint, used_param_buffers.count(var.get()));
+                        name_hint + "." + var->name_hint,
+                        used_param_buffers.count(var.get()));
     arg_buffer_declarations.push_back(DeclBuffer(buffer, nop));
   }
   // reset global symbol to attach prefix
