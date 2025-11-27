@@ -16,6 +16,7 @@ from tilelang.utils.deprecated import deprecated_warning
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
+    LayoutVisual,
     PreLowerSemanticCheck,
     LowerAndLegalize,
     OptimizeForTarget,
@@ -248,6 +249,9 @@ def lower(
 
     # Phase 1: Lower and legalize the IR
     mod = LowerAndLegalize(mod, target)
+
+    # Visualize the layout
+    LayoutVisual(mod)
 
     # Phase 2: Optimize the IR for the target
     mod = OptimizeForTarget(mod, target)

@@ -1,7 +1,7 @@
 import tilelang.language as T
 
 
-def plot_layout(layout: T.Layout,
+def plot_layout(layout: T.Fragment,
                 save_directory="./tmp",
                 name: str = "layout",
                 colormap: str = "RdPu",
@@ -81,6 +81,13 @@ def plot_layout(layout: T.Layout,
     # Generate a list of colors based on the colormap
     raw_colors = [cmap(i) for i in range(num_threads)]
     colors = raw_colors.copy()
+
+    # Show the distribution of registers in each thread of a warp.
+    warp_size = 32
+    spectral_camp = plt.get_cmap("hsv", warp_size * 6)
+    for i in range(warp_size):
+        colors[i] = spectral_camp(i * 6)
+    
 
     # Determine the number of rows and columns in the input shape
     nrows, ncols = input_shape
