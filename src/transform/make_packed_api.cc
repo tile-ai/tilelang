@@ -387,7 +387,22 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     DataType dtype = param.dtype();
     if (dtype.is_handle()) {
       std::ostringstream msg;
-      msg << name_hint << ": Expect arg[" << i << "] to be pointer";
+      // Prefer the Buffer name if available; otherwise, fall back to param name (trim _handle).
+      std::string display_name;
+      auto it_buf = func_ptr->buffer_map.find(param);
+      if (it_buf != func_ptr->buffer_map.end()) {
+        const auto &kv = *it_buf;
+        display_name = kv.second->data->name_hint;
+      } else {
+        display_name = param->name_hint;
+        const char *suffix = "_handle";
+        if (display_name.size() >= 7 &&
+            display_name.compare(display_name.size() - 7, 7, suffix) == 0) {
+          display_name.erase(display_name.size() - 7);
+        }
+      }
+      msg << name_hint << ": Expect buffer " << display_name
+          << " to be pointer or tensor";
       seq_init.emplace_back(
           AssertStmt(type_index == ffi::TypeIndex::kTVMFFINone ||
                          type_index == ffi::TypeIndex::kTVMFFIOpaquePtr ||
@@ -407,7 +422,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
                          handle_from_tensor, arg_value);
     } else if (dtype.is_bool()) {
       std::ostringstream msg;
-      msg << name_hint << ": Expect arg[" << i << "] to be boolean";
+      msg << name_hint << ": Expect " << param->name_hint << " to be boolean";
       seq_init.emplace_back(
           AssertStmt(type_index == ffi::TypeIndex::kTVMFFIBool ||
                          type_index == ffi::TypeIndex::kTVMFFIInt,
@@ -417,7 +432,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
 
     } else if (dtype.is_int() || dtype.is_uint()) {
       std::ostringstream msg;
-      msg << name_hint << ": Expect arg[" << i << "] to be int";
+      msg << name_hint << ": Expect " << param->name_hint << " to be int";
       seq_init.emplace_back(
           AssertStmt(type_index == ffi::TypeIndex::kTVMFFIInt ||
                          type_index == ffi::TypeIndex::kTVMFFIBool,
@@ -426,7 +441,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     } else {
       ICHECK(dtype.is_float());
       std::ostringstream msg;
-      msg << name_hint << ": Expect arg[" << i << "] to be float";
+      msg << name_hint << ": Expect " << param->name_hint << " to be float";
       seq_init.emplace_back(
           AssertStmt(type_index == ffi::TypeIndex::kTVMFFIFloat ||
                          type_index == ffi::TypeIndex::kTVMFFIInt ||
@@ -464,8 +479,9 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   }
 
   for (const auto &[var, buffer] : buffer_def) {
-    binder.BindDLTensor(buffer, device_type, device_id, var,
-                        name_hint + "." + var->name_hint,
+    // Prefer buffer data var name in diagnostics to avoid exposing low-level handle vars
+    std::string display = name_hint + "." + buffer->data->name_hint;
+    binder.BindDLTensor(buffer, device_type, device_id, var, display,
                         used_param_buffers.count(var.get()));
     arg_buffer_declarations.push_back(DeclBuffer(buffer, nop));
   }
