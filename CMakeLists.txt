@@ -145,6 +145,11 @@ file(GLOB TILE_LANG_SRCS
   src/target/intrin_rule*.cc
 )
 
+# Always include CPU-safe runtime helpers
+list(APPEND TILE_LANG_SRCS
+  src/runtime/error_helpers.cc
+)
+
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
@@ -206,7 +211,7 @@ elseif(USE_CUDA)
   cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
 
   file(GLOB TILE_LANG_CUDA_SRCS
-    src/runtime/*.cc
+    src/runtime/runtime.cc
     src/target/ptx.cc
     src/target/codegen_cuda.cc
     src/target/rt_mod_cuda.cc

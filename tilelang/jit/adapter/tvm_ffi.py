@@ -195,8 +195,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             expected_inputs = len(self.params) - len(self.result_idx)
             if len(inputs) != expected_inputs:
                 raise ValueError(
-                    f"Expected {expected_inputs} inputs, got {len(inputs)} (params={len(self.params)}, outputs={len(self.result_idx)})"
-                )
+                    f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.

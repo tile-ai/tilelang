@@ -354,32 +354,44 @@ void CodeGenCHost::VisitStmt_(const tvm::tir::AssertStmtNode *op) { // NOLINT(*)
     stream << "if (!(" << cond << ")) {\n";
     int assert_if_scope = this->BeginScope();
     {
-      // Prepare the base error message
+      // Prepare the base error message: allow StringImm or general PrimExpr
       const auto *msg_node = op->message.as<tvm::tir::StringImmNode>();
-      ICHECK(msg_node != nullptr) << "Assert message expected to be StringImm";
-      const std::string &raw_msg = msg_node->value;
-      const std::string esc_msg = tvm::support::StrEscape(
-          raw_msg.c_str(), raw_msg.length(), /*use_octal_escape=*/true,
-          /*escape_whitespace_special_chars=*/true);
+      bool msg_is_literal = (msg_node != nullptr);
+      std::string esc_msg;
+      std::string msg_expr;
+      if (msg_is_literal) {
+        const std::string &raw_msg = msg_node->value;
+        esc_msg = tvm::support::StrEscape(
+            raw_msg.c_str(), raw_msg.length(), /*use_octal_escape=*/true,
+            /*escape_whitespace_special_chars=*/true);
+      } else {
+        msg_expr = PrintExpr(op->message);
+      }
 
-      // If the assertion is an equality check, append the actual LHS/RHS values
-      if (const auto *eq = op->condition.as<tvm::tir::EQNode>()) {
-        std::string lhs = PrintExpr(eq->a);
-        std::string rhs = PrintExpr(eq->b);
-        PrintIndent();
-        stream << "char __tvm_assert_msg_buf[512];\n";
-        PrintIndent();
-        stream << "snprintf(__tvm_assert_msg_buf, 512, \"%s; expected: %lld, "
-                  "got: %lld\", \""
-               << esc_msg << "\", (long long)(" << lhs << "), (long long)("
-               << rhs << "));\n";
-        PrintIndent();
-        stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", "
-                  "__tvm_assert_msg_buf);\n";
+      // Only print expected/got values for equality when message is StringImm
+      if (msg_is_literal) {
+        if (const auto *eq = op->condition.as<tvm::tir::EQNode>()) {
+          std::string lhs = PrintExpr(eq->a);
+          std::string rhs = PrintExpr(eq->b);
+          PrintIndent();
+          stream << "char __tvm_assert_msg_buf[512];\n";
+          PrintIndent();
+          stream << "snprintf(__tvm_assert_msg_buf, 512, \"%s; expected: %lld, "
+                    "got: %lld\", \""
+                 << esc_msg << "\", (long long)(" << lhs << "), (long long)("
+                 << rhs << "));\n";
+          PrintIndent();
+          stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", "
+                    "__tvm_assert_msg_buf);\n";
+        } else {
+          PrintIndent();
+          stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", \""
+                 << esc_msg << "\");\n";
+        }
       } else {
         PrintIndent();
-        stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", \"" << esc_msg
-               << "\");\n";
+        stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", " << msg_expr
+               << ");\n";
       }
     }
     PrintIndent();
