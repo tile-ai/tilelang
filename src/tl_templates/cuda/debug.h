@@ -258,6 +258,13 @@ __device__ void debug_print_buffer_value<int16_t>(const char *msg,
          threadIdx.z, buf_name, index, (int32_t)var);
 }
 
+// Specialization for msg-only debug print
+__device__ void debug_print_msg(const char *msg) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d)\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z);
+}
+
 __device__ uint64_t get_clock() {
   uint64_t gpu_clock;
   asm volatile("mov.u64 %0, %%clock64;\n" : "=l"(gpu_clock) : : "memory");
