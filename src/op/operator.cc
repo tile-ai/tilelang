@@ -24,16 +24,14 @@ using namespace tir;
  *
  * @param call The TIR Call whose operator and arguments will be used to build
  * the TileOperator.
- * @param vmap Buffer mapping passed through to the builder to resolve buffer
- * references.
  * @return TileOperator The constructed TileOperator, or a default (empty)
  * TileOperator if no builder exists.
  */
-TileOperator ParseOperator(Call call, BufferMap vmap) {
+TileOperator ParseOperator(Call call) {
   auto op_map = Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
   Op op = call->op.as<Op>().value();
   if (op_map.count(op)) {
-    auto tile_op = op_map[op](call->args, vmap);
+    auto tile_op = op_map[op](call->args);
     ICHECK(tile_op.defined());
     return tile_op;
   }
@@ -48,14 +46,13 @@ TileOperator ParseOperator(Call call, BufferMap vmap) {
  * Otherwise returns a default-constructed (empty) TileOperator.
  *
  * @param stmt TIR statement to inspect; expected to be an Evaluate of a Call.
- * @param vmap Mapping of buffer variables used when building the operator.
  * @return TileOperator Parsed operator on success, or a default (empty)
  * TileOperator if `stmt` is not an Evaluate(Call).
  */
-TileOperator ParseOperator(Stmt stmt, BufferMap vmap) {
+TileOperator ParseOperator(Stmt stmt) {
   if (stmt.as<Evaluate>() && stmt.as<EvaluateNode>()->value.as<CallNode>()) {
     auto call = stmt.as<EvaluateNode>()->value.as<CallNode>();
-    return ParseOperator(tvm::ffi::GetRef<Call>(call), vmap);
+    return ParseOperator(tvm::ffi::GetRef<Call>(call));
   }
   return TileOperator();
 }

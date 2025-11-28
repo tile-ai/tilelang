@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file arg_binder.cc
  * \brief Helper utility to match and bind arguments.
@@ -24,6 +5,7 @@
 #include "arg_binder.h"
 
 #include <tvm/runtime/device_api.h>
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
@@ -44,16 +26,32 @@ namespace tl {
 using namespace tir;
 
 void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
-                     const std::string &arg_name, std::vector<Stmt> *asserts) {
+                     const std::string &arg_name, std::vector<Stmt> *asserts,
+                     PrimExpr nullable_guard = PrimExpr()) {
   PrimExpr scond = ana->Simplify(cond);
   if (is_zero(scond)) {
     LOG(FATAL) << "Bind have an unmet assertion: " << cond << ", "
                << " on argument " << arg_name;
   }
+
   if (!is_one(scond)) {
     std::ostringstream os;
     os << "Argument " << arg_name << " has an unsatisfied constraint: " << cond;
-    asserts->emplace_back(AssertStmt(scond, StringImm(os.str()), Evaluate(0)));
+
+    // Check if the condition is of the form "is_null || actual_cond"
+    // If so, generate "if !is_null: assert actual_cond" instead of "assert
+    // is_null || actual_cond"
+    if (nullable_guard.defined()) {
+      // Pattern: nullable_guard || actual_condition
+      // We want to transform this into: if !nullable_guard: assert
+      // actual_condition
+      Stmt check = AssertStmt(scond, StringImm(os.str()), Evaluate(0));
+      check = IfThenElse(Not(nullable_guard), check);
+      asserts->emplace_back(SeqStmt({check, Evaluate(0)}));
+    } else {
+      asserts->emplace_back(
+          AssertStmt(scond, StringImm(os.str()), Evaluate(0)));
+    }
   }
 }
 
@@ -106,8 +104,8 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
       return true;
     } else {
       // Second or later binding: add is_null short-circuit
-      PrimExpr cond = MakeGuarded(it->second == value);
-      BinderAddAssert(&analyzer_, cond, arg_name, &asserts_);
+      PrimExpr cond = value == it->second;
+      BinderAddAssert(&analyzer_, cond, arg_name, &asserts_, nullable_guard);
     }
   } else {
     // 2. complex binding expr = value
@@ -129,7 +127,7 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
         auto value_opt = sol->src_to_dst.Get(v);
         ICHECK(value_opt->defined())
             << "Unable to solve variable `" << v << "` from expression `"
-            << (arg == value) << "`";
+            << (value == arg) << "`";
         auto value = ffi::GetRef<PrimExpr>(sol->src_to_dst.Get(v)->get());
         BindVar(v.as<VarNode>(), value);
       }
@@ -138,9 +136,10 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
     //    because the solved expression may contain floordiv (e.g. 3 * m == n
     //    ==>   m = n // 3) we re-compute the constraint to verify the solution
     //    is correct
-    PrimExpr cond = MakeGuarded(arg == value);
-    BinderAddAssert(&analyzer_, cond, arg_name, &asserts_);
+    PrimExpr cond = value == arg;
+    BinderAddAssert(&analyzer_, cond, arg_name, &asserts_, nullable_guard);
   }
+  // ICHECK(false);
   return false;
 }
 
@@ -160,10 +159,10 @@ bool ArgBinder::Bind_(const PrimExpr &arg, const PrimExpr &value,
       }
       return true;
     } else {
-      BinderAddAssert(&analyzer_, it->second == value, arg_name, &asserts_);
+      BinderAddAssert(&analyzer_, value == it->second, arg_name, &asserts_);
     }
   } else {
-    BinderAddAssert(&analyzer_, arg == value, arg_name, &asserts_);
+    BinderAddAssert(&analyzer_, value == arg, arg_name, &asserts_);
   }
   return false;
 }
@@ -236,7 +235,7 @@ void ArgBinder::BindBuffer(const Buffer &arg, const Buffer &value,
         PrimExpr offset = value->elem_offset;
         PrimExpr factor = make_const(offset.dtype(), arg->offset_factor);
         PrimExpr zero = make_zero(offset.dtype());
-        BinderAddAssert(&analyzer_, truncmod(offset, factor) == zero,
+        BinderAddAssert(&analyzer_, zero == truncmod(offset, factor),
                         arg_name + ".elem_offset", &asserts_);
       }
     }
@@ -277,7 +276,7 @@ inline PrimExpr TVMArrayGet(DataType t, Var arr,
 
 void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
                              const PrimExpr &device_id, const Var &handle,
-                             const std::string &arg_name) {
+                             const std::string &arg_name, bool is_used) {
   const DataType tvm_shape_type = DataType::ShapeIndex();
   const DataType tvm_ndim_type = DataType::Int(32);
   const Stmt nop = Evaluate(0);
@@ -286,11 +285,18 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
   // avoid dereferencing it by using expression-level conditionals and
   // short-circuiting guards in asserts. Cache the null check in a Let-bound
   // boolean so codegen does not repeat `(handle == NULL)` everywhere.
+
   Var is_null_var(arg_name + "_is_null", DataType::Bool());
   init_nest_.emplace_back(
       LetStmt(is_null_var,
               Call(DataType::Bool(), builtin::isnullptr(), {handle}), nop));
-  const PrimExpr &is_null = is_null_var;
+  const PrimExpr &is_null = is_used ? const_false() : is_null_var;
+  if (is_used) {
+    init_nest_.emplace_back(AssertStmt(
+        !is_null_var,
+        tvm::tir::StringImm(arg_name + " is expected to have non-NULL pointer"),
+        nop));
+  }
 
   // dimension checks
   PrimExpr v_ndim = TVMArrayGet(tvm_ndim_type, handle, builtin::kArrNDim);
@@ -318,9 +324,10 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
   ndim_err_msg << arg_name << ".ndim is expected to equal "
                << buffer->shape.size() << ", but got mismatched ndim";
   auto msg = StringImm(ndim_err_msg.str());
-  // Only check ndim when handle is non-NULL (using short-circuit OR)
-  v_ndim = tvm::if_then_else(Not(is_null), v_ndim, make_zero(tvm_ndim_type));
-  init_nest_.emplace_back(AssertStmt(Or(is_null, a_ndim == v_ndim), msg, nop));
+  // Only check ndim when handle is non-NULL (using if statement)
+  Stmt ndim_check = AssertStmt(a_ndim == v_ndim, msg, nop);
+  ndim_check = IfThenElse(Not(is_null), ndim_check);
+  init_nest_.emplace_back(SeqStmt({ndim_check, nop}));
   // type checks
   std::ostringstream type_err_msg;
   // Avoid dumping TIR expressions in error text; just state mismatch.
@@ -396,8 +403,10 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
         buffer->dtype == DataType::Int(4) ||
         buffer->dtype == DataType::UInt(4))) {
     auto type_msg = StringImm(type_err_msg.str());
-    // Only check dtype when handle is non-NULL (short-circuit)
-    asserts_.emplace_back(AssertStmt(Or(is_null, cond), type_msg, nop));
+    // Only check dtype when handle is non-NULL (using if statement)
+    Stmt dtype_check = AssertStmt(cond, type_msg, nop);
+    dtype_check = IfThenElse(Not(is_null), dtype_check);
+    asserts_.emplace_back(SeqStmt({dtype_check, nop}));
   }
 
   // shape field
@@ -427,31 +436,16 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
     }
 
     // The "real" runtime shape value read from DLTensor
-    PrimExpr raw_shape_val =
+    PrimExpr shape_val =
         cast(buffer->shape[k].dtype(),
              BufferLoad(buf_shape,
                         {IntImm(DataType::Int(32), static_cast<int>(k))}));
 
-    // Bind to the value of the symbolic dimension (e.g., m) in TIR, with an
-    // is_null guard:
-    //   handle is NULL → use 0, placeholder but no dereference
-    //   handle non-NULL → actually read from DLTensor's shape array
-    PrimExpr bound_shape_val = tvm::if_then_else(
-        is_null, make_zero(buffer->shape[k].dtype()), raw_shape_val);
-
     // When first encountering a Var (e.g., m), this will generate:
     //   Let(m, bound_shape_val, ...)
     // Constant dimensions will only generate consistency assertions.
-    BindNullable(buffer->shape[k], bound_shape_val, shape_element_name(k), true,
+    BindNullable(buffer->shape[k], shape_val, shape_element_name(k), true,
                  is_null);
-
-    // Keep an explicit "consistency check": when non-NULL, the symbolic
-    // dimension must equal the DLTensor's shape.
-    Stmt shape_check = AssertStmt(
-        Or(is_null, buffer->shape[k] == raw_shape_val),
-        StringImm(shape_element_name(k) + " mismatch with DLTensor shape"),
-        Evaluate(0));
-    asserts_.emplace_back(shape_check);
   }
 
   // strides field
@@ -499,7 +493,7 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
       asserts_.emplace_back(SeqStmt({check, Evaluate(0)}));
     }
   } else if (buffer->buffer_type == kAutoBroadcast) {
-    PrimExpr stride_from_shape = make_const(buffer->DefaultIndexType(), 1);
+    PrimExpr stride_from_shape = 1;
     for (size_t i = buffer->shape.size(); i != 0; --i) {
       size_t k = i - 1;
       DataType stride_dtype = buffer->strides[k].dtype();
@@ -507,31 +501,15 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
           cast(stride_dtype,
                BufferLoad(buf_strides,
                           {IntImm(DataType::Int(32), static_cast<int>(k))}));
-      PrimExpr stride_from_shape_cast = cast(stride_dtype, stride_from_shape);
 
-      PrimExpr core_value = tvm::if_then_else(
-          v_strides_is_null, stride_from_shape_cast, explicit_stride);
-      core_value = tvm::if_then_else(buffer->shape[k] == 1,
-                                     make_zero(stride_dtype), core_value);
+      PrimExpr stride_val = tvm::if_then_else(
+          v_strides_is_null, stride_from_shape, explicit_stride);
 
-      // Bind like shape: define var when needed, and only assert when non-NULL
-      PrimExpr bound_stride_val =
-          tvm::if_then_else(is_null, make_zero(stride_dtype), core_value);
-      BindNullable(buffer->strides[k], bound_stride_val, stride_element_name(k),
-                   true, is_null);
-
-      Stmt stride_check = AssertStmt(
-          Or(is_null, buffer->strides[k] == core_value),
-          StringImm(stride_element_name(k) + " mismatch with DLTensor strides"),
-          Evaluate(0));
-      asserts_.emplace_back(stride_check);
-
-      PrimExpr shape_extent = cast(stride_dtype, buffer->shape[k]);
-      stride_from_shape =
-          analyzer_.Simplify(stride_from_shape_cast * shape_extent);
+      BindNullable(buffer->strides[k], stride_val, stride_element_name(k), true,
+                   is_null);
     }
   } else {
-    PrimExpr stride_from_shape = make_const(buffer->DefaultIndexType(), 1);
+    PrimExpr stride_from_shape = 1;
 
     for (int k = static_cast<int>(buffer->strides.size()) - 1; k >= 0; --k) {
       DataType stride_dtype = buffer->strides[k].dtype();
@@ -540,24 +518,12 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
                BufferLoad(buf_strides, {IntImm(DataType::Int(32), k)}));
       PrimExpr shape_stride = cast(
           stride_dtype, BufferLoad(buf_shape, {IntImm(DataType::Int(32), k)}));
-      PrimExpr stride_from_shape_cast = cast(stride_dtype, stride_from_shape);
 
-      PrimExpr core_value = tvm::if_then_else(
-          v_strides_is_null, stride_from_shape_cast, explicit_stride);
+      PrimExpr stride_val = tvm::if_then_else(
+          v_strides_is_null, stride_from_shape, explicit_stride);
 
-      PrimExpr bound_stride_val =
-          tvm::if_then_else(is_null, make_zero(stride_dtype), core_value);
-      BindNullable(buffer->strides[k], bound_stride_val, stride_element_name(k),
-                   true, is_null);
-
-      Stmt stride_check = AssertStmt(
-          Or(is_null, buffer->strides[k] == core_value),
-          StringImm(stride_element_name(k) + " mismatch with DLTensor strides"),
-          Evaluate(0));
-      asserts_.emplace_back(stride_check);
-
-      stride_from_shape =
-          analyzer_.Simplify(stride_from_shape_cast * shape_stride);
+      BindNullable(buffer->strides[k], stride_val, stride_element_name(k), true,
+                   is_null);
     }
   }
 
@@ -574,9 +540,10 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
     PrimExpr expect_byte_offset =
         make_const(DataType::UInt(64), const_offset->value * data_bytes);
     Stmt byte_off_check =
-        AssertStmt(Or(is_null, expect_byte_offset == actual_byte_offset),
+        AssertStmt(expect_byte_offset == actual_byte_offset,
                    StringImm(arg_name + ".byte_offset mismatch"), nop);
-    asserts_.emplace_back(byte_off_check);
+    byte_off_check = IfThenElse(Not(is_null), byte_off_check);
+    asserts_.emplace_back(SeqStmt({byte_off_check, nop}));
   } else {
     PrimExpr actual_byte_offset = tvm::if_then_else(
         Not(is_null),
@@ -586,28 +553,15 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
         cast(buffer->elem_offset.dtype(),
              (actual_byte_offset / make_const(DataType::UInt(64), data_bytes)));
 
-    // Like shape/stride, do NULL-safe binding for elem_offset:
-    //   handle is NULL → 0
-    //   handle non-NULL → actual_byte_offset / data_bytes
-    PrimExpr bound_elem_off = tvm::if_then_else(
-        is_null, make_zero(buffer->elem_offset.dtype()), expect_elem_off);
-    BindNullable(buffer->elem_offset, bound_elem_off, arg_name + ".elem_offset",
-                 true, is_null);
-
-    // Strict consistency check for non-NULL case
-    Stmt elem_off_check =
-        AssertStmt(Or(is_null, buffer->elem_offset == expect_elem_off),
-                   StringImm(arg_name + ".elem_offset mismatch"), nop);
-    asserts_.emplace_back(elem_off_check);
+    BindNullable(buffer->elem_offset, expect_elem_off,
+                 arg_name + ".elem_offset", true, is_null);
 
     if (buffer->offset_factor > 1) {
       PrimExpr offset = buffer->elem_offset;
       PrimExpr factor = make_const(offset.dtype(), buffer->offset_factor);
       PrimExpr zero = make_zero(offset.dtype());
-      Stmt off_factor_check =
-          AssertStmt(Or(is_null, truncmod(offset, factor) == zero),
-                     StringImm(arg_name + ".elem_offset factor mismatch"), nop);
-      asserts_.emplace_back(off_factor_check);
+      BindNullable(offset, truncmod(offset, factor), arg_name + ".elem_offset",
+                   true, is_null);
     }
   }
 
@@ -621,14 +575,29 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
       Not(is_null),
       TVMArrayGet(DataType::Int(32), handle, builtin::kArrDeviceId),
       make_zero(DataType::Int(32)));
+
   // Bind device_id to a safe expression (0 when NULL handle)
   BindNullable(device_id, actual_dev_id, arg_name + ".device_id", true,
                is_null);
   // Check device_type consistency (device_id equality is implicitly ensured by
   // binding above)
-  init_nest_.emplace_back(
-      AssertStmt(Or(is_null, device_type == actual_dev_type),
-                 StringImm(arg_name + ".device_type mismatch"), nop));
+  {
+    std::ostringstream dev_msg;
+    dev_msg << arg_name << ".device_type mismatch";
+    if (const auto *imm = device_type.as<IntImmNode>()) {
+      dev_msg << " [expected: " << imm->value << " ("
+              << tvm::runtime::DLDeviceType2Str(static_cast<int>(imm->value))
+              << ")]";
+    }
+    // Give a short legend so users can interpret numeric codes in the
+    // appended "got/expected" part printed by the runtime.
+    dev_msg << "; DLPack codes: 1=CPU, 2=CUDA, 7=Vulkan, 8=Metal, 10=ROCM, "
+               "14=OneAPI, 15=WebGPU";
+    auto device_type_check =
+        IfThenElse(Not(is_null), AssertStmt(device_type == actual_dev_type,
+                                            StringImm(dev_msg.str()), nop));
+    asserts_.emplace_back(SeqStmt({device_type_check, Evaluate(0)}));
+  }
 
   // Data field.  Because the validation of the data field may depend
   // on a dynamic size defined by the other DLTensor* parameters, this
@@ -650,12 +619,14 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
         product *= dim;
       return product;
     }();
-    asserts_.emplace_back(AssertStmt(
-        Or(is_null, (alloc_size == 0) ||
-                        !Call(DataType::Bool(), builtin::isnullptr(), {vptr})),
+    Stmt data_null_check = AssertStmt(
+        (alloc_size == 0) ||
+            !Call(DataType::Bool(), builtin::isnullptr(), {vptr}),
         StringImm(arg_name +
                   " is expected to have non-NULL data pointer, but got NULL"),
-        nop));
+        nop);
+    data_null_check = IfThenElse(Not(is_null), data_null_check);
+    asserts_.emplace_back(SeqStmt({data_null_check, nop}));
 
     // mark alignment of external bufs
     init_nest_.emplace_back(

@@ -253,6 +253,19 @@ struct DispatchInstruction<cute::float_e4m3_t, cute::float_e4m3_t, float, M, N,
                  integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
                  integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
 };
+
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e4m3_t, cute::float_e4m3_t, float, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<(M == 64 || M == 32) && K == 32>> {
+  using MMA =
+      MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e4m3_t, cute::float_e4m3_t,
+                 float, Int<M>, Int<N>, integral_constant<UMMA::Major, a_major>,
+                 integral_constant<UMMA::Major, b_major>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+
 template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
 struct DispatchInstruction<cute::float_e4m3_t, cute::float_e4m3_t, half_t, M, N,
                            K, a_major, b_major,
@@ -264,22 +277,10 @@ struct DispatchInstruction<cute::float_e4m3_t, cute::float_e4m3_t, half_t, M, N,
                          integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
                          integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
 };
-
-template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
-struct DispatchInstruction<cute::float_e4m3_t, cute::float_e4m3_t, float, M, N,
-                           K, a_major, b_major,
-                           std::enable_if_t<M == 64 && K == 32>> {
-  using MMA =
-      MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e4m3_t, cute::float_e4m3_t,
-                 float, Int<M>, Int<N>, integral_constant<UMMA::Major, a_major>,
-                 integral_constant<UMMA::Major, b_major>,
-                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
-                 integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
-};
 template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
 struct DispatchInstruction<cute::float_e4m3_t, cute::float_e4m3_t, half_t, M, N,
                            K, a_major, b_major,
-                           std::enable_if_t<M == 64 && K == 32>> {
+                           std::enable_if_t<(M == 64 || M == 32) && K == 32>> {
   using MMA = MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e4m3_t,
                          cute::float_e4m3_t, half_t, Int<M>, Int<N>,
                          integral_constant<UMMA::Major, a_major>,
@@ -299,17 +300,6 @@ struct DispatchInstruction<cute::float_e5m2_t, cute::float_e5m2_t, float, M, N,
                  integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
                  integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
 };
-template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
-struct DispatchInstruction<cute::float_e5m2_t, cute::float_e5m2_t, half_t, M, N,
-                           K, a_major, b_major,
-                           std::enable_if_t<M == 128 && K == 32>> {
-  using MMA = MMA_Traits<SM100_MMA_F8F6F4_SS, cute::float_e5m2_t,
-                         cute::float_e5m2_t, half_t, Int<M>, Int<N>,
-                         integral_constant<UMMA::Major, a_major>,
-                         integral_constant<UMMA::Major, b_major>,
-                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
-                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
-};
 
 template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
 struct DispatchInstruction<cute::float_e5m2_t, cute::float_e5m2_t, float, M, N,
@@ -321,6 +311,18 @@ struct DispatchInstruction<cute::float_e5m2_t, cute::float_e5m2_t, float, M, N,
                  integral_constant<UMMA::Major, b_major>,
                  integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
                  integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
+};
+
+template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
+struct DispatchInstruction<cute::float_e5m2_t, cute::float_e5m2_t, half_t, M, N,
+                           K, a_major, b_major,
+                           std::enable_if_t<M == 128 && K == 32>> {
+  using MMA = MMA_Traits<SM100_MMA_F8F6F4_SS, cute::float_e5m2_t,
+                         cute::float_e5m2_t, half_t, Int<M>, Int<N>,
+                         integral_constant<UMMA::Major, a_major>,
+                         integral_constant<UMMA::Major, b_major>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>,
+                         integral_constant<UMMA::ScaleIn, UMMA::ScaleIn::One>>;
 };
 template <int M, int N, int K, UMMA::Major a_major, UMMA::Major b_major>
 struct DispatchInstruction<cute::float_e5m2_t, cute::float_e5m2_t, half_t, M, N,

@@ -166,8 +166,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             else:
                 expected_dtype_strs.append(None)
                 is_buffer_param.append(False)
-        # Global function name used in error messages
-        global_symbol = str(prim_func.attrs.get("global_symbol", "main"))
 
         # Map torch dtype to TVM-style dtype string
         def torch_dtype_to_tvm_str(dtype: torch.dtype) -> str:
@@ -236,21 +234,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     tensor = torch.empty(*shape, dtype=dtype, device=out_device)
                 else:
                     tensor = inputs[ins_idx]
-                    # Input dtype validation with clear error message
-                    if is_buffer_param[i]:
-                        expected_dtype_str = expected_dtype_strs[i]
-                        expected_torch_dtype = param_dtypes[i]
-                        # Only check when the argument is a tensor and expected dtype is known
-                        if isinstance(
-                                tensor, torch.Tensor
-                        ) and expected_dtype_str is not None and tensor.dtype != expected_torch_dtype:
-                            param_var = params[i]
-                            # Reconstruct TVM-like handle name A_handle for error clarity
-                            handle_name = f"{param_var.name}_handle"
-                            actual_dtype_str = torch_dtype_to_tvm_str(tensor.dtype)
-                            raise RuntimeError(
-                                f"{global_symbol}.{handle_name}.dtype is expected to be {expected_dtype_str}, but got {actual_dtype_str}"
-                            )
                     ins_idx += 1
                 tensor_list.append(tensor)
 

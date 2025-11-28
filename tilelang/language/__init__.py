@@ -65,6 +65,11 @@ from .reduce import (
     reduce_bitxor,  # noqa: F401
     cumsum,  # noqa: F401
     finalize_reducer,  # noqa: F401
+    warp_reduce_sum,  # noqa: F401
+    warp_reduce_max,  # noqa: F401
+    warp_reduce_min,  # noqa: F401
+    warp_reduce_bitand,  # noqa: F401
+    warp_reduce_bitor,  # noqa: F401
 )
 from .print import print, device_assert  # noqa: F401
 from .customize import (

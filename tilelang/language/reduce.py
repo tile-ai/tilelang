@@ -2,7 +2,7 @@
 from __future__ import annotations
 from tvm import tir
 from tilelang.language import copy, macro, alloc_shared, alloc_fragment
-from tilelang.language.utils import buffer_to_tile_region
+from tilelang.utils.language import to_buffer_region
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.script.ir_builder import IRBuilder
 
@@ -51,8 +51,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(red_frag_in, "r"),
-                buffer_to_tile_region(red_frag_out, "w"),
+                to_buffer_region(red_frag_in, access_type="r"),
+                to_buffer_region(red_frag_out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -66,8 +66,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(red_frag_in, "r"),
-                buffer_to_tile_region(out, "w"),
+                to_buffer_region(red_frag_in, access_type="r"),
+                to_buffer_region(out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -79,8 +79,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(buffer, "r"),
-                buffer_to_tile_region(red_frag_out, "w"),
+                to_buffer_region(buffer, access_type="r"),
+                to_buffer_region(red_frag_out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -90,8 +90,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(buffer, "r"),
-                buffer_to_tile_region(out, "w"),
+                to_buffer_region(buffer, access_type="r"),
+                to_buffer_region(out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -246,8 +246,8 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.cumsum"),
-        cumsum_smem.access_ptr("r"),
-        cumsum_smem.access_ptr("w"),
+        to_buffer_region(cumsum_smem, access_type="r"),
+        to_buffer_region(cumsum_smem, access_type="w"),
         dim,
         reverse,
     )
@@ -300,8 +300,8 @@ def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.cumsum"),
-        src.access_ptr("r"),
-        dst.access_ptr("w"),
+        to_buffer_region(src, access_type="r"),
+        to_buffer_region(dst, access_type="w"),
         dim,
         reverse,
     )
@@ -323,5 +323,85 @@ def finalize_reducer(reducer: tir.Buffer):
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.finalize_reducer"),
-        reducer.access_ptr("w"),
+        to_buffer_region(reducer, access_type="w"),
     )
+
+
+def warp_reduce_sum(value: tir.PrimExpr):
+    """Perform warp reduction sum on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the sum of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced sum value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_sum"), value)
+
+
+def warp_reduce_max(value: tir.PrimExpr):
+    """Perform warp reduction max on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the max of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced max value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_max"), value)
+
+
+def warp_reduce_min(value: tir.PrimExpr):
+    """Perform warp reduction min on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the min of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced min value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_min"), value)
+
+
+def warp_reduce_bitand(value: tir.PrimExpr):
+    """Perform warp reduction bitwise-and on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the bitwise-and of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced bitwise-and value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_bitand"), value)
+
+
+def warp_reduce_bitor(value: tir.PrimExpr):
+    """Perform warp reduction bitwise-or on a register value.
+
+    This function reduces a value across all threads in a warp using shuffle operations.
+    Each thread provides a  register `value`, and after the reduction, all threads
+    will have the bitwise-or of all values across the warp.
+
+    Args:
+        value (tir.PrimExpr): The input register value to reduce
+
+    Returns:
+        tir.PrimExpr: The reduced bitwise-or value (same on all threads in the warp)
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.warp_reduce_bitor"), value)

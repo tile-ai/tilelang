@@ -53,6 +53,7 @@ public:
 
 class GemmSPNode : public TileOperatorNode {
 public:
+  BufferRegion aRegion_, bRegion_, cRegion_, eRegion_;
   tir::Buffer a_, b_, c_, e_;
   bool transA_, transB_;
   int m_, n_, k_;
@@ -75,6 +76,10 @@ public:
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<GemmSPNode>()
         .def_ro("policy", &GemmSPNode::policy_)
+        .def_ro("aRegion", &GemmSPNode::aRegion_)
+        .def_ro("bRegion", &GemmSPNode::bRegion_)
+        .def_ro("cRegion", &GemmSPNode::cRegion_)
+        .def_ro("eRegion", &GemmSPNode::eRegion_)
         .def_ro("a", &GemmSPNode::a_)
         .def_ro("b", &GemmSPNode::b_)
         .def_ro("c", &GemmSPNode::c_)
@@ -96,7 +101,7 @@ private:
 class GemmSP : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSP, TileOperator, GemmSPNode);
-  TVM_DLL GemmSP(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL GemmSP(Array<PrimExpr> args);
   static const Op &Get();
 };
 

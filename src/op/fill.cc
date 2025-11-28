@@ -17,7 +17,7 @@
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "builtin.h"
-#include "region.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
@@ -52,62 +52,18 @@ using namespace tir;
  * value].
  *             - args[0]: destination access (BufferLoad or pointer expression).
  *             - args[1]: value to fill (scalar or vector).
- * @param vmap Mapping from buffer variables to Buffer objects; used to resolve
- * the destination when args[0] is not a BufferLoad.
  *
  * Notes:
  * - The constructor enforces constraints (e.g., stride == 1 ramps, constant
  * lanes) and will terminate (via CHECK/ICHECK) if inputs are unsupported or out
  * of bounds.
  */
-Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
+Fill::Fill(Array<PrimExpr> args) {
   ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
 
-  // Case 1: Region descriptor call (tl.region)
-  if (const auto *call = args[0].as<CallNode>()) {
-    if (call->op.same_as(RegionOp::Get())) {
-      auto region = RegionOp(call->args, vmap);
-      node->dst = region->GetBuffer();
-      node->region = region->GetRanges();
-    } else if (call->op.same_as(builtin::tvm_access_ptr())) {
-      node->dst = vmap[GetVarFromAccessPtr(args[0])];
-      for (int i = 0; i < node->dst->shape.size(); i++) {
-        node->region.push_back(Range(0, node->dst->shape[i]));
-      }
-    } else {
-      ICHECK(false) << "Unsupported call op in tl.fill: "
-                    << Downcast<Op>(call->op)->name;
-    }
-
-    // Case 2: Explicit BufferRegion (legacy path)
-  } else if (args[0]->IsInstance<BufferRegionNode>()) {
-    auto region = Downcast<BufferRegion>(args[0]);
-    node->dst = region->buffer;
-    node->region = region->region;
-
-    // Case 3: Vector/scalar region expressed via BufferLoad indices
-  } else if (args[0]->IsInstance<BufferLoadNode>()) {
-    auto buffer_load = Downcast<BufferLoad>(args[0]);
-    for (const auto &index : buffer_load->indices) {
-      if (const auto *ramp = index.as<RampNode>()) {
-        CHECK(ramp->stride.as<IntImmNode>()->value == 1)
-            << "Only stride 1 ramps are supported";
-        const auto *lanes = ramp->lanes.as<IntImmNode>();
-        CHECK(lanes)
-            << "Scalable vectors not supported in BufferRegion conversion";
-        node->region.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
-      } else {
-        node->region.push_back(Range::FromMinExtent(index, 1));
-      }
-    }
-    node->dst = buffer_load->buffer;
-    // Case 4: Access pointer, fill the full buffer
-  } else {
-    node->dst = vmap[GetVarFromAccessPtr(args[0])];
-    for (int i = 0; i < node->dst->shape.size(); i++) {
-      node->region.push_back(Range(0, node->dst->shape[i]));
-    }
-  }
+  BufferRegion region = NormalizeToBufferRegion(args[0]);
+  node->dst = region->buffer;
+  node->region = region->region;
 
   if (args[1]->dtype != node->dst->dtype) {
     node->value = Cast(node->dst->dtype, args[1]);

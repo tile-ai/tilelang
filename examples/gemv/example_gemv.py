@@ -334,14 +334,14 @@ def get_autotuned_kernel(
     return main
 
 
-def check_correctness_and_bench(kernel, N, K, bench_ref=True):
+def check_correctness_and_bench(kernel, N, K, do_bench=True):
     profiler = kernel.get_profiler()
     profiler.assert_allclose(lambda x, y: x @ y.T, atol=1e-2, rtol=1e-2)
-    if bench_ref:
+    if do_bench:
         latency = profiler.do_bench(lambda x, y: x @ y.T, warmup=50)
         print(f"Torch Latency: {latency} ms")
-    latency = profiler.do_bench(kernel, warmup=50)
-    print(f"TileLang Latency: {latency} ms\n")
+        latency = profiler.do_bench(kernel, warmup=50)
+        print(f"TileLang Latency: {latency} ms\n")
 
 
 def main(do_bench: bool = True):
@@ -350,12 +350,13 @@ def main(do_bench: bool = True):
     parser.add_argument("--k", type=int, default=1024, help="Matrix dimension K")
     args, _ = parser.parse_known_args()
     N, K = args.n, args.k
-    check_correctness_and_bench(naive_gemv(N, K, 128, 128), N, K)
-    check_correctness_and_bench(naive_splitk_gemv(N, K, 32, 32), N, K)
-    check_correctness_and_bench(splitk_gemv(N, K, 32, 32, 32), N, K)
-    check_correctness_and_bench(splitk_gemv_vectorized(N, K, 2, 32), N, K)
-    check_correctness_and_bench(splitk_gemv_vectorized_tvm(N, K, 2, 32), N, K)
-    check_correctness_and_bench(gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K)
+    check_correctness_and_bench(naive_gemv(N, K, 128, 128), N, K, do_bench=do_bench)
+    check_correctness_and_bench(naive_splitk_gemv(N, K, 32, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(splitk_gemv(N, K, 32, 32, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(splitk_gemv_vectorized(N, K, 2, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(splitk_gemv_vectorized_tvm(N, K, 2, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(
+        gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K, do_bench=do_bench)
 
     print("Test passed!")
 

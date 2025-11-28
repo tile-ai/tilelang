@@ -3,14 +3,16 @@ import tilelang.language as T
 from typing import Literal, Callable
 from tilelang.common import TransformKind
 from tvm import DataType
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion
+from tvm import tir
+from tvm.ir import Range
+from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tilelang import tvm as tvm
 from tvm.runtime import convert
 from .utils import (
     mma_store_index_map,
     get_ldmatrix_offset,
 )
-from tilelang.utils import is_fragment, to_buffer_region
+from tilelang.utils import is_fragment, get_buffer_region_from_load
 from tilelang.intrinsics.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
     shared_16x8_to_mma_32x4_layout_sr_b,
@@ -246,7 +248,7 @@ class TensorCoreIntrinEmitter:
 
             thread_binding = self.get_thread_binding()
             # legalize shared buffer to region
-            A_region = to_buffer_region(A_shared_buf)
+            A_region = self._legalize_to_buffer_region(A_shared_buf)
             A_buf = A_region.buffer
             A_base0 = A_region.region[-2].min
             A_base1 = A_region.region[-1].min
@@ -297,7 +299,7 @@ class TensorCoreIntrinEmitter:
         thread_binding = self.get_thread_binding()
 
         # legalize shared buffer to region
-        A_region = to_buffer_region(A_shared_buf)
+        A_region = self._legalize_to_buffer_region(A_shared_buf)
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
@@ -363,7 +365,7 @@ class TensorCoreIntrinEmitter:
             thread_binding = self.get_thread_binding()
 
             # legalize shared buffer to region
-            B_region = to_buffer_region(B_shared_buf)
+            B_region = self._legalize_to_buffer_region(B_shared_buf)
             B_buf = B_region.buffer
             B_base0 = B_region.region[-2].min
             B_base1 = B_region.region[-1].min
@@ -400,7 +402,7 @@ class TensorCoreIntrinEmitter:
         thread_binding = self.get_thread_binding()
 
         # legalize shared buffer to region
-        B_region = to_buffer_region(B_shared_buf)
+        B_region = self._legalize_to_buffer_region(B_shared_buf)
         B_buf = B_region.buffer
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
@@ -800,6 +802,33 @@ class TensorCoreIntrinEmitter:
             forward_thread_fn=forward_thread,
             forward_index_fn=forward_index,
         )
+
+    @staticmethod
+    def _legalize_to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
+        """
+        Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
+
+        - Buffer -> full-region BufferRegion covering entire shape
+        - BufferRegion -> returned as-is
+        - BufferLoad -> best-effort convert via get_buffer_region_from_load;
+        if scalar, fall back to 1-sized ranges at given indices
+        """
+        if isinstance(obj, BufferRegion):
+            return obj
+        if isinstance(obj, Buffer):
+            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+            ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
+            return BufferRegion(obj, ranges)
+        if isinstance(obj, BufferLoad):
+            region = get_buffer_region_from_load(obj)
+            if region is not None:
+                return region
+            # Fallback: scalar load -> 1-sized ranges at indices
+            mins = [idx for idx in obj.indices]
+            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
+            return BufferRegion(obj.buffer, ranges)
+        raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
 
 
 class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
