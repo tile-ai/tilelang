@@ -24,8 +24,7 @@ os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 @tilelang.jit(
     pass_configs={"tl.disable_tma_lower": True,
-        "tl.disable_warp_specialized": True},
-        debug_root_path='/root/workspace/wt/debug/notify_combine')
+        "tl.disable_warp_specialized": True})
 def cached_notify_combine_kernel(
     num_recv_tokens,
     num_ranks,
@@ -112,7 +111,7 @@ def cached_notify_combine(
 
 @tilelang.jit(
     pass_configs={"tl.disable_tma_lower": True,  # use TMA later
-        "tl.disable_warp_specialized": True}, debug_root_path='/root/workspace/wt/debug/combine')
+        "tl.disable_warp_specialized": True})
 def combine_kernel(
     rank, num_ranks,
     num_recv_tokens,
@@ -163,6 +162,7 @@ def combine_kernel(
             warp_id = tx // 32
             responsible_channel = bx // 2
 
+
             if bx % 2 == 0:  # sender
                 send_rank_id = (responsible_channel + warp_id) % num_ranks
                 send_warp_id_in_rank = warp_id // num_ranks
@@ -174,8 +174,8 @@ def combine_kernel(
                 num_channel_tokens=  T.if_then_else(
                     responsible_channel == num_channels - 1,
                     num_rank_tokens,
-                    channel_prefix_matrix[send_rank_id, responsible_channel + 1] - channel_offset,
-                )
+                    channel_prefix_matrix[send_rank_id, responsible_channel + 1]
+                ) - channel_offset
                 token_start_idx = rank_offset + channel_offset
                 token_end_idx = token_start_idx + num_channel_tokens
 
@@ -227,9 +227,10 @@ def combine_kernel(
                             dst_pe=send_rank_id)
             
             else:  # receiver
-                warp_channel_head_idx = T.alloc_shared([warps, num_ranks], 'int32')
-                shared_channel_tail_idx = T.alloc_shared([32], 'int32')  #! workaround for illegal address
-                warp_retired = T.alloc_shared([warps], 'bool')
+                #? Why we must need scope='shared', not 'shared.dynamic' here?
+                warp_channel_head_idx = T.alloc_shared([warps, num_ranks], 'int32', scope='shared')
+                shared_channel_tail_idx = T.alloc_shared([32], 'int32', scope='shared')  #! workaround for illegal address
+                warp_retired = T.alloc_shared([warps], 'bool', scope='shared')
                 if tx < warps:
                     warp_retired[tx] = False
                 if lane_id < num_ranks:
@@ -283,12 +284,9 @@ def combine_kernel(
                             T.ld(send_head[token_idx, lane_id], expected_head, nc=True)
 
                         condvar = T.alloc_var('int32')
-                        if bx == 1 and tx == 32:
-                            T.print(condvar)
                         T.ld(shared_channel_tail_idx[lane_id], condvar, sem="acquire", scope="cta")
                         with T.While(T.warp_any(condvar <= expected_head and expected_head >= 0)):
                             T.ld(shared_channel_tail_idx[lane_id], condvar, sem="acquire", scope="cta")
-                            T.print(condvar-expected_head)
                             T.loop_continue()
                         # can we simplify this ?
                         T.sync_warp()
@@ -304,8 +302,6 @@ def combine_kernel(
                                 slot_indices[num_topk_ranks] = expected_head_i % num_recv_buffer_tokens
                                 topk_ranks[num_topk_ranks] = i
                                 num_topk_ranks += 1
-                        if bx == 0 and tx == 32:
-                            T.print(num_topk_ranks, 'broadcast finished')
 
                         # Reduce data with pipeline
                         # todo: vectorize
@@ -343,16 +339,11 @@ def combine_kernel(
                                 expected_head < 0,
                                 -expected_head - 1,
                                 expected_head + 1)
-                            
-                        if bx == 1 and tx == 32:
-                            T.print(warp_channel_head_idx[warp_id, lane_id])
 
                     # Retired
                     T.sync_warp()
                     if T.elect_one_sync():
                         warp_retired[warp_id] = True
-                    if bx == 1 and tx == 32:
-                        T.print(warp_channel_head_idx, 'retired')
 
     return combine_main
 
