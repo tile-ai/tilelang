@@ -2,7 +2,6 @@
 # This op is distributed
 ### TILELANG_USE_DISTRIBUTED=1 python combine.py
 
-from asyncio import Handle
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder to path
 
@@ -11,20 +10,17 @@ import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
 from tilelang.distributed.utils import init_dist
-from utils import Config, create_moe_recv_counters, gen_inputs  # noqa: F403
+from utils import Config, gen_inputs  # noqa: F403
 from argparse import ArgumentParser
 
 from get_dispatch_layout import get_dispatch_layout
-from notify_dispatch import notify_dispatch
 from dispatch import intranode_dispatch
 
 # tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
-@tilelang.jit(
-    pass_configs={"tl.disable_tma_lower": True,
-        "tl.disable_warp_specialized": True})
+@tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 def cached_notify_combine_kernel(
     num_recv_tokens,
     num_ranks,
@@ -44,14 +40,13 @@ def cached_notify_combine_kernel(
         with T.Kernel(num_channels + 1, threads=threads) as bx:
             tx = T.get_thread_binding()
 
-            if bx == 0:
-                # block 0 is responsible for clearing channel_head/tail_idx buffers
-                # note that the buffer layout is slightly different from original DeepEP logic
+            if bx == 0:  # clearing channel_head/tail_idx buffers
+                # note that the buffer layout here is slightly different from DeepEP
                 T.sync_blocks(barrier_signal)
                 T.clear(channel_head_idx)
                 T.clear(channel_tail_idx)
                 T.barrier_blocks(barrier_signal)
-            else:
+            else:  # calculate send_head
                 channel_id = bx - 1
                 rank_id = tx // 32
                 lane_id = tx % 32
@@ -255,7 +250,7 @@ def combine_kernel(
                         new_tail = T.alloc_var('int32')
                         T.ld(channel_tail_idx[responsible_channel, lane_id], new_tail, sem="acquire", scope="sys")
                         # Use release semantics to ensure receiver warps see the update
-                        T.st(shared_channel_tail_idx[lane_id], new_tail, sem="release", scope="cta")
+                        T.st(shared_channel_tail_idx[lane_id], new_tail, sem="release", scope="cta")  # todo: weaker sem pair
 
                         # Update minimum head
                         min_head = T.alloc_var('int32')
@@ -268,7 +263,6 @@ def combine_kernel(
                             T.st(channel_head_idx[responsible_channel, lane_id], min_head, sem="relaxed", scope="sys")
                 else:  # other warps for reduction
                     # All lanes will use data buffer, but only rank lane will use `head/tail/src_idx`
-                    # for *_buffers[i] channel_rank_offset = responsible_channel * kNumRanks + i;
 
                     # The same tokens as the dispatch process
                     num_tokens_per_channel = T.ceildiv(num_recv_tokens, num_channels)
@@ -434,13 +428,20 @@ def test_intranode_combine(
     
     if rank == 0: 
         print('get dispatch layout...')
-    num_tokens_per_rank, _, num_tokens_per_expert, is_token_in_rank, _ = buffer.get_dispatch_layout(topk_idx.to(torch.int64), num_experts)  # DeepEP requires int64 topk_idx
+    ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = buffer.get_dispatch_layout(topk_idx, num_experts)
+    num_tokens_per_rank, _, num_tokens_per_expert, is_token_in_rank = get_dispatch_layout(topk_idx, num_experts, num_ranks)
+    assert torch.equal(num_tokens_per_expert, ref_num_tokens_per_expert), \
+        f"num_tokens_per_expert mismatch, max err: {(num_tokens_per_expert - ref_num_tokens_per_expert).abs().max()}"
+    assert torch.equal(is_token_in_rank, ref_is_token_in_rank), \
+        "is_token_in_rank mismatch"
+    assert torch.equal(num_tokens_per_rank, ref_num_tokens_per_rank), \
+        f"num_tokens_per_rank mismatch, max err: {(num_tokens_per_rank - ref_num_tokens_per_rank).abs().max()}"
 
     if rank == 0: 
         print('intranode dispatch...')
     
     ref_recv_x, ref_recv_topk_idx, ref_recv_topk_weights, ref_num_recv_tokens_per_expert_list, ref_handle, event = \
-        buffer.dispatch(x, None, num_tokens_per_rank, None, is_token_in_rank, num_tokens_per_expert, topk_idx.to(torch.int64), topk_weights, expert_alignment)  # DeepEP requires int64 topk_idx``
+        buffer.dispatch(x, None, ref_num_tokens_per_rank, None, ref_is_token_in_rank, ref_num_tokens_per_expert, topk_idx, topk_weights, expert_alignment)
 
     recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, symm_buffers = \
         intranode_dispatch(rank, allocator, x, None, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, None)
@@ -451,9 +452,9 @@ def test_intranode_combine(
     assert num_recv_tokens_per_expert_list == ref_num_recv_tokens_per_expert_list, 'num_recv_tokens_per_expert_list mismatch'
     
     if rank == 0:
-        print('Start combine...')
+        print('cached notify combine and intranode combine...')
 
-    ref_combine_x, ref_combine_topk_weights, _, ref_send_head = buffer.combine(ref_recv_x, ref_handle, ref_recv_topk_weights, previous_event=event)
+    ref_combine_x, ref_combine_topk_weights, _ = buffer.combine(ref_recv_x, ref_handle, ref_recv_topk_weights, previous_event=event)
 
     rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head = handle
     channel_head_idx, channel_tail_idx, barrier_signal, channel_x_buffers, channel_src_idx_buffers, channel_topk_weights_buffers = symm_buffers
@@ -462,6 +463,19 @@ def test_intranode_combine(
     assert torch.equal(combine_x, ref_combine_x), f'combine_x mismatch, max err: {(combine_x - ref_combine_x).abs().max()}'
     assert torch.equal(combine_topk_weights, ref_combine_topk_weights), f'combine_topk_weights mismatch, max err: {(combine_topk_weights - ref_combine_topk_weights).abs().max()}'
     print(f'[rank {rank}] All checks passed for TileScale intranode_combine. ✅')
+
+    # benchmark
+    t1 = do_bench(lambda: buffer.combine(ref_recv_x, ref_handle, ref_recv_topk_weights),
+        _n_warmup=1,
+        _n_repeat=1,
+    )
+    t2 = do_bench(lambda: intranode_combine(rank, allocator, recv_x, recv_topk_weights, recv_src_idx, rank_prefix_matrix, recv_channel_prefix_matrix, send_head, channel_head_idx, channel_tail_idx, barrier_signal, channel_x_buffers, channel_src_idx_buffers, channel_topk_weights_buffers),
+        _n_warmup=1,
+        _n_repeat=1,
+    )
+    print(f"DeepEP: {t1:.3f} ms")
+    print(f"TileScale: {t2:.3f} ms")
+    print(f"Speedup: {t1 / t2:.2f}x")
 
 
 def main(local_rank: int, num_local_ranks: int, args):
@@ -478,8 +492,12 @@ def main(local_rank: int, num_local_ranks: int, args):
         group,
     )
 
+    torch.distributed.destroy_process_group(group)
+    torch.distributed.destroy_process_group()
+
+
 def parse_args():
-    parser = ArgumentParser(description="Test notify_dispatch")
+    parser = ArgumentParser(description="Test combine")
     parser.add_argument("--num_ranks", type=int, default=8, help="Number of ranks")
     parser.add_argument("--num_tokens", type=int, default=4096, help="Number of tokens")
     parser.add_argument("--hidden", type=int, default=7168, help="Hidden size")

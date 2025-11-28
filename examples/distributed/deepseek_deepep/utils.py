@@ -137,7 +137,7 @@ def gen_inputs(num_tokens: int, hidden: int, num_topk: int, num_experts: int, nu
         
     Returns:
         x: `[num_tokens, hidden]` with `torch.bfloat16`, the input to MoE layer.
-        topk_idx: `[num_tokens, num_topk]` with `torch.int32`, the expert indices selected by each token,
+        topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
             `-1` means no selections.
         topk_weights: `[num_tokens, num_topk]` with `torch.float32`, the weights corresponding to 
             each selected expert for each token.
@@ -149,7 +149,7 @@ def gen_inputs(num_tokens: int, hidden: int, num_topk: int, num_experts: int, nu
 
     x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
     scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
-    topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1].to(torch.int32)
+    topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1]
     topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda')
     rank_idx = topk_idx // (num_experts // num_ranks)
     rank_idx.masked_fill_(topk_idx == -1, -1)
