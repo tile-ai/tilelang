@@ -402,8 +402,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
           display_name.erase(display_name.size() - 7);
         }
       }
-      msg << name_hint << ": Expect buffer " << display_name
-          << " to be pointer or tensor";
+      msg << "kernel " << name_hint << " input " << display_name
+          << " expected pointer or tensor handle";
       seq_init.emplace_back(
           AssertStmt(type_index == ffi::TypeIndex::kTVMFFINone ||
                          type_index == ffi::TypeIndex::kTVMFFIOpaquePtr ||
@@ -423,7 +423,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
                          handle_from_tensor, arg_value);
     } else if (dtype.is_bool()) {
       std::ostringstream msg;
-      msg << name_hint << ": Expect " << param->name_hint << " to be boolean";
+      msg << "kernel " << name_hint << " scalar " << param->name_hint
+          << " expected boolean";
       seq_init.emplace_back(
           AssertStmt(type_index == ffi::TypeIndex::kTVMFFIBool ||
                          type_index == ffi::TypeIndex::kTVMFFIInt,
@@ -433,7 +434,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
 
     } else if (dtype.is_int() || dtype.is_uint()) {
       std::ostringstream msg;
-      msg << name_hint << ": Expect " << param->name_hint << " to be int";
+      msg << "kernel " << name_hint << " scalar " << param->name_hint
+          << " expected integer";
       seq_init.emplace_back(
           AssertStmt(type_index == ffi::TypeIndex::kTVMFFIInt ||
                          type_index == ffi::TypeIndex::kTVMFFIBool,
@@ -442,7 +444,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     } else {
       ICHECK(dtype.is_float());
       std::ostringstream msg;
-      msg << name_hint << ": Expect " << param->name_hint << " to be float";
+      msg << "kernel " << name_hint << " scalar " << param->name_hint
+          << " expected float";
       seq_init.emplace_back(
           AssertStmt(type_index == ffi::TypeIndex::kTVMFFIFloat ||
                          type_index == ffi::TypeIndex::kTVMFFIInt ||
