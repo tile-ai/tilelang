@@ -1,10 +1,10 @@
 # ruff: noqa: E712
 import math
 import torch
-
 import triton
 import triton.language as tl
 import torch.nn.functional as F
+from tilelang.profiler import do_bench
 
 
 def is_hip():
@@ -378,6 +378,30 @@ def test_topk_sparse_attention_qlt_kl():
 def main():
     test_topk_sparse_attention()
     test_topk_sparse_attention_qlt_kl()
+
+
+def benchmark():
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = 1, 1, 256, 64
+    TOPK = 2
+    BLOCK = 64
+    torch.manual_seed(0)
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
+    sm_scale = 1.0 / (D_HEAD**0.5)
+    downsample_factor = BLOCK
+    downsample_len = math.ceil(SEQ_LEN / downsample_factor)
+
+    x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
+                       device='cuda',
+                       dtype=torch.bfloat16)
+    x_ds[:, :, :, 0] = 100
+    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
+
+    def run_kernel_only():
+        block_sparse_triton_fn(q, k, v, block_mask, sm_scale)
+
+    return do_bench(run_kernel_only)
 
 
 if __name__ == "__main__":

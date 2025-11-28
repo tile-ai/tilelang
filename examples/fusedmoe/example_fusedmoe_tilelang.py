@@ -551,5 +551,32 @@ def main(d_hidden=7168,
     print("✅ Tilelang and Torch match")
 
 
+def benchmark(d_hidden=7168,
+              d_expert=2048,
+              n_routed_experts=8,
+              n_shared_experts=1,
+              n_experts_per_token=4,
+              batch_size=1,
+              seq_len=8192):
+    config = {
+        "dhidden": d_hidden,
+        "dexpert": d_expert,
+        "nroutedexperts": n_routed_experts,
+        "nsharedexperts": n_shared_experts,
+        "nexpertspertoken": n_experts_per_token,
+        "bs": batch_size,
+        "seqlen": seq_len,
+        "seed": 81394
+    }
+    from tilelang.profiler import do_bench
+    data = generate_input(**config)
+
+    def run_custom_kernel():
+        custom_kernel(data).to(torch.float32)
+        torch.cuda.synchronize()
+
+    return do_bench(run_custom_kernel, warmup=10, rep=10)
+
+
 if __name__ == "__main__":
     main()

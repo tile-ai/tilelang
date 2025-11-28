@@ -4,6 +4,7 @@ import torch
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
+from tilelang.profiler import do_bench
 
 
 def ref_program(x, y):
@@ -78,6 +79,24 @@ def main():
 
     out = kernel(a, b)
     torch.testing.assert_close(out, ref_program(a, b), rtol=1e-2, atol=1e-2)
+
+
+def benchmark():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--m", type=int, default=1024)
+    parser.add_argument("--n", type=int, default=1024)
+    parser.add_argument("--use_autotune", action="store_true", default=False)
+    args, _ = parser.parse_known_args()
+    M, N = args.m, args.n
+    a = torch.randn(M, N, dtype=torch.float32, device="cuda")
+    b = torch.randn(M, N, dtype=torch.float32, device="cuda")
+    config = {"block_M": 32, "block_N": 32, "threads": 128}
+    kernel = elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32")
+
+    def run_kernel_only():
+        kernel(a, b)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100)
 
 
 if __name__ == "__main__":

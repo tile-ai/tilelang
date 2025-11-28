@@ -301,6 +301,50 @@ def test_sparse_mla_fwd(B=1,
     print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
+def benchmark(B=1,
+              S=4096,
+              SKV=8192,
+              H=128,
+              HKV=1,
+              DQK=576,
+              DV=512,
+              topk=2048,
+              dtype=torch.bfloat16,
+              check_correctness=True,
+              block_I=64,
+              num_stages=2,
+              threads=256):
+    torch.random.manual_seed(0)
+    q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
+    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
+
+    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
+    for b in range(B):
+        for t in range(S):
+            for h in range(HKV):
+                i_i = torch.randperm(max(1, t))[:topk]
+                indices[b, t, h, :len(i_i)] = i_i
+
+    tl_out, tl_lse = sparse_mla_fwd_interface(
+        q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
+
+    if check_correctness:
+        ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+        assert_tensors_similar(tl_out, ref_out, eps=1e-2, name="out")
+
+    def fn():
+        return sparse_mla_fwd_interface(
+            q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
+
+    from tilelang.profiler import do_bench
+
+    return do_bench(
+        fn,
+        rep=100,
+        warmup=250,
+    )
+
+
 if __name__ == "__main__":
     test_sparse_mla_fwd(
         B=1,

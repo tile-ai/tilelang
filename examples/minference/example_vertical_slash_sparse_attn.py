@@ -596,5 +596,72 @@ def main(argv=None):
     print(f"speedup: {triton_time / tilelang_time:.2f}x")
 
 
+def benchmark(argv=None):
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--heads", type=int, default=1)
+    parser.add_argument("--seq_len", type=int, default=16384)
+    parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument("--vertical_size", type=int, default=1000)
+    parser.add_argument("--slash_size", type=int, default=200)
+
+    args = parser.parse_args(argv)
+
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = args.batch, args.heads, args.seq_len, args.head_dim
+
+    vertical_size, slash_size = args.vertical_size, args.slash_size
+
+    torch.manual_seed(0)
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+
+    q_len = SEQ_LEN
+
+    vertical_size, slash_size = min(q_len, vertical_size), min(q_len, slash_size)
+    last_q = 64
+    qk = torch.einsum('bhmk, bhnk -> bhmn', q[:, :, -last_q:, :], k)
+    arange = torch.arange(last_q, device="cuda")
+    qk[:, :, :, -last_q:] = torch.where(arange[None, None, :, None] >= arange[None, None, None, :],
+                                        qk[:, :, :, -last_q:], -torch.inf)
+    qk = torch.nn.functional.softmax(qk, dim=-1, dtype=torch.float32)
+    vertical = qk.sum(-2, keepdim=True)
+    vertical[..., :30] = torch.inf
+    vertical = qk.sum(-2, keepdim=True)
+    vertical[..., :30] = torch.inf
+    vertical_topk = torch.topk(vertical, vertical_size, -1).indices
+
+    slash = sum_all_diagonal_matrix(qk)[..., :-last_q + 1]
+    slash[..., -30:] = torch.inf
+
+    slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
+
+    block_size_M = 64
+    batch_size, num_heads, context_size, head_dim = q.shape
+    pad = (block_size_M - context_size) & (block_size_M - 1)
+    if pad == block_size_M:
+        pad = 0
+    q = torch.nn.functional.pad(q, [0, 0, 0, pad, 0, 0, 0, 0])
+    k = torch.nn.functional.pad(k, [0, 0, 0, pad, 0, 0, 0, 0])
+    v = torch.nn.functional.pad(v, [0, 0, 0, pad, 0, 0, 0, 0])
+
+    if head_dim not in [16, 32, 64, 128, 256, 512]:
+        target_dim = 2**math.ceil(math.log2(head_dim)) - head_dim
+        q = torch.nn.functional.pad(q, [0, target_dim, 0, 0, 0, 0, 0, 0])
+        k = torch.nn.functional.pad(k, [0, target_dim, 0, 0, 0, 0, 0, 0])
+        v = torch.nn.functional.pad(v, [0, target_dim, 0, 0, 0, 0, 0, 0])
+
+    vertical_topk = vertical_topk.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(
+        dim=-1, descending=False)[0]
+    slash = slash.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(
+        dim=-1, descending=True)[0]
+
+    tl_kernel = _tl_vs_sparse_flashattn(batch_size, num_heads, context_size, head_dim,
+                                        vertical_topk.shape[2], slash.shape[2])
+
+    return do_bench(lambda: tl_kernel)
+
+
 if __name__ == "__main__":
     main()

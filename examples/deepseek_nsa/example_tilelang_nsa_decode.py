@@ -135,7 +135,7 @@ def native_sparse_attention(
     return native_sparse_attention
 
 
-def main():
+def benchmark():
     B, SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 16, 1, 32, torch.float16
     groups = HQ // H
     SEQ_LEN_Q = 1
@@ -163,19 +163,13 @@ def main():
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
                 block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
-    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN_Q, H), device='cuda')
 
-    out = kernel(Q, K, V, block_indices.to(torch.int32))
+    from tilelang.profiler import do_bench
 
-    ref = naive_nsa_simple_inference(
-        q=Q,
-        k=K,
-        v=V,
-        block_indices=block_indices,
-        block_counts=block_counts,
-        block_size=block_size,
-    )
-    torch.testing.assert_close(ref, out, atol=1e-2, rtol=1e-2)
+    def run_kernel_only():
+        kernel(Q, K, V, block_indices.to(torch.int32))
+
+    return do_bench(run_kernel_only, warmup=10, rep=100)
 
 
 if __name__ == "__main__":

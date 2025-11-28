@@ -93,5 +93,28 @@ def main(argv=None):
     print(f"Tilelang latency: {tilelang_latency}")
 
 
+def benchmark(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--M", type=int, default=320, help="num_tokens")
+    parser.add_argument("--N", type=int, default=128, help="num_experts")
+    parser.add_argument("--topk", type=int, default=6, help="topk")
+    parser.add_argument("--blk_m", type=int, default=64, help="blk_m")
+    args = parser.parse_args(argv)
+    M, N, topk, blk_m = args.M, args.N, args.topk, args.blk_m
+
+    logits = torch.rand((M, N), device="cuda", dtype=torch.float32)
+
+    kernel = tl_topk(M=M, N=N, topk=topk, blk_m=blk_m)
+    tl_gates, tl_indices = kernel(logits)
+
+    torch_gates, torch_indices = ref_program(logits, topk)
+
+    torch.testing.assert_close(tl_gates, torch_gates)
+    torch.testing.assert_close(tl_indices, torch_indices)
+
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
+    return profiler.do_bench()
+
+
 if __name__ == "__main__":
     main()

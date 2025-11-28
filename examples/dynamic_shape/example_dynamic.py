@@ -107,5 +107,28 @@ def main(M=16384, N=16384, K=16384):
                    accum_dtype, num_stages, threads)
 
 
+def benchmark(M, N, K):
+    block_M, block_N, block_K = 128, 128, 32
+    trans_A, trans_B = False, False
+    in_dtype, out_dtype = "float16", "float16"
+    accum_dtype = "float32"
+    num_stages = 3
+    threads = 128
+    kernel = matmul_dynamic_mnk(block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
+                                accum_dtype, num_stages, threads)
+    import torch
+    if trans_A:
+        A = torch.rand(K, M, device="cuda", dtype=getattr(torch, in_dtype))
+    else:
+        A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
+    if trans_B:
+        B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
+    else:
+        B = torch.rand(K, N, device="cuda", dtype=getattr(torch, in_dtype))
+    C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, out_dtype))
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    return profiler.do_bench(input_tensors=[A, B, C])
+
+
 if __name__ == "__main__":
     main()

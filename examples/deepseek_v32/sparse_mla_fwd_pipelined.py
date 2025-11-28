@@ -456,6 +456,58 @@ def test_sparse_mla_fwd_pipelined(B=1,
     print(f'fwd tflops = ', (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
+def benchmark(B=1,
+              S=4096,
+              SKV=8192,
+              H=128,
+              HKV=1,
+              DQK=576,
+              DV=512,
+              topk=2048,
+              dtype=torch.bfloat16,
+              q_start_s_index=1024,
+              check_correctness=True):
+    KV_stride = 1
+
+    torch.random.manual_seed(0)
+    q = torch.randn((B, S, H, DQK), dtype=dtype, device='cuda').requires_grad_(True) / 10
+    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device='cuda').requires_grad_(True) / 10
+    q_start_s_index_t = torch.tensor([q_start_s_index], dtype=torch.int32, device="cuda")
+
+    q.clamp_(-10, 10)
+    kv.clamp_(-10, 10)
+
+    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device='cuda')
+    for b in range(B):
+        for t in range(S):
+            for h in range(HKV):
+                i_i = torch.randperm(min(max(1, ((t + q_start_s_index) // KV_stride)), SKV))[:topk]
+                indices[b, t, h, :len(i_i)] = i_i
+
+    kernel = sparse_mla_fwd_interface(
+        q, kv, indices, q_start_s_index, KV_stride, return_kernel=True, print_kernel=True)
+
+    def fn():
+        out, lse = kernel(q, kv, indices, q_start_s_index_t)
+        if q_start_s_index == 0 and KV_stride > 1:
+            out[:, :KV_stride - 1, :, :] = 0
+        return out, lse
+
+    tl_out, tl_lse = fn()
+    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+    # print(f"tl_out: {tl_out}")
+    # print(f"ref_out: {ref_out}")
+
+    torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
+
+    from tilelang.profiler import do_bench
+    return do_bench(
+        fn,
+        rep=100,
+        warmup=10,
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--test_correctness", action="store_true")

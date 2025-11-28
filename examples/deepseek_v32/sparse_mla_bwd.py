@@ -384,6 +384,52 @@ def test_sparse_mla_bwd(B=1,
     print(f'bwd tflops = ', per_token_flop * S / (ms * 1e-3) / 1e12)
 
 
+def benchmark(B=1,
+              S=4096,
+              SKV=8192,
+              H=64,
+              HKV=1,
+              DQKV=576,
+              DV=512,
+              topk=2048,
+              dtype=torch.bfloat16,
+              check_correctness=True):
+    q = torch.randn((B, S, H, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
+    kv = torch.randn((B, SKV, HKV, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
+    do = torch.randn((B, S, H, DV), dtype=dtype, device='cuda')
+
+    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device='cuda')
+    for b in range(B):
+        for t in range(S):
+            for h in range(HKV):
+                i_i = torch.randperm(max(1, t))[:topk]
+                indices[b, t, h, :len(i_i)] = i_i
+
+    from sparse_mla_fwd import sparse_mla_fwd_interface
+    tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
+
+    tl_dq, tl_dkv = sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse)
+    ref_dq, ref_dkv = ref_sparse_mla_bwd_interface(q, kv, None, do, indices, None)
+
+    if check_correctness:
+        assert_tensors_similar(tl_dq, ref_dq, eps=1e-4, name="dq")
+        assert_tensors_similar(tl_dkv, ref_dkv, eps=1e-4, name="dkv")
+
+    per_token_flop = 2 * sum([
+        H * DV * topk,
+        H * DQKV * topk,
+        H * DQKV * topk,
+        H * DQKV * topk,
+        H * DV * topk,
+    ])
+    from tilelang.profiler import do_bench
+
+    def fn():
+        return sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse)
+
+    return do_bench(fn, rep=100, warmup=250)
+
+
 if __name__ == "__main__":
     test_sparse_mla_bwd(
         B=1,
