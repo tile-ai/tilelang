@@ -5,6 +5,7 @@
  */
 
 #include "gemm_sp_py.h"
+#include "utils.h"
 
 #include "builtin.h"
 #include <tvm/tir/builtin.h>
@@ -48,17 +49,19 @@ using namespace tir;
  *       fails with an ICHECK (runtime assertion). No other validation is
  *       performed here.
  */
-GemmSPPy::GemmSPPy(Array<PrimExpr> args, BufferMap vmap) {
+GemmSPPy::GemmSPPy(Array<PrimExpr> args) {
   ObjectPtr<GemmSPPyNode> node = tvm::ffi::make_object<GemmSPPyNode>();
 
-  node->Aptr = args[0];
-  node->Eptr = args[1];
-  node->Bptr = args[2];
-  node->Cptr = args[3];
-  node->A = vmap[GetVarFromAccessPtr(node->Aptr)];
-  node->E = vmap[GetVarFromAccessPtr(node->Eptr)];
-  node->B = vmap[GetVarFromAccessPtr(node->Bptr)];
-  node->C = vmap[GetVarFromAccessPtr(node->Cptr)];
+  node->aRegion_ = NormalizeToBufferRegion(args[0]);
+  node->eRegion_ = NormalizeToBufferRegion(args[1]);
+  node->bRegion_ = NormalizeToBufferRegion(args[2]);
+  node->cRegion_ = NormalizeToBufferRegion(args[3]);
+
+  node->A = node->aRegion_->buffer;
+  node->E = node->eRegion_->buffer;
+  node->B = node->bRegion_->buffer;
+  node->C = node->cRegion_->buffer;
+
   node->trans_A = args[4].as<Bool>().value();
   node->trans_B = args[5].as<Bool>().value();
   node->trans_E = args[6].as<Bool>().value();

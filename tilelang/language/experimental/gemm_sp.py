@@ -1,10 +1,17 @@
 """The language interface for tl programs."""
 from __future__ import annotations
 from tilelang.primitives.gemm.base import GemmWarpPolicy
-from tilelang.utils.language import get_buffer_region_from_load
 import tilelang.language as T
 from tvm import tir
-from tilelang.utils.language import to_buffer_region
+from tilelang.utils.language import (
+    to_buffer_region,
+    retrieve_shape,
+    retrieve_stride,
+    retrieve_offset,
+    prim_expr_equal,
+)
+from tilelang.language.utils import (
+    buffer_region_to_tile_region,)
 
 
 def gemm_sp(
@@ -144,54 +151,13 @@ def gemm_sp_v2(
     B = legalize_arguments(B)
     C = legalize_arguments(C)
 
-    def retrieve_shape(object: tir.Buffer | tir.BufferRegion) -> list[int]:
-        if isinstance(object, tir.Buffer):
-            return object.shape
-        elif isinstance(object, tir.BufferRegion):
-            region = object.region
-            shape = []
-            for r in region:
-                shape.append(r.extent)
-            return shape
-        elif isinstance(object, tir.BufferLoad):
-            region = get_buffer_region_from_load(object).region
-            shape = []
-            for r in region:
-                shape.append(r.extent)
-            return shape
-        else:
-            raise ValueError(
-                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
-
-    def retrieve_stride(object: tir.Buffer | tir.BufferRegion) -> list[int]:
-        if isinstance(object, tir.Buffer):
-            strides = []
-            stride = 1
-            for s in reversed(object.shape):
-                strides.insert(0, stride)
-                stride *= s
-            return strides
-        elif isinstance(object, tir.BufferRegion):
-            buffer, _ = object.buffer, object.region
-            strides = []
-            stride = 1
-            for s in reversed(buffer.shape):
-                strides.insert(0, stride)
-                stride *= s
-            return strides
-        elif isinstance(object, tir.BufferLoad):
-            buffer = object.buffer
-            strides = []
-            stride = 1
-            for s in reversed(buffer.shape):
-                strides.insert(0, stride)
-                stride *= s
-            return strides
-        else:
-            raise ValueError(
-                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
+    A_region = to_buffer_region(A_sparse)
+    E_region = to_buffer_region(E)
+    B_region = to_buffer_region(B)
+    C_region = to_buffer_region(C)
 
     A_shape = retrieve_shape(A_sparse)
+    E_shape = retrieve_shape(E)  # nolint: F841
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
 
@@ -213,67 +179,11 @@ def gemm_sp_v2(
     M, N = C_shape
     K = 2 * (A_shape[-2] if transpose_A else A_shape[-1])
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
-    assert K == K_B, f"T.gemm_sp K shape check failed: K_A (wo sparse) = {K}, K_B = {K_B}"
+    assert prim_expr_equal(
+        K, K_B), f"T.gemm_sp K shape check failed: K_A (wo sparse) = {K}, K_B = {K_B}"
 
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
-
-    def retrieve_ptr(object: tir.Buffer | tir.BufferRegion, access_type: str = "r") -> tir.PrimExpr:
-        if isinstance(object, tir.Buffer):
-            return object.access_ptr(access_type)
-        elif isinstance(object, tir.BufferRegion):
-            buffer, region = object.buffer, object.region
-            indices = []
-            for r in region:
-                indices.append(r.min)
-            strides = []
-            stride = 1
-            for s in reversed(buffer.shape):
-                strides.insert(0, stride)
-                stride *= s
-            offset = 0
-            # not offset the last two dimension
-            for i in range(len(indices) - 2):
-                offset += indices[i] * strides[i]
-            return buffer.access_ptr(access_mask=access_type, offset=offset)
-        elif isinstance(object, tir.BufferLoad):
-            buffer = object.buffer
-            region = get_buffer_region_from_load(object).region
-            indices = []
-            for r in region:
-                indices.append(r.min)
-            strides = []
-            stride = 1
-            for s in reversed(buffer.shape):
-                strides.insert(0, stride)
-                stride *= s
-            offset = 0
-            for i in range(len(indices) - 2):
-                offset += indices[i] * strides[i]
-            return buffer.access_ptr(access_mask=access_type, offset=offset)
-        else:
-            raise ValueError(
-                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
-
-    def retrieve_offset(object: tir.Buffer | tir.BufferRegion) -> tir.PrimExpr:
-        """Retrieve the offset of the buffer or buffer region."""
-        if isinstance(object, tir.Buffer):
-            return [0] * len(object.shape)
-        elif isinstance(object, tir.BufferRegion):
-            _, region = object.buffer, object.region
-            indices = []
-            for r in region:
-                indices.append(r.min)
-            return indices
-        elif isinstance(object, tir.BufferLoad):
-            region = get_buffer_region_from_load(object).region
-            indices = []
-            for r in region:
-                indices.append(r.min)
-            return indices
-        else:
-            raise ValueError(
-                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
 
     A_offset = retrieve_offset(A_sparse)
     B_offset = retrieve_offset(B)
@@ -282,17 +192,17 @@ def gemm_sp_v2(
     offset_a = A_offset[-1]
     offset_b = B_offset[-1]
 
-    Aptr = retrieve_ptr(A_sparse, "r")
-    Eptr = retrieve_ptr(E, "r")
-    Bptr = retrieve_ptr(B, "r")
-    Cptr = retrieve_ptr(C, "rw")
+    A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
+    E_arg = buffer_region_to_tile_region(E_region, "r", [r for r in E_shape])
+    B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
+    C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.gemm_sp_py"),
-        Aptr,
-        Eptr,
-        Bptr,
-        Cptr,
+        A_arg,
+        E_arg,
+        B_arg,
+        C_arg,
         transpose_A,
         transpose_B,
         transpose_E,

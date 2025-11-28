@@ -23,7 +23,7 @@ public:
   bool CheckWGMMA() const;
   tir::Buffer A, E, B, C;
   // pointer to the A, E, B, C
-  PrimExpr Aptr, Eptr, Bptr, Cptr;
+  BufferRegion aRegion_, eRegion_, bRegion_, cRegion_;
   bool trans_A, trans_B, trans_E;
   int M, N, K;
   int stride_A, stride_B;
@@ -33,6 +33,8 @@ public:
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
   int wg_wait = 0;
+
+  // use GemmWarp Policy here as the atom size are flexible in v2
   mutable GemmWarpPolicy policy;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmSPPy", GemmSPPyNode,
@@ -45,10 +47,10 @@ public:
         .def_ro("E", &GemmSPPyNode::E)
         .def_ro("B", &GemmSPPyNode::B)
         .def_ro("C", &GemmSPPyNode::C)
-        .def_ro("Aptr", &GemmSPPyNode::Aptr)
-        .def_ro("Eptr", &GemmSPPyNode::Eptr)
-        .def_ro("Bptr", &GemmSPPyNode::Bptr)
-        .def_ro("Cptr", &GemmSPPyNode::Cptr)
+        .def_ro("aRegion", &GemmSPPyNode::aRegion_)
+        .def_ro("eRegion", &GemmSPPyNode::eRegion_)
+        .def_ro("bRegion", &GemmSPPyNode::bRegion_)
+        .def_ro("cRegion", &GemmSPPyNode::cRegion_)
         .def_ro("trans_A", &GemmSPPyNode::trans_A)
         .def_ro("trans_B", &GemmSPPyNode::trans_B)
         .def_ro("trans_E", &GemmSPPyNode::trans_E)
@@ -82,7 +84,7 @@ class GemmSPPy : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSPPy, TileOperator,
                                              GemmSPPyNode);
-  TVM_DLL GemmSPPy(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL GemmSPPy(Array<PrimExpr> args);
   static const Op &Get();
 };
 
