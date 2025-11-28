@@ -252,9 +252,9 @@ def test_marco_return():
             c = macro_return_expr(4.0)
             d = macro_apply_func(5.0, lambda x: x * 2.0)
             check(a, (int, float, T.PrimExpr))
-            check(b, T.PrimExpr)
-            check(c, T.PrimExpr)
-            check(d, T.PrimExpr)
+            check(b, (int, float, T.PrimExpr))
+            check(c, (int, float, T.PrimExpr))
+            check(d, (int, float, T.PrimExpr))
 
 
 def test_prim_func_generator():

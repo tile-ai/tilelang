@@ -107,6 +107,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         buffer_map = func.buffer_map
         dynamic_symbolic_map = {}
         for i, param in enumerate(params):
+            if isinstance(param, tir.Var) and (param not in dynamic_symbolic_map):
+                dynamic_symbolic_map[param] = (2, i, -1)
+        for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
@@ -217,7 +220,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                                 if (str(s) == str(key)):
                                     ref_id, ref_tensor_idx, ref_shape_idx = dynamic_symbolic_map[
                                         key]
-                                    shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
+                                    if ref_id == 2:
+                                        shape.append(inputs[ref_tensor_idx])
+                                    elif ref_id == 0:
+                                        shape.append(
+                                            tensor_list[ref_tensor_idx].shape[ref_shape_idx])
+                                    elif ref_id == 1:
+                                        shape.append(
+                                            tensor_list[ref_tensor_idx].stride()[ref_shape_idx])
                         else:  # Already converted to Python int during initialization
                             shape.append(s)
 
