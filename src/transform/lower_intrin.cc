@@ -122,49 +122,53 @@ public:
         return truncdiv(op->a, op->b);
       }
 
+      // NOTE: This optimization is disabled due to potential integer overflow in `a + b * c`.
+      // The transformation `floordiv(a,b) -> truncdiv(a + b*c, b) - c` may overflow when
+      // `a` is near max value and `c` is large, producing incorrect results.
+
       // If the numerator's lower bound is known, express the floordiv
       // in terms of truncdiv using only positive operands.
-      arith::ConstIntBound const_int_bound = analyzer_->const_int_bound(op->a);
-      if (const_int_bound->min_value < 0 &&
-          const_int_bound->min_value >
-              -(Downcast<IntImm>(tvm::max_value(op->a->dtype.element_of()))
-                    ->value)) {
-        // The goal is to write floordiv(a,b) in terms of truncdiv, without
-        // using negative operands.
-        //
-        // For any integer c
-        //
-        //   floordiv(a,b) == floordiv(a + b*c - b*c, b)
-        //                 == floordiv(a + b*c, b) - c
-        //
-        // Choosing `c = ceildiv(-a_min, b)`.  This can be rewritten in terms of
-        // truncdiv as follows.
-        //
-        //   c == ceildiv(-a_min,b)
-        //     == floordiv(-a_min + (b-1), b)
-        //     == truncdiv(-a_min + (b-1), b)
-        //
-        // When substituted into `a + b*c`, this results in a positive argument.
-        //
-        //   a + b*c
-        //     == a + b*ceildiv(-a_min,b)
-        //     == a - b*floordiv(a_min,b)
-        //     >= a - b*floordiv(a,b)
-        //     == floormod(a, b)
-        //     >= 0
-        //
-        // Since the argument is positive, this allows floordiv to be written as
-        // followed.
-        //
-        //   floordiv(a,b)
-        //     == floordiv(a + b*c, b) - c
-        //     == truncdiv(a + b*c, b) - c
-        IntImm min(op->a->dtype.element_of(), const_int_bound->min_value);
-        PrimExpr ceildiv = truncdiv((op->b - 1) - min, op->b);
-        PrimExpr offset_numerator =
-            analyzer_->Simplify(op->a + op->b * ceildiv);
-        return truncdiv(offset_numerator, op->b) - ceildiv;
-      }
+      // arith::ConstIntBound const_int_bound = analyzer_->const_int_bound(op->a);
+      // if (const_int_bound->min_value < 0 &&
+      //     const_int_bound->min_value >
+      //         -(Downcast<IntImm>(tvm::max_value(op->a->dtype.element_of()))
+      //               ->value)) {
+      //   // The goal is to write floordiv(a,b) in terms of truncdiv, without
+      //   // using negative operands.
+      //   //
+      //   // For any integer c
+      //   //
+      //   //   floordiv(a,b) == floordiv(a + b*c - b*c, b)
+      //   //                 == floordiv(a + b*c, b) - c
+      //   //
+      //   // Choosing `c = ceildiv(-a_min, b)`.  This can be rewritten in terms of
+      //   // truncdiv as follows.
+      //   //
+      //   //   c == ceildiv(-a_min,b)
+      //   //     == floordiv(-a_min + (b-1), b)
+      //   //     == truncdiv(-a_min + (b-1), b)
+      //   //
+      //   // When substituted into `a + b*c`, this results in a positive argument.
+      //   //
+      //   //   a + b*c
+      //   //     == a + b*ceildiv(-a_min,b)
+      //   //     == a - b*floordiv(a_min,b)
+      //   //     >= a - b*floordiv(a,b)
+      //   //     == floormod(a, b)
+      //   //     >= 0
+      //   //
+      //   // Since the argument is positive, this allows floordiv to be written as
+      //   // followed.
+      //   //
+      //   //   floordiv(a,b)
+      //   //     == floordiv(a + b*c, b) - c
+      //   //     == truncdiv(a + b*c, b) - c
+      //   IntImm min(op->a->dtype.element_of(), const_int_bound->min_value);
+      //   PrimExpr ceildiv = truncdiv((op->b - 1) - min, op->b);
+      //   PrimExpr offset_numerator =
+      //       analyzer_->Simplify(op->a + op->b * ceildiv);
+      //   return truncdiv(offset_numerator, op->b) - ceildiv;
+      // }
 
       DLOG(INFO) << "LowerFloorDiv: Cannot decide the sign of divident";
       PrimExpr rdiv = truncdiv(op->a, op->b);
@@ -223,48 +227,52 @@ public:
         return truncmod(op->a, op->b);
       }
 
+      // NOTE: This optimization is disabled due to potential integer overflow in `a + b * c`.
+      // The transformation `floordiv(a,b) -> truncdiv(a + b*c, b) - c` may overflow when
+      // `a` is near max value and `c` is large, producing incorrect results.
+
       // If the numerator's lower bound is known, express the floormod
       // in terms of truncmod using only positive operands.
-      arith::ConstIntBound const_int_bound = analyzer_->const_int_bound(op->a);
-      if (const_int_bound->min_value < 0 &&
-          const_int_bound->min_value >
-              -(Downcast<IntImm>(tvm::max_value(op->a->dtype.element_of()))
-                    ->value)) {
-        // The goal is to write floormod(a,b) in terms of truncdiv and truncmod,
-        // without using negative operands.
-        //
-        // For any integer c
-        //
-        //   floormod(a, b) == floormod(a + b*c, b)
-        //
-        // Choosing `c = ceildiv(-a_min, b)`.  This can be rewritten in terms of
-        // truncdiv as follows.
-        //
-        //   c == ceildiv(-a_min,b)
-        //     == floordiv(-a_min + (b-1), b)
-        //     == truncdiv(-a_min + (b-1), b)
-        //
-        // When substituted into `a + b*c`, this results in a positive argument.
-        //
-        //   a + b*c
-        //     == a + b*ceildiv(-a_min,b)
-        //     == a - b*floordiv(a_min,b)
-        //     >= a - b*floordiv(a,b)
-        //     == floormod(a, b)
-        //     >= 0
-        //
-        // Since the argument is positive, this allows floordiv to be written as
-        // followed.
-        //
-        //   floormod(a,b)
-        //     == floormod(a + b*c, b)
-        //     == truncmod(a + b*c, b)
-        IntImm min(op->a->dtype.element_of(), const_int_bound->min_value);
-        PrimExpr ceildiv = truncdiv(-min + (op->b - 1), op->b);
-        PrimExpr offset_numerator =
-            analyzer_->Simplify(op->a + op->b * ceildiv);
-        return truncmod(offset_numerator, op->b);
-      }
+      // arith::ConstIntBound const_int_bound = analyzer_->const_int_bound(op->a);
+      // if (const_int_bound->min_value < 0 &&
+      //     const_int_bound->min_value >
+      //         -(Downcast<IntImm>(tvm::max_value(op->a->dtype.element_of()))
+      //               ->value)) {
+      //   // The goal is to write floormod(a,b) in terms of truncdiv and truncmod,
+      //   // without using negative operands.
+      //   //
+      //   // For any integer c
+      //   //
+      //   //   floormod(a, b) == floormod(a + b*c, b)
+      //   //
+      //   // Choosing `c = ceildiv(-a_min, b)`.  This can be rewritten in terms of
+      //   // truncdiv as follows.
+      //   //
+      //   //   c == ceildiv(-a_min,b)
+      //   //     == floordiv(-a_min + (b-1), b)
+      //   //     == truncdiv(-a_min + (b-1), b)
+      //   //
+      //   // When substituted into `a + b*c`, this results in a positive argument.
+      //   //
+      //   //   a + b*c
+      //   //     == a + b*ceildiv(-a_min,b)
+      //   //     == a - b*floordiv(a_min,b)
+      //   //     >= a - b*floordiv(a,b)
+      //   //     == floormod(a, b)
+      //   //     >= 0
+      //   //
+      //   // Since the argument is positive, this allows floordiv to be written as
+      //   // followed.
+      //   //
+      //   //   floormod(a,b)
+      //   //     == floormod(a + b*c, b)
+      //   //     == truncmod(a + b*c, b)
+      //   IntImm min(op->a->dtype.element_of(), const_int_bound->min_value);
+      //   PrimExpr ceildiv = truncdiv(-min + (op->b - 1), op->b);
+      //   PrimExpr offset_numerator =
+      //       analyzer_->Simplify(op->a + op->b * ceildiv);
+      //   return truncmod(offset_numerator, op->b);
+      // }
 
       DLOG(INFO) << "LowerFloorMod: Cannot decide the sign of divident";
       // NOTE:condition on b >= 0.
