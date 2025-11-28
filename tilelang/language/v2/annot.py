@@ -165,14 +165,14 @@ class Value(Annot):
             if self.value is not None:
                 return repr(self.value)
             else:
-                return (self.name or '$unnamed') + '$'
+                return (str(self.name) or '$unnamed') + '$'
         else:
             if self.value is not None:
                 return repr(self.value)
             elif self.creator is not None:
                 return repr(self.creator())
             else:
-                return (self.name or '$unnamed') + '$dyn'
+                return (str(self.name) or '$unnamed') + '$dyn'
 
 
 def _canonicalize_dtype(val: Any) -> dt.dtype | None:

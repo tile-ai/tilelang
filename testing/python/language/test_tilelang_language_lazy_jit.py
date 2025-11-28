@@ -174,7 +174,7 @@ def test_jit2_annot():
             annot=T.Tensor[[1024, 1024], T.float32],
             promote=True,
         ),
-        AnnotTest(annot=T.dyn[int], promote=False, match_ok=[1, 2, 3, 4]),
+        AnnotTest(annot=T.dyn[int, 'X'], promote=False, match_ok=[1, 2, 3, 4]),
         AnnotTest(annot=T.dyn, promote=False, match_ok=[1, 2, 3, 4])
     ]
 
@@ -274,7 +274,7 @@ def test_jit2_many_annot():
 def test_jit2_return():
 
     @T.macro
-    def copy_impl(A, B):
+    def copy_impl(A):
         M, N = A.shape
         B = T.empty(M, N, dtype=A.dtype)
         M, N = A.shape

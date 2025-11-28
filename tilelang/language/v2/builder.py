@@ -173,7 +173,7 @@ def is_var(v: Any) -> bool:
 
 class Builder(BaseBuilder):
 
-    def __init__(self, func_annot: FuncAnnot):
+    def __init__(self, func_annot: FuncAnnot=None):
         self.frames: list[AnyFrame] = []
         self.ir_builder = IRBuilder()
         self.name_inside_frame: dict[str, AnyFrame] = {}
