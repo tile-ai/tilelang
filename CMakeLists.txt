@@ -233,7 +233,7 @@ target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 add_library(tilelang_module SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime tvm)
-target_link_libraries(tilelang_module PUBLIC tvm z3)
+target_link_libraries(tilelang_module PUBLIC tvm)
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
@@ -261,15 +261,15 @@ install(TARGETS tilelang_cython_wrapper
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
-  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-  set_target_properties(tvm PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib")
+  set_target_properties(tvm PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib")
+  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib")
 elseif(UNIX)
-  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-  set_target_properties(tvm PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib")
+  set_target_properties(tvm PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib")
+  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib")
 endif()
 
 install(

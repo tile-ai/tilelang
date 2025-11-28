@@ -36,6 +36,7 @@ dependencies = [
     "torch>=2.7; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
+    "z3-solver>=4.13.0"
 ]
 
 [project.optional-dependencies]
@@ -44,7 +45,7 @@ dependencies = [
 fp4 = ["ml-dtypes>=0.5.1"]
 
 [build-system]
-requires = ["cython>=3.0.0", "scikit-build-core"]
+requires = ["cython>=3.0.0", "z3-solver>=4.13.0", "scikit-build-core"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
