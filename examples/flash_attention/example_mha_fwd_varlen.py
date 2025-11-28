@@ -151,7 +151,7 @@ def flashattn(batch_size,
                         K_shared[i, d] = 0
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else((bx * block_M + i >= k * block_N + j) and
+                        acc_s[i, j] = T.if_then_else((bx * block_M + i < k * block_N + j) or
                                                      (bx * block_M + i >= q_current_seqlen or
                                                       k * block_N + j >= k_current_seqlen),
                                                      -T.infinity(acc_s.dtype), 0)
@@ -216,7 +216,7 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128):
 
     tilelang.testing.set_random_seed(0)
 
-    causal = False
+    causal = True
     if causal:
         total_flops *= 0.5
 
