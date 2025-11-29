@@ -69,7 +69,7 @@ class PassConfigKey(str, Enum):
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
 
-    TL_ENABLE_LAYOUT_VISUAL = "tl.enable_layout_visual"
+    TL_ENABLE_LAYOUT_VISUALIZATION = "tl.enable_layout_visualization"
     """Enable layout inference visualization. Default: False"""
 
     TL_STORAGE_REWRITE_DETECT_INPLACE = "tl.storage_rewrite_detect_inplace"

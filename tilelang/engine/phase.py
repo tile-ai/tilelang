@@ -71,7 +71,8 @@ def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     return bool(
-        pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUAL, False))
+        pass_ctx and
+        pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION, False))
 
 
 def LayoutVisual(mod: IRModule) -> None:

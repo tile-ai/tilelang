@@ -51,7 +51,8 @@ static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
-static constexpr const char *kEnableLayoutVisualization = "tl.enable_layout_visualization";
+static constexpr const char *kEnableLayoutVisualization =
+    "tl.enable_layout_visualization";
 /*!
  * \brief Whether to disable dynamic tail split
  *
