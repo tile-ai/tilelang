@@ -5,7 +5,7 @@ import argparse
 import tilelang
 import tilelang.language as T
 
-from tilelang.layout import make_metadata_layout
+from tilelang.layout import make_cutlass_metadata_layout
 from tilelang.utils.sparse import compress, randn_semi_sparse
 from tilelang.contrib import nvcc
 from triton.testing import do_bench
@@ -14,9 +14,7 @@ import torch
 
 arch = nvcc.get_target_compute_version()
 
-ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
-
-default_config = {  # take best config from autotune script
+DEFAULT_CONFIG = {  # take best config from autotune script
     "4090": {
         'float': {
             'block_M': 128,
@@ -59,6 +57,8 @@ default_config = {  # take best config from autotune script
     }
 }
 
+ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
+
 
 @tilelang.jit(out_idx=[-1])
 def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy,
@@ -84,15 +84,11 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
             T.use_swizzle(panel_size=10, enable=enable_rasterization)
             T.annotate_layout({
                 E:
-                    make_metadata_layout(
-                        E, mma_dtype="float16", backend="cutlass", block_k=block_K, arch=arch),
+                    make_cutlass_metadata_layout(
+                        E, mma_dtype="float16", block_k=block_K, arch=arch),
                 E_shared:
-                    make_metadata_layout(
-                        E_shared,
-                        mma_dtype="float16",
-                        backend="cutlass",
-                        block_k=block_K,
-                        arch=arch),
+                    make_cutlass_metadata_layout(
+                        E_shared, mma_dtype="float16", block_k=block_K, arch=arch),
             })
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
@@ -117,10 +113,10 @@ def main():
         default="float",
         choices=["float", "float16"],
         help="Accumulation datatype")
-    parser.add_argument("--cfg", type=str, choices=["4090", "h20"], required=True)
+    parser.add_argument("--cfg", type=str, choices=["4090", "h20"], default="4090")
     args = parser.parse_args()
     kernel = matmul_sp_fp16(args.m, args.n, args.k, args.accum_dtype,
-                            **default_config[args.cfg][args.accum_dtype])
+                            **DEFAULT_CONFIG[args.cfg][args.accum_dtype])
 
     a = randn_semi_sparse(args.m, args.k, device='cuda', dtype=torch.half)
     b = torch.randn(args.k, args.n, device='cuda', dtype=torch.half)
@@ -128,7 +124,7 @@ def main():
     a_sparse, e = compress(
         a,
         transposed=False,
-        block_k=default_config[args.cfg][args.accum_dtype]['block_K'],
+        block_k=DEFAULT_CONFIG[args.cfg][args.accum_dtype]['block_K'],
         arch=arch)
     c = kernel(a_sparse, e, b)
 

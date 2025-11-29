@@ -9,7 +9,7 @@ import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit
 from tilelang.contrib import nvcc
-from tilelang.layout import make_metadata_layout
+from tilelang.layout import make_cutlass_metadata_layout
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ def get_configs(M, N, K):
     return configs
 
 
-def matmul_sp(M, N, K, accum_dtype):
+def matmul_sp(M, N, K, in_dtype, accum_dtype):
     """
     Create an autotuned matrix multiplication kernel for matrices of shape:
       - A: (M, K)
@@ -161,14 +161,13 @@ def matmul_sp(M, N, K, accum_dtype):
         """
         # Use half-precision for input data to reduce memory bandwidth,
         # accumulate in float for better numerical accuracy
-        dtype = "float16"
         e_factor, e_dtype = ARCH_INFO[arch]
 
         @T.prim_func
         def main(
-                A_sparse: T.Tensor((M, K // 2), dtype),
+                A_sparse: T.Tensor((M, K // 2), in_dtype),
                 E: T.Tensor((M, K // e_factor), e_dtype),
-                B: T.Tensor((K, N), dtype),
+                B: T.Tensor((K, N), in_dtype),
                 C: T.Tensor((M, N), accum_dtype),
         ):
             """
@@ -187,9 +186,9 @@ def matmul_sp(M, N, K, accum_dtype):
                     T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
 
                 # Allocate shared memory for A sub-block of shape (block_M, block_K)
-                A_shared = T.alloc_shared((block_M, block_K // 2), dtype)
+                A_shared = T.alloc_shared((block_M, block_K // 2), in_dtype)
                 # Allocate shared memory for B sub-block of shape (block_N, block_K)
-                B_shared = T.alloc_shared((block_K, block_N), dtype)
+                B_shared = T.alloc_shared((block_K, block_N), in_dtype)
                 # Allocate shared memory for E sub-block of shape (block_M, block_K // E_factor)
                 E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
                 # Allocate a local fragment for intermediate accumulation
@@ -204,11 +203,9 @@ def matmul_sp(M, N, K, accum_dtype):
                 T.use_swizzle(panel_size=10, enable=enable_rasterization)
                 T.annotate_layout({
                     E:
-                        make_metadata_layout(
-                            E, mma_dtype="float16", backend="cutlass", block_k=block_K),
+                        make_cutlass_metadata_layout(E, mma_dtype=in_dtype, block_k=block_K),
                     E_shared:
-                        make_metadata_layout(
-                            E_shared, mma_dtype="float16", backend="cutlass", block_k=block_K),
+                        make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, block_k=block_K),
                 })
                 # Loop over sub-blocks in K dimension, pipelined by num_stages
                 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -220,7 +217,7 @@ def matmul_sp(M, N, K, accum_dtype):
                     T.copy(B[k * block_K, bx * block_N], B_shared)
                     # Perform a partial matrix multiplication:
                     #   C_local += A_shared @ B_shared
-                    T.gemm_sp(
+                    T.gemm_sp_v2(
                         A_shared,
                         E_shared,
                         B_shared,
@@ -268,7 +265,7 @@ if __name__ == "__main__":
     total_flops = 2 * M * N * K
 
     # matmul(...) returns (best_latency, best_config, ref_latency)
-    best_result = matmul_sp(M, N, K, args.accum_dtype)
+    best_result = matmul_sp(M, N, K, "float16", args.accum_dtype)
     best_latency = best_result.latency
     best_config = best_result.config
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")

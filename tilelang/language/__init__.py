@@ -51,7 +51,7 @@ from .allocate import (
 )
 from .copy import copy, c2d_im2col  # noqa: F401
 from .gemm import GemmWarpPolicy, gemm, gemm_v1, gemm_v2  # noqa: F401
-from .experimental.gemm_sp import gemm_sp  # noqa: F401
+from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401
 from .fill import fill, clear  # noqa: F401
 from .reduce import (
     reduce,  # noqa: F401

@@ -108,6 +108,16 @@ __device__ void debug_print_buffer_value(const char *msg, const char *buf_name,
   PrintTraits<T>::print_buffer(msg, buf_name, index, var);
 }
 
+template <>
+__device__ void debug_print_buffer_value<uint16_t>(const char *msg,
+                                                   const char *buf_name,
+                                                   int index, uint16_t var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=uint16_t value=%u\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, (uint32_t)var);
+}
+
 TL_DEVICE void device_assert(bool cond) { assert(cond); }
 
 TL_DEVICE void device_assert_with_msg(bool cond, const char *msg) {
