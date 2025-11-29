@@ -573,9 +573,8 @@ def benchmark(d_hidden=7168,
 
     def run_custom_kernel():
         custom_kernel(data).to(torch.float32)
-        torch.cuda.synchronize()
 
-    return do_bench(run_custom_kernel, warmup=10, rep=10)
+    return do_bench(run_custom_kernel, warmup=100, rep=1000)
 
 
 if __name__ == "__main__":

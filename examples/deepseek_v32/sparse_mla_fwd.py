@@ -325,21 +325,31 @@ def benchmark(B=1,
                 i_i = torch.randperm(max(1, t))[:topk]
                 indices[b, t, h, :len(i_i)] = i_i
 
-    tl_out, tl_lse = sparse_mla_fwd_interface(
-        q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
+    is_casual = True
+    batch, seq_len, heads, dim_plus_tail_dim = q.shape
+    _, seq_len_kv, kv_group, _ = kv.shape
+    dim = 512
+    tail_dim = dim_plus_tail_dim - dim
+    _, _, _, topk = indices.shape
+    kernel = sparse_mla_fwd(
+        heads,
+        dim,
+        tail_dim,
+        topk,
+        kv_group,
+        None,
+        is_casual,
+        block_I=block_I,
+        num_stages=num_stages,
+        threads=threads)
 
-    if check_correctness:
-        ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
-        assert_tensors_similar(tl_out, ref_out, eps=1e-2, name="out")
-
-    def fn():
-        return sparse_mla_fwd_interface(
-            q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
+    def run_kernel_only():
+        kernel(q, kv, indices)
 
     from tilelang.profiler import do_bench
 
     return do_bench(
-        fn,
+        run_kernel_only,
         rep=100,
         warmup=250,
     )

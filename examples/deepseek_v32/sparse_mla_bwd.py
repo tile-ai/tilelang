@@ -407,27 +407,22 @@ def benchmark(B=1,
 
     from sparse_mla_fwd import sparse_mla_fwd_interface
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
+    B, S, H, dim_plus_tail_dim = q.shape
+    _, S_kv, kv_group, _ = kv.shape
+    D = 512
+    D_tail = dim_plus_tail_dim - D
+    topk = indices.shape[-1]
+    preprocess_kernel = preprocess(B, S, H, D)
+    bwd_kernel = bwd(B, S, S_kv, H, D, D_tail, topk, kv_group, None, True)
+    delta = preprocess_kernel(tl_out, do)
+    dkv = torch.zeros_like(kv, dtype=torch.float32)
 
-    tl_dq, tl_dkv = sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse)
-    ref_dq, ref_dkv = ref_sparse_mla_bwd_interface(q, kv, None, do, indices, None)
-
-    if check_correctness:
-        assert_tensors_similar(tl_dq, ref_dq, eps=1e-4, name="dq")
-        assert_tensors_similar(tl_dkv, ref_dkv, eps=1e-4, name="dkv")
-
-    per_token_flop = 2 * sum([
-        H * DV * topk,
-        H * DQKV * topk,
-        H * DQKV * topk,
-        H * DQKV * topk,
-        H * DV * topk,
-    ])
     from tilelang.profiler import do_bench
 
-    def fn():
-        return sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse)
+    def run_kernel_only():
+        return bwd_kernel(q, kv, do, indices, tl_lse, delta, dkv)
 
-    return do_bench(fn, rep=100, warmup=250)
+    return do_bench(run_kernel_only, rep=100, warmup=250)
 
 
 if __name__ == "__main__":

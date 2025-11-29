@@ -231,8 +231,7 @@ def benchmark(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
     from tilelang.profiler import do_bench
 
     def run_tilelang():
-        x_fp8_tilelang_, x_amax_tilelang_ = kernel(x, batch_sizes)
-        return x_fp8_tilelang_, x_amax_tilelang_
+        kernel(x, batch_sizes)
 
     return do_bench(run_tilelang)
 

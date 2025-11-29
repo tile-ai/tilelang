@@ -464,62 +464,6 @@ def main(batch=64,
     print(f"Speedup: {avg_time_ref / avg_time:.2f}x")
 
 
-def benchmark(batch=64,
-              heads=32,
-              heads_kv=8,
-              max_cache_seqlen=8192,
-              dim=128,
-              dim_v=128,
-              sparse_ratio=0.8,
-              block_size=32):
-
-    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
-    sparse_ratio = sparse_ratio
-    block_size = block_size
-
-    max_selected_blocks = int(math.ceil(max_cache_seqlen * (1 - sparse_ratio) / block_size))
-    dtype = torch.float16
-
-    Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
-    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
-    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device='cuda')
-    cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device='cuda')
-    random_index = torch.randint(0, batch, (1,), device='cuda').item()
-    cache_seqlens[random_index] = max_cache_seqlen
-
-    max_valid_num_blocks = torch.ceil(cache_seqlens / block_size).int()
-    block_indices = torch.full((batch, heads_kv, max_selected_blocks),
-                               -1,
-                               dtype=torch.int32,
-                               device='cuda')
-
-    for b in range(batch):
-        max_valid_block = max_valid_num_blocks[b].item()
-        if max_valid_block > 0:
-            for h in range(heads_kv):
-                valid_indices = torch.randperm(
-                    max_valid_block, device='cuda', dtype=torch.int32)[:max_selected_blocks]
-                block_indices[b, h, :len(valid_indices)] = valid_indices
-
-    block_indices, _ = block_indices.sort(dim=-1, descending=True)
-    actual_num_blocks = torch.sum(block_indices != -1, dim=-1).to(torch.int32)[:, 0]
-
-    max_num_blocks = torch.max(max_valid_num_blocks).item()
-
-    def run_kernel_only():
-        block_sparse_flash_decode_gqa_indice_triton(
-            Q,
-            K,
-            V,
-            cache_seqlens,
-            max_cache_seqlen,
-            max_selected_blocks,
-            block_indices,
-            block_size,
-        )
-
-    return do_bench(run_kernel_only, warmup=10, rep=100)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

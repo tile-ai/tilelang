@@ -445,54 +445,6 @@ def main(batch=64,
     print(f"Speedup: {avg_time_ref / avg_time:.2f}x")
 
 
-def benchmark(batch=64,
-              heads=32,
-              heads_kv=8,
-              max_cache_seqlen=8192,
-              dim=128,
-              dim_v=128,
-              sparse_ratio=0.8,
-              block_size=32):
-
-    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
-    block_size = block_size
-    sparse_ratio = sparse_ratio
-    dtype = torch.float16
-
-    Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
-    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
-    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device='cuda')
-    cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device='cuda')
-    random_index = torch.randint(0, batch, (1,), device='cuda').item()
-    cache_seqlens[random_index] = max_cache_seqlen
-
-    num_blocks = (max_cache_seqlen + block_size - 1) // block_size
-
-    valid_num_blocks = torch.ceil(cache_seqlens * (1 - sparse_ratio) / block_size).int()
-    max_valid_num_blocks = torch.ceil(cache_seqlens / block_size).int()
-    block_mask = torch.zeros((batch, heads_kv, num_blocks), dtype=torch.bool, device='cuda')
-
-    for b in range(batch):
-        max_valid_block = max_valid_num_blocks[b].item()
-        valid_num_block = valid_num_blocks[b].item()
-        if valid_num_block > 0:
-            for h in range(heads_kv):
-                perm = torch.randperm(max_valid_block, device='cuda')[:valid_num_block]
-                block_mask[b, h, perm] = True
-
-    def run_kernel_only():
-        block_sparse_flash_decode_gqa_mask_triton(
-            Q,
-            K,
-            V,
-            cache_seqlens,
-            max_cache_seqlen,
-            block_mask,
-            block_size,
-        )
-
-    return do_bench(run_kernel_only, warmup=10, rep=100)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
