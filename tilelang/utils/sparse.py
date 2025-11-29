@@ -3,7 +3,7 @@ import os
 import torch
 import warnings
 from tilelang.contrib import nvcc
-from tilelang.utils.tensor import is_float8, fp8_remove_negative_zeros_
+from tilelang.utils.tensor import is_float8_dtype, fp8_remove_negative_zeros_
 from torch.utils.cpp_extension import load, _import_module_from_library
 from tilelang import env
 
@@ -92,11 +92,11 @@ def compress(A: torch.Tensor,
         if transposed:
             A = A.t().contiguous()
         origin_dtype = A.dtype
-        if is_float8(origin_dtype):
+        if is_float8_dtype(origin_dtype):
             fp8_remove_negative_zeros_(A)
             A = A.view(torch.int8)
         A_sp, E = compress_sm80(A, transposed=False)
-        if is_float8(origin_dtype):
+        if is_float8_dtype(origin_dtype):
             A_sp = A_sp.view(origin_dtype)
         if transposed:
             A_sp = A_sp.t().contiguous()

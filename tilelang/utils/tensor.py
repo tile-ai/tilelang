@@ -5,7 +5,7 @@ from tvm import tir
 import numpy as np
 
 
-def is_float8(dtype: torch.dtype) -> bool:
+def is_float8_dtype(dtype: torch.dtype) -> bool:
     return dtype in {
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
@@ -15,7 +15,7 @@ def is_float8(dtype: torch.dtype) -> bool:
 
 
 def fp8_remove_negative_zeros_(tensor: torch.Tensor):
-    assert is_float8(tensor.dtype), "Input tensor must be of float8 dtype"
+    assert is_float8_dtype(tensor.dtype), "Input tensor must be of float8 dtype"
     bits = tensor.view(torch.uint8)
     zeros_mask = (tensor == 0)
     bits[zeros_mask] = 0x00
