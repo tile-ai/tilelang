@@ -487,10 +487,10 @@ def benchmark(B=1,
 
     batch, seq_len, heads, dim_plus_tail_dim = q.shape
     _, seq_len_kv, kv_group, _ = kv.shape
-    sm_scale=None
-    is_casual=True
-    return_kernel=False
-    print_kernel=False
+    sm_scale = None
+    is_casual = True
+    return_kernel = False
+    print_kernel = False
     dim = 512
     tail_dim = dim_plus_tail_dim - dim
     _, _, _, topk = indices.shape
@@ -501,7 +501,6 @@ def benchmark(B=1,
 
     def ren_kernel_only():
         kernel(q, kv, indices, torch.tensor([q_start_s_index], dtype=torch.int32, device="cuda"))
-
 
     from tilelang.profiler import do_bench
     return do_bench(

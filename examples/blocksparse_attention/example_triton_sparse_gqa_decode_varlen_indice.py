@@ -464,7 +464,6 @@ def main(batch=64,
     print(f"Speedup: {avg_time_ref / avg_time:.2f}x")
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=64, help='batch size')

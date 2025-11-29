@@ -4,7 +4,6 @@ import torch
 import triton
 import triton.language as tl
 import torch.nn.functional as F
-from tilelang.profiler import do_bench
 
 
 def is_hip():
@@ -378,8 +377,6 @@ def test_topk_sparse_attention_qlt_kl():
 def main():
     test_topk_sparse_attention()
     test_topk_sparse_attention_qlt_kl()
-
-
 
 
 if __name__ == "__main__":

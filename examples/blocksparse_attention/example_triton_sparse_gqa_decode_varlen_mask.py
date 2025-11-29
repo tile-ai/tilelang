@@ -7,7 +7,6 @@ import torch.nn.functional as F
 import math
 import time
 from heuristic import num_splits_heuristic
-from tilelang.profiler import do_bench
 
 @triton.autotune(
     configs=[
@@ -443,7 +442,6 @@ def main(batch=64,
     print(f"Average flops of ref: {avg_flops_ref:.2f} GFLOPS")
 
     print(f"Speedup: {avg_time_ref / avg_time:.2f}x")
-
 
 
 if __name__ == "__main__":
