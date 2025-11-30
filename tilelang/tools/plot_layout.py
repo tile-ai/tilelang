@@ -26,7 +26,7 @@ def plot_layout(layout: T.Fragment,
     formats : str | list[str], optional
         The formats to save the image in (default is "png").
     Returns
-    -------s
+    -------
     None
     """
     import os

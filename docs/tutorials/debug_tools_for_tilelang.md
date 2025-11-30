@@ -181,7 +181,7 @@ When TileLang performs layout inference, it determines how fragment buffers are 
 The visual layout inference tool is controlled through the `TL_ENABLE_LAYOUT_VISUALIZATION` pass configuration. By default, visualization is **disabled** to avoid performance overhead during compilation.
 
 `TL_ENABLE_LAYOUT_VISUALIZATION` accepts string values to control output formats:
-- "True" or "all": Enabled, generates all formats (PDF, PNG, SVG)
+- "all": Enabled, generates all formats (PDF, PNG, SVG)
 - "png": Generate PNG format only
 - "pdf": Generate PDF format only
 - "svg": Generate SVG format only
