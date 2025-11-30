@@ -134,6 +134,7 @@ def native_sparse_attention(
 
     return native_sparse_attention
 
+
 def main():
     B, SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 16, 1, 32, torch.float16
     groups = HQ // H
@@ -175,6 +176,7 @@ def main():
         block_size=block_size,
     )
     torch.testing.assert_close(ref, out, atol=1e-2, rtol=1e-2)
+
 
 def benchmark():
     B, SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 16, 1, 32, torch.float16
