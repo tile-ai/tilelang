@@ -225,6 +225,35 @@ def main(
         print(f"Ref latency: {ref_latency}")
 
 
+def benchmark(
+    batch: int = 1,
+    heads: int = 1,
+    seq_q: int = 256,
+    seq_kv: int = 256,
+    dim: int = 64,
+    is_causal: bool = False,
+    tune: bool = False,
+):
+    flops_per_matmul = 2.0 * batch * heads * seq_q * seq_kv * dim
+    total_flops = 2 * flops_per_matmul
+    if is_causal:
+        total_flops *= 0.5
+
+    kernel = flashattn(
+        batch,
+        heads,
+        seq_q,
+        seq_kv,
+        dim,
+        is_causal,
+        block_M=64,
+        block_N=64,
+        num_stages=1,
+        threads=128)
+    profiler = kernel.get_profiler()
+    return profiler.do_bench(warmup=500)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='batch size')

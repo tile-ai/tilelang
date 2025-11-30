@@ -309,6 +309,26 @@ def main(
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
 
 
+def benchmark(
+    batch=1,
+    heads=128,
+    kv_heads=1,
+    kv_ctx=8192,
+    dim=512,
+    pe_dim=64,
+):
+    BLOCK_N = 64
+    BLOCK_H = min(64, heads // kv_heads)
+    num_split = 1
+    softmax_scale = (dim + pe_dim)**-0.5
+
+    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split,
+                       softmax_scale)
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
+    return profiler.do_bench(warmup=500)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=132, help='batch size')
