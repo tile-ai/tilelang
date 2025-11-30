@@ -11,8 +11,7 @@ def print_layout_format(layout: T.Fragment) -> str:
     input_shape = layout.get_input_shape()
     output_shape = layout.get_output_shape()
     lines = [
-        f"  Shape: {input_shape} -> {output_shape}", 
-        f"  Thread: {layout.forward_thread}",
+        f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}",
         f"  Index:  {layout.forward_index}"
     ]
 
@@ -43,11 +42,13 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
 
         self.visit_stmt(op.body)
 
+
 def LayoutVisual():
 
     def pass_fn(func: tir.PrimFunc, mod, ctx):
         pass_ctx = tilelang.transform.get_pass_context()
-        config_value = pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value)
+        config_value = pass_ctx.config.get(
+            tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value)
 
         config_str = str(config_value).strip().lower()
         if not config_str or config_str == "false":
@@ -56,7 +57,7 @@ def LayoutVisual():
             formats = "all"
         else:
             formats = config_str
-    
+
         _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func
 

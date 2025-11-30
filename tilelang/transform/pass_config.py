@@ -75,7 +75,7 @@ class PassConfigKey(str, Enum):
     - "true" or "all": enabled, generate all formats (pdf, png, svg)
     - "png", "pdf", "svg": enabled, generate specified format
     - "png,svg": enabled, generate multiple formats (comma-separated)
-    """""
+    """ ""
 
     TL_STORAGE_REWRITE_DETECT_INPLACE = "tl.storage_rewrite_detect_inplace"
     """Control StorageRewrite inplace detection.

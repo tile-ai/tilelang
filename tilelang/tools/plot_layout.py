@@ -1,4 +1,4 @@
-from torch import Value
+from __future__ import annotations
 import tilelang.language as T
 
 
@@ -209,10 +209,8 @@ def plot_layout(layout: T.Fragment,
         else:
             formats_list = [formats_str]
     else:
-        raise TypeError(
-            f"Expected str, but got {type(formats).__name__}. "
-            f"Please pass a string like 'png', 'pdf', 'svg', 'all', or 'png,pdf'."
-        )
+        raise TypeError(f"Expected str, but got {type(formats).__name__}. "
+                        f"Please pass a string like 'png', 'pdf', 'svg', 'all', or 'png,pdf'.")
 
     # Save the figure
     if 'pdf' in formats_list:
