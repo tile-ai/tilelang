@@ -310,7 +310,6 @@ def benchmark(B=1,
               DV=512,
               topk=2048,
               dtype=torch.bfloat16,
-              check_correctness=True,
               block_I=64,
               num_stages=2,
               threads=256):

@@ -291,9 +291,9 @@ def main(m=256, n=256, k=256, tune=False):
         print(f"Best config: {best_config}")
 
 
-def benchmark(m=256, n=256, k=256, tune=False):
+def benchmark(m=256, n=256, k=256):
     kernel = matmul(
-        m, n, k, "float16", "float16", "float32", num_bits=4, tune=tune)(
+        m, n, k, "float16", "float16", "float32", num_bits=4, tune=False)(
             block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1)
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
     return profiler.do_bench(warmup=10, rep=100)

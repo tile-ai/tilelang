@@ -99,7 +99,8 @@ def benchmark(argv=None):
     parser.add_argument("--N", type=int, default=128, help="num_experts")
     parser.add_argument("--topk", type=int, default=6, help="topk")
     parser.add_argument("--blk_m", type=int, default=64, help="blk_m")
-    args = parser.parse_args(argv)
+    # In benchmark mode, ignore process-wide sys.argv unless an explicit argv is provided.
+    args = parser.parse_args(argv or [])
     M, N, topk, blk_m = args.M, args.N, args.topk, args.blk_m
 
     logits = torch.rand((M, N), device="cuda", dtype=torch.float32)

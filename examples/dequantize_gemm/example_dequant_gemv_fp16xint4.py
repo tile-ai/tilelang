@@ -205,7 +205,7 @@ def main() -> None:
     torch.testing.assert_close(C, ref_c, atol=1e3, rtol=1e-1)
 
 
-def benchmark() -> None:
+def benchmark():
     M = 1
     N = 1024
     K = 1024

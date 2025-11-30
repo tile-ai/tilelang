@@ -187,9 +187,9 @@ def main(m=128, n=256, k=256, tune=False):
         print(f"Best tflops: {total_flops / best_latency * 1e-9}")
 
 
-def benchmark(m=128, n=256, k=256, tune=False):
+def benchmark(m=128, n=256, k=256):
     kernel = matmul_int8xint4(
-        m, n, k, "int8", "int32", "int32", num_bits=4, tune=tune)(
+        m, n, k, "int8", "int32", "int32", num_bits=4, tune=False)(
             block_M=32, block_N=32, block_K=128, num_stages=1, threads=128)
     profiler = kernel.get_profiler()
     return profiler.do_bench(warmup=10, rep=100)

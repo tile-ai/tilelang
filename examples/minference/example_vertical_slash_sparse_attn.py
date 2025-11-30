@@ -628,8 +628,6 @@ def benchmark(argv=None):
     qk = torch.nn.functional.softmax(qk, dim=-1, dtype=torch.float32)
     vertical = qk.sum(-2, keepdim=True)
     vertical[..., :30] = torch.inf
-    vertical = qk.sum(-2, keepdim=True)
-    vertical[..., :30] = torch.inf
     vertical_topk = torch.topk(vertical, vertical_size, -1).indices
 
     slash = sum_all_diagonal_matrix(qk)[..., :-last_q + 1]

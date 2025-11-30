@@ -388,7 +388,8 @@ def benchmark():
     ]
     for kernel in kernel_list:
         profiler = kernel.get_profiler()
-        latency += profiler.do_bench(lambda x, y: x @ y.T, warmup=50)
+        # Benchmark the TileLang kernel itself, not the PyTorch reference.
+        latency += profiler.do_bench(warmup=50)
     return latency / len(kernel_list)
 
 

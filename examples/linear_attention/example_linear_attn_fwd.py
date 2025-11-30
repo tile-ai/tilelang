@@ -150,7 +150,6 @@ def benchmark(B=1, S=512, H=16, D=128):
     v = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
     q, _ = l2norm_fwd(q)
     k, _ = l2norm_fwd(k)
-    o, _ = tl_fused_chunk_fwd(q, k, v)
     B, S, H, D = q.shape
     kernel = tl_fused_chunk_fwd_kernel(B, S, H, D, D)
     o = torch.zeros((B, S, H, D), device='cuda', dtype=torch.float32)
