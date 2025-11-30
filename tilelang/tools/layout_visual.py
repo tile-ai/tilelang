@@ -48,15 +48,13 @@ def LayoutVisual():
     def pass_fn(func: tir.PrimFunc, mod, ctx):
         pass_ctx = tilelang.transform.get_pass_context()
         config_value = pass_ctx.config.get(
-            tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value)
+            tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value, "")
+
+        if config_value is None:
+            return func
 
         config_str = str(config_value).strip().lower()
-        if not config_str or config_str == "false":
-            return func
-        elif config_str == "true":
-            formats = "all"
-        else:
-            formats = config_str
+        formats = config_str
 
         _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func

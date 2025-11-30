@@ -71,8 +71,8 @@ class PassConfigKey(str, Enum):
 
     TL_ENABLE_LAYOUT_VISUALIZATION = "tl.enable_layout_visualization"
     """Enable layout inference visualization. Accepts string values:
-    - "" or "false": disabled (default)
-    - "true" or "all": enabled, generate all formats (pdf, png, svg)
+    - "" or: disabled (default)
+    - "all": enabled, generate all formats (pdf, png, svg)
     - "png", "pdf", "svg": enabled, generate specified format
     - "png,svg": enabled, generate multiple formats (comma-separated)
     """ ""

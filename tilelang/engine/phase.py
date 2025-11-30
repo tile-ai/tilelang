@@ -78,7 +78,16 @@ def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
         return False
 
     config_str = str(config_value).strip().lower()
-    return bool(config_str and config_str != "false")
+    valid_formats = ["png", "pdf", "svg", "all"]
+    formats_list = [f.strip() for f in config_str.split(",")]
+
+    invalid_formats = [fmt for fmt in formats_list if fmt not in valid_formats]
+    if invalid_formats:
+        raise ValueError(
+            f"Invalid formats for TL_ENABLE_LAYOUT_VISUALIZATION: {invalid_formats}. "
+            f"Valid formats are: {valid_formats}. "
+            f"You can choose one of the valid formats or a comma-separated list of formats.")
+    return True
 
 
 def LayoutVisual(mod: IRModule) -> None:
