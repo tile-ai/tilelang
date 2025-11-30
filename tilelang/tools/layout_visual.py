@@ -4,6 +4,7 @@ from tvm import tir
 from tvm.tir import PyStmtExprVisitor
 
 from tvm.tir.transform import prim_func_pass
+from tilelang.tools.plot_layout import plot_layout
 
 
 def print_layout_format(layout: T.Fragment) -> str:
@@ -36,7 +37,6 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
                     if layout_id not in self.processed_layouts:
                         print(f"{key} layout inference:")
                         print(print_layout_format(layout))
-                        from tilelang.tools.plot_layout import plot_layout
                         plot_layout(layout, name=f"{key}_layout", formats=self.formats)
                         self.processed_layouts.add(layout_id)
 

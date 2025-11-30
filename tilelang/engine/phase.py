@@ -71,7 +71,11 @@ def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
 
-    config_value = pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value)
+    config_value = pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value,
+                                       "")
+
+    if config_value is None:
+        return False
 
     config_str = str(config_value).strip().lower()
     return bool(config_str and config_str != "false")
