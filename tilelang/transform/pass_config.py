@@ -70,7 +70,12 @@ class PassConfigKey(str, Enum):
     """Force TileLang to inline let bindings during simplification. Default: False"""
 
     TL_ENABLE_LAYOUT_VISUALIZATION = "tl.enable_layout_visualization"
-    """Enable layout inference visualization. Default: False"""
+    """Enable layout inference visualization. Accepts string values:
+    - "" or "false": disabled (default)
+    - "true" or "all": enabled, generate all formats (pdf, png, svg)
+    - "png", "pdf", "svg": enabled, generate specified format
+    - "png,svg": enabled, generate multiple formats (comma-separated)
+    """""
 
     TL_STORAGE_REWRITE_DETECT_INPLACE = "tl.storage_rewrite_detect_inplace"
     """Control StorageRewrite inplace detection.

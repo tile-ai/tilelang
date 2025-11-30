@@ -34,7 +34,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kDisableVectorize256, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWGMMA, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableShuffleElect, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kStorageRewriteDetectInplace, Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION(kEnableLayoutVisualization, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableLayoutVisualization, ffi::String);
 
 DataType cuTensorMapType() { return DataType::UInt(8, 128); }
 
