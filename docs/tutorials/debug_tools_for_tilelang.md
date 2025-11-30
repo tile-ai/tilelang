@@ -171,6 +171,30 @@ The output messages will include something like:
 msg='hello world' BlockIdx=(0, 0, 0), ThreadIdx=(0, 0, 0): 0
 ```
 
+### Visual Layout Inference For TileLang
+ The **Visual Layout Inference** tool automatically generates visual diagrams that illustrate the mapping between logical indices, thread IDs, and register file locations.
+
+When TileLang performs layout inference, it determines how fragment buffers are distributed across threads. The visual layout tool captures this information and generates:
+1. **Textual output**: A human-readable description of the layout mapping
+2. **Visual diagrams**: Color-coded plots showing the thread-to-data mapping
+
+The visual layout inference tool is controlled through the `TL_ENABLE_LAYOUT_VISUALIZATION` pass configuration. By default, visualization is **disabled** to avoid performance overhead during compilation.
+
+`TL_ENABLE_LAYOUT_VISUALIZATION` accepts string values to control output formats:
+- "True" or "all": Enabled, generates all formats (PDF, PNG, SVG)
+- "png": Generate PNG format only
+- "pdf": Generate PDF format only
+- "svg": Generate SVG format only
+
+The output messages will include something like:
+```
+C_local layout inference:
+  Shape: [32, 32] -> [8]
+  Thread: _j // 16 * 64 + _i // 16 * 32 + _i % 8 * 4 + _j % 8 // 2
+  Index:  [_j % 16 // 8 * 4 + _i % 16 // 8 * 2 + _j % 2]
+```
+
+
 ## Conclusion
 
 By carefully examining intermediate representations (IR) before final code generation—and by leveraging runtime printing through `T.print`—one can quickly diagnose where index calculations, copy logic, or other kernel operations deviate from the intended behavior. This two-pronged approach (inspecting IR transformations and using runtime prints) is often sufficient for resolving generation and correctness issues in TileLang programs.

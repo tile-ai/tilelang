@@ -67,6 +67,35 @@ def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
     return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
 
 
+def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+
+    config_value = pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value,
+                                       "")
+
+    if config_value is None:
+        return False
+
+    config_str = str(config_value).strip().lower()
+    valid_formats = ["png", "pdf", "svg", "all"]
+    formats_list = [f.strip() for f in config_str.split(",")]
+
+    invalid_formats = [fmt for fmt in formats_list if fmt not in valid_formats]
+    if invalid_formats:
+        raise ValueError(
+            f"Invalid formats for TL_ENABLE_LAYOUT_VISUALIZATION: {invalid_formats}. "
+            f"Valid formats are: {valid_formats}. "
+            f"You can choose one of the valid formats or a comma-separated list of formats.")
+    return True
+
+
+def LayoutVisual(mod: IRModule) -> None:
+    """Apply layout visualization pass if enabled."""
+    if should_enable_layout_visual():
+        tilelang.tools.LayoutVisual()(mod)
+
+
 def PreLowerSemanticCheck(mod: IRModule) -> None:
     """
     Check whether the module is valid before lowering. If not, raise a user-friendly error

@@ -42,6 +42,8 @@ dependencies = [
 # mldtypes should be greater than 0.5.1
 # if you want to enable fp4
 fp4 = ["ml-dtypes>=0.5.1"]
+# if you want to enable layout inference visualization
+vis = ["matplotlib"]
 
 [build-system]
 requires = ["cython>=3.0.0", "scikit-build-core"]
