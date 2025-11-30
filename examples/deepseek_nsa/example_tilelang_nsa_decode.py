@@ -134,6 +134,47 @@ def native_sparse_attention(
 
     return native_sparse_attention
 
+def main():
+    B, SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 16, 1, 32, torch.float16
+    groups = HQ // H
+    SEQ_LEN_Q = 1
+    kernel = native_sparse_attention(
+        batch=B,
+        heads=HQ,
+        seq_len=SEQ_LEN,
+        dim=D,
+        block_size=block_size,
+        groups=HQ // H,
+        selected_blocks=S,
+    )
+
+    Q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
+    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+
+    mask = torch.randint(0, 2, (B, SEQ_LEN, groups), device='cuda')
+    DO = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device='cuda')
+
+    block_indices = torch.full((B, SEQ_LEN_Q, H, S), SEQ_LEN, dtype=torch.long, device='cuda')
+    for b in range(B):
+        for t in range(SEQ_LEN_Q):
+            for h in range(H):
+                i_i = torch.randperm(max(1, (t // block_size)))[:S]
+                block_indices[b, t, h, :len(i_i)] = i_i
+    block_indices = block_indices.sort(-1)[0]
+    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN_Q, H), device='cuda')
+
+    out = kernel(Q, K, V, block_indices.to(torch.int32))
+
+    ref = naive_nsa_simple_inference(
+        q=Q,
+        k=K,
+        v=V,
+        block_indices=block_indices,
+        block_counts=block_counts,
+        block_size=block_size,
+    )
+    torch.testing.assert_close(ref, out, atol=1e-2, rtol=1e-2)
 
 def benchmark():
     B, SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 16, 1, 32, torch.float16
