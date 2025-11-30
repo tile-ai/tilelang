@@ -50,13 +50,9 @@ def LayoutVisual():
         config_value = pass_ctx.config.get(
             tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value, "")
 
-        if config_value is None:
-            return func
-
         config_str = str(config_value).strip().lower()
-        formats = config_str
 
-        _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
+        _LayoutVisualVisitor(formats=config_str).visit_stmt(func.body)
         return func
 
     return prim_func_pass(pass_fn, opt_level=0)

@@ -74,10 +74,10 @@ def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
     config_value = pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value,
                                        "")
 
-    if config_value is None:
+    config_str = str(config_value).strip().lower()
+    if not config_str:
         return False
 
-    config_str = str(config_value).strip().lower()
     valid_formats = ["png", "pdf", "svg", "all"]
     formats_list = [f.strip() for f in config_str.split(",")]
 
