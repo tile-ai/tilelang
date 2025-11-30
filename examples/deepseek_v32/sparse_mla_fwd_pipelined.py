@@ -499,12 +499,12 @@ def benchmark(B=1,
     kernel = sparse_mla_fwd(batch, seq_len, seq_len_kv, heads, dim, tail_dim, topk, KV_stride,
                             kv_group, sm_scale, is_casual, CP0)
 
-    def ren_kernel_only():
+    def ran_kernel_only():
         kernel(q, kv, indices, torch.tensor([q_start_s_index], dtype=torch.int32, device="cuda"))
 
     from tilelang.profiler import do_bench
     return do_bench(
-        ren_kernel_only,
+        ran_kernel_only,
         rep=100,
         warmup=10,
     )
