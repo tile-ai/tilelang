@@ -5,7 +5,6 @@ from tvm.tir import (
     PrimFunc,
     PyStmtExprVisitor,
 )
-from tvm.ir import Op
 from tvm.tir.transform import prim_func_pass
 
 
@@ -19,10 +18,10 @@ def is_pipelined_for(op: For) -> bool:
     return any(key in op.annotations for key in anno_keys)
 
 
-def is_atomic_op(op: Call) -> bool:
-    """Check if a call is an atomic operation."""
+def is_tile_op(op: Call) -> bool:
+    """Check if a call is a tile-op"""
 
-    return op.op == Op.get("tir.call_extern") and op.args[0].value.startswith("Atomic")
+    return op.op.get_attr("TLOpBuilder") is not None
 
 
 @tir.functor.visitor
@@ -59,7 +58,7 @@ class _NestedLoopCheckVisitor(PyStmtExprVisitor):
         super().visit_for_(op)
 
     def visit_call_(self, op: Call) -> None:
-        if self.in_parallel_context and not is_atomic_op(op):
+        if self.in_parallel_context and is_tile_op(op):
             raise ValueError("[Tilelang Semantic Check] "
                              "Only elementwise operations are allowed inside a parallel loop. " \
                              f"Got a tile-op \"{op.op}\"."

@@ -70,7 +70,7 @@ def gemm_sp(
     C_arg = to_buffer_region(C, access_type="rw")
     return tir.call_intrin(
         "handle",
-        tir.op.Op.get("tl.gemm_sp"),
+        tir.op.Op.get("tl.tileop.gemm_sp"),
         A_arg,
         E_arg,
         B_arg,

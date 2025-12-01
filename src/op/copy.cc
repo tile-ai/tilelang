@@ -2037,7 +2037,7 @@ Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
 // - Takes 5 inputs: src_buffer, dst_buffer, coalesced_width, disable_tma,
 // eviction_policy
 // - Marked as opaque since it has side effects (memory writes)
-TIR_REGISTER_TL_OP(Copy, copy)
+TIR_REGISTER_TL_TILE_OP(Copy, copy)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -2062,7 +2062,7 @@ LayoutMap Conv2DIm2ColOpNode::InferLayout(const LayoutInferArgs &T,
 // - Takes 9 inputs: src_buffer, dst_buffer, nhw_step, c_step, kernel, stride,
 // dilation, padding, eviction_policy
 // - Marked as opaque since it has side effects (memory writes)
-TIR_REGISTER_TL_OP(Conv2DIm2ColOp, c2d_im2col)
+TIR_REGISTER_TL_TILE_OP(Conv2DIm2ColOp, c2d_im2col)
     .set_num_inputs(9)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

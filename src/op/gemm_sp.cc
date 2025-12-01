@@ -302,7 +302,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
   return results;
 }
 
-TIR_REGISTER_TL_OP(GemmSP, gemm_sp)
+TIR_REGISTER_TL_TILE_OP(GemmSP, gemm_sp)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

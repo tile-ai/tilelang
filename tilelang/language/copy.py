@@ -90,7 +90,7 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         eviction_policy = 0
     else:
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
-    return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, coalesced_width,
                            disable_tma, eviction_policy)
 
 
@@ -124,5 +124,5 @@ def c2d_im2col(img: tir.Buffer,
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
     img_region = to_buffer_region(img, access_type="r")
     col_region = to_buffer_region(col, access_type="w")
-    return tir.call_intrin("handle", tir.op.Op.get("tl.c2d_im2col"), img_region, col_region,
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.c2d_im2col"), img_region, col_region,
                            nhw_step, c_step, kernel, stride, dilation, pad, eviction_policy)

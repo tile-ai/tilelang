@@ -77,12 +77,12 @@ TileOperator ParseOperator(Stmt stmt);
 
 using OpBuilderFunc = ffi::TypedFunction<TileOperator(Array<PrimExpr>)>;
 
-#define TIR_REGISTER_TL_OP(Entry, OpName)                                      \
+#define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \
-    static const Op &op = Op::Get("tl." #OpName);                              \
+    static const Op &op = Op::Get("tl.tileop." #OpName);                       \
     return op;                                                                 \
   }                                                                            \
-  TVM_REGISTER_OP("tl." #OpName)                                               \
+  TVM_REGISTER_OP("tl.tileop." #OpName)                                        \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)             \
       .set_attr<OpBuilderFunc>(                                                \
           "TLOpBuilder", [](Array<PrimExpr> args) { return Entry(args); })
