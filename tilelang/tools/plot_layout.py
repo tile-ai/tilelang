@@ -87,8 +87,17 @@ def plot_layout(layout: T.Fragment,
 
     # Show the distribution of registers in each thread of a warp.
     warp_size = 32
+    # Warn if the number of threads is less than the warp size
+    if num_threads < warp_size:
+        import warnings
+        warnings.warn(
+            f"Layout visualization has {num_threads} threads, which is less than the warp size ({warp_size}). "
+            f"For the best viewing experience, it is recommended to have at least {warp_size} threads.",
+            UserWarning,
+            stacklevel=2)
     spectral_camp = plt.get_cmap("hsv", warp_size * 6)
-    for i in range(warp_size):
+
+    for i in range(min(warp_size, num_threads)):
         colors[i] = spectral_camp(i * 6)
 
     # Determine the number of rows and columns in the input shape
