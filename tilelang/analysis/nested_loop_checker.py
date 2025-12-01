@@ -1,9 +1,11 @@
 from tvm import tir
 from tvm.tir import (
     For,
+    Call,
     PrimFunc,
     PyStmtExprVisitor,
 )
+from tvm.ir import Op
 from tvm.tir.transform import prim_func_pass
 
 
@@ -15,6 +17,12 @@ def is_pipelined_for(op: For) -> bool:
         "tl_pipeline_group"
     ]
     return any(key in op.annotations for key in anno_keys)
+
+
+def is_atomic_op(op: Call) -> bool:
+    """Check if a call is an atomic operation."""
+
+    return op.op == Op.get("tir.call_extern") and op.args[0].value.startswith("Atomic")
 
 
 @tir.functor.visitor
@@ -39,7 +47,7 @@ class _NestedLoopCheckVisitor(PyStmtExprVisitor):
                                  "Nested parallel loops are not allowed. "
                                  "Please check your loop structure.")
             self.in_parallel_context = True
-            self.visit_stmt(child)
+            super().visit_for_(op)
             self.in_parallel_context = False
             return
         elif is_pipelined_for(op):
@@ -48,7 +56,14 @@ class _NestedLoopCheckVisitor(PyStmtExprVisitor):
                                  "Pipelined loop cannot be nested inside a parallel loop. "
                                  "Please check your loop structure.")
 
-        self.visit_stmt(op.body)
+        super().visit_for_(op)
+
+    def visit_call_(self, op: Call) -> None:
+        if self.in_parallel_context and not is_atomic_op(op):
+            raise ValueError("[Tilelang Semantic Check] "
+                             "Only elementwise operations are allowed inside a parallel loop. " \
+                             f"Got a tile-op \"{op.op}\"."
+                             )
 
 
 def NestedLoopChecker():
