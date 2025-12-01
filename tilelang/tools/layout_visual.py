@@ -28,10 +28,9 @@ def print_fragment_format(layout: T.Fragment) -> str:
             f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}",
             f"  Index:  {layout.forward_index}"
         ]
+        print("\n".join(lines))
     else:
         raise ValueError(f"Expected T.Fragment, but got {type(layout).__name__}")
-
-    return "\n".join(lines)
 
 
 @tir.functor.visitor
@@ -75,7 +74,7 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
                     layout_id = str(layout)
                     if layout_id not in self.processed_layouts:
                         print(f"{key} layout inference:")
-                        print(print_fragment_format(layout))
+                        print_fragment_format(layout)
                         plot_layout(layout, name=f"{key}_layout", formats=self.formats)
                         self.processed_layouts.add(layout_id)
 
