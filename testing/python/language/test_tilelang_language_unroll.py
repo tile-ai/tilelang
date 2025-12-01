@@ -17,6 +17,7 @@ def test_unroll_with_step():
     kernel = tilelang.compile(main, target="cuda")
     assert "#pragma unroll" in kernel.get_kernel_source()
 
+
 def test_unroll_with_unroll_factor():
 
     @T.prim_func
@@ -30,6 +31,7 @@ def test_unroll_with_unroll_factor():
 
     kernel = tilelang.compile(main, target="cuda")
     assert "#pragma unroll 4" in kernel.get_kernel_source()
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
