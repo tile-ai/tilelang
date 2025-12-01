@@ -4,8 +4,9 @@ from typing import Any
 from tvm import tir
 from tvm.tir import IntImm
 import tvm.script.ir_builder.tir as tb_tir
-from .v2.builder import SerialForWithStep
+from .v2.builder import SerialForWithStep, UnrollForWithStep
 from tilelang import _ffi_api
+from tvm.script.ir_builder.tir import frame
 
 
 def Parallel(*extents: tir.PrimExpr, coalesced_width: int | None = None):
@@ -97,7 +98,7 @@ def serial(start: tir.PrimExpr,
            stop: tir.PrimExpr | None = None,
            step: tir.PrimExpr | None = None,
            *,
-           annotations: dict[str, Any] | None = None):
+           annotations: dict[str, Any] | None = None) -> frame.ForFrame:
     step_is_one = False
     step_is_one |= isinstance(step, int) and step == 1
     step_is_one |= isinstance(step, IntImm) and step.value == 1
@@ -108,3 +109,70 @@ def serial(start: tir.PrimExpr,
             stop = start
             start = IntImm(start.dtype, 0) if hasattr(start, "dtype") else 0
         return SerialForWithStep(start, stop, step, annotations=annotations)
+
+
+def unroll(start: tir.PrimExpr,
+           stop: tir.PrimExpr | None = None,
+           step: tir.PrimExpr | None = None,
+           *,
+           explicit: bool = False,
+           unroll_factor: int | None = None,
+           annotations: dict[str, Any] | None = None) -> frame.ForFrame:
+    """The unrolled For statement.
+
+    Parameters
+    ----------
+    start : PrimExpr
+        The minimum value of iteration.
+
+    stop : PrimExpr
+        The maximum value of iteration.
+
+    step : PrimExpr
+        The step size of the iteration.
+
+    explicit : bool
+        Whether to explicitly unroll the loop.
+
+    unroll_factor : int
+        The unroll factor of the loop.
+
+    annotations : Dict[str, Any]
+        The optional annotations of the For statement.
+
+    Returns
+    -------
+    res : frame.ForFrame
+        The ForFrame.
+    """
+
+    step_is_one = False
+    if stop is None:
+        stop = start
+        if hasattr(start, "dtype"):
+            start = IntImm(start.dtype, 0)
+        else:
+            start = 0
+
+    # Ensure annotations has {"pragma_unroll_explicit": True} by default
+    if annotations is None:
+        annotations = {"pragma_unroll_explicit": explicit}
+    else:
+        # Add "pragma_unroll_explicit": True if not already present
+        annotations = dict(annotations)
+        annotations.setdefault("pragma_unroll_explicit", explicit)
+
+    if unroll_factor is not None:
+        # check pragma_unroll_explicit must be False
+        if annotations.get("pragma_unroll_explicit", True):
+            raise ValueError("pragma_unroll_explicit must be True when unroll_factor is not None")
+        annotations.update({"pragma_unroll_factor": unroll_factor})
+
+    if step is None or step_is_one:
+        return tb_tir.unroll(start, stop, annotations=annotations)
+    else:
+        return UnrollForWithStep(start, stop, step, annotations=annotations)
+
+
+Serial = serial
+Unroll = unroll
