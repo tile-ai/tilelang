@@ -7,19 +7,58 @@ from tvm.tir.transform import prim_func_pass
 from tilelang.tools.plot_layout import plot_layout
 
 
-def print_layout_format(layout: T.Fragment) -> str:
-    input_shape = layout.get_input_shape()
-    output_shape = layout.get_output_shape()
-    lines = [
-        f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}",
-        f"  Index:  {layout.forward_index}"
-    ]
+def print_fragment_format(layout: T.Fragment) -> str:
+    """
+    Format fragment layout information into a human-readable string.
+
+    Parameters
+    ----------
+    layout : T.Fragment
+        The fragment layout to format
+
+    Returns
+    -------
+    str
+        Formatted string showing shape, thread mapping, and index mapping
+    """
+    if isinstance(layout, T.Fragment):
+        input_shape = layout.get_input_shape()
+        output_shape = layout.get_output_shape()
+        lines = [
+            f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}",
+            f"  Index:  {layout.forward_index}"
+        ]
+    else:
+        raise ValueError(f"Expected T.Fragment, but got {type(layout).__name__}")
 
     return "\n".join(lines)
 
 
 @tir.functor.visitor
 class _LayoutVisualVisitor(PyStmtExprVisitor):
+    """
+    User-friendly pass which visualizes fragment layouts inferred during compilation.
+
+    In TileLang, Fragment layouts describe:
+    - How logical indices (e.g., [i, j]) map to thread IDs
+    - How logical indices map to register file locations within each thread
+    - The shape transformation from input dimensions to output dimensions
+
+    This pass generates two types of output:
+    1. Textual output: A human-readable description printed to console
+    2. Visual diagrams: Color-coded plots saved to files (PDF, PNG, SVG formats)
+
+    Configuration:
+    The pass is controlled by the TL_ENABLE_LAYOUT_VISUALIZATION configuration option.
+    The configuration accepts string values:
+
+    - Empty string or not set: Pass does nothing (default, disabled)
+    - "png": Generate PNG format only (recommended for quick inspection)
+    - "pdf": Generate PDF format only (recommended for documentation)
+    - "svg": Generate SVG format only (recommended for web/vector graphics)
+    - "all": Generate all formats (PDF, PNG, SVG)
+    - "png,svg": Generate multiple formats (comma-separated)
+    """
 
     def __init__(self, formats: str = "png"):
         super().__init__()
@@ -36,7 +75,7 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
                     layout_id = str(layout)
                     if layout_id not in self.processed_layouts:
                         print(f"{key} layout inference:")
-                        print(print_layout_format(layout))
+                        print(print_fragment_format(layout))
                         plot_layout(layout, name=f"{key}_layout", formats=self.formats)
                         self.processed_layouts.add(layout_id)
 
