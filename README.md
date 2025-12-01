@@ -209,7 +209,7 @@ torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 print("Kernel output matches PyTorch reference.")
 
 # 4. Retrieve and inspect the generated CUDA source (optional)
-# cuda_source = jit_kernel.get_kernel_source()
+# cuda_source = matmul_relu_kernel.get_kernel_source()
 # print("Generated CUDA kernel:\n", cuda_source)
 
 # 5.Profile latency with kernel
