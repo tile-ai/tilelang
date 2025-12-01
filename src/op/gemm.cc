@@ -826,7 +826,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   return results;
 }
 
-TIR_REGISTER_TL_OP(Gemm, gemm)
+TIR_REGISTER_TL_TILE_OP(Gemm, gemm)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

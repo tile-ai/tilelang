@@ -252,17 +252,18 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           forward_vars.push_back(
               IterVar(Range(0, s), Var(), IterVarType::kDataPar));
         }
-        Array<PrimExpr> forward_index;
-        for (const auto &iv : forward_vars) {
-          forward_index.push_back(iv->var);
-        }
         Var rep;
         auto rep_iter =
             IterVar({0, T.thread_bounds->extent}, rep, IterVarType::kDataPar);
 
+        // Use default fragment indexing (single output dim) to
+        // stay consistent with other ops (e.g., ReduceOp), and
+        // bind the thread range for comparability.
         const PrimExpr &forward_thread = rep;
-        results.Set(buffer, Fragment(forward_vars, forward_index,
-                                     forward_thread, rep_iter));
+        auto frag = Fragment(forward_vars, /*forward_index=*/{}, forward_thread,
+                             rep_iter)
+                        ->BindThreadRange(T.thread_bounds);
+        results.Set(buffer, frag);
       }
     }
     return results;

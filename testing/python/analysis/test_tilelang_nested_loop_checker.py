@@ -550,5 +550,178 @@ def test_mixed_pp():
     run_gemm_mixed_pp(order=[0, 1, 2], stage=[0, 0, 1])
 
 
+"""
+TiledOp in a T.Parallel is also not permitted.
+"""
+
+
+def matmul_with_parallel(
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    threads,
+    order,
+    stage,
+):
+    A_shape = (M, K)
+    B_shape = (K, N)
+    A_shared_shape = (block_M, block_K)
+    B_shared_shape = (block_K, block_N)
+
+    @T.prim_func
+    def main(
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            T.clear(C_local)
+            for k in T.Pipelined(T.ceildiv(K, block_K), order=order, stage=stage):
+                for i, j in T.Parallel(block_M, block_K):
+                    A_shared[i, j] = A[by * block_M + i, k * block_K + j]
+                for i, j in T.Parallel(block_K, block_N):
+                    B_shared[i, j] = B[k * block_K + i, bx * block_N + j]
+
+                # T.copy(A[by * block_M, k * block_K], A_shared)
+                # T.copy(B[k * block_K, bx * block_N], B_shared)
+
+                for _ in T.Parallel(1):
+                    T.gemm(A_shared, B_shared, C_local, False, False)
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+def run_gemm_tiled_op_with_parallel(
+    order,
+    stage,
+):
+    M = 1024
+    N = 1024
+    K = 1024
+    block_M = 128
+    block_N = 128
+    block_K = 32
+    in_dtype = "float16"
+    out_dtype = "float16"
+    dtypeAccum = "float32"
+    num_threads = 128
+
+    program = matmul_nested_pipa(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        in_dtype,
+        out_dtype,
+        dtypeAccum,
+        num_threads,
+        order,
+        stage,
+    )
+
+    kernel = tilelang.compile(
+        program,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
+    profiler = kernel.get_profiler()
+
+    def ref_program(A, B):
+        import torch
+
+        if in_dtype == "float32":
+            # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
+            # float32 automatically, -0x1000 meas
+            A = ((A.view(torch.int32) - 0x1000)).view(torch.float32)
+            B = ((B.view(torch.int32) - 0x1000)).view(torch.float32)
+        C = torch.matmul(A.to(torch.float), B.to(torch.float))
+        C = C.to(torch.__getattribute__(out_dtype))
+        return C
+
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+
+    program1 = matmul_with_parallel(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        in_dtype,
+        out_dtype,
+        dtypeAccum,
+        num_threads,
+        order,
+        stage,
+    )
+    with pytest.raises(ValueError):
+        tilelang.compile(
+            program1,
+            out_idx=[2],
+            pass_configs={
+                tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+                tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+            })
+
+
+@tilelang.jit(out_idx=[1])
+def tir_op_with_parallel(length=256, block=16, dtype="float32"):
+
+    @T.prim_func
+    def main(
+            A: T.Tensor((length,), dtype),
+            B: T.Tensor((length,), dtype),
+    ):
+        with T.Kernel(1, threads=length) as _:
+            for i in T.Parallel(length // block):
+                for j in T.Parallel(block):
+                    B[i * block + j] = T.max(A[i * block + j], 0.0)
+
+    return main
+
+
+@tilelang.jit(out_idx=[1])
+def customize_op_with_parallel(length=256, block=16, dtype="float32"):
+
+    @T.prim_func
+    def main(
+            A: T.Tensor((length,), dtype),
+            B: T.Tensor((length,), dtype),
+    ):
+        with T.Kernel(1, threads=length) as _:
+            for i in T.Parallel(length // block):
+                for j in T.Parallel(block):
+                    B[i * block + j] = A[i * block + j]
+                    T.atomic_add(B[i * block + j], 1.0)
+
+    return main
+
+
+def test_tiled_op_with_parallel():
+    run_gemm_tiled_op_with_parallel(order=[0, 1, 2], stage=[0, 0, 1])
+
+    kernel1 = tir_op_with_parallel(length=256, block=16)
+    data = _require_cuda_tensor((256,), torch.float32)
+    result1 = kernel1(data)
+    torch.testing.assert_close(result1, torch.relu(data), atol=1e-5, rtol=1e-5)
+    kernel2 = customize_op_with_parallel(length=256, block=16)
+    result2 = kernel2(data)
+    torch.testing.assert_close(result2, data + 1, atol=1e-5, rtol=1e-5)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

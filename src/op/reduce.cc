@@ -478,7 +478,7 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
   return {};
 }
 
-TIR_REGISTER_TL_OP(ReduceOp, reduce)
+TIR_REGISTER_TL_TILE_OP(ReduceOp, reduce)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -563,7 +563,7 @@ LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &T,
   return {};
 }
 
-TIR_REGISTER_TL_OP(CumSumOp, cumsum)
+TIR_REGISTER_TL_TILE_OP(CumSumOp, cumsum)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

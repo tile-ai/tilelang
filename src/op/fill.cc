@@ -209,7 +209,7 @@ LayoutMap FillNode::InferLayout(const LayoutInferArgs &T,
   return {};
 }
 
-TIR_REGISTER_TL_OP(Fill, fill)
+TIR_REGISTER_TL_TILE_OP(Fill, fill)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

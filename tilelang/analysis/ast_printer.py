@@ -14,7 +14,7 @@ def ASTPrinter():
         Pre-order visitor to print all visited statements.
         """
 
-        print(f"Visiting statement: {type(statement)}")
+        print(f"Visiting statement: {type(statement)}, {statement}")
 
     def pass_fn(func: PrimFunc, mod, ctx) -> PrimFunc:
         new_body = ir_transform(func.body, pre_visit, None)

@@ -159,7 +159,7 @@ TileOperator FinalizeReducerOpNode::Clone() const {
   return TileOperator(node);
 }
 
-TIR_REGISTER_TL_OP(FinalizeReducerOp, finalize_reducer)
+TIR_REGISTER_TL_TILE_OP(FinalizeReducerOp, finalize_reducer)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
