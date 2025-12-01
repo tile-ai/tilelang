@@ -2,28 +2,46 @@ import torch
 import tilelang
 import tilelang.testing
 
-from tilelang.utils.sparse import compress, randn_semi_sparse
-from tilelang.layout import make_metadata_layout
+from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
+from tilelang.layout import make_cutlass_metadata_layout
+from tilelang.utils.tensor import torch_assert_close, map_torch_type
+from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
-torch.set_printoptions(threshold=float('inf'), edgeitems=float('inf'), linewidth=10000)
-torch.manual_seed(42)
+torch.backends.cuda.matmul.allow_tf32 = False
+# torch.manual_seed(42)  # only enable when debugging
 
-STR_TO_TYPE = {
-    'float32': torch.float32,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float8_e4m3": torch.float8_e4m3fn,
-    "int8": torch.int8,
-    "int32": torch.int32,
-}
 
-SPARSITY_MAP = {
-    # 'float32': (1, 2),  # not supported for now
-    torch.float16: (2, 4),
-    torch.bfloat16: (2, 4),
-    torch.float8_e4m3fn: (2, 4),
-    torch.int8: (2, 4),
-}
+def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
+    is_8bit = "8" in in_dtype
+    is_unsigned = "uint" in in_dtype
+    is_int = "int" in in_dtype
+    if is_int:
+        if is_8bit:
+            low, high = (0, 4) if is_unsigned else (-2, 2)
+        else:
+            low, high = (0, 128) if is_unsigned else (-64, 64)
+        A = randint_semi_sparse(
+            M,
+            K,
+            low=low,
+            high=high,
+            dtype=map_torch_type(in_dtype),
+            device='cuda',
+            transposed=trans_A)
+        B = torch.randint(
+            size=(N, K) if trans_B else (K, N),
+            low=low,
+            high=high,
+            dtype=map_torch_type(in_dtype),
+            device='cuda')
+    else:
+        A = randn_semi_sparse(
+            M, K, dtype=torch.float32, device='cuda',
+            transposed=trans_A).to(map_torch_type(in_dtype))
+        B = torch.randn(
+            (N, K) if trans_B else (K, N), device='cuda',
+            dtype=torch.float32).to(map_torch_type(in_dtype))
+    return A, B
 
 
 def matmul_sp_sm90(
@@ -60,21 +78,17 @@ def matmul_sp_sm90(
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             E_shared = T.alloc_shared((block_M, block_K // E_factor), 'uint8')
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
                 E:
-                    make_metadata_layout(
-                        E, mma_dtype="float16", arch="9.0", backend="cutlass", block_k=block_K),
+                    make_cutlass_metadata_layout(
+                        E, mma_dtype=in_dtype, arch="9.0", block_k=block_K),
                 E_shared:
-                    make_metadata_layout(
-                        E_shared,
-                        mma_dtype="float16",
-                        arch="9.0",
-                        backend="cutlass",
-                        block_k=block_K),
+                    make_cutlass_metadata_layout(
+                        E_shared, mma_dtype=in_dtype, arch="9.0", block_k=block_K),
             })
             T.disable_warp_group_reg_alloc()
-            T.clear(C_local)
+            T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
                 if trans_A:
@@ -85,8 +99,8 @@ def matmul_sp_sm90(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local, trans_A, trans_B)
-            T.copy(C_local, C[by * block_M, bx * block_N])
+                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B)
+            T.copy(C_frag, C[by * block_M, bx * block_N])
 
     return main
 
@@ -107,7 +121,8 @@ def matmul_sp_sm80(
     trans_B,
 ):
     is_8_bit = "8" in in_dtype
-    E_factor = 32 if is_8_bit else 16
+    metadata_dtype = 'int32' if is_8_bit else 'int16'
+    E_factor = SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype]
     A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
     B_shape = (K, N) if not trans_B else (N, K)
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
@@ -118,22 +133,18 @@ def matmul_sp_sm80(
     @T.prim_func
     def main(
             A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), 'int32' if is_8_bit else 'int16'),
+            E: T.Tensor((M, K // E_factor), metadata_dtype),
             B: T.Tensor(B_shape, in_dtype),
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            E_shared = T.alloc_shared((block_M, block_K // E_factor),
-                                      'int32' if is_8_bit else 'int16')
+            E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
-                E:
-                    make_metadata_layout(E, mma_dtype="float16", backend="cutlass", arch="8.0"),
-                E_shared:
-                    make_metadata_layout(
-                        E_shared, mma_dtype="float16", backend="cutlass", arch="8.0"),
+                E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
+                E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
             })
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -181,19 +192,14 @@ def run_gemm_sp(
         kernel,
         out_idx=[-1],
     )
-    A = randn_semi_sparse(M, K, dtype=STR_TO_TYPE[in_dtype], device='cuda', transposed=trans_A)
-    if trans_B:
-        B = torch.randn((N, K), device='cuda', dtype=torch.float32)
-    else:
-        B = torch.randn((K, N), device='cuda', dtype=torch.float32)
-
-    if "float8" in in_dtype or "int8" in in_dtype:
-        A = normalize(A.float())
-        B = normalize(B.float())
-
-    A = A.to(STR_TO_TYPE[in_dtype])
-    B = B.to(STR_TO_TYPE[in_dtype])
-
+    A, B = generate_dense_input(
+        M=M,
+        N=N,
+        K=K,
+        trans_A=trans_A,
+        trans_B=trans_B,
+        in_dtype=in_dtype,
+    )
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
 
     C_sp = kernel(A_sparse, E, B)
@@ -206,14 +212,22 @@ def run_gemm_sp(
         if "float8" in in_dtype or "int8" in in_dtype:
             A = A.to(torch.float32)
             B = B.to(torch.float32)
-        return torch.matmul(A, B).to(STR_TO_TYPE[out_dtype])
+        return torch.matmul(A, B)
 
     C = _matmul(A, B)
+
     if 'float8' in in_dtype:
         diff = calc_diff(C_sp, C)
         assert diff < 1e-3, f"{diff=}"
     else:
-        torch.testing.assert_close(C_sp, C, atol=1e-3, rtol=1e-3)
+        torch_assert_close(
+            C_sp.to(torch.float32),
+            C.to(torch.float32),
+            rtol=1e-3,
+            atol=1e-3,
+            base_name="tilelang_sp",
+            ref_name="ref_dense",
+        )
     print("pass")
 
 

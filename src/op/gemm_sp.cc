@@ -307,7 +307,20 @@ TIR_REGISTER_TL_TILE_OP(GemmSP, gemm_sp)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK() { GemmSPNode::RegisterReflection(); }
+TVM_REGISTER_OP("tl.GemmSPWarpPolicy")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmSPWarpPolicy");
 
+TVM_FFI_STATIC_INIT_BLOCK() {
+  GemmSPNode::RegisterReflection();
+  GemmSPWarpPolicyNode::RegisterReflection();
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def(
+      "tl.GemmSPWarpPolicyComputeWarpPartition",
+      [](GemmSPWarpPolicy policy, int M, int N, int block_size, Target target,
+         bool use_wgmma, int bits) {
+        policy->computeWarpPartition(M, N, block_size, target, use_wgmma, bits);
+        return;
+      });
+}
 } // namespace tl
 } // namespace tvm
