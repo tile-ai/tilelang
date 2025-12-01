@@ -198,7 +198,7 @@ def gemm_sp_v2(
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
     return tir.call_intrin(
         "handle",
-        tir.op.Op.get("tl.gemm_sp_py"),
+        tir.op.Op.get("tl.tileop.gemm_sp_py"),
         A_arg,
         E_arg,
         B_arg,

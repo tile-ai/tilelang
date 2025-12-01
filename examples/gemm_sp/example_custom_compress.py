@@ -275,8 +275,9 @@ def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
             for tm in T.Parallel(block_M):
                 for g_i in range(0, block_K // group):
                     a_k = g_i * group
-                    T.clear(non_zero_cnt)
-                    T.clear(non_zero_elt_log_idx)
+                    non_zero_cnt[0] = 0
+                    for i in range(elem):
+                        non_zero_elt_log_idx[i] = 0
                     for i in range(group):
                         val = A_shared[tm, a_k + i]
                         if val != 0.0:
