@@ -112,6 +112,11 @@ class SerialForWithStep:
     annotations: dict[str, Any] | None = None
 
 
+@dataclass
+class UnrollForWithStep(SerialForWithStep):
+    ...
+
+
 # Python 3.9 compatibility: avoid PEP 604 unions at runtime
 # Use tuple for isinstance checks and typing.Union for annotations/aliases
 ContinueOrBreak = (ContinueFrame, BreakFrame)
@@ -270,7 +275,7 @@ class Builder(BaseBuilder):
     def ctx_for(self, it):
         self.check_continue_break()
         it = unwrap_expr(it)
-        if isinstance(it, SerialForWithStep):
+        if isinstance(it, (SerialForWithStep, UnrollForWithStep)):
             # Validate and compute the trip count before constructing the frame
             if isinstance(it.step, (int, IntImm)):
                 step_value = it.step if isinstance(it.step, int) else it.step.value
@@ -285,7 +290,14 @@ class Builder(BaseBuilder):
                     f'Using a non-constant step `{it.step}` in stepped serial may lead to undefined behavior in tilelang'
                 )
                 real_stop = tir.ceildiv(it.stop - it.start, it.step)
-            real_frame = tir.serial(real_stop, annotations=it.annotations)
+            if isinstance(it, UnrollForWithStep):
+                real_frame = tir.unroll(real_stop, annotations=it.annotations)
+            elif isinstance(it, SerialForWithStep):
+                real_frame = tir.serial(real_stop, annotations=it.annotations)
+            else:
+                raise TypeError(
+                    f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
+                    "range, T.serial, T.unroll, T.grid, T.parallel, T.vectorized, T.thread_binding")
             with self.with_frame(real_frame) as v:
                 IRBuilder.name('_tmp', v)
                 yield it.start + v * it.step
