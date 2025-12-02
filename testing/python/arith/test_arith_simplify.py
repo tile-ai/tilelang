@@ -15,12 +15,9 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import pytest
-
 from tilelang import tvm
 import tilelang.testing
 from tvm import tir
-from tvm.script import tir as T
 import tvm.ir
 
 
@@ -90,9 +87,8 @@ def test_regression_simplify_inf_recursion():
     ana = tvm.arith.Analyzer()
     cond = tir.Var("cond", "int32")
 
-    res = (tvm.tir.NE(cond, 0).astype("int8") - tvm.tir.NE(cond, 0).astype("int8")).astype(
-        "int32"
-    ) == 0
+    res = (tvm.tir.NE(cond, 0).astype("int8") -
+           tvm.tir.NE(cond, 0).astype("int8")).astype("int32") == 0
     # regression in a previous case
     # try compare and int set recursive call can cause infinite loop
     ana.rewrite_simplify(res)

@@ -22,6 +22,7 @@ from tvm.arith.analyzer import Analyzer
 
 
 class IntSetChecker:
+
     def __init__(self):
         self.analyzer = tvm.arith.Analyzer()
 
@@ -118,8 +119,7 @@ def test_mod():
     ck1 = IntSetChecker()
     ck1.analyzer.bind(x, tvm.ir.Range.from_min_extent(0, 2))
     ck1.verify(
-        flm(y, 8), {y: tvm.arith.IntervalSet(z * 8 + x * 4, z * 8 + x * 4 + 3)}, (x * 4, x * 4 + 3)
-    )
+        flm(y, 8), {y: tvm.arith.IntervalSet(z * 8 + x * 4, z * 8 + x * 4 + 3)}, (x * 4, x * 4 + 3))
 
 
 def test_max_min():
@@ -133,7 +133,8 @@ def test_max_min():
 
 def test_select():
     ck = IntSetChecker()
-    x, y = te.var("x"), te.var("y")
+    # x, y = te.var("x"), te.var("y")
+    x = te.var('x')
     ck.verify(tvm.tir.Select(x > 0, x - 1, x + 1), {x: tvm.arith.IntervalSet(0, 10)}, (-1, 11))
 
 
@@ -166,16 +167,13 @@ def check_region_bound(expect_region, var_dom, mode, predicate=None):
         expect.append(v)
     if mode == "lowerbound":
         result = tvm.arith.estimate_region_lower_bound(
-            region=region, var_dom=var_dom, predicate=predicate
-        )
+            region=region, var_dom=var_dom, predicate=predicate)
     elif mode == "upperbound":
         result = tvm.arith.estimate_region_upper_bound(
-            region=region, var_dom=var_dom, predicate=predicate
-        )
+            region=region, var_dom=var_dom, predicate=predicate)
     else:
         result = tvm.arith.estimate_region_strict_bound(
-            region=region, var_dom=var_dom, predicate=predicate
-        )
+            region=region, var_dom=var_dom, predicate=predicate)
     if result is None:
         assert all([_ is None for _ in expect])
         return
@@ -190,22 +188,18 @@ def check_region_bound(expect_region, var_dom, mode, predicate=None):
                 expect_begin, expect_end = expect_desc[binding]
                 result_begin = analyzer.simplify(intset.min_value, 3)
                 result_end = analyzer.simplify(intset.max_value + 1, 3)
-                assert analyzer.can_prove_equal(
-                    result_begin - expect_begin, 0
-                ), f"{result_begin} vs {expect_begin}"
-                assert analyzer.can_prove_equal(
-                    result_end - expect_end, 0
-                ), f"{result_end} vs {expect_end}"
+                assert analyzer.can_prove_equal(result_begin - expect_begin,
+                                                0), f"{result_begin} vs {expect_begin}"
+                assert analyzer.can_prove_equal(result_end - expect_end,
+                                                0), f"{result_end} vs {expect_end}"
         else:
             # check range
             expect_begin, expect_end = expect_desc
             analyzer = Analyzer()
-            assert analyzer.can_prove_equal(
-                intset.min_value - expect_begin, 0
-            ), f"{intset.min_value} vs {expect_begin}"
-            assert analyzer.can_prove_equal(
-                intset.max_value - expect_end + 1, 0
-            ), f"{intset.max_value} vs {expect_end - 1}"
+            assert analyzer.can_prove_equal(intset.min_value - expect_begin,
+                                            0), f"{intset.min_value} vs {expect_begin}"
+            assert analyzer.can_prove_equal(intset.max_value - expect_end + 1,
+                                            0), f"{intset.max_value} vs {expect_end - 1}"
 
 
 def test_region_bound_not_independent():
@@ -225,13 +219,21 @@ def test_region_bound_not_independent():
         k: tvm.ir.Range(begin=0, end=16),
     }
     check_region_bound(
-        {i // 4: None, j * 4 + i % 4: None, tir.truncdiv(k, 2): None},
+        {
+            i // 4: None,
+            j * 4 + i % 4: None,
+            tir.truncdiv(k, 2): None
+        },
         var_dom,
         predicate=j * 4 + i % 4 > 3,
         mode="lowerbound",
     )
     check_region_bound(
-        {i // 4: (0, 4), j * 4 + i % 4: (4, 64), tir.truncdiv(k, 2): (0, 8)},
+        {
+            i // 4: (0, 4),
+            j * 4 + i % 4: (4, 64),
+            tir.truncdiv(k, 2): (0, 8)
+        },
         var_dom,
         predicate=j * 4 + i % 4 > 3,
         mode="upperbound",
@@ -264,7 +266,10 @@ def test_region_lower_bound_split_predicate():
     check_region_bound({(x * 4, x * 4 + 8): (0, 256)}, var_dom, predicate=x < 63, mode="lowerbound")
 
     check_region_bound(
-        {(x * 4, x * 4 + 8): (0, 256), (x * 3, x * 3 + 5): (0, 191)},
+        {
+            (x * 4, x * 4 + 8): (0, 256),
+            (x * 3, x * 3 + 5): (0, 191)
+        },
         var_dom,
         predicate=x < 63,
         mode="upperbound",
@@ -293,9 +298,12 @@ def test_region_lower_bound_negative_scale():
         i: tvm.ir.Range(begin=0, end=4),
         j: tvm.ir.Range(begin=0, end=4),
     }
-    check_region_bound(
-        {(1 - i, 5 - i): (-2, 5), (20 - j * 4, 36 - j * 4): (8, 36)}, var_dom, mode="lowerbound"
-    )
+    check_region_bound({
+        (1 - i, 5 - i): (-2, 5),
+        (20 - j * 4, 36 - j * 4): (8, 36)
+    },
+                       var_dom,
+                       mode="lowerbound")
 
 
 def test_region_lower_bound_for_non_perfect_tile():
@@ -309,8 +317,7 @@ def test_region_lower_bound_for_non_perfect_tile():
     }
     check_region_bound(
         {
-            h3 * 8
-            + h2: {
+            h3 * 8 + h2: {
                 (): (
                     tvm.tir.max(h3 * 8, 1),
                     tvm.tir.min(0, h3 * 8 - 214) + 224,
@@ -321,7 +328,7 @@ def test_region_lower_bound_for_non_perfect_tile():
             }
         },
         var_dom,
-        predicate=tvm.tir.all(1 <= h3 * 8 + h2, h3 * 8 + h2 < 224),
+        predicate=tvm.tir.all(h3 * 8 + h2 >= 1, h3 * 8 + h2 < 224),
         mode="lowerbound",
     )
 
@@ -332,9 +339,7 @@ def test_region_lower_bound_for_non_perfect_tile():
     }
     check_region_bound(
         {
-            h3 * 8
-            + h2 * 5
-            + h1: {
+            h3 * 8 + h2 * 5 + h1: {
                 (): (
                     tvm.tir.max(h3 * 8, 1),
                     tvm.tir.min(0, h3 * 8 - 214) + 224,
@@ -345,7 +350,7 @@ def test_region_lower_bound_for_non_perfect_tile():
             }
         },
         var_dom,
-        predicate=tvm.tir.all(1 <= h3 * 8 + h2 * 5 + h1, h3 * 8 + h2 * 5 + h1 < 224),
+        predicate=tvm.tir.all(h3 * 8 + h2 * 5 + h1 >= 1, h3 * 8 + h2 * 5 + h1 < 224),
         mode="lowerbound",
     )
 
@@ -353,13 +358,13 @@ def test_region_lower_bound_for_non_perfect_tile():
     check_region_bound(
         {h3 * 8 + h2 * 5 + h1: None},
         var_dom,
-        predicate=tvm.tir.all(1 <= h3 * 8 + h2 * 5 + h1, h3 * 8 + h1 * 2 + h2 < 224),
+        predicate=tvm.tir.all(h3 * 8 + h2 * 5 + h1 >= 1, h3 * 8 + h1 * 2 + h2 < 224),
         mode="lowerbound",
     )
     check_region_bound(
         {h3 * 8 + h2 * 5 + h1: (h3 * 8, h3 * 8 + 10)},
         var_dom,
-        predicate=tvm.tir.all(1 <= h3 * 8 + h2 * 5 + h1, h3 * 8 + h1 * 2 + h2 < 224),
+        predicate=tvm.tir.all(h3 * 8 + h2 * 5 + h1 >= 1, h3 * 8 + h1 * 2 + h2 < 224),
         mode="upperbound",
     )
 
@@ -392,9 +397,10 @@ def test_modular_set():
     x = tvm.te.var("x", dtype="int32")
     y = tvm.te.var("y", dtype="int32")
     expr = (x * 2048 + y * 16) % 7168
-    ck.verify(
-        expr, {x: tvm.arith.IntervalSet(0, 128), y: tvm.arith.IntervalSet(0, 3584)}, (0, 7152)
-    )
+    ck.verify(expr, {
+        x: tvm.arith.IntervalSet(0, 128),
+        y: tvm.arith.IntervalSet(0, 3584)
+    }, (0, 7152))
 
 
 if __name__ == "__main__":

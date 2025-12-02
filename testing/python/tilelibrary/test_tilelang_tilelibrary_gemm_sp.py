@@ -177,6 +177,7 @@ def calc_diff(x, y):
     sim = 2 * (x * y).sum() / denominator
     return 1 - sim
 
+
 def run_gemm_sp(
     kernel,
     M,
@@ -230,6 +231,7 @@ def run_gemm_sp(
         )
     print("pass")
 
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 @pytest.mark.parametrize(
@@ -248,8 +250,7 @@ def run_gemm_sp(
         (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True, True),
         (512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False, True),
         (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True),
-    ]
-)
+    ])
 def test_gemm_sp_sm90(
     M,
     N,
@@ -292,6 +293,7 @@ def test_gemm_sp_sm90(
         trans_B,
     )
 
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 @tilelang.testing.requires_cuda_compute_version_le(8, 9)
@@ -313,8 +315,7 @@ def test_gemm_sp_sm90(
         (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 1, 128, False, True),
         (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True),
         (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 3, 128, False, True),
-    ]
-)
+    ])
 def test_gemm_sp_sm80(
     M,
     N,

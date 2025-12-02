@@ -3,10 +3,11 @@ import tilelang.language as T
 from tvm.arith import Analyzer
 from tvm.ir.expr import Range
 from tvm.tir.expr import Not, Or
-from tvm.arith.analyzer import ProofStrength
+
 
 def implies(x, y):
     return Or(Not(x), y)
+
 
 def test_hard_prove():
     a = T.Var('a', T.int32)
@@ -24,38 +25,33 @@ def test_hard_prove():
 
     @T.macro
     def complex_expr_1():
-        return implies(
-            a > 0 and b > 0 and c > 0,
-            ((b - a) // c) * c + a <= b
-        )
-    
+        return implies(a > 0 and b > 0 and c > 0, ((b - a) // c) * c + a <= b)
+
     check_expr(complex_expr_1())
 
     @T.macro
     def complex_expr_2():
-        return implies(
-            a < b and b < c and a * d < b * d,
-            b * d < c * d
-        )
-    
+        return implies(a < b and b < c and a * d < b * d, b * d < c * d)
+
     check_expr(complex_expr_2())
 
     @T.macro
     def complex_expr_3():
         return implies(a >= 0 and a < 128, a // 128 == (a // 64 * 32 + a % 32 // 16 * 8) // 64)
-    
+
     check_expr(complex_expr_3())
 
     @T.macro
     def complex_expr_4():
-        return implies(
-            a >= 0 and a < 128,
-            (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 + (a % 32 // 16 + a % 2) % 2 * 8 + 16 - (a // 64 + a % 8 // 4) // 2 * 64) // 512
-            ==
-            (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 + (a % 32 // 16 + a % 2) % 2 * 8 - (a // 64 + a % 8 // 4) // 2 * 64) // 512
-        )
+        return implies(a >= 0 and a < 128,
+                       (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 +
+                        (a % 32 // 16 + a % 2) % 2 * 8 + 16 - (a // 64 + a % 8 // 4) // 2 * 64) //
+                       512 == (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 +
+                               (a % 32 // 16 + a % 2) % 2 * 8 -
+                               (a // 64 + a % 8 // 4) // 2 * 64) // 512)
 
     check_expr(complex_expr_4())
+
 
 def test_smtlib2():
 
@@ -67,10 +63,7 @@ def test_smtlib2():
 
     @T.macro
     def complex_expr_1():
-        return implies(
-            a > 0 and b > 0 and c > 0,
-            ((b - a) // c) * c + a <= b
-        )
+        return implies(a > 0 and b > 0 and c > 0, ((b - a) // c) * c + a <= b)
 
     e = complex_expr_1()
     analyzer = Analyzer()
@@ -80,6 +73,7 @@ def test_smtlib2():
     solver = z3.Solver()
     solver.from_string(smtlib2)
     assert solver.check()
+
 
 def test_bind():
     a = T.Var('a', T.int32)
