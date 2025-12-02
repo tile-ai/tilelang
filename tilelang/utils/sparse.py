@@ -19,9 +19,8 @@ def _get_cached_lib():
 
     if os.path.exists(cached_path):
         try:
-            return _import_module_from_library(name, cached_path)
+            return _import_module_from_library(name, _CACHE_DIR, is_python_module=True)
         except Exception:
-            # If loading fails, recompile
             pass
 
     # Set TORCH_CUDA_ARCH_LIST
