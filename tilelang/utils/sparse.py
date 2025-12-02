@@ -16,11 +16,10 @@ os.makedirs(_CACHE_DIR, exist_ok=True)
 
 def _get_cached_lib():
     name = 'compress_lib'
-    cached_path = os.path.join(_CACHE_DIR, f"{name}.so")
 
-    if os.path.exists(cached_path):
+    if os.path.exists(os.path.join(_CACHE_DIR, f"{name}.so")):
         try:
-            return _import_module_from_library(name, cached_path)
+            return _import_module_from_library(name, _CACHE_DIR, is_python_module=True)
         except Exception:
             # If loading fails, recompile
             pass

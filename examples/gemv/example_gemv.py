@@ -360,7 +360,7 @@ def main(do_bench: bool = True):
 
     print("Test passed!")
 
-    if not do_bench:
+    if do_bench:
         best_result = get_autotuned_kernel(N, K)
         best_config = best_result.config
         kernel = splitk_gemv_vectorized_tvm(N, K, **best_config)
