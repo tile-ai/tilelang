@@ -539,7 +539,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return vectorized_thread_loop;
 }
 
-TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
+TIR_REGISTER_TL_TILE_OP(AtomicAdd, atomicadd)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

@@ -10,6 +10,7 @@ from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
     torch_assert_close,
+    is_float8_dtype,
 )
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
@@ -125,17 +126,9 @@ class Profiler:
             if lhs is not None and rhs is not None:
                 # in case of numsplit template, the ref output may be None
                 # which means the value is invalid, so we skip the comparison
-                def is_float8(tensor: torch.Tensor) -> bool:
-                    return tensor.dtype in {
-                        torch.float8_e5m2,
-                        torch.float8_e5m2fnuz,
-                        torch.float8_e4m3fn,
-                        torch.float8_e4m3fnuz,
-                    }
-
                 torch_assert_close(
-                    lhs if not is_float8(lhs) else lhs.to(torch.float32),
-                    rhs if not is_float8(rhs) else rhs.to(torch.float32),
+                    lhs if not is_float8_dtype(lhs.dtype) else lhs.to(torch.float32),
+                    rhs if not is_float8_dtype(rhs.dtype) else rhs.to(torch.float32),
                     rtol=rtol,
                     atol=atol,
                     max_mismatched_ratio=max_mismatched_ratio,

@@ -76,17 +76,7 @@ LayoutMap RegionOpNode::InferLayout(const LayoutInferArgs &T,
   return {};
 }
 
-const Op &RegionOp::Get() {
-  static const Op &op = Op::Get("tl.region");
-  return op;
-}
-
-TVM_REGISTER_OP("tl.region")
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "region")
-    .set_attr<OpBuilderFunc>("TLOpBuilder",
-                             [](Array<PrimExpr> args) {
-                               return RegionOp(args);
-                             })
+TIR_REGISTER_TL_TILE_OP(RegionOp, region)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));

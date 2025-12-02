@@ -76,10 +76,8 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
 
     # Debug
     # tilelang.analysis.ASTPrinter()(mod)
-
     # Check if there are any invalid nested loops.
     tilelang.analysis.NestedLoopChecker()(mod)
-
     # Check if there are any invalid symbolic T.Parallel + fragment access.
     tilelang.analysis.FragmentLoopChecker()(mod)
 

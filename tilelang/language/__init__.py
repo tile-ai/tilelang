@@ -24,7 +24,15 @@ from .proxy import (
     LocalBuffer,  # noqa: F401
     Ref,  # noqa: F401
 )
-from .loop import serial, Parallel, Persistent, Pipelined  # noqa: F401
+from .loop import (
+    Parallel,  # noqa: F401
+    Persistent,  # noqa: F401
+    Pipelined,  # noqa: F401
+    serial,  # noqa: F401
+    unroll,  # noqa: F401
+    Serial,  # noqa: F401
+    Unroll,  # noqa: F401
+)
 from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
@@ -51,7 +59,7 @@ from .allocate import (
 )
 from .copy import copy, c2d_im2col  # noqa: F401
 from .gemm import GemmWarpPolicy, gemm, gemm_v1, gemm_v2  # noqa: F401
-from .experimental.gemm_sp import gemm_sp  # noqa: F401
+from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401
 from .fill import fill, clear  # noqa: F401
 from .reduce import (
     reduce,  # noqa: F401

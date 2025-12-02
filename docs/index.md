@@ -33,6 +33,7 @@ tutorials/auto_tuning
 deeplearning_operators/elementwise
 deeplearning_operators/gemv
 deeplearning_operators/matmul
+deeplearning_operators/matmul_sparse
 deeplearning_operators/deepseek_mla
 :::
 

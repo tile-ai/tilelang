@@ -140,6 +140,7 @@ private:
 
   std::unordered_map<const VarNode *, std::string> fragment_shapes;
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
+  std::unordered_map<const VarNode *, IntImm> unroll_factor;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,

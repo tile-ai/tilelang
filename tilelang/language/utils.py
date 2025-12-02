@@ -7,7 +7,7 @@ from tilelang import language as T
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
     """Create a tl.region call for a BufferLoad and extents."""
     access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
-    return T.call_intrin("handle", op.Op.get("tl.region"), buffer, access_type, *args)
+    return T.call_intrin("handle", op.Op.get("tl.tileop.region"), buffer, access_type, *args)
 
 
 def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: list[PrimExpr]):

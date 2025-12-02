@@ -116,7 +116,7 @@ def gemm_v1(
 ):
     """GEMM v1: use op tl.gemm."""
     return _gemm_impl(
-        "tl.gemm",
+        "tl.tileop.gemm",
         A,
         B,
         C,
@@ -145,7 +145,7 @@ def gemm_v2(
 ):
     """GEMM v2: use op tl.gemm_py."""
     return _gemm_impl(
-        "tl.gemm_py",
+        "tl.tileop.gemm_py",
         A,
         B,
         C,
