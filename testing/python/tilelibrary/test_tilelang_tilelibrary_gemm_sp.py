@@ -1,3 +1,4 @@
+import pytest
 import torch
 import tilelang
 import tilelang.testing
@@ -165,7 +166,6 @@ def calc_diff(x, y):
     sim = 2 * (x * y).sum() / denominator
     return 1 - sim
 
-
 def run_gemm_sp(
     kernel,
     M,
@@ -216,8 +216,27 @@ def run_gemm_sp(
         torch.testing.assert_close(C_sp, C, atol=1e-3, rtol=1e-3)
     print("pass")
 
-
-def run_gemm_sp_sm90(
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+@pytest.mark.parametrize(
+    "M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K, num_stages, num_threads, trans_A, trans_B",
+    [
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 32, 2, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 32, 0, 256, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 2, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 128, 128, 128, 0, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 128, 128, 128, 2, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 128, 256, 0, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 128, 256, 2, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False, True),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True, True),
+        (512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False, True),
+        (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True),
+    ]
+)
+def test_gemm_sp_sm90(
     M,
     N,
     K,
@@ -229,8 +248,8 @@ def run_gemm_sp_sm90(
     block_K,
     num_stages,
     num_threads,
-    trans_A=False,
-    trans_B=False,
+    trans_A,
+    trans_B,
 ):
     kernel = matmul_sp_sm90(
         M,
@@ -259,8 +278,30 @@ def run_gemm_sp_sm90(
         trans_B,
     )
 
-
-def run_gemm_sp_sm80(
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@tilelang.testing.requires_cuda_compute_version_le(8, 9)
+@pytest.mark.parametrize(
+    "M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K, num_stages, num_threads, trans_A, trans_B",
+    [
+        (512, 1024, 768, "float16", "float32", "float32", 32, 32, 32, 0, 32, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 0, 32, False, True),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32, False, True),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False, True),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 1, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 2, 128, False, False),
+        (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 3, 128, False, False),
+        (512, 1024, 768, "int8", "int32", "int32", 32, 32, 64, 0, 32, False, True),
+        (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 0, 32, False, True),
+        (512, 1024, 768, "int8", "int32", "int32", 128, 128, 128, 0, 128, False, True),
+        (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 1, 128, False, True),
+        (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True),
+        (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 3, 128, False, True),
+    ]
+)
+def test_gemm_sp_sm80(
     M,
     N,
     K,
@@ -272,8 +313,8 @@ def run_gemm_sp_sm80(
     block_K,
     num_stages,
     num_threads,
-    trans_A=False,
-    trans_B=False,
+    trans_A,
+    trans_B,
 ):
     kernel = matmul_sp_sm80(
         M,
@@ -301,61 +342,6 @@ def run_gemm_sp_sm80(
         trans_A,
         trans_B,
     )
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_gemm_sp_sm90():
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 32, 2, 128)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 32, 0, 256)
-
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 2, 128)
-
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 128, 128, 128, 0, 128)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 128, 128, 128, 2, 128)
-
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 128, 256, 0, 128)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 128, 256, 2, 128)
-
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False,
-                     True)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True,
-                     False)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True,
-                     True)
-
-    run_gemm_sp_sm90(512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False,
-                     True)
-    run_gemm_sp_sm90(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True)
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
-@tilelang.testing.requires_cuda_compute_version_le(8, 9)
-def test_gemm_sp_sm80():
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 32, 0, 32)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128)
-
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 0, 32, False,
-                     True)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32, False,
-                     True)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False,
-                     True)
-
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 1, 128)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 2, 128)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 3, 128)
-
-    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 32, 32, 64, 0, 32, False, True)
-    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 0, 32, False, True)
-    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 128, 128, 128, 0, 128, False, True)
-
-    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 1, 128, False, True)
-    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True)
-    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 3, 128, False, True)
 
 
 if __name__ == "__main__":
