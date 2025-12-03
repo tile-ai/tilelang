@@ -143,6 +143,8 @@ class Ref:
 
     def load(self):
         return self.bufload
+class UnrollForWithStep(SerialForWithStep):
+    ...
 
 
 # Python 3.9 compatibility: avoid PEP 604 unions at runtime
@@ -185,8 +187,7 @@ class Builder(BaseBuilder):
 
     @classmethod
     def current(cls) -> Self:
-        builder = thread_local_storage.builder
-        assert builder is not None, "No active Builder found in the current thread."
+        builder = getattr(thread_local_storage, 'builder', None)
         return builder
 
     @contextmanager
@@ -313,7 +314,7 @@ class Builder(BaseBuilder):
     def ctx_for(self, it):
         self.check_continue_break()
         it = unwrap_expr(it)
-        if isinstance(it, SerialForWithStep):
+        if isinstance(it, (SerialForWithStep, UnrollForWithStep)):
             # Validate and compute the trip count before constructing the frame
             if isinstance(it.step, (int, IntImm)):
                 step_value = it.step if isinstance(it.step, int) else it.step.value
@@ -328,7 +329,14 @@ class Builder(BaseBuilder):
                     f'Using a non-constant step `{it.step}` in stepped serial may lead to undefined behavior in tilelang'
                 )
                 real_stop = tir.ceildiv(it.stop - it.start, it.step)
-            real_frame = tir.serial(real_stop, annotations=it.annotations)
+            if isinstance(it, UnrollForWithStep):
+                real_frame = tir.unroll(real_stop, annotations=it.annotations)
+            elif isinstance(it, SerialForWithStep):
+                real_frame = tir.serial(real_stop, annotations=it.annotations)
+            else:
+                raise TypeError(
+                    f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
+                    "range, T.serial, T.unroll, T.grid, T.parallel, T.vectorized, T.thread_binding")
             with self.with_frame(real_frame) as v:
                 IRBuilder.name('_tmp', v)
                 yield it.start + v * it.step
@@ -500,7 +508,7 @@ class Builder(BaseBuilder):
         else:
             return super().aug_assign_slice(op, target, sl, aug_value)
 
-    def boolop(self, op, left, right):
+    def boolop(self, op, left, right=None):
         left = unwrap_cond(left)
         if isinstance(left, PrimExpr):
             with self.with_frame(BoolOpFrame()):
@@ -508,6 +516,8 @@ class Builder(BaseBuilder):
                     return tir.And(left, right())
                 if op == 'Or':
                     return tir.Or(left, right())
+                if op == 'Not':
+                    return tir.Not(left)
             raise RuntimeError(f"Unsupported boolean operator: {op}")
         else:
             return super().boolop(op, left, right)
@@ -704,7 +714,7 @@ class Macro(Generic[_P, _T]):
         return self.ir_gen.source
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _T:
-        builder = Builder.current()
+        builder = Builder.current() or Builder()
         with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res

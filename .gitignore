@@ -108,3 +108,6 @@ cmake-build-*/
 
 # pre-commit cache
 .pre-commit-cache/*
+
+# host checks logs
+maint/host_checks/logs/*

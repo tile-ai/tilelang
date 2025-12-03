@@ -80,8 +80,8 @@ def compile_cuda(code,
     file_target = path_target if path_target else temp_target
     cmd = [get_nvcc_compiler()]
     cmd += [f"--{target_format}", "-O3"]
-    if kernels_output_dir is not None:
-        cmd += ["-lineinfo"]
+    # Always include line info for better profiling and mapping
+    cmd += ["-lineinfo"]
     if isinstance(arch, list):
         cmd += arch
     elif isinstance(arch, str):

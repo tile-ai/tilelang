@@ -12,7 +12,6 @@
 #include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
-#include "region.h"
 #include "tcgen5_meta.h"
 #include "utils.h"
 
@@ -42,8 +41,6 @@ using namespace tir;
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
  *      (optional) kPack (Int), (optional) wg_wait (Int)]
- * @param vmap Mapping from access pointer vars to Buffer objects used to
- *   resolve the Buffer corresponding to each pointer argument.
  *
  * @note If `kPack` is provided it must be 1; otherwise the constructor
  *       fails with an ICHECK (runtime assertion). No other validation is
@@ -53,12 +50,12 @@ using namespace tir;
 
 // MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
 
-Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
+Gemm::Gemm(Array<PrimExpr> args) {
   ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
 
-  node->aRegion_ = NormalizeToBufferRegion(args[0], vmap);
-  node->bRegion_ = NormalizeToBufferRegion(args[1], vmap);
-  node->cRegion_ = NormalizeToBufferRegion(args[2], vmap);
+  node->aRegion_ = NormalizeToBufferRegion(args[0]);
+  node->bRegion_ = NormalizeToBufferRegion(args[1]);
+  node->cRegion_ = NormalizeToBufferRegion(args[2]);
 
   node->a_ = node->aRegion_->buffer;
   node->b_ = node->bRegion_->buffer;
@@ -83,11 +80,14 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   if (args.size() > 15) {
     node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
-  node->mbarPtr_ = args[16];
-  if (node->mbarPtr_.as<CallNode>()) {
-    node->mbar_ = vmap[GetVarFromAccessPtr(node->mbarPtr_)];
-  } else {
-    node->mbar_ = std::nullopt;
+  if (args.size() > 16) {
+    if (const auto *load = args[16].as<BufferLoadNode>()) {
+      node->mbarRegion_ =
+          NormalizeToBufferRegion(Downcast<BufferLoad>(args[16]));
+      node->mbar_ = node->mbarRegion_->buffer;
+    } else {
+      node->mbar_ = std::nullopt;
+    }
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
@@ -500,11 +500,13 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
     auto C_buffer = T.buffer_remap.count(c_) ? T.buffer_remap[c_] : c_;
     Array<PrimExpr> new_args;
+    auto mbarPtr =
+        MakeAccessPtrFromRegion(mbarRegion_, /*rw*/ 3, /*require_2d*/ true);
     new_args.push_back(StringImm(ss.str()));
     new_args.push_back(Aptr);
     new_args.push_back(Bptr);
     new_args.push_back(BufferLoad(C_buffer, cCoords_));
-    new_args.push_back(mbarPtr_);
+    new_args.push_back(mbarPtr);
     new_args.push_back(clearAccum_);
     auto new_call = Call(DataType::Handle(), builtin::call_extern(), new_args);
 
@@ -824,7 +826,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   return results;
 }
 
-TIR_REGISTER_TL_OP(Gemm, gemm)
+TIR_REGISTER_TL_TILE_OP(Gemm, gemm)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

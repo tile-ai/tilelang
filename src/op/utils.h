@@ -16,10 +16,10 @@ namespace tl {
 
 using namespace tir;
 
-// Normalize an argument (BufferRegion/BufferLoad/tl.region/tvm_access_ptr)
+// Normalize an argument (BufferRegion/BufferLoad/tl.region)
 // to BufferRegion so ops can uniformly consume regions.
-TVM_DLL BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
-                                             const BufferMap &vmap);
+// Note: tvm_access_ptr is no longer supported here.
+TVM_DLL BufferRegion NormalizeToBufferRegion(const PrimExpr &arg);
 
 // Build a tvm_access_ptr(handle) from a BufferRegion.
 // - If `require_2d` is true, checks buffer ndim >= 2.

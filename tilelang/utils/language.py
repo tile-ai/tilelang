@@ -1,10 +1,10 @@
 from __future__ import annotations
 from tvm.tir import Buffer, BufferLoad, BufferRegion, PrimExpr
+from tilelang.language.utils import region as _make_region_call
 from functools import reduce
 from tvm import IRModule, DataType
 from tvm.tir import PrimFunc
 from tvm import ir, tir
-
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.
 
@@ -159,7 +159,8 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
     return func
 
 
-def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> tir.BufferRegion | None:
+def get_buffer_region_from_load(buffer_load: tir.BufferLoad,
+                                extents: list[PrimExpr] | None = None) -> tir.BufferRegion | None:
     """
     Get the buffer region from a buffer load.
 
@@ -170,45 +171,71 @@ def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> tir.BufferRegion
     buffer, indices = buffer_load.buffer, buffer_load.indices
     regions = []
     found_ramp: bool = False
-    for indice in indices:
+
+    if extents is not None:
+        assert len(extents) == len(indices), "extents should have the same length as indices"
+    for i, indice in enumerate(indices):
         if isinstance(indice, tir.Ramp):
+            assert extents is None, "extents should be provided for BufferLoad with Ramp indices"
             regions.append(ir.Range.from_min_extent(indice.base, indice.lanes))
             found_ramp = True
         elif isinstance(indice, tir.PrimExpr):
-            regions.append(ir.Range.from_min_extent(indice, 1))
+            if extents is not None:
+                regions.append(ir.Range.from_min_extent(indice, extents[i]))
+                found_ramp = True
+            else:
+                regions.append(ir.Range.from_min_extent(indice, 1))
         else:
-            raise ValueError("Unsupported type: ", type(indice))
+            raise ValueError(f"Unsupported type: {type(indice)} for index {i}")
     if found_ramp:
         return tir.BufferRegion(buffer, regions)
     else:
         return None
 
 
-def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
+def to_buffer_region(obj: Buffer | BufferLoad | BufferRegion | tir.Var,
+                     access_type: str = "rw",
+                     extents: list[PrimExpr] | None = None) -> PrimExpr | BufferRegion:
     """
-    Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
+    Convert to/from the tl.region representation.
 
-    - Buffer -> full-region BufferRegion covering entire shape
-    - BufferRegion -> returned as-is
-    - BufferLoad -> best-effort convert via get_buffer_region_from_load;
-      if scalar, fall back to 1-sized ranges at given indices
+    - Buffer/BufferLoad/BufferRegion -> returns a tl.region call (PrimExpr)
+    - tl.region Call -> returns the decoded BufferRegion for analysis
     """
+    from tilelang.language.frame import has_let_value, get_let_value
+    if isinstance(obj, tir.Var) and has_let_value(obj):
+        obj = get_let_value(obj)
+    # Encode into tl.region call (when extents is provided), otherwise return BufferRegion for analysis
     if isinstance(obj, tir.BufferRegion):
-        return obj
+        if extents is None:
+            return obj
+        mins = [r.min for r in obj.region]
+        exts = [r.extent for r in obj.region]
+        assert len(extents) == len(exts)
+        exts = [tir.min(exts[i], extents[i]) for i in range(len(exts))]
+        return _make_region_call(tir.BufferLoad(obj.buffer, mins), access_type, *exts)
     if isinstance(obj, tir.Buffer):
         mins = [tir.IntImm("int32", 0) for _ in obj.shape]
-        ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
-        return tir.BufferRegion(obj, ranges)
+        if extents is None:
+            ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
+            return tir.BufferRegion(obj, ranges)
+        exts = list(extents)
+        return _make_region_call(tir.BufferLoad(obj, mins), access_type, *exts)
     if isinstance(obj, tir.BufferLoad):
-        region = get_buffer_region_from_load(obj)
-        if region is not None:
-            return region
-        # Fallback: scalar load -> 1-sized ranges at indices
-        mins = [idx for idx in obj.indices]
-        ones = [tir.IntImm("int32", 1) for _ in obj.indices]
-        ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-        return tir.BufferRegion(obj.buffer, ranges)
-    raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
+        if extents is None:
+            region = get_buffer_region_from_load(obj)
+            if region is not None:
+                return region
+            mins = [idx for idx in obj.indices]
+            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
+            return tir.BufferRegion(obj.buffer, ranges)
+        exts = list(extents)
+        if len(obj.indices) > len(exts):
+            exts = [tir.IntImm("int32", 1) for _ in range(len(obj.indices) - len(exts))] + exts
+        assert len(obj.indices) == len(exts)
+        return _make_region_call(obj, access_type, *exts)
+    raise ValueError(f"Unsupported argument type for to_buffer_region: {type(obj)}")
 
 
 def retrieve_shape(obj: Buffer | BufferRegion | BufferLoad) -> list:

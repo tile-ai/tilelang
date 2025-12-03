@@ -466,5 +466,18 @@ def test_buffer_slice_step():
         pass
 
 
+def test_boolop():
+    a = Var('a', 'int32')
+    b = Var('b', 'int32')
+    c = Var('c', 'int32')
+    d = Var('d', 'int32')
+
+    @T.macro
+    def cond():
+        return not (a < b and b < c and a * d < b * d) or b * d < c * d
+
+    cond()
+
+
 if __name__ == '__main__':
     tilelang.testing.main()

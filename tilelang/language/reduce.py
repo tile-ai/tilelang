@@ -2,7 +2,7 @@
 from __future__ import annotations
 from tvm import tir
 from tilelang.language import copy, macro, alloc_shared, alloc_fragment
-from tilelang.language.utils import buffer_to_tile_region
+from tilelang.utils.language import to_buffer_region
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.script.ir_builder import IRBuilder
 
@@ -11,6 +11,9 @@ def _legalize_dim(buffer: tir.Buffer, dim: int):
     if dim < 0:
         dim = len(buffer.shape) + dim
     return dim
+
+
+_REDUCE_OP_KEY = "tl.tileop.reduce"
 
 
 def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool):
@@ -50,9 +53,9 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             copy(buffer, red_frag_in)
             tir.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(red_frag_in, "r"),
-                buffer_to_tile_region(red_frag_out, "w"),
+                tir.op.Op.get(_REDUCE_OP_KEY),
+                to_buffer_region(red_frag_in, access_type="r"),
+                to_buffer_region(red_frag_out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -65,9 +68,9 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             copy(buffer, red_frag_in)
             tir.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(red_frag_in, "r"),
-                buffer_to_tile_region(out, "w"),
+                tir.op.Op.get(_REDUCE_OP_KEY),
+                to_buffer_region(red_frag_in, access_type="r"),
+                to_buffer_region(out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -78,9 +81,9 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
 
             tir.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(buffer, "r"),
-                buffer_to_tile_region(red_frag_out, "w"),
+                tir.op.Op.get(_REDUCE_OP_KEY),
+                to_buffer_region(buffer, access_type="r"),
+                to_buffer_region(red_frag_out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -89,9 +92,9 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
         elif is_fragment(buffer) and is_fragment(out):
             tir.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.reduce"),
-                buffer_to_tile_region(buffer, "r"),
-                buffer_to_tile_region(out, "w"),
+                tir.op.Op.get(_REDUCE_OP_KEY),
+                to_buffer_region(buffer, access_type="r"),
+                to_buffer_region(out, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
@@ -245,9 +248,9 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     copy(src, cumsum_smem)
     tir.call_intrin(
         "handle",
-        tir.op.Op.get("tl.cumsum"),
-        buffer_to_tile_region(cumsum_smem, "r"),
-        buffer_to_tile_region(cumsum_smem, "w"),
+        tir.op.Op.get("tl.tileop.cumsum"),
+        to_buffer_region(cumsum_smem, access_type="r"),
+        to_buffer_region(cumsum_smem, access_type="w"),
         dim,
         reverse,
     )
@@ -299,9 +302,9 @@ def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse
         return cumsum_fragment(src, dst, dim, reverse)
     return tir.call_intrin(
         "handle",
-        tir.op.Op.get("tl.cumsum"),
-        buffer_to_tile_region(src, "r"),
-        buffer_to_tile_region(dst, "w"),
+        tir.op.Op.get("tl.tileop.cumsum"),
+        to_buffer_region(src, access_type="r"),
+        to_buffer_region(dst, access_type="w"),
         dim,
         reverse,
     )
@@ -309,7 +312,7 @@ def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse
 
 def finalize_reducer(reducer: tir.Buffer):
     """
-    Finalize a reducer buffer by emitting the `tl.finalize_reducer` intrinsic.
+    Finalize a reducer buffer by emitting the `tl.tileop.finalize_reducer` intrinsic.
 
     This returns a TVM `tir.Call` handle that finalizes the given reducer using its writable pointer.
     The call does not modify Python objects directly; it produces the low-level intrinsic call used by the IR.
@@ -322,8 +325,8 @@ def finalize_reducer(reducer: tir.Buffer):
     """
     return tir.call_intrin(
         "handle",
-        tir.op.Op.get("tl.finalize_reducer"),
-        reducer.access_ptr("w"),
+        tir.op.Op.get("tl.tileop.finalize_reducer"),
+        to_buffer_region(reducer, access_type="w"),
     )
 
 

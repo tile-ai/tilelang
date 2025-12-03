@@ -125,7 +125,7 @@ class ReduceOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceOp, TileOperator,
                                              ReduceOpNode);
-  TVM_DLL ReduceOp(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL ReduceOp(Array<PrimExpr> args);
   static const Op &Get();
 };
 
@@ -163,7 +163,7 @@ class CumSumOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CumSumOp, TileOperator,
                                              CumSumOpNode);
-  TVM_DLL CumSumOp(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL CumSumOp(Array<PrimExpr> args);
   static const Op &Get();
 };
 

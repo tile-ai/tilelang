@@ -12,8 +12,7 @@ namespace tl {
 
 using namespace tir;
 
-BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
-                                     const BufferMap &vmap) {
+BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
   // Case 1: Already a BufferRegion
   if (arg->IsInstance<BufferRegionNode>()) {
     return Downcast<BufferRegion>(arg);
@@ -38,23 +37,15 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
     return BufferRegion(load->buffer, ranges);
   }
 
-  // Case 3: Call nodes
+  // Case 3: tl.region(...) — reconstruct via RegionOp (bridge)
   if (const auto *call = arg.as<CallNode>()) {
-    // tl.region(...) — reconstruct via RegionOp
     if (call->op.same_as(RegionOp::Get())) {
-      RegionOp region(call->args, vmap);
+      RegionOp region(call->args);
       return BufferRegion(region->GetBuffer(), region->GetRanges());
     }
-    // builtin.tvm_access_ptr(...) — map var to Buffer and take full region
-    if (call->op.same_as(builtin::tvm_access_ptr())) {
-      Var var = Downcast<Var>(call->args[1]);
-      Buffer buf = vmap.at(var);
-      Array<Range> ranges;
-      for (PrimExpr extent : buf->shape) {
-        ranges.push_back(Range(IntImm(extent->dtype, 0), extent));
-      }
-      return BufferRegion(buf, ranges);
-    }
+    LOG(FATAL) << "Unsupported argument for BufferRegion (expect "
+                  "BufferLoad/BufferRegion/tl.region): "
+               << arg;
   }
 
   LOG(FATAL) << "Unsupported argument for BufferRegion: " << arg;

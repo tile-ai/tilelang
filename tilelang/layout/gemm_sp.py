@@ -17,7 +17,7 @@ def decompose_col_major(index_1d: int, basis: list[int]) -> list[int]:
     return res
 
 
-def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
+def make_cutlass_metadata_layout_sm90(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
     """Make a layout of metadata that is compatible with cutlass sm90 compression kernel. Note that layout atom is the same for smem and gmem.
 
     Args:
@@ -30,7 +30,7 @@ def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, b
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
         warnings.warn(f"block_k {block_k} is too large, set to 128 for {mma_dtype}.", stacklevel=2)
-    if mma_dtype not in ["float16", "bfloat16", "float32", "int8", "float8"]:
+    if mma_dtype not in ["float16", "bfloat16", "float32", "int8", "float8_e4m3", "float8_e5m2"]:
         raise NotImplementedError(f"Unsupported dtype: {mma_dtype}")
 
     if buffer.dtype not in ["uint8", "int8"]:
@@ -41,7 +41,8 @@ def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, b
         "bfloat16": 16,
         "float32": 32,
         "int8": 8,
-        "float8": 8,
+        "float8_e4m3": 8,
+        "float8_e5m2": 8,
     }
 
     # ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_config.inl#L108-L117
@@ -75,8 +76,8 @@ def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, b
         shape_i, shape_k = shape_ik[:3], shape_ik[3:]
         stride_i, stride_k = stride_ik[:3], stride_ik[3:]
     elif bits_map[mma_dtype] == 8:
-        shape_i, shape_k = [64], [BlockK]
-        stride_i, stride_k = [BlockK], [1]
+        shape_i, shape_k = [64], [block_k // 8]
+        stride_i, stride_k = [block_k // 8], [1]
     else:
         raise NotImplementedError(f"Unknown mma type {mma_dtype}")
 
@@ -103,54 +104,48 @@ def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, b
     return T.Layout(shape, transform)
 
 
-def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
+def make_cutlass_metadata_layout_sm8x(buffer: tvm.tir.Buffer, mma_dtype: str):
     """Make a layout of metadata that is compatible with cutlass sm8x compression kernel. Note that layout atom is the same for smem and gmem.
-
+        ref: https://github.com/pytorch/pytorch/blob/d0c24b392cbb7b213d22e42c52c6c2d1ac2da1bd/torch/sparse/_semi_structured_conversions.py#L5
     Args:
         buffer: metadata buffer shape, for sm80 it should be a 16bit type
     """
 
-    # ref: https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/gemm/threadblock/default_mma_core_sparse_sm80.h#L651
-    #      https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/layout/matrix.h#L405
-    #      https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/gemm/warp/mma_sparse_tensor_op.h#L172
-
     if mma_dtype in ["float16", "bfloat16"] and buffer.dtype not in ["uint16", "int16"]:
         raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
 
-    if mma_dtype in ["float8", "int8", "uint8"] and buffer.dtype not in ["uint32", "int32"]:
+    if mma_dtype in ["float8_e4m3", "float8_e5m2", "int8", "uint8"
+                    ] and buffer.dtype not in ["uint32", "int32"]:
         raise ValueError(f"metadata should be 32 bit, got {buffer.dtype}")
 
-    kInterleaved = 2
-    stride = buffer.shape[0] * kInterleaved
+    m, k = buffer.shape
+    group = 32 if buffer.dtype.bits == 16 else 16
+    interweave = 4 if buffer.dtype.bits == 16 else 2
 
     def ColumnMajorInterleaved(i: int, j: int) -> int:
-        column_major = j // kInterleaved
-        column_minor = j % kInterleaved
-        return column_major * stride + i * kInterleaved + column_minor
+        i = i // group * group + (i % 8) * interweave + (i % group) // 8
+        topright = (1 - (i % 2)) & (j % 2)
+        bottomleft = (i % 2) & (1 - (j % 2))
+        i += topright - bottomleft
+        j -= topright - bottomleft
+        offset = (j // 2) * m * 2 + i * 2 + (j % 2)
+        return offset // k, offset % k
 
     return T.Layout(buffer.shape, ColumnMajorInterleaved)
 
 
-def make_metadata_layout(buffer: tvm.tir.Buffer,
-                         mma_dtype: str = "float16",
-                         backend: str = 'cutlass',
-                         arch: str | None = None,
-                         **extra_args):
+def make_cutlass_metadata_layout(buffer: tvm.tir.Buffer,
+                                 mma_dtype: str = "float16",
+                                 arch: str | None = None,
+                                 **extra_args):
     if arch is None:
         arch = nvcc.get_target_compute_version()
 
     compute_version = nvcc.parse_compute_version(arch)
 
     if compute_version >= (9, 0):
-        if backend == 'cutlass':
-            return _make_metadata_layout_sm90_cutlass(
-                buffer=buffer, mma_dtype=mma_dtype, **extra_args)
-        else:
-            raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
+        return make_cutlass_metadata_layout_sm90(buffer=buffer, mma_dtype=mma_dtype, **extra_args)
     elif compute_version >= (8, 0):
-        if backend == 'cutlass':
-            return _make_metadata_layout_sm8x_cutlass(buffer=buffer, mma_dtype=mma_dtype)
-        else:
-            raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
+        return make_cutlass_metadata_layout_sm8x(buffer=buffer, mma_dtype=mma_dtype)
     else:
         raise NotImplementedError(f"Unsupported architecture: {arch}")

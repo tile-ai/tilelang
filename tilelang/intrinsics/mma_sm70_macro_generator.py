@@ -5,7 +5,7 @@ from tvm import DataType
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion
 from tilelang import tvm as tvm
 from tvm.runtime import convert
-from tilelang.utils import is_fragment, to_buffer_region
+from tilelang.utils import is_fragment
 from tilelang.intrinsics.mma_sm70_layout import (
     shared_16x4_to_mma_a_32x4_layout,
     shared_4x16_to_mma_b_32x4_layout,
@@ -207,7 +207,7 @@ class TensorCoreIntrinEmitter:
         mma_load_layout = mma_load_a_32x4_to_shared_16x4_layout
 
         # legalize shared buffer to region
-        A_region = to_buffer_region(A_shared_buf)
+        A_region = self._legalize_to_buffer_region(A_shared_buf)
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
@@ -248,7 +248,7 @@ class TensorCoreIntrinEmitter:
         mma_load_layout = mma_load_b_32x4_to_shared_16x4_layout_trans if b_transposed else mma_load_b_32x4_to_shared_4x16_layout
 
         # legalize shared buffer to region
-        B_region = to_buffer_region(B_shared_buf)
+        B_region = self._legalize_to_buffer_region(B_shared_buf)
         B_buf = B_region.buffer
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
