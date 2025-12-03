@@ -1,6 +1,5 @@
 # For intranode only
 # This op is distributed
-### TILELANG_USE_DISTRIBUTED=1 python combine.py
 
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder to path
@@ -14,7 +13,6 @@ from utils import Config, gen_inputs  # noqa: F403
 from argparse import ArgumentParser
 
 from get_dispatch_layout import get_dispatch_layout
-from dispatch import intranode_dispatch
 
 # tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
@@ -22,12 +20,13 @@ os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 @tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 def cached_notify_combine_kernel(
-    num_recv_tokens,
     num_ranks,
     num_sms,
 ):
     num_channels = num_sms // 2
     threads = max(128, 32 * num_ranks)
+
+    num_recv_tokens = T.dynamic('num_recv_tokens')
 
     @T.prim_func
     def cached_notify_combine_main(
@@ -41,7 +40,6 @@ def cached_notify_combine_kernel(
             tx = T.get_thread_binding()
 
             if bx == 0:  # clearing channel_head/tail_idx buffers
-                # note that the buffer layout here is slightly different from DeepEP
                 T.sync_blocks(barrier_signal)
                 T.clear(channel_head_idx)
                 T.clear(channel_tail_idx)
@@ -85,7 +83,6 @@ def cached_notify_combine_kernel(
 def cached_notify_combine(
     num_ranks,
     num_sms,
-    num_recv_tokens,  #! means the original #tokens on each rank here
     ##### symm buffers #####
     send_head: torch.Tensor,
     channel_head_idx: torch.Tensor,
@@ -93,15 +90,10 @@ def cached_notify_combine(
     barrier_signal: torch.Tensor,    
     allocator
 ):
-    kernel = cached_notify_combine_kernel(num_recv_tokens, num_ranks, num_sms)
+    kernel = cached_notify_combine_kernel(num_ranks, num_sms)
     kernel.initialize(allocator=allocator)
 
-    kernel(
-        send_head,
-        channel_head_idx,
-        channel_tail_idx,
-        barrier_signal,
-    )
+    kernel(send_head, channel_head_idx, channel_tail_idx, barrier_signal)
 
 
 @tilelang.jit(
@@ -342,10 +334,18 @@ def combine_kernel(
     return combine_main
 
 
-def intranode_combine(rank: int, allocator, x, topk_weights, src_idx, 
-    rank_prefix_matrix, channel_prefix_matrix, send_head, 
-    channel_head_idx, channel_tail_idx, barrier_signal, channel_x_buffers, channel_src_idx_buffers, channel_topk_weights_buffers,
-    config=None):
+def intranode_combine(
+    rank: int, 
+    allocator, 
+    symm_buffers,
+    x,
+    config,
+    handle,
+    topk_weights, 
+):
+    assert handle is not None
+    rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, _, send_head = handle  
+    barrier_signal, _, _, _, _, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, _, channel_topk_weights_buffers = symm_buffers
 
     # acquire_shapes
     num_tokens, hidden = x.shape
@@ -353,24 +353,14 @@ def intranode_combine(rank: int, allocator, x, topk_weights, src_idx,
     num_ranks, num_channels = channel_prefix_matrix.shape
     num_recv_tokens = send_head.shape[0]
     
-    # Default config
-    config = Config.get_combine_config(num_ranks) if config is None else config
-    
-    ### notify combine ###
-    kernel1 = cached_notify_combine_kernel(num_recv_tokens, num_ranks, config.num_sms)
-    kernel1.initialize(allocator=allocator)
-    kernel1(
-        send_head,
-        channel_head_idx,
-        channel_tail_idx,
-        barrier_signal,
-    )
+    # notify combine
+    cached_notify_combine(num_ranks, config.num_sms, send_head, channel_head_idx, channel_tail_idx, barrier_signal, allocator)
 
-    ### combine ###
+    # combine
     recv_x = torch.empty((num_recv_tokens, hidden), dtype=x.dtype, device='cuda')
     recv_topk_weights = torch.empty((num_recv_tokens, num_topk), dtype=torch.float32, device='cuda')
 
-    kernel2 = combine_kernel(
+    kernel = combine_kernel(
         rank, num_ranks,
         num_recv_tokens,
         config.num_max_nvl_chunked_send_tokens,
@@ -380,15 +370,15 @@ def intranode_combine(rank: int, allocator, x, topk_weights, src_idx,
         config.num_sms,
         dtype='bfloat16'
     )
-    kernel2.initialize(allocator=allocator)
-    kernel2(
+    kernel.initialize(allocator=allocator)
+    kernel(
         x,
         topk_weights,
-        src_idx,
+        recv_src_idx,
         recv_x,
         recv_topk_weights,
         rank_prefix_matrix,
-        channel_prefix_matrix,
+        recv_channel_prefix_matrix,
         send_head,
         channel_head_idx,
         channel_tail_idx,
@@ -396,119 +386,4 @@ def intranode_combine(rank: int, allocator, x, topk_weights, src_idx,
         channel_src_idx_buffers,
         channel_topk_weights_buffers,
     )
-
     return recv_x, recv_topk_weights
-
-
-def test_intranode_combine(
-    num_tokens: int,
-    hidden: int,
-    num_topk: int,
-    num_experts: int,
-    rank: int,
-    num_ranks: int,
-    expert_alignment: int,
-    group: torch.distributed.ProcessGroup,
-):
-    try: 
-        import deep_ep  # noqa: F403
-    except ModuleNotFoundError as e:
-        raise ModuleNotFoundError("Please install DeepEP to run this test.")
-
-    allocator = tilelang.get_allocator(
-        size=2**30,
-        device="cuda",
-        is_distributed=True,
-        local_rank=rank,
-        num_local_ranks=num_ranks,
-        group=group)
-
-    x, topk_idx, topk_weights, rank_idx = gen_inputs(num_tokens, hidden, num_topk, num_experts, num_ranks)
-    buffer = deep_ep.Buffer(group, num_nvl_bytes=2**30)
-    
-    if rank == 0: 
-        print('get dispatch layout...')
-    ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = buffer.get_dispatch_layout(topk_idx, num_experts)
-    num_tokens_per_rank, _, num_tokens_per_expert, is_token_in_rank = get_dispatch_layout(topk_idx, num_experts, num_ranks)
-    assert torch.equal(num_tokens_per_expert, ref_num_tokens_per_expert), \
-        f"num_tokens_per_expert mismatch, max err: {(num_tokens_per_expert - ref_num_tokens_per_expert).abs().max()}"
-    assert torch.equal(is_token_in_rank, ref_is_token_in_rank), \
-        "is_token_in_rank mismatch"
-    assert torch.equal(num_tokens_per_rank, ref_num_tokens_per_rank), \
-        f"num_tokens_per_rank mismatch, max err: {(num_tokens_per_rank - ref_num_tokens_per_rank).abs().max()}"
-
-    if rank == 0: 
-        print('intranode dispatch...')
-    
-    ref_recv_x, ref_recv_topk_idx, ref_recv_topk_weights, ref_num_recv_tokens_per_expert_list, ref_handle, event = \
-        buffer.dispatch(x, None, ref_num_tokens_per_rank, None, ref_is_token_in_rank, ref_num_tokens_per_expert, topk_idx, topk_weights, expert_alignment)
-
-    recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, symm_buffers = \
-        intranode_dispatch(rank, allocator, x, None, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, None)
-
-    assert torch.equal(recv_x, ref_recv_x), f'recv_x mismatch, max err: {(recv_x - ref_recv_x).abs().max()}'
-    assert torch.equal(recv_topk_idx, ref_recv_topk_idx), f'recv_topk_idx mismatch, max err: {(recv_topk_idx - ref_recv_topk_idx).abs().max()}'
-    assert torch.equal(recv_topk_weights, ref_recv_topk_weights), f'recv_topk_weights mismatch, max err: {(recv_topk_weights - ref_recv_topk_weights).abs().max()}'
-    assert num_recv_tokens_per_expert_list == ref_num_recv_tokens_per_expert_list, 'num_recv_tokens_per_expert_list mismatch'
-    
-    if rank == 0:
-        print('cached notify combine and intranode combine...')
-
-    ref_combine_x, ref_combine_topk_weights, _ = buffer.combine(ref_recv_x, ref_handle, ref_recv_topk_weights, previous_event=event)
-
-    rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head = handle
-    channel_head_idx, channel_tail_idx, barrier_signal, channel_x_buffers, channel_src_idx_buffers, channel_topk_weights_buffers = symm_buffers
-    combine_x, combine_topk_weights = intranode_combine(rank, allocator, recv_x, recv_topk_weights, recv_src_idx, rank_prefix_matrix, recv_channel_prefix_matrix, send_head, channel_head_idx, channel_tail_idx, barrier_signal, channel_x_buffers, channel_src_idx_buffers, channel_topk_weights_buffers)
-
-    assert torch.equal(combine_x, ref_combine_x), f'combine_x mismatch, max err: {(combine_x - ref_combine_x).abs().max()}'
-    assert torch.equal(combine_topk_weights, ref_combine_topk_weights), f'combine_topk_weights mismatch, max err: {(combine_topk_weights - ref_combine_topk_weights).abs().max()}'
-    print(f'[rank {rank}] All checks passed for TileScale intranode_combine. ✅')
-
-    # benchmark
-    t1 = do_bench(lambda: buffer.combine(ref_recv_x, ref_handle, ref_recv_topk_weights),
-        _n_warmup=1,
-        _n_repeat=1,
-    )
-    t2 = do_bench(lambda: intranode_combine(rank, allocator, recv_x, recv_topk_weights, recv_src_idx, rank_prefix_matrix, recv_channel_prefix_matrix, send_head, channel_head_idx, channel_tail_idx, barrier_signal, channel_x_buffers, channel_src_idx_buffers, channel_topk_weights_buffers),
-        _n_warmup=1,
-        _n_repeat=1,
-    )
-    print(f"DeepEP: {t1:.3f} ms")
-    print(f"TileScale: {t2:.3f} ms")
-    print(f"Speedup: {t1 / t2:.2f}x")
-
-
-def main(local_rank: int, num_local_ranks: int, args):
-    rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-
-    test_intranode_combine(
-        args.num_tokens,
-        args.hidden,
-        args.num_topk,
-        args.num_experts,
-        rank,
-        num_ranks,
-        args.expert_alignment,
-        group,
-    )
-
-    torch.distributed.destroy_process_group(group)
-    torch.distributed.destroy_process_group()
-
-
-def parse_args():
-    parser = ArgumentParser(description="Test combine")
-    parser.add_argument("--num_ranks", type=int, default=8, help="Number of ranks")
-    parser.add_argument("--num_tokens", type=int, default=4096, help="Number of tokens")
-    parser.add_argument("--hidden", type=int, default=7168, help="Hidden size")
-    parser.add_argument("--num_topk", type=int, default=8, help="Number of top-k experts to select for each token")
-    parser.add_argument("--num_experts", type=int, default=32, help="Number of experts")
-    parser.add_argument("--expert_alignment", type=int, default=1, help="Expert alignment")
-    return parser.parse_args()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-
-    num_ranks = args.num_ranks
-    torch.multiprocessing.spawn(main, args=(num_ranks, args), nprocs=num_ranks)

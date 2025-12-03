@@ -209,3 +209,43 @@ def create_moe_recv_counters(num_ranks: int, num_local_experts: int):
     moe_recv_rdma_counter_mapped = get_device_tensor(moe_recv_rdma_counter)
     return moe_recv_counter, moe_recv_expert_counter, moe_recv_rdma_counter, \
         moe_recv_counter_mapped, moe_recv_expert_counter_mapped, moe_recv_rdma_counter_mapped
+
+    
+def ep_bench(fn, warmup: int = 50, rep: int = 50, post_fn=None):
+    """DeepEP style benchmark function.
+    Args:
+        fn: the function to benchmark.
+        warmup: the number of warmup iterations.
+        rep: the number of repetitions.
+        post_fn: the function to post-process the results.
+
+    Returns:
+        time (ms): the average time of the function.
+    """
+    import numpy as np
+
+    # Flush L2 cache with 256 MB data
+    torch.cuda.synchronize()
+    cache = torch.empty(int(256e6 // 4), dtype=torch.int, device='cuda')
+
+    # Warmup
+    for _ in range(warmup):
+        fn()
+
+    # Flush L2
+    cache.zero_()
+
+    # Testing
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+    for i in range(rep):
+        # Record
+        start_events[i].record()
+        fn()
+        end_events[i].record()
+        if post_fn is not None:
+            post_fn()
+    torch.cuda.synchronize()
+
+    times = np.array([s.elapsed_time(e) for s, e in zip(start_events, end_events)])[1:]
+    return np.average(times).item()

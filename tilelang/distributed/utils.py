@@ -228,7 +228,7 @@ def dist_print(*args, **kwargs):
             print(*args, **kwargs)
 
 
-def perf_fn(fn, rep, warmup):
+def perf_fn(fn, warmup, rep):
     start_event = torch.cuda.Event(enable_timing=True)
     stop_event = torch.cuda.Event(enable_timing=True)
     for n in range(rep + warmup):

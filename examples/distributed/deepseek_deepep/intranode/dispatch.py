@@ -1,6 +1,5 @@
 # For intranode only
 # This op is distributed
-### TILELANG_USE_DISTRIBUTED=1 python dispatch.py
 
 import os, sys
 from torch.types import Number
@@ -21,6 +20,9 @@ from get_dispatch_layout import get_dispatch_layout
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
+# notify_dispatch is responible for:
+# 1. Pre-compute rank/channel prefix for dispatch
+# 2. Zero 4 symm buffers before a system-level barrier
 @tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 def notify_dispatch_kernel(
     rank: int,
@@ -46,6 +48,11 @@ def notify_dispatch_kernel(
         barrier_signal: T.Tensor((num_ranks,), 'int32'),
         rank_prefix_matrix: T.Tensor((num_ranks, num_ranks), 'int32'),
         channel_prefix_matrix: T.Tensor((num_ranks, num_channels), 'int32'),
+        # 4 symm buffers to be zeroed
+        channel_start_offset: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_end_offset: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_head_idx: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_tail_idx: T.Tensor([num_channels, num_ranks], "int32"),
     ):
         with T.Kernel(num_ranks+1, threads=threads) as bx:
             tx = T.get_thread_binding()
@@ -85,7 +92,12 @@ def notify_dispatch_kernel(
                 # TODO: simply returns per_rank_buffer as rank_prefix_matrix             
                 T.copy(per_rank_buffer, rank_prefix_matrix)
 
-                # NOTE: We don't cleanup the buffer for later use
+                # Clear 4 symm buffers  for later use 
+                T.clear(channel_start_offset)
+                T.clear(channel_end_offset)
+                T.clear(channel_head_idx)
+                T.clear(channel_tail_idx)
+
                 T.barrier_blocks(barrier_signal)
             else:
                 dst_rank = bx - 1
@@ -129,47 +141,13 @@ def notify_dispatch(
     per_rank_buffer: torch.Tensor,
     per_expert_buffer: torch.Tensor,
     barrier_signal: torch.Tensor,
+    channel_start_offset: torch.Tensor,
+    channel_end_offset: torch.Tensor,
+    channel_head_idx: torch.Tensor,
+    channel_tail_idx: torch.Tensor,
     # allocator
     allocator,
 ):
-    """
-    TileScale notify-dispatch op.
-
-    Args:
-        rank (int): The current rank (process or device index).
-        num_ranks (int): Total number of participating ranks (nodes).
-        num_experts (int): Global number of experts in the MoE layer.
-        num_tokens (int): Number of tokens being dispatched.
-        num_channels (int): Number of communication channels.
-        expert_alignment (int): Alignment constraint for expert buffer.
-
-        num_tokens_per_rank (torch.Tensor): [num_ranks] 
-            - For each rank r, num_tokens_per_rank[r] is the number of tokens assigned for dispatch to rank r across the cluster.
-        num_tokens_per_expert (torch.Tensor): [num_experts] 
-            - For each expert e, num_tokens_per_expert[e] is the number of tokens rank r will send to global expert e.
-        is_token_in_rank (torch.Tensor): [num_tokens, num_ranks]
-            - For each (token t, rank r), is_token_in_rank[t, r] indicates (bool) whether token t belongs to rank r after dispatch.
-        
-        moe_recv_counter_mapped (torch.Tensor): [1] 
-            - The number of tokens received by the current rank from other ranks.
-        moe_recv_expert_counter_mapped (torch.Tensor): [num_local_experts]
-            - The number of tokens received by the current rank for its local experts.
-        
-        per_rank_buffer (torch.Tensor): num_ranks * [num_ranks, num_ranks], symm tensor, should be zeroed before use
-            - Symmetric buffer for per-rank communication; [src_rank, dst_rank] region.
-        per_expert_buffer (torch.Tensor): num_ranks * [num_ranks, num_local_experts], symm tensor, should be zeroed before use
-            - Buffer for per-expert communication; [rank, local_expert] region.
-        barrier_signal (torch.Tensor): num_ranks * [num_ranks], symm_tensor, should be zeroed before use
-            - Synchronization tensor used as a system-wide barrier.
-
-        allocator: TileScale allocator for symm tensors
-
-    Returns
-        rank_prefix_matrix (torch.Tensor): [num_ranks, num_ranks] 
-            - For each (rank r, other_rank), rank_prefix_matrix[r, other_rank] records prefix sums/statistics for token dispatch between r and other_rank.
-        channel_prefix_matrix (torch.Tensor): [num_ranks, num_channels]
-            - For each (rank r, channel c), channel_prefix_matrix[r, c] records prefix sums/statistics for tokens on communication channel c for rank r.
-    """
     kernel = notify_dispatch_kernel(
         rank,
         num_ranks,
@@ -183,6 +161,10 @@ def notify_dispatch(
     rank_prefix_matrix = torch.empty([num_ranks, num_ranks], dtype=torch.int32, device='cuda')
     channel_prefix_matrix = torch.empty([num_ranks, num_channels], dtype=torch.int32, device='cuda')
 
+    # clear buffers and counters
+    moe_recv_counter_mapped.fill_(-1)
+    moe_recv_expert_counter_mapped.fill_(-1)
+
     kernel(
         num_tokens_per_rank,
         num_tokens_per_expert,
@@ -194,11 +176,59 @@ def notify_dispatch(
         barrier_signal,
         rank_prefix_matrix,
         channel_prefix_matrix,
+        channel_start_offset,
+        channel_end_offset,
+        channel_head_idx,
+        channel_tail_idx,
     )
 
     return rank_prefix_matrix, channel_prefix_matrix
 
-# NOTE: We don't need cached_notify_dispatch, as per-rank-buffer is for one-time use
+
+# cached_notify_dispatch only needs to clear symm buffers
+@tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
+def cached_notify_dispatch_kernel(
+    num_ranks: int,
+    num_channels: int
+):
+    @T.prim_func
+    def cached_notify_dispatch_main(
+        barrier_signal: T.Tensor((num_ranks,), 'int32'),
+        # 4 symm buffers to be zeroed
+        channel_start_offset: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_end_offset: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_head_idx: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_tail_idx: T.Tensor([num_channels, num_ranks], "int32"),
+    ):
+        with T.Kernel(1, threads=128):
+            T.sync_blocks(barrier_signal)
+
+            T.clear(channel_start_offset)
+            T.clear(channel_end_offset)
+            T.clear(channel_head_idx)
+            T.clear(channel_tail_idx)
+
+            T.barrier_blocks(barrier_signal)
+
+    return cached_notify_dispatch_main
+
+
+def cached_notify_dispatch(
+    num_ranks: int,
+    num_channels: int,
+    # symm buffers to be cleared
+    channel_start_offset: torch.Tensor,
+    channel_end_offset: torch.Tensor,
+    channel_head_idx: torch.Tensor,
+    channel_tail_idx: torch.Tensor,
+    # barrier
+    barrier_signal: torch.Tensor,
+    # allocator
+    allocator
+):
+    kernel = cached_notify_dispatch_kernel(num_ranks, num_channels)
+    kernel.initialize(allocator=allocator)  # we still comm on barrier_signal
+    kernel(barrier_signal, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx)
 
 
 @tilelang.jit(
@@ -682,15 +712,15 @@ def cached_dispatch_kernel(
     return cached_dispatch_main
 
 
-# todo: support cached-mode via handle
 def intranode_dispatch(
     rank: int,
     allocator,
-    # data
+    symm_buffers,
+    moe_recv_counter_mapped,
+    moe_recv_expert_counter_mapped,
     x: torch.Tensor,  # todo: support fp8 quant
-    # handle
+    config: Config,
     handle: Optional[Tuple] = None,
-    # meta
     num_tokens_per_rank: Optional[torch.Tensor] = None,
     is_token_in_rank: Optional[torch.Tensor] = None,
     num_tokens_per_expert: Optional[torch.Tensor] = None,
@@ -698,42 +728,8 @@ def intranode_dispatch(
     topk_weights: Optional[torch.Tensor] = None,
     expert_alignment: int = 1,
     # todo: support num_worst_tokens
-    # tuning cfg
-    config: Optional[Config] = None,
     # todo: support async functionality
-    
 ):
-    """
-    Dispatch tokens to different intranode ranks.
-    Intranode kernels require all the ranks should be visible via NVLink.
-
-    Arguments:
-        x: `torch.Tensor` or tuple of `torch.Tensor`, for the first type, the shape must be `[num_tokens, hidden]`,
-            and type must be `torch.bfloat16`; for the second type, the first element of the tuple must be shaped as
-            `[num_tokens, hidden]` with type `torch.float8_e4m3fn`, the second must be `[num_tokens, hidden // 128]`
-                (requiring divisible) with type `torch.float`.
-        num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
-        is_token_in_rank: `[num_tokens, num_ranks]` with `torch.bool`, whether a token be sent to a rank.
-        num_tokens_per_expert: `[num_experts]` with `torch.int`, the number of tokens to be sent to each expert.
-            Returns None for cached-mode.
-        topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices
-            selected by each token, `-1` means no selections.
-        topk_weights: `[num_tokens, num_topk]` with `torch.float`, the expert weights of each token to dispatch.
-        expert_alignment: align the number of tokens received by each local expert to this variable.
-        config: the performance tuning config.
-        allocator: TileScale allocator for symm tensors
-
-    Returns:
-        recv_x: received tokens, the same type and tuple as the input `x`, but the number of tokens equals to the
-            received token count.
-        recv_topk_idx: received expert indices.
-        recv_topk_weights: received expert weights.
-        num_recv_tokens_per_expert_list: Python list shaped `[num_local_experts]`, the received token count by
-            each local expert, aligned to the input `expert_alignment`. If `num_worst_tokens` is specified, the list
-            will be empty.
-        handle: the handle for combine, has `(rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)`.
-    """
-
     if handle is None:
         assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None, \
         "num_tokens_per_rank, is_token_in_rank, and num_tokens_per_expert must be provided in non-cached mode"
@@ -749,20 +745,10 @@ def intranode_dispatch(
     # Default config
     config = Config.get_dispatch_config(num_ranks) if config is None else config
 
-    # Alloc public barrier
-    barrier_signal = tilelang.tensor((num_ranks), dtype=torch.int32, device='cuda', allocator=allocator).zero_()
+    barrier_signal, per_rank_buffer, per_expert_buffer, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, \
+        channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers = symm_buffers
 
     if handle is None:
-        # Size prefix by ranks, shaped as `[num_ranks, num_ranks]`
-        # Size prefix by experts (not used later), shaped as `[num_ranks, num_local_experts]`
-        rank_prefix_matrix = torch.empty([num_ranks, num_ranks], dtype=torch.int32, device='cuda')
-        channel_prefix_matrix = torch.empty([num_ranks, config.num_channels], dtype=torch.int32, device='cuda')
-
-        moe_recv_counter_mapped, moe_recv_expert_counter_mapped = create_moe_recv_counters(num_ranks, num_experts // num_ranks)[3:5]
-
-        per_rank_buffer = tilelang.tensor((num_ranks, num_ranks), dtype=torch.int32, device='cuda', allocator=allocator).zero_()
-        per_expert_buffer = tilelang.tensor((num_ranks, num_local_experts), dtype=torch.int32, device='cuda', allocator=allocator).zero_()        
-
         rank_prefix_matrix, channel_prefix_matrix = notify_dispatch(
             rank,
             num_ranks,
@@ -778,17 +764,21 @@ def intranode_dispatch(
             per_rank_buffer,
             per_expert_buffer,
             barrier_signal,
+            channel_start_offset,
+            channel_end_offset,
+            channel_head_idx,
+            channel_tail_idx,
             allocator,
         )
-        torch.cuda.synchronize()  # todo: replace it with host-side wait_ne
+        # todo: replace it with host-side wait_ne
 
         num_recv_tokens = moe_recv_counter_mapped.item()
         num_recv_tokens_per_expert_list = moe_recv_expert_counter_mapped.tolist()
     else:
+        cached_notify_dispatch(num_ranks, config.num_channels, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, barrier_signal, allocator)
         num_recv_tokens = recv_src_idx.size(0)
-        num_recv_tokens_per_expert_list = None
 
-    # create normal buffers
+    # create output buffers
     recv_x = torch.empty((num_recv_tokens, hidden), dtype=x.dtype, device='cuda')
     recv_src_idx = torch.empty((num_recv_tokens,), dtype=torch.int32, device='cuda')
     if handle is None:
@@ -797,172 +787,15 @@ def intranode_dispatch(
     recv_channel_prefix_matrix = torch.empty((num_ranks, config.num_channels), dtype=torch.int32, device='cuda')
     send_head = torch.empty((num_tokens, num_ranks), dtype=torch.int32, device='cuda')
 
-    # create symm buffers
-    channel_start_offset = tilelang.tensor(
-        [config.num_channels, num_ranks], dtype=torch.int32, device='cuda', allocator=allocator).zero_()
-    channel_end_offset = tilelang.tensor(
-        [config.num_channels, num_ranks], dtype=torch.int32, device='cuda', allocator=allocator).zero_()
-    channel_head_idx = tilelang.tensor(
-        [config.num_channels, num_ranks], dtype=torch.int32, device='cuda', allocator=allocator).zero_()    
-    channel_tail_idx = tilelang.tensor(
-        shape=[config.num_channels, num_ranks], dtype=torch.int32, device='cuda', allocator=allocator).zero_()
-    channel_x_buffers = tilelang.tensor(
-        [config.num_channels, num_ranks, config.num_max_nvl_chunked_recv_tokens, hidden], dtype=torch.bfloat16, device='cuda', allocator=allocator)
-    channel_src_idx_buffers = tilelang.tensor(
-        [config.num_channels, num_ranks, config.num_max_nvl_chunked_recv_tokens], dtype=torch.int32, device='cuda', allocator=allocator)
-    
-    if handle is None:
-        channel_topk_idx_buffers = tilelang.tensor(
-            [config.num_channels, num_ranks, config.num_max_nvl_chunked_recv_tokens, num_topk], dtype=torch.int64, device='cuda', allocator=allocator)
-        channel_topk_weights_buffers = tilelang.tensor(
-            [config.num_channels, num_ranks, config.num_max_nvl_chunked_recv_tokens, num_topk], dtype=torch.float32, device='cuda', allocator=allocator)
-    else: 
-        channel_topk_idx_buffers = None  # todo: double-check this (may affect combine)
-        channel_topk_weights_buffers = None
-
-    # get dispatch 
-    _kernel = dispatch_kernel if handle is None else cached_dispatch_kernel
-    kernel = _kernel(
-        rank, 
-        num_ranks,
-        num_tokens,
-        config.num_max_nvl_chunked_send_tokens,
-        config.num_max_nvl_chunked_recv_tokens,
-        hidden,
-        num_topk,
-        num_experts,
-        config.num_sms,
-        'bfloat16'
-    )
-    kernel.initialize(allocator=allocator)
-    
     # run dispatch
-    if rank == 0:
-        print('Start running dispatch kernel...')
     if handle is None:
-        args = (recv_x, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_prefix_matrix, send_head, x, topk_idx, topk_weights, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers)
+        kernel = dispatch_kernel(rank, num_ranks, num_tokens, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens, hidden, num_topk, num_experts, config.num_sms, 'bfloat16')
+        kernel.initialize(allocator=allocator)
+        kernel(recv_x, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_prefix_matrix, send_head, x, topk_idx, topk_weights, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers)
+        handle = (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
+        return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle
     else:
-        args = (recv_x, recv_src_idx, recv_channel_prefix_matrix, send_head, x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers)
-    kernel(*args)
-
-    handle = (rank_prefix_matrix, channel_prefix_matrix, 
-        recv_channel_prefix_matrix, recv_src_idx,
-        is_token_in_rank, send_head
-    )
-    symm_buffers = (channel_head_idx, channel_tail_idx, barrier_signal, channel_x_buffers, channel_src_idx_buffers, channel_topk_weights_buffers)
-    
-    if handle is not None:
-        recv_topk_idx = recv_topk_weights = None
-    return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, symm_buffers  # todo: reconsider hierachy
-
-
-def test_intranode_dispatch(
-    num_tokens: int,
-    hidden: int,
-    num_topk: int,
-    num_experts: int,
-    rank: int,
-    num_ranks: int,
-    expert_alignment: int,
-    cached: bool,
-    group: torch.distributed.ProcessGroup,
-):
-    try: 
-        import deep_ep  # noqa: F403
-    except ModuleNotFoundError as e:
-        raise ModuleNotFoundError("Please install DeepEP to run this test.")
-
-    allocator = tilelang.get_allocator(
-        size=2**30,
-        device="cuda",
-        is_distributed=True,
-        local_rank=rank,
-        num_local_ranks=num_ranks,
-        group=group)
-
-    x, topk_idx, topk_weights, rank_idx = gen_inputs(num_tokens, hidden, num_topk, num_experts, num_ranks)
-    buffer = deep_ep.Buffer(group, num_nvl_bytes=2**30)
-
-    if rank == 0: 
-        print(f'get dispatch layout ...')
-    ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = buffer.get_dispatch_layout(topk_idx, num_experts)
-    num_tokens_per_rank, _, num_tokens_per_expert, is_token_in_rank = get_dispatch_layout(topk_idx, num_experts, num_ranks)
-    assert torch.equal(num_tokens_per_expert, ref_num_tokens_per_expert), \
-        f"num_tokens_per_expert mismatch, max err: {(num_tokens_per_expert - ref_num_tokens_per_expert).abs().max()}"
-    assert torch.equal(is_token_in_rank, ref_is_token_in_rank), \
-        "is_token_in_rank mismatch"
-    assert torch.equal(num_tokens_per_rank, ref_num_tokens_per_rank), \
-        f"num_tokens_per_rank mismatch, max err: {(num_tokens_per_rank - ref_num_tokens_per_rank).abs().max()}"
-
-    if rank == 0: 
-        print('notify dispatch and intranode dispatch ...')
-    
-    # golden
-    ref_recv_x, ref_recv_topk_idx, ref_recv_topk_weights, ref_num_recv_tokens_per_expert_list, ref_handle, _ = \
-        buffer.dispatch(x, None, ref_num_tokens_per_rank, None, ref_is_token_in_rank, ref_num_tokens_per_expert, topk_idx, topk_weights, expert_alignment)
-
-    # ours
-    if cached:
-        recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, _ = \
-            intranode_dispatch(rank, allocator, x, ref_handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, None, None, expert_alignment, None)
-    else:
-        recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, _ = \
-            intranode_dispatch(rank, allocator, x, None, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, None)
-
-    # check dispatch output
-    assert torch.equal(recv_x, ref_recv_x), f'recv_x mismatch, max err: {(recv_x - ref_recv_x).abs().max()}'
-    if not cached:
-        assert torch.equal(recv_topk_idx, ref_recv_topk_idx), f'recv_topk_idx mismatch, max err: {(recv_topk_idx - ref_recv_topk_idx).abs().max()}'
-        assert torch.equal(recv_topk_weights, ref_recv_topk_weights), f'recv_topk_weights mismatch, max err: {(recv_topk_weights - ref_recv_topk_weights).abs().max()}'
-        assert num_recv_tokens_per_expert_list == ref_num_recv_tokens_per_expert_list, 'num_recv_tokens_per_expert_list mismatch'
-    
-    # check handle
-    if not cached:
-        rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head = handle
-        ref_rank_prefix_matrix, ref_channel_prefix_matrix, ref_recv_channel_prefix_matrix, ref_recv_src_idx, ref_is_token_in_rank, ref_send_head = ref_handle
-        assert torch.equal(rank_prefix_matrix, ref_rank_prefix_matrix), f'rank_prefix_matrix mismatch, max err: {(rank_prefix_matrix - ref_rank_prefix_matrix).abs().max()}'
-        assert torch.equal(channel_prefix_matrix, ref_channel_prefix_matrix), f'channel_prefix_matrix mismatch, max err: {(channel_prefix_matrix - ref_channel_prefix_matrix).abs().max()}'
-        assert torch.equal(recv_channel_prefix_matrix, ref_recv_channel_prefix_matrix), f'recv_channel_prefix_matrix mismatch, max err: {(recv_channel_prefix_matrix - ref_recv_channel_prefix_matrix).abs().max()}'
-        assert torch.equal(recv_src_idx, ref_recv_src_idx), f'recv_src_idx mismatch, max err: {(recv_src_idx - ref_recv_src_idx).abs().max()}'
-        assert torch.equal(is_token_in_rank, ref_is_token_in_rank), f'is_token_in_rank mismatch, max err: {(is_token_in_rank - ref_is_token_in_rank).abs().max()}'
-        assert torch.equal(send_head, ref_send_head), f'send_head mismatch, max err: {(send_head - ref_send_head).abs().max()}'
-    
-    print(f'[rank {rank}] All checks passed for {'cached' if cached else 'non-cached'} TileScale intranode_dispatch. ✅')
-
-
-def main(local_rank: int, num_local_ranks: int, args):
-    rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
-
-    test_intranode_dispatch(
-        args.num_tokens,
-        args.hidden,
-        args.num_topk,
-        args.num_experts,
-        rank,
-        num_ranks,
-        args.expert_alignment,
-        args.cached,
-        group,
-    )
-
-    torch.distributed.destroy_process_group(group)
-    torch.distributed.destroy_process_group()
-
-
-def parse_args():
-    parser = ArgumentParser(description="Test dispatch")
-    parser.add_argument("--num_ranks", type=int, default=8, help="Number of ranks")
-    parser.add_argument("--num_tokens", type=int, default=4096, help="Number of tokens")
-    parser.add_argument("--hidden", type=int, default=7168, help="Hidden size")
-    parser.add_argument("--num_topk", type=int, default=8, help="Number of top-k experts to select for each token")
-    parser.add_argument("--num_experts", type=int, default=32, help="Number of experts")
-    parser.add_argument("--expert_alignment", type=int, default=1, help="Expert alignment")
-    parser.add_argument("-cached", action="store_true", default=False, help="Use cached mode")
-    return parser.parse_args()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-
-    num_ranks = args.num_ranks
-    torch.multiprocessing.spawn(main, args=(num_ranks, args), nprocs=num_ranks)
+        kernel = cached_dispatch_kernel(rank, num_ranks, num_tokens, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens, hidden, num_topk, num_experts, config.num_sms, 'bfloat16')
+        kernel.initialize(allocator=allocator)
+        kernel(recv_x, recv_src_idx, recv_channel_prefix_matrix, send_head, x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers)
+        return recv_x

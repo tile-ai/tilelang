@@ -44,7 +44,6 @@ def get_dispatch_layout(
     # TODO(wt): Wait on previous events and allocate on comm stream when adding async functionality
     num_tokens, num_topk = topk_idx.shape
     num_tokens_per_rank = torch.empty(num_ranks, dtype=torch.int32, device='cuda')
-    num_tokens_per_rdma_rank = None  # No RDMA ranks in intranode settings
     num_tokens_per_expert = torch.empty(num_experts, dtype=torch.int32, device='cuda')
     is_token_in_rank = torch.empty((num_tokens, num_ranks), dtype=torch.bool, device='cuda')
 
@@ -53,14 +52,13 @@ def get_dispatch_layout(
     kernel(
         topk_idx,
         num_tokens_per_rank,
-        # num_tokens_per_rdma_rank,
         num_tokens_per_expert,
         is_token_in_rank,
     )
 
     # TODO(wt): Wait streams when adding async functionality
 
-    return num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank
+    return num_tokens_per_rank, num_tokens_per_expert, is_token_in_rank
 
 
 @tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
