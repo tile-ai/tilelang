@@ -52,8 +52,7 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
     } else {
       FAIL;
     }
-  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e4m3() ||
-              ab_dtype.is_float8_e5m2() || ab_dtype.is_float8_e5m2fnuz() ||
+  } else if ((ab_dtype.is_float8() ||
               ab_dtype.is_float6_e2m3fn() || ab_dtype.is_float6_e3m2fn() ||
               ab_dtype.is_float4_e2m1fn()) &&
              ((c_dtype.is_float() && c_dtype.bits() == 32) ||

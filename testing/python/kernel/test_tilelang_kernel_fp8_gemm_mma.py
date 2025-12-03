@@ -51,7 +51,12 @@ def tl_matmul(
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    is_float8 = in_dtype in ["float8_e4m3", "float8_e5m2"]
+    is_float8 = in_dtype in [
+        "float8_e4m3",
+        "float8_e5m2",
+        "float8_e4m3fn",
+        "float8_e5m2fnuz",
+    ]
     if out_dtype == "int32" or is_float8:
         micro_size_k = 32
 

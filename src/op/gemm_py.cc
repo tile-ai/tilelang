@@ -182,13 +182,7 @@ bool GemmPyNode::checkWgmma() const {
   if (c_->dtype == DataType::Float(16)) {
     if (a_->dtype == DataType::Float(16) && b_->dtype == DataType::Float(16))
       return k_ % 16 == 0;
-    else if (a_->dtype.is_float8_e4m3() && b_->dtype.is_float8_e4m3())
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else if (a_->dtype.is_float8_e4m3() && b_->dtype.is_float8_e5m2())
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else if (a_->dtype.is_float8_e5m2() && b_->dtype.is_float8_e4m3())
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else if (a_->dtype.is_float8_e5m2() && b_->dtype.is_float8_e5m2())
+    else if (a_->dtype.is_float8() && b_->dtype.is_float8())
       return (!transA_) && transB_ && k_ % 32 == 0;
     else
       return false;
@@ -201,13 +195,7 @@ bool GemmPyNode::checkWgmma() const {
     else if (a_->dtype == DataType::Float(32) &&
              b_->dtype == DataType::Float(32))
       return (!transA_) && transB_ && k_ % 8 == 0;
-    else if (a_->dtype.is_float8_e4m3() && b_->dtype.is_float8_e4m3())
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else if (a_->dtype.is_float8_e4m3() && b_->dtype.is_float8_e5m2())
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else if (a_->dtype.is_float8_e5m2() && b_->dtype.is_float8_e4m3())
-      return (!transA_) && transB_ && k_ % 32 == 0;
-    else if (a_->dtype.is_float8_e5m2() && b_->dtype.is_float8_e5m2())
+    else if (a_->dtype.is_float8() && b_->dtype.is_float8())
       return (!transA_) && transB_ && k_ % 32 == 0;
     else
       return false;
