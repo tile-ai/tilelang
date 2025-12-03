@@ -196,12 +196,6 @@ class EnvVar:
         # os.environ[self.key] = value
 
 
-# Cache control API (wrap CacheState)
-enable_cache = CacheState.enable
-disable_cache = CacheState.disable
-is_cache_enabled = CacheState.is_enabled
-
-
 # Utility function for environment variables with defaults
 # Assuming EnvVar and CacheState are defined elsewhere
 class Environment:
@@ -234,13 +228,18 @@ class Environment:
     # Kernel Build options
     TILELANG_PRINT_ON_COMPILATION = EnvVar("TILELANG_PRINT_ON_COMPILATION",
                                            "1")  # print kernel name on compile
-    TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE", "0")  # clear cache automatically if set
+    TILELANG_DISABLE_CACHE = EnvVar(
+        "TILELANG_DISABLE_CACHE",
+        "0")  # disable kernel cache, usually for unit testing / debugging, high priority
+    TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE",
+                                  "0")  # DEPRECATED! clear cache automatically if set
 
     # Kernel selection options
     # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
     TILELANG_USE_GEMM_V1 = EnvVar("TILELANG_USE_GEMM_V1", "0")
 
     # Auto-tuning settings
+    TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES",
                                                 "0.9")  # percent of CPUs used
     TILELANG_AUTO_TUNING_CPU_COUNTS = EnvVar("TILELANG_AUTO_TUNING_CPU_COUNTS",
@@ -267,13 +266,19 @@ class Environment:
 
     # Cache control API (wrap CacheState)
     def is_cache_enabled(self) -> bool:
-        return CacheState.is_enabled()
+        return not self.is_cache_globally_disabled() and CacheState.is_enabled()
 
     def enable_cache(self) -> None:
         CacheState.enable()
 
     def disable_cache(self) -> None:
         CacheState.disable()
+
+    def is_cache_globally_disabled(self) -> bool:
+        return self.TILELANG_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
+
+    def is_autotune_cache_disabled(self) -> bool:
+        return self.TILELANG_AUTO_TUNING_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
 
     def is_print_on_compilation_enabled(self) -> bool:
         return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
@@ -289,6 +294,11 @@ class Environment:
 
 # Instantiate as a global configuration object
 env = Environment()
+
+# Cache control API (wrap env, which is managed by CacheState and Environment Variables jointly)
+enable_cache = env.enable_cache  # CacheState.enable
+disable_cache = env.disable_cache  # CacheState.disable
+is_cache_enabled = env.is_cache_enabled  # CacheState.is_enabled
 
 # Export CUDA_HOME and ROCM_HOME, both are static variables
 # after initialization.
