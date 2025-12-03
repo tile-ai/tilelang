@@ -325,7 +325,7 @@ class AutoTuner:
         key = self.generate_cache_key(parameters, extra_parameters)
 
         with self._lock:
-            if env.is_cache_enabled():
+            if env.is_cache_enabled() and not env.is_autotune_cache_disabled():
                 # First check in-memory cache
                 if key in self._memory_cache:
                     logger.warning("Found kernel in memory cache. For better performance," \
@@ -601,7 +601,7 @@ class AutoTuner:
             logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:
-                if env.is_cache_enabled():
+                if env.is_cache_enabled() and not env.is_autotune_cache_disabled():
                     self._save_result_to_disk(key, autotuner_result)
 
         self._memory_cache[key] = autotuner_result
