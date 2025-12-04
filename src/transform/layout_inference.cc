@@ -878,11 +878,7 @@ private:
         }
       }
     }
-    // // print root and it's stmt
-    // for (int i = 0; i < infer_list_.size(); i++) {
-    //   int root = uf.Find(i);
-    //   LOG(INFO) << "root " << root << " stmt " << infer_list_stmt_[i];
-    // }
+
     std::unordered_map<int, std::vector<int>> components;
     for (int i = 0; i < infer_list_.size(); i++) {
       int root = uf.Find(i);
