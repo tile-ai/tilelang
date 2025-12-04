@@ -915,12 +915,8 @@ private:
 
       // Try each member as the root of inference for this component
       for (int attempt_infer_root : members) {
-        LOG(INFO) << "----------------------- try root " << attempt_infer_root
-                  << " members " << members.size() << '\n';
-        for (int member : members) {
-          LOG(INFO) << "  member " << member;
-          LOG(INFO) << "  member stmt " << infer_list_stmt_[member];
-        }
+        DLOG(INFO) << "----------------------- try root " << attempt_infer_root
+                   << " members " << members.size() << '\n';
         // Backup the current infer_list_ state
         auto back_infer_list = BackupInferList();
         // Copy the current layout_map for temporary use
@@ -930,10 +926,8 @@ private:
           // Run inference starting from attempt_infer_root
           RunInferStep(attempt_infer_root, InferLevel::kFree, true,
                        tmp_layout_map, strict_layout_map, q, in_queue);
-          LOG(INFO) << "RunInferStep finished";
           FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map,
                            q, in_queue);
-          LOG(INFO) << "FinishInferQueue finished";
 
           // After the first search, run inference for all other members in
           // order
