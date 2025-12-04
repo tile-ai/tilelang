@@ -244,7 +244,6 @@ public:
 
     while (!q.empty()) {
       int cur_infer_id = q.front();
-      LOG(INFO) << "cur_infer_id " << cur_infer_id;
       q.pop_front();
       // Range check again, just to be safe
       ICHECK_GE(cur_infer_id, 0);
@@ -892,13 +891,6 @@ private:
     }
     // Keep components_buffers for debug purpose
     (void)components_buffers;
-    LOG(INFO) << "components_buffers: " << components_buffers.size();
-    for (const auto &[root, buffers] : components_buffers) {
-      LOG(INFO) << "  " << root << " -> " << buffers.size();
-      for (const auto &buffer : buffers) {
-        LOG(INFO) << "    " << buffer;
-      }
-    }
 
     // For each component, try each op as root, and determine the least
     // replicated one
@@ -933,7 +925,6 @@ private:
           // order
           for (int other_infer_root : members) {
             if (other_infer_root != attempt_infer_root) {
-              LOG(INFO) << "infer other_infer_root " << other_infer_root;
               RunInferStep(other_infer_root, InferLevel::kFree, true,
                            tmp_layout_map, strict_layout_map, q, in_queue);
               FinishInferQueue(InferLevel::kFree, tmp_layout_map,
