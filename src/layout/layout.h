@@ -116,6 +116,8 @@ public:
 
   bool IsCompletedReplicated() const;
 
+  arith::IterMapResult DetectInjective() const;
+
   static void RegisterReflection();
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Fragment", FragmentNode, LayoutNode);

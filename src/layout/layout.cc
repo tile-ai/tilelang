@@ -536,6 +536,21 @@ bool FragmentNode::IsCompletedReplicated() const {
                          ReplicationPlaceholder());
 }
 
+arith::IterMapResult FragmentNode::DetectInjective() const {
+  // lei:To perform injective check, we need to reverse the layout
+  // and use surjective check, now we use bijective check for convenience
+  // can be relaxed in future
+  arith::Analyzer analyzer;
+  // Build a flat indices array: [forward_thread_, forward_index_[...]]
+  Array<PrimExpr> indices;
+  indices.push_back(forward_thread_);
+  for (const auto &e : forward_index_) {
+    indices.push_back(e);
+  }
+  return arith::DetectIterMap(indices, getVarMap(), 1,
+                              arith::IterMapLevel::Bijective, &analyzer);
+}
+
 PrimExpr FragmentNode::ThreadExtent() const {
   Array<PrimExpr> ret(OutputDim(), 1);
   arith::Analyzer analyzer;
