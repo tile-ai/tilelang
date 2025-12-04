@@ -244,7 +244,7 @@ def fast_flashattn(
                 current_bx = bx_loop_var
                 q_block_offset = current_bx * block_M
 
-                # Forward: Q in register, K/V in LDS
+                # Forward: Q在register里, K/V在LDS里
                 Q_fragment = T.alloc_fragment([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -355,18 +355,6 @@ def get_bwd_configs():
     configs = []
     for m, n, stages, t, r, p in itertools.product(block_M, block_N, num_stages, threads,
                                                    enable_rasterization, panel_size):
-        if m <= 0 or n <= 0 or t <= 0:
-            continue
-        if t % 32 != 0:
-            continue
-        min_block = min(m, n)
-        if t >= 1024 and min_block < 32:
-            continue
-        if t >= 512 and min_block < 16:
-            continue
-        if t > min_block * 64:
-            continue
-        
         configs.append({
             "block_M": m,
             "block_N": n,
@@ -379,32 +367,28 @@ def get_bwd_configs():
     return configs
 
 
-@tilelang.jit
+@tilelang.jit(out_idx=[2])
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     dtype = "float16"
     accum_dtype = "float"
     shape = [batch, seq_len, heads, dim]
-    blk = 64
+    blk = 32
 
     @T.prim_func
     def flash_bwd_prep(O: T.Tensor(shape, dtype), dO: T.Tensor(shape, dtype),
                        Delta: T.Tensor([batch, heads, seq_len], accum_dtype)):
-        with T.Kernel(batch, heads, T.ceildiv(seq_len, blk), threads=128) as (bz, bx, by):
-            o = T.alloc_fragment([blk, dim], dtype)
-            do = T.alloc_fragment([blk, dim], dtype)
+        with T.Kernel(batch, heads, T.ceildiv(seq_len, blk)) as (bz, bx, by):
+            o = T.alloc_fragment([blk, blk], dtype)
+            do = T.alloc_fragment([blk, blk], dtype)
+            acc = T.alloc_fragment([blk, blk], accum_dtype)
             delta = T.alloc_fragment([blk], accum_dtype)
-            
-            T.copy(O[bz, by * blk:(by + 1) * blk, bx, :], o)
-            T.copy(dO[bz, by * blk:(by + 1) * blk, bx, :], do)
-            
-            # Manual dot product to avoid gemm overhead for vectors
-            for i in T.Parallel(blk):
-                acc = T.alloc_fragment([1], accum_dtype)
-                T.clear(acc)
-                for k in range(dim):
-                    acc[0] += T.cast(o[i, k], accum_dtype) * T.cast(do[i, k], accum_dtype)
-                delta[i] = acc[0]
-
+            T.clear(acc)
+            for k in range(T.ceildiv(dim, blk)):
+                T.copy(O[bz, by * blk:(by + 1) * blk, bx, k * blk:(k + 1) * blk], o)
+                T.copy(dO[bz, by * blk:(by + 1) * blk, bx, k * blk:(k + 1) * blk], do)
+                for i, j in T.Parallel(blk, blk):
+                    acc[i, j] += o[i, j] * do[i, j]
+            T.reduce_sum(acc, delta, 1)
             T.copy(delta, Delta[bz, bx, by * blk:(by + 1) * blk])
 
     return flash_bwd_prep
@@ -425,22 +409,25 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
     def flash_bwd_kernel(Q: T.Tensor(q_shape,
                                      dtype), K: T.Tensor(kv_shape,
                                                          dtype), V: T.Tensor(kv_shape, dtype),
-                         O: T.Tensor(q_shape, dtype), dO: T.Tensor(q_shape, dtype),
-                         lse: T.Tensor([batch, heads, seq_len], accum_dtype),
-                         Delta: T.Tensor([batch, heads, seq_len], accum_dtype),
-                         dQ: T.Tensor(q_shape, accum_dtype),
+                         dO: T.Tensor(q_shape, dtype), lse: T.Tensor([batch, heads, seq_len],
+                                                                     accum_dtype),
+                         Delta: T.Tensor([batch, heads, seq_len],
+                                         accum_dtype),
+                         dQ_partial: T.Tensor([batch, T.ceildiv(seq_len, block_M), seq_len, heads,
+                                               dim], dtype),
                          dK: T.Tensor(kv_shape, accum_dtype), dV: T.Tensor(kv_shape, accum_dtype)):
         with T.Kernel(head_kv, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bk, by, bz):
             T.use_swizzle(panel_size, enable=enable_rasterization)
 
-            # Backward: K in shared, V in register, Q/QT/dO/dOT in LDS
+            # Backward: K在shared里, V在register里, Q/QT/dO/dOT在LDS里
             K_shared = T.alloc_shared([block_M, dim], dtype)
             V_fragment = T.alloc_fragment([block_M, dim], dtype)
             q_shared = T.alloc_shared([block_N, dim], dtype)
             do_shared = T.alloc_shared([block_N, dim], dtype)
             lse_shared = T.alloc_shared([block_N], accum_dtype)
             delta_shared = T.alloc_shared([block_N], accum_dtype)
-            
+            ds_shared = T.alloc_shared([block_M, block_N], dtype)
+
             qkT = T.alloc_fragment([block_M, block_N], accum_dtype)
             P_acc = T.alloc_fragment([block_M, block_N], accum_dtype)
             dP = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -466,9 +453,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
 
                 for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
                     T.copy(Q[bz, k * block_N:(k + 1) * block_N, q_head, :], q_shared)
-                    T.copy(dO[bz, k * block_N:(k + 1) * block_N, q_head, :], do_shared)
-                    T.copy(Delta[bz, q_head, k * block_N:(k + 1) * block_N], delta_shared)
-                    
                     T.clear(qkT)
 
                     T.gemm(K_shared,
@@ -487,13 +471,18 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                             P_acc[i, j] = T.if_then_else(
                                 kv_offset + i <= k * block_N + j, P_acc[i, j], 0.0)
 
+                    T.copy(dO[bz, k * block_N:(k + 1) * block_N, q_head, :], do_shared)
+                    T.copy(Delta[bz, q_head, k * block_N:(k + 1) * block_N], delta_shared)
+
                     # Optimized GEMM order: Compute dV first (GEMM1), then dP (GEMM2)
+                    # This improves V_fragment reuse since it's already in registers
+                    # GEMM1: P^T @ dO = dV (compute dV first)
                     P_cast = T.alloc_fragment([block_M, block_N], dtype)
                     for i, j in T.Parallel(block_M, block_N):
                         P_cast[i, j] = T.cast(P_acc[i, j], dtype)
                     T.gemm(P_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
 
-                    # GEMM2: dO @ V^T = dP
+                    # GEMM2: dO @ V^T = dP (compute dP after dV, reusing V_fragment in registers)
                     T.clear(dP)
                     T.gemm(V_fragment,
                            do_shared,
@@ -501,7 +490,8 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                            transpose_B=True,
                            policy=T.GemmWarpPolicy.FullRow)
 
-                    # Compute ds = P * (dP - delta) * sm_scale
+                    # Compute ds = P * (dP - delta) * sm_scale for dk and dq computation
+                    # Create ds_compute fragment directly in loop to avoid layout conflict
                     ds_compute = T.alloc_fragment([block_M, block_N], dtype)
                     for i, j in T.Parallel(block_M, block_N):
                         ds_compute[i, j] = T.cast(P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale, dtype)
@@ -509,19 +499,14 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                     # Compute dK: ds^T @ Q = dK
                     T.gemm(ds_compute, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
 
-                    # Compute dQ: ds @ K = dQ
-                    # ds_compute is [block_M, block_N]. K_shared is [block_M, dim].
-                    # transpose_A=True -> [block_N, block_M] @ [block_M, dim] -> [block_N, dim]
-                    ds_shared = T.alloc_shared([block_M, block_N], dtype)
+                    # Compute dQ: ds @ K = dQ (using shared memory for K)
                     T.copy(ds_compute, ds_shared)
                     T.clear(dq)
                     T.gemm(ds_shared, K_shared, dq, transpose_A=True)
-                    
-                    # Accumulate dQ to global memory using Atomic Add
                     for i, j in T.Parallel(block_N, dim):
                         seq_idx = k * block_N + i
                         if seq_idx < seq_len and q_head < heads:
-                            T.atomic_add(dQ[bz, seq_idx, q_head, j], dq[i, j])
+                            dQ_partial[bz, by, seq_idx, q_head, j] = T.cast(dq[i, j], dtype)
 
             for i, j in T.Parallel(block_M, dim):
                 seq_idx = kv_offset + i
@@ -548,6 +533,29 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
             )
 
     return flash_bwd_post
+
+
+@tilelang.jit(out_idx=[1])
+def flashattn_bwd_reduce_dq(batch, num_tiles, seq_len, heads, dim):
+    accum_dtype = "float"
+    @T.prim_func
+    def flash_bwd_reduce(
+        dQ_partial: T.Tensor([batch, num_tiles, seq_len, heads, dim], "float16"),
+        dQ_out: T.Tensor([batch, seq_len, heads, dim], accum_dtype),
+    ):
+        with T.Kernel(batch, heads, seq_len, threads=64) as (bz, bh, bs):
+            acc = T.alloc_fragment([dim], accum_dtype)
+            T.clear(acc)
+
+            for tile in range(num_tiles):
+                for d in T.Parallel(dim):
+                    val = T.cast(dQ_partial[bz, tile, bs, bh, d], accum_dtype)
+                    acc[d] += val
+
+            for d in T.Parallel(dim):
+                dQ_out[bz, bs, bh, d] = acc[d]
+
+    return flash_bwd_reduce
 
 
 def debug_tensor_comparison(tensor1, tensor2, name, rtol=1e-3, atol=1e-3):
@@ -661,6 +669,10 @@ def main(batch: int = 1,
 
     o_tl, lse_tl = fwd_kernel(q, k, v)
 
+    bwd_prep = flashattn_bwd_preprocess(batch, heads, seq_len, dim)
+    dump_kernel_artifacts(bwd_prep, dump_dir, "flashattn_bwd_preprocess")
+    delta_tl = bwd_prep(o_tl, dO)
+
     print("\nStarting FlashAttention-V2 backward pass autotuning...")
     bwd_kernel = flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups)
     if bwd_kernel is None or bwd_kernel.config is None:
@@ -669,23 +681,22 @@ def main(batch: int = 1,
     print(f"Autotuning completed. Best backward pass configuration: {bwd_kernel.config}")
 
     dump_kernel_artifacts(bwd_kernel, dump_dir, "flashattn_bwd")
-    
-    prep_kernel = flashattn_bwd_preprocess(batch, heads, seq_len, dim)
-    dump_kernel_artifacts(prep_kernel, dump_dir, "flashattn_bwd_preprocess")
-    
-    # Allocate buffers
-    delta_tl = torch.zeros((batch, heads, seq_len), dtype=torch.float32, device=device)
-    dQ_accum = torch.zeros((batch, seq_len, heads, dim), dtype=torch.float32, device=device)
+
+    block_M = bwd_kernel.config["block_M"]
+    num_kv_tiles = math.ceil(seq_len / block_M)
+
+    dQ_partial = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
+                              dtype=torch.float16,
+                              device=device)
     dK_tl = torch.zeros_like(k, dtype=torch.float32)
     dV_tl = torch.zeros_like(v, dtype=torch.float32)
 
-    # 1. Preprocess (compute Delta)
-    prep_kernel(o_tl, dO, delta_tl)
-    
-    # 2. Backward Kernel
-    bwd_kernel(q, k, v, o_tl, dO, lse_tl, delta_tl, dQ_accum, dK_tl, dV_tl)
+    bwd_kernel(q, k, v, dO, lse_tl, delta_tl, dQ_partial, dK_tl, dV_tl)
 
-    # 3. Postprocess (cast dQ to fp16)
+    reduce_kernel = flashattn_bwd_reduce_dq(batch, num_kv_tiles, seq_len, heads, dim)
+    dump_kernel_artifacts(reduce_kernel, dump_dir, "flashattn_bwd_reduce_dq")
+    dQ_accum = reduce_kernel(dQ_partial)
+
     post_kernel = flashattn_bwd_postprocess(batch, heads, seq_len, dim)
     dump_kernel_artifacts(post_kernel, dump_dir, "flashattn_bwd_postprocess")
     dQ_tl = post_kernel(dQ_accum)
@@ -741,15 +752,18 @@ def main(batch: int = 1,
     def run_complete_fwd_bwd():
         o_tl_bench, lse_tl_bench = fwd_kernel(q, k, v)
 
-        delta_tl_bench = torch.zeros((batch, heads, seq_len), dtype=torch.float32, device=device)
-        dQ_accum_bench = torch.zeros((batch, seq_len, heads, dim), dtype=torch.float32, device=device)
+        delta_tl_bench = bwd_prep(o_tl_bench, dO)
+
+        dQ_partial_bench = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
+                                       dtype=torch.float16,
+                                       device=device)
         dK_bench = torch.zeros_like(k, dtype=torch.float32)
         dV_bench = torch.zeros_like(v, dtype=torch.float32)
-        
-        prep_kernel(o_tl_bench, dO, delta_tl_bench)
-        bwd_kernel(q, k, v, o_tl_bench, dO, lse_tl_bench, delta_tl_bench, dQ_accum_bench,
-                   dK_bench, dV_bench)
-        post_kernel(dQ_accum_bench)
+        bwd_kernel(q, k, v, dO, lse_tl_bench, delta_tl_bench, dQ_partial_bench, dK_bench,
+                   dV_bench)
+        dQ_bench = reduce_kernel(dQ_partial_bench)
+
+        post_kernel(dQ_bench)
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -775,9 +789,9 @@ def main(batch: int = 1,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=1, help='batch size')
-    parser.add_argument('--heads', type=int, default=8, help='heads')
-    parser.add_argument('--seq_len', type=int, default=1024, help='sequence length')
+    parser.add_argument('--batch', type=int, default=4, help='batch size')
+    parser.add_argument('--heads', type=int, default=16, help='heads')
+    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
     parser.add_argument('--dim', type=int, default=64, help='dim')
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--groups', type=int, default=1, help='groups')
