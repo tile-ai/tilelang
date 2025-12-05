@@ -545,13 +545,16 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     return results;
   }
 
-  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
+  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
+      copy_inst == CopyInst::kBulkLoad1D ||
+      copy_inst == CopyInst::kBulkStore1D) {
     // if can apply swizzling, we skip layout inference
     // for bulk load/store, we can directly apply the layout of normal copy
     // This must be a global/shared layout, so we can skip the parallel op
     // layout inference (parallel layout inference only annotate the loop layout
     // and the register layout).
-    bool is_load = copy_inst == CopyInst::kBulkLoad;
+    bool is_load =
+        copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
     Buffer global_tensor = is_load ? src : dst;
     Buffer shared_tensor = is_load ? dst : src;
     // check shared layout is non-swizzle
@@ -561,6 +564,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
       Layout linear_layout = ComputeLinearLayout(shared_tensor);
       return Map<Buffer, Layout>({{shared_tensor, linear_layout}});
     }
+    return {};
   }
   // for LDSM/STSM, the layout was deduced from register layout
   // so we can directly apply the layout of normal copy
