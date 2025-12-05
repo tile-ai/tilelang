@@ -42,8 +42,18 @@ public:
 
   virtual Layout Inverse() const;
 
+  // Reshape the layout to a new logical shape. When aliasing buffers of
+  // different dtypes, the element count may change while the underlying
+  // byte-size stays equal. Use rescale_num/rescale_den to represent the
+  // ratio between the old element size and the new element size in bytes.
+  // Specifically, define factor = rescale_num / rescale_den where:
+  //   new_num_elems = old_num_elems * factor
+  // For example, f32->i8 (4B -> 1B) uses rescale_num=4, rescale_den=1.
+  // i8->f32 (1B -> 4B) uses rescale_num=1, rescale_den=4.
   virtual Layout Reshape(const Array<PrimExpr> &shape,
-                         arith::Analyzer *analyzer) const;
+                         arith::Analyzer *analyzer,
+                         const PrimExpr rescale_num = Integer(1),
+                         const PrimExpr rescale_den = Integer(1)) const;
 
   virtual std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const;
 
@@ -86,7 +96,9 @@ public:
 
   Layout Inverse() const final;
 
-  Layout Reshape(const Array<PrimExpr> &shape, arith::Analyzer *analyzer) const;
+  Layout Reshape(const Array<PrimExpr> &shape, arith::Analyzer *analyzer,
+                 const PrimExpr rescale_num = Integer(1),
+                 const PrimExpr rescale_den = Integer(1)) const;
 
   std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const final;
 

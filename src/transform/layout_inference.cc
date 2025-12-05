@@ -141,8 +141,11 @@ public:
             }
           }
           Layout target_layout =
-              shapes_equal ? src_layout
-                           : src_layout->Reshape(sib->shape, &analyzer_);
+              shapes_equal
+                  ? src_layout
+                  : src_layout->Reshape(sib->shape, &analyzer_,
+                                        Integer(src_buffer->dtype.bytes()),
+                                        Integer(sib->dtype.bytes()));
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
@@ -348,10 +351,12 @@ public:
             }
           }
 
-          Layout reshaped =
-              shapes_equal
-                  ? rep_layout.value()
-                  : rep_layout.value()->Reshape(buf->shape, &analyzer_);
+          Layout reshaped = shapes_equal
+                                ? rep_layout.value()
+                                : rep_layout.value()->Reshape(
+                                      buf->shape, &analyzer_,
+                                      Integer(rep.value()->dtype.bytes()),
+                                      Integer(buf->dtype.bytes()));
           layout_map.Set(buf, reshaped);
         }
       }
@@ -725,7 +730,11 @@ private:
           if (shapes_equal) {
             annotated_layout_map_.Set(buffer, layout);
           } else {
-            auto reshaped_layout = layout->Reshape(buffer->shape, &analyzer_);
+            // Use the first buffer sharing this var as the base for dtype ratio
+            int base_bytes = buffers[0]->dtype.bytes();
+            auto reshaped_layout =
+                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bytes),
+                                Integer(buffer->dtype.bytes()));
             annotated_layout_map_.Set(buffer, reshaped_layout);
           }
         }
