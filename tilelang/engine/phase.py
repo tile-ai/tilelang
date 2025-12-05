@@ -163,7 +163,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.InjectFenceProxy()(mod)
     else:
         mod = tilelang.transform.IfStmtBinding()(mod)
-        mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+        mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
