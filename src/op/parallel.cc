@@ -567,7 +567,10 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   auto injective_res = loop_layout_->DetectInjective();
   if (!injective_res->errors.empty()) {
     std::ostringstream oss;
-    oss << "Loop layout is not injective: " << loop_layout_->DebugOutput();
+    oss << "Loop layout is not injective: " << loop_layout_->DebugOutput()
+        << '\n'
+        << "  errors: " << injective_res->errors << '\n'
+        << "  loop AST: " << root_;
     throw LoopLayoutInjectiveException(oss.str());
   }
 

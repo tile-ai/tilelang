@@ -6,6 +6,7 @@
 #ifndef TVM_TL_LAYOUT_LAYOUT_H_
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
+#include <exception>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/ffi/object.h>
@@ -17,6 +18,25 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+// Common layout-related exceptions
+class LayoutConflictException : public std::exception {
+public:
+  const char *what() const noexcept override { return msg_.c_str(); }
+  explicit LayoutConflictException(const std::string &msg) : msg_(msg) {}
+
+private:
+  std::string msg_;
+};
+
+class LoopLayoutInjectiveException : public std::exception {
+public:
+  const char *what() const noexcept override { return msg_.c_str(); }
+  explicit LoopLayoutInjectiveException(const std::string &msg) : msg_(msg) {}
+
+private:
+  std::string msg_;
+};
 
 class Layout;
 class Fragment;
