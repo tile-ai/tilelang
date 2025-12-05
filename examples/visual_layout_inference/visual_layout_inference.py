@@ -4,7 +4,11 @@ import tilelang.language as T
 
 # use pass_configs to enable layout visualization
 @tilelang.jit(
-    out_idx=[-1], pass_configs={tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION: "png"})
+    out_idx=[-1],
+    pass_configs={
+        tilelang.PassConfigKey.TL_LAYOUT_VISUALIZATION_ENABLE: True,
+        tilelang.PassConfigKey.TL_LAYOUT_VISUALIZATION_FORMATS: "pdf"
+    })
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
 
     @T.prim_func

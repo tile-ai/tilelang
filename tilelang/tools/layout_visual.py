@@ -1,4 +1,3 @@
-import tilelang
 import tilelang.language as T
 from tvm import tir
 from tvm.tir import PyStmtExprVisitor
@@ -59,11 +58,11 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
     - "png,svg": Generate multiple formats (comma-separated)
     """
 
-    def __init__(self, formats: str = "png"):
+    def __init__(self, formats: str = ""):
         super().__init__()
         self.layout_found = []
         self.processed_layouts = set()
-        self.formats = formats
+        self.formats = formats.strip().lower() if formats else ""
 
     def visit_block_(self, op: tir.Block) -> None:
         if "layout_map" in op.annotations:
@@ -75,22 +74,17 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
                     if layout_id not in self.processed_layouts:
                         print(f"{key} layout inference:")
                         print_fragment_format(layout)
-                        plot_layout(layout, name=f"{key}_layout", formats=self.formats)
+                        if self.formats:
+                            plot_layout(layout, name=f"{key}_layout", formats=self.formats)
                         self.processed_layouts.add(layout_id)
 
-        self.visit_stmt(op.body)
+        # super().visit_block_(op)
 
 
-def LayoutVisual():
+def LayoutVisual(formats: str = ""):
 
     def pass_fn(func: tir.PrimFunc, mod, ctx):
-        pass_ctx = tilelang.transform.get_pass_context()
-        config_value = pass_ctx.config.get(
-            tilelang.PassConfigKey.TL_ENABLE_LAYOUT_VISUALIZATION.value, "")
-
-        config_str = str(config_value).strip().lower()
-
-        _LayoutVisualVisitor(formats=config_str).visit_stmt(func.body)
+        _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func
 
     return prim_func_pass(pass_fn, opt_level=0)
