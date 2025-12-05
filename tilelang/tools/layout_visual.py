@@ -58,11 +58,11 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
     - "png,svg": Generate multiple formats (comma-separated)
     """
 
-    def __init__(self, formats: str = ""):
+    def __init__(self, formats: list[str] = ""):
         super().__init__()
         self.layout_found = []
         self.processed_layouts = set()
-        self.formats = formats.strip().lower() if formats else ""
+        self.formats_list = [f for f in formats if f != "txt"]
 
     def visit_block_(self, op: tir.Block) -> None:
         if "layout_map" in op.annotations:
@@ -74,8 +74,8 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
                     if layout_id not in self.processed_layouts:
                         print(f"{key} layout inference:")
                         print_fragment_format(layout)
-                        if self.formats:
-                            plot_layout(layout, name=f"{key}_layout", formats=self.formats)
+                        for fmt in self.formats_list:
+                            plot_layout(layout, name=f"{key}_layout", formats=fmt)
                         self.processed_layouts.add(layout_id)
 
         # super().visit_block_(op)

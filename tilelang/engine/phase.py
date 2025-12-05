@@ -79,16 +79,27 @@ def get_layout_visual_formats(pass_ctx: PassContext | None = None) -> list[str]:
         pass_ctx = tilelang.transform.get_pass_context()
     formats_value = pass_ctx.config.get(tilelang.PassConfigKey.TL_LAYOUT_VISUALIZATION_FORMATS, "")
     if not formats_value:
-        return ""
+        return ["txt"]
 
     formats_str = formats_value.strip().lower()
-    valid_formats = ["png", "pdf", "svg", "all"]
-    if formats_str not in valid_formats:
+    valid_formats = ["txt", "png", "pdf", "svg", "all"]
+
+    if formats_str == "all":
+        return ["txt", "png", "pdf", "svg"]
+
+    if "," in formats_str:
+        formats_list = [f.strip() for f in formats_str.split(',')]
+    else:
+        formats_list = [formats_str]
+
+    invalid_formats = [f for f in formats_list if f not in valid_formats]
+    if invalid_formats:
         raise ValueError(
-            f"Invalid formats for TL_LAYOUT_VISUALIZATION_FORMATS: {formats_str}. "
+            f"Invalid formats for TL_LAYOUT_VISUALIZATION_FORMATS: {invalid_formats}. "
             f"Valid formats are: {valid_formats}. "
-            f"You can choose one of the valid formats or a comma-separated list of formats.")
-    return formats_str
+            f"You can choose one of the valid formats or a comma-separated list of formats.(e.g., 'txt,png,pdf')"
+        )
+    return formats_list
 
 
 def LayoutVisual(mod: IRModule) -> None:

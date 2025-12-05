@@ -7,7 +7,7 @@ import tilelang.language as T
     out_idx=[-1],
     pass_configs={
         tilelang.PassConfigKey.TL_LAYOUT_VISUALIZATION_ENABLE: True,
-        tilelang.PassConfigKey.TL_LAYOUT_VISUALIZATION_FORMATS: "pdf"
+        tilelang.PassConfigKey.TL_LAYOUT_VISUALIZATION_FORMATS: "svg"
     })
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
 
@@ -50,7 +50,7 @@ def main():
 
     # print the layout visualization result and save figures to ./tmp.
     '''
-    C_local layout inference:
+    C_local inferenced layout:
     Shape: [32, 32] -> [8]
     Thread: _j // 16 * 64 + _i // 16 * 32 + _i % 8 * 4 + _j % 8 // 2
     Index:  [_j % 16 // 8 * 4 + _i % 16 // 8 * 2 + _j % 2]
