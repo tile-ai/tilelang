@@ -354,7 +354,7 @@ def dispatch_kernel(
                         cached_channel_tail_idx += 1
                         if cached_channel_tail_idx % num_warps_per_rank == send_warp_id_in_rank:
                             # copy data, all are remote copy
-                            # 1. copy data (why useless???)
+                            # 1. copy data
                             T.put_warp(T.address_of(x[token_idx, 0]), 
                             T.address_of(channel_x_buffers[responsible_channel, rank, dst_slot_idx, 0]), 
                             hidden, dst_pe=responsible_rank, unroll_factor=4)
@@ -606,7 +606,7 @@ def cached_dispatch_kernel(
                         cached_channel_tail_idx += 1
                         if cached_channel_tail_idx % num_warps_per_rank == send_warp_id_in_rank:
                             # copy data, all are remote copy
-                            # 1. copy data (why useless???)
+                            # 1. copy data
                             T.put_warp(T.address_of(x[token_idx, 0]), 
                             T.address_of(channel_x_buffers[responsible_channel, rank, dst_slot_idx, 0]), 
                             hidden, dst_pe=responsible_rank, unroll_factor=4)
@@ -741,9 +741,6 @@ def intranode_dispatch(
     num_ranks = num_tokens_per_rank.shape[0]
     num_local_experts = num_experts // num_ranks
     num_topk = topk_idx.shape[1] if handle is None else 0
-
-    # Default config
-    config = Config.get_dispatch_config(num_ranks) if config is None else config
 
     barrier_signal, per_rank_buffer, per_expert_buffer, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, \
         channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers = symm_buffers
