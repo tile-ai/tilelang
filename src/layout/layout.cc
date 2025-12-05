@@ -301,9 +301,6 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
                            const PrimExpr rescale_num,
                            const PrimExpr rescale_den) const {
 
-  LOG(INFO) << "Reshape: InputShape() = " << InputShape()
-            << " shape = " << shape << " rescale_num = " << rescale_num
-            << " rescale_den = " << rescale_den;
   // Fast path: if shape is the same, return the original layout
   if (StructuralEqual()(InputShape(), shape)) {
     return ffi::GetRef<Layout>(this);
