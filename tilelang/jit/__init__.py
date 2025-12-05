@@ -293,7 +293,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         """
         if isinstance(self.func, PrimFuncCreater):
             tir = self.func(*args, **kwargs)
-        if isinstance(self.func, PrimFunc):
+        elif isinstance(self.func, PrimFunc):
             tir = self.func
         elif callable(self.func):
             tir = self.func(*args, **kwargs)
