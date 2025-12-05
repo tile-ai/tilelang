@@ -184,7 +184,7 @@ private:
     if (it == buffer_data_to_buffers_.end())
       return;
     ffi::Array<Buffer> arr = (*it).second;
-    if (arr.size() > 0) {
+    if (!arr.empty()) {
       // erase last element
       std::vector<Buffer> tmp;
       tmp.reserve(arr.size() - 1);
@@ -192,7 +192,7 @@ private:
         tmp.push_back(arr[i]);
       arr = ffi::Array<Buffer>(tmp);
     }
-    if (arr.size() == 0) {
+    if (arr.empty()) {
       buffer_data_to_buffers_.erase(v);
     } else {
       buffer_data_to_buffers_.Set(v, arr);
@@ -201,7 +201,7 @@ private:
 
   bool HasBinding(const Var &v) const {
     auto it = buffer_data_to_buffers_.find(v);
-    return it != buffer_data_to_buffers_.end() && (*it).second.size() != 0;
+    return it != buffer_data_to_buffers_.end() && !(*it).second.empty();
   }
 
   // Snapshot the current top binding per Var for APIs that require
@@ -211,7 +211,7 @@ private:
     for (const auto &kv : buffer_data_to_buffers_) {
       const Var &v = kv.first;
       const ffi::Array<Buffer> &arr = kv.second;
-      if (arr.size() != 0) {
+      if (!arr.empty()) {
         out.Set(v, arr[arr.size() - 1]);
       }
     }
@@ -235,7 +235,7 @@ private:
       }
     }
 
-    if (new_block_alloc_bufs.size()) {
+    if (!new_block_alloc_bufs.empty()) {
       node.CopyOnWrite()->body =
           InjectOpaqueBlock(node->body, new_block_alloc_bufs);
     }
