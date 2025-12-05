@@ -545,9 +545,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     return results;
   }
 
-  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
-      copy_inst == CopyInst::kBulkLoad1D ||
-      copy_inst == CopyInst::kBulkStore1D) {
+  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
     // if can apply swizzling, we skip layout inference
     // for bulk load/store, we can directly apply the layout of normal copy
     // This must be a global/shared layout, so we can skip the parallel op
