@@ -178,17 +178,19 @@ When TileLang performs layout inference, it determines how fragment buffers are 
 1. **Textual output**: A human-readable description of the layout mapping
 2. **Visual diagrams**: Color-coded plots showing the thread-to-data mapping
 
-The visual layout inference tool is controlled through the `TL_ENABLE_LAYOUT_VISUALIZATION` pass configuration. By default, visualization is **disabled** to avoid performance overhead during compilation.
+The visual layout inference tool is controlled through the `TL_LAYOUT_VISUALIZATION_ENABLE` and `TL_LAYOUT_VISUALIZATION_FORMATS` pass configuration. By default, `TL_LAYOUT_VISUALIZATION_ENABLE` is **disabled** to avoid performance overhead during compilation.
 
-`TL_ENABLE_LAYOUT_VISUALIZATION` accepts string values to control output formats:
-- "all": Enabled, generates all formats (PDF, PNG, SVG)
+When enabled, `TL_LAYOUT_VISUALIZATION_FORMATS` accepts string values to control output formats:
+- "txt": Text output only (same as default)
+- "all": Generates all formats (TXT, PDF, PNG, SVG)
 - "png": Generate PNG format only
 - "pdf": Generate PDF format only
 - "svg": Generate SVG format only
+- "txt,svg": Generate multiple formats (comma-separated) in addition to text output
 
-The output messages will include something like:
+The output messages of "txt" will include something like:
 ```
-C_local layout inference:
+C_local inferenced layout:
   Shape: [32, 32] -> [8]
   Thread: _j // 16 * 64 + _i // 16 * 32 + _i % 8 * 4 + _j % 8 // 2
   Index:  [_j % 16 // 8 * 4 + _i % 16 // 8 * 2 + _j % 2]
