@@ -112,8 +112,6 @@ jobs:
         python-version:
           # Wheels are built with Python 3.8 Limited API, they should work with all Python >= 3.8.
           # Only build wheels against Python 3.8 Limited API to save CI resources.
-          # FIXME: Here we use Python 3.9 because our dependency `apache-tvm-ffi` claims to support
-          #        Python 3.8 but it depends on a version of `ml-dtypes` that requires Python >= 3.9.
           - "3.9"
       fail-fast: false
     timeout-minutes: 120
