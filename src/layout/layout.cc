@@ -567,8 +567,39 @@ arith::IterMapResult FragmentNode::DetectInjective() const {
   for (const auto &e : forward_index_) {
     indices.push_back(e);
   }
-  return arith::DetectIterMap(indices, getVarMap(), 1,
-                              arith::IterMapLevel::Bijective, &analyzer);
+
+  // Mirror Layout::InverseWithLevel(): if any participating shape is
+  // symbolic, relax to NoCheck and rely on runtime guards elsewhere.
+  auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
+    Array<PrimExpr> symbolic_dims;
+    for (const auto &dim : shape) {
+      if (!as_const_int(dim)) {
+        symbolic_dims.push_back(dim);
+      }
+    }
+    return symbolic_dims;
+  };
+
+  Array<PrimExpr> symbolic_dims = collect_symbolic(InputShape());
+  Array<PrimExpr> output_shape = OutputShape();
+  symbolic_dims.insert(symbolic_dims.end(), output_shape.begin(),
+                       output_shape.end());
+  // Also consider replicate size for fragments
+  if (!as_const_int(ReplicateExtent())) {
+    symbolic_dims.push_back(ReplicateExtent());
+  }
+  symbolic_dims = collect_symbolic(symbolic_dims);
+
+  bool is_static_shape = symbolic_dims.empty();
+  auto level = is_static_shape ? arith::IterMapLevel::Bijective
+                               : arith::IterMapLevel::NoCheck;
+  if (!is_static_shape) {
+    DLOG(WARNING)
+        << "Fragment::DetectInjective on symbolic layout, falling back to "
+        << "NoCheck; symbolic dims: " << symbolic_dims;
+  }
+
+  return arith::DetectIterMap(indices, getVarMap(), 1, level, &analyzer);
 }
 
 PrimExpr FragmentNode::ThreadExtent() const {
