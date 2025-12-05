@@ -8,6 +8,7 @@ from einops import rearrange, einsum
 import argparse
 import time
 import math
+from tilelang.profiler import do_bench
 
 from heuristic import num_splits_heuristic
 
@@ -570,6 +571,139 @@ def main(args):
     print(f"FA kernel execution time: {kernel_time_fa:.2f} ms")
 
     print(f"Speedup: {kernel_time_fa / kernel_time:.2f}x")
+
+
+def benchmark(args):
+
+    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v
+    sparse_ratio = args.sparse_ratio
+    block_N = args.block_N
+    page_block_size = args.page_block_size
+    num_blocks = args.num_pages
+    max_selected_blocks = int(math.ceil(max_cache_seqlen / block_N))
+    dtype = torch.float16
+    Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
+    cache_seqlens = torch.randint(
+        max_cache_seqlen // 2, max_cache_seqlen + 1, (batch,), dtype=torch.int32, device='cuda')
+    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
+    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device='cuda')
+    K_cache = torch.zeros((num_blocks, page_block_size, heads_kv, dim), dtype=dtype, device='cuda')
+    V_cache = torch.zeros((num_blocks, page_block_size, heads_kv, dim_v),
+                          dtype=dtype,
+                          device='cuda')
+    max_num_blocks_per_seq = int(math.ceil(max_cache_seqlen / page_block_size))
+    block_table = torch.zeros((batch, max_num_blocks_per_seq), dtype=torch.int32, device='cuda')
+    block_indices = torch.zeros((batch, heads_kv, max_selected_blocks),
+                                dtype=torch.int32,
+                                device='cuda')
+    total_blocks_needed = sum(
+        int(math.ceil(cache_seqlens[seq_idx].item() / page_block_size)) for seq_idx in range(batch))
+    available_blocks = list(range(total_blocks_needed))
+    import random
+    random.seed(42)
+    random.shuffle(available_blocks)
+    block_assignment = {}
+    block_idx_counter = 0
+    for seq_idx in range(batch):
+        seq_len = cache_seqlens[seq_idx].item()
+        num_blocks_needed = int(math.ceil(seq_len / page_block_size))
+        for block_idx in range(num_blocks_needed):
+            physical_block_idx = available_blocks[block_idx_counter]
+            block_table[seq_idx, block_idx] = physical_block_idx
+            block_assignment[(seq_idx, block_idx)] = physical_block_idx
+            block_idx_counter += 1
+    for seq_idx in range(batch):
+        seq_len = cache_seqlens[seq_idx].item()
+        num_blocks_needed = int(math.ceil(seq_len / page_block_size))
+        for block_idx in range(num_blocks_needed):
+            physical_block_idx = block_assignment[(seq_idx, block_idx)]
+            start_token = block_idx * page_block_size
+            end_token = min(start_token + page_block_size, seq_len)
+            actual_block_size = end_token - start_token
+            K_cache[physical_block_idx, :actual_block_size, :, :] = K[seq_idx,
+                                                                      start_token:end_token, :, :]
+            V_cache[physical_block_idx, :actual_block_size, :, :] = V[seq_idx,
+                                                                      start_token:end_token, :, :]
+    for seq_idx in range(batch):
+        seq_len = cache_seqlens[seq_idx].item()
+        num_tile = int(math.ceil(seq_len / block_N))
+        if sparse_ratio == 0.0:
+            selected_blocks = min(num_tile, max_selected_blocks)
+            for head_idx in range(heads_kv):
+                for i in range(selected_blocks):
+                    block_indices[seq_idx, head_idx, i] = num_tile - 1 - i
+                for i in range(selected_blocks, max_selected_blocks):
+                    block_indices[seq_idx, head_idx, i] = -1
+        else:
+            num_selected = int(num_tile * (1.0 - sparse_ratio))
+            num_selected = max(1, min(num_selected, max_selected_blocks))
+            all_blocks = list(range(num_tile))
+            for head_idx in range(heads_kv):
+                selected_blocks = []
+                recent_blocks = 1
+                selected_blocks.append(num_tile - 1)
+                if num_selected > recent_blocks:
+                    remaining_blocks = [b for b in all_blocks if b not in selected_blocks]
+                    if remaining_blocks:
+                        import random
+                        random.seed(42)
+                        additional_blocks = random.sample(
+                            remaining_blocks,
+                            min(num_selected - recent_blocks, len(remaining_blocks)))
+                        selected_blocks.extend(additional_blocks)
+
+                selected_blocks.sort(reverse=True)
+
+                for i in range(len(selected_blocks)):
+                    block_indices[seq_idx, head_idx, i] = selected_blocks[i]
+                for i in range(len(selected_blocks), max_selected_blocks):
+                    block_indices[seq_idx, head_idx, i] = -1
+
+    sparse_attn = SparseFlashAttn(batch, heads, heads_kv, dim, dim_v, page_block_size, block_N,
+                                  num_blocks)
+    kernel = sparse_attn.kernel
+    batch = sparse_attn.batch
+    heads = sparse_attn.heads
+    heads_kv = sparse_attn.heads_kv
+    dim_v = sparse_attn.dim_v
+    dim = sparse_attn.dim
+    block_size = sparse_attn.block_N
+    max_selected_blocks = block_indices.shape[-1]
+
+    num_m_blocks = 1 * (heads // heads_kv + sparse_attn.block_H - 1) // sparse_attn.block_H
+    num_n_blocks = max_selected_blocks
+    size_one_kv_head = max_selected_blocks * block_size * (dim + dim_v) * 2
+    total_mblocks = batch * heads_kv * num_m_blocks
+
+    num_sm = sparse_attn.num_sm
+
+    num_split = num_splits_heuristic(
+        total_mblocks,
+        num_sm,
+        num_n_blocks,
+        num_m_blocks,
+        size_one_kv_head,
+        is_causal_or_local=True,
+        max_splits=128)
+
+    glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device='cuda')
+    output_partial = torch.empty((batch, heads, num_split, dim_v),
+                                 dtype=torch.float32,
+                                 device='cuda')
+
+    def run_kernel_only():
+        kernel(
+            Q,
+            K_cache,
+            V_cache,
+            block_indices,
+            cache_seqlens,
+            block_table,
+            glse,
+            output_partial,
+        )
+
+    return do_bench(run_kernel_only, warmup=10, rep=100)
 
 
 if __name__ == "__main__":
