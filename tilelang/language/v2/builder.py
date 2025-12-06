@@ -409,7 +409,14 @@ class Builder(BaseBuilder):
         if isinstance(value, tir.IntImm) and value.dtype == 'int32':
             return value.value
         if isinstance(value, (Var, Buffer)):
+            # Bind TVM Var/Buffer names and also record scope so reusing the same
+            # Python name (e.g., loop vars like `i`) across different for-frames
+            # works without triggering out-of-scope errors.
             IRBuilder.name(name, value)
+            if name != '_':
+                frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
+                assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
+                self.name_inside_frame[name] = self.frames[frame]
             return value
 
         # 3. Bind immutable tilelang objects
