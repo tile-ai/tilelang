@@ -106,7 +106,7 @@ def LayoutVisual(mod: IRModule) -> None:
     """Apply layout visualization pass if enabled."""
     if should_enable_layout_visual():
         formats = get_layout_visual_formats()
-        tilelang.tools.LayoutVisual(formats=formats)(mod)
+        tilelang.analysis.LayoutVisual(formats=formats)(mod)
 
 
 def PreLowerSemanticCheck(mod: IRModule) -> None:

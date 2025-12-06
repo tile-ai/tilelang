@@ -72,7 +72,7 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
                 if isinstance(layout, T.Fragment):
                     layout_id = str(layout)
                     if layout_id not in self.processed_layouts:
-                        print(f"{key} layout inference:")
+                        print(f"{key} inferenced layout:")
                         print_fragment_format(layout)
                         for fmt in self.formats_list:
                             plot_layout(layout, name=f"{key}_layout", formats=fmt)
