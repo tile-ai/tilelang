@@ -14,6 +14,7 @@ class cudaDeviceAttrNames:
     """
 
     cudaDevAttrMaxThreadsPerBlock: int = 1
+    cudaDevAttrMaxRegistersPerBlock: int = 12
     cudaDevAttrMaxSharedMemoryPerMultiprocessor: int = 81
     cudaDevAttrMaxPersistingL2CacheSize: int = 108
 
@@ -38,6 +39,8 @@ def get_device_name(device_id: int = 0) -> str | None:
 def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> int | None:
     assert format in ["bytes", "kb", "mb"], "Invalid format. Must be one of: bytes, kb, mb"
     prop = get_cuda_device_properties(device_id)
+    if prop is None:
+        raise RuntimeError("Failed to get device properties.")
     shared_mem = int(prop.shared_memory_per_block)
     if format == "bytes":
         return shared_mem
@@ -121,7 +124,7 @@ def get_registers_per_block(device_id: int = 0) -> int:
     Get the maximum number of 32-bit registers available per block.
     """
     prop = get_device_attribute(
-        cudaDeviceAttrNames.cudaDevAttrMaxThreadsPerBlock,
+        cudaDeviceAttrNames.cudaDevAttrMaxRegistersPerBlock,
         device_id,
     )
     return prop
