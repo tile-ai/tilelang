@@ -67,6 +67,48 @@ def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
     return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
 
 
+def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    enabled = pass_ctx.config.get(tilelang.PassConfigKey.TL_LAYOUT_VISUALIZATION_ENABLE, False)
+    return enabled
+
+
+def get_layout_visual_formats(pass_ctx: PassContext | None = None) -> list[str]:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    formats_value = pass_ctx.config.get(tilelang.PassConfigKey.TL_LAYOUT_VISUALIZATION_FORMATS, "")
+    if not formats_value:
+        return ["txt"]
+
+    formats_str = formats_value.strip().lower()
+    valid_formats = ["txt", "png", "pdf", "svg", "all"]
+
+    if formats_str == "all":
+        return ["txt", "png", "pdf", "svg"]
+
+    if "," in formats_str:
+        formats_list = [f.strip() for f in formats_str.split(',')]
+    else:
+        formats_list = [formats_str]
+
+    invalid_formats = [f for f in formats_list if f not in valid_formats]
+    if invalid_formats:
+        raise ValueError(
+            f"Invalid formats for TL_LAYOUT_VISUALIZATION_FORMATS: {invalid_formats}. "
+            f"Valid formats are: {valid_formats}. "
+            f"You can choose one of the valid formats or a comma-separated list of formats.(e.g., 'txt,png,pdf')"
+        )
+    return formats_list
+
+
+def LayoutVisual(mod: IRModule) -> None:
+    """Apply layout visualization pass if enabled."""
+    if should_enable_layout_visual():
+        formats = get_layout_visual_formats()
+        tilelang.analysis.LayoutVisual(formats=formats)(mod)
+
+
 def PreLowerSemanticCheck(mod: IRModule) -> None:
     """
     Check whether the module is valid before lowering. If not, raise a user-friendly error
@@ -121,6 +163,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
+    # Visualize the layout
+    LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
@@ -163,7 +207,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.InjectFenceProxy()(mod)
     else:
         mod = tilelang.transform.IfStmtBinding()(mod)
-        mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+        mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)

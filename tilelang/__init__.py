@@ -137,6 +137,7 @@ from . import (
     transform,  # noqa: F401
     language,  # noqa: F401
     engine,  # noqa: F401
+    tools,  # noqa: F401
 )
 from .autotuner import autotune  # noqa: F401
 from .transform import PassConfigKey  # noqa: F401

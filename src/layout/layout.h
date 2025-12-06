@@ -6,6 +6,7 @@
 #ifndef TVM_TL_LAYOUT_LAYOUT_H_
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
+#include <exception>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/ffi/object.h>
@@ -17,6 +18,25 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+// Common layout-related exceptions
+class LayoutConflictException : public std::exception {
+public:
+  const char *what() const noexcept override { return msg_.c_str(); }
+  explicit LayoutConflictException(const std::string &msg) : msg_(msg) {}
+
+private:
+  std::string msg_;
+};
+
+class LoopLayoutInjectiveException : public std::exception {
+public:
+  const char *what() const noexcept override { return msg_.c_str(); }
+  explicit LoopLayoutInjectiveException(const std::string &msg) : msg_(msg) {}
+
+private:
+  std::string msg_;
+};
 
 class Layout;
 class Fragment;
@@ -42,8 +62,18 @@ public:
 
   virtual Layout Inverse() const;
 
+  // Reshape the layout to a new logical shape. When aliasing buffers of
+  // different dtypes, the element count may change while the underlying
+  // byte-size stays equal. Use rescale_num/rescale_den to represent the
+  // ratio between the old element size and the new element size in bytes.
+  // Specifically, define factor = rescale_num / rescale_den where:
+  //   new_num_elems = old_num_elems * factor
+  // For example, f32->i8 (4B -> 1B) uses rescale_num=4, rescale_den=1.
+  // i8->f32 (1B -> 4B) uses rescale_num=1, rescale_den=4.
   virtual Layout Reshape(const Array<PrimExpr> &shape,
-                         arith::Analyzer *analyzer) const;
+                         arith::Analyzer *analyzer,
+                         const PrimExpr rescale_num = Integer(1),
+                         const PrimExpr rescale_den = Integer(1)) const;
 
   virtual std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const;
 
@@ -86,7 +116,9 @@ public:
 
   Layout Inverse() const final;
 
-  Layout Reshape(const Array<PrimExpr> &shape, arith::Analyzer *analyzer) const;
+  Layout Reshape(const Array<PrimExpr> &shape, arith::Analyzer *analyzer,
+                 const PrimExpr rescale_num = Integer(1),
+                 const PrimExpr rescale_den = Integer(1)) const;
 
   std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const final;
 
@@ -115,6 +147,8 @@ public:
   bool IsEqual(const FragmentNode *other, bool skip_index = false) const;
 
   bool IsCompletedReplicated() const;
+
+  arith::IterMapResult DetectInjective() const;
 
   static void RegisterReflection();
 

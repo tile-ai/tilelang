@@ -57,7 +57,7 @@ static int to_CUtensorMapDataType(DataType dtype) {
     }
   } else if (dtype.is_bfloat16()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  } else if (dtype.is_float8_e4m3() || dtype.is_float8_e5m2()) {
+  } else if (dtype.is_float8()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
   } else if (dtype.is_int()) {
     switch (dtype.bits()) {
@@ -551,7 +551,8 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     // This must be a global/shared layout, so we can skip the parallel op
     // layout inference (parallel layout inference only annotate the loop layout
     // and the register layout).
-    bool is_load = copy_inst == CopyInst::kBulkLoad;
+    bool is_load =
+        copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
     Buffer global_tensor = is_load ? src : dst;
     Buffer shared_tensor = is_load ? dst : src;
     // check shared layout is non-swizzle
@@ -561,6 +562,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
       Layout linear_layout = ComputeLinearLayout(shared_tensor);
       return Map<Buffer, Layout>({{shared_tensor, linear_layout}});
     }
+    return {};
   }
   // for LDSM/STSM, the layout was deduced from register layout
   // so we can directly apply the layout of normal copy
