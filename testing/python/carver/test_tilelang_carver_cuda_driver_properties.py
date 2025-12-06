@@ -20,6 +20,7 @@ class _cudaDeviceAttrNames:
 
     cudaDevAttrMaxThreadsPerBlock: int = 1
     cudaDevAttrMaxSharedMemoryPerBlock: int = 8
+    cudaDevAttrMaxRegistersPerBlock: int = 12
     cudaDevAttrMultiProcessorCount: int = 16
     cudaDevAttrMaxSharedMemoryPerMultiprocessor: int = 81
     cudaDevAttrMaxPersistingL2CacheSize: int = 108
@@ -60,7 +61,8 @@ def test_device_get_num_sms():
 
 def test_device_get_registers_per_block():
     tl_regs_per_block = get_registers_per_block()
-    driver_regs_per_block = get_device_attribute(_cudaDeviceAttrNames.cudaDevAttrMaxThreadsPerBlock)
+    driver_regs_per_block = get_device_attribute(
+        _cudaDeviceAttrNames.cudaDevAttrMaxRegistersPerBlock)
     assert tl_regs_per_block == driver_regs_per_block, "Registers per block values do not match"
 
 
