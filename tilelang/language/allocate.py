@@ -14,7 +14,12 @@ Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
 """
 from __future__ import annotations
-from typing import TypeVarTuple, TypeVar, overload, Literal, Unpack, Callable
+from typing import TypeVar, overload, Literal, Callable
+# Python 3.9 compatibility for advanced typing features (PEP 646)
+try:
+    from typing import TypeVarTuple, Unpack  # type: ignore[attr-defined]
+except Exception:
+    from typing_extensions import TypeVarTuple, Unpack  # type: ignore
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
