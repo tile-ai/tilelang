@@ -20,7 +20,9 @@ TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expe
 TVM_LIBRARY_NOT_FOUND_MESSAGE = ("TVM is not installed or found in the expected path")
 
 TL_ROOT = os.path.dirname(os.path.abspath(__file__))
-TL_LIBS = [TL_ROOT, os.path.join(TL_ROOT, 'lib')]
+# Only expose the internal lib directory to sys.path to avoid shadowing
+# common top-level module names (e.g., utils, analysis) from user projects.
+TL_LIBS = [os.path.join(TL_ROOT, 'lib')]
 TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
 
 DEV = False
@@ -30,7 +32,9 @@ if not os.path.exists(THIRD_PARTY_ROOT):
     tl_dev_root = os.path.dirname(TL_ROOT)
 
     dev_lib_root = os.path.join(tl_dev_root, 'build')
-    TL_LIBS = [dev_lib_root, os.path.join(dev_lib_root, 'tvm')]
+    # In dev builds, place artifacts under build/lib and point search path there
+    # to avoid adding the entire build root to sys.path.
+    TL_LIBS = [os.path.join(dev_lib_root, 'lib'), os.path.join(dev_lib_root, 'tvm')]
     THIRD_PARTY_ROOT = os.path.join(tl_dev_root, '3rdparty')
     logger.warning(f'Loading tilelang libs from dev root: {dev_lib_root}')
 

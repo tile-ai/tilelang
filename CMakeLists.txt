@@ -257,11 +257,19 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-# Install extension into the tilelang package directory
+
+# Ensure dev builds drop the extension into build/lib alongside other shared libs
+set_target_properties(tilelang_cython_wrapper PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+
+# Install the extension into tilelang/lib inside the wheel
 install(TARGETS tilelang_cython_wrapper
-        LIBRARY DESTINATION tilelang
-        RUNTIME DESTINATION tilelang
-        ARCHIVE DESTINATION tilelang)
+        LIBRARY DESTINATION tilelang/lib
+        RUNTIME DESTINATION tilelang/lib
+        ARCHIVE DESTINATION tilelang/lib)
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
