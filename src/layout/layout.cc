@@ -297,13 +297,17 @@ std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
 }
 
 Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
-                           arith::Analyzer *analyzer) const {
+                           arith::Analyzer *analyzer,
+                           const PrimExpr rescale_num,
+                           const PrimExpr rescale_den) const {
+
   // Fast path: if shape is the same, return the original layout
   if (StructuralEqual()(InputShape(), shape)) {
     return ffi::GetRef<Layout>(this);
   }
 
-  // Step 1. Prove the product of InputShape is equal to the product of shape
+  // Step 1. Prove the product relation holds under rescale:
+  //   prod(InputShape) * rescale_num == prod(shape) * rescale_den
   PrimExpr input_shape_product = Integer(1);
   for (const auto &dim : InputShape()) {
     input_shape_product *= dim;
@@ -317,8 +321,10 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
   // potential null dereference paths flagged by static analysis.
   arith::Analyzer fallback_analyzer;
   arith::Analyzer *az = analyzer ? analyzer : &fallback_analyzer;
-  ICHECK(az->CanProveEqual(input_shape_product, shape_product))
-      << "InputShape() = " << InputShape() << " shape = " << shape;
+  ICHECK(az->CanProveEqual(input_shape_product * rescale_num,
+                           shape_product * rescale_den))
+      << "InputShape() = " << InputShape() << " shape = " << shape
+      << ", rescale_num = " << rescale_num << ", rescale_den = " << rescale_den;
 
   // Step 2. Create new forward indices by reshaping
   // For each dimension in the new shape, we create a placeholder variable
@@ -339,13 +345,17 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
     }
     flat_index = flat_index + new_vars[i] * stride;
   }
+  // Convert new flat index (in units of new elements) to the old flat index
+  // (in units of old elements) using the rational rescale factor.
+  // old_flat = floor((flat_index * rescale_den) / rescale_num)
+  PrimExpr old_flat_index = floordiv(flat_index * rescale_den, rescale_num);
   // Step 4. Convert flat index back to original shape indices
   // For original shape [s0, s1, ..., sm]:
   // i0 = flat_index // (s1 * s2 * ... * sm)
   // i1 = (flat_index % (s1 * s2 * ... * sm)) // (s2 * s3 * ... * sm)
   // ...
   Array<PrimExpr> original_indices;
-  PrimExpr remaining = flat_index;
+  PrimExpr remaining = old_flat_index;
   for (size_t i = 0; i < InputShape().size(); ++i) {
     PrimExpr stride = Integer(1);
     for (size_t j = i + 1; j < InputShape().size(); ++j) {
@@ -373,7 +383,10 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
 }
 
 Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
-                             arith::Analyzer *analyzer) const {
+                             arith::Analyzer *analyzer,
+                             const PrimExpr rescale_num,
+                             const PrimExpr rescale_den) const {
+
   // Fast path: identical input shape, return self
   if (StructuralEqual()(InputShape(), shape)) {
     return ffi::GetRef<Fragment>(this);
@@ -390,8 +403,9 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
   // Use provided analyzer if present, otherwise a local fallback.
   arith::Analyzer fallback_analyzer;
   arith::Analyzer *az = analyzer ? analyzer : &fallback_analyzer;
-  ICHECK(az->CanProveEqual(input_prod, shape_prod))
+  ICHECK(az->CanProveEqual(input_prod * rescale_num, shape_prod * rescale_den))
       << "InputShape() = " << InputShape() << " shape = " << shape
+      << ", rescale_num = " << rescale_num << ", rescale_den = " << rescale_den
       << " input fragment layout is = " << DebugOutput();
 
   // 2) Build flat index from new-shape indices
@@ -414,9 +428,12 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
       stride = stride * shape[j];
     flat = flat + new_vars[i] * stride;
   }
+  // Convert to old flat index units using the rational rescale factor.
+  // old_flat = floor((flat * rescale_den) / rescale_num)
+  PrimExpr old_flat = floordiv(flat * rescale_den, rescale_num);
   // 3) Recover original indices from flat index
   Array<PrimExpr> orig_indices;
-  PrimExpr remain = flat;
+  PrimExpr remain = old_flat;
   for (size_t i = 0; i < InputShape().size(); ++i) {
     PrimExpr stride = Integer(1);
     for (size_t j = i + 1; j < InputShape().size(); ++j)
@@ -534,6 +551,52 @@ bool FragmentNode::IsCompletedReplicated() const {
   arith::Analyzer analyzer;
   return ExprDeepEqual()(analyzer.Simplify(forward_thread_),
                          ReplicationPlaceholder());
+}
+
+arith::IterMapResult FragmentNode::DetectInjective() const {
+  // lei:To perform injective check, we need to reverse the layout
+  // and use surjective check, now we use bijective check for convenience
+  // can be relaxed in future
+  arith::Analyzer analyzer;
+  // Build a flat indices array: [forward_thread_, forward_index_[...]]
+  Array<PrimExpr> indices;
+  indices.push_back(forward_thread_);
+  for (const auto &e : forward_index_) {
+    indices.push_back(e);
+  }
+
+  // Mirror Layout::InverseWithLevel(): if any participating shape is
+  // symbolic, relax to NoCheck and rely on runtime guards elsewhere.
+  auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
+    Array<PrimExpr> symbolic_dims;
+    for (const auto &dim : shape) {
+      if (!as_const_int(dim)) {
+        symbolic_dims.push_back(dim);
+      }
+    }
+    return symbolic_dims;
+  };
+
+  Array<PrimExpr> symbolic_dims = collect_symbolic(InputShape());
+  Array<PrimExpr> output_shape = OutputShape();
+  symbolic_dims.insert(symbolic_dims.end(), output_shape.begin(),
+                       output_shape.end());
+  // Also consider replicate size for fragments
+  if (!as_const_int(ReplicateExtent())) {
+    symbolic_dims.push_back(ReplicateExtent());
+  }
+  symbolic_dims = collect_symbolic(symbolic_dims);
+
+  bool is_static_shape = symbolic_dims.empty();
+  auto level = is_static_shape ? arith::IterMapLevel::Bijective
+                               : arith::IterMapLevel::NoCheck;
+  if (!is_static_shape) {
+    DLOG(WARNING)
+        << "Fragment::DetectInjective on symbolic layout, falling back to "
+        << "NoCheck; symbolic dims: " << symbolic_dims;
+  }
+
+  return arith::DetectIterMap(indices, getVarMap(), 1, level, &analyzer);
 }
 
 PrimExpr FragmentNode::ThreadExtent() const {

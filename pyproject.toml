@@ -27,7 +27,11 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "apache-tvm-ffi==0.1.0",
+    "apache-tvm-ffi~=0.1.0",
+    # Extra constraint to tvm-ffi for abi issue,
+    # should be removed after our tvm's update.
+    # See discussion in tilelang#1373 and apache/tvm-ffi#307
+    "apache-tvm-ffi<=0.1.1",
     "cloudpickle",
     "ml-dtypes",
     "numpy>=1.23.5",
@@ -43,6 +47,8 @@ dependencies = [
 # mldtypes should be greater than 0.5.1
 # if you want to enable fp4
 fp4 = ["ml-dtypes>=0.5.1"]
+# if you want to enable layout inference visualization
+vis = ["matplotlib"]
 
 [build-system]
 requires = ["cython>=3.0.0", "z3-solver>=4.13.0", "scikit-build-core"]

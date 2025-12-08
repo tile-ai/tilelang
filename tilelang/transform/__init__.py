@@ -414,6 +414,17 @@ def LowerSharedBarrier():
     return _ffi_api.LowerSharedBarrier()  # type: ignore
 
 
+def PlanAndUpdateBufferAllocationLocation():
+    """Plan and update buffer allocation locations within PrimFuncs.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.PlanAndUpdateBufferAllocationLocation()  # type: ignore
+
+
 def StorageRewrite():
     """StorageRewrite
 

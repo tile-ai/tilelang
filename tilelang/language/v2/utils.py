@@ -4,6 +4,7 @@ import inspect
 from typing import Any, Callable, Literal
 from tilelang import env
 from hashlib import sha256
+from tvm import tir
 import linecache
 
 
@@ -84,3 +85,17 @@ def get_compiled_object(source: str | ast.AST,
     locs = {}
     exec(compiled, globals, locs)
     return locs[name]
+
+
+def construct_strides(shape: tuple[Any, ...], allow_prim_expr: bool = True) -> tuple[Any, ...]:
+    """Construct row-major strides from shape."""
+    strides = []
+    stride = 1
+    for s in shape[::-1]:
+        strides.append(stride)
+        stride *= s
+        if not allow_prim_expr and isinstance(stride, tir.PrimExpr):
+            raise ValueError(
+                "Cannot construct strides with PrimExpr when allow_prim_expr is False.")
+    strides = tuple(reversed(strides))
+    return strides

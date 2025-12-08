@@ -120,7 +120,7 @@ def _load_tile_lang_lib():
 if env.SKIP_LOADING_TILELANG_SO == "0":
     _LIB, _LIB_PATH = _load_tile_lang_lib()
 
-from .jit import jit, JITKernel, compile  # noqa: F401
+from .jit import jit, lazy_jit, JITKernel, compile, par_compile  # noqa: F401
 from .profiler import Profiler  # noqa: F401
 from .cache import clear_cache  # noqa: F401
 
@@ -137,6 +137,7 @@ from . import (
     transform,  # noqa: F401
     language,  # noqa: F401
     engine,  # noqa: F401
+    tools,  # noqa: F401
 )
 from .autotuner import autotune  # noqa: F401
 from .transform import PassConfigKey  # noqa: F401

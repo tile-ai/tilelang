@@ -35,11 +35,7 @@ repos:
     rev: v21.1.6  # sync with requirements-lint.txt
     hooks:
       - id: clang-format
-        exclude: |
-          (?ix)(
-            ^.+\.(cu|cuh)$|
-            ^.+\.json$
-          )
+        types_or: [c++, c]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.7  # sync with requirements-lint.txt
     hooks:

@@ -214,6 +214,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
   if (loop_layout_.defined())
     return {};
+
   if (level == InferLevel::kStrict) {
     LayoutMap results;
     // Deduce buffers that should be complicated replicated.
@@ -561,6 +562,16 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     }();
   } else {
     return {};
+  }
+  // check loop_layout_ is injective
+  auto injective_res = loop_layout_->DetectInjective();
+  if (!injective_res->errors.empty()) {
+    std::ostringstream oss;
+    oss << "Loop layout is not injective: " << loop_layout_->DebugOutput()
+        << '\n'
+        << "  errors: " << injective_res->errors << '\n'
+        << "  loop AST: " << root_;
+    throw LoopLayoutInjectiveException(oss.str());
   }
 
   PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();

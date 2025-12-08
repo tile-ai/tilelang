@@ -1,11 +1,13 @@
+from __future__ import annotations
 import tilelang.language as T
 
 
-def plot_layout(layout: T.Layout,
+def plot_layout(layout: T.Fragment,
                 save_directory="./tmp",
                 name: str = "layout",
                 colormap: str = "RdPu",
-                verbose: bool = False) -> None:
+                verbose: bool = False,
+                formats: str | list[str] = "png") -> None:
     """
     Plot the layout of a buffer.
 
@@ -21,7 +23,8 @@ def plot_layout(layout: T.Layout,
         The colormap to use for visualization (default is "RdPu").
     verbose : bool, optional
         If True, prints additional information about the mapping (default is False).
-
+    formats : str | list[str], optional
+        The formats to save the image in (default is "png").
     Returns
     -------
     None
@@ -81,6 +84,21 @@ def plot_layout(layout: T.Layout,
     # Generate a list of colors based on the colormap
     raw_colors = [cmap(i) for i in range(num_threads)]
     colors = raw_colors.copy()
+
+    # Show the distribution of registers in each thread of a warp.
+    warp_size = 32
+    # Warn if the number of threads is less than the warp size
+    if num_threads < warp_size:
+        import warnings
+        warnings.warn(
+            f"Layout visualization has {num_threads} threads, which is less than the warp size ({warp_size}). "
+            f"For the best viewing experience, it is recommended to have at least {warp_size} threads.",
+            UserWarning,
+            stacklevel=2)
+    spectral_camp = plt.get_cmap("hsv", warp_size * 6)
+
+    for i in range(min(warp_size, num_threads)):
+        colors[i] = spectral_camp(i * 6)
 
     # Determine the number of rows and columns in the input shape
     nrows, ncols = input_shape
@@ -191,17 +209,30 @@ def plot_layout(layout: T.Layout,
     # Save the figure in multiple formats
     plt.tight_layout()
 
-    # Save as PDF
-    pdf_path = tmp_directory / f"{name}.pdf"
-    plt.savefig(pdf_path, bbox_inches="tight")
-    print(f"Saved pdf format into {pdf_path}")
+    if isinstance(formats, str):
+        formats_str = formats.strip().lower()
+        if formats_str == 'all':
+            formats_list = ['pdf', 'png', 'svg']
+        elif "," in formats_str:
+            formats_list = [f.strip() for f in formats_str.split(',')]
+        else:
+            formats_list = [formats_str]
+    else:
+        raise TypeError(f"Expected str, but got {type(formats).__name__}. "
+                        f"Please pass a string like 'png', 'pdf', 'svg', 'all', or 'png,pdf'.")
 
-    # Save as PNG
-    png_path = tmp_directory / f"{name}.png"
-    plt.savefig(png_path, bbox_inches="tight", transparent=False, dpi=255)
-    print(f"Saved png format into {png_path}")
+    # Save the figure
+    if 'pdf' in formats_list:
+        pdf_path = tmp_directory / f"{name}.pdf"
+        plt.savefig(pdf_path, bbox_inches="tight")
+        print(f"Saved pdf format into {pdf_path}")
 
-    # Save as SVG
-    svg_path = tmp_directory / f"{name}.svg"
-    plt.savefig(svg_path, bbox_inches="tight", format="svg")
-    print(f"Saved svg format into {svg_path}")
+    if 'png' in formats_list:
+        png_path = tmp_directory / f"{name}.png"
+        plt.savefig(png_path, bbox_inches="tight", transparent=False, dpi=255)
+        print(f"Saved png format into {png_path}")
+
+    if 'svg' in formats_list:
+        svg_path = tmp_directory / f"{name}.svg"
+        plt.savefig(svg_path, bbox_inches="tight", format="svg")
+        print(f"Saved svg format into {svg_path}")

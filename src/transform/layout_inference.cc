@@ -12,6 +12,7 @@
 #include <tvm/tir/utils.h>
 
 #include <algorithm>
+#include <deque>
 #include <memory>
 #include <queue>
 
@@ -72,7 +73,7 @@ public:
 
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
                     LayoutMap &layout_map, const LayoutMap &strict_layout_map,
-                    std::queue<int> &q, std::vector<bool> &in_queue) {
+                    std::deque<int> &q, std::vector<bool> &in_queue) {
     auto num_infer = infer_list_.size();
 
     // Range check for cur_infer_id
@@ -112,9 +113,9 @@ public:
         next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
                                           cur_analyzer, buffer_oob},
                           level);
+
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
-
       // Basic validity checks
       ICHECK(buffer.defined()) << "InferLayout returned an undefined buffer.";
       ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
@@ -140,8 +141,11 @@ public:
             }
           }
           Layout target_layout =
-              shapes_equal ? src_layout
-                           : src_layout->Reshape(sib->shape, &analyzer_);
+              shapes_equal
+                  ? src_layout
+                  : src_layout->Reshape(sib->shape, &analyzer_,
+                                        Integer(src_buffer->dtype.bytes()),
+                                        Integer(sib->dtype.bytes()));
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
@@ -152,10 +156,7 @@ public:
             layout_map.Set(sib, target_layout);
             if (update_queue && use_list_.count(sib)) {
               for (int idx : use_list_[sib]) {
-                if (!in_queue[idx] && idx != cur_infer_id) {
-                  in_queue[idx] = true;
-                  q.push(idx);
-                }
+                EnqueueWithPriority(idx, q, in_queue, cur_infer_id, layout_map);
               }
             }
           }
@@ -233,22 +234,20 @@ public:
               << "Index in use_list_ for buffer " << buffer
               << " out of range: " << idx << " >= " << num_infer << ".";
 
-          if (!in_queue[idx] && idx != cur_infer_id) {
-            in_queue[idx] = true;
-            q.push(idx);
-          }
+          EnqueueWithPriority(idx, q, in_queue, cur_infer_id, layout_map);
         }
       }
     }
   };
 
   void FinishInferQueue(InferLevel level, LayoutMap &layout_map,
-                        const LayoutMap &strict_layout_map, std::queue<int> &q,
+                        const LayoutMap &strict_layout_map, std::deque<int> &q,
                         std::vector<bool> &in_queue) {
     auto num_infer = infer_list_.size();
+
     while (!q.empty()) {
       int cur_infer_id = q.front();
-      q.pop();
+      q.pop_front();
       // Range check again, just to be safe
       ICHECK_GE(cur_infer_id, 0);
       ICHECK_LT(cur_infer_id, num_infer);
@@ -289,7 +288,7 @@ public:
     int num_infer = infer_list_.size();
 
     // Prepare BFS queue for iterative inference
-    std::queue<int> q;
+    std::deque<int> q;
     std::vector<bool> in_queue(num_infer, true);
     for (int i = 0; i < num_infer; i++) {
       // Check that each infer_list_ entry is valid
@@ -301,7 +300,7 @@ public:
       if (!thread_var_vec_[i].defined() && skip_thread_partition_) {
         thread_var_vec_[i] = thread_var_;
       }
-      q.push(i);
+      q.push_back(i);
     }
 
     // step 1: infer strict layout
@@ -352,10 +351,12 @@ public:
             }
           }
 
-          Layout reshaped =
-              shapes_equal
-                  ? rep_layout.value()
-                  : rep_layout.value()->Reshape(buf->shape, &analyzer_);
+          Layout reshaped = shapes_equal
+                                ? rep_layout.value()
+                                : rep_layout.value()->Reshape(
+                                      buf->shape, &analyzer_,
+                                      Integer(rep.value()->dtype.bytes()),
+                                      Integer(buf->dtype.bytes()));
           layout_map.Set(buf, reshaped);
         }
       }
@@ -429,6 +430,38 @@ private:
       }
     }
     return buffer_map;
+  }
+
+  // Return true if all buffers that this op (idx) touches already have
+  // inferred layouts in layout_map. Used to prioritize enqueue order.
+  bool ShouldPrioritize(int idx, const LayoutMap &layout_map) const {
+    auto it = op_touched_buffers_.find(idx);
+    if (it == op_touched_buffers_.end() || it->second.empty())
+      return false;
+    for (const auto &buf : it->second) {
+      if (!layout_map.count(buf))
+        return false;
+    }
+    return true;
+  }
+
+  // Enqueue idx to q with priority if all its buffers already
+  // have layouts. Also guards against duplicates and self-enqueue.
+  void EnqueueWithPriority(int idx, std::deque<int> &q,
+                           std::vector<bool> &in_queue, int cur_infer_id,
+                           const LayoutMap &layout_map) const {
+    if (idx == cur_infer_id)
+      return;
+    if (idx < 0 || idx >= static_cast<int>(in_queue.size()))
+      return;
+    if (in_queue[idx])
+      return;
+    in_queue[idx] = true;
+    if (ShouldPrioritize(idx, layout_map)) {
+      q.push_front(idx);
+    } else {
+      q.push_back(idx);
+    }
   }
 
   void VisitExpr_(const CallNode *op) final {
@@ -536,11 +569,28 @@ private:
   }
 
   void addToUseList(const Buffer &buffer) {
+    // buffer scope must be local.fragment
+    if (buffer.scope() != "local.fragment") {
+      return;
+    }
     int infer_idx = infer_list_.size();
     if (use_list_.find(buffer) == use_list_.end()) {
       use_list_[buffer] = {};
     }
     use_list_[buffer].push_back(infer_idx);
+
+    // Track which buffers this op (infer_idx) touches for prioritization.
+    // Avoid duplicates.
+    auto &vec = op_touched_buffers_[infer_idx];
+    bool exists = false;
+    for (const auto &b : vec) {
+      if (b.same_as(buffer)) {
+        exists = true;
+        break;
+      }
+    }
+    if (!exists)
+      vec.push_back(buffer);
   }
 
   void VisitStmt_(const ForNode *op) final {
@@ -549,6 +599,71 @@ private:
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
         addToUseList(buffer);
       }
+
+      PostOrderVisit(op->body, [this](const ObjectRef &node) {
+        if (auto *buffer_load = node.as<BufferLoadNode>()) {
+          if (buffer_load->buffer.defined() &&
+              buffer_load->buffer->data.defined()) {
+            if (buffer_data_to_buffers_.count(buffer_load->buffer->data)) {
+              // Check if this buffer is already in the list
+              auto buffers = buffer_data_to_buffers_[buffer_load->buffer->data];
+              bool found = false;
+              for (const auto &buf : buffers) {
+                if (buf.same_as(buffer_load->buffer)) {
+                  found = true;
+                  break;
+                }
+              }
+              if (!found) {
+                buffers.push_back(buffer_load->buffer);
+                buffer_data_to_buffers_.Set(buffer_load->buffer->data, buffers);
+                DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
+                           << buffer_load->buffer
+                           << " buffer.get() = " << buffer_load->buffer.get()
+                           << " data = " << buffer_load->buffer->data.get();
+              }
+            } else {
+              buffer_data_to_buffers_.Set(buffer_load->buffer->data,
+                                          {buffer_load->buffer});
+              DLOG(INFO) << "[LayoutInference] BufferStore: new buffer "
+                         << buffer_load->buffer
+                         << " buffer.get() = " << buffer_load->buffer.get()
+                         << " data = " << buffer_load->buffer->data.get();
+            }
+          }
+        } else if (auto *buffer_store = node.as<BufferStoreNode>()) {
+          if (buffer_store->buffer.defined() &&
+              buffer_store->buffer->data.defined()) {
+            if (buffer_data_to_buffers_.count(buffer_store->buffer->data)) {
+              auto buffers =
+                  buffer_data_to_buffers_[buffer_store->buffer->data];
+              bool found = false;
+              for (const auto &buf : buffers) {
+                if (buf.same_as(buffer_store->buffer)) {
+                  found = true;
+                  break;
+                }
+              }
+              if (!found) {
+                buffers.push_back(buffer_store->buffer);
+                buffer_data_to_buffers_.Set(buffer_store->buffer->data,
+                                            buffers);
+                DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
+                           << buffer_store->buffer
+                           << " buffer.get() = " << buffer_store->buffer.get()
+                           << " data = " << buffer_store->buffer->data.get();
+              }
+            } else {
+              buffer_data_to_buffers_.Set(buffer_store->buffer->data,
+                                          {buffer_store->buffer});
+              DLOG(INFO) << "[LayoutInference] BufferStore: new buffer "
+                         << buffer_store->buffer
+                         << " buffer.get() = " << buffer_store->buffer.get()
+                         << " data = " << buffer_store->buffer->data.get();
+            }
+          }
+        }
+      });
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
       thread_var_vec_.push_back(thread_var_);
@@ -615,7 +730,11 @@ private:
           if (shapes_equal) {
             annotated_layout_map_.Set(buffer, layout);
           } else {
-            auto reshaped_layout = layout->Reshape(buffer->shape, &analyzer_);
+            // Use the first buffer sharing this var as the base for dtype ratio
+            int base_bytes = buffers[0]->dtype.bytes();
+            auto reshaped_layout =
+                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bytes),
+                                Integer(buffer->dtype.bytes()));
             annotated_layout_map_.Set(buffer, reshaped_layout);
           }
         }
@@ -699,6 +818,8 @@ private:
   std::vector<TileOperator> infer_list_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
       use_list_;
+  // Per-op list of buffers it touches (fragment scope), used for prioritization
+  std::unordered_map<int, std::vector<Buffer>> op_touched_buffers_;
   // This is a workaround for cpu backend,
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
@@ -765,6 +886,7 @@ private:
         }
       }
     }
+
     std::unordered_map<int, std::vector<int>> components;
     for (int i = 0; i < infer_list_.size(); i++) {
       int root = uf.Find(i);
@@ -781,7 +903,7 @@ private:
 
     // For each component, try each op as root, and determine the least
     // replicated one
-    std::queue<int> q;
+    std::deque<int> q;
     std::vector<bool> in_queue(infer_list_.size(), false);
 
     for (auto &&[root, members] : components) {
@@ -795,7 +917,7 @@ private:
       // Try each member as the root of inference for this component
       for (int attempt_infer_root : members) {
         DLOG(INFO) << "----------------------- try root " << attempt_infer_root
-                   << '\n';
+                   << " members " << members.size() << '\n';
         // Backup the current infer_list_ state
         auto back_infer_list = BackupInferList();
         // Copy the current layout_map for temporary use
@@ -825,6 +947,10 @@ private:
         } catch (const NormalizeIterException &e) {
           do_update = false;
           DLOG(INFO) << "attempt failed due to NormalizeIterException "
+                     << e.what() << '\n';
+        } catch (const LoopLayoutInjectiveException &e) {
+          do_update = false;
+          DLOG(INFO) << "attempt failed due to LoopLayoutInjectiveException "
                      << e.what() << '\n';
         }
 

@@ -82,6 +82,7 @@ def postprocess(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE: True,
     })
 def bwd(
     B,
@@ -159,9 +160,8 @@ def bwd(
             acc_dq_tail = T.alloc_fragment([padded_H, D_tail], accum_dtype)
             acc_dkv = T.alloc_fragment([BS, D], accum_dtype)
             acc_dkv_tail = T.alloc_fragment([BS, D_tail], accum_dtype)
-            acc_dkv_shared = T.view(KV_shared, shape=[BS // split_store, D], dtype=accum_dtype)
-            acc_dkv_tail_shared = T.view(
-                KV_tail_shared, shape=[BS // split_store, D_tail], dtype=accum_dtype)
+            acc_dkv_shared = T.alloc_shared([BS // split_store, D], accum_dtype)
+            acc_dkv_tail_shared = T.alloc_shared([BS // split_store, D_tail], accum_dtype)
 
             max_kv_i = s_i
 

@@ -141,6 +141,10 @@ def extrac_params(func: tir.PrimFunc) -> list[KernelParam]:
         if var in func.buffer_map:
             tensor_types.append(KernelParam.from_buffer(func.buffer_map[var]))
         else:
+            if var.dtype == 'handle':
+                raise ValueError(
+                    f'Handle parameter {var} must be mapped to a buffer.\n'
+                    f'Please use T.tensor({var.name}, shape=..., dtype=...) to map it to a buffer.')
             tensor_types.append(KernelParam.from_var(var))
     return tensor_types
 

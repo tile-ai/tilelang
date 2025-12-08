@@ -6,12 +6,18 @@ import inspect
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm_ffi.container import Map
 from tvm.ir.base import Span
+from tvm.ir.expr import Range
+from tvm.tir.stmt import BufferRegion
 from .ast import BaseBuilder, IRGenerator, eval_op, mutate
+from .utils import construct_strides
 import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
-from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
+from tvm.tir.expr import BufferLoad, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
+from collections.abc import Sequence
+from .annot import FuncAnnot, ArgVarTable, Annot
+import pprint
 # Python 3.9 compatibility for ParamSpec and Self
 try:
     from typing import ParamSpec, Self
@@ -31,7 +37,9 @@ def unwrap_expr(expr) -> PrimExpr | int | float:
     '''
     if isinstance(expr, tir.meta_var):
         expr = expr.value
-    elif isinstance(expr, Buffer) and expr.scope() == 'local.var':
+    elif isinstance(expr, Ref):
+        return expr.load()
+    elif is_var(expr):
         expr = tir.BufferLoad(expr, indices=[0])
     elif isinstance(expr, (EqualOp, NotEqualOp)):
         expr = expr.asobject()
@@ -113,6 +121,30 @@ class SerialForWithStep:
 
 
 @dataclass
+class OutTensor:
+    shape: Sequence[PrimExpr]
+    dtype: dt.dtype
+
+    @property
+    def strides(self):
+        return construct_strides(tuple(self.shape))
+
+
+@dataclass
+class Ref:
+    bufload: BufferLoad
+
+    @property
+    def buffer(self):
+        return self.bufload.buffer
+
+    def store(self, value):
+        tir.buffer_store(self.bufload.buffer, value, self.bufload.indices)
+
+    def load(self):
+        return self.bufload
+
+
 class UnrollForWithStep(SerialForWithStep):
     ...
 
@@ -145,11 +177,15 @@ def is_var(v: Any) -> bool:
 
 class Builder(BaseBuilder):
 
-    def __init__(self):
+    def __init__(self, func_annot: FuncAnnot = None):
         self.frames: list[AnyFrame] = []
         self.ir_builder = IRBuilder()
         self.name_inside_frame: dict[str, AnyFrame] = {}
-        self.arg_annotations = {}
+        self.macro_arg_annot = {}
+        self.func_annot = func_annot
+        self.out_idx = []
+        self.out_tensor_cnt = 0
+        self.arg_vt = ArgVarTable()
 
     @classmethod
     def current(cls) -> Self:
@@ -162,6 +198,8 @@ class Builder(BaseBuilder):
         with self.ir_builder, self.with_frame(tir.prim_func()):
             tir.func_name(name)
             yield
+        if len(self.out_idx) != self.out_tensor_cnt:
+            raise RuntimeError('Not all tensor allocated from `T.empty` are returned')
 
     @contextmanager
     def macro(self, name=None, annotations=None):
@@ -169,9 +207,9 @@ class Builder(BaseBuilder):
             raise RuntimeError(
                 f"Macro `{name}` is used inside boolean expressions, "
                 "please use `if` to replace `M and M`, `M or M`, `M if xxx else M` constructs")
-        save = self.name_inside_frame, self.arg_annotations
+        save = self.name_inside_frame, self.macro_arg_annot
         self.name_inside_frame = {}
-        self.arg_annotations = annotations or {}
+        self.macro_arg_annot = annotations or {}
         pos = len(self.frames)
         # here we add a ExitedMacroFrame to preserve the frame stack inside macro
         # because macro may bind some variable, and return it
@@ -188,7 +226,7 @@ class Builder(BaseBuilder):
         self.frames.append(MacroFrame())
         yield
         self.frames[pos] = ExitedMacroFrame()
-        self.name_inside_frame, self.arg_annotations = save
+        self.name_inside_frame, self.macro_arg_annot = save
 
     def get(self):
         return self.ir_builder.get()
@@ -269,8 +307,11 @@ class Builder(BaseBuilder):
             pass
         elif isinstance(val, tvm.tir.stmt.BufferStore):
             tir.buffer_store(val.buffer, val.value, val.indices, val.predicate)
-        elif not isinstance(val, tvm.tir.Buffer):
-            raise TypeError(f"Unsupported eval value: {val} of type {type(val)}")
+        elif isinstance(val, (Buffer, Var)):
+            pass
+        else:
+            logger.warning(
+                f"Unused return value: {val}({type(val)})", stack_info=True, stacklevel=2)
 
     def ctx_for(self, it):
         self.check_continue_break()
@@ -355,10 +396,33 @@ class Builder(BaseBuilder):
         #   c = tl.alloc_var('float32')  # bind var `c`
         #   c = a                        # get and assign `c[0] = a_1[0]`
         #   ```
+        if isinstance(orig_value, Ref) and isinstance(value, (int, float, PrimExpr)):
+            orig_value.store(value)
+            return orig_value
         if is_var(orig_value) and isinstance(value, (int, float, PrimExpr)):
             tir.buffer_store(orig_value, value, 0)
             return orig_value
+
+        # 2. Quick return for trivil types
+        if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
+            return value
+        if isinstance(value, tir.IntImm) and value.dtype == 'int32':
+            return value.value
+        if isinstance(value, (Var, Buffer)):
+            # Bind TVM Var/Buffer names and also record scope so reusing the same
+            # Python name (e.g., loop vars like `i`) across different for-frames
+            # works without triggering out-of-scope errors.
+            IRBuilder.name(name, value)
+            if name != '_':
+                frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
+                assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
+                self.name_inside_frame[name] = self.frames[frame]
+            return value
+
+        # 3. Bind immutable tilelang objects
         res = self.bind_immutable(name, value)
+
+        # 4. Check variable scope and shadowing
         if name != '_':
             frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
@@ -372,6 +436,9 @@ class Builder(BaseBuilder):
         return res
 
     def unwrap_value(self, value):
+        '''
+        Unwrap some tilelang objects to get their inner value
+        '''
         value = unwrap_expr(value)
         # handle bx, by = tl.Kernel(128, 128), rval is frame
         if isinstance(value, tir.frame.IRBuilderFrame):
@@ -380,6 +447,10 @@ class Builder(BaseBuilder):
             return value
 
     def bind_immutable(self, name, value):
+        '''
+        Bind an immutable tilelang objects.
+        The immutability means the result is usually not changed or re-assigned in a python block.
+        '''
         if name == '_':
             # use _tmp to make the generated tir more readable
             name = "_tmp"
@@ -393,10 +464,18 @@ class Builder(BaseBuilder):
                     stacklevel=2,
                 )
             return self.enter_frame(value)
+        elif isinstance(value, OutTensor):
+            arg = tir.arg(name,
+                          tir.buffer(
+                              shape=value.shape,
+                              dtype=value.dtype,
+                              strides=value.strides,
+                          ))
+            arg._out_idx = self.out_tensor_cnt
+            self.out_tensor_cnt += 1
+            return arg
         elif isinstance(value, (Buffer, tir.IterVar, tir.Var)):
             IRBuilder.name(name, value)
-            return value
-        elif isinstance(value, (tuple, list, tvm.ffi.Array)):
             return value
         else:
             try:
@@ -420,7 +499,10 @@ class Builder(BaseBuilder):
 
     def aug_assign(self, op, target, aug_value):
         self.check_continue_break()
-        if is_var(target):
+        if isinstance(target, Ref):
+            target.store(eval_op(op, target.bufload, aug_value))
+            return target
+        elif is_var(target):
             tir.buffer_store(target, eval_op(op, target[0], aug_value), 0)
             return target
         elif isinstance(target, Buffer):
@@ -457,10 +539,15 @@ class Builder(BaseBuilder):
         else:
             return super().ifexp(cond, then, otherwise)
 
-    def ret(self, value):
+    def ret(self, value=None):
         self.check_continue_break()
         # handle return T.alloc_var()
-        value = self.unwrap_value(value)
+        if value is None:
+            value = tuple()
+        elif isinstance(value, tuple):
+            value = tuple(self.unwrap_value(v) for v in value)
+        else:
+            value = self.unwrap_value(value)
         last_macro = self.find_frame_idx(MacroFrame)
         if last_macro is not None:
             frame = self.find_frame_idx(TIR_CONTROL_FRAME, start=last_macro)
@@ -478,7 +565,20 @@ class Builder(BaseBuilder):
                     "    return a\n"
                     "```"
                 )
-        return value
+            return value
+        else:
+            if not isinstance(value, tuple):
+                value = (value,)
+            for v in value:
+                if not isinstance(v, Buffer) or not hasattr(v, '_out_idx'):
+                    raise RuntimeError(
+                        f'Only tensor allocated from `T.empty` can be returned in a prim_func, got {v}({type(v)})'
+                    )
+                # convert 0, 1, 2 => -3, -2, -1 as the out tensor index
+                self.out_idx.append(v._out_idx - self.out_tensor_cnt)
+            if len(self.out_idx) != self.out_tensor_cnt:
+                raise RuntimeError(f'Not all tensor from `T.empty` are returned, only got {value}')
+            return NotImplemented
 
     def ctx_with(self, ctx):
         self.check_continue_break()
@@ -487,9 +587,11 @@ class Builder(BaseBuilder):
         else:
             return super().ctx_with(ctx)
 
-    def assert_expr(self, cond, msg):
+    def assert_expr(self, cond, msg=None):
         self.check_continue_break()
         cond = unwrap_cond(cond)
+        if msg is None:
+            msg = 'Assertion failed'
         if isinstance(cond, PrimExpr):
             self.enter_frame(tir.Assert(cond, msg))
         elif not cond:
@@ -506,30 +608,41 @@ class Builder(BaseBuilder):
         return self.unwrap_value(value)
 
     def macro_arg(self, name, value):
-        from tilelang.language.proxy import Ref
-        annot_value = self.arg_annotations.get(name, None)
+        annot_value = self.macro_arg_annot.get(name, None)
         if annot_value is Var or annot_value is Ref:
             if annot_value is Var:
                 logger.warning('Use `T.Var` as macro annotations is deprecated, please use `T.Ref`')
-            is_var = isinstance(value, tvm.tir.BufferLoad) and value.buffer.scope() == 'local.var'
-            if not is_var:
-                raise ValueError(
-                    f'Argument `{name}` is expected to be a variable allocated by `T.alloc_var`, but got {value}({type(value)})'
-                )
-            return value.buffer
+            if isinstance(value, BufferLoad):
+                if is_var(value.buffer):
+                    return value.buffer
+                idx = [self.bind('_', idx) for idx in value.indices]
+                # indices = self.bind(f'_', value.indices)
+                return Ref(BufferLoad(value.buffer, indices=idx))
+            if isinstance(value, BufferRegion):
+                region = [
+                    Range(
+                        self.bind('_', x.begin),
+                        end=self.bind('_', x.end) if x.end is not None else None)
+                    for x in value.region
+                ]
+                return BufferRegion(value.buffer, region=region)
+            raise ValueError(
+                f'To pass as reference, argument `{name}` is expected to be a variable or a buffer region, but got {value}({type(value)})'
+            )
         elif isinstance(value, (PrimExpr, int, float)):
             return self.bind(name, value)
         else:
             return value
 
     def prim_func_arg(self, name, value):
-        if isinstance(value, (Buffer, Var)):
-            return tir.arg(name, value)
-        elif value is self.empty:
-            raise ValueError(f'Argument `{name}` is not annotated')
-        else:
-            raise TypeError(
-                f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
+        return self.func_annot.create_argument(name, value, self.arg_vt)
+        # if isinstance(value, (Buffer, Var)):
+        #     return tir.arg(name, value)
+        # elif value is self.empty:
+        #     raise ValueError(f'Argument `{name}` is not annotated')
+        # else:
+        #     raise TypeError(
+        #         f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
 
     def arg(self, name, value):
         if self.find_frame_idx(MacroFrame) is not None:
@@ -547,6 +660,39 @@ class Builder(BaseBuilder):
 _P = ParamSpec('_P')
 _T = TypeVar('_T')
 
+
+@dataclass
+class PrimFuncCreater(Generic[_P, _T]):
+    func_annot: FuncAnnot
+    ir_gen: IRGenerator[_P, _T]
+    orig_func: Callable[_P, _T]
+
+    @property
+    def annot(self) -> dict[str, Annot]:
+        return self.func_annot.annots
+
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> PrimFunc[_P, _T]:
+        builder = Builder(self.func_annot)
+        with builder.prim_func(self.orig_func.__name__):
+            self.ir_gen.gen(builder)(*args, **kwargs)
+        res: PrimFunc = builder.get()
+        res.ir_gen = self.ir_gen
+        res.orig_func = self.orig_func
+        res.func_annot = self.func_annot
+        res.out_idx_override = builder.out_idx or None
+        return res
+
+    def __repr__(self):
+        fmt = pprint.pformat(
+            {
+                'annot': self.func_annot.annots,
+                'ir_gen': self.ir_gen,
+                'orig_func': self.orig_func
+            },
+            indent=2)
+        return f'{self.__class__.__name__}(\n{fmt}\n)'
+
+
 if TYPE_CHECKING:
 
     class PrimFunc(Generic[_P, _T], tvm.tir.PrimFunc):
@@ -557,8 +703,10 @@ if TYPE_CHECKING:
         attrs: tvm.Attrs | None
         span: Span | None
         ir_gen: IRGenerator[_P, _T] | None
-        source: str | None
         orig_func: Callable[_P, _T] | None
+        func_annot: FuncAnnot | None
+        out_idx_override: list[int] | None
+
 else:
     PrimFunc = tvm.tir.PrimFunc
 
@@ -579,6 +727,12 @@ class Macro(Generic[_P, _T]):
         with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res
+
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return id(self) == id(other)
 
 
 def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
@@ -683,13 +837,9 @@ def get_type_hints(func):
     return hints
 
 
-def _is_static_annot(annot: Any) -> bool:
-    return isinstance(annot, (dt.dtype, Buffer, Var))
-
-
 def prim_func(func: Callable[_P, _T] = None,
               *,
-              generator: bool = False) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
+              generator: bool = False) -> PrimFunc[_P, _T] | PrimFuncCreater[_P, _T]:
     """
     Decorator to create a primitive function (PrimFunc) for TileLang IR generation.
     This decorator transforms a Python function into a TileLang primitive function by analyzing
@@ -739,45 +889,21 @@ def prim_func(func: Callable[_P, _T] = None,
         sig = inspect.signature(func)
         annot = get_type_hints(func)
 
-        for k in annot:
-            if callable(annot[k]):
-                annot[k] = annot[k]()
-
-        # check whether all arguments are annotated
-        all_arg_annotated = all([x in annot for x in sig.parameters])
-        # check whether all annotations are Buffer/Var/dtype
-        all_annot_are_static = all([_is_static_annot(x) for x in annot.values()])
+        func_annot = FuncAnnot.from_sig_annots(sig, annot)
         ir_gen = mutate(func)
 
-        def prim_func_generator(*args, **kwargs):
-            builder = Builder()
-            with builder.prim_func(func.__name__):
-                ir_gen.gen(builder)(*args, **kwargs)
-            res = builder.get()
-            res.ir_gen = ir_gen
-            res.source = ir_gen.source
-            res.orig_func = func
-            return res
+        prim_func_generator = PrimFuncCreater(func_annot, ir_gen, orig_func=func)
 
-        prim_func_generator.ir_gen = ir_gen
-        prim_func_generator.source = ir_gen.source
-        prim_func_generator.orig_func = func
-
-        if generator:
-            return prim_func_generator
-
-        if all_arg_annotated and all_annot_are_static:
-            return prim_func_generator(**annot)
+        if func_annot.is_all_static():
+            args = func_annot.get_all_static_args()
+            return prim_func_generator(**args)
         else:
-            raise ValueError(
-                "Some arguments are not supported or statically annotated, \n"
-                "please check the annotations or set generator=True to get a prim_func generator.\n"
-                f"Argument Annotations: {annot}\n"
-                "Example usage of generator:\n"
-                "```py\n"
-                "@prim_func(generator=True)\n"
-                "def my_func(a=T.Tensor((128,), T.float32)): ...\n"
-                "return my_func()\n"
-                "```")
+            if generator is False:
+                unknown_args = func_annot.get_compile_time_unknown_args()
+                raise ValueError(
+                    f"Cannot create PrimFunc for `{func.__name__}`, some arguments are not compile-time known, \n"
+                    f"Annotations:\n{func_annot.annots}"
+                    f"Unknown Args: {unknown_args}")
+            return prim_func_generator
 
     return impl(func) if func is not None else impl
