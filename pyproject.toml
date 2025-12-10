@@ -51,7 +51,7 @@ fp4 = ["ml-dtypes>=0.5.1"]
 vis = ["matplotlib"]
 
 [build-system]
-requires = ["cython>=3.0.0", "z3-solver>=4.13.0", "scikit-build-core"]
+requires = ["cython>=3.0.0", "z3-solver==4.13.0", "scikit-build-core"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
