@@ -143,4 +143,5 @@ class Layout(Node):
         return _ffi_api.Layout_is_equal(self, other)
 
     def __repr__(self):
-        return f"Layout<{self.get_input_shape()}->{self.get_output_shape()}, {self.get_forward_vars()} -> {self.get_forward_index()}>"
+        return self._DebugOutput()
+        # return f"Layout<{self.get_input_shape()}->{self.get_output_shape()}, {self.get_forward_vars()} -> {self.get_forward_index()}>"
