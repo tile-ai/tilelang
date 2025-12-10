@@ -49,7 +49,7 @@ static ForFrame MakeIterVarFrame(const std::string &name, const PrimExpr &dom) {
     ICHECK_EQ(vars.size(), 1);
     ICHECK_EQ(doms.size(), 1);
     Optional<PrimExpr> step =
-        steps.size() > 0 ? steps[0] : Optional<PrimExpr>(std::nullopt);
+        !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
     return For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body,
                /*thread_binding=*/std::nullopt,
                /*annotations=*/tvm::ffi::Map<tvm::ffi::String, tvm::ffi::Any>{},
@@ -116,7 +116,7 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
     if (!groups.empty())
       anno.Set("tl_pipeline_group", groups);
     Optional<PrimExpr> step =
-        steps.size() > 0 ? steps[0] : Optional<PrimExpr>(std::nullopt);
+        !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
     body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body,
                /*thread_binding=*/std::nullopt, /*annotations=*/anno,
                /*step=*/step);
@@ -183,7 +183,7 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
       new_body = SeqStmt({out_if, body});
     }
     Optional<PrimExpr> step =
-        steps.size() > 0 ? steps[0] : Optional<PrimExpr>(std::nullopt);
+        !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
     Stmt outer = For(loop_var, 0, waves, ForKind::kSerial, new_body,
                      /*thread_binding=*/std::nullopt, /*annotations=*/anno,
                      /*step=*/step);
