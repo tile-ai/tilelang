@@ -504,17 +504,18 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  Stmt VisitStmt_(const EvaluateNode* op) final {
+  Stmt VisitStmt_(const EvaluateNode *op) final {
     // Check whether this is ptx_arrive_barrier()
-    if (const CallNode* call = op->value.as<CallNode>()) {
-        if (call->op.same_as(builtin::ptx_arrive_barrier())) {
-            // producer arrives → guard with tl_shuffle_elect()
-            if (has_warp_specialization_ && is_producer_) {
-              PrimExpr cond = Call(DataType::Bool(), tl_shuffle_elect(), {IntImm(DataType::Int(32), 128)});
-              Stmt arrive_stmt = StmtExprMutator::VisitStmt_(op);
-              return IfThenElse(cond, arrive_stmt, Stmt());
-            }
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(builtin::ptx_arrive_barrier())) {
+        // producer arrives → guard with tl_shuffle_elect()
+        if (has_warp_specialization_ && is_producer_) {
+          PrimExpr cond = Call(DataType::Bool(), tl_shuffle_elect(),
+                               {IntImm(DataType::Int(32), 128)});
+          Stmt arrive_stmt = StmtExprMutator::VisitStmt_(op);
+          return IfThenElse(cond, arrive_stmt, Stmt());
         }
+      }
     }
 
     return StmtExprMutator::VisitStmt_(op);
