@@ -232,7 +232,8 @@ private:
         Stmt body = Substitute(fnode->body, vmap);
         body = For(inner_var, 0, vector_size_, ForKind::kVectorized, body);
         body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
-                   fnode->thread_binding, fnode->annotations, fnode->span);
+                   fnode->thread_binding, fnode->annotations, fnode->step,
+                   fnode->span);
         return body;
       }
     } else {
