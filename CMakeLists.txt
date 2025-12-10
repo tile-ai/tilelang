@@ -228,7 +228,11 @@ add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
 
 add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
+
+# Set debug mode compile definitions
+# We open the deubg option of TVM, i.e. TVM_LOG_DEBUG
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message(STATUS "Building TileLang with DEBUG mode")
   target_compile_definitions(tilelang_objs PRIVATE "TVM_LOG_DEBUG")
 endif()
 
