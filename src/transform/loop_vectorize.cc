@@ -292,7 +292,8 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
     return false;
 
   // Check if expr is invariant within vector boundaries
-  PrimExpr expr_aligned = Substitute(expr, {{var, floordiv(var, target_vectorized_size) * target_vectorized_size}});
+  PrimExpr expr_aligned = Substitute(expr,
+    {{var, floordiv(var, target_vectorized_size) * target_vectorized_size}});
   if (analyzer->CanProveEqual(expr, expr_aligned)) {
     return true;
   }
