@@ -201,5 +201,32 @@ def main():
     torch.testing.assert_close(C, b_c, rtol=1e-2, atol=1e-2)
 
 
+def benchmark():
+    kernel = tl_matmul_streamk(
+        m,
+        n,
+        k,
+        streamk_tiles,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        False,
+        True,
+        "float16",
+        "float16",
+        "float32",
+        2,
+        64,
+    )
+    b_c = torch.zeros((m, n), device="cuda", dtype=torch.float16)
+    kernel(A, B, b_c)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(A, B, b_c)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100)
+
+
 if __name__ == "__main__":
     main()

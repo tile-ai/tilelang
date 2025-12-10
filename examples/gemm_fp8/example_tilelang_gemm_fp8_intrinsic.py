@@ -224,5 +224,19 @@ def main():
     assert_tl_matmul_correctness(128, 128, 128, "float8_e5m2", "float32", "float32")
 
 
+def benchmark():
+    M, N, K = 128, 128, 128
+    out_dtype, accum_dtype = "float32", "float32"
+    in_dtype = "float8_e4m3"
+    kernel_e4m3 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
+    latency_e4m3 = profiler_e4m3.do_bench(warmup=25)
+    in_dtype = "float8_e5m2"
+    kernel_e5m2 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    profiler_e5m2 = kernel_e5m2.get_profiler(tilelang.TensorSupplyType.Integer)
+    latency_e5m2 = profiler_e5m2.do_bench(warmup=25)
+    return (latency_e4m3 + latency_e5m2) / 2
+
+
 if __name__ == "__main__":
     main()

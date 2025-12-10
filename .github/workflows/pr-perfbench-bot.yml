@@ -6,7 +6,7 @@ on:
       - created
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -53,8 +53,12 @@ jobs:
         run: |
           python -m venv tll
           source tll/bin/activate
-          pip install -r requirements-test.txt
-          pip install .
+          export PIP_CONFIG_FILE=/dev/null
+          export PYTHONUSERBASE=""
+          pip config unset global.user
+          pip config unset user.user
+          pip install --no-user -r requirements-test.txt
+          pip install --no-user .
 
       - name: Install original version
         run: |
@@ -64,25 +68,70 @@ jobs:
           git checkout main
           python -m venv tl
           source tl/bin/activate
-          pip install -r requirements-test.txt
-          pip install .
+          export PIP_CONFIG_FILE=/dev/null
+          export PYTHONUSERBASE=""           
+          pip config unset global.user || true
+          pip config unset user.user || true
+          pip install --no-user -r requirements-test.txt
+          pip install --no-user .
 
       - name: Run performance test
         id: perfbench
         run: |
           source tl/bin/activate
           python maint/scripts/ci_performance.py
+      - name: Read markdown table
+        id: read_md
+        run: |
+          echo "content<<EOF" >> $GITHUB_OUTPUT
+          cat bench.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Upload PNG to GitHub and get URL
+        id: upload_png
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const content = fs.readFileSync('bench.png').toString('base64');
+            // Create blob in the repo
+            const blob = await github.rest.git.createBlob({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              content: content,
+              encoding: "base64",
+            });
+            // Attach blob as a tree item
+            const tree = await github.rest.git.createTree({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tree: [{
+                path: `bench_${context.runId}.png`,
+                mode: '100644',
+                type: 'blob',
+                sha: blob.data.sha
+              }]
+            });
+            // Raw file URL (works for embedding image)
+            const url = `https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/${tree.data.sha}/bench_${context.runId}.png`
+            core.setOutput("url", url);
 
       - name: Post test results as PR comment
         uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const md = `${{ steps.read_md.outputs.content }}`;
+            const img = `${{ steps.upload_png.outputs.url }}`;
             github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: '📊 ​**Performance Test Results** (triggered by @' + context.payload.comment.user.login + '):\n\n' +
-                'Run listed here: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n' +
-                "${{ steps.perfbench.outputs.stdout }}"
+              body:
+                '📊 **Performance Test Results** (triggered by @' +
+                context.payload.comment.user.login + ')\n\n' +
+                'Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n' +
+                md +
+                '\n\n📈 **Speedup Plot:**\n\n' +
+                `![Speedup Plot](${img})`
             })

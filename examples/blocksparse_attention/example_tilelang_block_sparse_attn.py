@@ -1,8 +1,8 @@
 import math
 import torch
-
 import tilelang
 import tilelang.language as T
+from tilelang.profiler import do_bench
 import torch.nn.functional as F
 
 
@@ -224,5 +224,29 @@ def main():
     test_topk_sparse_attention()
 
 
+def benchmark():
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = 1, 1, 256, 64
+    TOPK = 2
+    BLOCK = 64
+    torch.manual_seed(0)
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+    downsample_factor = BLOCK
+    downsample_len = math.ceil(SEQ_LEN / downsample_factor)
+    x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
+                       device='cuda',
+                       dtype=torch.bfloat16)
+    x_ds[:, :, :, 0] = 100
+    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
+    kernel = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
+
+    def run_kernel_only():
+        kernel(q, k, v, block_mask)
+
+    return do_bench(run_kernel_only)
+
+
 if __name__ == "__main__":
+    benchmark()
     main()
