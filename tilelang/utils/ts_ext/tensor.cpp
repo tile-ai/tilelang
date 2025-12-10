@@ -86,10 +86,39 @@ torch::Tensor tensor_from_ptr(uint64_t ptr_val, std::vector<int64_t> shape,
   }
 }
 
-torch::Tensor get_device_tensor(torch::Tensor tensor) {
-  void* device_ptr = nullptr;
-  CUDA_CHECK(cudaHostGetDevicePointer(&device_ptr, tensor.data_ptr(), 0));
-  std::vector<int64_t> shape(tensor.sizes().begin(), tensor.sizes().end());
-  std::string dtype_name(tensor.dtype().name());
-  return tensor_from_ptr(reinterpret_cast<uint64_t>(device_ptr), shape, dtype_name, tensor.device().index(), false);
+std::pair<torch::Tensor, torch::Tensor>
+create_host_device_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype) {
+    size_t elem_size = at::elementSize(dtype);
+    int64_t numel = 1;
+    for (int64_t s : shape) numel *= s;
+
+    size_t bytes = numel * elem_size;
+
+    void* host_ptr = nullptr;
+    CUDA_CHECK(cudaHostAlloc(
+        &host_ptr,
+        bytes,
+        cudaHostAllocMapped
+    ));
+
+    void* device_ptr = nullptr;
+    CUDA_CHECK(cudaHostGetDevicePointer(
+        &device_ptr,
+        host_ptr,
+        0
+    ));
+
+    auto host_tensor = torch::from_blob(
+        host_ptr,
+        shape,
+        torch::TensorOptions().dtype(dtype).device(torch::kCPU)
+    );
+  
+    auto device_tensor = torch::from_blob(
+        device_ptr,
+        shape,
+        torch::TensorOptions().dtype(dtype).device(torch::kCUDA)
+    );
+
+    return std::make_pair(host_tensor, device_tensor);
 }

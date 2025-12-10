@@ -22,7 +22,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       },
       py::arg("shape"), py::arg("dtype"));
 
-  m.def("get_device_tensor", &get_device_tensor, py::arg("tensor"));
+  m.def("create_host_device_tensor",
+    &create_host_device_tensor,
+    "Create host/device shared pinned-mapped tensor (shape + dtype)");
 
   m.def(
       "_create_ipc_handle",

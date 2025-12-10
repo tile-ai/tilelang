@@ -1,12 +1,11 @@
 import torch
-from tilelang.distributed.utils import get_device_tensor
+from tilelang.distributed.utils import create_mapped_tensor
 
 
 if __name__ == "__main__":
     shape = (1024, 1024)
     dtype = torch.float32
-    host_tensor = torch.randn(shape, dtype=dtype, pin_memory=True)
-    device_tensor = get_device_tensor(host_tensor)
+    host_tensor, device_tensor = create_mapped_tensor(shape, dtype)
     
     # test meta-data
     assert device_tensor.device.type == "cuda"
@@ -18,4 +17,4 @@ if __name__ == "__main__":
     device_tensor.random_()
     assert torch.equal(host_tensor, device_tensor.cpu()), f"{host_tensor=}, {device_tensor=}"
 
-    print("All checks passed for get_device_tensor. ✅")
+    print("All checks passed for create_mapped_tensor. ✅")

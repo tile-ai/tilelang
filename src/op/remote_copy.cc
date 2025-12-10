@@ -78,6 +78,7 @@ PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
   node->dst_pe = args[3];
   node->unroll_factor = args[4].as<IntImm>().value()->value;
   node->scope = args[5].as<StringImm>().value()->value;
+  node->enable_aggresive_vectorize = bool(args[6].as<IntImm>().value()->value);
   data_ = std::move(node);
   (void)vmap;
 }
@@ -91,7 +92,8 @@ Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
-    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
+    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ", " 
+      << (enable_aggresive_vectorize ? "true" : "false") << ">";
   } else if (scope == "block") {
     ss << "tl::cp_block<" << copy_size << ">";
   } else {
@@ -185,6 +187,7 @@ GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
   node->src_pe = args[3];
   node->unroll_factor = args[4].as<IntImm>().value()->value;
   node->scope = args[5].as<StringImm>().value()->value;
+  node->enable_aggresive_vectorize = bool(args[6].as<IntImm>().value()->value);
   data_ = std::move(node);
   (void)vmap;
 }
@@ -198,7 +201,8 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> new_args;
   std::stringstream ss;
   if (scope == "warp") {
-    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ">";
+    ss << "tl::cp_warp<" << copy_size << ", " << unroll_factor << ", " 
+      << (enable_aggresive_vectorize ? "true" : "false") << ">";
   } else if (scope == "block") {
     ss << "tl::cp_block<" << copy_size << ">";
   } else {

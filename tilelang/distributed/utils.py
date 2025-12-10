@@ -19,7 +19,7 @@ else:
     from cuda import cuda, cudart
 
 import ctypes
-from tilescale_ext import _create_tensor, _create_ipc_handle, _sync_ipc_handles, _get_device_tensor
+from tilescale_ext import _create_tensor, _create_ipc_handle, _sync_ipc_handles, create_host_device_tensor
 import functools
 from functools import lru_cache
 from threading import Lock
@@ -401,16 +401,5 @@ def has_fullmesh_nvlink():
         return _has_fullmesh_nvlink
 
 
-def get_device_tensor(tensor: torch.Tensor) -> torch.Tensor:
-    """Get the device tensor from the host tensor.
-    This is implemented via `cudaHostGetDevicePointer`
-
-    Args:
-        tensor: The host tensor.
-
-    Returns:
-        The device tensor with same meta-data.
-    """
-    assert tensor.device.type == "cpu"
-    assert tensor.is_pinned()
-    return _get_device_tensor(tensor)
+def create_mapped_tensor(shape: list[int], dtype: torch.dtype) -> torch.Tensor:
+    return create_host_device_tensor(shape, dtype)

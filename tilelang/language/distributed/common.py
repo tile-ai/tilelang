@@ -23,7 +23,8 @@ def put_warp(src: PrimExpr,
              dst: PrimExpr,
              size: PrimExpr,
              dst_pe: PrimExpr | IntImm | None = -1,
-             unroll_factor: int = 4):
+             unroll_factor: int = 4,
+             enable_aggresive_vectorize: bool = False):
     """Put to a remote buffer with unrolled loop.
 
     Args:
@@ -38,16 +39,20 @@ def put_warp(src: PrimExpr,
             -1 by default, which means local copy.
         unroll_factor: int
             The unroll factor
+        enable_aggresive_vectorize: bool
+            Whether to enable aggressive vectorization.
+            If True, the compiler with try to vectorize the copy via int4.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, unroll_factor,
-                           "warp")
+                           "warp", enable_aggresive_vectorize)
 
 
 def get_warp(src: PrimExpr,
              dst: PrimExpr,
              size: PrimExpr,
              src_pe: PrimExpr | IntImm | None = -1,
-             unroll_factor: int = 4):
+             unroll_factor: int = 4,
+             enable_aggresive_vectorize: bool = False):
     """Get from a remote buffer with unrolled loop.
 
     Args:
@@ -62,9 +67,12 @@ def get_warp(src: PrimExpr,
             -1 by default, which means local copy.
         unroll_factor: int
             The unroll factor
+        enable_aggresive_vectorize: bool
+            Whether to enable aggressive vectorization.
+            If True, the compiler with try to vectorize the copy via int4.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, unroll_factor,
-                           "warp")
+                           "warp", enable_aggresive_vectorize)
 
 
 def put_block(src: PrimExpr,
@@ -85,7 +93,7 @@ def put_block(src: PrimExpr,
             -1 by default, which means local copy.
     """
     return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, 0, "block"
+        "handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, 0, "block", True
     )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
@@ -107,7 +115,7 @@ def get_block(src: PrimExpr,
             -1 by default, which means local copy.
     """
     return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, 0, "block"
+        "handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, 0, "block", True
     )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 

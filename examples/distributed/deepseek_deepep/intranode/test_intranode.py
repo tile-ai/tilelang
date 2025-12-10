@@ -5,11 +5,8 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder
 
 import torch
 import tilelang
-import tilelang.language as T
 from argparse import ArgumentParser
-from typing import Optional, Tuple
 from tilelang.distributed.utils import init_dist, perf_fn
-from functools import partial
 
 from buffer import EPBuffer
 from utils import gen_inputs, ep_bench
@@ -108,23 +105,21 @@ def test_intranode(
     if not cached_dispatch:
         group.barrier()
         deepep_dispatch_time = ep_bench(lambda: deepep_buffer.dispatch(x, None, ref_num_tokens_per_rank, None, ref_is_token_in_rank, ref_num_tokens_per_expert, topk_idx, topk_weights, expert_alignment),
-            warmup=10, rep=10)
+            warmup=5, rep=5)
         print(f'[rank {rank}] DeepEP dispatch time: {deepep_dispatch_time:.4f}ms')
         group.barrier()
-        if rank == 0:
-            print(f'avg_time: {deepep_dispatch_time:.4f}ms')
         ts_dispatch_time = ep_bench(lambda: ts_buffer.dispatch(x, None, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment),
-            warmup=10, rep=10)
+            warmup=5, rep=5)
         print(f'[rank {rank}] TileScale dispatch time: {ts_dispatch_time:.4f}ms')
         group.barrier()
     else:
         group.barrier()
         deepep_dispatch_time = ep_bench(lambda: deepep_buffer.dispatch(x, ref_handle, ref_num_tokens_per_rank, None, ref_is_token_in_rank, ref_num_tokens_per_expert, None, None, expert_alignment),
-            warmup=10, rep=10)
+            warmup=5, rep=5)
         print(f'[rank {rank}] DeepEP dispatch time: {deepep_dispatch_time:.4f}ms')
         group.barrier()
         ts_dispatch_time = ep_bench(lambda: ts_buffer.dispatch(x, ref_handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, None, None, expert_alignment),
-            warmup=10, rep=10)
+            warmup=5, rep=5)
         print(f'[rank {rank}] TileScale dispatch time: {ts_dispatch_time:.4f}ms')
         group.barrier()
 
@@ -132,11 +127,12 @@ def test_intranode(
         print('========== Benchmarking combine ==========')
     group.barrier()
     deepep_combine_time = ep_bench(lambda: deepep_buffer.combine(recv_x, ref_handle, ref_recv_topk_weights),
-        warmup=10, rep=10)
+        warmup=50, rep=50)
     print(f'[rank {rank}] DeepEP combine time: {deepep_combine_time:.4f}ms')
+    
     group.barrier()
     ts_combine_time = ep_bench(lambda: ts_buffer.combine(recv_x, handle, recv_topk_weights),
-        warmup=10, rep=10)
+        warmup=50, rep=50)
     print(f'[rank {rank}] TileScale combine time: {ts_combine_time:.4f}ms')
     group.barrier()
 
@@ -145,8 +141,8 @@ def test_intranode(
     dispatch_bf16_nvl_recv_bytes = recv_x.numel() * 2
     combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
     if rank == 0:
-        print(f'DeepEP dispatch time: {deepep_dispatch_time:.4f}ms, bandwidth: {dispatch_bf16_nvl_recv_bytes  / deepep_dispatch_time / 1e6:.2f} GB/s')
-        print(f'TileScale dispatch time: {ts_dispatch_time:.4f}ms, bandwidth: {dispatch_bf16_nvl_recv_bytes / ts_dispatch_time / 1e6:.2f} GB/s')
+        print(f'DeepEP dispatch time: {deepep_dispatch_time:.4f}ms, bandwidth: {dispatch_bf16_nvl_recv_bytes  / deepep_dispatch_time / 1e6:.2f} GB/s (NVL)')
+        print(f'TileScale dispatch time: {ts_dispatch_time:.4f}ms, bandwidth: {dispatch_bf16_nvl_recv_bytes / ts_dispatch_time / 1e6:.2f} GB/s (NVL)')
         print(f'DeepEP combine time: {deepep_combine_time:.4f}ms, bandwidth: {combine_bf16_nvl_send_bytes / deepep_combine_time / 1e6:.2f} GB/s (NVL)')
         print(f'TileScale combine time: {ts_combine_time:.4f}ms, bandwidth: {combine_bf16_nvl_send_bytes / ts_combine_time / 1e6:.2f} GB/s (NVL)')
 

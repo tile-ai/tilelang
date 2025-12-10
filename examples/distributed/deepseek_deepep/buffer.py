@@ -1,6 +1,5 @@
 """ The interface for DeepEP. """
 
-import os
 import torch
 import torch.distributed as dist
 from typing import Callable, List, Tuple, Optional, Union
@@ -8,8 +7,8 @@ from typing import Callable, List, Tuple, Optional, Union
 import tilelang
 import tilelang.language as T
 from utils import Config
-from tilelang.distributed.utils import get_device_tensor
-from intranode import get_dispatch_layout, intranode_dispatch, intranode_combine
+from tilelang.distributed.utils import create_mapped_tensor
+from intranode import get_dispatch_layout, intranode_dispatch, intranode_combine, dispatch_kernel
 
 
 class EPBuffer:
@@ -68,6 +67,9 @@ class EPBuffer:
         self._pre_alloc_symm_buffers()
         self._prepare_counters()
 
+        torch.cuda.synchronize()
+        self.group.barrier()
+
     def _pre_alloc_symm_buffers(self):
         """Pre-allocate the symmetric buffers via the alloctor for later communication."""
         if self.num_ranks <= 8:
@@ -103,18 +105,19 @@ class EPBuffer:
         self._symm_buffers = (barrier_signal, per_rank_buffer, per_expert_buffer, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, 
             channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers)
 
+        # exp: prepare kernels AOT
+        self._dispatch_kernel = dispatch_kernel(self.rank, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_send_tokens, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens, self.hidden, self.num_topk, self.num_experts, self.num_sms, 'bfloat16')
+        self._dispatch_kernel.initialize(allocator=self._allocator)
+
     def _pre_alloc_symm_buffers_internode(self):
         raise NotImplementedError("internode is not supported yet")
 
     def _prepare_counters(self):
-        self._moe_recv_counter = torch.empty((1,), dtype=torch.int32, pin_memory=True, device='cpu')  # MoE counter
-        self._moe_recv_counter_mapped = get_device_tensor(self._moe_recv_counter)
-        self._moe_recv_expert_counter = torch.empty((self.num_local_experts,), dtype=torch.int32, pin_memory=True, device='cpu')  # MoE expert-level counter
-        self._moe_recv_expert_counter_mapped = get_device_tensor(self._moe_recv_expert_counter)
+        self._moe_recv_counter, self._moe_recv_counter_mapped = create_mapped_tensor([1], torch.int32)
+        self._moe_recv_expert_counter, self._moe_recv_expert_counter_mapped = create_mapped_tensor([self.num_local_experts], torch.int32)
         
         if self.num_ranks > 8:  # internode
-            self._moe_recv_rdma_counter = torch.tensor(-1, dtype=torch.int32, pin_memory=True, device='cpu')  # MoE RDMA-level counter
-            self._moe_recv_rdma_counter_mapped = get_device_tensor(self._moe_recv_rdma_counter)
+            self._moe_recv_rdma_counter, self._moe_recv_rdma_counter_mapped = create_mapped_tensor([1], torch.int32)
 
     @staticmethod
     def set_num_sms(num_sms: int):
@@ -169,7 +172,7 @@ class EPBuffer:
         num_tokens_per_expert: Optional[torch.Tensor] = None,
         topk_idx: Optional[torch.Tensor] = None,
         topk_weights: Optional[torch.Tensor] = None,
-        expert_alignment: int = 1,
+        expert_alignment: int = 1
     ):
         """
         Dispatch tokens to different ranks, both intranode and internode settings are supported.
@@ -208,6 +211,8 @@ class EPBuffer:
                 self.rank,
                 self._allocator,
                 self._symm_buffers,
+                self._moe_recv_counter,
+                self._moe_recv_expert_counter,
                 self._moe_recv_counter_mapped,
                 self._moe_recv_expert_counter_mapped,
                 x,
@@ -224,7 +229,7 @@ class EPBuffer:
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
             recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle = intranode_dispatch(
-                self.rank, self._allocator, self._symm_buffers, self._moe_recv_counter_mapped, self._moe_recv_expert_counter_mapped, x, self.dispatch_cfg, handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment)
+                self.rank, self._allocator, self._symm_buffers, self._moe_recv_counter, self._moe_recv_expert_counter, self._moe_recv_counter_mapped, self._moe_recv_expert_counter_mapped, x, self.dispatch_cfg, handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, self._dispatch_kernel)
             return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle
         
     def combine(self, x: torch.Tensor, handle: Tuple, topk_weights: torch.Tensor):

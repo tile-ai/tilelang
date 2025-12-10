@@ -7,12 +7,6 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.profiler import do_bench
-from tilelang.distributed.utils import init_dist
-from utils import Config, gen_inputs  # noqa: F403
-from argparse import ArgumentParser
-
-from get_dispatch_layout import get_dispatch_layout
 
 # tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
@@ -100,8 +94,8 @@ def cached_notify_combine(
     pass_configs={"tl.disable_tma_lower": True,  # use TMA later
         "tl.disable_warp_specialized": True})
 def combine_kernel(
-    rank, num_ranks,
-    num_recv_tokens,
+    rank, 
+    num_ranks,
     num_max_send_tokens,  # config.num_max_nvl_chunked_send_tokens
     num_recv_buffer_tokens,  # config.num_max_nvl_chunked_recv_tokens
     hidden, 
@@ -110,6 +104,7 @@ def combine_kernel(
     dtype: str = 'bfloat16',
 ):
     num_tokens = T.dynamic('num_tokens')
+    num_recv_tokens = T.dynamic('num_recv_tokens')
 
     num_channels = num_sms // 2
     threads = 768  # 24 warps
@@ -187,7 +182,7 @@ def combine_kernel(
                         # 1. copy data
                         T.put_warp(T.address_of(x[token_idx + i, 0]), 
                             T.address_of(channel_x_buffers[responsible_channel, rank, dst_slot_idx, 0]), 
-                            hidden, dst_pe=send_rank_id, unroll_factor=4)
+                            hidden, dst_pe=send_rank_id, unroll_factor=4, enable_aggresive_vectorize=True)
                             
                         # 2. send src idx
                         idx = T.alloc_var('int32')
@@ -257,7 +252,8 @@ def combine_kernel(
                     # All lanes will use data buffer, but only rank lane will use `head/tail/src_idx`
 
                     # The same tokens as the dispatch process
-                    num_tokens_per_channel = T.ceildiv(num_recv_tokens, num_channels)
+                    num_tokens_per_channel = T.truncdiv(num_recv_tokens+num_channels-1, num_channels)
+                    # todo: this is a workaround, as TVM has a bug when calculating safe ceildiv for tir.Var
                     token_start_idx = T.min(num_tokens_per_channel * responsible_channel, num_recv_tokens)
                     token_end_idx = T.min(token_start_idx + num_tokens_per_channel, num_recv_tokens)
 
@@ -361,8 +357,8 @@ def intranode_combine(
     recv_topk_weights = torch.empty((num_recv_tokens, num_topk), dtype=torch.float32, device='cuda')
 
     kernel = combine_kernel(
-        rank, num_ranks,
-        num_recv_tokens,
+        rank, 
+        num_ranks,
         config.num_max_nvl_chunked_send_tokens,
         config.num_max_nvl_chunked_recv_tokens,
         hidden,

@@ -2,7 +2,6 @@
 # This op is distributed
 
 import os, sys
-from torch.types import Number
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder to path
 
 import torch
@@ -12,9 +11,7 @@ from tilelang.profiler import do_bench
 from argparse import ArgumentParser
 from typing import Optional, Tuple
 from tilelang.distributed.utils import init_dist
-from utils import Config, create_moe_recv_counters, gen_inputs  # noqa: F403
-
-from get_dispatch_layout import get_dispatch_layout
+from utils import Config, ep_ext  # noqa: F403
 
 # tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
@@ -28,13 +25,14 @@ def notify_dispatch_kernel(
     rank: int,
     num_ranks: int,
     num_experts: int,
-    num_tokens: int,
     num_channels: int,
     expert_alignment: int,
 ):
     threads = 128
     num_local_experts = num_experts // num_ranks
     num_warps = threads // 32
+
+    num_tokens = T.dynamic('num_tokens')
 
     @T.prim_func
     def notify_dispatch_main(
@@ -102,7 +100,8 @@ def notify_dispatch_kernel(
             else:
                 dst_rank = bx - 1
                 for channel_id in T.serial(warp_id, num_channels, num_warps):
-                    num_tokens_per_channel = T.ceildiv(num_tokens, num_channels)
+                    num_tokens_per_channel = T.truncdiv(num_tokens+num_channels-1, num_channels)
+                    # todo: this is a workaround, as TVM has a bug when calculating safe ceildiv for tir.Var
                     token_start_idx = T.min(num_tokens_per_channel * channel_id, num_tokens)
                     token_end_idx = T.min(token_start_idx + num_tokens_per_channel, num_tokens)
                     cnt = T.alloc_var('int32')
@@ -135,6 +134,8 @@ def notify_dispatch(
     num_tokens_per_expert: torch.Tensor,
     is_token_in_rank: torch.Tensor,
     # counter
+    moe_recv_counter: torch.Tensor,
+    moe_recv_expert_counter: torch.Tensor,
     moe_recv_counter_mapped: torch.Tensor,
     moe_recv_expert_counter_mapped: torch.Tensor,
     # symm buffers
@@ -152,7 +153,6 @@ def notify_dispatch(
         rank,
         num_ranks,
         num_experts,
-        num_tokens,
         num_channels,
         expert_alignment,
     )
@@ -162,8 +162,8 @@ def notify_dispatch(
     channel_prefix_matrix = torch.empty([num_ranks, num_channels], dtype=torch.int32, device='cuda')
 
     # clear buffers and counters
-    moe_recv_counter_mapped.fill_(-1)
-    moe_recv_expert_counter_mapped.fill_(-1)
+    moe_recv_counter.fill_(-1)
+    moe_recv_expert_counter.fill_(-1)
 
     kernel(
         num_tokens_per_rank,
@@ -182,15 +182,13 @@ def notify_dispatch(
         channel_tail_idx,
     )
 
-    return rank_prefix_matrix, channel_prefix_matrix
+    num_recv_tokens, num_recv_tokens_per_expert_list = ep_ext.wait_for_counters_ready(moe_recv_counter, moe_recv_expert_counter)
+    return num_recv_tokens, num_recv_tokens_per_expert_list, rank_prefix_matrix, channel_prefix_matrix
 
 
 # cached_notify_dispatch only needs to clear symm buffers
 @tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
-def cached_notify_dispatch_kernel(
-    num_ranks: int,
-    num_channels: int
-):
+def cached_notify_dispatch_kernel(num_ranks: int, num_channels: int):
     @T.prim_func
     def cached_notify_dispatch_main(
         barrier_signal: T.Tensor((num_ranks,), 'int32'),
@@ -233,10 +231,10 @@ def cached_notify_dispatch(
 
 @tilelang.jit(
     pass_configs={"tl.disable_tma_lower": True,  # enable TMA later
-        "tl.disable_warp_specialized": True})
+        "tl.disable_warp_specialized": True}, debug_root_path='/home/wt/debug/dispatch_static')
 def dispatch_kernel(
-    rank, num_ranks, 
-    num_tokens, 
+    rank, 
+    num_ranks,
     num_max_send_tokens,  # config.num_max_nvl_chunked_send_tokens
     num_recv_buffer_tokens,  # config.num_max_nvl_chunked_recv_tokens
     hidden, 
@@ -256,6 +254,7 @@ def dispatch_kernel(
     num_warps = threads // 32  # 24
     num_warps_per_rank = num_warps // num_ranks  # 3
 
+    num_tokens = T.dynamic('num_tokens')
     num_recv_tokens = T.dynamic('num_recv_tokens')
 
     @T.prim_func
@@ -313,7 +312,8 @@ def dispatch_kernel(
                 T.sync_warp()
 
                 # get task
-                num_tokens_per_channel = T.alloc_var('int32', init=T.ceildiv(num_tokens, num_channels))
+                num_tokens_per_channel = T.truncdiv(num_tokens+num_channels-1, num_channels) 
+                # todo: this is a workaround, as TVM has a bug when calculating safe ceildiv for tir.Var
                 token_start_idx = T.alloc_var('int32')
                 token_start_idx = T.min(num_tokens_per_channel * responsible_channel, num_tokens)
                 token_end_idx = T.alloc_var('int32')
@@ -357,7 +357,7 @@ def dispatch_kernel(
                             # 1. copy data
                             T.put_warp(T.address_of(x[token_idx, 0]), 
                             T.address_of(channel_x_buffers[responsible_channel, rank, dst_slot_idx, 0]), 
-                            hidden, dst_pe=responsible_rank, unroll_factor=4)
+                            hidden, dst_pe=responsible_rank, unroll_factor=4, enable_aggresive_vectorize=True)
                            
                             # 2. copy src idx
                             if T.elect_one_sync():
@@ -455,7 +455,8 @@ def dispatch_kernel(
                             T.address_of(recv_x[total_offset+chunk_idx, 0]),
                             hidden,
                             -1, 
-                            5)
+                            5,
+                            enable_aggresive_vectorize=True)
                     
                     # 2. recv src_idx
                     for chunk_idx in T.serial(cached_channel_head_idx+recv_thread_id_in_rank,
@@ -609,7 +610,7 @@ def cached_dispatch_kernel(
                             # 1. copy data
                             T.put_warp(T.address_of(x[token_idx, 0]), 
                             T.address_of(channel_x_buffers[responsible_channel, rank, dst_slot_idx, 0]), 
-                            hidden, dst_pe=responsible_rank, unroll_factor=4)
+                            hidden, dst_pe=responsible_rank, unroll_factor=4, enable_aggresive_vectorize=True)
                         
                             # 2. copy src idx
                             if T.elect_one_sync():
@@ -678,13 +679,13 @@ def cached_dispatch_kernel(
                     num_cur_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx
                     for chunk_idx in T.serial(recv_warp_id_in_rank, num_cur_recv_tokens, num_warps_per_rank):
                         token_idx_in_buffer = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens
-                        # T.copy(channel_x_buffers[responsible_channel, responsible_rank, token_idx_in_buffer, :], recv_x[total_offset+chunk_idx, :])  # todo: add ld_nc and st_na
                         #! T.copy will cause layout inference error
                         T.put_warp(T.address_of(channel_x_buffers[responsible_channel, responsible_rank, token_idx_in_buffer, 0]),
                             T.address_of(recv_x[total_offset+chunk_idx, 0]),
                             hidden,
                             -1, 
-                            5)
+                            5,
+                            enable_aggresive_vectorize=True)
                     
                     # 2. recv src_idx
                     for chunk_idx in T.serial(cached_channel_head_idx+recv_thread_id_in_rank,
@@ -716,6 +717,8 @@ def intranode_dispatch(
     rank: int,
     allocator,
     symm_buffers,
+    moe_recv_counter,
+    moe_recv_expert_counter,
     moe_recv_counter_mapped,
     moe_recv_expert_counter_mapped,
     x: torch.Tensor,  # todo: support fp8 quant
@@ -727,6 +730,7 @@ def intranode_dispatch(
     topk_idx: Optional[torch.Tensor] = None,
     topk_weights: Optional[torch.Tensor] = None,
     expert_alignment: int = 1,
+    kernel = None
     # todo: support num_worst_tokens
     # todo: support async functionality
 ):
@@ -746,7 +750,7 @@ def intranode_dispatch(
         channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers = symm_buffers
 
     if handle is None:
-        rank_prefix_matrix, channel_prefix_matrix = notify_dispatch(
+        num_recv_tokens, num_recv_tokens_per_expert_list, rank_prefix_matrix, channel_prefix_matrix = notify_dispatch(
             rank,
             num_ranks,
             num_experts,
@@ -756,6 +760,8 @@ def intranode_dispatch(
             num_tokens_per_rank,
             num_tokens_per_expert,
             is_token_in_rank,
+            moe_recv_counter,
+            moe_recv_expert_counter,
             moe_recv_counter_mapped,
             moe_recv_expert_counter_mapped,
             per_rank_buffer,
@@ -767,15 +773,10 @@ def intranode_dispatch(
             channel_tail_idx,
             allocator,
         )
-        # todo: replace it with host-side wait_ne
-
-        num_recv_tokens = moe_recv_counter_mapped.item()
-        num_recv_tokens_per_expert_list = moe_recv_expert_counter_mapped.tolist()
     else:
         cached_notify_dispatch(num_ranks, config.num_channels, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, barrier_signal, allocator)
         num_recv_tokens = recv_src_idx.size(0)
 
-    # create output buffers
     recv_x = torch.empty((num_recv_tokens, hidden), dtype=x.dtype, device='cuda')
     recv_src_idx = torch.empty((num_recv_tokens,), dtype=torch.int32, device='cuda')
     if handle is None:
@@ -786,8 +787,8 @@ def intranode_dispatch(
 
     # run dispatch
     if handle is None:
-        kernel = dispatch_kernel(rank, num_ranks, num_tokens, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens, hidden, num_topk, num_experts, config.num_sms, 'bfloat16')
-        kernel.initialize(allocator=allocator)
+        # kernel = dispatch_kernel(rank, num_ranks, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens, hidden, num_topk, num_experts, config.num_sms, 'bfloat16')
+        # kernel.initialize(allocator=allocator)
         kernel(recv_x, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_prefix_matrix, send_head, x, topk_idx, topk_weights, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers)
         handle = (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
         return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle

@@ -1,8 +1,8 @@
 from typing import Union, Tuple
 import torch
+from torch.utils.cpp_extension import load_inline
 import os
 from dataclasses import dataclass, field
-from tilelang.distributed.utils import get_device_tensor
 
 # Pre-defined constants in DeepEP
 NUM_MAX_NVL_PEERS = 8  # Maximum number of NVLink peers per GPU
@@ -176,40 +176,6 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
     valid_len = min(num_slots, x.size(1))
     x[:, :valid_len] = sorted_bin_idx[:, :valid_len]
 
-
-# Check: csrc/deep_ep.cpp:Buffer::Buffer
-def create_moe_recv_counters(num_ranks: int, num_local_experts: int):
-    """Create MoE receive counters.
-    All allocated tensors are initialized with -1.
-    
-    Args:
-        num_ranks: the number of ranks.
-        num_local_experts: the number of local experts.
-
-    Returns:
-        moe_recv_counter: the MoE counter, allocated on pinned host memory.
-        moe_recv_expert_counter: the MoE expert-level counter, allocated on pinned host memory.
-        moe_recv_rdma_counter: the MoE RDMA-level counter, allocated on pinned host memory.
-
-        moe_recv_counter_mapped: the MoE counter on device, mapped from the pinned host memory.
-        moe_recv_expert_counter_mapped: the MoE expert-level counter on device, mapped from the pinned host memory.
-        moe_recv_rdma_counter_mapped: the MoE RDMA-level counter on device, mapped from the pinned host memory.
-    """
-
-    moe_recv_counter = torch.tensor(
-        [-1], dtype=torch.int32, pin_memory=True, device='cpu')  # MoE counter
-    moe_recv_expert_counter = torch.tensor(
-        [-1] * num_local_experts, dtype=torch.int32,
-        pin_memory=True, device='cpu')  # MoE expert-level counter
-    moe_recv_rdma_counter = torch.tensor(
-        -1, dtype=torch.int32, pin_memory=True, device='cpu')  # MoE RDMA-level counter
-
-    moe_recv_counter_mapped = get_device_tensor(moe_recv_counter)
-    moe_recv_expert_counter_mapped = get_device_tensor(moe_recv_expert_counter)
-    moe_recv_rdma_counter_mapped = get_device_tensor(moe_recv_rdma_counter)
-    return moe_recv_counter, moe_recv_expert_counter, moe_recv_rdma_counter, \
-        moe_recv_counter_mapped, moe_recv_expert_counter_mapped, moe_recv_rdma_counter_mapped
-
     
 def ep_bench(fn, warmup: int = 50, rep: int = 50, post_fn=None):
     """DeepEP style benchmark function.
@@ -249,3 +215,43 @@ def ep_bench(fn, warmup: int = 50, rep: int = 50, post_fn=None):
 
     times = np.array([s.elapsed_time(e) for s, e in zip(start_events, end_events)])[1:]
     return np.average(times).item()
+
+
+_src = r"""
+#include <torch/extension.h>
+#include <vector>
+
+std::tuple<int, std::vector<int>> wait_for_counters_ready(
+    torch::Tensor& moe_recv_counter, torch::Tensor& moe_recv_expert_counter) {
+    volatile int *counter_ptr = moe_recv_counter.data_ptr<int>();  // volatile is necessary
+    volatile int *expert_ptr = moe_recv_expert_counter.data_ptr<int>();
+    const int num_local_experts = moe_recv_expert_counter.size(0);
+
+    // Wait for counters to be ready
+    while (true) {
+        bool ready = counter_ptr[0] >= 0;
+        for (int i = 0; i < num_local_experts and ready; ++i)
+            ready &= expert_ptr[i] >= 0;
+
+        if (ready) break;
+    }
+
+    // After ready, get counter values to return
+    int counter_value = counter_ptr[0];
+    
+    std::vector<int> expert_counter_values = std::vector<int>(
+        expert_ptr, 
+        expert_ptr + num_local_experts);
+    
+    return std::make_tuple(counter_value, expert_counter_values);
+}
+"""
+
+ep_ext = load_inline(
+    name="ep_ext",
+    cpp_sources=_src,
+    functions=["wait_for_counters_ready"],
+    extra_cflags=["-O3", "-march=native"],
+    verbose=False
+)
+

@@ -94,7 +94,7 @@ template <> struct VecInt<16> {
   using vec_t = int4;
 };
 
-#define LD_NC_FUNC "ld.volatile.global"
+#define LD_NC_FUNC "ld.nc.global"
 #define ST_NA_FUNC "st.global"
 
 template <typename dtype_t> TL_DEVICE dtype_t ld_nc_global(const dtype_t *ptr) {
@@ -195,72 +195,71 @@ template <> TL_DEVICE void st_na_global(const int4 *ptr, const int4 &value) {
 #define ST_FUNC(ptr, value) st_na_global(ptr, value)
 
 template <int N, int UNROLL_FACTOR, typename dtype_t>
+TL_DEVICE void cp_warp_impl(dtype_t const *const dst_addr,
+                       dtype_t const *const src_addr) {
+  int lane_id;
+  asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
+  constexpr int kLoopStride = 32 * (UNROLL_FACTOR);
+  typename std::remove_reference<decltype(LD_FUNC((src_addr) + 0))>::type
+      unrolled_values[(UNROLL_FACTOR)];
+  auto __src = (src_addr);
+  auto __dst = (dst_addr);
+  for (int __i = (lane_id); __i < ((N) / kLoopStride) * kLoopStride;
+       __i += kLoopStride) {
+    _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j)
+        unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32);
+    _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j)
+        ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]);
+  }
+  for (int __i = ((N) / kLoopStride) * kLoopStride + (lane_id); __i < (N);
+       __i += 32)
+    ST_FUNC(__dst + __i, LD_FUNC(__src + __i));
+}
+
+/**
+ * @param enable_aggresive_vectorize If set to true, the copy will be performed with aggressive vectorization
+ * (e.g., using int4 for aligned and sized transfers), which requires that both source and destination addresses
+ * are 16-byte aligned and N*sizeof(dtype_t) is a multiple of 16 for optimal memory access and throughput.
+ * If false, performs a standard element-wise copy.
+ */
+ // todo: support more auto-vectorize later
+template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize=false, typename dtype_t>
 TL_DEVICE void cp_warp(dtype_t const *const dst_addr,
                        dtype_t const *const src_addr) {
-  int lane_id;
-  asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
-  constexpr int kLoopStride = 32 * (UNROLL_FACTOR);
-  typename std::remove_reference<decltype(LD_FUNC((src_addr) + 0))>::type
-      unrolled_values[(UNROLL_FACTOR)];
-  auto __src = (src_addr);
-  auto __dst = (dst_addr);
-  for (int __i = (lane_id); __i < ((N) / kLoopStride) * kLoopStride;
-       __i += kLoopStride) {
-    _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j)
-        unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32);
-    _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j)
-        ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]);
+  if constexpr (enable_aggresive_vectorize) {
+    int4 *__restrict__ dst_addr_int4 = (int4 *)dst_addr;
+    const int4 *__restrict__ src_addr_int4 = (const int4 *)src_addr;
+    constexpr int N_int4 = sizeof(dtype_t) * N / 16;
+    cp_warp_impl<N_int4, UNROLL_FACTOR>(dst_addr_int4, src_addr_int4);
+  } else {
+    cp_warp_impl<N, UNROLL_FACTOR>(dst_addr, src_addr);
   }
-  for (int __i = ((N) / kLoopStride) * kLoopStride + (lane_id); __i < (N);
-       __i += 32)
-    ST_FUNC(__dst + __i, LD_FUNC(__src + __i));
 }
 
-template <int N, int UNROLL_FACTOR, typename dtype_t>
-TL_DEVICE void cp_warp(uint64_t dst_addr_uint64,
-                       dtype_t const *const src_addr) {
+template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize=false, typename dtype_t>
+TL_DEVICE void cp_warp(uint64_t dst_addr_uint64,dtype_t const *const src_addr) {
   dtype_t *dst_addr = reinterpret_cast<dtype_t *>(dst_addr_uint64);
-
-  int lane_id;
-  asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
-  constexpr int kLoopStride = 32 * (UNROLL_FACTOR);
-  typename std::remove_reference<decltype(LD_FUNC((src_addr) + 0))>::type
-      unrolled_values[(UNROLL_FACTOR)];
-  auto __src = (src_addr);
-  auto __dst = (dst_addr);
-  for (int __i = (lane_id); __i < ((N) / kLoopStride) * kLoopStride;
-       __i += kLoopStride) {
-    _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j)
-        unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32);
-    _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j)
-        ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]);
+  if constexpr (enable_aggresive_vectorize) {
+    int4 *__restrict__ dst_addr_int4 = (int4 *)dst_addr;
+    const int4 *__restrict__ src_addr_int4 = (const int4 *)src_addr;
+    constexpr int N_int4 = sizeof(dtype_t) * N / 16;
+    cp_warp_impl<N_int4, UNROLL_FACTOR>(dst_addr_int4, src_addr_int4);
+  } else {
+    cp_warp_impl<N, UNROLL_FACTOR>(dst_addr, src_addr);
   }
-  for (int __i = ((N) / kLoopStride) * kLoopStride + (lane_id); __i < (N);
-       __i += 32)
-    ST_FUNC(__dst + __i, LD_FUNC(__src + __i));
 }
 
-template <int N, int UNROLL_FACTOR, typename dtype_t>
+template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize=false, typename dtype_t>
 TL_DEVICE void cp_warp(dtype_t *const dst_addr, uint64_t src_addr_uint64) {
   const dtype_t *src_addr = reinterpret_cast<const dtype_t *>(src_addr_uint64);
-
-  int lane_id;
-  asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
-  constexpr int kLoopStride = 32 * (UNROLL_FACTOR);
-  typename std::remove_reference<decltype(LD_FUNC((src_addr) + 0))>::type
-      unrolled_values[(UNROLL_FACTOR)];
-  auto __src = (src_addr);
-  auto __dst = (dst_addr);
-  for (int __i = (lane_id); __i < ((N) / kLoopStride) * kLoopStride;
-       __i += kLoopStride) {
-    _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j)
-        unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32);
-    _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j)
-        ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]);
+  if constexpr (enable_aggresive_vectorize) {
+    int4 *__restrict__ dst_addr_int4 = (int4 *)dst_addr;
+    const int4 *__restrict__ src_addr_int4 = (const int4 *)src_addr;
+    constexpr int N_int4 = sizeof(dtype_t) * N / 16;
+    cp_warp_impl<N_int4, UNROLL_FACTOR>(dst_addr_int4, src_addr_int4);
+  } else {
+    cp_warp_impl<N, UNROLL_FACTOR>(dst_addr, src_addr);
   }
-  for (int __i = ((N) / kLoopStride) * kLoopStride + (lane_id); __i < (N);
-       __i += 32)
-    ST_FUNC(__dst + __i, LD_FUNC(__src + __i));
 }
 
 /**
