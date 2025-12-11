@@ -1,7 +1,7 @@
 /*!
  * \file inject_assumes.cc
  * \brief Inject assumes on buffer's shape boundary check. Also convert
- * exisiting assumes to AttrNodes.
+ * existing assumes to AttrNodes.
  */
 
 #include "common/assume.h"
@@ -103,7 +103,7 @@ private:
       std::vector<Stmt> stmts;
     };
     std::vector<AssumeGroup> groups = {AssumeGroup{std::nullopt, {}}};
-    for (auto i = 0; i < op->seq.size(); i++) {
+    for (size_t i = 0; i < op->seq.size(); i++) {
       auto stmt = VisitStmt(op->seq[i]);
       // Convert assume in evaluate form to assume attribute.
       // By default, we have the following IR:

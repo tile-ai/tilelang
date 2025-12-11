@@ -1,7 +1,7 @@
 
 /*!
  * \file assume.h
- * \brief Uitls on assume statements
+ * \brief Utils on assume statements
  */
 
 #ifndef TVM_TL_TRANSFORM_COMMON_ASSUME_H_

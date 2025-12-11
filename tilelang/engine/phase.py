@@ -117,7 +117,7 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     """
 
     # Debug
-    tilelang.analysis.ASTPrinter()(mod)
+    # tilelang.analysis.ASTPrinter()(mod)
     # Check if there are any invalid nested loops.
     tilelang.analysis.NestedLoopChecker()(mod)
     # Check if there are any invalid symbolic T.Parallel + fragment access.
@@ -254,7 +254,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.ThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
-    print(mod)
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)

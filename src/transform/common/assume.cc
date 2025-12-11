@@ -1,7 +1,7 @@
 
 /*!
  * \file assume.cc
- * \brief Uitls on assume statements
+ * \brief Utils on assume statements
  */
 
 #include "assume.h"
