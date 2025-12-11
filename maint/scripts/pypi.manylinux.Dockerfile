@@ -1,6 +1,6 @@
 FROM quay.io/pypa/manylinux_2_28_x86_64 AS builder_amd64
 
-RUN dnf config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+RUN dnf config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
 
 ARG CUDA_VERSION=12.8
 ENV CUDA_VERSION=${CUDA_VERSION}
