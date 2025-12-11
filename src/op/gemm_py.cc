@@ -135,7 +135,7 @@ GemmInst GemmPyNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kMFMA;
   } else if (TargetIsVolta(target) || TargetIsAmpere(target) ||
              TargetIsTuring(target) || TargetIsHopper(target) ||
-             TargetIsSm100(target)) {
+             TargetIsSm100(target) || TargetIsSM120(target)) {
     return GemmInst::kMMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
