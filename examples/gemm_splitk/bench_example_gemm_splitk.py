@@ -8,7 +8,8 @@ def bench_example_tilelang_gemm_splitk():
 
 
 def bench_example_tilelang_gemm_splitk_vectorize_atomicadd():
-    tilelang.testing.benchmark.process_func(example_tilelang_gemm_splitk_vectorize_atomicadd.benchmark)
+    tilelang.testing.benchmark.process_func(
+        example_tilelang_gemm_splitk_vectorize_atomicadd.benchmark)
 
 
 if globals().get("__name__") == "__main__":

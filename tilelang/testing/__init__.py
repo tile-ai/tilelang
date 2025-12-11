@@ -18,6 +18,7 @@ __all__ = [
     'requires_rocm',
     'requires_llvm',
     'main',
+    'bench',
     'requires_cuda_compute_version',
 ] + [f'requires_cuda_compute_version_{op}' for op in ('ge', 'gt', 'le', 'lt', 'eq')]
 

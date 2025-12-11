@@ -17,26 +17,12 @@ def bench_fp8_lighting_indexer():
 
 def bench_sparse_mla_fwd():
     tilelang.testing.benchmark.process_func(
-        sparse_mla_fwd.benchmark,
-        S=256,
-        SKV=1024,
-        H=64,
-        HKV=1,
-        DQK=576,
-        DV=512,
-        topk=256)
+        sparse_mla_fwd.benchmark, S=256, SKV=1024, H=64, HKV=1, DQK=576, DV=512, topk=256)
 
 
 def bench_sparse_mla_fwd_pipelined():
     tilelang.testing.benchmark.process_func(
-        sparse_mla_fwd_pipelined.benchmark,
-        S=256,
-        SKV=512,
-        H=64,
-        HKV=1,
-        DQK=576,
-        DV=512,
-        topk=256)
+        sparse_mla_fwd_pipelined.benchmark, S=256, SKV=512, H=64, HKV=1, DQK=576, DV=512, topk=256)
 
 
 def bench_sparse_mla_bwd():

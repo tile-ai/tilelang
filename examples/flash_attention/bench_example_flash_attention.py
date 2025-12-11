@@ -29,11 +29,13 @@ def bench_example_gqa_bwd_wgmma_pipelined():
 
 
 def bench_example_mha_bwd_bshd():
-    tilelang.testing.benchmark.process_func(example_mha_bwd_bshd.benchmark, name="example_mha_bwd_bshd")
+    tilelang.testing.benchmark.process_func(
+        example_mha_bwd_bshd.benchmark, name="example_mha_bwd_bshd")
 
 
 def bench_example_mha_bwd_bhsd():
-    tilelang.testing.benchmark.process_func(example_mha_bwd_bhsd.benchmark, name="example_mha_bwd_bhsd")
+    tilelang.testing.benchmark.process_func(
+        example_mha_bwd_bhsd.benchmark, name="example_mha_bwd_bhsd")
 
 
 def bench_example_mha_bwd_bshd_wgmma_pipelined():

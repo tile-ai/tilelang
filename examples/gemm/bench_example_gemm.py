@@ -10,7 +10,8 @@ def bench_example_gemm_autotune():
 
 
 def bench_example_gemm_intrinsics():
-    tilelang.testing.benchmark.process_func(example_gemm_intrinsics.benchmark, M=1024, N=1024, K=1024)
+    tilelang.testing.benchmark.process_func(
+        example_gemm_intrinsics.benchmark, M=1024, N=1024, K=1024)
 
 
 def bench_example_gemm_schedule():
