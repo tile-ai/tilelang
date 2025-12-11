@@ -234,7 +234,7 @@ uname -a
 case "$(uname -m)" in
     "x86_64")
         DEFAULT_CUDA_VERSION="12.1"
-        yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+        dnf config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
         ;;
     "aarch64")
         DEFAULT_CUDA_VERSION="12.8"
