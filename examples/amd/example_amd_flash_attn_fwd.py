@@ -7,6 +7,7 @@ import itertools
 import argparse
 from functools import partial
 
+
 # Custom supply function to ensure tensors are created on GPU
 def supply_tensors_gpu(params):
     """Supply function that creates tensors on GPU for ROCm/HIP."""
@@ -264,4 +265,3 @@ if __name__ == "__main__":
     parser.add_argument('--groups', type=int, default=1, help='groups')
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
-
