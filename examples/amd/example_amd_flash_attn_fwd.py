@@ -7,6 +7,20 @@ import itertools
 import argparse
 from functools import partial
 
+# Custom supply function to ensure tensors are created on GPU
+def supply_tensors_gpu(params):
+    """Supply function that creates tensors on GPU for ROCm/HIP."""
+    tensors = []
+    for param in params:
+        if hasattr(param, 'shape') and hasattr(param, 'dtype'):
+            # Force creation on GPU device
+            shape = [int(s) for s in param.shape]
+            tensor = torch.randn(shape, dtype=param.dtype, device='cuda')
+            tensors.append(tensor)
+        else:
+            tensors.append(param)
+    return tensors
+
 
 def ref_program(Q, K, V, is_causal, groups=1):
     assert Q.size(
@@ -63,7 +77,7 @@ def get_configs():
     return valid_configs
 
 
-@tilelang.autotune(configs=get_configs(), cache_input_tensors=True)
+@tilelang.autotune(configs=get_configs(), cache_input_tensors=True, supply_prog=supply_tensors_gpu)
 @tilelang.jit(out_idx=[3])
 def fast_flashattn(
     batch,
@@ -250,3 +264,4 @@ if __name__ == "__main__":
     parser.add_argument('--groups', type=int, default=1, help='groups')
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
+
