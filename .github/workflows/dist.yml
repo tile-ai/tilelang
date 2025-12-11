@@ -106,7 +106,7 @@ jobs:
     strategy:
       matrix:
         target:
-          - { runner: ubuntu-latest, toolkit: "CUDA-12.1" }
+          - { runner: ubuntu-latest, toolkit: "CUDA-12.8" }
           - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
