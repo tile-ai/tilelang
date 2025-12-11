@@ -1,4 +1,4 @@
-FROM quay.io/pypa/manylinux2014_x86_64 AS builder_amd64
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS builder_amd64
 
 RUN yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
 
