@@ -49,17 +49,26 @@ jobs:
             pyproject.toml
             requirements*.txt
 
+      - name: Clean pip environment
+        run: |
+          export HOME=$(mktemp -d)
+          echo "Using clean HOME=$HOME"
+          export PIP_CONFIG_FILE=/dev/null
+          export PYTHONUSERBASE=""
+          export PIP_USER=0
       - name: Install merged version
         run: |
           python -m venv tll
           source tll/bin/activate
-          export PIP_CONFIG_FILE=/dev/null
-          export PYTHONUSERBASE=""
-          pip config unset global.user
-          pip config unset user.user
           pip install --no-user -r requirements-test.txt
           pip install --no-user .
-
+      - name: Clean pip environment (again)
+        run: |
+          export HOME=$(mktemp -d)
+          echo "Using clean HOME=$HOME"
+          export PIP_CONFIG_FILE=/dev/null
+          export PYTHONUSERBASE=""
+          export PIP_USER=0
       - name: Install original version
         run: |
           echo "Check files to be deleted!"
