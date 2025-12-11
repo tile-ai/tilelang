@@ -422,7 +422,7 @@ def benchmark(B=1,
     def run_kernel_only():
         return bwd_kernel(q, kv, do, indices, tl_lse, delta, dkv)
 
-    return do_bench(run_kernel_only, rep=100, warmup=250)
+    return do_bench(run_kernel_only, rep=1000, warmup=250)
 
 
 if __name__ == "__main__":
