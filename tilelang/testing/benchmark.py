@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import importlib.util
 import multiprocessing as mp
 
-__all__ = ["main", "process_func"]
+__all__ = ["bench", "process_func"]
 _RECORDS = []
 
 
@@ -102,7 +102,7 @@ def _bench_worker(file_path, func_name, queue):
         queue.put(local_records)
 
 
-def main():
+def bench():
     # Entry point — automatically run all bench_* functions in caller file.
     mp.set_start_method("spawn", force=True)
     test_file = inspect.getsourcefile(sys._getframe(1))

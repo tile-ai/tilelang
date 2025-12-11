@@ -1,9 +1,9 @@
-import tilelang.tools.bench
+import tilelang.testing.benchmark
 import example_fusedmoe_tilelang
 
 
 def bench_example_fusedmoe_tilelang():
-    tilelang.tools.bench.process_func(
+    tilelang.testing.benchmark.process_func(
         example_fusedmoe_tilelang.benchmark,
         d_hidden=1024,
         d_expert=256,
@@ -15,4 +15,4 @@ def bench_example_fusedmoe_tilelang():
 
 
 if globals().get("__name__") == "__main__":
-    tilelang.tools.bench.main()
+    tilelang.testing.bench()

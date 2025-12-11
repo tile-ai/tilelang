@@ -1,10 +1,10 @@
-import tilelang.tools.bench
+import tilelang.testing.benchmark
 import example_topk
 
 
 def bench_example_topk():
-    tilelang.tools.bench.process_func(example_topk.benchmark)
+    tilelang.testing.benchmark.process_func(example_topk.benchmark)
 
 
 if globals().get("__name__") == "__main__":
-    tilelang.tools.bench.main()
+    tilelang.testing.bench()

@@ -1,14 +1,14 @@
-import tilelang.tools.bench
+import tilelang.testing.benchmark
 import example_gqa_decode
 import example_mha_inference
 
 
 def bench_example_gqa_decode():
-    tilelang.tools.bench.process_func(example_gqa_decode.benchmark)
+    tilelang.testing.benchmark.process_func(example_gqa_decode.benchmark)
 
 
 def bench_example_mha_inference():
-    tilelang.tools.bench.process_func(
+    tilelang.testing.benchmark.process_func(
         example_mha_inference.benchmark,
         BATCH=1,
         H=32,
@@ -19,4 +19,4 @@ def bench_example_mha_inference():
 
 
 if globals().get("__name__") == "__main__":
-    tilelang.tools.bench.main()
+    tilelang.testing.bench()

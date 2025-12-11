@@ -1,10 +1,10 @@
-import tilelang.tools.bench
+import tilelang.testing.benchmark
 import example_blocksparse_gemm
 
 
 def bench_example_blocksparse_gemm():
-    tilelang.tools.bench.process_func(example_blocksparse_gemm.benchmark)
+    tilelang.testing.benchmark.process_func(example_blocksparse_gemm.benchmark)
 
 
 if globals().get("__name__") == "__main__":
-    tilelang.tools.bench.main()
+    tilelang.testing.bench()

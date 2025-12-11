@@ -1,4 +1,4 @@
-import tilelang.tools.bench as b
+import tilelang.testing.benchmark
 
 if __name__ == "__main__":
-    b.bench_all()
+    tilelang.testing.benchmark.bench_all()

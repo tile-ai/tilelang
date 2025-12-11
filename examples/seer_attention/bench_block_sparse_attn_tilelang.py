@@ -1,10 +1,10 @@
-import tilelang.tools.bench
+import tilelang.testing.benchmark
 import block_sparse_attn_tilelang
 
 
 def bench_block_sparse_attn_tilelang():
-    tilelang.tools.bench.process_func(block_sparse_attn_tilelang.benchmark)
+    tilelang.testing.benchmark.process_func(block_sparse_attn_tilelang.benchmark)
 
 
 if globals().get("__name__") == "__main__":
-    tilelang.tools.bench.main()
+    tilelang.testing.bench()
