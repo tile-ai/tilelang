@@ -29,6 +29,18 @@ tutorials/logging
 
 :::{toctree}
 :maxdepth: 1
+:caption: PROGRAMMING GUIDES
+
+programming_guides/overview
+programming_guides/language_basics
+programming_guides/instructions
+programming_guides/control_flow
+programming_guides/autotuning
+programming_guides/type_system
+:::
+
+:::{toctree}
+:maxdepth: 1
 :caption: DEEP LEARNING OPERATORS
 
 deeplearning_operators/elementwise
