@@ -6,10 +6,12 @@ import tilelang.language.tir.op as _tir_op
 import functools
 
 
-def serial(start: PrimExpr,
-           stop: PrimExpr = None,
-           *,
-           annotations: dict[str, Any] = None) -> frame.ForFrame:
+def serial(
+    start: PrimExpr,
+    stop: PrimExpr = None,
+    *,
+    annotations: dict[str, Any] = None
+) -> frame.ForFrame:
     """The serial For statement.
 
     Parameters
@@ -31,10 +33,12 @@ def serial(start: PrimExpr,
     return _ir.serial(start=start, stop=stop, annotations=annotations)
 
 
-def parallel(start: PrimExpr,
-             stop: PrimExpr = None,
-             *,
-             annotations: dict[str, Any] = None) -> frame.ForFrame:
+def parallel(
+    start: PrimExpr,
+    stop: PrimExpr = None,
+    *,
+    annotations: dict[str, Any] = None
+) -> frame.ForFrame:
     """The parallel For statement.
 
     Parameters
@@ -56,10 +60,12 @@ def parallel(start: PrimExpr,
     return _ir.parallel(start=start, stop=stop, annotations=annotations)
 
 
-def vectorized(start: PrimExpr,
-               stop: PrimExpr = None,
-               *,
-               annotations: dict[str, Any] = None) -> frame.ForFrame:
+def vectorized(
+    start: PrimExpr,
+    stop: PrimExpr = None,
+    *,
+    annotations: dict[str, Any] = None
+) -> frame.ForFrame:
     """The vectorized For statement.
 
     Parameters
@@ -81,10 +87,12 @@ def vectorized(start: PrimExpr,
     return _ir.vectorized(start=start, stop=stop, annotations=annotations)
 
 
-def unroll(start: PrimExpr,
-           stop: PrimExpr = None,
-           *,
-           annotations: dict[str, Any] = None) -> frame.ForFrame:
+def unroll(
+    start: PrimExpr,
+    stop: PrimExpr = None,
+    *,
+    annotations: dict[str, Any] = None
+) -> frame.ForFrame:
     """The unrolled For statement.
 
     Parameters

@@ -74,7 +74,8 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                             continue
                     elif dim is not None:
                         assert param.size(
-                            dim) % mp == 0, f"Dimension {dim} must be divisible by {mp}"
+                            dim
+                        ) % mp == 0, f"Dimension {dim} must be divisible by {mp}"
                         shard_size = param.size(dim) // mp
                         new_param = param.narrow(dim, i * shard_size, shard_size).contiguous()
                     state_dicts[i][name] = new_param

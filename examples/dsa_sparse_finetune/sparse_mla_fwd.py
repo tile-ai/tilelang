@@ -28,12 +28,15 @@ def sparse_mla_fwd(
     threads=128,
 ):
     assert dim == tilelang.math.next_power_of_2(
-        dim), f"haven't check padding correctness yet, dim={dim}"
+        dim
+    ), f"haven't check padding correctness yet, dim={dim}"
     assert tail_dim == tilelang.math.next_power_of_2(
-        tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
+        tail_dim
+    ), f"haven't check padding correctness yet, dim={tail_dim}"
     assert is_causal == True, "non-casual is not supported"
-    assert (topk %
-            block_I == 0), "otherwise will load some index=0 thus causing wrong kv to be loaded"
+    assert (
+        topk % block_I == 0
+    ), "otherwise will load some index=0 thus causing wrong kv to be loaded"
     if sm_scale is None:
         sm_scale = (1.0 / (dim + tail_dim))**0.5
     else:
@@ -76,19 +79,18 @@ def sparse_mla_fwd(
 
     @T.prim_func
     def main(
-            Q: T.Tensor(q_shape, dtype),  # type: ignore
-            KV: T.Tensor(kv_shape, dtype),  # type: ignore
-            Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
-            Offsets: T.Tensor(offsets_shape, indices_dtype),  # type: ignore
-            TokenIndices: T.Tensor(token_indices_shape, indices_dtype),  # type: ignore
-            Output: T.Tensor(o_shape, dtype),  # type: ignore
-            Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
+        Q: T.Tensor(q_shape, dtype),  # type: ignore
+        KV: T.Tensor(kv_shape, dtype),  # type: ignore
+        Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
+        Offsets: T.Tensor(offsets_shape, indices_dtype),  # type: ignore
+        TokenIndices: T.Tensor(token_indices_shape, indices_dtype),  # type: ignore
+        Output: T.Tensor(o_shape, dtype),  # type: ignore
+        Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
     ):
-        with T.Kernel(
-                seq_len * REPLICATE_H, kv_group, threads=threads) as (
-                    bx,
-                    by,
-                ):
+        with T.Kernel(seq_len * REPLICATE_H, kv_group, threads=threads) as (
+                bx,
+                by,
+        ):
             Q_shared = T.alloc_shared([H_per_block, D], dtype)
             Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
             KV_shared = T.alloc_shared([BI, D], dtype)
@@ -125,7 +127,8 @@ def sparse_mla_fwd(
 
                 for bi_i in T.Parallel(BI):
                     mask[bi_i] = (Indices[bos + s_i, g_i, i_i * BI + bi_i] <= max_kv_i) & (
-                        Indices[bos + s_i, g_i, i_i * BI + bi_i] != -1)
+                        Indices[bos + s_i, g_i, i_i * BI + bi_i] != -1
+                    )
 
                 for bi_i, d_i in T.Parallel(BI, D):
                     KV_shared[bi_i, d_i] = KV[bos + Indices[bos + s_i, g_i, i_i * BI + bi_i], g_i,
@@ -177,16 +180,18 @@ def sparse_mla_fwd(
     return main
 
 
-def sparse_mla_fwd_interface(q,
-                             kv,
-                             indices,
-                             offsets,
-                             sm_scale=None,
-                             return_p_sum: bool = False,
-                             d_v=512,
-                             block_I=32,
-                             num_stages=2,
-                             threads=128):
+def sparse_mla_fwd_interface(
+    q,
+    kv,
+    indices,
+    offsets,
+    sm_scale=None,
+    return_p_sum: bool = False,
+    d_v=512,
+    block_I=32,
+    num_stages=2,
+    threads=128
+):
     is_casual = True
     assert return_p_sum == False, "This kernel file is for fwd only"
     assert q.is_contiguous() and kv.is_contiguous() and indices.is_contiguous()
@@ -214,7 +219,8 @@ def sparse_mla_fwd_interface(q,
         is_casual,
         block_I=block_I,
         num_stages=num_stages,
-        threads=threads)
+        threads=threads
+    )
     out, lse = kernel(q, kv, indices, offsets, token_indices)
     return out, lse
 
@@ -241,8 +247,10 @@ def ref_sparse_mla_fwd_interface(Q, KV, Indices, offsets, sm_scale=None, is_casu
         g_index = g
         h_index = h // g
         compressed_casual_mask = torch.arange(
-            0, sq, dtype=torch.int32, device="cuda").view(-1, 1) >= torch.arange(
-                1 - 1, sk * 1, 1, dtype=torch.int32, device="cuda").view(1, -1)
+            0, sq, dtype=torch.int32, device="cuda"
+        ).view(-1, 1) >= torch.arange(
+            1 - 1, sk * 1, 1, dtype=torch.int32, device="cuda"
+        ).view(1, -1)
 
         indices[indices > sk] = sk
         mask = q.new_zeros(b, g_index, sq, sk + 1, dtype=torch.bool).scatter(3, indices.long(), 1)
@@ -265,18 +273,20 @@ def ref_sparse_mla_fwd_interface(Q, KV, Indices, offsets, sm_scale=None, is_casu
     return o.to(torch.bfloat16)
 
 
-def test_sparse_mla_fwd(B=1,
-                        S=4096,
-                        H=128,
-                        HKV=1,
-                        DQK=576,
-                        DV=512,
-                        topk=2048,
-                        dtype=torch.bfloat16,
-                        check_correctness=True,
-                        block_I=64,
-                        num_stages=2,
-                        threads=256):
+def test_sparse_mla_fwd(
+    B=1,
+    S=4096,
+    H=128,
+    HKV=1,
+    DQK=576,
+    DV=512,
+    topk=2048,
+    dtype=torch.bfloat16,
+    check_correctness=True,
+    block_I=64,
+    num_stages=2,
+    threads=256
+):
     torch.random.manual_seed(0)
     q = torch.randn((S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
     kv = torch.randn((S, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
@@ -292,7 +302,8 @@ def test_sparse_mla_fwd(B=1,
                 indices[offsets[i] + t, h, :len(i_i)] = i_i
 
     tl_out, tl_lse = sparse_mla_fwd_interface(
-        q, kv, indices, offsets, block_I=block_I, num_stages=num_stages, threads=threads)
+        q, kv, indices, offsets, block_I=block_I, num_stages=num_stages, threads=threads
+    )
 
     if check_correctness:
         # otherwise may cause out of memory
@@ -302,7 +313,8 @@ def test_sparse_mla_fwd(B=1,
 
     def fn():
         return sparse_mla_fwd_interface(
-            q, kv, indices, offsets, block_I=block_I, num_stages=num_stages, threads=threads)
+            q, kv, indices, offsets, block_I=block_I, num_stages=num_stages, threads=threads
+        )
 
     from tilelang.profiler import do_bench
 
@@ -329,4 +341,5 @@ if __name__ == "__main__":
         check_correctness=True,
         block_I=64,
         num_stages=2,
-        threads=256)
+        threads=256
+    )

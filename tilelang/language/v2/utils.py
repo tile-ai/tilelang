@@ -67,10 +67,9 @@ def get_ast(func: Callable):
 CompileMethod = Literal['direct', 'disk']
 
 
-def get_compiled_object(source: str | ast.AST,
-                        name: str,
-                        filename: str = None,
-                        globals: dict[str, Any] = None):
+def get_compiled_object(
+    source: str | ast.AST, name: str, filename: str = None, globals: dict[str, Any] = None
+):
     if isinstance(source, ast.AST):
         assert filename is not None, "filename must be provided when source is an AST"
     try:
@@ -96,6 +95,7 @@ def construct_strides(shape: tuple[Any, ...], allow_prim_expr: bool = True) -> t
         stride *= s
         if not allow_prim_expr and isinstance(stride, tir.PrimExpr):
             raise ValueError(
-                "Cannot construct strides with PrimExpr when allow_prim_expr is False.")
+                "Cannot construct strides with PrimExpr when allow_prim_expr is False."
+            )
     strides = tuple(reversed(strides))
     return strides

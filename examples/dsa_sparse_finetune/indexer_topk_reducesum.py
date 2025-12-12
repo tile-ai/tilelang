@@ -53,8 +53,8 @@ def tl_indexer_topk_reducesum_impl(
 
     @T.macro
     def bitonic_sort(
-            topk_index_shared: T.SharedBuffer([N], dtype=INT32),
-            topk_value_shared: T.SharedBuffer([N], dtype=FP32),
+        topk_index_shared: T.SharedBuffer([N], dtype=INT32),
+        topk_value_shared: T.SharedBuffer([N], dtype=FP32),
     ):
         T.sync_threads()
         for i1 in T.serial(num_iters):
@@ -75,13 +75,13 @@ def tl_indexer_topk_reducesum_impl(
 
     @T.prim_func
     def tl_indexer_topk_reducesum_kernel(
-            IndexQ: T.Tensor(index_q_shape, dtype),
-            Weights: T.Tensor(weights_shape, dtype),
-            IndexK: T.Tensor(index_k_shape, dtype),
-            TopkIndices: T.Tensor(topk_indices_shape, INT32),
-            ReduceSum: T.Tensor(topk_indices_shape, FP32),
-            Offsets: T.Tensor(offsets_shape, INT32),
-            TokenIndices: T.Tensor(token_indices_shape, INT32),
+        IndexQ: T.Tensor(index_q_shape, dtype),
+        Weights: T.Tensor(weights_shape, dtype),
+        IndexK: T.Tensor(index_k_shape, dtype),
+        TopkIndices: T.Tensor(topk_indices_shape, INT32),
+        ReduceSum: T.Tensor(topk_indices_shape, FP32),
+        Offsets: T.Tensor(offsets_shape, INT32),
+        TokenIndices: T.Tensor(token_indices_shape, INT32),
     ):
         with T.Kernel(seq_len, threads=num_threads) as (bx):
             i_b, i_t = TokenIndices[bx, 0], TokenIndices[bx, 1]
@@ -113,8 +113,8 @@ def tl_indexer_topk_reducesum_impl(
 
                 index_k_shared = T.alloc_shared([block_K, dim], dtype=dtype)
                 for i, j in T.Parallel(block_K, dim):
-                    index_k_shared[i, j] = T.if_then_else(k_st + i < k_ed, IndexK[bos + k_st + i,
-                                                                                  j], 0)
+                    index_k_shared[
+                        i, j] = T.if_then_else(k_st + i < k_ed, IndexK[bos + k_st + i, j], 0)
                 T.sync_threads()
 
                 logits = T.alloc_fragment((block_K, heads), FP32)
@@ -209,8 +209,9 @@ def indexer_topk_reducesum_interface(
     return topk_indices, topk_score
 
 
-def ref_index_score(Q: torch.Tensor, Weights: torch.Tensor, K: torch.Tensor, topk: int,
-                    offsets: torch.Tensor) -> torch.Tensor:
+def ref_index_score(
+    Q: torch.Tensor, Weights: torch.Tensor, K: torch.Tensor, topk: int, offsets: torch.Tensor
+) -> torch.Tensor:
     all_topk_indices = []
     all_topk_score = []
     for i in range(offsets.shape[0] - 1):
@@ -265,8 +266,10 @@ def test_kernel(
         set_trt = set(trt_np[mask])
         intersection = set_ref & set_trt
 
-        print("idx:", j, "selected/all:", len(intersection), "/", len(set_ref), "=",
-              len(intersection) / len(set_ref))
+        print(
+            "idx:", j, "selected/all:", len(intersection), "/", len(set_ref), "=",
+            len(intersection) / len(set_ref)
+        )
 
         print(
             f"err: {get_abs_err(ref_np_val, trt_np_val):.6f} ratio: {get_err_ratio(ref_np_val, trt_np_val):.6f}"

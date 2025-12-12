@@ -40,8 +40,9 @@ def hadamard(b, n, dtype):
     # print(f'{exchange_round=}')
 
     @T.macro
-    def warp_shfl(local: T.Tensor((thread_elem,), dtype), buf: T.Tensor((thread_elem,), dtype),
-                  round: int):
+    def warp_shfl(
+        local: T.Tensor((thread_elem,), dtype), buf: T.Tensor((thread_elem,), dtype), round: int
+    ):
         tx = T.get_thread_binding(0)
         for i in T.serial(round):
             tx_stride = 1 << i
@@ -56,7 +57,8 @@ def hadamard(b, n, dtype):
                     local[j],
                     another_tx % warp_size,
                     warp_size,
-                    warp_size)
+                    warp_size
+                )
                 local[j] = T.if_then_else(sign == 0, local[j] + buf[j], buf[j] - local[j])
 
     @T.prim_func
@@ -132,7 +134,8 @@ def ref_program(x: torch.Tensor):
     dim = x.shape[-1]
     assert is_pow_of_2(dim)
     return F.linear(
-        x, torch.tensor(scipy.linalg.hadamard(dim, dtype=float), dtype=x.dtype, device=x.device))
+        x, torch.tensor(scipy.linalg.hadamard(dim, dtype=float), dtype=x.dtype, device=x.device)
+    )
 
 
 def main():

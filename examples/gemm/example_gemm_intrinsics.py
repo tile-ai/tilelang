@@ -4,7 +4,8 @@ import tilelang
 import tilelang.language as T
 from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
-    TensorCoreIntrinEmitter,)
+    TensorCoreIntrinEmitter,
+)
 from tilelang.transform import simplify_prim_func
 
 
@@ -99,9 +100,9 @@ def tl_matmul(
 
     @T.prim_func
     def gemm_intrinsics(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
@@ -112,10 +113,12 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)
@@ -152,8 +155,7 @@ def tl_matmul(
                     i // micro_size_x,
                     j // micro_size_y,
                     i % micro_size_x,
-                    j % micro_size_y,
-                ]
+                    j % micro_size_y,]
 
     return gemm_intrinsics
 

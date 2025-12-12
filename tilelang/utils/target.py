@@ -59,8 +59,9 @@ def check_metal_availability() -> bool:
     return arch == 'arm64'
 
 
-def determine_target(target: str | Target | Literal["auto"] = "auto",
-                     return_object: bool = False) -> str | Target:
+def determine_target(
+    target: str | Target | Literal["auto"] = "auto", return_object: bool = False
+) -> str | Target:
     """
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 

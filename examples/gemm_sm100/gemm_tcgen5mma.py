@@ -25,9 +25,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -48,7 +48,8 @@ def matmul(
                     trans_B,
                     mbar=mbar,
                     wg_wait=-1,
-                    clear_accum=k == 0)
+                    clear_accum=k == 0
+                )
                 T.mbarrier_wait_parity(mbar, k % 2)
 
             T.copy(C_tmem, C_local)
@@ -66,8 +67,10 @@ in_dtype, out_dtype, accum_dtype = "bfloat16", "bfloat16", "float"
 num_stages = 2
 threads = 256
 
-func = matmul(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
-              accum_dtype, num_stages, threads)
+func = matmul(
+    M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype,
+    num_stages, threads
+)
 jit_kernel = tilelang.compile(
     func,
     out_idx=[2],
@@ -75,7 +78,8 @@ jit_kernel = tilelang.compile(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    }
+)
 
 print(jit_kernel.get_kernel_source())
 

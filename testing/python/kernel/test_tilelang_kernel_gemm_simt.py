@@ -76,9 +76,9 @@ def tl_matmul_simt(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor(C_shape, out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor(C_shape, out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
@@ -120,8 +120,10 @@ def tl_matmul_simt(
                     for i, j in T.grid(local_size_a, local_size_b):
                         for mk in T.serial(micro_size_k // dp4a_size):
                             if use_dp4a:
-                                T.dp4a(A_local[i, mk * dp4a_size], B_local[j, mk * dp4a_size],
-                                       C_local[i * local_size_b + j])
+                                T.dp4a(
+                                    A_local[i, mk * dp4a_size], B_local[j, mk * dp4a_size],
+                                    C_local[i * local_size_b + j]
+                                )
                             else:
                                 for dp4a_idx in T.serial(dp4a_size):
                                     C_local[i * local_size_b +

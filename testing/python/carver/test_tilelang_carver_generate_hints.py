@@ -18,7 +18,8 @@ def run_general_matmul_emit_configs(M, N, K, topk: int = 20):
         C = te.compute(
             (M, N),
             lambda i, j: te.sum(A[i, k].astype('float16') * B[j, k].astype('float16'), axis=[k]),
-            name='C')
+            name='C'
+        )
 
         return A, B, C
 
@@ -30,7 +31,8 @@ def run_general_matmul_emit_configs(M, N, K, topk: int = 20):
     tensorized_func, tags = carver.utils.get_tensorized_func_and_tags(func, arch.target)
     print(tags)
     policy = carver.TensorCorePolicy.from_prim_func(
-        func=tensorized_func, arch=arch, tags=tags, name="matmul_0")
+        func=tensorized_func, arch=arch, tags=tags, name="matmul_0"
+    )
 
     hints = policy.emit_config(topk=topk)
 
@@ -68,7 +70,8 @@ def run_general_matmul_matmul_emit_configs(M, N, K, topk: int = 20):
         C = te.compute(
             (M, N),
             lambda i, j: te.sum(A[i, k].astype('float16') * B[j, k].astype('float16'), axis=[k]),
-            name='C')
+            name='C'
+        )
 
         return A, B, C
 

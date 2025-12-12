@@ -4,9 +4,11 @@ from tilelang import tvm as tvm
 from typing import Any
 from tvm import IRModule
 from tvm.target import Target
-from .utils import (is_metal_target, match_declare_kernel, match_declare_kernel_cpu, is_cuda_target,
-                    is_hip_target, is_cpu_target, get_annotated_mod, pythonic_expr,
-                    parse_function_call_args, parse_tma_descriptor_args)
+from .utils import (
+    is_metal_target, match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target,
+    is_cpu_target, get_annotated_mod, pythonic_expr, parse_function_call_args,
+    parse_tma_descriptor_args
+)
 import re
 import logging
 import textwrap
@@ -163,13 +165,15 @@ class TLCUDASourceWrapper:
     host_mod: IRModule | None = None
     pass_configs: dict[str, Any] | None = None
 
-    def __init__(self,
-                 scheduled_ir_module: IRModule,
-                 source: str,
-                 target: Target,
-                 device_mod: IRModule | None = None,
-                 host_mod: IRModule | None = None,
-                 pass_configs: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        scheduled_ir_module: IRModule,
+        source: str,
+        target: Target,
+        device_mod: IRModule | None = None,
+        host_mod: IRModule | None = None,
+        pass_configs: dict[str, Any] | None = None
+    ):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
@@ -211,15 +215,18 @@ class TLCUDASourceWrapper:
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append({
-                    "name": buffer.data.name,
-                    "type": self._lookup_type(buffer.dtype) + "* __restrict__",
-                })
+                function_args.append(
+                    {
+                        "name": buffer.data.name,
+                        "type": self._lookup_type(buffer.dtype) + "* __restrict__",
+                    }
+                )
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(
-                    f"Parameter {param} is not in the buffer map of the primary function.")
+                    f"Parameter {param} is not in the buffer map of the primary function."
+                )
         # Add dynamic symbols as integer arguments
         for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
             if dyn_sym not in [arg["name"] for arg in function_args]:
@@ -263,8 +270,9 @@ class TLCUDASourceWrapper:
             kernel_launch_code += init_l2_persistent_map
 
             if self.use_cooperative_groups[function_name]:
-                args_list = parse_function_call_args(declaration, function_args, function_params,
-                                                     desc_name_map, desc_name_var_map)
+                args_list = parse_function_call_args(
+                    declaration, function_args, function_params, desc_name_map, desc_name_var_map
+                )
                 assert len(function_params) == len(
                     args_list
                 ), f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
@@ -273,10 +281,12 @@ class TLCUDASourceWrapper:
                 kernel_launch_code += call_args
                 # Using cudaLaunchCooperativeKernel to launch the kernel
                 kernel_launch_code += "\tTILELANG_CHECK(cudaLaunchCooperativeKernel((void*){}, {}, {}, {}, {}, stream));\n".format(
-                    function_name, grid_str, block_str, function_name + "_args", smem_str)
+                    function_name, grid_str, block_str, function_name + "_args", smem_str
+                )
             else:
-                args_list = parse_function_call_args(declaration, function_args, function_params,
-                                                     desc_name_map, desc_name_var_map)
+                args_list = parse_function_call_args(
+                    declaration, function_args, function_params, desc_name_map, desc_name_var_map
+                )
                 assert len(function_params) == len(
                     args_list
                 ), f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
@@ -286,8 +296,9 @@ class TLCUDASourceWrapper:
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
-        init_tma_descriptor_args = self.generate_tma_descriptor_args(desc_name_map,
-                                                                     desc_name_var_map)
+        init_tma_descriptor_args = self.generate_tma_descriptor_args(
+            desc_name_map, desc_name_var_map
+        )
         kernel_launch_code = init_tma_descriptor_args + kernel_launch_code
 
         # Wrap the kernel dispatch logic in an external C function
@@ -309,19 +320,22 @@ class TLCUDASourceWrapper:
                 # as size_in_bytes maybe a symbolic expression
                 num_bytes = persisting_l2_cache_max_size
             init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(
-                buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes))
+                buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes)
+            )
 
         return init_l2_persistent_map
 
-    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str],
-                                     desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
+    def generate_tma_descriptor_args(
+        self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tir.Var]
+    ) -> str:
         tma_descripter_init = ""
         if self.tma_descriptor_args is None:
             return tma_descripter_init
 
         # Parse TMA descriptor arguments using the common utility
-        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map,
-                                                  desc_name_var_map, self._pythonic_expr)
+        parsed_params = parse_tma_descriptor_args(
+            self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr
+        )
 
         # Generate C++ code from parsed parameters
         for params in parsed_params:
@@ -330,14 +344,16 @@ class TLCUDASourceWrapper:
                     params.handle_name, params.dtype, params.tensor_rank, params.global_address,
                     ",".join(params.global_dim), ",".join(params.global_stride),
                     ",".join(params.box_dim), ",".join(params.element_strides), params.interleave,
-                    params.swizzle, params.l2_promotion, params.oob_fill)
+                    params.swizzle, params.l2_promotion, params.oob_fill
+                )
             else:
                 tma_descripter_init += TMA_IM2COL_DESC_INIT_FUNC.format(
                     params.handle_name, params.dtype, params.tensor_rank, params.global_address,
                     ",".join(params.global_dim), ",".join(params.global_stride),
                     ",".join(params.element_strides), ",".join(params.lower_corner),
                     ",".join(params.upper_corner), params.smem_box_channel, params.smem_box_pixel,
-                    params.interleave, params.swizzle, params.l2_promotion, params.oob_fill)
+                    params.interleave, params.swizzle, params.l2_promotion, params.oob_fill
+                )
 
         return tma_descripter_init
 
@@ -347,8 +363,9 @@ class TLCUDASourceWrapper:
                 device_mod, host_mod = get_annotated_mod(self.mod, self.target)
             self.device_mod = device_mod
             self.host_mod = host_mod
-        assert (len(self.device_mod.functions)
-                >= 1), "Device module should have at least one function."
+        assert (
+            len(self.device_mod.functions) >= 1
+        ), "Device module should have at least one function."
         assert (len(self.host_mod.functions) == 1), "Only support one function in host module."
 
         block_info_map = {}
@@ -439,7 +456,8 @@ class TLCUDASourceWrapper:
             if dynamic_smem_buf is not None:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
                 call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(
-                    function_name, dynamic_smem_buf)
+                    function_name, dynamic_smem_buf
+                )
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
         return init_funcs
@@ -564,13 +582,15 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         "uchar": "uint8_t",
     }
 
-    def __init__(self,
-                 scheduled_ir_module: IRModule,
-                 source: str,
-                 target: Target,
-                 device_mod: IRModule | None = None,
-                 host_mod: IRModule | None = None,
-                 pass_configs: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        scheduled_ir_module: IRModule,
+        source: str,
+        target: Target,
+        device_mod: IRModule | None = None,
+        host_mod: IRModule | None = None,
+        pass_configs: dict[str, Any] | None = None
+    ):
         super().__init__(scheduled_ir_module, source, target, device_mod, host_mod, pass_configs)
 
     def get_init_func(self):
@@ -581,7 +601,8 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
             if dynamic_smem_buf is not None:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
                 call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP.format(
-                    function_name, dynamic_smem_buf)
+                    function_name, dynamic_smem_buf
+                )
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
         return init_funcs
@@ -609,27 +630,31 @@ class TLCPUSourceWrapper:
     # Use common init with error buffer and get_last_error for CPU backend as well
     INIT_FUNC = PREDEF_INIT_FUNC.format("")
 
-    CALL_PREFIX = textwrap.dedent("""
+    CALL_PREFIX = textwrap.dedent(
+        """
         #ifdef __cplusplus
         extern "C"
         #endif
         int32_t call({}) {{
           return {};
         }}
-    """)
+    """
+    )
 
     backend = "tl"
     device_mod: IRModule | None = None
     host_mod: IRModule | None = None
     pass_configs: dict[str, Any] | None = None
 
-    def __init__(self,
-                 scheduled_ir_module: IRModule,
-                 source: str,
-                 target: Target,
-                 device_mod: IRModule | None = None,
-                 host_mod: IRModule | None = None,
-                 pass_configs: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        scheduled_ir_module: IRModule,
+        source: str,
+        target: Target,
+        device_mod: IRModule | None = None,
+        host_mod: IRModule | None = None,
+        pass_configs: dict[str, Any] | None = None
+    ):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
@@ -658,15 +683,18 @@ class TLCPUSourceWrapper:
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append({
-                    "name": buffer.name,
-                    "type": self._lookup_type(buffer.dtype) + "*",
-                })
+                function_args.append(
+                    {
+                        "name": buffer.name,
+                        "type": self._lookup_type(buffer.dtype) + "*",
+                    }
+                )
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(
-                    f"Parameter {param} is not in the buffer map of the primary function.")
+                    f"Parameter {param} is not in the buffer map of the primary function."
+                )
         # Add dynamic symbols as integer arguments
         for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
             function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
@@ -768,13 +796,15 @@ class TLCPUSourceWrapper:
 
 class TLMetalSourceWrapper:
 
-    def __init__(self,
-                 scheduled_ir_module: IRModule,
-                 source: str,
-                 target: Target,
-                 device_mod: IRModule | None = None,
-                 host_mod: IRModule | None = None,
-                 pass_configs: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        scheduled_ir_module: IRModule,
+        source: str,
+        target: Target,
+        device_mod: IRModule | None = None,
+        host_mod: IRModule | None = None,
+        pass_configs: dict[str, Any] | None = None
+    ):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
@@ -836,7 +866,8 @@ class TLWrapper(BaseWrapper):
             target=self.target,
             device_mod=self.device_mod,
             host_mod=self.host_mod,
-            pass_configs=self.pass_configs)
+            pass_configs=self.pass_configs
+        )
         return wrapper.lib_code
 
 
@@ -858,5 +889,6 @@ class TLPyWrapper(TLWrapper):
             target=self.target,
             device_mod=self.device_mod,
             host_mod=self.host_mod,
-            pass_configs=self.pass_configs)
+            pass_configs=self.pass_configs
+        )
         return wrapper.host_func, wrapper.function_names

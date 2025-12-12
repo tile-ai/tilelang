@@ -16,8 +16,8 @@ class IndexFirstAxis(torch.autograd.Function):
         # TD [2022-03-04] For some reason torch.gather is a bit faster than indexing.
         # return input[indices]
         return torch.gather(
-            rearrange(input, "b ... -> b (...)"), 0,
-            repeat(indices, "z -> z d", d=second_dim)).reshape(-1, *other_shape)
+            rearrange(input, "b ... -> b (...)"), 0, repeat(indices, "z -> z d", d=second_dim)
+        ).reshape(-1, *other_shape)
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -47,7 +47,8 @@ class IndexPutFirstAxis(torch.autograd.Function):
         assert indices.ndim == 1
         assert values.ndim >= 2
         output = torch.zeros(
-            first_axis_dim, *values.shape[1:], device=values.device, dtype=values.dtype)
+            first_axis_dim, *values.shape[1:], device=values.device, dtype=values.dtype
+        )
         # TD [2022-03-04] For some reason torch.scatter is a bit faster than indexing.
         output[indices] = values
         # output.scatter_(0, repeat(indices, 'z -> z d', d=values.shape[1]), values)
@@ -178,8 +179,8 @@ def unpad_input_for_concatenated_sequences(hidden_states, attention_mask_in_leng
     length = attention_mask_in_length.sum(dim=-1)
     seqlen = attention_mask_in_length.size(-1)
     attention_mask_2d = torch.arange(
-        seqlen, device=length.device, dtype=length.dtype).expand(len(length),
-                                                                 seqlen) < length.unsqueeze(1)
+        seqlen, device=length.device, dtype=length.dtype
+    ).expand(len(length), seqlen) < length.unsqueeze(1)
     real_indices_idx = torch.nonzero(attention_mask_in_length.flatten(), as_tuple=False).flatten()
     seqlens_in_batch = attention_mask_in_length.flatten()[real_indices_idx]
     indices = torch.nonzero(attention_mask_2d.flatten(), as_tuple=False).flatten()

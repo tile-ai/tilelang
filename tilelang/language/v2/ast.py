@@ -326,14 +326,16 @@ class DSLMutator(ast.NodeTransformer):
         if isinstance(target, ast.Name):
             if annot is None:
                 return quote(
-                    f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target)
+                    f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target
+                )
             else:
                 return quote(
                     f'name = __tb.bind("{target.id}", value, annot)',
                     name=target,
                     value=rval,
                     annot=annot,
-                    span=target)
+                    span=target
+                )
         elif isinstance(target, ast.Attribute):
             s = ast.unparse(target)
             raise NotImplementedError(f'Attribute assignment not supported yet, `{s}`')
@@ -378,7 +380,8 @@ class DSLMutator(ast.NodeTransformer):
 
             unpack_stmt = ast.Assign(
                 targets=[_visit_target(target)],
-                value=quote_expr('__tb.unwrap_value(rval)', rval=rval, span=rval))
+                value=quote_expr('__tb.unwrap_value(rval)', rval=rval, span=rval)
+            )
             ast_set_span(unpack_stmt, ast_get_span(target))
             stmts = [unpack_stmt]
             bind_lvals = []
@@ -387,7 +390,8 @@ class DSLMutator(ast.NodeTransformer):
             def flush_binds():
                 if bind_lvals:
                     stmts.append(
-                        quote1(f'{", ".join(bind_lvals)}, = {", ".join(bind_rvals)},', span=target))
+                        quote1(f'{", ".join(bind_lvals)}, = {", ".join(bind_rvals)},', span=target)
+                    )
                     bind_lvals.clear()
                     bind_rvals.clear()
 
@@ -422,7 +426,9 @@ class DSLMutator(ast.NodeTransformer):
                             f'__tb.assign_slice(lval, slice, {tmp})',
                             lval=target.value,
                             slice=target.slice,
-                            span=target))
+                            span=target
+                        )
+                    )
                 else:
                     s = ast.unparse(target)
                     raise NotImplementedError(f'Unsupported target: {s}')
@@ -454,7 +460,8 @@ class DSLMutator(ast.NodeTransformer):
                 f"name = __tb.aug_assign('{op}', {target.id}, value)",
                 name=target,
                 value=rval,
-                span=node)
+                span=node
+            )
         elif isinstance(target, ast.Subscript):
             return quote(
                 f"__tb.aug_assign_slice('{op}', lval, slice, value)",
@@ -477,7 +484,8 @@ class DSLMutator(ast.NodeTransformer):
             "for _ in __tb.ctx_while(lambda: cond):\n  pass",
             cond=node.test,
             passes=[node.body],
-            span=node)
+            span=node
+        )
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         node = self.generic_visit(node)
@@ -537,7 +545,8 @@ class DSLMutator(ast.NodeTransformer):
         last = split[-1]
         for i in reversed(range(len(split) - 1)):
             last = quote_expr(
-                "__tb.boolop('And', left, lambda: right)", left=split[i], right=last, span=node)
+                "__tb.boolop('And', left, lambda: right)", left=split[i], right=last, span=node
+            )
         return last
 
     def visit_IfExp(self, node: ast.IfExp) -> ast.Expr:
@@ -547,7 +556,8 @@ class DSLMutator(ast.NodeTransformer):
             cond=node.test,
             then=node.body,
             otherwise=node.orelse,
-            span=node)
+            span=node
+        )
 
     def visit_Return(self, node: ast.Return):
         node = self.generic_visit(node)

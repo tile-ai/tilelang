@@ -126,7 +126,8 @@ def torch_chunk_gated_delta_rule_bwd_dhu(
     block_S = 64
     BS = S // block_S
     dh, dh0, dv2 = torch.empty((B, BS, H, DK, DV), dtype=output_dtype), torch.empty(
-        (B, H, DK, DV), dtype=state_dtype), torch.empty((B, S, H, DV), dtype=output_dtype)
+        (B, H, DK, DV), dtype=state_dtype
+    ), torch.empty((B, S, H, DV), dtype=output_dtype)
     dh_tmp = torch.empty((B, H, DK, DV), dtype=accum_dtype)
     dv_tmp = torch.empty((B, S, H, DV), dtype=accum_dtype)
     Q_tmp = torch.empty((B, S, H, DK), dtype=accum_dtype)
@@ -138,17 +139,19 @@ def torch_chunk_gated_delta_rule_bwd_dhu(
 
     for i_s in range(BS - 1, -1, -1):
         dh[:, i_s, :, :, :] = dh_tmp
-        dv_tmp = torch.matmul(K[:, i_s * block_S:(i_s + 1) * block_S, :, :].permute(0, 2, 1, 3),
-                              dh_tmp.to(K.dtype)).permute(0, 2, 1, 3)
+        dv_tmp = torch.matmul(
+            K[:, i_s * block_S:(i_s + 1) * block_S, :, :].permute(0, 2, 1, 3), dh_tmp.to(K.dtype)
+        ).permute(0, 2, 1, 3)
         if use_g:
             for i_bh in range(B * H):
                 i_b, i_h = i_bh // H, i_bh % H
                 for i_s2 in range(block_S):
                     if G[i_b, i_s * block_S + block_S - 1, i_h] - G[i_b, i_s * block_S + i_s2,
                                                                     i_h] <= 0:
-                        dv_tmp[i_b, i_s2,
-                               i_h, :] *= torch.exp(G[i_b, i_s * block_S + block_S - 1, i_h] -
-                                                    G[i_b, i_s * block_S + i_s2, i_h])
+                        dv_tmp[i_b, i_s2, i_h, :] *= torch.exp(
+                            G[i_b, i_s * block_S + block_S - 1, i_h] -
+                            G[i_b, i_s * block_S + i_s2, i_h]
+                        )
                     else:
                         dv_tmp[i_b, i_s2, i_h, :] = 0
         dv_tmp += dv[:, i_s * block_S:(i_s + 1) * block_S, :, :]
@@ -223,19 +226,19 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
 
     @T.prim_func
     def kernel(
-            # Input
-            Q: T.Tensor(Q_shape, dtype=input_dtype),
-            K: T.Tensor(K_shape, dtype=input_dtype),
-            W: T.Tensor(W_shape, dtype=input_dtype),
-            G: T.Tensor(G_shape, dtype=gate_dtype),
-            h0: T.Tensor(h0_shape, dtype=input_dtype),
-            dht: T.Tensor(dht_shape, dtype=input_dtype),
-            dO: T.Tensor(dO_shape, dtype=input_dtype),
-            dv: T.Tensor(dv_shape, dtype=input_dtype),
-            # Output
-            dh: T.Tensor(dh_shape, dtype=output_dtype),
-            dh0: T.Tensor(dh0_shape, dtype=state_dtype),
-            dv2: T.Tensor(dv2_shape, dtype=output_dtype),
+        # Input
+        Q: T.Tensor(Q_shape, dtype=input_dtype),
+        K: T.Tensor(K_shape, dtype=input_dtype),
+        W: T.Tensor(W_shape, dtype=input_dtype),
+        G: T.Tensor(G_shape, dtype=gate_dtype),
+        h0: T.Tensor(h0_shape, dtype=input_dtype),
+        dht: T.Tensor(dht_shape, dtype=input_dtype),
+        dO: T.Tensor(dO_shape, dtype=input_dtype),
+        dv: T.Tensor(dv_shape, dtype=input_dtype),
+        # Output
+        dh: T.Tensor(dh_shape, dtype=output_dtype),
+        dh0: T.Tensor(dh0_shape, dtype=state_dtype),
+        dv2: T.Tensor(dv2_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(DV, block_DV), B * H, threads=threads) as (bv, bbh):
             bb, bh = bbh // H, bbh % H
@@ -269,17 +272,19 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
 
             T.use_swizzle(10)
 
-            T.annotate_layout({
-                b_dh_shared: tilelang.layout.make_swizzled_layout(b_dh_shared),
-                b_dh_shared_fp32: tilelang.layout.make_swizzled_layout(b_dh_shared_fp32),
-                dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
-                dO_shared_t: tilelang.layout.make_swizzled_layout(dO_shared_t),
-                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-                Q_shared_fp32: tilelang.layout.make_swizzled_layout(Q_shared_fp32),
-                W_shared: tilelang.layout.make_swizzled_layout(W_shared),
-            })
+            T.annotate_layout(
+                {
+                    b_dh_shared: tilelang.layout.make_swizzled_layout(b_dh_shared),
+                    b_dh_shared_fp32: tilelang.layout.make_swizzled_layout(b_dh_shared_fp32),
+                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
+                    dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
+                    dO_shared_t: tilelang.layout.make_swizzled_layout(dO_shared_t),
+                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+                    Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
+                    Q_shared_fp32: tilelang.layout.make_swizzled_layout(Q_shared_fp32),
+                    W_shared: tilelang.layout.make_swizzled_layout(W_shared),
+                }
+            )
 
             if use_final_state_gradient:
                 T.copy(dht[bb, bh, 0:DK, bv * block_DV:(bv + 1) * block_DV], b_dh_shared)
@@ -303,7 +308,8 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
                     T.copy(
                         G[bb, i_s_inv * block_S:(i_s_inv + 1) * block_S, bh],
                         G_shared,
-                        disable_tma=True)
+                        disable_tma=True
+                    )
                     T.copy(G_shared, G_fragment)
                     G_last_local[0] = G_shared[block_S - 1]
                     G_last_local_exp[0] = T.exp(G_last_local[0])
@@ -320,7 +326,8 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
 
                 T.copy(
                     dv[bb, i_s_inv * block_S:(i_s_inv + 1) * block_S, bh,
-                       bv * block_DV:(bv + 1) * block_DV], dv_shared)
+                       bv * block_DV:(bv + 1) * block_DV], dv_shared
+                )
                 T.copy(dv_shared, dv_fragment_2)
                 for i_s2, i_v in T.Parallel(block_S, block_DV):
                     dv_fragment[i_s2, i_v] = dv_fragment[i_s2, i_v] + dv_fragment_2[i_s2, i_v]
@@ -329,7 +336,8 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
                 T.copy(dv_fragment, dv_shared)
                 T.copy(
                     dv_shared, dv2[bb, i_s_inv * block_S:(i_s_inv + 1) * block_S, bh,
-                                   bv * block_DV:(bv + 1) * block_DV])
+                                   bv * block_DV:(bv + 1) * block_DV]
+                )
 
                 # Update dh
                 T.copy(Q[bb, i_s_inv * block_S:(i_s_inv + 1) * block_S, bh, 0:DK], Q_shared)
@@ -355,7 +363,8 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
 
                 T.copy(
                     dO[bb, i_s_inv * block_S:(i_s_inv + 1) * block_S, bh,
-                       bv * block_DV:(bv + 1) * block_DV], dO_shared)
+                       bv * block_DV:(bv + 1) * block_DV], dO_shared
+                )
                 T.copy(dO_shared, dO_fragment)
                 for i_s2, i_v in T.Parallel(block_S, block_DV):
                     dO_fragment_t[i_v, i_s2] = dO_fragment[i_s2, i_v]
@@ -444,44 +453,45 @@ def run_test(
     num_stages=0,
     use_torch=False,
 ):
-    Q, K, W, G, h0, dht, dO, dv = prepare_input(B, S, H, DK, DV, chunk_size,
-                                                getattr(torch, input_dtype),
-                                                getattr(torch, output_dtype),
-                                                getattr(torch, accum_dtype),
-                                                getattr(torch, gate_dtype),
-                                                getattr(torch, state_dtype))
-    dh_ref, dh0_ref, dv2_ref = prepare_output(B, S, H, DK, DV, chunk_size,
-                                              getattr(torch, output_dtype),
-                                              getattr(torch, gate_dtype),
-                                              getattr(torch, state_dtype))
-    dh_tilelang, dh0_tilelang, dv2_tilelang = prepare_output(B, S, H, DK, DV, chunk_size,
-                                                             getattr(torch, output_dtype),
-                                                             getattr(torch, gate_dtype),
-                                                             getattr(torch, state_dtype))
+    Q, K, W, G, h0, dht, dO, dv = prepare_input(
+        B, S, H, DK, DV, chunk_size, getattr(torch, input_dtype), getattr(torch, output_dtype),
+        getattr(torch, accum_dtype), getattr(torch, gate_dtype), getattr(torch, state_dtype)
+    )
+    dh_ref, dh0_ref, dv2_ref = prepare_output(
+        B, S, H, DK, DV, chunk_size, getattr(torch, output_dtype), getattr(torch, gate_dtype),
+        getattr(torch, state_dtype)
+    )
+    dh_tilelang, dh0_tilelang, dv2_tilelang = prepare_output(
+        B, S, H, DK, DV, chunk_size, getattr(torch, output_dtype), getattr(torch, gate_dtype),
+        getattr(torch, state_dtype)
+    )
 
     # fla ref
     print("fla running...", flush=True)
     if use_g:
-        dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu(Q, K, W, G, h0, dht, dO, dv,
-                                                                  scale)
+        dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu(
+            Q, K, W, G, h0, dht, dO, dv, scale
+        )
     else:
         G = G.fill_(0)
-        dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu(Q, K, W, G, h0, dht, dO, dv,
-                                                                  scale)
+        dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu(
+            Q, K, W, G, h0, dht, dO, dv, scale
+        )
 
     # tilelang
     print("tilelang running...", flush=True)
-    kernel = tilelang_chunk_gated_delta_rule_bwd_dhu(B, S, H, DK, DV, input_dtype, output_dtype,
-                                                     accum_dtype, gate_dtype, state_dtype,
-                                                     chunk_size, scale, use_g, use_initial_state,
-                                                     use_final_state_gradient, block_DV, threads,
-                                                     num_stages)
+    kernel = tilelang_chunk_gated_delta_rule_bwd_dhu(
+        B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype, gate_dtype, state_dtype,
+        chunk_size, scale, use_g, use_initial_state, use_final_state_gradient, block_DV, threads,
+        num_stages
+    )
     # kernel = tilelang.compile(program)
     print(kernel.get_kernel_source())
     dh_tilelang, dh0_tilelang, dv2_tilelang = kernel(Q, K, W, G, h0, dht, dO, dv)
 
     fla_time = do_bench(
-        chunk_gated_delta_rule_bwd_dhu, Q, K, W, G, h0, dht, dO, dv, scale, chunk_size=chunk_size)
+        chunk_gated_delta_rule_bwd_dhu, Q, K, W, G, h0, dht, dO, dv, scale, chunk_size=chunk_size
+    )
     tilelang_time = do_bench(kernel, Q, K, W, G, h0, dht, dO, dv)
 
     print(f"fla time: {fla_time} ms")
@@ -499,7 +509,8 @@ def run_test(
                 Q, K, W, G, h0, dht, dO, dv, scale, use_g, use_initial_state,
                 use_final_state_gradient, getattr(torch, input_dtype), getattr(torch, output_dtype),
                 getattr(torch, accum_dtype), getattr(torch,
-                                                     gate_dtype), getattr(torch, state_dtype))
+                                                     gate_dtype), getattr(torch, state_dtype)
+            )
             dh_ref_torch = dh_ref_torch.cuda()
             dh0_ref_torch = dh0_ref_torch.cuda()
             dv2_ref_torch = dv2_ref_torch.cuda()
@@ -508,7 +519,8 @@ def run_test(
                 Q, K, W, None, h0, dht, dO, dv, scale, use_g, use_initial_state,
                 use_final_state_gradient, getattr(torch, input_dtype), getattr(torch, output_dtype),
                 getattr(torch, accum_dtype), getattr(torch,
-                                                     gate_dtype), getattr(torch, state_dtype))
+                                                     gate_dtype), getattr(torch, state_dtype)
+            )
             dh_ref_torch = dh_ref_torch.cuda()
             dh0_ref_torch = dh0_ref_torch.cuda()
             dv2_ref_torch = dv2_ref_torch.cuda()

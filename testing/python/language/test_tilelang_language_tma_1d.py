@@ -11,8 +11,10 @@ def ref_program(x, y):
 def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
 
     @T.prim_func
-    def elem_add(A: T.Tensor((M, N), in_dtype), B: T.Tensor((M, N), in_dtype), C: T.Tensor(
-        (M, N), out_dtype)):
+    def elem_add(
+        A: T.Tensor((M, N), in_dtype), B: T.Tensor((M, N), in_dtype),
+        C: T.Tensor((M, N), out_dtype)
+    ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), in_dtype)
             B_shared = T.alloc_shared((block_M, block_N), in_dtype)

@@ -34,17 +34,24 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
                 with T.ws(1):
                     T.mbarrier_wait_parity(
                         mbarrier=ko % num_stages + num_stages,
-                        parity=((ko // num_stages) % num_stages) ^ 1)
-                    T.copy(A[by * block_M:(by + 1) * block_M, ko * block_K:(ko + 1) * block_K],
-                           A_shared[ko % num_stages, :, :])
-                    T.copy(B[ko * block_K:(ko + 1) * block_K, bx * block_N:(bx + 1) * block_N],
-                           B_shared[ko % num_stages, :, :])
+                        parity=((ko // num_stages) % num_stages) ^ 1
+                    )
+                    T.copy(
+                        A[by * block_M:(by + 1) * block_M, ko * block_K:(ko + 1) * block_K],
+                        A_shared[ko % num_stages, :, :]
+                    )
+                    T.copy(
+                        B[ko * block_K:(ko + 1) * block_K, bx * block_N:(bx + 1) * block_N],
+                        B_shared[ko % num_stages, :, :]
+                    )
                     T.mbarrier_arrive(mbarrier=ko % num_stages)
                 with T.ws(0):
                     T.mbarrier_wait_parity(
-                        mbarrier=ko % num_stages, parity=(ko // num_stages) % num_stages)
-                    T.gemm(A_shared[ko % num_stages, :, :], B_shared[ko % num_stages, :, :],
-                           C_local)
+                        mbarrier=ko % num_stages, parity=(ko // num_stages) % num_stages
+                    )
+                    T.gemm(
+                        A_shared[ko % num_stages, :, :], B_shared[ko % num_stages, :, :], C_local
+                    )
                     T.mbarrier_arrive(mbarrier=ko % num_stages + num_stages)
 
             with T.ws(0):

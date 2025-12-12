@@ -419,7 +419,8 @@ class TensorAnnot(BufferAnnot):
             align=align,
             offset_factor=offset_factor,
             buffer_type=buffer_type,
-            axis_separators=axis_separators)
+            axis_separators=axis_separators
+        )
 
     def promote(self):
         shape = _try_convert_static_shape(self.shape)

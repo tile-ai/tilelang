@@ -39,8 +39,9 @@ with VllmRunner(
         # set enforce_eager = True to disable cuda graph
         enforce_eager=False,
 ) as bitnet_model:
-    bitbnet_outputs = bitnet_model.generate_greedy(["Hi, tell me about microsoft?"],
-                                                   max_tokens=1024)
+    bitbnet_outputs = bitnet_model.generate_greedy(
+        ["Hi, tell me about microsoft?"], max_tokens=1024
+    )
     print("bitnet inference:")
     print(bitbnet_outputs[0][0])
     print(bitbnet_outputs[0][1])

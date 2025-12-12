@@ -36,20 +36,22 @@ class DefaultPolicy:
         self.rasterization = NoRasterization()
 
     @classmethod
-    def from_prim_func(cls,
-                       func: tvm.tir.PrimFunc,
-                       arch: TileDevice,
-                       tags: dict | None = None,
-                       name: str = "PrimFuncNode"):
+    def from_prim_func(
+        cls,
+        func: tvm.tir.PrimFunc,
+        arch: TileDevice,
+        tags: dict | None = None,
+        name: str = "PrimFuncNode"
+    ):
         return cls(arch, tags)._init_with_prim_func(func, name)
 
     @classmethod
     def from_output_nodes(cls, nodes: list[OutputNode], arch: TileDevice, tags: dict | None = None):
         return cls(arch, tags)._init_with_output_nodes(nodes)
 
-    def _init_with_prim_func(self,
-                             func: tvm.tir.PrimFunc,
-                             name: str = "PrimFuncNode") -> DefaultPolicy:
+    def _init_with_prim_func(
+        self, func: tvm.tir.PrimFunc, name: str = "PrimFuncNode"
+    ) -> DefaultPolicy:
         if func is not None and isinstance(func, tvm.tir.PrimFunc):
             self.func = func
             self.prim_func_node = PrimFuncNode(self.func, tags=self.tags, name=name)
@@ -61,8 +63,11 @@ class DefaultPolicy:
 
     def _init_with_output_nodes(self, output_nodes: list[OutputNode]):
         self.ordered_nodes = list(
-            filter(lambda n: not n.is_placeholder() and not n.is_output(),
-                   find_topo_sort(output_nodes)))
+            filter(
+                lambda n: not n.is_placeholder() and not n.is_output(),
+                find_topo_sort(output_nodes)
+            )
+        )
         for node in self.ordered_nodes:
             node.update_tags(self.tags)
 
@@ -108,7 +113,8 @@ class DefaultPolicy:
                 filter(
                     lambda s: s < steps[i][-1] and s > steps[i][0] and s not in steps[i],
                     [2, 4, 8, 16, 32],
-                ))
+                )
+            )
             steps[i].extend(added)
             steps[i] = sorted(steps[i])
         visited_tiles = {}
@@ -305,7 +311,8 @@ class DefaultPolicy:
             shape = node.propagate_inputs(tile, rstep=rstep)
             for i, input_buffer in enumerate(node.input_buffers):
                 read_transaction_elements = self.arch.transaction_size[1] // (
-                    (node.get_buffer_dtype(input_buffer).bits + 7) // 8)
+                    (node.get_buffer_dtype(input_buffer).bits + 7) // 8
+                )
                 score += sim(
                     int(coalesced_factor(shape[i], input_buffer.shape)),
                     read_transaction_elements,
@@ -434,15 +441,17 @@ class DefaultPolicy:
                 if edge.src_node.is_placeholder():
                     nbytes = (edge.src_node.get_dtype().bits + 7) // 8
                     read_transaction_elements = self.arch.transaction_size[1] // nbytes
-                    traffic += coalesced_tensor_shape(input_shapes[i], edge.src_node.get_shape(),
-                                                      read_transaction_elements) * nbytes
+                    traffic += coalesced_tensor_shape(
+                        input_shapes[i], edge.src_node.get_shape(), read_transaction_elements
+                    ) * nbytes
             for edge in node.outputs:
                 if edge.dst_node.is_output():
                     nbytes = (edge.src_node.get_dtype().bits + 7) // 8
                     write_transaction_elements = self.arch.transaction_size[0] // nbytes
-                    traffic += coalesced_tensor_shape(output_shapes[edge.src_id],
-                                                      node.get_shape(edge.src_id),
-                                                      write_transaction_elements) * nbytes
+                    traffic += coalesced_tensor_shape(
+                        output_shapes[edge.src_id], node.get_shape(edge.src_id),
+                        write_transaction_elements
+                    ) * nbytes
 
         return traffic, op_tile_map
 
@@ -552,7 +561,8 @@ class DefaultPolicy:
         tensor_strides_map = {}
         for node in self.ordered_nodes:
             output_strides_map[node], tensor_strides_map[node] = self.compute_node_stride_map(
-                node, td)
+                node, td
+            )
         td.output_strides_map, td.tensor_strides_map = output_strides_map, tensor_strides_map
 
     def compute_tile_dict(self, output_tile: list[int], rstep_map) -> TileDict:
@@ -582,9 +592,14 @@ class DefaultPolicy:
         output_shape = self.output_nodes[0].get_space_dim()
         td.grid_size = int(np.prod([(y + x - 1) // x for x, y in zip(output_tile, output_shape)]))
         # estimated reg usage
-        reg_usage = int(2 * max([
-            np.prod(td.get_tile(node)) * node.get_dtype().bits / 32 for node in self.ordered_nodes
-        ]))
+        reg_usage = int(
+            2 * max(
+                [
+                    np.prod(td.get_tile(node)) * node.get_dtype().bits / 32
+                    for node in self.ordered_nodes
+                ]
+            )
+        )
         if reg_usage > self.arch.reg_cap:
             td.valid = False
             return td
@@ -609,9 +624,9 @@ class DefaultPolicy:
         for node in self.ordered_nodes:
             if np.prod(td.get_tile(node)) == 0:
                 return False
-            node_grid_size = np.prod([
-                (y + x - 1) // x for x, y in zip(td.get_tile(node), node.get_space_dim())
-            ])
+            node_grid_size = np.prod(
+                [(y + x - 1) // x for x, y in zip(td.get_tile(node), node.get_space_dim())]
+            )
             if node_grid_size != td.grid_size:
                 return False
             if (hasattr(node, "reduce_op") and node.reduce_op is not None and
@@ -650,7 +665,8 @@ class DefaultPolicy:
                 filter(
                     lambda x: x % max_block_size == 0 and x <= 1024,
                     get_all_factors(max_possible_size),
-                ))
+                )
+            )
             possible_block_sizes = list(
                 filter(  # either be a factor of space or cover fully cover the space
                     lambda x: all([x % s == 0 or s % x == 0 for s in node_space_sizes]),

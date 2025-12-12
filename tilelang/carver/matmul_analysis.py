@@ -157,8 +157,9 @@ def find_last_producer_from_buffer(sch, main_block, buffer: tir.Buffer) -> Block
     return block
 
 
-def find_arg_idx_from_buffer_chain(sch: tir.Schedule, main_block: tir.schedule.BlockRV,
-                                   buffer: tir.Buffer) -> int:
+def find_arg_idx_from_buffer_chain(
+    sch: tir.Schedule, main_block: tir.schedule.BlockRV, buffer: tir.Buffer
+) -> int:
     """traverse to find the arg index from the buffer"""
     producers = sch.get_producers(main_block)
 
@@ -384,17 +385,22 @@ def get_index_map(block: tir.Block,
             if kind == "C":
                 return [IterKind.kIter_S, primary_iter, secondary_iter]
             else:
-                return ([IterKind.kIter_S, spatial_iter, reduction_iter] if check_last_trait(region)
-                        else [IterKind.kIter_S, reduction_iter, spatial_iter])
+                return (
+                    [IterKind.kIter_S, spatial_iter, reduction_iter] if check_last_trait(region)
+                    else [IterKind.kIter_S, reduction_iter, spatial_iter]
+                )
         else:
             raise ValueError(f"Unknown layout {layout}")
 
     A_index_map = make_iter_fusion_index_map(
-        A_traits, infer_layout(layout[0], block.reads[0].region, kind="A"))
+        A_traits, infer_layout(layout[0], block.reads[0].region, kind="A")
+    )
     B_index_map = make_iter_fusion_index_map(
-        B_traits, infer_layout(layout[1], block.reads[1].region, kind="B"))
+        B_traits, infer_layout(layout[1], block.reads[1].region, kind="B")
+    )
     C_index_map = make_iter_fusion_index_map(
-        C_traits, infer_layout(layout[2], block.writes[0].region, kind="C"))
+        C_traits, infer_layout(layout[2], block.writes[0].region, kind="C")
+    )
 
     matmul_index_map = make_iter_fusion_index_map(
         block_traits,
@@ -429,8 +435,9 @@ def get_dequantize_block(sch, blocks) -> BlockRV | None:
         has_uint_input = any("uint" in str(region.buffer.dtype) for region in block_stmt.reads)
         if not has_uint_input:
             return False
-        return not (len(block_stmt.writes) != 1 or
-                    "float" not in str(block_stmt.writes[0].buffer.dtype))
+        return not (
+            len(block_stmt.writes) != 1 or "float" not in str(block_stmt.writes[0].buffer.dtype)
+        )
 
     dequantize_blocks = [block for block in blocks if is_dequantize(block)]
     return dequantize_blocks[0] if len(dequantize_blocks) == 1 else None
@@ -453,7 +460,8 @@ def is_identity_or_transpose_block(block_stmt: tir.Block) -> bool:
             axes.extend(undefined_vars(r.min))
         # remove trivial axis
         trivial_vars = set(
-            iter_var.var for iter_var in block_stmt.iter_vars if _is_one(iter_var.dom.extent))
+            iter_var.var for iter_var in block_stmt.iter_vars if _is_one(iter_var.dom.extent)
+        )
         axes = [axis for axis in axes if axis not in trivial_vars]
         # remove duplicate axis
         axes = [var for i, var in enumerate(axes) if i == 0 or var != axes[i - 1]]
@@ -462,8 +470,8 @@ def is_identity_or_transpose_block(block_stmt: tir.Block) -> bool:
     lhs_access_vars = get_access_vars(block_stmt.reads[0].region)[-2:]
     rhs_access_vars = get_access_vars(block_stmt.writes[0].region)[-2:]
     is_identity = list(lhs_access_vars) == list(rhs_access_vars)
-    is_transpose = list(lhs_access_vars) != list(rhs_access_vars) and set(lhs_access_vars) == set(
-        rhs_access_vars)
+    is_transpose = list(lhs_access_vars) != list(rhs_access_vars) and set(lhs_access_vars
+                                                                         ) == set(rhs_access_vars)
     return is_identity, is_transpose
 
 
@@ -491,9 +499,9 @@ def inline_transpose_block(sch: tir.Schedule, blocks: list[tir.schedule.BlockRV]
     return result_blocks
 
 
-def normalize_to_matmul(sch: tir.Schedule,
-                        main_block: BlockRV,
-                        layout: list[str] | None = None) -> tir.Schedule | None:
+def normalize_to_matmul(
+    sch: tir.Schedule, main_block: BlockRV, layout: list[str] | None = None
+) -> tir.Schedule | None:
     if layout is None:
         layout = ["n", "t", "n"]
     block_stmt = sch.get(main_block)
@@ -545,8 +553,11 @@ def get_tensorized_func_and_tags(
         conditions.append(len(block_stmt.writes) == 1)
         conditions.append(
             len(
-                collect_block_iter_vars_used_in_access_region(block_stmt,
-                                                              block_stmt.writes[0].region)) > 0)
+                collect_block_iter_vars_used_in_access_region(
+                    block_stmt, block_stmt.writes[0].region
+                )
+            ) > 0
+        )
         return all(conditions)
 
     # step2. transform function to tensorcore matmul (e.g. conv2d with im2col)
@@ -729,7 +740,8 @@ def get_propagate_map(trans: bool = True, dtype="float16", matrix_name="A", inde
     if dtype in ["bfloat16", "float16"]:
         ldmatrix_index_map = (
             ldmatrix_trans_permutation_16x16_32x8_16x16
-            if trans else ldmatrix_permutation_16x16_32x8_16x16)
+            if trans else ldmatrix_permutation_16x16_32x8_16x16
+        )
     else:
         ldmatrix_index_map = ldmatrix_permutation_16x32_32x16_32x16
 
@@ -838,7 +850,8 @@ def layout_propagate_chain(
                 for i, j in zip(write.buffer.shape, read.buffer.shape):
                     scaling_factor *= i // j
                 final_indices = list(
-                    index_map.map_indices(tmp_index_map.map_indices(write_indices)))
+                    index_map.map_indices(tmp_index_map.map_indices(write_indices))
+                )
                 final_indices[-1] = final_indices[-1] // scaling_factor
                 index_map = IndexMap(
                     write_indices,

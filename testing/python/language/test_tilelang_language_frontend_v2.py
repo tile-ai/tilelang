@@ -261,8 +261,8 @@ def test_prim_func_generator():
 
     @T.prim_func(generator=True)
     def prim_func_gen(
-            A=T.Tensor((128,), T.float32),  # noqa: B008
-            B=T.Tensor((128,), T.float32),  # noqa: B008
+        A=T.Tensor((128,), T.float32),  # noqa: B008
+        B=T.Tensor((128,), T.float32),  # noqa: B008
     ):
         with T.Kernel(128) as (tx,):
             T.copy(A[tx], B[tx])

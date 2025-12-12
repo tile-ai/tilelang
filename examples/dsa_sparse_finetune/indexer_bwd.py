@@ -49,17 +49,17 @@ def tl_indexer_bwd_impl(
 
     @T.prim_func
     def tl_indexer_bwd_kernel(
-            IndexQ: T.Tensor(index_q_shape, dtype),
-            Weights: T.Tensor(weights_shape, dtype),
-            IndexK: T.Tensor(index_k_shape, dtype),
-            dIndexQ: T.Tensor(index_q_shape, dtype),
-            dWeights: T.Tensor(weights_shape, dtype),
-            dIndexK: T.Tensor(index_k_shape, dtype),
-            AttnScore: T.Tensor(shape_p, FP32),
-            IndexScore: T.Tensor(shape_p, FP32),
-            TopkIndices: T.Tensor(topk_indices_shape, INT32),
-            Offsets: T.Tensor(offsets_shape, INT32),
-            TokenIndices: T.Tensor(token_indices_shape, INT32),
+        IndexQ: T.Tensor(index_q_shape, dtype),
+        Weights: T.Tensor(weights_shape, dtype),
+        IndexK: T.Tensor(index_k_shape, dtype),
+        dIndexQ: T.Tensor(index_q_shape, dtype),
+        dWeights: T.Tensor(weights_shape, dtype),
+        dIndexK: T.Tensor(index_k_shape, dtype),
+        AttnScore: T.Tensor(shape_p, FP32),
+        IndexScore: T.Tensor(shape_p, FP32),
+        TopkIndices: T.Tensor(topk_indices_shape, INT32),
+        Offsets: T.Tensor(offsets_shape, INT32),
+        TokenIndices: T.Tensor(token_indices_shape, INT32),
     ):
         with T.Kernel(seq_len, threads=num_threads) as (bx):
             i_b, i_t = TokenIndices[bx, 0], TokenIndices[bx, 1]
@@ -91,8 +91,9 @@ def tl_indexer_bwd_impl(
                 index_k_shared = T.alloc_shared([block_I, dim], dtype=dtype)
                 for i, j in T.Parallel(block_I, dim):
                     pos = indices_shared[i]
-                    index_k_shared[i, j] = T.if_then_else((pos > -1) & (pos <= i_t),
-                                                          IndexK[bos + pos, j], 0)
+                    index_k_shared[i, j] = T.if_then_else(
+                        (pos > -1) & (pos <= i_t), IndexK[bos + pos, j], 0
+                    )
 
                 attn_score_shared = T.alloc_shared([block_I], dtype=accum_dtype)
                 index_score_shared = T.alloc_shared([block_I], dtype=accum_dtype)
@@ -184,14 +185,17 @@ def indexer_bwd_interface(
     dweights = torch.zeros_like(weights)
     dk = torch.zeros_like(k)
     kernel = tl_indexer_bwd_impl(heads, dim, topk)
-    kernel(q, weights, k, dq, dweights, dk, attn_score, index_score, topk_indices, offsets,
-           token_indices)
+    kernel(
+        q, weights, k, dq, dweights, dk, attn_score, index_score, topk_indices, offsets,
+        token_indices
+    )
     return dq, dweights, dk
 
 
-def ref_indexer_bwd(Q: torch.Tensor, Weights: torch.Tensor, K: torch.Tensor,
-                    TopkIndices: torch.Tensor, AttnScore: torch.Tensor,
-                    offsets: torch.Tensor) -> torch.Tensor:
+def ref_indexer_bwd(
+    Q: torch.Tensor, Weights: torch.Tensor, K: torch.Tensor, TopkIndices: torch.Tensor,
+    AttnScore: torch.Tensor, offsets: torch.Tensor
+) -> torch.Tensor:
     Q.requires_grad_(True)
     Weights.requires_grad_(True)
     K.requires_grad_(True)
@@ -217,7 +221,8 @@ def ref_indexer_bwd(Q: torch.Tensor, Weights: torch.Tensor, K: torch.Tensor,
             log_topk_prob.clip(-100, 0),
             attn_score.log().clip(-100, 0),
             log_target=True,
-            reduction="sum")
+            reduction="sum"
+        )
         all_loss.append(loss)
         all_log_topk_prob.append(log_topk_prob)
     loss = torch.stack(all_loss).sum()
@@ -250,9 +255,11 @@ def test_kernel(
     attn_score = torch.cat(all_attn_score, dim=0)
 
     topk_indices = repeat(
-        torch.arange(topk, dtype=torch.int32).cuda(), 'k -> s k', s=S).contiguous()
-    index_score, ref_dq, ref_dw, ref_dk = ref_indexer_bwd(q, w, k, topk_indices, attn_score,
-                                                          offsets)
+        torch.arange(topk, dtype=torch.int32).cuda(), 'k -> s k', s=S
+    ).contiguous()
+    index_score, ref_dq, ref_dw, ref_dk = ref_indexer_bwd(
+        q, w, k, topk_indices, attn_score, offsets
+    )
 
     dq, dw, dk = indexer_bwd_interface(q, w, k, attn_score, index_score, topk_indices, offsets)
 

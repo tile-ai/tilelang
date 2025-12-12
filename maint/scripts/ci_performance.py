@@ -26,23 +26,26 @@ def parse_output(output):
     return data
 
 
-output_v1 = subprocess.run(['./tl/bin/python', './maint/scripts/performance.py'],
-                           capture_output=True,
-                           text=True,
-                           env=env).stdout
+output_v1 = subprocess.run(
+    ['./tl/bin/python', './maint/scripts/performance.py'], capture_output=True, text=True, env=env
+).stdout
 data_v1 = parse_output(output_v1)
 
-output_v2 = subprocess.run(['./tll/bin/python', './maint/scripts/performance.py'],
-                           capture_output=True,
-                           text=True,
-                           env=env).stdout
+output_v2 = subprocess.run(
+    ['./tll/bin/python', './maint/scripts/performance.py'], capture_output=True, text=True, env=env
+).stdout
 data_v2 = parse_output(output_v2)
 
-table = [[
-    "original", data_v1['latency'], data_v1['best_tflops'], data_v1['ref_tflops'], data_v1['config']
-], [
-    "current", data_v2['latency'], data_v2['best_tflops'], data_v2['ref_tflops'], data_v2['config']
-]]
+table = [
+    [
+        "original", data_v1['latency'], data_v1['best_tflops'], data_v1['ref_tflops'],
+        data_v1['config']
+    ],
+    [
+        "current", data_v2['latency'], data_v2['best_tflops'], data_v2['ref_tflops'],
+        data_v2['config']
+    ]
+]
 
 headers = ["version", "Best Latency (s)", "Best TFlops", "Reference TFlops", "Best Config"]
 

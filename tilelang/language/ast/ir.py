@@ -669,10 +669,12 @@ class axis:  # pylint: disable=invalid-name
     R = reduce  # pylint: disable=invalid-name
 
 
-def serial(start: PrimExpr,
-           stop: PrimExpr = None,
-           *,
-           annotations: Dict[str, Any] = None) -> frame.ForFrame:
+def serial(
+    start: PrimExpr,
+    stop: PrimExpr = None,
+    *,
+    annotations: Dict[str, Any] = None
+) -> frame.ForFrame:
     """The serial For statement.
 
     Parameters
@@ -700,10 +702,12 @@ def serial(start: PrimExpr,
     return _ffi_api.Serial(start, stop, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def parallel(start: PrimExpr,
-             stop: PrimExpr = None,
-             *,
-             annotations: Dict[str, Any] = None) -> frame.ForFrame:
+def parallel(
+    start: PrimExpr,
+    stop: PrimExpr = None,
+    *,
+    annotations: Dict[str, Any] = None
+) -> frame.ForFrame:
     """The parallel For statement.
 
     Parameters
@@ -731,10 +735,12 @@ def parallel(start: PrimExpr,
     return _ffi_api.Parallel(start, stop, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def vectorized(start: PrimExpr,
-               stop: PrimExpr = None,
-               *,
-               annotations: Dict[str, Any] = None) -> frame.ForFrame:
+def vectorized(
+    start: PrimExpr,
+    stop: PrimExpr = None,
+    *,
+    annotations: Dict[str, Any] = None
+) -> frame.ForFrame:
     """The vectorized For statement.
 
     Parameters
@@ -762,10 +768,12 @@ def vectorized(start: PrimExpr,
     return _ffi_api.Vectorized(start, stop, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def unroll(start: PrimExpr,
-           stop: PrimExpr = None,
-           *,
-           annotations: Dict[str, Any] = None) -> frame.ForFrame:
+def unroll(
+    start: PrimExpr,
+    stop: PrimExpr = None,
+    *,
+    annotations: Dict[str, Any] = None
+) -> frame.ForFrame:
     """The unrolled For statement.
 
     Parameters
@@ -1346,8 +1354,7 @@ def func_gen(name: str):
             PrimExpr,
             Literal["inf", "-inf", "nan"],
             int,
-            float,
-        ] = None,
+            float,] = None,
         *,
         is_size_var: bool = False,
     ) -> PrimExpr:
@@ -1464,10 +1471,12 @@ def boolean(expr: Optional[PrimExpr] = None, is_size_var: bool = False) -> PrimE
     return _ffi_api.Boolean(expr, is_size_var)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def handle(dtype: Optional[str] = None,
-           storage_scope: str = "global",
-           *,
-           is_size_var: bool = False) -> Var:
+def handle(
+    dtype: Optional[str] = None,
+    storage_scope: str = "global",
+    *,
+    is_size_var: bool = False
+) -> Var:
     """Create a TIR var that represents a pointer.
 
     Parameters
@@ -1701,15 +1710,20 @@ def target(
     """
     if not isinstance(target_config, (str, dict)):
         raise ValueError(
-            f"T.target expected a config dict or string, but got {type(target_config)}")
+            f"T.target expected a config dict or string, but got {type(target_config)}"
+        )
     if host is not None and not isinstance(host, (str, dict, Target)):
-        raise ValueError("T.target expected the host to be "
-                         "a config dict, string, or T.target, "
-                         f"but got {type(host)}")
+        raise ValueError(
+            "T.target expected the host to be "
+            "a config dict, string, or T.target, "
+            f"but got {type(host)}"
+        )
     if isinstance(target_config, dict) and "host" in target_config and host is not None:
-        raise ValueError("T.target expects to either receive the host "
-                         "as part of the target's config dictionary, "
-                         "or as a separate argument, but not both.")
+        raise ValueError(
+            "T.target expects to either receive the host "
+            "as part of the target's config dictionary, "
+            "or as a separate argument, but not both."
+        )
     return Target(target_config, host)
 
 

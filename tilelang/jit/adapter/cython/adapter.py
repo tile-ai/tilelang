@@ -70,17 +70,19 @@ class CythonKernelAdapter(BaseKernelAdapter):
     # Pass configs for the compiler
     pass_configs: dict[str, Any] | None = None
 
-    def __init__(self,
-                 params: list[KernelParam],
-                 result_idx: list[int],
-                 target: str | Target,
-                 func_or_mod: tir.PrimFunc | tvm.IRModule,
-                 host_mod: tvm.IRModule | None = None,
-                 device_mod: tvm.IRModule | None = None,
-                 device_kernel_source: str | None = None,
-                 verbose: bool = False,
-                 pass_configs: dict[str, Any] | None = None,
-                 compile_flags: list[str] | None = None):
+    def __init__(
+        self,
+        params: list[KernelParam],
+        result_idx: list[int],
+        target: str | Target,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_mod: tvm.IRModule | None = None,
+        device_mod: tvm.IRModule | None = None,
+        device_kernel_source: str | None = None,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None
+    ):
         """Initialize the adapter with the given TIR function or module.
 
         Args:
@@ -145,17 +147,19 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self._post_init()
 
     @classmethod
-    def from_database(cls,
-                      params: list[TensorType],
-                      result_idx: list[int],
-                      target: str,
-                      func_or_mod: tir.PrimFunc | tvm.IRModule,
-                      host_kernel_source: str,
-                      device_kernel_source: str,
-                      kernel_lib_path: str,
-                      verbose: bool = False,
-                      pass_configs: dict[str, Any] | None = None,
-                      compile_flags: list[str] | None = None):
+    def from_database(
+        cls,
+        params: list[TensorType],
+        result_idx: list[int],
+        target: str,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_kernel_source: str,
+        device_kernel_source: str,
+        kernel_lib_path: str,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None
+    ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -193,8 +197,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
             error_msg = adapter.lib.get_last_error().decode('utf-8')
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params,
-                                                     adapter.lib)
+        adapter.cython_wrapper = CythonKernelWrapper(
+            adapter.result_idx, adapter.params, adapter.lib
+        )
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
@@ -349,9 +354,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 skip_tensor_validation: Whether to skip tensor attributes validation which
                 includes shape, dtype, device, etc.
             """
-            return self.cython_wrapper.forward([*args],
-                                               stream=stream,
-                                               skip_tensor_validation=skip_tensor_validation)
+            return self.cython_wrapper.forward(
+                [*args], stream=stream, skip_tensor_validation=skip_tensor_validation
+            )
 
         return lambda_forward
 

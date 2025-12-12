@@ -14,16 +14,11 @@ tilelang.testing.set_random_seed(0)
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
-def native_sparse_attention(batch,
-                            heads,
-                            seq_len,
-                            dim,
-                            is_causal,
-                            scale=None,
-                            block_size=64,
-                            groups=1,
-                            selected_blocks=16):
+    }
+)
+def native_sparse_attention(
+    batch, heads, seq_len, dim, is_causal, scale=None, block_size=64, groups=1, selected_blocks=16
+):
     if scale is None:
         scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     else:
@@ -52,11 +47,11 @@ def native_sparse_attention(batch,
 
     @T.prim_func
     def native_sparse_attention(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(kv_shape, dtype),
-            V: T.Tensor(kv_shape, dtype),
-            BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
-            Output: T.Tensor(q_shape, dtype),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
+        BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
+        Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([G, BK], dtype)
@@ -91,8 +86,9 @@ def native_sparse_attention(batch,
 
                     if is_causal:
                         for i, j in T.Parallel(G, BS):
-                            acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0,
-                                                         -T.infinity(acc_s.dtype))
+                            acc_s[
+                                i,
+                                j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
 
@@ -101,7 +97,8 @@ def native_sparse_attention(batch,
                         K_shared,
                         acc_s,
                         transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow)
+                        policy=T.GemmWarpPolicy.FullRow
+                    )
 
                     # Softmax
                     T.copy(scores_max, scores_max_prev)

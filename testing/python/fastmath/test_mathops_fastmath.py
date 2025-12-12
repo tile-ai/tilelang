@@ -51,13 +51,9 @@ def check_non_fastmath_usage(source, mathop_name):
     check_fastmath_usage(source, mathop_name, expect_fastmath=False)
 
 
-def run_single_arg_mathop_test(mathop_name,
-                               mathop_func,
-                               M=128,
-                               N=128,
-                               block_M=32,
-                               block_N=32,
-                               dtype="float32"):
+def run_single_arg_mathop_test(
+    mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype="float32"
+):
     """
     Test single-argument mathops.
     T.exp should generate expf (non-fastmath), T.__exp should generate __expf (fastmath)
@@ -65,13 +61,13 @@ def run_single_arg_mathop_test(mathop_name,
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             for i, j in T.Parallel(block_M, block_N):
-                B[by * block_M + i, bx * block_N + j] = mathop_func(A[by * block_M + i,
-                                                                      bx * block_N + j])
+                B[by * block_M + i,
+                  bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j])
 
     # Test with FAST_MATH disabled
     kernel_no_fastmath = tilelang.compile(
@@ -80,7 +76,8 @@ def run_single_arg_mathop_test(mathop_name,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        })
+        }
+    )
 
     source_no_fastmath = kernel_no_fastmath.get_kernel_source()
 
@@ -93,28 +90,24 @@ def run_single_arg_mathop_test(mathop_name,
     print(f"✓ {mathop_name} compilation and execution test passed")
 
 
-def run_two_arg_mathop_test(mathop_name,
-                            mathop_func,
-                            M=128,
-                            N=128,
-                            block_M=32,
-                            block_N=32,
-                            dtype="float32"):
+def run_two_arg_mathop_test(
+    mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype="float32"
+):
     """
     Test two-argument mathops to ensure they generate non-fastmath CUDA code.
     """
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             for i, j in T.Parallel(block_M, block_N):
-                C[by * block_M + i,
-                  bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j],
-                                                  B[by * block_M + i, bx * block_N + j])
+                C[by * block_M + i, bx * block_N + j] = mathop_func(
+                    A[by * block_M + i, bx * block_N + j], B[by * block_M + i, bx * block_N + j]
+                )
 
     # Test with FAST_MATH disabled
     kernel_no_fastmath = tilelang.compile(
@@ -123,7 +116,8 @@ def run_two_arg_mathop_test(mathop_name,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        })
+        }
+    )
 
     # Test with FAST_MATH enabled
     kernel_fastmath = tilelang.compile(
@@ -132,7 +126,8 @@ def run_two_arg_mathop_test(mathop_name,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        })
+        }
+    )
 
     source_no_fastmath = kernel_no_fastmath.get_kernel_source()
     source_fastmath = kernel_fastmath.get_kernel_source()
@@ -171,8 +166,8 @@ def run_abs_test():
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), "float32"),
-            B: T.Tensor((M, N), "float32"),
+        A: T.Tensor((M, N), "float32"),
+        B: T.Tensor((M, N), "float32"),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             for i, j in T.Parallel(block_M, block_N):
@@ -184,7 +179,8 @@ def run_abs_test():
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        })
+        }
+    )
 
     source = kernel.get_kernel_source()
     print("\n=== Testing abs (maps to fabs) ===")
@@ -199,26 +195,22 @@ def run_abs_test():
     print("✓ abs numerical test passed")
 
 
-def run_fastmath_mathop_test(mathop_name,
-                             mathop_func,
-                             M=128,
-                             N=128,
-                             block_M=32,
-                             block_N=32,
-                             dtype="float32"):
+def run_fastmath_mathop_test(
+    mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype="float32"
+):
     """
     Test fastmath mathops to ensure they generate fastmath CUDA code (with __ prefix).
     """
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             for i, j in T.Parallel(block_M, block_N):
-                B[by * block_M + i, bx * block_N + j] = mathop_func(A[by * block_M + i,
-                                                                      bx * block_N + j])
+                B[by * block_M + i,
+                  bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j])
 
     # Test with FAST_MATH enabled
     kernel_fastmath = tilelang.compile(
@@ -227,7 +219,8 @@ def run_fastmath_mathop_test(mathop_name,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        })
+        }
+    )
 
     source_fastmath = kernel_fastmath.get_kernel_source()
 

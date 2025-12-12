@@ -70,7 +70,8 @@ def get_configs(M, N, K):
             thread_num,
             policy,
             enable_rasterization,
-        ))
+        )
+    )
 
     configs = [
         {
@@ -165,10 +166,10 @@ def matmul_sp(M, N, K, in_dtype, accum_dtype):
 
         @T.prim_func
         def main(
-                A_sparse: T.Tensor((M, K // 2), in_dtype),
-                E: T.Tensor((M, K // e_factor), e_dtype),
-                B: T.Tensor((K, N), in_dtype),
-                C: T.Tensor((M, N), accum_dtype),
+            A_sparse: T.Tensor((M, K // 2), in_dtype),
+            E: T.Tensor((M, K // e_factor), e_dtype),
+            B: T.Tensor((K, N), in_dtype),
+            C: T.Tensor((M, N), accum_dtype),
         ):
             """
             The compiled TVM function for block-level matrix multiplication.
@@ -182,8 +183,8 @@ def matmul_sp(M, N, K, in_dtype, accum_dtype):
             """
             # Bind x-dimension to block index in N,
             #     y-dimension to block index in M.
-            with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
+            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M),
+                          threads=thread_num) as (bx, by):
 
                 # Allocate shared memory for A sub-block of shape (block_M, block_K)
                 A_shared = T.alloc_shared((block_M, block_K // 2), in_dtype)
@@ -201,12 +202,16 @@ def matmul_sp(M, N, K, in_dtype, accum_dtype):
                 T.disable_warp_group_reg_alloc()
 
                 T.use_swizzle(panel_size=10, enable=enable_rasterization)
-                T.annotate_layout({
-                    E:
-                        make_cutlass_metadata_layout(E, mma_dtype=in_dtype, block_k=block_K),
-                    E_shared:
-                        make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, block_k=block_K),
-                })
+                T.annotate_layout(
+                    {
+                        E:
+                            make_cutlass_metadata_layout(E, mma_dtype=in_dtype, block_k=block_K),
+                        E_shared:
+                            make_cutlass_metadata_layout(
+                                E_shared, mma_dtype=in_dtype, block_k=block_K
+                            ),
+                    }
+                )
                 # Loop over sub-blocks in K dimension, pipelined by num_stages
                 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                     # Load a sub-block of A from global memory into A_shared
@@ -246,7 +251,8 @@ if __name__ == "__main__":
         type=str,
         default="float",
         choices=["float", "float16"],
-        help="Accumulation datatype")
+        help="Accumulation datatype"
+    )
     parser.add_argument(
         "--bench_torch_sparse",
         type=str,

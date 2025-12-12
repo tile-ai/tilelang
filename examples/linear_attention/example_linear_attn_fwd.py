@@ -14,7 +14,8 @@ from typing import Optional, Tuple
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    }
+)
 def tl_fused_chunk_fwd_kernel(
     B,
     S,
@@ -38,11 +39,12 @@ def tl_fused_chunk_fwd_kernel(
 
     @T.prim_func
     def fused_chunk_linear_attn_fwd(
-            Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-            K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-            V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-            O: T.Tensor([B, S, H, DV], accum_dtype),  # type: ignore
-            final_state: T.Tensor([B, H, DK, DV], accum_dtype)):  # type: ignore
+        Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+        K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+        V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+        O: T.Tensor([B, S, H, DV], accum_dtype),  # type: ignore
+        final_state: T.Tensor([B, H, DK, DV], accum_dtype)
+    ):  # type: ignore
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
             i_h = i_bh % H
@@ -79,7 +81,8 @@ def tl_fused_chunk_fwd_kernel(
                 T.copy(o, o_shared)
                 T.atomic_add(
                     O[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV],
-                    o_shared)
+                    o_shared
+                )
 
             # Output final state
             T.copy(h, final_state[i_b, i_h, i_k * BK:(i_k + 1) * BK, i_v * BV:(i_v + 1) * BV])
@@ -112,9 +115,12 @@ def ref_program(q: torch.Tensor,
     h = kv[:, :, -1, :, :]
     kv = torch.cat([torch.zeros_like(kv[:, :, :1]), kv[:, :, :-1]], dim=2)
     inter = q @ kv
-    intra = ((q @ k.transpose(-1, -2)).masked_fill_(
-        torch.triu(torch.ones(chunk_size, chunk_size, dtype=bool, device=q.device), diagonal=1),
-        0)) @ v
+    intra = (
+        (q @ k.transpose(-1, -2)).masked_fill_(
+            torch.triu(torch.ones(chunk_size, chunk_size, dtype=bool, device=q.device), diagonal=1),
+            0
+        )
+    ) @ v
     o = inter + intra
     return rearrange(o, 'b h n c d -> b (n c) h d'), h
 
@@ -137,7 +143,8 @@ def main(B=1, S=512, H=16, D=128):
 
     t1 = do_bench(
         lambda: fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False),
-        backend='cupti')
+        backend='cupti'
+    )
     t2 = do_bench(lambda: tl_fused_chunk_fwd(q, k, v), backend='cupti')
     print(f'Triton latency: {t1:.3f} ms')
     print(f'TileLang latency: {t2:.3f} ms')

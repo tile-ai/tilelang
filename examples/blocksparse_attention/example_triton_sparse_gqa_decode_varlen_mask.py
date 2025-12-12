@@ -79,14 +79,16 @@ def _split_kernel(
     q_ptr += batch_idx * stride_q_b + head_idx_q * stride_q_h
     k_cache_ptr += batch_idx * stride_k_b + head_idx_kv * stride_k_h + offs_n[
         None, :] * stride_k_s + offs_d[:, None] * stride_k_d
-    v_cache_ptr += batch_idx * stride_v_b + head_idx_kv * stride_v_h + offs_n[:,
-                                                                              None] * stride_v_s + offs_d[
-                                                                                  None, :] * stride_v_d
+    v_cache_ptr += batch_idx * stride_v_b + head_idx_kv * stride_v_h + offs_n[:, None
+                                                                             ] * stride_v_s + offs_d[
+                                                                                 None, :
+                                                                             ] * stride_v_d
     mask_ptr += batch_idx * stride_mask_b + head_idx_kv * stride_mask_h
 
     q = tl.load(
         q_ptr + offs_h[:, None] * stride_q_h + offs_d[None, :] * stride_q_d,
-        mask=offs_h[:, None] < gqa_group_size)
+        mask=offs_h[:, None] < gqa_group_size
+    )
     start = blocks_per_split * split_idx + tl.minimum(split_idx, remaining_blocks)
     for block_idx in range(loop_range):
         start_n = (start + block_idx) * BLOCK_N
@@ -118,12 +120,13 @@ def _split_kernel(
     acc = acc.to(o_partial_ptr.dtype.element_ty)
 
     lse_partial_ptr += batch_idx * stride_lse_b + (
-        head_idx_q + offs_h) * stride_lse_h + split_idx * stride_lse_split
+        head_idx_q + offs_h
+    ) * stride_lse_h + split_idx * stride_lse_split
     tl.store(lse_partial_ptr, m_i, mask=offs_h < gqa_group_size)
 
     o_partial_ptr += batch_idx * stride_o_b + (
-        head_idx_q +
-        offs_h[:, None]) * stride_o_h + split_idx * stride_o_split + offs_d[None, :] * stride_o_d
+        head_idx_q + offs_h[:, None]
+    ) * stride_o_h + split_idx * stride_o_split + offs_d[None, :] * stride_o_d
     tl.store(o_partial_ptr, acc, mask=offs_h[:, None] < gqa_group_size)
 
 
@@ -164,7 +167,8 @@ def _merge_kernel(
     lse = tl.load(
         lse_offsets + offs_splits * lse_partial_stride_split,
         mask=offs_splits < num_splits,
-        other=float("-inf"))
+        other=float("-inf")
+    )
 
     lse_max = tl.max(lse)
 
@@ -172,7 +176,8 @@ def _merge_kernel(
     o_partial = tl.load(
         o_offsets + offs_splits[:, None] * o_partial_stride_split +
         offs_d[None, :] * o_partial_stride_d,
-        mask=offs_splits[:, None] < num_splits)
+        mask=offs_splits[:, None] < num_splits
+    )
     sumexp_normalized_splitk = tl.exp(lse - lse_max)
     sumexp_normalized = tl.sum(sumexp_normalized_splitk, axis=0)
     numerator_normalized = tl.sum(o_partial * sumexp_normalized_splitk[:, None], axis=0)
@@ -208,7 +213,8 @@ def block_sparse_flash_decode_gqa_mask_triton(
     num_n_blocks = max_selected_blocks
 
     size_one_kv_head = max_selected_blocks * block_size * (
-        dim + dim_v) * 2  #kv_seqlen * (dim + dim_v) * 2
+        dim + dim_v
+    ) * 2  #kv_seqlen * (dim + dim_v) * 2
     total_mblocks = batch * heads_kv * num_m_blocks
     num_sm = 64
     # num_sm = self.num_sm
@@ -219,7 +225,8 @@ def block_sparse_flash_decode_gqa_mask_triton(
         num_m_blocks,
         size_one_kv_head,
         is_causal_or_local=True,
-        max_splits=128)
+        max_splits=128
+    )
 
     # print("num_splits:", num_splits, "num_blocks:", num_n_blocks)
 
@@ -292,8 +299,9 @@ def block_sparse_flash_decode_gqa_mask_triton(
     return output
 
 
-def ref_program_torch(query, key, value, block_mask, cache_seqlens, max_cache_seqlen, num_blocks,
-                      block_size):
+def ref_program_torch(
+    query, key, value, block_mask, cache_seqlens, max_cache_seqlen, num_blocks, block_size
+):
 
     batch, heads, dim = query.shape
     heads_kv = key.shape[2]
@@ -304,12 +312,12 @@ def ref_program_torch(query, key, value, block_mask, cache_seqlens, max_cache_se
     value = rearrange(value, 'b n h d -> b h n d')  # [batch_size, heads_kv, seqlen_kv, dim]
 
     query = rearrange(
-        query, 'b (h g) d -> b g h d',
-        g=num_head_groups)  # [batch_size, num_head_groups, heads_kv, dim]
+        query, 'b (h g) d -> b g h d', g=num_head_groups
+    )  # [batch_size, num_head_groups, heads_kv, dim]
 
     scores = einsum(
-        query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
+        query, key, 'b g h d, b h s d -> b g h s'
+    )  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
 
     sparse_mask = torch.zeros_like(scores)
     # Assign mask values
@@ -327,10 +335,12 @@ def ref_program_torch(query, key, value, block_mask, cache_seqlens, max_cache_se
     pad_mask = pad_mask[:, None, None, :]
     scores = scores.masked_fill(pad_mask, float('-inf'))
     attention = F.softmax(
-        scores / scale, dim=-1)  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
+        scores / scale, dim=-1
+    )  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
 
-    out = einsum(attention, value,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, heads_kv, dim]
+    out = einsum(
+        attention, value, 'b g h s, b h s d -> b g h d'
+    )  # [batch_size, num_head_groups, heads_kv, dim]
     out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
     return out
 
@@ -345,14 +355,16 @@ def ref_program_fa(query, key, value, cache_seqlens):
     return output
 
 
-def main(batch=64,
-         heads=32,
-         heads_kv=8,
-         max_cache_seqlen=8192,
-         dim=128,
-         dim_v=128,
-         sparse_ratio=0.8,
-         block_size=32):
+def main(
+    batch=64,
+    heads=32,
+    heads_kv=8,
+    max_cache_seqlen=8192,
+    dim=128,
+    dim_v=128,
+    sparse_ratio=0.8,
+    block_size=32
+):
 
     batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
     block_size = block_size
@@ -369,8 +381,8 @@ def main(batch=64,
     cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device='cuda')
     # Ensure at least one element equals cache_seqlen
     random_index = torch.randint(0, batch, (1,), device='cuda').item()  # Select a random index
-    cache_seqlens[
-        random_index] = max_cache_seqlen  # Assign cache_seqlen to ensure at least one occurrence
+    cache_seqlens[random_index
+                 ] = max_cache_seqlen  # Assign cache_seqlen to ensure at least one occurrence
 
     num_blocks = (max_cache_seqlen + block_size - 1) // block_size
 
@@ -390,8 +402,9 @@ def main(batch=64,
                 perm = torch.randperm(max_valid_block, device='cuda')[:valid_num_block]
                 block_mask[b, h, perm] = True
 
-    ref = ref_program_torch(Q, K, V, block_mask, cache_seqlens, max_cache_seqlen, num_blocks,
-                            block_size)
+    ref = ref_program_torch(
+        Q, K, V, block_mask, cache_seqlens, max_cache_seqlen, num_blocks, block_size
+    )
 
     triton_out = block_sparse_flash_decode_gqa_mask_triton(
         Q,
@@ -405,7 +418,8 @@ def main(batch=64,
 
     # print("max difference: ", torch.max(torch.abs(ref - triton_out)))
     assert torch.allclose(
-        ref, triton_out, atol=1e-2), "Output mismatch between Triton and reference implementation"
+        ref, triton_out, atol=1e-2
+    ), "Output mismatch between Triton and reference implementation"
     print("Passed the ref test!")
 
     # Measure performance
@@ -452,11 +466,14 @@ if __name__ == "__main__":
     parser.add_argument('--heads', type=int, default=32, help='heads')
     parser.add_argument('--heads_kv', type=int, default=8, help='heads_kv')
     parser.add_argument(
-        '--max_cache_seqlen', type=int, default=8192, help='kvcache sequence length')
+        '--max_cache_seqlen', type=int, default=8192, help='kvcache sequence length'
+    )
     parser.add_argument('--dim', type=int, default=128, help='dim')
     parser.add_argument('--dim_v', type=int, default=128, help='dim_v')
     parser.add_argument('--sparse_ratio', type=float, default=0.8, help='sparse ratio')
     parser.add_argument('--block_size', type=int, default=32, help='block_size')
     args = parser.parse_args()
-    main(args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v,
-         args.sparse_ratio, args.block_size)
+    main(
+        args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v,
+        args.sparse_ratio, args.block_size
+    )

@@ -123,8 +123,10 @@ def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var
         val = first + second.upper()
     call = getattr(tb_ffi, val, None)
     if call is None:
-        raise TypeError(f"Convert to datatype `{self}` is not supported by tvm\n"
-                        f"calling failed on `tvm.script.ir_builder.tir._ffi_api.{val}`")
+        raise TypeError(
+            f"Convert to datatype `{self}` is not supported by tvm\n"
+            f"calling failed on `tvm.script.ir_builder.tir._ffi_api.{val}`"
+        )
     return call(expr, is_size_var)
 
 

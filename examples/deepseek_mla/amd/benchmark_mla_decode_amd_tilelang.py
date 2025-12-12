@@ -15,29 +15,25 @@ def get_configs():
 
     _configs = list(itertools.product(BLOCK_N, BLOCK_H, num_split, threads))
 
-    return [{
-        "block_N": c[0],
-        "block_H": c[1],
-        "num_split": c[2],
-        "threads": c[3],
-    } for c in _configs]
+    return [
+        {
+            "block_N": c[0],
+            "block_H": c[1],
+            "num_split": c[2],
+            "threads": c[3],
+        } for c in _configs
+    ]
 
 
 @tilelang.autotune(configs=get_configs())
 @tilelang.jit(
     out_idx=[6], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
-def flashmla_decode(batch,
-                    heads,
-                    kv_head_num,
-                    seqlen_kv,
-                    dim,
-                    pe_dim,
-                    block_N,
-                    block_H,
-                    num_split,
-                    threads=128):
+    }
+)
+def flashmla_decode(
+    batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, threads=128
+):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
@@ -47,11 +43,11 @@ def flashmla_decode(batch,
 
     @T.macro
     def flash_attn(
-            Q: T.Tensor([batch, heads, dim], dtype),
-            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(batch, heads // min(block_H, kv_group_num), threads=threads) as (bx, by):
             Q_local = T.alloc_fragment([block_H, dim], dtype)
@@ -87,7 +83,8 @@ def flashmla_decode(batch,
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow)
+                    policy=T.GemmWarpPolicy.FullRow
+                )
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -111,16 +108,15 @@ def flashmla_decode(batch,
 
     @T.macro
     def flash_attn_split(
-            Q: T.Tensor([batch, heads, dim], dtype),
-            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
     ):
-        with T.Kernel(
-                batch, heads // min(block_H, kv_group_num), num_split,
-                threads=threads) as (bx, by, bz):
+        with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split,
+                      threads=threads) as (bx, by, bz):
             Q_local = T.alloc_fragment([block_H, dim], dtype)
             Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)
             KV_shared = T.alloc_shared([block_N, dim], dtype)
@@ -155,7 +151,8 @@ def flashmla_decode(batch,
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow)
+                    policy=T.GemmWarpPolicy.FullRow
+                )
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -181,9 +178,9 @@ def flashmla_decode(batch,
 
     @T.macro
     def combine(
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(heads, batch, threads=128) as (by, bz):
             po_local = T.alloc_fragment([dim], dtype)
@@ -193,9 +190,12 @@ def flashmla_decode(batch,
             lse_max_local = T.alloc_local([1], accum_dtype)
             scale_local = T.alloc_local([1], accum_dtype)
 
-            T.annotate_layout({
-                lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-            })
+            T.annotate_layout(
+                {
+                    lse_logsum_local:
+                        T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
+                }
+            )
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
@@ -218,26 +218,26 @@ def flashmla_decode(batch,
 
     @T.prim_func
     def main_split(
-            Q: T.Tensor([batch, heads, dim], dtype),
-            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         flash_attn_split(Q, Q_pe, KV, K_pe, glse, Output_partial)
         combine(glse, Output_partial, Output)
 
     @T.prim_func
     def main_no_split(
-            Q: T.Tensor([batch, heads, dim], dtype),
-            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         flash_attn(Q, Q_pe, KV, K_pe, Output)
 
@@ -264,11 +264,12 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     num_head_groups = q.shape[1] // kv.shape[2]
     scale = (dim + pe_dim)**0.5
     q = rearrange(
-        q, 'b (h g) d -> b g h d', g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
+        q, 'b (h g) d -> b g h d', g=num_head_groups
+    )  # [batch_size, num_head_groups, groups, dim]
 
     q_pe = rearrange(
-        q_pe, 'b (h g) d -> b g h d',
-        g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
+        q_pe, 'b (h g) d -> b g h d', g=num_head_groups
+    )  # [batch_size, num_head_groups, groups, pe_dim]
 
     kv = rearrange(kv, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
 
@@ -278,14 +279,16 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     key = torch.concat([kv, k_pe], dim=-1)
 
     scores = einsum(
-        query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, groups, seqlen_kv]
+        query, key, 'b g h d, b h s d -> b g h s'
+    )  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     attention = F.softmax(
-        scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
+        scores / scale, dim=-1
+    )  # [batch_size, num_head_groups, groups, seqlen_kv]
 
-    out = einsum(attention, kv,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, groups, dim]
+    out = einsum(
+        attention, kv, 'b g h s, b h s d -> b g h d'
+    )  # [batch_size, num_head_groups, groups, dim]
     out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
     return out
 
@@ -324,7 +327,8 @@ if __name__ == "__main__":
             BLOCK_N,
             BLOCK_H,
             num_split,
-            threads=threads)
+            threads=threads
+        )
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)

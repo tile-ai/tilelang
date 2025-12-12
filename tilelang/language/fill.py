@@ -32,8 +32,10 @@ def fill(buffer: tir.Buffer | tir.BufferRegion | tir.BufferLoad, value: tir.Prim
             extents = [tir.IntImm("int32", 1) for _ in buffer.indices]
     else:
         extents = []
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.fill"),
-                           to_buffer_region(buffer, access_type="w", extents=extents), value)
+    return tir.call_intrin(
+        "handle", tir.op.Op.get("tl.tileop.fill"),
+        to_buffer_region(buffer, access_type="w", extents=extents), value
+    )
 
 
 def clear(buffer: tir.Buffer | tir.Var):
@@ -56,7 +58,8 @@ def clear(buffer: tir.Buffer | tir.Var):
             region = get_buffer_region_from_load(buffer_region)
             if region is None:
                 raise ValueError(
-                    f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")
+                    f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}"
+                )
             return fill(region, 0)
         else:
             raise ValueError(f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")

@@ -29,8 +29,10 @@ def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
 
 
 @torch.inference_mode()
-def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q,
-                  h_kv, d, dv, causal, dtype):
+def run_torch_mla(
+    q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv,
+    causal, dtype
+):
     blocked_v = blocked_k[..., :dv]
 
     def ref_mla():
@@ -138,9 +140,9 @@ def _mla_attn_kernel(
 
         e_sum = e_sum * re_scale + tl.sum(p, 1)
         e_max = n_e_max
-    offs_o = cur_batch * stride_o_b + cur_head[:,
-                                               None] * stride_o_h + split_kv_id * stride_o_s + offs_d_ckv[
-                                                   None, :]
+    offs_o = cur_batch * stride_o_b + cur_head[:, None
+                                              ] * stride_o_h + split_kv_id * stride_o_s + offs_d_ckv[
+                                                  None, :]
     tl.store(O + offs_o, acc / e_sum[:, None])
     offs_o_1 = cur_batch * stride_o_b + cur_head * stride_o_h + split_kv_id * stride_o_s + HEAD_DIM_CKV
     tl.store(O + offs_o_1, e_max + tl.log(e_sum))
@@ -306,8 +308,10 @@ def mla_decode_triton(
 
 
 @torch.inference_mode()
-def run_flash_mla_triton(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
-                         cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
+def run_flash_mla_triton(
+    q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv,
+    causal, dtype
+):
 
     blocked_v = blocked_k[..., :dv]
 
@@ -323,7 +327,8 @@ def run_flash_mla_triton(q, block_table, blocked_k, max_seqlen_pad, block_size, 
         mla_decode_triton(
             q_nope.view(-1, h_q, dv), q_pe.view(-1, h_q, d - dv), blocked_k_nope.view(-1, dv),
             blocked_k_pe.view(-1, d - dv), o, block_table, cache_seqlens, attn_logits,
-            num_kv_splits, 1 / math.sqrt(d), block_size)
+            num_kv_splits, 1 / math.sqrt(d), block_size
+        )
         return o.view([b, s_q, h_q, dv])
 
     out_flash = flash_mla_triton()
@@ -360,13 +365,18 @@ def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal
     q = torch.randn(b, s_q, h_q, d)
     block_size = 64
     block_table = torch.arange(
-        b * max_seqlen_pad // block_size, dtype=torch.int32).view(b, max_seqlen_pad // block_size)
+        b * max_seqlen_pad // block_size, dtype=torch.int32
+    ).view(b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
 
-    out_a, lse_a, perf_a = baseline_func(q, block_table, blocked_k, max_seqlen_pad, block_size, b,
-                                         s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
-    out_b, lse_b, perf_b = target_func(q, block_table, blocked_k, max_seqlen_pad, block_size, b,
-                                       s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
+    out_a, lse_a, perf_a = baseline_func(
+        q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d,
+        dv, causal, dtype
+    )
+    out_b, lse_b, perf_b = target_func(
+        q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d,
+        dv, causal, dtype
+    )
 
     torch.testing.assert_close(out_b.float(), out_a.float(), atol=1e-2, rtol=1e-2), "out"
     if target not in ["flash_mla_triton"]:
@@ -375,7 +385,8 @@ def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal
 
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
     bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (
-        torch.finfo(dtype).bits // 8)
+        torch.finfo(dtype).bits // 8
+    )
     print(
         f"perf {baseline}: {perf_a:.3f} ms, {FLOPS / 10 ** 9 / perf_a:.0f} TFLOPS, {bytes / 10 ** 6 / perf_a:.0f} GB/s"
     )
@@ -406,15 +417,19 @@ def compare_a(target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
     q = torch.randn(b, s_q, h_q, d)
     block_size = 64
     block_table = torch.arange(
-        b * max_seqlen_pad // block_size, dtype=torch.int32).view(b, max_seqlen_pad // block_size)
+        b * max_seqlen_pad // block_size, dtype=torch.int32
+    ).view(b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
 
-    out_b, lse_b, perf_b = target_func(q, block_table, blocked_k, max_seqlen_pad, block_size, b,
-                                       s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
+    out_b, lse_b, perf_b = target_func(
+        q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d,
+        dv, causal, dtype
+    )
 
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
     bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (
-        torch.finfo(dtype).bits // 8)
+        torch.finfo(dtype).bits // 8
+    )
     print(
         f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10 ** 9 / perf_b:.0f} TFLOPS, {bytes / 10 ** 6 / perf_b:.0f} GB/s"
     )
@@ -426,26 +441,28 @@ available_targets = [
     "flash_mla_triton",
 ]
 
-shape_configs = [{
-    "b":
-        batch,
-    "s_q":
-        1,
-    "cache_seqlens":
-        torch.tensor([seqlen + 2 * i for i in range(batch)], dtype=torch.int32, device="cuda"),
-    "h_q":
-        head,
-    "h_kv":
-        1,
-    "d":
-        512 + 64,
-    "dv":
-        512,
-    "causal":
-        True,
-    "dtype":
-        torch.float16
-} for batch in [64, 128] for seqlen in [1024, 2048, 4096, 8192, 16384] for head in [128]]
+shape_configs = [
+    {
+        "b":
+            batch,
+        "s_q":
+            1,
+        "cache_seqlens":
+            torch.tensor([seqlen + 2 * i for i in range(batch)], dtype=torch.int32, device="cuda"),
+        "h_q":
+            head,
+        "h_kv":
+            1,
+        "d":
+            512 + 64,
+        "dv":
+            512,
+        "causal":
+            True,
+        "dtype":
+            torch.float16
+    } for batch in [64, 128] for seqlen in [1024, 2048, 4096, 8192, 16384] for head in [128]
+]
 
 
 def get_args():
@@ -467,16 +484,19 @@ if __name__ == "__main__":
         for shape in shape_configs:
             if args.all:
                 for target in available_targets:
-                    perf = compare_a(target, shape["b"], shape["s_q"], shape["cache_seqlens"],
-                                     shape["h_q"], shape["h_kv"], shape["d"], shape["dv"],
-                                     shape["causal"], shape["dtype"])
+                    perf = compare_a(
+                        target, shape["b"], shape["s_q"], shape["cache_seqlens"], shape["h_q"],
+                        shape["h_kv"], shape["d"], shape["dv"], shape["causal"], shape["dtype"]
+                    )
                     fout.write(
                         f'{target},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{perf:.0f}\n'
                     )
             elif args.compare:
-                perfa, prefb = compare_ab(args.baseline, args.target, shape["b"], shape["s_q"],
-                                          shape["cache_seqlens"], shape["h_q"], shape["h_kv"],
-                                          shape["d"], shape["dv"], shape["causal"], shape["dtype"])
+                perfa, prefb = compare_ab(
+                    args.baseline, args.target, shape["b"], shape["s_q"], shape["cache_seqlens"],
+                    shape["h_q"], shape["h_kv"], shape["d"], shape["dv"], shape["causal"],
+                    shape["dtype"]
+                )
                 fout.write(
                     f'{args.baseline},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{perfa:.0f}\n'
                 )
@@ -484,9 +504,10 @@ if __name__ == "__main__":
                     f'{args.target},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{prefb:.0f}\n'
                 )
             elif args.one:
-                perf = compare_a(args.target, shape["b"], shape["s_q"], shape["cache_seqlens"],
-                                 shape["h_q"], shape["h_kv"], shape["d"], shape["dv"],
-                                 shape["causal"], shape["dtype"])
+                perf = compare_a(
+                    args.target, shape["b"], shape["s_q"], shape["cache_seqlens"], shape["h_q"],
+                    shape["h_kv"], shape["d"], shape["dv"], shape["causal"], shape["dtype"]
+                )
                 fout.write(
                     f'{args.target},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{perf:.0f}\n'
                 )

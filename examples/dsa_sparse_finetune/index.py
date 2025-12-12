@@ -62,10 +62,12 @@ def prepare_lens_from_cu_seqlens(cu_seqlens: torch.LongTensor,) -> torch.LongTen
 
 @tensor_cache
 def prepare_position_ids(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
-    return torch.cat([
-        torch.arange(n, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
-        for n in prepare_lens(cu_seqlens).unbind()
-    ])
+    return torch.cat(
+        [
+            torch.arange(n, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+            for n in prepare_lens(cu_seqlens).unbind()
+        ]
+    )
 
 
 @tensor_cache

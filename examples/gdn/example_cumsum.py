@@ -24,7 +24,8 @@ import torch
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
-    })
+    }
+)
 def tilelang_chunk_local_cumsum_scalar(
     # task config
     B,
@@ -47,8 +48,8 @@ def tilelang_chunk_local_cumsum_scalar(
 
     @T.prim_func
     def kernel(
-            G: T.Tensor(G_shape, dtype=input_dtype),
-            G_new: T.Tensor(G_shape, dtype=output_dtype),
+        G: T.Tensor(G_shape, dtype=input_dtype),
+        G_new: T.Tensor(G_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -117,7 +118,8 @@ def run_test(
         chunk_size=chunk_size,
         reverse=reverse,
         head_first=head_first,
-        output_dtype=getattr(torch, output_dtype))
+        output_dtype=getattr(torch, output_dtype)
+    )
 
     # tilelang cumsum
     block_S = chunk_size
@@ -162,7 +164,8 @@ def main():
         input_dtype="float32",
         output_dtype="float32",
         threads=256,
-        use_fragment=False)
+        use_fragment=False
+    )
 
 
 if __name__ == "__main__":

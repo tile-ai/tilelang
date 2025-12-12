@@ -150,9 +150,9 @@ def tl_matmul_streamk(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, dtypeAB),
-            B: T.Tensor(B_shape, dtypeAB),
-            C: T.Tensor((M, N), dtypeC),
+        A: T.Tensor(A_shape, dtypeAB),
+        B: T.Tensor(B_shape, dtypeAB),
+        C: T.Tensor((M, N), dtypeC),
     ):
         with T.Kernel(streamk_programs, threads=threads) as pid:
 

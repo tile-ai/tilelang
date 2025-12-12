@@ -18,10 +18,12 @@ _MEMORY_ORDER_ID_MAP = {
 }
 
 
-def atomic_max(dst: Buffer,
-               value: PrimExpr,
-               memory_order: str | None = None,
-               return_prev: bool = False) -> PrimExpr:
+def atomic_max(
+    dst: Buffer,
+    value: PrimExpr,
+    memory_order: str | None = None,
+    return_prev: bool = False
+) -> PrimExpr:
     """
     Perform an atomic maximum on the value stored at dst with an optional memory-order.
 
@@ -64,10 +66,12 @@ def atomic_max(dst: Buffer,
         return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
 
 
-def atomic_min(dst: Buffer,
-               value: PrimExpr,
-               memory_order: str | None = None,
-               return_prev: bool = False) -> PrimExpr:
+def atomic_min(
+    dst: Buffer,
+    value: PrimExpr,
+    memory_order: str | None = None,
+    return_prev: bool = False
+) -> PrimExpr:
     """
     Atomically update the value at dst to the minimum of its current value and value.
 
@@ -112,11 +116,13 @@ def atomic_min(dst: Buffer,
         return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
 
 
-def atomic_add(dst: Buffer,
-               value: PrimExpr,
-               memory_order: str | None = None,
-               return_prev: bool = False,
-               use_tma: bool = False) -> PrimExpr:
+def atomic_add(
+    dst: Buffer,
+    value: PrimExpr,
+    memory_order: str | None = None,
+    return_prev: bool = False,
+    use_tma: bool = False
+) -> PrimExpr:
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
 
@@ -191,8 +197,9 @@ def atomic_add(dst: Buffer,
         if memory_order is None:
             return T.call_extern(return_type, func_name, dst, value)
         else:
-            return T.call_extern(return_type, func_name, dst, value,
-                                 _MEMORY_ORDER_ID_MAP[memory_order])
+            return T.call_extern(
+                return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order]
+            )
 
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
@@ -209,13 +216,16 @@ def atomic_add(dst: Buffer,
     # This would need to be implemented in the tile runtime
     if return_prev:
         raise NotImplementedError(
-            "return_prev is not supported for tile-region-based atomic operations")
+            "return_prev is not supported for tile-region-based atomic operations"
+        )
 
     if memory_order is None:
         return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, use_tma, 0)
     else:
-        return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, use_tma,
-                             _MEMORY_ORDER_ID_MAP[memory_order])
+        return T.call_intrin(
+            "handle", op.Op.get("tl.tileop.atomicadd"), value, dst, use_tma,
+            _MEMORY_ORDER_ID_MAP[memory_order]
+        )
 
 
 def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:

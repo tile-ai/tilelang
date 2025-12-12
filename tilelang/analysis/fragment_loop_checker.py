@@ -75,7 +75,8 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
                         raise ValueError(
                             "[Tilelang Semantic Check] "
                             f"Loop variable {loop.loop_var} in a T.Parallel loop with symbolic range (min={loop.min}, extent={loop.extent}) is used to index "
-                            "a local/fragment buffer, which is not allowed in Tilelang.")
+                            "a local/fragment buffer, which is not allowed in Tilelang."
+                        )
 
             return
 

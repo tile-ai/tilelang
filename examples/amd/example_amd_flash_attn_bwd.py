@@ -12,9 +12,11 @@ import time
 
 def ref_program(Q, K, V, is_causal, groups=1):
     assert Q.size(
-        2) == K.size(2) * groups, f"Q heads {Q.size(2)} K heads {K.size(2)} groups {groups}"
+        2
+    ) == K.size(2) * groups, f"Q heads {Q.size(2)} K heads {K.size(2)} groups {groups}"
     assert Q.size(
-        2) == V.size(2) * groups, f"Q heads {Q.size(2)} V heads {V.size(2)} groups {groups}"
+        2
+    ) == V.size(2) * groups, f"Q heads {Q.size(2)} V heads {V.size(2)} groups {groups}"
     dim = Q.size(-1)
     K_ref = K.repeat_interleave(groups, dim=2)
     V_ref = V.repeat_interleave(groups, dim=2)
@@ -50,18 +52,20 @@ def get_fwd_configs():
                                                                   enable_rasterization, k_pack,
                                                                   panel_size, qk_coalesced_width,
                                                                   v_coalesced_width):
-        valid_configs.append({
-            "block_M": m,
-            "block_N": n,
-            "num_split_q": s,
-            "threads": t,
-            "num_stages": stages,
-            "enable_rasterization": r,
-            "k_pack": k,
-            "panel_size": p,
-            "qk_coalesced_width": qkw,
-            "v_coalesced_width": vw,
-        })
+        valid_configs.append(
+            {
+                "block_M": m,
+                "block_N": n,
+                "num_split_q": s,
+                "threads": t,
+                "num_stages": stages,
+                "enable_rasterization": r,
+                "k_pack": k,
+                "panel_size": p,
+                "qk_coalesced_width": qkw,
+                "v_coalesced_width": vw,
+            }
+        )
     return valid_configs
 
 
@@ -97,11 +101,11 @@ def fast_flashattn(
 
     @T.prim_func
     def main(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(kv_shape, dtype),
-            V: T.Tensor(kv_shape, dtype),
-            Output: T.Tensor(q_shape, dtype),
-            LSE: T.Tensor([batch, heads, seq_len], accum_dtype),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
+        Output: T.Tensor(q_shape, dtype),
+        LSE: T.Tensor([batch, heads, seq_len], accum_dtype),
     ):
         with T.Kernel(num_split_q, batch * heads, threads=threads) as (b_split, byz_combined):
             T.use_swizzle(panel_size, enable=enable_rasterization)
@@ -138,11 +142,13 @@ def fast_flashattn(
                 T.copy(
                     Q[bz, q_block_offset:q_block_offset + block_M, by, :],
                     Q_shared,
-                    coalesced_width=vec_size)
+                    coalesced_width=vec_size
+                )
 
                 loop_end_k = (
                     T.ceildiv(q_block_offset +
-                              block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N))
+                              block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
+                )
 
                 row_sum = T.alloc_fragment([block_M], accum_dtype)
 
@@ -152,16 +158,19 @@ def fast_flashattn(
                     T.copy(
                         K[bz, kv_idx:kv_idx + block_N, by // groups, :],
                         K_shared,
-                        coalesced_width=vec_size)
+                        coalesced_width=vec_size
+                    )
                     T.copy(
                         V[bz, kv_idx:kv_idx + block_N, by // groups, :],
                         V_shared,
-                        coalesced_width=v_vec_size)
+                        coalesced_width=v_vec_size
+                    )
 
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, 0,
-                                                         -T.infinity(acc_s.dtype))
+                            acc_s[i, j] = T.if_then_else(
+                                q_block_offset + i >= kv_idx + j, 0, -T.infinity(acc_s.dtype)
+                            )
                     else:
                         T.clear(acc_s)
                     T.gemm(
@@ -216,8 +225,10 @@ def fast_flashattn(
 
                 for i in T.Parallel(block_M):
                     if q_block_offset + i < seq_len:
-                        lse_val = T.if_then_else(l_i[i] > 0,
-                                                 T.log(l_i[i]) + m_i[i], -T.infinity(accum_dtype))
+                        lse_val = T.if_then_else(
+                            l_i[i] > 0,
+                            T.log(l_i[i]) + m_i[i], -T.infinity(accum_dtype)
+                        )
                         LSE[bz, by, q_block_offset + i] = lse_val
 
                 bx_loop_var = current_bx + num_split_q
@@ -236,14 +247,16 @@ def get_bwd_configs():
     configs = []
     for m, n, stages, t, r, p in itertools.product(block_M, block_N, num_stages, threads,
                                                    enable_rasterization, panel_size):
-        configs.append({
-            "block_M": m,
-            "block_N": n,
-            "num_stages": stages,
-            "threads": t,
-            "enable_rasterization": r,
-            "panel_size": p,
-        })
+        configs.append(
+            {
+                "block_M": m,
+                "block_N": n,
+                "num_stages": stages,
+                "threads": t,
+                "enable_rasterization": r,
+                "panel_size": p,
+            }
+        )
 
     return configs
 
@@ -256,8 +269,10 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     blk = 32
 
     @T.prim_func
-    def flash_bwd_prep(O: T.Tensor(shape, dtype), dO: T.Tensor(shape, dtype),
-                       Delta: T.Tensor([batch, heads, seq_len], accum_dtype)):
+    def flash_bwd_prep(
+        O: T.Tensor(shape, dtype), dO: T.Tensor(shape, dtype),
+        Delta: T.Tensor([batch, heads, seq_len], accum_dtype)
+    ):
         with T.Kernel(batch, heads, T.ceildiv(seq_len, blk)) as (bz, bx, by):
             o = T.alloc_fragment([blk, blk], dtype)
             do = T.alloc_fragment([blk, blk], dtype)
@@ -277,8 +292,10 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 
 @tilelang.autotune(configs=get_bwd_configs(), cache_input_tensors=True)
 @tilelang.jit
-def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, block_N: int,
-                  num_stages: int, threads: int, enable_rasterization: bool, panel_size: int):
+def flashattn_bwd(
+    batch, heads, seq_len, dim, is_causal, groups, block_M: int, block_N: int, num_stages: int,
+    threads: int, enable_rasterization: bool, panel_size: int
+):
     sm_scale = (1.0 / dim)**0.5
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
@@ -287,14 +304,12 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
     accum_dtype = "float"
 
     @T.prim_func
-    def flash_bwd_kernel(Q: T.Tensor(q_shape,
-                                     dtype), K: T.Tensor(kv_shape,
-                                                         dtype), V: T.Tensor(kv_shape, dtype),
-                         dO: T.Tensor(q_shape, dtype), lse: T.Tensor([batch, heads, seq_len],
-                                                                     accum_dtype),
-                         Delta: T.Tensor([batch, heads, seq_len],
-                                         accum_dtype), dQ: T.Tensor(q_shape, accum_dtype),
-                         dK: T.Tensor(kv_shape, accum_dtype), dV: T.Tensor(kv_shape, accum_dtype)):
+    def flash_bwd_kernel(
+        Q: T.Tensor(q_shape, dtype), K: T.Tensor(kv_shape, dtype), V: T.Tensor(kv_shape, dtype),
+        dO: T.Tensor(q_shape, dtype), lse: T.Tensor([batch, heads, seq_len], accum_dtype),
+        Delta: T.Tensor([batch, heads, seq_len], accum_dtype), dQ: T.Tensor(q_shape, accum_dtype),
+        dK: T.Tensor(kv_shape, accum_dtype), dV: T.Tensor(kv_shape, accum_dtype)
+    ):
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bx, by, bz):
             T.use_swizzle(panel_size, enable=enable_rasterization)
 
@@ -336,8 +351,9 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
 
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        P_acc[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j,
-                                                     P_acc[i, j], 0.0)
+                        P_acc[i, j] = T.if_then_else(
+                            by * block_M + i <= k * block_N + j, P_acc[i, j], 0.0
+                        )
 
                 T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do_shared)
                 T.clear(dP)
@@ -446,12 +462,14 @@ def benchmark_function(func, *args, warmup=10, repeat=100):
     return np.median(times)
 
 
-def main(batch: int = 1,
-         heads: int = 8,
-         seq_len: int = 4096,
-         dim: int = 128,
-         is_causal: bool = False,
-         groups: int = 1):
+def main(
+    batch: int = 1,
+    heads: int = 8,
+    seq_len: int = 4096,
+    dim: int = 128,
+    is_causal: bool = False,
+    groups: int = 1
+):
 
     device = "cuda"
     dtype = torch.float16
@@ -518,21 +536,24 @@ def main(batch: int = 1,
 
     print("Verifying backward pass correctness...")
     dq_close, dq_max_diff, dq_mean_diff = debug_tensor_comparison(
-        dQ_tl, q_ref.grad, "dQ", rtol=0.05, atol=0.05)
+        dQ_tl, q_ref.grad, "dQ", rtol=0.05, atol=0.05
+    )
     if dq_close:
         print("dQ is correct.")
     else:
         print("dQ mismatch detected.")
 
     dk_close, dk_max_diff, dk_mean_diff = debug_tensor_comparison(
-        dK_tl.to(torch.float16), k_ref.grad, "dK", rtol=0.05, atol=0.05)
+        dK_tl.to(torch.float16), k_ref.grad, "dK", rtol=0.05, atol=0.05
+    )
     if dk_close:
         print("dK is correct.")
     else:
         print("dK mismatch detected.")
 
     dv_close, dv_max_diff, dv_mean_diff = debug_tensor_comparison(
-        dV_tl.to(torch.float16), v_ref.grad, "dV", rtol=0.05, atol=0.05)
+        dV_tl.to(torch.float16), v_ref.grad, "dV", rtol=0.05, atol=0.05
+    )
     if dv_close:
         print("dV is correct.")
     else:

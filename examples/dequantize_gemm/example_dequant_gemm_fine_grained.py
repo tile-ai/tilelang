@@ -39,9 +39,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, storage_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, storage_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -67,12 +67,13 @@ def matmul(
                         B_local[v] = B_shared[vi, vj]
                     for v in T.serial(0, local_size):
                         B_dequantize_local[v] = _tir_packed_to_unsigned_convert(
-                            storage_type, storage_nbit)(
-                                num_bits,
-                                B_local[v // num_elems_per_byte],
-                                v % num_elems_per_byte,
-                                dtype=in_dtype,
-                            )
+                            storage_type, storage_nbit
+                        )(
+                            num_bits,
+                            B_local[v // num_elems_per_byte],
+                            v % num_elems_per_byte,
+                            dtype=in_dtype,
+                        )
                     for v in T.vectorized(0, local_size):
                         index = i * threads * local_size + tx * local_size + v
                         vi = index // block_K
@@ -123,7 +124,8 @@ def run_gemm(
 
         B = (
             torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4,
-                        dtype=torch.half).to(torch.half).to(A.device))
+                        dtype=torch.half).to(torch.half).to(A.device)
+        )
         for i in range(B.shape[0]):
             for j in range(B.shape[1]):
                 B[i][j] = ((qB[i][j // 2] >> (4 * (j % 2))) & 0xF).to(torch.half)
@@ -146,7 +148,8 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
 ):
     from tilelang.intrinsics.mma_layout import make_mma_swizzle_layout as make_swizzle_layout
     from tilelang.intrinsics.mma_macro_generator import (
-        TensorCoreIntrinEmitterWithLadderTransform,)
+        TensorCoreIntrinEmitterWithLadderTransform,
+    )
 
     from bitblas.gpu.intrin.lop3 import decode_i4_to_f16
     assert in_dtype in [
@@ -192,8 +195,9 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     pad_factor = 8
 
     A_shape = (M, K)
-    B_shape = (N // micro_size_y, K // micro_size_k, micro_size_y,
-               micro_size_k // num_elems_per_byte)
+    B_shape = (
+        N // micro_size_y, K // micro_size_k, micro_size_y, micro_size_k // num_elems_per_byte
+    )
     A_shared_shape = (block_M, (block_K + pad_factor) if apply_pad_a else block_K)
     B_shared_shape = (
         block_N // micro_size_y,
@@ -228,7 +232,8 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
         chunk=chunk,
         reduce_k=reduce_k,
         transform_kind_b=transform_b,
-        num_elems_per_byte=num_elems_per_byte)
+        num_elems_per_byte=num_elems_per_byte
+    )
 
     vec_load_qb = 16
     if block_N * (block_K // reduce_k) // num_elems_per_byte // threads < vec_load_qb:
@@ -236,13 +241,12 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, storage_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, storage_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads,
-                prelude=decode_i4_to_f16) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads,
+                      prelude=decode_i4_to_f16) as (bx, by):
 
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype, scope=shared_scope)
@@ -279,10 +283,14 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                         vkk = idx % (micro_size_k // num_elems_per_byte)
                         vjj = (idx // (micro_size_k // num_elems_per_byte)) % micro_size_y
                         vk = (idx // (micro_size_k // num_elems_per_byte) // micro_size_y) % (
-                            block_K // micro_size_k)
-                        vj = (idx // (micro_size_k // num_elems_per_byte) // micro_size_y //
-                              (block_K // micro_size_k)) % (
-                                  block_N // micro_size_y)
+                            block_K // micro_size_k
+                        )
+                        vj = (
+                            idx // (micro_size_k // num_elems_per_byte) // micro_size_y //
+                            (block_K // micro_size_k)
+                        ) % (
+                            block_N // micro_size_y
+                        )
                         B_shared[vj, vk, vjj,
                                  vkk] = B[bx * (block_N // micro_size_y) + vj,
                                           ko * (block_K // micro_size_k) + vk, vjj, vkk]
@@ -307,9 +315,11 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
 
                     for j in T.serial(warp_cols):
                         local_size_b = mma_emitter.local_size_b
-                        T.call_extern('handle', 'decode_i4u_to_f16',
-                                      T.address_of(B_local[j * local_size_b // num_elems_per_byte]),
-                                      T.address_of(B_dequantize_local[j * local_size_b]), 8)
+                        T.call_extern(
+                            'handle', 'decode_i4u_to_f16',
+                            T.address_of(B_local[j * local_size_b // num_elems_per_byte]),
+                            T.address_of(B_dequantize_local[j * local_size_b]), 8
+                        )
 
                     mma_emitter.mma(A_local, B_dequantize_local, C_local)
 
@@ -328,7 +338,8 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                             reduced_accum_res[0],
                             rk,
                             dtype="handle",
-                        ))
+                        )
+                    )
                     if rk == 0:
                         C_local[n] = reduced_accum_res[0]
 
@@ -358,7 +369,8 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
 ):
     import bitblas
     matmul = tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
-        M, N, K, in_dtype, out_dtype, accum_dtype, transform_b)
+        M, N, K, in_dtype, out_dtype, accum_dtype, transform_b
+    )
 
     kernel = tilelang.compile(matmul, out_idx=[2])
     src_code = kernel.get_kernel_source()
@@ -372,7 +384,8 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
 
     A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
     qB = torch.randint(
-        0, 127, (N, K // num_elems_per_byte), device="cuda", dtype=getattr(torch, storage_dtype))
+        0, 127, (N, K // num_elems_per_byte), device="cuda", dtype=getattr(torch, storage_dtype)
+    )
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, accum_dtype))
 
     ladder_permutate_config = bitblas.ops.LadderPermutateConfig(
@@ -409,7 +422,8 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
 
     B = (
         torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4,
-                    dtype=torch.half).to(torch.half).to(A.device))
+                    dtype=torch.half).to(torch.half).to(A.device)
+    )
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
             B[i][j] = ((qB[i][j // 2] >> (4 * (j % 2))) & 0xF).to(torch.half)
@@ -430,7 +444,8 @@ def test_run_dequantize_gemm():
 @tilelang.testing.requires_package("bitblas")
 def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
     assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correctness(
-        256, 1024, 512, "float16", "float16", "float16", 3)
+        256, 1024, 512, "float16", "float16", "float16", 3
+    )
 
 
 def main():

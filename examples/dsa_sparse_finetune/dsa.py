@@ -38,8 +38,9 @@ def ref_deepseek_sparse_attention_innner(
     index_sm_scale: Optional[float] = None,
 ):
     dtype = q.dtype
-    q, kv, index_q, index_k, weights = map(lambda x: x.to(torch.float32),
-                                           (q, kv, index_q, index_k, weights))
+    q, kv, index_q, index_k, weights = map(
+        lambda x: x.to(torch.float32), (q, kv, index_q, index_k, weights)
+    )
 
     index_sm_scale = index_q.shape[-1]**-0.5
     b, s = index_q.shape[:2]
@@ -51,11 +52,13 @@ def ref_deepseek_sparse_attention_innner(
     index_logits = einsum(index_q, index_k, 'b s1 h k, b s2 k -> b s1 h s2')
     index_logits = F.relu(index_logits)
     index_logits = (index_logits * weights.unsqueeze(-1)).sum(
-        dim=-2, dtype=torch.float32) * index_sm_scale
+        dim=-2, dtype=torch.float32
+    ) * index_sm_scale
     index_logits = torch.where(casual_mask, index_logits, float('-inf'))
     topk_indices = torch.topk(index_logits, k=topk, dim=-1).indices
     topk_logits = torch.gather(
-        F.pad(index_logits, (0, 1), value=float('-inf')), dim=-1, index=topk_indices)
+        F.pad(index_logits, (0, 1), value=float('-inf')), dim=-1, index=topk_indices
+    )
     topk_score = F.log_softmax(topk_logits, dim=-1, dtype=torch.float32)
     index_topk_score = topk_score
 
@@ -80,7 +83,8 @@ def ref_deepseek_sparse_attention_innner(
         index_topk_score.clip(-100, 0),
         attn_topk_score.detach().log().clip(-100, 0),
         log_target=True,
-        reduction="sum")
+        reduction="sum"
+    )
     o = register_loss(o, loss)
 
     return o.to(dtype), topk_indices
@@ -134,12 +138,15 @@ class DSAFunction(torch.autograd.Function):
         sm_scale: Optional[float] = None,
     ):
         # topk_indices, index_score = ref_index_score(index_q, weights, index_k, topk)
-        topk_indices, index_score = indexer_topk_reducesum_interface(index_q, weights, index_k,
-                                                                     topk, offsets)
+        topk_indices, index_score = indexer_topk_reducesum_interface(
+            index_q, weights, index_k, topk, offsets
+        )
         o, lse = sparse_mla_fwd_interface(
-            q, kv.unsqueeze(-2), topk_indices.unsqueeze(-2), offsets, sm_scale=sm_scale, d_v=dim_v)
-        ctx.save_for_backward(q, kv, index_q, index_k, weights, topk_indices, index_score, o, lse,
-                              offsets)
+            q, kv.unsqueeze(-2), topk_indices.unsqueeze(-2), offsets, sm_scale=sm_scale, d_v=dim_v
+        )
+        ctx.save_for_backward(
+            q, kv, index_q, index_k, weights, topk_indices, index_score, o, lse, offsets
+        )
         ctx.topk = topk
         ctx.dim_v = dim_v
         ctx.sm_scale = sm_scale
@@ -153,8 +160,8 @@ class DSAFunction(torch.autograd.Function):
     ):
         q, kv, index_q, index_k, weights, topk_indices, index_score, o, lse, offsets = ctx.saved_tensors
         attn_score = sparse_mla_topk_reducesum_interface(
-            q, kv.unsqueeze(-2), topk_indices.unsqueeze(-2), lse, offsets,
-            dim_v=ctx.dim_v).squeeze(-2)
+            q, kv.unsqueeze(-2), topk_indices.unsqueeze(-2), lse, offsets, dim_v=ctx.dim_v
+        ).squeeze(-2)
         dq, dkv = sparse_mla_bwd(
             q,
             kv.unsqueeze(-2),
@@ -163,9 +170,11 @@ class DSAFunction(torch.autograd.Function):
             topk_indices.unsqueeze(-2),
             lse,
             offsets,
-            sm_scale=ctx.sm_scale)
-        dindex_q, dweights, dindex_k = indexer_bwd_interface(index_q, weights, index_k, attn_score,
-                                                             index_score, topk_indices, offsets)
+            sm_scale=ctx.sm_scale
+        )
+        dindex_q, dweights, dindex_k = indexer_bwd_interface(
+            index_q, weights, index_k, attn_score, index_score, topk_indices, offsets
+        )
         return dq, dkv.squeeze(-2), dindex_q, dindex_k, dweights, None, None, None, None
 
 
@@ -209,8 +218,9 @@ def test_kernel(
     index_k_grad, index_k.grad = index_k.grad, None
     weights_grad, weights.grad = weights.grad, None
 
-    ref_o, ref_topk_indices = ref_deepseek_sparse_attention(q, kv, index_q, index_k, weights,
-                                                            offsets, topk, D)
+    ref_o, ref_topk_indices = ref_deepseek_sparse_attention(
+        q, kv, index_q, index_k, weights, offsets, topk, D
+    )
     ref_o.backward(do)
     ref_q_grad, q.grad = q.grad, None
     ref_kv_grad, kv.grad = kv.grad, None

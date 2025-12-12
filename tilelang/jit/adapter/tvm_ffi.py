@@ -51,19 +51,21 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     dynamic_symbolic_map: dict[tir.Var, tuple[int, int, int]] | None = None
 
     # Stream/device functors are inherited from BaseKernelAdapter
-    def __init__(self,
-                 params: list[KernelParam],
-                 result_idx: list[int],
-                 target: str | Target,
-                 func_or_mod: tir.PrimFunc | tvm.IRModule,
-                 host_mod: tvm.IRModule | None = None,
-                 device_mod: tvm.IRModule | None = None,
-                 rt_mod: tvm.runtime.Module | None = None,
-                 host_kernel_source: str | None = None,
-                 device_kernel_source: str | None = None,
-                 verbose: bool = False,
-                 pass_configs: dict[str, Any] | None = None,
-                 compile_flags: list[str] | None = None):
+    def __init__(
+        self,
+        params: list[KernelParam],
+        result_idx: list[int],
+        target: str | Target,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_mod: tvm.IRModule | None = None,
+        device_mod: tvm.IRModule | None = None,
+        rt_mod: tvm.runtime.Module | None = None,
+        host_kernel_source: str | None = None,
+        device_kernel_source: str | None = None,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None
+    ):
         """Initialize the adapter with the given TIR function or module.
 
         Args:
@@ -198,7 +200,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             expected_inputs = len(self.params) - len(self.result_idx)
             if len(inputs) != expected_inputs:
                 raise ValueError(
-                    f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
+                    f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided."
+                )
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.
@@ -218,16 +221,18 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         if isinstance(s, tir.Var):
                             for key in dynamic_symbolic_map:
                                 if (str(s) == str(key)):
-                                    ref_id, ref_tensor_idx, ref_shape_idx = dynamic_symbolic_map[
-                                        key]
+                                    ref_id, ref_tensor_idx, ref_shape_idx = dynamic_symbolic_map[key
+                                                                                                ]
                                     if ref_id == 2:
                                         shape.append(inputs[ref_tensor_idx])
                                     elif ref_id == 0:
                                         shape.append(
-                                            tensor_list[ref_tensor_idx].shape[ref_shape_idx])
+                                            tensor_list[ref_tensor_idx].shape[ref_shape_idx]
+                                        )
                                     elif ref_id == 1:
                                         shape.append(
-                                            tensor_list[ref_tensor_idx].stride()[ref_shape_idx])
+                                            tensor_list[ref_tensor_idx].stride()[ref_shape_idx]
+                                        )
                         else:  # Already converted to Python int during initialization
                             shape.append(s)
 
@@ -235,11 +240,13 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         out_device = current_device_functor()
 
                     if len(shape) == 0:
-                        param_name = self.params[i].name if hasattr(self.params[i],
-                                                                    'name') else f'parameter_{i}'
+                        param_name = self.params[i].name if hasattr(
+                            self.params[i], 'name'
+                        ) else f'parameter_{i}'
                         raise ValueError(
                             f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
-                            f"Expected shape: {shape}")
+                            f"Expected shape: {shape}"
+                        )
                     tensor = torch.empty(*shape, dtype=dtype, device=out_device)
                 else:
                     tensor = inputs[ins_idx]
@@ -256,17 +263,19 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         return func
 
     @classmethod
-    def from_database(cls,
-                      params: list[TensorType],
-                      result_idx: list[int],
-                      target: str,
-                      func_or_mod: tir.PrimFunc | tvm.IRModule,
-                      host_kernel_source: str,
-                      device_kernel_source: str,
-                      kernel_lib_path: str,
-                      verbose: bool = False,
-                      pass_configs: dict[str, Any] | None = None,
-                      compile_flags: list[str] | None = None):
+    def from_database(
+        cls,
+        params: list[TensorType],
+        result_idx: list[int],
+        target: str,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_kernel_source: str,
+        device_kernel_source: str,
+        kernel_lib_path: str,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None
+    ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)

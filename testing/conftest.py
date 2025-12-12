@@ -33,12 +33,13 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         "warnings",
         "error",
     }
-    if (sum(
-            len(terminalreporter.stats.get(k, []))
+    if (sum(len(terminalreporter.stats.get(k, []))
             for k in known_types.difference({"skipped", "deselected"})) == 0):
         terminalreporter.write_sep(
             "!",
-            (f"Error: No tests were collected. "
-             f"{dict(sorted((k, len(v)) for k, v in terminalreporter.stats.items()))}"),
+            (
+                f"Error: No tests were collected. "
+                f"{dict(sorted((k, len(v)) for k, v in terminalreporter.stats.items()))}"
+            ),
         )
         pytest.exit("No tests were collected.", returncode=5)

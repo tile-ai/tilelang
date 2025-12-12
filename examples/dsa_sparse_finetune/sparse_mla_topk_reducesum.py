@@ -31,11 +31,14 @@ def tl_sparse_mla_topk_reducesum_impl(
     threads=128,
 ):
     assert dim == tilelang.math.next_power_of_2(
-        dim), f"haven't check padding correctness yet, dim={dim}"
+        dim
+    ), f"haven't check padding correctness yet, dim={dim}"
     assert tail_dim == tilelang.math.next_power_of_2(
-        tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
-    assert (topk %
-            block_I == 0), "otherwise will load some index=0 thus causing wrong kv to be loaded"
+        tail_dim
+    ), f"haven't check padding correctness yet, dim={tail_dim}"
+    assert (
+        topk % block_I == 0
+    ), "otherwise will load some index=0 thus causing wrong kv to be loaded"
     if sm_scale is None:
         sm_scale = (1.0 / (dim + tail_dim))**0.5
 
@@ -78,19 +81,18 @@ def tl_sparse_mla_topk_reducesum_impl(
 
     @T.prim_func
     def tl_sparse_mla_topk_reducesum_kernel(
-            Q: T.Tensor(q_shape, dtype),  # type: ignore
-            KV: T.Tensor(kv_shape, dtype),  # type: ignore
-            Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
-            Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
-            Offsets: T.Tensor(offsets_shape, indices_dtype),  # type: ignore
-            TokenIndices: T.Tensor(token_indices_shape, indices_dtype),  # type: ignore
-            ReduceSum: T.Tensor(reducesum_shape, accum_dtype),  # type: ignore
+        Q: T.Tensor(q_shape, dtype),  # type: ignore
+        KV: T.Tensor(kv_shape, dtype),  # type: ignore
+        Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
+        Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
+        Offsets: T.Tensor(offsets_shape, indices_dtype),  # type: ignore
+        TokenIndices: T.Tensor(token_indices_shape, indices_dtype),  # type: ignore
+        ReduceSum: T.Tensor(reducesum_shape, accum_dtype),  # type: ignore
     ):
-        with T.Kernel(
-                seq_len * REPLICATE_H, kv_group, threads=threads) as (
-                    bx,
-                    by,
-                ):
+        with T.Kernel(seq_len * REPLICATE_H, kv_group, threads=threads) as (
+                bx,
+                by,
+        ):
             Q_shared = T.alloc_shared([H_per_block, D], dtype)
             Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
             KV_shared = T.alloc_shared([BI, D], dtype)
@@ -122,7 +124,8 @@ def tl_sparse_mla_topk_reducesum_impl(
 
                 for bi_i in T.Parallel(BI):
                     mask[bi_i] = (Indices[bos + s_i, g_i, i_i * BI + bi_i] <= max_kv_i) & (
-                        Indices[bos + s_i, g_i, i_i * BI + bi_i] != -1)
+                        Indices[bos + s_i, g_i, i_i * BI + bi_i] != -1
+                    )
 
                 for bi_i, d_i in T.Parallel(BI, D):
                     KV_shared[bi_i, d_i] = KV[bos + Indices[bos + s_i, g_i, i_i * BI + bi_i], g_i,
@@ -178,8 +181,9 @@ def sparse_mla_topk_reducesum_interface(
     return attn_score
 
 
-def ref_mla_topk_softmax(Q: torch.Tensor, K: torch.Tensor, TopkIndices: torch.Tensor,
-                         offsets: torch.Tensor):
+def ref_mla_topk_softmax(
+    Q: torch.Tensor, K: torch.Tensor, TopkIndices: torch.Tensor, offsets: torch.Tensor
+):
     # q: [batch, seq_len, heads, dim]
     # k: [batch, seq_len, dim]
     sm_scale = Q.shape[-1]**-0.5
@@ -200,7 +204,8 @@ def ref_mla_topk_softmax(Q: torch.Tensor, K: torch.Tensor, TopkIndices: torch.Te
         topk_score = topk_score / topk_score.sum(dim=-1, keepdim=True)
         max_logits = logits.amax(dim=-1).to(torch.float32)
         lse = torch.log(
-            (logits - max_logits.unsqueeze(-1).to(torch.float32)).exp().sum(dim=-1)) + max_logits
+            (logits - max_logits.unsqueeze(-1).to(torch.float32)).exp().sum(dim=-1)
+        ) + max_logits
         all_lse.append(lse)
         all_topk_score.append(topk_score)
     lse = torch.cat(all_lse, dim=0)
@@ -223,7 +228,8 @@ def test_kernel(
     offsets = torch.tensor([0, 1023, S], dtype=torch.int32).cuda()
 
     topk_indices = repeat(
-        torch.arange(topk, dtype=torch.int32).cuda(), 'k -> s k', s=S).contiguous()
+        torch.arange(topk, dtype=torch.int32).cuda(), 'k -> s k', s=S
+    ).contiguous()
 
     lse, ref_attn_score = ref_mla_topk_softmax(q, kv, topk_indices, offsets)
 
@@ -231,7 +237,8 @@ def test_kernel(
     topk_indices = topk_indices.unsqueeze(-2)
 
     attn_score = sparse_mla_topk_reducesum_interface(
-        q, kv, topk_indices, lse, offsets, dim_v=D).squeeze(-2)
+        q, kv, topk_indices, lse, offsets, dim_v=D
+    ).squeeze(-2)
     print(
         f"attn_score err: {get_abs_err(attn_score, ref_attn_score):.6f} ratio: {get_err_ratio(attn_score, ref_attn_score):.6f}"
     )

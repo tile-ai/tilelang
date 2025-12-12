@@ -127,8 +127,9 @@ class Analyzer:
                         iter_var = stmt.node
                         thread_tag = iter_var.thread_tag
                         if thread_tag in self.block_counts:
-                            extent = stmt.value.value if hasattr(stmt.value,
-                                                                 'value') else stmt.value
+                            extent = stmt.value.value if hasattr(
+                                stmt.value, 'value'
+                            ) else stmt.value
                             self.block_counts[thread_tag] = extent
                 elif isinstance(stmt, tvm.tir.For):
                     # Push loop extent onto the stack
@@ -203,7 +204,8 @@ class Analyzer:
             total_global_bytes=self.total_global_bytes,
             estimated_time=estimated_time,
             expected_tflops=peak_tflops,
-            expected_bandwidth_GBps=bandwidth_GBps)
+            expected_bandwidth_GBps=bandwidth_GBps
+        )
 
     @classmethod
     def analysis(cls, fn, device):

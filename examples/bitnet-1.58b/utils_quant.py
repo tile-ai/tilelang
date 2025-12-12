@@ -100,7 +100,8 @@ class BitLinearBitBLAS(nn.Module):
     @classmethod
     def from_bit_linear(cls, bitlinear, weight_group=1):
         bitblas_linear = cls(
-            bitlinear.in_features, bitlinear.out_features, weight_bits=1, input_bits=8)
+            bitlinear.in_features, bitlinear.out_features, weight_bits=1, input_bits=8
+        )
         sw, qweight = bitblas_linear.create_bitblas_weights(bitlinear.weight, weight_group)
         bitblas_linear.register_buffer("qweight", qweight)
         bitblas_linear.register_buffer("sw", sw)
@@ -175,7 +176,8 @@ class BitLinearBitBLAS(nn.Module):
     def native_forward(self, input):
         quant_input = (input + (activation_quant(input, self.input_bits) - input).detach())
         quant_weight = (
-            self.weight + (weight_quant(self.weight, self.weight_bits) - self.weight).detach())
+            self.weight + (weight_quant(self.weight, self.weight_bits) - self.weight).detach()
+        )
 
         out = nn.functional.linear(quant_input, quant_weight)
         if self.bias is not None:

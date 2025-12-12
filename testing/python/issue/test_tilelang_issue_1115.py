@@ -15,14 +15,13 @@ def test_int64_address():
 
         @T.prim_func
         def main(
-                pos: T
-            .Tensor(
+            pos: T.Tensor(
                 [
                     S,
                 ], pos_ty
             ),  # type: ignore  `TypeError: Check failed: (a.dtype() == b.dtype()) is false: mismatched types. int64 vs. int32`
-                value: T.Tensor([S, D], dtype),  # type: ignore
-                cache: T.Tensor([S, D], dtype),  # type: ignore
+            value: T.Tensor([S, D], dtype),  # type: ignore
+            cache: T.Tensor([S, D], dtype),  # type: ignore
         ):
             with T.Kernel(S, threads=128) as bx:
                 slot = pos[bx]

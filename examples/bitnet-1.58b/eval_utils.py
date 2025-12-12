@@ -21,7 +21,8 @@ def get_test_dataset(dataset_name, tokenizer, seqlen=2048):
         testdata = load_dataset(
             'allenai/c4',
             data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'},
-            split='validation')['text']
+            split='validation'
+        )['text']
     else:
         raise NotImplementedError
 
@@ -138,4 +139,5 @@ class LMEvalAdaptor(BaseLM):
 
     def _model_generate(self, context, max_length, eos_token_id):
         return self.model.generate(
-            context, max_length=max_length, eos_token_id=eos_token_id, do_sample=False)
+            context, max_length=max_length, eos_token_id=eos_token_id, do_sample=False
+        )

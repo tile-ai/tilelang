@@ -25,8 +25,10 @@ def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_off
             for j in T.serial(N):
                 A_shared[tid, j] = T.if_then_else(
                     j + N_offset < N,
-                    T.if_then_else(tid + M_offset < M, A[tid + M_offset, j + N_offset],
-                                   T.float32(0)), T.float32(0))
+                    T.if_then_else(
+                        tid + M_offset < M, A[tid + M_offset, j + N_offset], T.float32(0)
+                    ), T.float32(0)
+                )
 
     return main, expected
 
@@ -63,16 +65,17 @@ def issue_1013_buggy_kernel():
             thread_idx = T.get_thread_binding()
             for i in T.serial(0, T.ceildiv(num_tokens - thread_idx, num_threads)):
                 idx = thread_idx + i * num_threads
-                count += T.Cast("int32",
-                                T.if_then_else(idx < num_tokens, x[idx], T.int64(0)) == T.int64(2))
+                count += T.Cast(
+                    "int32",
+                    T.if_then_else(idx < num_tokens, x[idx], T.int64(0)) == T.int64(2)
+                )
 
     return main, expected
 
 
-def vectorize_access_with_atmoic_add_legalize(M: int = 64,
-                                              N: int = 64,
-                                              M_offset: int = 2,
-                                              N_offset: int = 2):
+def vectorize_access_with_atmoic_add_legalize(
+    M: int = 64, N: int = 64, M_offset: int = 2, N_offset: int = 2
+):
     dtype = "float32"
 
     @T.prim_func
@@ -94,8 +97,10 @@ def vectorize_access_with_atmoic_add_legalize(M: int = 64,
             for j in T.serial(N):
                 A_shared[tid, j] = T.if_then_else(
                     j + N_offset < N,
-                    T.if_then_else(tid + M_offset < M, A[tid + M_offset, j + N_offset],
-                                   T.float32(0)), T.float32(0))
+                    T.if_then_else(
+                        tid + M_offset < M, A[tid + M_offset, j + N_offset], T.float32(0)
+                    ), T.float32(0)
+                )
                 # Nest if-then-else is expected, do not flatten it to pass structural equal check
                 if j + N_offset < N:  # noqa: SIM102
                     if tid + M_offset < M:

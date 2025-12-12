@@ -38,7 +38,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
         expected_shapes_str = ' or '.join(map(str, expected_shapes))
         raise ValueError(
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
-            f"output shape is {out.shape}, expected shapes are {expected_shapes_str}")
+            f"output shape is {out.shape}, expected shapes are {expected_shapes_str}"
+        )
 
     @macro
     def reduce_macro(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool):

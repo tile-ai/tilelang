@@ -100,16 +100,18 @@ def get_annotated_mod(
         "host":
             lambda m: tir.transform.Filter(_is_host_call)(m),
         "all":
-            lambda m: (tir.transform.Filter(_is_device_call)(m), tir.transform.Filter(_is_host_call)
-                       (m)),
+            lambda m:
+            (tir.transform.Filter(_is_device_call)(m), tir.transform.Filter(_is_host_call)(m)),
     }
 
     return dispatch[model_type](mod)
 
 
-def pythonic_expr(expr: tvm.tir.PrimExpr,
-                  dtype_map: dict[str, str] | None = None,
-                  ignore_cast: bool = False) -> str:
+def pythonic_expr(
+    expr: tvm.tir.PrimExpr,
+    dtype_map: dict[str, str] | None = None,
+    ignore_cast: bool = False
+) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
 
@@ -222,10 +224,9 @@ def pythonic_expr(expr: tvm.tir.PrimExpr,
     return next(iter(node_to_result_map[expr]), "")
 
 
-def maybe_desc_name(name: str,
-                    matches: list[str],
-                    i: int,
-                    desc_name_map: dict[str, str] | None = None) -> bool:
+def maybe_desc_name(
+    name: str, matches: list[str], i: int, desc_name_map: dict[str, str] | None = None
+) -> bool:
     """
     Check if a parameter name corresponds to a TMA descriptor.
 
@@ -300,12 +301,14 @@ def parse_function_call_args(
 class TMADescriptorParams:
     """Parsed TMA descriptor parameters."""
 
-    def __init__(self,
-                 handle_name: str,
-                 dtype: str,
-                 tensor_rank: int,
-                 global_address: Any,
-                 is_img2col: bool = False):
+    def __init__(
+        self,
+        handle_name: str,
+        dtype: str,
+        tensor_rank: int,
+        global_address: Any,
+        is_img2col: bool = False
+    ):
         self.handle_name = handle_name
         self.dtype = dtype
         self.tensor_rank = tensor_rank
@@ -366,7 +369,8 @@ def parse_tma_descriptor_args(
         # Skip __tvm_tensormap_create_tiled and second element (like CUDA version)
         if len(args) < 3:
             raise ValueError(
-                f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
+                f"TMA descriptor args too short: {len(args)} elements, expected at least 3"
+            )
 
         tma_create_str, _, dtype, tensor_rank, global_address, *remaining_args = args
 
@@ -386,8 +390,10 @@ def parse_tma_descriptor_args(
             # Tiled mode
             expected_args_len = 4 * tensor_rank + 4
             if len(remaining_args) < expected_args_len:
-                raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
-                                 f"expected {expected_args_len} for tensor_rank {tensor_rank}")
+                raise ValueError(
+                    f"Insufficient remaining args: got {len(remaining_args)}, "
+                    f"expected {expected_args_len} for tensor_rank {tensor_rank}"
+                )
 
             # Extract dimensions and strides
             params.global_dim = [pythonic_expr_func(i) for i in remaining_args[:tensor_rank]]
@@ -417,8 +423,10 @@ def parse_tma_descriptor_args(
             # Im2col mode
             expected_args_len = 5 * tensor_rank + 2
             if len(remaining_args) < expected_args_len:
-                raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
-                                 f"expected {expected_args_len} for tensor_rank {tensor_rank}")
+                raise ValueError(
+                    f"Insufficient remaining args: got {len(remaining_args)}, "
+                    f"expected {expected_args_len} for tensor_rank {tensor_rank}"
+                )
 
             # Extract dimensions and strides
             params.global_dim = [pythonic_expr_func(i) for i in remaining_args[:tensor_rank]]

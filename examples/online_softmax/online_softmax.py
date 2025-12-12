@@ -20,8 +20,8 @@ def softmax_kernel(
 
     @T.prim_func
     def main(
-            X: T.Tensor([M, N], dtype),
-            Y: T.Tensor([M, N], dtype),
+        X: T.Tensor([M, N], dtype),
+        Y: T.Tensor([M, N], dtype),
     ):
         with T.Kernel(M, threads=128) as (i_m):
             x = T.alloc_fragment([BN], dtype)

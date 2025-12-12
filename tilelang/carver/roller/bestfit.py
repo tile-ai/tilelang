@@ -40,7 +40,8 @@ class BestFit:
             if remain != 0:
                 found.end -= remain
                 self.list.insert(
-                    self.list.index(found) + 1, Block(found.end, found.end + remain, True))
+                    self.list.index(found) + 1, Block(found.end, found.end + remain, True)
+                )
             return found
         elif len(self.list) > 0 and self.list[-1].is_free:
             add = size - self.list[-1].size()

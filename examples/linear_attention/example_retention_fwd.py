@@ -30,10 +30,10 @@ def chunk_retention_fwd_kernel(
 
     @T.prim_func
     def chunk_retention_fwd(
-            Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-            K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-            V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-            O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
+        Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+        K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+        V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+        O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
     ):
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
@@ -61,9 +61,9 @@ def chunk_retention_fwd_kernel(
 
                 T.gemm(q, k, s, clear_accum=True, transpose_B=True)
                 for row, col in T.Parallel(chunk_size, chunk_size):
-                    s_shared[row,
-                             col] = T.if_then_else(row >= col, s[row, col] * T.exp2(
-                                 (row - col) * log_decay), 0)
+                    s_shared[row, col] = T.if_then_else(
+                        row >= col, s[row, col] * T.exp2((row - col) * log_decay), 0
+                    )
 
                 T.copy(h, h_shared)
                 T.gemm(q, h_shared, o, clear_accum=True)
@@ -77,7 +77,8 @@ def chunk_retention_fwd_kernel(
                     h[row, col] = T.exp2(chunk_size * log_decay) * h[row, col]
                 T.copy(
                     o, O[i_k, i_b, i * chunk_size:(i + 1) * chunk_size, i_h,
-                         i_v * BV:(i_v + 1) * BV])
+                         i_v * BV:(i_v + 1) * BV]
+                )
                 T.gemm(k, v, h, transpose_A=True)
 
     return chunk_retention_fwd

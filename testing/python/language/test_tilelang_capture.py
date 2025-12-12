@@ -11,7 +11,8 @@ def test_tilelang_capture():
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },)
+        },
+    )
     def get_dummy_kernel():
 
         @T.prim_func

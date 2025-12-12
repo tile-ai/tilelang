@@ -11,11 +11,13 @@ def get_nvrtc_version() -> tuple[int, int]:
     return (major, minor)
 
 
-def compile_cuda(code: str,
-                 target_format: Literal["ptx", "cubin"] = "ptx",
-                 arch: int | None = None,
-                 options: str | list[str] | None = None,
-                 verbose: bool = False) -> bytearray:
+def compile_cuda(
+    code: str,
+    target_format: Literal["ptx", "cubin"] = "ptx",
+    arch: int | None = None,
+    options: str | list[str] | None = None,
+    verbose: bool = False
+) -> bytearray:
     """Compile cuda code with NVRTC.
 
     Parameters
@@ -44,7 +46,8 @@ def compile_cuda(code: str,
         # If None, then it will use `tvm.target.Target.current().arch`.
         # Target arch could be a str like "80", "90", "90a", etc.
         major, minor = parse_compute_version(
-            get_target_compute_version(Target.current(allow_none=True)))
+            get_target_compute_version(Target.current(allow_none=True))
+        )
         arch = major * 10 + minor
     prefix = "compute" if target_format == "ptx" else "sm"
     suffix = "a" if arch >= 90 else ""
@@ -105,7 +108,7 @@ def compile_cuda(code: str,
         assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get PTX: {result}"
 
     # Destroy handler
-    assert nvrtc.nvrtcDestroyProgram(
-        program)[0] == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to destroy program: {result}"
+    assert nvrtc.nvrtcDestroyProgram(program)[
+        0] == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to destroy program: {result}"
 
     return result_bytes

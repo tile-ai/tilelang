@@ -17,17 +17,20 @@ def get_configs():
 @tilelang.jit(
     out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
-def flashattn(batch,
-              heads,
-              seq_q,
-              seq_kv,
-              dim,
-              is_causal,
-              block_M=128,
-              block_N=128,
-              num_stages=2,
-              threads=256):
+    }
+)
+def flashattn(
+    batch,
+    heads,
+    seq_q,
+    seq_kv,
+    dim,
+    is_causal,
+    block_M=128,
+    block_N=128,
+    num_stages=2,
+    threads=256
+):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     q_shape = [batch, heads, seq_q, dim]
     kv_shape = [batch, heads, seq_kv, dim]
@@ -75,13 +78,13 @@ def flashattn(batch,
 
     @T.macro
     def Softmax(
-            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
-            scores_max: T.FragmentBuffer([block_M], accum_dtype),
-            scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-            scores_sum: T.FragmentBuffer([block_M], accum_dtype),
-            logsum: T.FragmentBuffer([block_M], accum_dtype),
+        acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+        acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+        scores_max: T.FragmentBuffer([block_M], accum_dtype),
+        scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+        scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+        scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+        logsum: T.FragmentBuffer([block_M], accum_dtype),
     ):
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
@@ -108,18 +111,18 @@ def flashattn(batch,
 
     @T.macro
     def Rescale(
-            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+        acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+        scores_scale: T.FragmentBuffer([block_M], accum_dtype),
     ):
         for i, j in T.Parallel(block_M, dim):
             acc_o[i, j] *= scores_scale[i]
 
     @T.prim_func
     def main(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(kv_shape, dtype),
-            V: T.Tensor(kv_shape, dtype),
-            Output: T.Tensor(q_shape, dtype),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
+        Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(T.ceildiv(seq_q, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
@@ -142,19 +145,18 @@ def flashattn(batch,
 
             loop_range = (
                 T.min(
-                    T.ceildiv(seq_kv, block_N), T.ceildiv(
-                        (bx + 1) * block_M +
-                        past_len, block_N)) if is_causal else T.ceildiv(seq_kv, block_N))
+                    T.ceildiv(seq_kv, block_N), T.ceildiv((bx + 1) * block_M + past_len, block_N)
+                ) if is_causal else T.ceildiv(seq_kv, block_N)
+            )
 
-            for k in T.Pipelined(
-                    loop_range,
-                    num_stages=num_stages,
-                    order=[-1, 0, 3, 1, -1, 2],
-                    stage=[-1, 0, 0, 1, -1, 1],
-                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10, 11], [12], [13], [14]]):
+            for k in T.Pipelined(loop_range, num_stages=num_stages, order=[-1, 0, 3, 1, -1, 2],
+                                 stage=[-1, 0, 0, 1, -1, 1], group=[[0], [1, 2], [3, 4, 5, 6, 7, 8,
+                                                                                  9, 10, 11], [12],
+                                                                    [13], [14]]):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
-                        logsum)
+                Softmax(
+                    acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum
+                )
                 Rescale(acc_o, scores_scale)
                 MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
             for i, j in T.Parallel(block_M, dim):
@@ -205,7 +207,8 @@ def main(
             block_M=128,
             block_N=128,
             num_stages=2,
-            threads=256)
+            threads=256
+        )
         ref_program_processed = partial(ref_program, is_causal=is_causal)
 
         profiler = kernel.get_profiler()

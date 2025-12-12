@@ -17,7 +17,8 @@ class GeneralReductionTemplate(BaseTemplate):
 
     def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:
         roller_hints = get_roller_hints_from_func(
-            self._func, arch=arch, topk=topk, allow_gemv=False)
+            self._func, arch=arch, topk=topk, allow_gemv=False
+        )
         return roller_hints
 
     def initialize_function(self) -> None:

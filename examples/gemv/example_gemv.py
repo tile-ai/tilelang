@@ -23,9 +23,9 @@ def naive_gemv(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N)) as bn:
             tn = T.get_thread_binding(0)  # tn = threadIdx.x
@@ -57,9 +57,9 @@ def naive_splitk_gemv(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, BLOCK_K)) as bn:
             tn = T.get_thread_binding(0)
@@ -95,9 +95,9 @@ def splitk_gemv(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -136,9 +136,9 @@ def splitk_gemv_vectorized(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -177,9 +177,9 @@ def splitk_gemv_vectorized_tvm(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -209,7 +209,8 @@ def splitk_gemv_vectorized_tvm(
                         C_reduced[0],
                         tk,
                         dtype="handle",
-                    ))
+                    )
+                )
 
             C[bn * BLOCK_N + tn] = C_reduced[0]
 
@@ -221,7 +222,8 @@ def get_block_template_configs():
         block_M=[2, 4, 8, 32, 64, 128],
         block_N=[2, 4, 8, 32, 64, 128],
         num_stages=[0, 1, 2, 3, 4],
-        threads=[32, 64, 128, 256])
+        threads=[32, 64, 128, 256]
+    )
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
@@ -237,18 +239,21 @@ def get_block_template_configs():
     },
     out_idx=[2],
 )
-def gemv_alloc_reducer(M,
-                       N,
-                       block_M=128,
-                       block_N=128,
-                       num_stages=2,
-                       threads=256,
-                       dtype: str = "float16",
-                       accum_dtype: str = "float"):
+def gemv_alloc_reducer(
+    M,
+    N,
+    block_M=128,
+    block_N=128,
+    num_stages=2,
+    threads=256,
+    dtype: str = "float16",
+    accum_dtype: str = "float"
+):
 
     @T.prim_func
-    def main(a: T.Tensor((M, N), dtype), x: T.Tensor(N, dtype), o: T.Tensor(M,
-                                                                            dtype)):  # type: ignore
+    def main(
+        a: T.Tensor((M, N), dtype), x: T.Tensor(N, dtype), o: T.Tensor(M, dtype)
+    ):  # type: ignore
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as i0_m:
             o_reducer = T.alloc_reducer(block_M, accum_dtype, replication="all")
             T.clear(o_reducer)
@@ -295,9 +300,9 @@ def get_autotuned_kernel(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -327,7 +332,8 @@ def get_autotuned_kernel(
                         C_reduced[0],
                         tk,
                         dtype="handle",
-                    ))
+                    )
+                )
 
             C[bn * BLOCK_N + tn] = C_reduced[0]
 
@@ -356,7 +362,8 @@ def main(do_bench: bool = True):
     check_correctness_and_bench(splitk_gemv_vectorized(N, K, 2, 32), N, K, do_bench=do_bench)
     check_correctness_and_bench(splitk_gemv_vectorized_tvm(N, K, 2, 32), N, K, do_bench=do_bench)
     check_correctness_and_bench(
-        gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K, do_bench=do_bench)
+        gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K, do_bench=do_bench
+    )
 
     print("Test passed!")
 

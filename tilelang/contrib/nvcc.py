@@ -18,12 +18,9 @@ from tvm.base import py_str
 from tvm.contrib import utils
 
 
-def compile_cuda(code,
-                 target_format="ptx",
-                 arch=None,
-                 options=None,
-                 path_target=None,
-                 verbose=False):
+def compile_cuda(
+    code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False
+):
     """Compile cuda code with NVCC from env.
 
     Parameters
@@ -172,9 +169,9 @@ def default_compile_options(compile_flags: list[str] | None = None) -> list[str]
     return options
 
 
-def get_ptx_from_source(code: str,
-                        compile_flags: list[str] | None = None,
-                        verbose: bool = False) -> str:
+def get_ptx_from_source(
+    code: str, compile_flags: list[str] | None = None, verbose: bool = False
+) -> str:
     """
     Compile CUDA C++ source to PTX using NVCC and return as text.
 
@@ -212,9 +209,9 @@ def _find_tool(name: str) -> str | None:
     return None
 
 
-def get_sass_from_source(code: str,
-                         compile_flags: list[str] | None = None,
-                         verbose: bool = False) -> str:
+def get_sass_from_source(
+    code: str, compile_flags: list[str] | None = None, verbose: bool = False
+) -> str:
     """
     Compile CUDA C++ source to CUBIN and disassemble to SASS.
 
@@ -268,8 +265,10 @@ def get_sass_from_source(code: str,
                 return text
             last_err = f"{tool_name} rc={proc.returncode}, output:\n{text}"
         # If we reach here, all attempts failed
-        raise RuntimeError(f"SASS disassembly failed. Tried tools: "
-                           f"{', '.join(name for name, _ in tools_to_try)}\n{last_err or ''}")
+        raise RuntimeError(
+            f"SASS disassembly failed. Tried tools: "
+            f"{', '.join(name for name, _ in tools_to_try)}\n{last_err or ''}"
+        )
     finally:
         with contextlib.suppress(Exception):
             os.remove(cubin_path)
@@ -438,8 +437,10 @@ def get_target_compute_version(target=None):
     if tvm.cuda(0).exist:
         return tvm.cuda(0).compute_version
 
-    raise ValueError("No CUDA architecture was specified or GPU detected."
-                     "Try specifying it by adding '-arch=sm_xx' to your target.")
+    raise ValueError(
+        "No CUDA architecture was specified or GPU detected."
+        "Try specifying it by adding '-arch=sm_xx' to your target."
+    )
 
 
 def parse_compute_version(compute_version) -> tuple[int, int]:
@@ -524,7 +525,8 @@ def have_tensorcore(compute_version=None, target=None):
                 warnings.warn(
                     "Tensorcore will be disabled due to no CUDA architecture specified."
                     "Try specifying it by adding '-arch=sm_xx' to your target.",
-                    stacklevel=2)
+                    stacklevel=2
+                )
                 return False
             compute_version = target.attrs["arch"]
             # Compute version will be in the form "sm_{major}{minor}"

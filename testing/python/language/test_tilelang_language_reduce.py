@@ -10,8 +10,8 @@ def _make_shared_reduce(M, N, dtype, reduce_cb):
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1) as _:
             A_shared = T.alloc_shared((M, N), dtype)
@@ -35,8 +35,8 @@ def reduce_max_test(M, N, dtype="float16"):
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1) as _:
             A_local = T.alloc_fragment((M, N), dtype)
@@ -54,8 +54,8 @@ def reduce_sum_test(M, N, dtype="float32"):
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1) as _:
             A_local = T.alloc_fragment((M, N), dtype)
@@ -145,8 +145,8 @@ def reduce_sum_test_clear(M, N, dtype="float32"):
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1, threads=32) as _:
             A_local = T.alloc_fragment((M, N), dtype)
@@ -186,8 +186,8 @@ def reduce_max_test_clear(M, N, dtype="float16"):
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1, threads=32) as _:
             A_local = T.alloc_fragment((M, N), dtype)

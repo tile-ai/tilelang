@@ -22,7 +22,8 @@ import tilelang
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    }
+)
 def tilelang_kernel_fwd(
     batch,
     heads,
@@ -67,12 +68,12 @@ def tilelang_kernel_fwd(
 
     @T.prim_func
     def native_sparse_attention(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(kv_shape, dtype),
-            V: T.Tensor(kv_shape, dtype),
-            BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
-            O_slc: T.Tensor(o_slc_shape, dtype),
-            LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
+        BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
+        O_slc: T.Tensor(o_slc_shape, dtype),
+        LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
     ):
         with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([G, BK], dtype)
@@ -107,8 +108,9 @@ def tilelang_kernel_fwd(
 
                     if is_causal:
                         for k, j in T.Parallel(G, BS):
-                            acc_s[k, j] = T.if_then_else(i_t >= (i_s + j), 0,
-                                                         -T.infinity(acc_s.dtype))
+                            acc_s[
+                                k,
+                                j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
 
@@ -207,15 +209,15 @@ def tilelang_kernel_bwd_dkv(
 
     @T.prim_func
     def flash_bwd_dkv(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(k_shape, dtype),
-            V: T.Tensor(v_shape, dtype),
-            LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
-            Delta_slc: T.Tensor(delta_slc_shape, accum_dtype),
-            DO_slc: T.Tensor(do_slc_shape, dtype),
-            DK: T.Tensor(dk_shape, dtype),
-            DV: T.Tensor(dv_shape, dtype),
-            BlockMask: T.Tensor(block_mask_shape, "int32"),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(k_shape, dtype),
+        V: T.Tensor(v_shape, dtype),
+        LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
+        Delta_slc: T.Tensor(delta_slc_shape, accum_dtype),
+        DO_slc: T.Tensor(do_slc_shape, dtype),
+        DK: T.Tensor(dk_shape, dtype),
+        DV: T.Tensor(dv_shape, dtype),
+        BlockMask: T.Tensor(block_mask_shape, "int32"),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)
@@ -246,11 +248,13 @@ def tilelang_kernel_bwd_dkv(
             # [BS, BV]
             T.clear(dv)
 
-            T.annotate_layout({
-                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-            })
+            T.annotate_layout(
+                {
+                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
+                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
+                }
+            )
 
             loop_st = i_s * BS
             loop_ed = seq_len
@@ -373,16 +377,16 @@ def tilelang_kernel_bwd_dqkv(
 
     @T.prim_func
     def flash_bwd_dqkv(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(k_shape, dtype),
-            V: T.Tensor(v_shape, dtype),
-            LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
-            Delta_slc: T.Tensor(delta_slc_shape, accum_dtype),
-            DO_slc: T.Tensor(do_slc_shape, dtype),
-            DQ: T.Tensor(dq_shape, dtype),
-            DK: T.Tensor(dk_shape, dtype),
-            DV: T.Tensor(dv_shape, dtype),
-            BlockMask: T.Tensor(block_mask_shape, "int32"),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(k_shape, dtype),
+        V: T.Tensor(v_shape, dtype),
+        LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
+        Delta_slc: T.Tensor(delta_slc_shape, accum_dtype),
+        DO_slc: T.Tensor(do_slc_shape, dtype),
+        DQ: T.Tensor(dq_shape, dtype),
+        DK: T.Tensor(dk_shape, dtype),
+        DV: T.Tensor(dv_shape, dtype),
+        BlockMask: T.Tensor(block_mask_shape, "int32"),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)
@@ -414,11 +418,13 @@ def tilelang_kernel_bwd_dqkv(
             # [BS, BV]
             T.clear(dv)
 
-            T.annotate_layout({
-                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-            })
+            T.annotate_layout(
+                {
+                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
+                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
+                }
+            )
 
             loop_st = i_s * BS
             loop_ed = seq_len
@@ -489,7 +495,8 @@ def tilelang_kernel_bwd_dqkv(
 @tilelang.jit(
     out_idx=[2], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    }
+)
 def tilelang_kernel_preprocess(
     batch,
     heads,
@@ -505,9 +512,9 @@ def tilelang_kernel_preprocess(
 
     @T.prim_func
     def flash_bwd_prep(
-            O: T.Tensor(shape, dtype),  # type: ignore
-            dO: T.Tensor(shape, dtype),  # type: ignore
-            Delta: T.Tensor([batch, seq_len, heads], accum_dtype),  # type: ignore
+        O: T.Tensor(shape, dtype),  # type: ignore
+        dO: T.Tensor(shape, dtype),  # type: ignore
+        Delta: T.Tensor([batch, seq_len, heads], accum_dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, blk), batch) as (bx, by, bz):
             o = T.alloc_fragment([blk, blk], dtype)
@@ -529,7 +536,8 @@ def tilelang_kernel_preprocess(
 @tilelang.jit(
     out_idx=[2], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    }
+)
 def tilelang_kernel_block_mask(
     batch,
     heads,
@@ -551,9 +559,9 @@ def tilelang_kernel_block_mask(
 
     @T.prim_func
     def flash_bwd_block_mask(
-            BlockIndices: T.Tensor(block_indices_shape, dtype),  # type: ignore
-            BlockCounts: T.Tensor(block_counts_shape, dtype),  # type: ignore
-            BlockMask: T.Tensor(block_mask_shape, dtype),  # type: ignore
+        BlockIndices: T.Tensor(block_indices_shape, dtype),  # type: ignore
+        BlockCounts: T.Tensor(block_counts_shape, dtype),  # type: ignore
+        BlockMask: T.Tensor(block_mask_shape, dtype),  # type: ignore
     ):
         with T.Kernel(seq_len, batch, heads * S) as (bx, by, bz):
             i_t, i_b, i_hs = bx, by, bz
@@ -603,9 +611,9 @@ def parallel_nsa_bwd(
     dk = torch.empty(NV, *k.shape, dtype=k.dtype, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
 
-    block_mask = tilelang_kernel_block_mask(B, H, T, S,
-                                            BS)(block_indices.to(torch.int32),
-                                                block_counts.to(torch.int32)).to(torch.bool)
+    block_mask = tilelang_kernel_block_mask(B, H, T, S, BS)(
+        block_indices.to(torch.int32), block_counts.to(torch.int32)
+    ).to(torch.bool)
 
     fused_qkv_bwd_kernel = tilelang_kernel_bwd_dqkv(
         batch=B,
@@ -618,8 +626,9 @@ def parallel_nsa_bwd(
         selected_blocks=S,
         scale=scale,
     )
-    fused_qkv_bwd_kernel(q, k, v, lse_slc, delta_slc, do_slc, dq, dk, dv,
-                         block_mask.to(torch.int32))
+    fused_qkv_bwd_kernel(
+        q, k, v, lse_slc, delta_slc, do_slc, dq, dk, dv, block_mask.to(torch.int32)
+    )
 
     dq = dq.sum(0)
     dk = dk.sum(0)
@@ -777,8 +786,9 @@ def parallel_nsa(
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, "b h t d -> b t h d"),
-                                     (q, k, v, block_indices))
+        q, k, v, block_indices = map(
+            lambda x: rearrange(x, "b h t d -> b t h d"), (q, k, v, block_indices)
+        )
         g_slc, g_swa = map(lambda x: rearrange(x, "b h t -> b t h"), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, "b h t -> b t h")
@@ -788,8 +798,9 @@ def parallel_nsa(
         block_indices = block_indices[:, :, :, :block_counts]
         block_counts = None
 
-    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size,
-                                             window_size, scale, cu_seqlens)
+    o_slc, o_swa = ParallelNSAFunction.apply(
+        q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens
+    )
     if window_size > 0:
         o = torch.addcmul(o_slc * g_slc.unsqueeze(-1), o_swa, g_swa.unsqueeze(-1))
     else:

@@ -7,9 +7,11 @@ from tvm.tir.function import PrimFunc
 from tvm.script.parser._core import parse, scan_macro, utils
 
 
-def prim_func(func: Callable | None = None,
-              private: bool = False,
-              check_well_formed: bool = False) -> PrimFunc | Callable:
+def prim_func(
+    func: Callable | None = None,
+    private: bool = False,
+    check_well_formed: bool = False
+) -> PrimFunc | Callable:
     """The parsing method for tir prim func, by using `@prim_func` as decorator.
 
     Parameters
@@ -114,7 +116,8 @@ def macro(*args, hygienic: bool = True) -> Callable:
         return _decorator(args[0])
 
     raise ValueError(
-        "Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])")
+        "Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])"
+    )
 
 
 setattr(macro, "dispatch_token", "tir")  # noqa: B010

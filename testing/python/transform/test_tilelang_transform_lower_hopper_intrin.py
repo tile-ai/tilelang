@@ -38,17 +38,25 @@ def test_lower_hopper_intrin_barrier():
             T.evaluate(tir.Call("handle", "tir.create_barriers", [4]))
             with T.If(v_1 == 0), T.Then():
                 T.evaluate(
-                    tir.Call("handle", "tir.ptx_init_barrier_thread_count",
-                             [T.get_mbarrier(0), 128]))
+                    tir.Call(
+                        "handle", "tir.ptx_init_barrier_thread_count", [T.get_mbarrier(0), 128]
+                    )
+                )
                 T.evaluate(
-                    tir.Call("handle", "tir.ptx_init_barrier_thread_count",
-                             [T.get_mbarrier(1), 128]))
+                    tir.Call(
+                        "handle", "tir.ptx_init_barrier_thread_count", [T.get_mbarrier(1), 128]
+                    )
+                )
                 T.evaluate(
-                    tir.Call("handle", "tir.ptx_init_barrier_thread_count",
-                             [T.get_mbarrier(2), 128]))
+                    tir.Call(
+                        "handle", "tir.ptx_init_barrier_thread_count", [T.get_mbarrier(2), 128]
+                    )
+                )
                 T.evaluate(
-                    tir.Call("handle", "tir.ptx_init_barrier_thread_count",
-                             [T.get_mbarrier(3), 128]))
+                    tir.Call(
+                        "handle", "tir.ptx_init_barrier_thread_count", [T.get_mbarrier(3), 128]
+                    )
+                )
             T.evaluate(tir.Call("handle", "tir.tvm_storage_sync", ["shared"]))
 
     _check(before, after)

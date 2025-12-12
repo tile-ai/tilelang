@@ -11,14 +11,14 @@ from varlen_utils import generate_random_padding_mask, generate_qkv
 
 
 def attention_ref(
-        q,
-        k,
-        v,
-        query_padding_mask=None,
-        key_padding_mask=None,
-        causal=False,
-        window_size=(-1, -1),  # -1 means infinite window size
-        upcast=True,
+    q,
+    k,
+    v,
+    query_padding_mask=None,
+    key_padding_mask=None,
+    causal=False,
+    window_size=(-1, -1),  # -1 means infinite window size
+    upcast=True,
 ):
     """
     Arguments:
@@ -70,17 +70,11 @@ def attention_ref(
 @tilelang.jit(
     out_idx=[6], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
-def flashattn(batch_size,
-              UQ,
-              UKV,
-              heads,
-              dim,
-              is_causal,
-              block_M=64,
-              block_N=64,
-              num_stages=0,
-              threads=32):
+    }
+)
+def flashattn(
+    batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64, num_stages=0, threads=32
+):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     q_shape = [UQ, heads, dim]
     k_shape = [UKV, heads, dim]
@@ -92,17 +86,16 @@ def flashattn(batch_size,
 
     @T.prim_func
     def main(
-            Q_unpad: T.Tensor(q_shape, dtype),
-            K_unpad: T.Tensor(k_shape, dtype),
-            V_unpad: T.Tensor(v_shape, dtype),
-            cu_seqlens_q: T.Tensor([batch_size + 1], "int32"),
-            cu_seqlens_k: T.Tensor([batch_size + 1], "int32"),
-            max_seqlen_q: T.int32,
-            Output_unpad: T.Tensor(o_shape, dtype),
+        Q_unpad: T.Tensor(q_shape, dtype),
+        K_unpad: T.Tensor(k_shape, dtype),
+        V_unpad: T.Tensor(v_shape, dtype),
+        cu_seqlens_q: T.Tensor([batch_size + 1], "int32"),
+        cu_seqlens_k: T.Tensor([batch_size + 1], "int32"),
+        max_seqlen_q: T.int32,
+        Output_unpad: T.Tensor(o_shape, dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(max_seqlen_q, block_M), heads, batch_size,
-                threads=threads) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(max_seqlen_q, block_M), heads, batch_size,
+                      threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype, "shared")
             K_shared = T.alloc_shared([block_N, dim], dtype, "shared")
             V_shared = T.alloc_shared([block_N, dim], dtype, "shared")
@@ -151,15 +144,20 @@ def flashattn(batch_size,
                         K_shared[i, d] = 0
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else((bx * block_M + i >= k * block_N + j) and
-                                                     (bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen),
-                                                     -T.infinity(acc_s.dtype), 0)
+                        acc_s[i, j] = T.if_then_else(
+                            (bx * block_M + i >= k * block_N + j) and (
+                                bx * block_M + i >= q_current_seqlen or
+                                k * block_N + j >= k_current_seqlen
+                            ), -T.infinity(acc_s.dtype), 0
+                        )
                 else:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen),
-                                                     -T.infinity(acc_s.dtype), 0)
+                        acc_s[i, j] = T.if_then_else(
+                            (
+                                bx * block_M + i >= q_current_seqlen or
+                                k * block_N + j >= k_current_seqlen
+                            ), -T.infinity(acc_s.dtype), 0
+                        )
 
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
@@ -245,7 +243,8 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128):
         dq_pad_fn,
         dk_pad_fn,
     ) = generate_qkv(
-        q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
+        q, k, v, query_padding_mask, key_padding_mask, kvpacked=False
+    )
 
     UQ = q_unpad.shape[0]  # unpadded query length
     UK = k_unpad.shape[0]  # unpadded key length

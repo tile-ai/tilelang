@@ -2,12 +2,14 @@ from __future__ import annotations
 import tilelang.language as T
 
 
-def plot_layout(layout: T.Fragment,
-                save_directory="./tmp",
-                name: str = "layout",
-                colormap: str = "RdPu",
-                verbose: bool = False,
-                formats: str | list[str] = "png") -> None:
+def plot_layout(
+    layout: T.Fragment,
+    save_directory="./tmp",
+    name: str = "layout",
+    colormap: str = "RdPu",
+    verbose: bool = False,
+    formats: str | list[str] = "png"
+) -> None:
     """
     Plot the layout of a buffer.
 
@@ -94,7 +96,8 @@ def plot_layout(layout: T.Fragment,
             f"Layout visualization has {num_threads} threads, which is less than the warp size ({warp_size}). "
             f"For the best viewing experience, it is recommended to have at least {warp_size} threads.",
             UserWarning,
-            stacklevel=2)
+            stacklevel=2
+        )
     spectral_camp = plt.get_cmap("hsv", warp_size * 6)
 
     for i in range(min(warp_size, num_threads)):
@@ -118,12 +121,9 @@ def plot_layout(layout: T.Fragment,
 
             color = colors[thread_ids[0]]  # Select color based on thread ID
             # Create a rectangle patch for visualization
-            rect = patches.Rectangle((j, i),
-                                     1,
-                                     1,
-                                     linewidth=0.5,
-                                     edgecolor='black',
-                                     facecolor=color)
+            rect = patches.Rectangle(
+                (j, i), 1, 1, linewidth=0.5, edgecolor='black', facecolor=color
+            )
             ax.add_patch(rect)  # Add the rectangle to the plot
 
             # Add text annotations inside the rectangles
@@ -146,7 +146,8 @@ def plot_layout(layout: T.Fragment,
                 ha='center',
                 va='center',
                 color='black',
-                fontsize=thread_fontsize)
+                fontsize=thread_fontsize
+            )
             # Add local ID text with original font size
             ax.text(
                 j + 0.5,
@@ -155,7 +156,8 @@ def plot_layout(layout: T.Fragment,
                 ha='center',
                 va='center',
                 color='black',
-                fontsize=font_size)
+                fontsize=font_size
+            )
 
     # Add row labels to the left side of the plot
     for i in range(nrows):
@@ -173,7 +175,8 @@ def plot_layout(layout: T.Fragment,
             va='center',
             color='black',
             fontsize=font_size,
-            rotation=45)
+            rotation=45
+        )
 
     # Set the plot limits
     ax.set_xlim(0, ncols)
@@ -199,7 +202,8 @@ def plot_layout(layout: T.Fragment,
         fontsize=font_size - 4,
         frameon=False,
         bbox_to_anchor=(legend_x, legend_y),  # Dynamic position
-        ncols=2)
+        ncols=2
+    )
 
     # Create the output directory if it does not exist
     tmp_directory = pathlib.Path(save_directory)
@@ -218,8 +222,10 @@ def plot_layout(layout: T.Fragment,
         else:
             formats_list = [formats_str]
     else:
-        raise TypeError(f"Expected str, but got {type(formats).__name__}. "
-                        f"Please pass a string like 'png', 'pdf', 'svg', 'all', or 'png,pdf'.")
+        raise TypeError(
+            f"Expected str, but got {type(formats).__name__}. "
+            f"Please pass a string like 'png', 'pdf', 'svg', 'all', or 'png,pdf'."
+        )
 
     # Save the figure
     if 'pdf' in formats_list:

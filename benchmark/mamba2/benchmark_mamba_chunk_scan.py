@@ -52,13 +52,18 @@ def ref_program(cb, x, dt, dA_cumsum, C, prev_states, D):
     decay = torch.exp(dt_segment_sum)
     scores_decay = cb * rearrange(decay, "b h c l s -> b c h l s")
     causal_mask = torch.tril(
-        torch.ones(chunk_size, chunk_size, device=x.device, dtype=bool), diagonal=0)
+        torch.ones(chunk_size, chunk_size, device=x.device, dtype=bool), diagonal=0
+    )
     scores_decay = scores_decay.masked_fill(~causal_mask, 0)
-    out = torch.einsum('bchls,bhcs,bcshp->bclhp', scores_decay.to(x.dtype), dt.to(x.dtype),
-                       rearrange(x, "b (c s) h p -> b c s h p", c=nchunks))
+    out = torch.einsum(
+        'bchls,bhcs,bcshp->bclhp', scores_decay.to(x.dtype), dt.to(x.dtype),
+        rearrange(x, "b (c s) h p -> b c s h p", c=nchunks)
+    )
     state_decay_out = torch.exp(rearrange(dA_cumsum, "b h c l -> b c l h 1"))
-    out_prev = torch.einsum('bclhn,bchpn->bclhp', rearrange(
-        C, "b (c l) h n -> b c l h n", c=nchunks), prev_states.to(C.dtype)) * state_decay_out
+    out_prev = torch.einsum(
+        'bclhn,bchpn->bclhp', rearrange(C, "b (c l) h n -> b c l h n", c=nchunks),
+        prev_states.to(C.dtype)
+    ) * state_decay_out
     out = out + out_prev
     out = rearrange(out, "b c l h p -> b (c l) h p")
     if D is not None:
@@ -118,8 +123,10 @@ def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
 
         dtype = cb.dtype
         accum_dtype = torch.float32
-        assert (x.dtype == dt.dtype == dA_cumsum.dtype == C.dtype == prev_states.dtype == D.dtype ==
-                dtype)
+        assert (
+            x.dtype == dt.dtype == dA_cumsum.dtype == C.dtype == prev_states.dtype == D.dtype ==
+            dtype
+        )
 
         out = torch.empty_like(x)
 
@@ -138,8 +145,7 @@ def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
                 tile_b.begin,
                 tile_m.index + tile_c.begin * chunk_size,
                 tile_h.begin // (nheads // ngroups),
-                :,
-            ]
+                :,]
             prev_states_local = prev_states[tile_b.begin, tile_c.begin, tile_h.begin, tile_n, :]
             acc_o = hl.dot(C_local, prev_states_local.T, acc=acc_o)
             acc_o *= scale_m_local[:, None]
@@ -150,12 +156,12 @@ def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
                     tile_c.begin,
                     tile_h.begin // (nheads // ngroups),
                     tile_m,
-                    tile_k,
-                ]
+                    tile_k,]
                 dA_cumsum_local_k = dA_cumsum[tile_b.begin, tile_h.begin, tile_c.begin,
                                               tile_k].to(torch.float32)
-                cb_local *= torch.exp2(dA_cumsum_local_m[:, None] * p -
-                                       dA_cumsum_local_k[None, :] * p)
+                cb_local *= torch.exp2(
+                    dA_cumsum_local_m[:, None] * p - dA_cumsum_local_k[None, :] * p
+                )
                 dt_local = dt[tile_b.begin, tile_h.begin, tile_c.begin, tile_k].to(torch.float32)
                 cb_local = (cb_local * dt_local[None, :]).to(dtype)
                 pred = (tile_m.index + 0)[:, None] >= (tile_k.index + 0)[None, :]
@@ -164,8 +170,7 @@ def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
                     tile_b.begin,
                     tile_c.begin * chunk_size + tile_k.index,
                     tile_h.begin,
-                    tile_n,
-                ]
+                    tile_n,]
                 acc_o = hl.dot(cb_local, x_local, acc=acc_o)
 
             D_local = D[tile_h.begin].to(torch.float32)
@@ -187,7 +192,8 @@ def get_configs():
         block_N=[32, 64],
         block_K=[64, 128, 256],
         block_Dstate=[128],
-        num_stages=[1, 2, 3, 4, 5])
+        num_stages=[1, 2, 3, 4, 5]
+    )
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
@@ -198,19 +204,21 @@ def get_configs():
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def chunk_scan_fwd(batch,
-                   seqlen,
-                   chunk_size,
-                   ngroups,
-                   nheads,
-                   headdim,
-                   dstate,
-                   block_M=64,
-                   block_N=64,
-                   block_K=64,
-                   block_Dstate=128,
-                   num_stages=2,
-                   threads=128):
+def chunk_scan_fwd(
+    batch,
+    seqlen,
+    chunk_size,
+    ngroups,
+    nheads,
+    headdim,
+    dstate,
+    block_M=64,
+    block_N=64,
+    block_K=64,
+    block_Dstate=128,
+    num_stages=2,
+    threads=128
+):
     dtype = "float16"
     accum_dtype = "float"
     nchunks = T.ceildiv(seqlen, chunk_size)
@@ -218,20 +226,17 @@ def chunk_scan_fwd(batch,
 
     @T.prim_func
     def main(
-            cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype),  # type: ignore
-            x: T.Tensor((batch, seqlen, nheads, headdim), dtype),  # type: ignore
-            dt: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),  # type: ignore
-            dA_cumsum: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),  # type: ignore
-            C: T.Tensor((batch, seqlen, ngroups, dstate), dtype),  # type: ignore
-            prev_states: T.Tensor((batch, nchunks, nheads, headdim, dstate), dtype),  # type: ignore
-            D: T.Tensor((nheads), dtype),  # type: ignore
-            Output: T.Tensor((batch, seqlen, nheads, headdim), dtype)  # type: ignore
+        cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype),  # type: ignore
+        x: T.Tensor((batch, seqlen, nheads, headdim), dtype),  # type: ignore
+        dt: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),  # type: ignore
+        dA_cumsum: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),  # type: ignore
+        C: T.Tensor((batch, seqlen, ngroups, dstate), dtype),  # type: ignore
+        prev_states: T.Tensor((batch, nchunks, nheads, headdim, dstate), dtype),  # type: ignore
+        D: T.Tensor((nheads), dtype),  # type: ignore
+        Output: T.Tensor((batch, seqlen, nheads, headdim), dtype)  # type: ignore
     ):
-        with T.Kernel(
-                nheads,
-                T.ceildiv(chunk_size, block_M) * T.ceildiv(headdim, block_N),
-                batch * nchunks,
-                threads=threads) as (bz, bx, by):
+        with T.Kernel(nheads, T.ceildiv(chunk_size, block_M) * T.ceildiv(headdim, block_N),
+                      batch * nchunks, threads=threads) as (bz, bx, by):
             acc_o = T.alloc_fragment((block_M, block_N), accum_dtype)
             acc_o_shared = T.alloc_shared((block_M, block_N), dtype)
             cb_shared = T.alloc_shared((block_M, block_K), dtype, scope="shared.dyn")
@@ -257,16 +262,20 @@ def chunk_scan_fwd(batch,
             m_idx = bx // T.ceildiv(headdim, block_N)
             n_idx = bx % T.ceildiv(headdim, block_N)
 
-            T.annotate_layout({
-                acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared),
-                cb_shared: tilelang.layout.make_swizzled_layout(cb_shared),
-                x_residual_shared: tilelang.layout.make_swizzled_layout(x_residual_shared)
-            })
+            T.annotate_layout(
+                {
+                    acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared),
+                    cb_shared: tilelang.layout.make_swizzled_layout(cb_shared),
+                    x_residual_shared: tilelang.layout.make_swizzled_layout(x_residual_shared)
+                }
+            )
 
             T.no_set_max_nreg()
 
-            T.copy(dA_cumsum[batch_idx, bz, chunk_idx, m_idx * block_M:(m_idx + 1) * block_M],
-                   dA_cs_m_shared)
+            T.copy(
+                dA_cumsum[batch_idx, bz, chunk_idx, m_idx * block_M:(m_idx + 1) * block_M],
+                dA_cs_m_shared
+            )
             T.copy(dA_cs_m_shared, dA_cs_m_local)
             T.clear(acc_o)
 
@@ -274,10 +283,12 @@ def chunk_scan_fwd(batch,
                 scale_m_local[i] = T.exp2(dA_cs_m_local[i] * p)
             T.copy(
                 C[batch_idx, chunk_idx * chunk_size + m_idx * block_M:chunk_idx * chunk_size +
-                  (m_idx + 1) * block_M, bz // (nheads // ngroups), 0:block_Dstate], C_shared)
+                  (m_idx + 1) * block_M, bz // (nheads // ngroups), 0:block_Dstate], C_shared
+            )
             T.copy(
                 prev_states[batch_idx, chunk_idx, bz, n_idx * block_N:(n_idx + 1) * block_N,
-                            0:block_Dstate], prev_state_shared)
+                            0:block_Dstate], prev_state_shared
+            )
             T.gemm(C_shared, prev_state_shared, acc_o, transpose_B=True)
             for i, j in T.Parallel(block_M, block_N):
                 acc_o[i, j] *= scale_m_local[i]
@@ -288,10 +299,13 @@ def chunk_scan_fwd(batch,
                 T.copy(
                     cb[batch_idx, chunk_idx, bz // (nheads // ngroups),
                        m_idx * block_M:(m_idx + 1) * block_M, k * block_K:(k + 1) * block_K],
-                    cb_shared)
+                    cb_shared
+                )
                 T.copy(cb_shared, cb_local)
-                T.copy(dA_cumsum[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K],
-                       dA_cs_k_shared)
+                T.copy(
+                    dA_cumsum[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K],
+                    dA_cs_k_shared
+                )
                 T.copy(dA_cs_k_shared, dA_cs_k_local)
                 for i, j in T.Parallel(block_M, block_K):
                     cb_local[i,
@@ -302,18 +316,21 @@ def chunk_scan_fwd(batch,
                 for i, j in T.Parallel(block_M, block_K):
                     cb_local[i, j] *= dt_local[j]
                 for i, j in T.Parallel(block_M, block_K):
-                    cb_local[i, j] = T.if_then_else(m_idx * block_M + i >= k * block_K + j,
-                                                    cb_local[i, j], 0)
+                    cb_local[i, j] = T.if_then_else(
+                        m_idx * block_M + i >= k * block_K + j, cb_local[i, j], 0
+                    )
                 T.copy(
                     x[batch_idx, chunk_idx * chunk_size + k * block_K:chunk_idx * chunk_size +
-                      (k + 1) * block_K, bz, n_idx * block_N:(n_idx + 1) * block_N], x_shared)
+                      (k + 1) * block_K, bz, n_idx * block_N:(n_idx + 1) * block_N], x_shared
+                )
                 T.gemm(cb_local, x_shared, acc_o)
 
             D_local[0] = D[bz]
             T.copy(
                 x[batch_idx, chunk_idx * chunk_size + m_idx * block_M:chunk_idx * chunk_size +
                   (m_idx + 1) * block_M, bz, n_idx * block_N:(n_idx + 1) * block_N],
-                x_residual_shared)
+                x_residual_shared
+            )
             T.copy(x_residual_shared, x_residual_local)
             for i, j in T.Parallel(block_M, block_N):
                 acc_o[i, j] += x_residual_local[i, j] * D_local[0]
@@ -322,7 +339,8 @@ def chunk_scan_fwd(batch,
             T.copy(
                 acc_o_shared,
                 Output[batch_idx, chunk_idx * chunk_size + m_idx * block_M:chunk_idx * chunk_size +
-                       (m_idx + 1) * block_M, bz, n_idx * block_N:(n_idx + 1) * block_N])
+                       (m_idx + 1) * block_M, bz, n_idx * block_N:(n_idx + 1) * block_N]
+            )
 
     return main
 
@@ -361,7 +379,8 @@ if __name__ == "__main__":
 
     print("Benchmarking Triton...")
     triton_latency = do_bench(
-        lambda: chunk_scan_triton(cb, x, dt, dA_cumsum, C, states, D), _n_warmup=10, _n_repeat=10)
+        lambda: chunk_scan_triton(cb, x, dt, dA_cumsum, C, states, D), _n_warmup=10, _n_repeat=10
+    )
     print(f"Triton TFlops: {total_flops / triton_latency * 1e-9}")
 
     print("Benchmarking Helion...")

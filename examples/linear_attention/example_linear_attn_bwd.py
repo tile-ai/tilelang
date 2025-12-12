@@ -13,7 +13,8 @@ from typing import Optional, Tuple
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    }
+)
 def tl_fused_chunk_bwd_kernel(
     B,
     S,
@@ -37,13 +38,13 @@ def tl_fused_chunk_bwd_kernel(
 
     @T.prim_func
     def fused_chunk_linear_attn_bwd(
-            Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-            K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-            V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-            dO: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-            dQ: T.Tensor([B, S, H, DK], accum_dtype),  # type: ignore
-            dK: T.Tensor([B, S, H, DK], accum_dtype),  # type: ignore
-            dV: T.Tensor([B, S, H, DV], accum_dtype),  # type: ignore
+        Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+        K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+        V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+        dO: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+        dQ: T.Tensor([B, S, H, DK], accum_dtype),  # type: ignore
+        dK: T.Tensor([B, S, H, DK], accum_dtype),  # type: ignore
+        dV: T.Tensor([B, S, H, DV], accum_dtype),  # type: ignore
     ):
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
@@ -66,11 +67,13 @@ def tl_fused_chunk_bwd_kernel(
             dh = T.alloc_fragment([BK, BV], accum_dtype)
             dh_shared = T.alloc_shared([BK, BV], dtype)
 
-            T.annotate_layout({
-                dq_shared: tilelang.layout.make_swizzled_layout(dq_shared),
-                dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-                dv_shared: tilelang.layout.make_swizzled_layout(dv_shared)
-            })
+            T.annotate_layout(
+                {
+                    dq_shared: tilelang.layout.make_swizzled_layout(dq_shared),
+                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
+                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared)
+                }
+            )
             T.use_swizzle(10)
 
             T.clear(h)
@@ -80,8 +83,9 @@ def tl_fused_chunk_bwd_kernel(
             for i in T.Pipelined(0, NT):
                 T.copy(K[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK], k)
                 T.copy(V[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV], v)
-                T.copy(dO[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV],
-                       do)
+                T.copy(
+                    dO[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV], do
+                )
 
                 T.gemm(do, v, ds, transpose_B=True, clear_accum=True)
                 for row, col in T.Parallel(chunk_size, chunk_size):
@@ -96,7 +100,8 @@ def tl_fused_chunk_bwd_kernel(
                 T.copy(dq, dq_shared)
                 T.atomic_add(
                     dQ[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK],
-                    dq_shared)
+                    dq_shared
+                )
 
             # Calculate dK, dV (reversely)
             for i in T.Pipelined(1, NT + 1):
@@ -105,13 +110,16 @@ def tl_fused_chunk_bwd_kernel(
                     q[row, col] = Q[i_b, start * chunk_size + row, i_h, i_k * BK + col] * scale
                 T.copy(
                     K[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
-                      i_k * BK:(i_k + 1) * BK], k)
+                      i_k * BK:(i_k + 1) * BK], k
+                )
                 T.copy(
                     V[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
-                      i_v * BV:(i_v + 1) * BV], v)
+                      i_v * BV:(i_v + 1) * BV], v
+                )
                 T.copy(
                     dO[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
-                       i_v * BV:(i_v + 1) * BV], do)
+                       i_v * BV:(i_v + 1) * BV], do
+                )
 
                 # Calculate dk
                 T.gemm(
@@ -136,11 +144,13 @@ def tl_fused_chunk_bwd_kernel(
                 T.copy(dk, dk_shared)
                 T.atomic_add(
                     dK[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
-                       i_k * BK:(i_k + 1) * BK], dk_shared)
+                       i_k * BK:(i_k + 1) * BK], dk_shared
+                )
                 T.copy(dv, dv_shared)
                 T.atomic_add(
                     dV[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
-                       i_v * BV:(i_v + 1) * BV], dv_shared)
+                       i_v * BV:(i_v + 1) * BV], dv_shared
+                )
 
     return fused_chunk_linear_attn_bwd
 
@@ -171,9 +181,12 @@ def ref_program(q: torch.Tensor,
     h = kv[:, :, -1, :, :]
     kv = torch.cat([torch.zeros_like(kv[:, :, :1]), kv[:, :, :-1]], dim=2)
     inter = q @ kv
-    intra = ((q @ k.transpose(-1, -2)).masked_fill_(
-        torch.triu(torch.ones(chunk_size, chunk_size, dtype=bool, device=q.device), diagonal=1),
-        0)) @ v
+    intra = (
+        (q @ k.transpose(-1, -2)).masked_fill_(
+            torch.triu(torch.ones(chunk_size, chunk_size, dtype=bool, device=q.device), diagonal=1),
+            0
+        )
+    ) @ v
     o = inter + intra
     return rearrange(o, 'b h n c d -> b (n c) h d'), h
 
@@ -194,11 +207,14 @@ def main(B=1, S=1024, H=16, D=128):
     o_ref.backward(do, retain_graph=True)
 
     assert torch.allclose(
-        dq, q.grad, atol=1e-2, rtol=1e-2), f'dq max err: {(dq - q.grad).abs().max()}'
+        dq, q.grad, atol=1e-2, rtol=1e-2
+    ), f'dq max err: {(dq - q.grad).abs().max()}'
     assert torch.allclose(
-        dk, k.grad, atol=1e-2, rtol=1e-2), f'dk max err: {(dk - k.grad).abs().max()}'
+        dk, k.grad, atol=1e-2, rtol=1e-2
+    ), f'dk max err: {(dk - k.grad).abs().max()}'
     assert torch.allclose(
-        dv, v.grad, atol=1e-2, rtol=1e-2), f'dv max err: {(dv - v.grad).abs().max()}'
+        dv, v.grad, atol=1e-2, rtol=1e-2
+    ), f'dv max err: {(dv - v.grad).abs().max()}'
     print('Passed all tests!✅')
 
     # Benchmark

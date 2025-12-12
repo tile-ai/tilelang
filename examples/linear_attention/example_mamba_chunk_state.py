@@ -41,46 +41,49 @@ def ref_program(B, x, dt, dA_cumsum):
     x = rearrange(x, "b (c l) h p -> b c l h p", l=chunk_size)
     B = rearrange(B, "b (c l) ... -> b c l ...", l=chunk_size)
     decay_states = torch.exp((dA_cumsum[:, :, :, -1:] - dA_cumsum))
-    return torch.einsum("bclhn,bhcl,bhcl,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype),
-                        dt.to(x.dtype), x)
+    return torch.einsum(
+        "bclhn,bhcl,bhcl,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype), dt.to(x.dtype), x
+    )
 
 
 def get_configs():
     iter_params = dict(
-        block_M=[64, 128], block_N=[32, 64, 128], block_K=[32, 64], num_stages=[1, 2, 3, 4, 5])
+        block_M=[64, 128], block_N=[32, 64, 128], block_K=[32, 64], num_stages=[1, 2, 3, 4, 5]
+    )
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(out_idx=[4])
-def chunk_state_fwd(batch,
-                    seqlen,
-                    chunk_size,
-                    ngroups,
-                    nheads,
-                    headdim,
-                    dstate,
-                    block_M=64,
-                    block_N=64,
-                    block_K=64,
-                    num_stages=2,
-                    threads=128):
+def chunk_state_fwd(
+    batch,
+    seqlen,
+    chunk_size,
+    ngroups,
+    nheads,
+    headdim,
+    dstate,
+    block_M=64,
+    block_N=64,
+    block_K=64,
+    num_stages=2,
+    threads=128
+):
     dtype = "float16"
     accum_dtype = "float"
     nchunks = T.ceildiv(seqlen, chunk_size)
     p = 1.44269504
 
     @T.prim_func
-    def main(B: T.Tensor((batch, seqlen, ngroups, dstate), dtype), x: T.Tensor(
-        (batch, seqlen, nheads, headdim), dtype), dt: T.Tensor(
-            (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Tensor(
-                (batch, nheads, nchunks, chunk_size), dtype), Output: T.Tensor(
-                    (batch, nchunks, nheads, headdim, dstate), dtype)):
-        with T.Kernel(
-                nheads,
-                T.ceildiv(headdim, block_M) * T.ceildiv(dstate, block_N),
-                batch * nchunks,
-                threads=threads) as (bz, bx, by):
+    def main(
+        B: T.Tensor((batch, seqlen, ngroups, dstate),
+                    dtype), x: T.Tensor((batch, seqlen, nheads, headdim), dtype),
+        dt: T.Tensor((batch, nheads, nchunks, chunk_size),
+                     dtype), dA_cumsum: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),
+        Output: T.Tensor((batch, nchunks, nheads, headdim, dstate), dtype)
+    ):
+        with T.Kernel(nheads, T.ceildiv(headdim, block_M) * T.ceildiv(dstate, block_N),
+                      batch * nchunks, threads=threads) as (bz, bx, by):
             x_shared = T.alloc_shared((block_K, block_M), dtype)
             x_local = T.alloc_fragment((block_K, block_M), dtype)
             xt_local = T.alloc_fragment((block_M, block_K), dtype)
@@ -101,19 +104,24 @@ def chunk_state_fwd(batch,
             m_idx = bx // T.ceildiv(dstate, block_N)
             n_idx = bx % T.ceildiv(dstate, block_N)
 
-            T.annotate_layout({
-                x_shared: tilelang.layout.make_swizzled_layout(x_shared),
-                acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared)
-            })
+            T.annotate_layout(
+                {
+                    x_shared: tilelang.layout.make_swizzled_layout(x_shared),
+                    acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared)
+                }
+            )
 
             dA_cs_last[0] = dA_cumsum[batch_idx, bz, chunk_idx, chunk_size - 1]
             T.clear(acc_o)
             for k in T.Pipelined(loop_range, num_stages=num_stages):
                 T.copy(
                     x[batch_idx, chunk_idx * chunk_size + k * block_K:chunk_idx * chunk_size +
-                      (k + 1) * block_K, bz, m_idx * block_M:(m_idx + 1) * block_M], x_shared)
-                T.copy(dA_cumsum[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K],
-                       dA_cumsum_shared)
+                      (k + 1) * block_K, bz, m_idx * block_M:(m_idx + 1) * block_M], x_shared
+                )
+                T.copy(
+                    dA_cumsum[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K],
+                    dA_cumsum_shared
+                )
                 T.copy(dt[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K], dt_shared)
                 T.copy(dA_cumsum_shared, dA_cumsum_local)
                 T.copy(dt_shared, dt_local)
@@ -125,13 +133,15 @@ def chunk_state_fwd(batch,
                 T.copy(
                     B[batch_idx, chunk_idx * chunk_size + k * block_K:chunk_idx * chunk_size +
                       (k + 1) * block_K, bz // (nheads // ngroups),
-                      n_idx * block_N:(n_idx + 1) * block_N], B_shared)
+                      n_idx * block_N:(n_idx + 1) * block_N], B_shared
+                )
                 T.gemm(xt_local, B_shared, acc_o)
             T.copy(acc_o, acc_o_shared)
             T.copy(
                 acc_o_shared,
                 Output[batch_idx, chunk_idx, bz, m_idx * block_M:(m_idx + 1) * block_M,
-                       n_idx * block_N:(n_idx + 1) * block_N])
+                       n_idx * block_N:(n_idx + 1) * block_N]
+            )
 
     return main
 
@@ -163,7 +173,8 @@ if __name__ == "__main__":
             block_N=128,
             block_K=64,
             num_stages=4,
-            threads=128)
+            threads=128
+        )
         profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")

@@ -10,21 +10,19 @@ def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
         lengths = torch.full((batch_size, 1), max_seqlen, device=device, dtype=torch.int32)
     elif mode == "random":
         lengths = torch.randint(
-            max(1, max_seqlen - 20), max_seqlen + 1, (batch_size, 1), device=device)
+            max(1, max_seqlen - 20), max_seqlen + 1, (batch_size, 1), device=device
+        )
     elif mode == "third":
         lengths = torch.randint(max_seqlen // 3, max_seqlen + 1, (batch_size, 1), device=device)
     padding_mask = (
-        repeat(torch.arange(max_seqlen, device=device), "s -> b s", b=batch_size) < lengths)
+        repeat(torch.arange(max_seqlen, device=device), "s -> b s", b=batch_size) < lengths
+    )
     return padding_mask
 
 
-def generate_qkv(q,
-                 k,
-                 v,
-                 query_padding_mask=None,
-                 key_padding_mask=None,
-                 kvpacked=False,
-                 qkvpacked=False):
+def generate_qkv(
+    q, k, v, query_padding_mask=None, key_padding_mask=None, kvpacked=False, qkvpacked=False
+):
     """
     Arguments:
         q: (batch_size, seqlen_q, nheads, d)
@@ -39,15 +37,18 @@ def generate_qkv(q,
 
     if query_padding_mask is not None:
         q_unpad, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, query_padding_mask)
-        output_pad_fn = lambda output_unpad: pad_input(output_unpad, indices_q, batch_size, seqlen_q
-                                                      )
+        output_pad_fn = lambda output_unpad: pad_input(
+            output_unpad, indices_q, batch_size, seqlen_q
+        )
     else:
         q_unpad = rearrange(q, "b s h d -> (b s) h d")
         cu_seqlens_q = torch.arange(
-            0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q_unpad.device)
+            0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q_unpad.device
+        )
         max_seqlen_q = seqlen_q
         output_pad_fn = lambda output_unpad: rearrange(
-            output_unpad, "(b s) h d -> b s h d", b=batch_size)
+            output_unpad, "(b s) h d -> b s h d", b=batch_size
+        )
 
     if key_padding_mask is not None:
         k_unpad, indices_k, cu_seqlens_k, max_seqlen_k = unpad_input(k, key_padding_mask)
@@ -56,7 +57,8 @@ def generate_qkv(q,
         k_unpad = rearrange(k, "b s h d -> (b s) h d")
         v_unpad = rearrange(v, "b s h d -> (b s) h d")
         cu_seqlens_k = torch.arange(
-            0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=k_unpad.device)
+            0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=k_unpad.device
+        )
         max_seqlen_k = seqlen_k
 
     if qkvpacked:
@@ -68,7 +70,8 @@ def generate_qkv(q,
             dqkv_pad_fn = lambda dqkv_unpad: pad_input(dqkv_unpad, indices_q, batch_size, seqlen_q)
         else:
             dqkv_pad_fn = lambda dqkv_unpad: rearrange(
-                dqkv_unpad, "(b s) t h d -> b s t h d", b=batch_size)
+                dqkv_unpad, "(b s) t h d -> b s t h d", b=batch_size
+            )
         return (
             qkv_unpad.detach().requires_grad_(),
             cu_seqlens_q,
@@ -85,7 +88,8 @@ def generate_qkv(q,
             dkv_pad_fn = lambda dkv_unpad: pad_input(dkv_unpad, indices_k, batch_size, seqlen_k)
         else:
             dkv_pad_fn = lambda dkv_unpad: rearrange(
-                dkv_unpad, "(b s) t h d -> b s t h d", b=batch_size)
+                dkv_unpad, "(b s) t h d -> b s t h d", b=batch_size
+            )
         return (
             q_unpad.detach().requires_grad_(),
             kv_unpad.detach().requires_grad_(),

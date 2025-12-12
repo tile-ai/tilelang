@@ -61,8 +61,9 @@ def view(src: Buffer, shape: list[PrimExpr] | None = None, dtype: str | None = N
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
-    assert prim_expr_equal(bits_product(shape, dtype),
-                           bits_product(src.shape, src.dtype)), "T.reshape/view shape check failed."
+    assert prim_expr_equal(
+        bits_product(shape, dtype), bits_product(src.shape, src.dtype)
+    ), "T.reshape/view shape check failed."
     return T.Tensor(shape, dtype, src.data)
 
 

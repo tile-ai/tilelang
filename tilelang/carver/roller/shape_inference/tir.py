@@ -113,7 +113,8 @@ class DependencyAnalysis:
     def traverse_dependencies(self, compute):
         if isinstance(compute, Statement):
             node = self.get_or_create_node(
-                compute.block_analyzer.get_output_buffers(compute.block)[0].name)
+                compute.block_analyzer.get_output_buffers(compute.block)[0].name
+            )
             # Loop through input tensors
             for input_buffer in compute.block_analyzer.get_input_buffers(compute.block):
                 # Get the input node
@@ -190,8 +191,8 @@ class InputShapeInference:
         input_vars = []
         for target in targets:
             vars = [
-                iter.var
-                for iter in name2dep[target].block_analyzer.get_spatial_axis(name2dep[target].block)
+                iter.var for iter in
+                name2dep[target].block_analyzer.get_spatial_axis(name2dep[target].block)
             ]
             input_vars.append(vars)
             mapping[target] = [vars]
@@ -241,10 +242,12 @@ class InputShapeInference:
         self.target_mapping[targets] = input_vars, mapping
         return input_vars, mapping
 
-    def infer(self,
-              shape: dict[str, list[arith.ConstIntBound]],
-              rstep: dict[str, int] = None,
-              targets=None):
+    def infer(
+        self,
+        shape: dict[str, list[arith.ConstIntBound]],
+        rstep: dict[str, int] = None,
+        targets=None
+    ):
         if rstep is None:
             rstep = {}
         compute_targets = tuple(shape.keys())
@@ -259,7 +262,8 @@ class InputShapeInference:
             # assume the dom.min is always 0, maybe we can extend the IterInfo to include the min value.
             if ax.var.name in rstep:
                 bound = arith.ConstIntBound(
-                    int(ax.dom.min), int(ax.dom.min + min(ax.dom.extent, rstep[ax.var.name]) - 1))
+                    int(ax.dom.min), int(ax.dom.min + min(ax.dom.extent, rstep[ax.var.name]) - 1)
+                )
             else:
                 bound = arith.ConstIntBound(int(ax.dom.min), int(ax.dom.min + ax.dom.extent - 1))
             ana.update(ax.var, bound, True)

@@ -11,11 +11,14 @@ def run_passes(func: tvm.tir.PrimFunc):
 
     cuda_target = tvm.target.Target("cuda", host="llvm")
 
-    mod = tvm.tir.transform.Apply(lambda f: f.with_attr({
-        "global_symbol": "test",
-        "target": cuda_target
-    }))(
-        mod)
+    mod = tvm.tir.transform.Apply(
+        lambda f: f.with_attr({
+            "global_symbol": "test",
+            "target": cuda_target
+        })
+    )(
+        mod
+    )
 
     mod = tvm.tir.transform.AnnotateDeviceRegions()(mod)
     mod = tvm.tir.transform.SplitHostDevice()(mod)
@@ -199,7 +202,8 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
             off = (
                 i // 4 * 8192 + tx // 32 * 1024 + tx % 16 * 64 +
                 (tx % 8 // 4 + i % 4 // 2) % 2 * 32 + (tx % 4 // 2 + i % 2) % 2 * 16 +
-                (tx % 32 // 16 + tx % 2) % 2 * 8)
+                (tx % 32 // 16 + tx % 2) % 2 * 8
+            )
             T.evaluate(
                 T.call_intrin(
                     "handle",
@@ -214,7 +218,8 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
                         2,
                     ),
                     T.int32(2),
-                ))
+                )
+            )
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)

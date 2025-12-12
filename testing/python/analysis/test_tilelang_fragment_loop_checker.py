@@ -5,14 +5,14 @@ import pytest
 
 
 @tilelang.jit
-def simple_invalid_loop(dtype: str = "bfloat16",
-                        accum_dtype: str = "float32",
-                        num_threads: int = 128):
+def simple_invalid_loop(
+    dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128
+):
     A = T.dynamic("A")
 
     @T.prim_func
     def main(
-            data: T.Tensor((128, A), dtype),  # type: ignore
+        data: T.Tensor((128, A), dtype),  # type: ignore
     ):
         with T.Kernel(128, threads=num_threads) as (tid,):
             data_frag = T.alloc_fragment([128], accum_dtype)
@@ -28,14 +28,14 @@ def simple_invalid_loop(dtype: str = "bfloat16",
 
 
 @tilelang.jit
-def nested_invalid_loop(dtype: str = "bfloat16",
-                        accum_dtype: str = "float32",
-                        num_threads: int = 128):
+def nested_invalid_loop(
+    dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128
+):
     A = T.dynamic("A")
 
     @T.prim_func
     def main(
-            data: T.Tensor((128, A), dtype),  # type: ignore
+        data: T.Tensor((128, A), dtype),  # type: ignore
     ):
         with T.Kernel(128, threads=num_threads) as (tid,):
             data_frag = T.alloc_fragment([128], accum_dtype)
@@ -52,14 +52,14 @@ def nested_invalid_loop(dtype: str = "bfloat16",
 
 
 @tilelang.jit
-def invalid_loop_with_complex_dataflow(dtype: str = "bfloat16",
-                                       accum_dtype: str = "float32",
-                                       num_threads: int = 128):
+def invalid_loop_with_complex_dataflow(
+    dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128
+):
     A = T.dynamic("A")
 
     @T.prim_func
     def main(
-            data: T.Tensor((128, A), dtype),  # type: ignore
+        data: T.Tensor((128, A), dtype),  # type: ignore
     ):
         with T.Kernel(128, threads=num_threads) as (tid,):
             data_frag = T.alloc_fragment([128], accum_dtype)
@@ -75,14 +75,14 @@ def invalid_loop_with_complex_dataflow(dtype: str = "bfloat16",
 
 
 @tilelang.jit
-def valid_loop_not_use_loop_var(dtype: str = "bfloat16",
-                                accum_dtype: str = "float32",
-                                num_threads: int = 128):
+def valid_loop_not_use_loop_var(
+    dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128
+):
     A = T.dynamic("A")
 
     @T.prim_func
     def main(
-            data: T.Tensor((128, A), dtype),  # type: ignore
+        data: T.Tensor((128, A), dtype),  # type: ignore
     ):
         with T.Kernel(128, threads=num_threads) as (tid,):
             data_frag = T.alloc_fragment([128], accum_dtype)
@@ -99,14 +99,14 @@ def valid_loop_not_use_loop_var(dtype: str = "bfloat16",
 
 
 @tilelang.jit
-def valid_loop_not_frag(dtype: str = "bfloat16",
-                        accum_dtype: str = "float32",
-                        num_threads: int = 128):
+def valid_loop_not_frag(
+    dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128
+):
     A = T.dynamic("A")
 
     @T.prim_func
     def main(
-            data: T.Tensor((128, A), dtype),  # type: ignore
+        data: T.Tensor((128, A), dtype),  # type: ignore
     ):
         with T.Kernel(128, threads=num_threads) as (tid,):
             data_shared = T.alloc_shared([128], accum_dtype)
@@ -122,14 +122,14 @@ def valid_loop_not_frag(dtype: str = "bfloat16",
 
 
 @tilelang.jit
-def valid_loop_serial(dtype: str = "bfloat16",
-                      accum_dtype: str = "float32",
-                      num_threads: int = 128):
+def valid_loop_serial(
+    dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128
+):
     A = T.dynamic("A")
 
     @T.prim_func
     def main(
-            data: T.Tensor((128, A), dtype),  # type: ignore
+        data: T.Tensor((128, A), dtype),  # type: ignore
     ):
         with T.Kernel(128, threads=num_threads) as (tid,):
             data_shared = T.alloc_shared([128], accum_dtype)

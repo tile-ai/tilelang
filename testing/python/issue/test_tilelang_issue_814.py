@@ -9,8 +9,8 @@ def _tmp_var_kernel(N, block_N, dtype="float"):
 
     @T.prim_func
     def kernel(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=128) as bx:
             for i in T.Parallel(block_N):

@@ -90,7 +90,8 @@ def get_configs(M, N, K, with_roller=False, topk=20):
                 num_stages,
                 thread_num,
                 enable_rasterization,
-            ))
+            )
+        )
 
         configs = [
             {
@@ -120,12 +121,12 @@ def get_best_config(M, N, K, with_roller=False):
 
         @T.prim_func
         def main(
-                A: T.Tensor((M, K), dtype),
-                B: T.Tensor((N, K), dtype),
-                C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((N, K), dtype),
+            C: T.Tensor((M, N), dtype),
         ):
-            with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
+            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M),
+                          threads=thread_num) as (bx, by):
                 A_shared = T.alloc_shared((block_M, block_K), dtype)
                 B_shared = T.alloc_shared((block_N, block_K), dtype)
                 C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -147,14 +148,15 @@ def get_best_config(M, N, K, with_roller=False):
         return main
 
     autotuner = AutoTuner.from_kernel(
-        kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
-            out_idx=[-1],
-            target="auto",
-        ).set_profile_args(
-            supply_type=tl.TensorSupplyType.Integer,
-            ref_prog=ref_program,
-            skip_check=False,
-        )
+        kernel=kernel, configs=get_configs(M, N, K, with_roller)
+    ).set_compile_args(
+        out_idx=[-1],
+        target="auto",
+    ).set_profile_args(
+        supply_type=tl.TensorSupplyType.Integer,
+        ref_prog=ref_program,
+        skip_check=False,
+    )
     return autotuner.run(warmup=3, rep=20)
 
 
@@ -196,23 +198,25 @@ def get_heuristic_config() -> dict:
 
 
 @tl.jit(out_idx=[-1])
-def matmul(M,
-           N,
-           K,
-           block_M,
-           block_N,
-           block_K,
-           num_stages,
-           thread_num,
-           enable_rasteration,
-           dtype="float16",
-           accum_dtype="float"):
+def matmul(
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    num_stages,
+    thread_num,
+    enable_rasteration,
+    dtype="float16",
+    accum_dtype="float"
+):
 
     @T.prim_func
     def gemm_autotune(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -236,11 +240,13 @@ def matmul(M,
     return gemm_autotune
 
 
-def main(M: int = 4096,
-         N: int = 4096,
-         K: int = 4096,
-         use_autotune: bool = False,
-         with_roller: bool = False):
+def main(
+    M: int = 4096,
+    N: int = 4096,
+    K: int = 4096,
+    use_autotune: bool = False,
+    with_roller: bool = False
+):
     use_autotune = True
     if use_autotune:
         result = get_best_config(M, N, K, with_roller)
@@ -270,11 +276,13 @@ if __name__ == "__main__":
         "--use_autotune",
         action="store_true",
         default=False,
-        help="Whether to use autotune for matmul configs")
+        help="Whether to use autotune for matmul configs"
+    )
     parser.add_argument(
         "--with_roller",
         action="store_true",
         default=False,
-        help="Whether to enable BitBLAS roller for search space")
+        help="Whether to enable BitBLAS roller for search space"
+    )
     args = parser.parse_args()
     main(args.m, args.n, args.k, args.use_autotune, args.with_roller)

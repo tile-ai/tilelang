@@ -25,9 +25,11 @@ def supply_tensors_gpu(params):
 
 def ref_program(Q, K, V, is_causal, groups=1):
     assert Q.size(
-        2) == K.size(2) * groups, f"Q heads {Q.size(2)} K heads {K.size(2)} groups {groups}"
+        2
+    ) == K.size(2) * groups, f"Q heads {Q.size(2)} K heads {K.size(2)} groups {groups}"
     assert Q.size(
-        2) == V.size(2) * groups, f"Q heads {Q.size(2)} V heads {V.size(2)} groups {groups}"
+        2
+    ) == V.size(2) * groups, f"Q heads {Q.size(2)} V heads {V.size(2)} groups {groups}"
     dim = Q.size(-1)
     K = K.repeat_interleave(groups, dim=2)
     V = V.repeat_interleave(groups, dim=2)
@@ -63,18 +65,20 @@ def get_configs():
                                                                   enable_rasterization, k_pack,
                                                                   panel_size, qk_coalesced_width,
                                                                   v_coalesced_width):
-        valid_configs.append({
-            "block_M": m,
-            "block_N": n,
-            "num_split_q": s,
-            "threads": t,
-            "num_stages": stages,
-            "enable_rasterization": r,
-            "k_pack": k,
-            "panel_size": p,
-            "qk_coalesced_width": qkw,
-            "v_coalesced_width": vw,
-        })
+        valid_configs.append(
+            {
+                "block_M": m,
+                "block_N": n,
+                "num_split_q": s,
+                "threads": t,
+                "num_stages": stages,
+                "enable_rasterization": r,
+                "k_pack": k,
+                "panel_size": p,
+                "qk_coalesced_width": qkw,
+                "v_coalesced_width": vw,
+            }
+        )
     return valid_configs
 
 
@@ -110,10 +114,10 @@ def fast_flashattn(
 
     @T.prim_func
     def main(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(kv_shape, dtype),
-            V: T.Tensor(kv_shape, dtype),
-            Output: T.Tensor(q_shape, dtype),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
+        Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(num_split_q, batch * heads, threads=threads) as (b_split, byz_combined):
             T.use_swizzle(panel_size, enable=enable_rasterization)
@@ -150,7 +154,8 @@ def fast_flashattn(
                 T.copy(
                     Q[bz, q_block_offset:q_block_offset + block_M, by, :],
                     Q_shared,
-                    coalesced_width=vec_size)
+                    coalesced_width=vec_size
+                )
 
                 loop_end_k = T.ceildiv(q_block_offset + block_M,
                                        block_N) if is_causal else T.ceildiv(seq_len, block_N)
@@ -163,16 +168,19 @@ def fast_flashattn(
                     T.copy(
                         K[bz, kv_idx:kv_idx + block_N, by // groups, :],
                         K_shared,
-                        coalesced_width=vec_size)
+                        coalesced_width=vec_size
+                    )
                     T.copy(
                         V[bz, kv_idx:kv_idx + block_N, by // groups, :],
                         V_shared,
-                        coalesced_width=v_vec_size)
+                        coalesced_width=v_vec_size
+                    )
 
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, 0,
-                                                         -T.infinity(acc_s.dtype))
+                            acc_s[i, j] = T.if_then_else(
+                                q_block_offset + i >= kv_idx + j, 0, -T.infinity(acc_s.dtype)
+                            )
                     else:
                         T.clear(acc_s)
                     T.gemm(
@@ -222,12 +230,14 @@ def fast_flashattn(
     return main
 
 
-def main(batch: int = 1,
-         heads: int = 8,
-         seq_len: int = 4096,
-         dim: int = 128,
-         is_causal: bool = False,
-         groups: int = 1):
+def main(
+    batch: int = 1,
+    heads: int = 8,
+    seq_len: int = 4096,
+    dim: int = 128,
+    is_causal: bool = False,
+    groups: int = 1
+):
 
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul

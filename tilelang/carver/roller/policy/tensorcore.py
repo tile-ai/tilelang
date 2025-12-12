@@ -87,7 +87,8 @@ class TensorCorePolicy(DefaultPolicy):
         target_transaction = self.arch.transaction_size[0] * 2
         # 512 bytes // type bits
         reduce_input_dtype = node.get_buffer_dtype(
-            node.block_analyzer.get_input_buffers(node.reduction_block)[0])
+            node.block_analyzer.get_input_buffers(node.reduction_block)[0]
+        )
         basic = (target_transaction * 8) // reduce_input_dtype.bits
 
         result = {}
@@ -127,8 +128,9 @@ class TensorCorePolicy(DefaultPolicy):
                     return rstep
 
                 def _shared_memory_usage(td: TileDict):
-                    return node.footprint(td.output_tile, new_rstep_map,
-                                          td.tensor_strides_map[node])
+                    return node.footprint(
+                        td.output_tile, new_rstep_map, td.tensor_strides_map[node]
+                    )
 
                 def _score(rstep_id):
                     rstep = {
@@ -207,9 +209,9 @@ class TensorCorePolicy(DefaultPolicy):
         else:
             # must be a a multiple of wmma_k
             return {
-                k.var.name: [
-                    x * self.wmma_k for x in get_all_factors(int(k.dom.extent) // self.wmma_k)
-                ] for k in node.raxis
+                k.var.name:
+                    [x * self.wmma_k for x in get_all_factors(int(k.dom.extent) // self.wmma_k)]
+                for k in node.raxis
             }
 
     def check_tile_shape_isvalid(self, td: TileDict):
@@ -242,8 +244,9 @@ class TensorCorePolicy(DefaultPolicy):
             return super().compute_node_stride_map(node, td)
         use_layout = self._can_implement_layout(node, td)
 
-        AS_stride, BS_stride, C_stride = self._compute_tc_strides(node, td.get_tile(node),
-                                                                  td.get_rstep(node))
+        AS_stride, BS_stride, C_stride = self._compute_tc_strides(
+            node, td.get_tile(node), td.get_rstep(node)
+        )
         A_stride, B_stride, _ = self._compute_tc_strides(node, td.get_tile(node))
         tensor_strides = {}
         output_strides = {
@@ -348,7 +351,8 @@ class TensorCorePolicy(DefaultPolicy):
             for node in self.ordered_nodes:
                 for buffer in node.input_buffers:
                     overall_gmem_size_in_bytes += (
-                        int(np.prod(buffer.shape)) * tvm.DataType(buffer.dtype).bits // 8)
+                        int(np.prod(buffer.shape)) * tvm.DataType(buffer.dtype).bits // 8
+                    )
             return overall_gmem_size_in_bytes < self.arch.l2_cache_size_bytes
 
         conditions.append(_check_memory_size())

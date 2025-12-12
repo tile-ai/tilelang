@@ -8,7 +8,8 @@ from tilelang import language as T
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    },)
+    },
+)
 def _fill_with_static_region_kernel():
     num_tokens = T.symbolic('num_tokens')
 
@@ -24,7 +25,8 @@ def _fill_with_static_region_kernel():
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    },)
+    },
+)
 def _fill_with_dynamic_region_kernel():
     num_tokens = T.symbolic('num_tokens')
 

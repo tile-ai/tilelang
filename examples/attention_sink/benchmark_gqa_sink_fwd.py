@@ -120,7 +120,8 @@ def triton_program(Q, K, V, Sinks, window_size: Optional[int] = None) -> torch.T
         BANDWIDTH=window_size,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        start_q=seq_kv - seq_q)
+        start_q=seq_kv - seq_q
+    )
     return o
 
 
@@ -140,7 +141,8 @@ def main(
         print('Using sliding window attention.')
         assert window_size <= seq_q
         flops_per_matmul = 2.0 * batch * heads * min(
-            window_size, seq_kv // 2) * seq_q * dim  # just a rough estimation
+            window_size, seq_kv // 2
+        ) * seq_q * dim  # just a rough estimation
     else:
         print('Using full attention.')
         flops_per_matmul = 2.0 * batch * heads * seq_q * seq_kv * dim * 0.5
@@ -170,15 +172,14 @@ def main(
             block_N=block_N,
             num_stages=num_stages,
             threads=threads,
-            dtype=dtype)
+            dtype=dtype
+        )
 
         Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, groups, dtype=torch_dtype)
 
-        if torch.allclose(
-                triton_program(Q, K, V, sinks, window_size),
-                ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype),
-                rtol=1e-2,
-                atol=1e-2):
+        if torch.allclose(triton_program(Q, K, V, sinks, window_size),
+                          ref_program(Q, K, V, sinks, window_size,
+                                      dtype=torch_dtype), rtol=1e-2, atol=1e-2):
             print("Checks for triton passed.✅")
         else:
             print("Checks for triton failed.❌")
@@ -208,10 +209,14 @@ if __name__ == "__main__":
         '--window_size',
         type=int,
         default=None,
-        help='window size (default: None, which means full attention)')
+        help='window size (default: None, which means full attention)'
+    )
     parser.add_argument(
-        '--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16")
+        '--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16"
+    )
     parser.add_argument('--tune', action='store_true', help='tune configs')
     args = parser.parse_args()
-    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.groups, args.window_size,
-         args.dtype, args.tune)
+    main(
+        args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.groups, args.window_size,
+        args.dtype, args.tune
+    )

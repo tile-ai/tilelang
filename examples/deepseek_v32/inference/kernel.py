@@ -48,11 +48,10 @@ def act_quant_kernel(N, in_dtype=BF16, out_dtype=FP8, scale_dtype=FP32, round_sc
         Y: T.Tensor[(M, N), out_dtype],
         S: T.Tensor[(M, T.ceildiv(N, group_size)), scale_dtype],
     ):
-        with T.Kernel(
-                T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (
-                    pid_m,
-                    pid_n,
-                ):
+        with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (
+                pid_m,
+                pid_n,
+        ):
             x_shared = T.alloc_shared((blk_m, group_size), in_dtype)
             x_local = T.alloc_fragment((blk_m, group_size), in_dtype)
             amax_local = T.alloc_fragment((blk_m,), scale_dtype)
@@ -97,7 +96,8 @@ def act_quant(x: torch.Tensor,
     """
     assert x.is_contiguous(), "Input tensor must be contiguous"
     assert x.size(-1) % block_size == 0, (
-        f"Last dimension size must be divisible by block_size (block_size={block_size})")
+        f"Last dimension size must be divisible by block_size (block_size={block_size})"
+    )
     N = x.size(-1)
     y = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     s = x.new_empty(*x.size()[:-1], N // block_size, dtype=torch.float32)
@@ -124,11 +124,10 @@ def fp8_gemm_kernel(N, K, out_dtype=BF16, accum_dtype="float32"):
         scales_a: T.Tensor[(M, T.ceildiv(K, group_size)), FP32],
         scales_b: T.Tensor[(T.ceildiv(N, group_size), T.ceildiv(K, group_size)), FP32],
     ):
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
-                    bx,
-                    by,
-                ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
+                bx,
+                by,
+        ):
             A_shared = T.alloc_shared((block_M, block_K), FP8)
             B_shared = T.alloc_shared((block_N, block_K), FP8)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
@@ -164,8 +163,9 @@ def fp8_gemm_kernel(N, K, out_dtype=BF16, accum_dtype="float32"):
     return fp8_gemm_kernel_
 
 
-def fp8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor,
-             b_s: torch.Tensor) -> torch.Tensor:
+def fp8_gemm(
+    a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Tensor
+) -> torch.Tensor:
     """
     Perform a matrix multiplication using FP8 precision.
 
@@ -180,7 +180,8 @@ def fp8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor,
     """
     assert a.is_contiguous() and b.is_contiguous(), "Input tensors must be contiguous"
     assert a_s.is_contiguous() and b_s.is_contiguous(), (
-        "Scaling factor tensors must be contiguous")
+        "Scaling factor tensors must be contiguous"
+    )
     K = a.size(-1)
     M = a.numel() // K
     N = b.size(0)

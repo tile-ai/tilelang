@@ -11,7 +11,8 @@ import argparse
 @tilelang.jit(
     out_idx=[6], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    }
+)
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
@@ -23,13 +24,13 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.prim_func
     def main_split_persistent(
-            Q: T.Tensor([batch, heads, dim], dtype),
-            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(sm_num, threads=256) as (block_id):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
@@ -53,11 +54,15 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             lse_max_local = T.alloc_local([1], accum_dtype)
             scale_local = T.alloc_local([1], accum_dtype)
 
-            T.annotate_layout({
-                # O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                S_shared: tilelang.layout.make_swizzled_layout(S_shared),
-                lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-            })
+            T.annotate_layout(
+                {
+                    # O_shared: tilelang.layout.make_swizzled_layout(O_shared),
+                    S_shared:
+                        tilelang.layout.make_swizzled_layout(S_shared),
+                    lse_logsum_local:
+                        T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
+                }
+            )
             T.use_swizzle(10)
 
             total_tiles = batch * (heads // min(block_H, kv_group_num)) * num_split
@@ -88,21 +93,24 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                             KV_shared,
                             acc_s,
                             transpose_B=True,
-                            policy=T.GemmWarpPolicy.FullCol)
+                            policy=T.GemmWarpPolicy.FullCol
+                        )
                         T.gemm(
                             Q_pe_shared,
                             K_pe_shared,
                             acc_s,
                             transpose_B=True,
-                            policy=T.GemmWarpPolicy.FullCol)
+                            policy=T.GemmWarpPolicy.FullCol
+                        )
                         T.copy(scores_max, scores_max_prev)
                         T.fill(scores_max, -T.infinity(accum_dtype))
                         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                         for i in T.Parallel(block_H):
                             scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
                         for i in T.Parallel(block_H):
-                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale -
-                                                     scores_max[i] * scale)
+                            scores_scale[i] = T.exp2(
+                                scores_max_prev[i] * scale - scores_max[i] * scale
+                            )
                         for i, j in T.Parallel(block_H, block_N):
                             acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                         T.reduce_sum(acc_s, scores_sum, dim=1)
@@ -121,7 +129,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     # T.copy(acc_o, O_shared)
                     T.copy(
                         acc_o, Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H,
-                                              sid, :])
+                                              sid, :]
+                    )
 
             T.sync_grid()
             waves = T.ceildiv(heads * batch, sm_num)
@@ -169,11 +178,12 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     num_head_groups = q.shape[1] // kv.shape[2]
     scale = (dim + pe_dim)**0.5
     q = rearrange(
-        q, 'b (h g) d -> b g h d', g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
+        q, 'b (h g) d -> b g h d', g=num_head_groups
+    )  # [batch_size, num_head_groups, groups, dim]
 
     q_pe = rearrange(
-        q_pe, 'b (h g) d -> b g h d',
-        g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
+        q_pe, 'b (h g) d -> b g h d', g=num_head_groups
+    )  # [batch_size, num_head_groups, groups, pe_dim]
 
     kv = rearrange(kv, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
 
@@ -183,14 +193,16 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     key = torch.concat([kv, k_pe], dim=-1)
 
     scores = einsum(
-        query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, groups, seqlen_kv]
+        query, key, 'b g h d, b h s d -> b g h s'
+    )  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     attention = F.softmax(
-        scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
+        scores / scale, dim=-1
+    )  # [batch_size, num_head_groups, groups, seqlen_kv]
 
-    out = einsum(attention, kv,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, groups, dim]
+    out = einsum(
+        attention, kv, 'b g h s, b h s d -> b g h d'
+    )  # [batch_size, num_head_groups, groups, dim]
     out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
     return out
 

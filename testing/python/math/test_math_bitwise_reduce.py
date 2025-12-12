@@ -22,9 +22,9 @@ def bitwise_reduce(
 
     @T.prim_func
     def reduce_func(
-            A: T.Tensor((M, N), "int32"),
-            B: T.Tensor((M), "int32"),
-            Output: T.Tensor((M), "int32"),
+        A: T.Tensor((M, N), "int32"),
+        B: T.Tensor((M), "int32"),
+        Output: T.Tensor((M), "int32"),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), "int32")

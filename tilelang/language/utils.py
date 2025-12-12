@@ -20,8 +20,9 @@ def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: list
     return region(load, access_type, *extents)
 
 
-def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str,
-                                 extents: list[tir.PrimExpr]):
+def buffer_region_to_tile_region(
+    buffer_region: tir.BufferRegion, access_type: str, extents: list[tir.PrimExpr]
+):
     """Clamp extents and return a tl.region call."""
     mins = [r.min for r in buffer_region.region]
     region_extents = [r.extent for r in buffer_region.region]

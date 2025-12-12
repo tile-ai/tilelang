@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
 COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE = (
-    "Composable Kernel is not installed or found in the expected path")
+    "Composable Kernel is not installed or found in the expected path"
+)
 ", which may lead to compilation bugs when utilize tilelang backend."
 TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
@@ -39,7 +40,8 @@ if not os.path.exists(THIRD_PARTY_ROOT):
     logger.warning(f'Loading tilelang libs from dev root: {dev_lib_root}')
 
 assert TL_LIBS and all(
-    os.path.exists(i) for i in TL_LIBS), f'tilelang lib root do not exists: {TL_LIBS}'
+    os.path.exists(i) for i in TL_LIBS
+), f'tilelang lib root do not exists: {TL_LIBS}'
 
 for lib in TL_LIBS:
     if lib not in sys.path:
@@ -230,13 +232,15 @@ class Environment:
     TILELANG_TMP_DIR = EnvVar("TILELANG_TMP_DIR", os.path.join(TILELANG_CACHE_DIR.get(), "tmp"))
 
     # Kernel Build options
-    TILELANG_PRINT_ON_COMPILATION = EnvVar("TILELANG_PRINT_ON_COMPILATION",
-                                           "1")  # print kernel name on compile
+    TILELANG_PRINT_ON_COMPILATION = EnvVar(
+        "TILELANG_PRINT_ON_COMPILATION", "1"
+    )  # print kernel name on compile
     TILELANG_DISABLE_CACHE = EnvVar(
-        "TILELANG_DISABLE_CACHE",
-        "0")  # disable kernel cache, usually for unit testing / debugging, high priority
-    TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE",
-                                  "0")  # DEPRECATED! clear cache automatically if set
+        "TILELANG_DISABLE_CACHE", "0"
+    )  # disable kernel cache, usually for unit testing / debugging, high priority
+    TILELANG_CLEAR_CACHE = EnvVar(
+        "TILELANG_CLEAR_CACHE", "0"
+    )  # DEPRECATED! clear cache automatically if set
 
     # Kernel selection options
     # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
@@ -244,12 +248,15 @@ class Environment:
 
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
-    TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES",
-                                                "0.9")  # percent of CPUs used
-    TILELANG_AUTO_TUNING_CPU_COUNTS = EnvVar("TILELANG_AUTO_TUNING_CPU_COUNTS",
-                                             "-1")  # -1 means auto
-    TILELANG_AUTO_TUNING_MAX_CPU_COUNT = EnvVar("TILELANG_AUTO_TUNING_MAX_CPU_COUNT",
-                                                "-1")  # -1 means no limit
+    TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar(
+        "TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9"
+    )  # percent of CPUs used
+    TILELANG_AUTO_TUNING_CPU_COUNTS = EnvVar(
+        "TILELANG_AUTO_TUNING_CPU_COUNTS", "-1"
+    )  # -1 means auto
+    TILELANG_AUTO_TUNING_MAX_CPU_COUNT = EnvVar(
+        "TILELANG_AUTO_TUNING_MAX_CPU_COUNT", "-1"
+    )  # -1 means no limit
 
     # TVM integration
     SKIP_LOADING_TILELANG_SO = EnvVar("SKIP_LOADING_TILELANG_SO", "0")

@@ -361,8 +361,9 @@ def visit_with(self: Parser, node: doc.With) -> None:
         for item in node.items:
             frame = self.eval_expr(item.context_expr)
             if not isinstance(frame, Frame):
-                self.report_error(item.context_expr,
-                                  "Invalid context expression in the with-statement.")
+                self.report_error(
+                    item.context_expr, "Invalid context expression in the with-statement."
+                )
             rhs = stack.enter_context(frame)
             if item.optional_vars is not None:
                 self.eval_assign(target=item.optional_vars, source=rhs, bind_value=bind_with_value)
@@ -505,8 +506,9 @@ def visit_if(self: Parser, node: doc.If) -> None:
                 with self.var_table.with_frame():
                     self.visit_body(node.orelse)
         else:
-            self.report_error(node.test,
-                              f"If condition must be a boolean expression, but got {predicate}")
+            self.report_error(
+                node.test, f"If condition must be a boolean expression, but got {predicate}"
+            )
 
 
 @dispatch.register(token="tir", type_name="Assert")

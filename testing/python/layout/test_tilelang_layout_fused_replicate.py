@@ -15,8 +15,8 @@ def fused_index_kernel(B: int, M: int, N: int, BLOCK_MN: int, BLOCK_K: int):
 
     @T.prim_func
     def main(
-            a: T.Buffer((B, M, N), "bfloat16"),
-            a_out: T.Buffer((B, M, N), "float32"),
+        a: T.Buffer((B, M, N), "bfloat16"),
+        a_out: T.Buffer((B, M, N), "float32"),
     ):
         with T.Kernel(
                 T.ceildiv(M, BLOCK_MN),

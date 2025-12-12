@@ -33,8 +33,8 @@ def test_assume_enable_vectorization():
 
         @T.prim_func
         def main(
-                A: T.Tensor((M, N), "float32"),
-                B: T.Tensor((M, N), "float32"),
+            A: T.Tensor((M, N), "float32"),
+            B: T.Tensor((M, N), "float32"),
         ):
             with T.Kernel(1, threads=32) as _:
                 tid = T.get_thread_binding()
@@ -63,8 +63,8 @@ def test_assume_complex_indexing():
 
         @T.prim_func
         def main(
-                A: T.Tensor((M, N), "float32"),
-                B: T.Tensor((M, N), "float32"),
+            A: T.Tensor((M, N), "float32"),
+            B: T.Tensor((M, N), "float32"),
         ):
             with T.Kernel(1, threads=32) as _:
                 tid = T.get_thread_binding()

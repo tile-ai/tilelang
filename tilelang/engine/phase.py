@@ -6,8 +6,9 @@ from tilelang.transform import PassContext
 from tilelang.contrib.nvcc import have_tma, is_hopper
 
 
-def allow_warp_specialized(pass_ctx: PassContext | None = None,
-                           target: Target | None = None) -> bool:
+def allow_warp_specialized(
+    pass_ctx: PassContext | None = None, target: Target | None = None
+) -> bool:
     # avoid circular import
     from tilelang.jit.adapter.utils import is_cuda_target
 
@@ -19,8 +20,9 @@ def allow_warp_specialized(pass_ctx: PassContext | None = None,
     return not disable_warp_specialized
 
 
-def allow_tma_and_warp_specialized(pass_ctx: PassContext | None = None,
-                                   target: Target | None = None) -> bool:
+def allow_tma_and_warp_specialized(
+    pass_ctx: PassContext | None = None, target: Target | None = None
+) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     if not have_tma(target):
@@ -47,12 +49,14 @@ def allow_global_thread_synchronization(pass_ctx: PassContext | None = None) -> 
     return enable_global_thread_sync
 
 
-def should_enable_aggressive_merge(pass_ctx: PassContext | None = None,
-                                   target: Target | None = None) -> bool:
+def should_enable_aggressive_merge(
+    pass_ctx: PassContext | None = None, target: Target | None = None
+) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     enable_aggressive_merge = bool(
-        pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE, False))
+        pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE, False)
+    )
     if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
         # This is a workaround to avoid the bug in the MergeSharedMemoryAllocations pass
         # when warp specialization is enabled, as different warp threads may access different
@@ -258,8 +262,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
     mod = tilelang.transform.MergeSharedMemoryAllocations(
-        enable_aggressive_merge=enable_aggressive_merge)(
-            mod)
+        enable_aggressive_merge=enable_aggressive_merge
+    )(
+        mod
+    )
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     # Inject PTX async copy must behind the thread sync pass

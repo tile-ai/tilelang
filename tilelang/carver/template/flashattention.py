@@ -94,7 +94,8 @@ class FlashAttentionTemplate(BaseTemplate):
                 return te.sum(
                     A[tuple(A_indices)].astype(accum_dtype) *
                     B[tuple(B_indices)].astype(accum_dtype),
-                    axis=k)
+                    axis=k
+                )
 
             # Compute matrix multiplication result
             C = te.compute(

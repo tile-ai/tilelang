@@ -17,8 +17,8 @@ def shared_16x4_to_mma_b_32x4_layout_trans(row, col, rep):
 
 
 def mma_32x8_to_shared_16x16_layout_fp32(thread_id, local_id):
-    row = (thread_id % 2) + (
-        (local_id // 2 % 2) * 2) + 4 * (thread_id // 16) + (thread_id % 16 // 4) % 2 * 8
+    row = (thread_id % 2) + ((local_id // 2 % 2) *
+                             2) + 4 * (thread_id // 16) + (thread_id % 16 // 4) % 2 * 8
     col = (thread_id % 4 // 2) * 2 + (thread_id % 16 // 8) * 4 + (local_id %
                                                                   2) + (local_id // 4) * 8
     return row, col

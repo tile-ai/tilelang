@@ -6,7 +6,8 @@ import tilelang as tl
 import tilelang.language as T
 from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
-    TensorCoreIntrinEmitter,)
+    TensorCoreIntrinEmitter,
+)
 from tilelang.transform import simplify_prim_func
 from tilelang.autotuner import autotune
 import itertools
@@ -103,9 +104,9 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
@@ -116,10 +117,12 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10, enable=enable_rasteration)
@@ -233,9 +236,11 @@ def get_configs(args, kwargs):
             stage=[0, 2],
             enable_rasteration=[True, False],
         )
-        return [{
-            k: v for k, v in zip(iter_params, values)
-        } for values in itertools.product(*iter_params.values())]
+        return [
+            {
+                k: v for k, v in zip(iter_params, values)
+            } for values in itertools.product(*iter_params.values())
+        ]
 
     return configs
 
@@ -295,9 +300,11 @@ if __name__ == "__main__":
         "--with_roller",
         type=bool,
         default=False,
-        help="Whether to use roller to deduce search spaces")
+        help="Whether to use roller to deduce search spaces"
+    )
     parser.add_argument(
-        "--dtype", type=str, default="float16", choices=["float16", "int8"], help="Input data type")
+        "--dtype", type=str, default="float16", choices=["float16", "int8"], help="Input data type"
+    )
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k

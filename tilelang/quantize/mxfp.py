@@ -80,10 +80,12 @@ def get_mxfp_intrin_group(
         AssertionError: if out_dtype, source_format, or storage_dtype are not supported.
         KeyError: if the constructed key does not match any available C source implementation.
     """
-    assert out_dtype in ["float16", "bfloat16"
-                        ], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'bfloat16'."
-    assert source_format in ["int", "uint"
-                            ], f"Invalid source_format: {source_format}. Expected 'int' or 'uint'."
+    assert out_dtype in [
+        "float16", "bfloat16"
+    ], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'bfloat16'."
+    assert source_format in [
+        "int", "uint"
+    ], f"Invalid source_format: {source_format}. Expected 'int' or 'uint'."
     assert storage_dtype in [
         "int32", "int8", "uint8"
     ], f"Invalid storage_dtype: {storage_dtype}. Expected 'int32' or 'int8' or 'uint8'."

@@ -121,7 +121,8 @@ def test_internal_subroutine_call():
     subroutine_call_op = compute_scope.body.value.op
     assert isinstance(subroutine_call_op, tvm.ir.GlobalVar), (
         f"The main function's CallNode should use the subroutine's GLobalVar as the operation, "
-        f"but instead has an operation of type {subroutine_call_op}")
+        f"but instead has an operation of type {subroutine_call_op}"
+    )
 
 
 def test_subroutine_call_to_externally_visible_subroutine():
@@ -157,8 +158,10 @@ def test_subroutine_call_to_externally_visible_subroutine():
     assert (
         isinstance(subroutine_call_op, tvm.ir.Op) and
         subroutine_call_op.name == "tir.tvm_call_cpacked"
-    ), (f"The main function's CallNode should be lowered to the builtin 'tir.tvm_call_cpacked', "
-        f"but instead has an operation of type {subroutine_call_op}")
+    ), (
+        f"The main function's CallNode should be lowered to the builtin 'tir.tvm_call_cpacked', "
+        f"but instead has an operation of type {subroutine_call_op}"
+    )
 
 
 @tilelang.testing.requires_llvm
@@ -167,10 +170,10 @@ def test_function_call_with_wrong_argument_count():
 
     @T.prim_func
     def func(
-            A: T.Buffer([16, 16], "int32"),
-            B: T.Buffer([16, 16], "int32"),
-            C: T.Buffer([16, 16], "int32"),
-            D: T.Buffer([16, 16], "int32"),
+        A: T.Buffer([16, 16], "int32"),
+        B: T.Buffer([16, 16], "int32"),
+        C: T.Buffer([16, 16], "int32"),
+        D: T.Buffer([16, 16], "int32"),
     ):
         pass
 

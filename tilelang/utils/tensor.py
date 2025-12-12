@@ -63,7 +63,8 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
         if hasattr(param, "shape") and not param.shape:
             raise ValueError(
                 f"TensorType must have a shape, but got {type(param)}, "
-                "likely you are trying to generate a random tensor with a dynamic symbolic shape.")
+                "likely you are trying to generate a random tensor with a dynamic symbolic shape."
+            )
 
         # Check if with dynamic symbolic shape
         for shape in param.shape:
@@ -82,7 +83,8 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
                 return torch.randint(
-                    low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
+                    low=-128, high=128, size=shape, device=device, dtype=torch.int8
+                ).to(dtype)
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             elif dtype in {torch.float16, torch.float32, torch.bfloat16}:
@@ -92,8 +94,7 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
 
         if dtype == torch.int8 and supply_type in [
                 TensorSupplyType.Uniform,
-                TensorSupplyType.Normal,
-        ]:
+                TensorSupplyType.Normal,]:
             return torch.ones(*shape, device=device, dtype=dtype)
 
         if supply_type == TensorSupplyType.Integer:
@@ -104,17 +105,20 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
                 return torch.randint(
-                    low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
+                    low=-128, high=128, size=shape, device=device, dtype=torch.int8
+                ).to(dtype)
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
         elif supply_type == TensorSupplyType.Uniform:
             return torch.empty(
-                *shape, device=device, dtype=torch.float32).uniform_(-1.0, 1.0).to(dtype)
+                *shape, device=device, dtype=torch.float32
+            ).uniform_(-1.0, 1.0).to(dtype)
         elif supply_type == TensorSupplyType.Normal:
             return torch.empty(
-                *shape, device=device, dtype=torch.float32).normal_(-1.0, 1.0).to(dtype)
+                *shape, device=device, dtype=torch.float32
+            ).normal_(-1.0, 1.0).to(dtype)
         elif supply_type == TensorSupplyType.Randn:
             return torch.randn(*shape, device=device).to(dtype)
         elif supply_type == TensorSupplyType.Zero:
@@ -259,7 +263,8 @@ def torch_assert_close(
         check_device=check_device,
         check_dtype=check_dtype,
         check_layout=check_layout,
-        check_stride=check_stride)
+        check_stride=check_stride
+    )
     tensor_a, tensor_b = _equalize_attributes(tensor_a, tensor_b)
 
     mismatched = ~torch.isclose(tensor_a, tensor_b, rtol=rtol, atol=atol, equal_nan=equal_nan)
@@ -276,8 +281,10 @@ def torch_assert_close(
 
     # Print debug information about the mismatch
     if verbose:
-        print(f"Number of mismatched elements: {num_mismatched} / {total_elements} "
-              f"(allowed: {max_allowed_mismatched})")
+        print(
+            f"Number of mismatched elements: {num_mismatched} / {total_elements} "
+            f"(allowed: {max_allowed_mismatched})"
+        )
 
     # If there are mismatched elements, print the first mismatch
     if num_mismatched > 0:
@@ -289,9 +296,11 @@ def torch_assert_close(
         b_val = tensor_b.reshape(-1)[flat_idx].item()
         abs_diff = abs(a_val - b_val)
         rel_diff = abs_diff / (abs(b_val) + 1e-12)
-        mismatch_info = (f"\nFirst mismatch at index {idx}: "
-                         f"lhs={a_val:.6f}, rhs={b_val:.6f}, "
-                         f"abs_diff={abs_diff:.6f}, rel_diff={rel_diff:.6f}")
+        mismatch_info = (
+            f"\nFirst mismatch at index {idx}: "
+            f"lhs={a_val:.6f}, rhs={b_val:.6f}, "
+            f"abs_diff={abs_diff:.6f}, rel_diff={rel_diff:.6f}"
+        )
     else:
         mismatch_info = ""
 
@@ -304,6 +313,7 @@ def torch_assert_close(
             f"\nGreatest absolute difference: {diff.max().item()}, "
             f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}"
             f"\n{base_name}: {tensor_a}"
-            f"\n{ref_name}: {tensor_b}")
+            f"\n{ref_name}: {tensor_b}"
+        )
     else:
         return True

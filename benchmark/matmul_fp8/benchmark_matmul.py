@@ -104,9 +104,11 @@ def get_configs(args, kwargs):
             policy=[T.GemmWarpPolicy.Square],
             enable_rasteration=[True, False],
         )
-        return [{
-            k: v for k, v in zip(iter_params, values)
-        } for values in itertools.product(*iter_params.values())]
+        return [
+            {
+                k: v for k, v in zip(iter_params, values)
+            } for values in itertools.product(*iter_params.values())
+        ]
 
     return configs
 
@@ -164,9 +166,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         """
         The compiled TVM function for block-level matrix multiplication.

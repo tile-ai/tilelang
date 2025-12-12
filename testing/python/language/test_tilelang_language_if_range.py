@@ -9,8 +9,8 @@ def tilelang_if_range(M, N, block_M, block_N, dtype="float16"):
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):

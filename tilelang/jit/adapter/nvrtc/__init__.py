@@ -14,9 +14,11 @@ logger = logging.getLogger(__name__)
 
 # Check if cuda-python is available
 is_nvrtc_available = False
-NVRTC_UNAVAILABLE_MESSAGE = ("cuda-python is not available, NVRTC backend cannot be used. "
-                             "Please install cuda-python via `pip install cuda-python` "
-                             "if you want to use the NVRTC backend.")
+NVRTC_UNAVAILABLE_MESSAGE = (
+    "cuda-python is not available, NVRTC backend cannot be used. "
+    "Please install cuda-python via `pip install cuda-python` "
+    "if you want to use the NVRTC backend."
+)
 
 try:
     import cuda.bindings.driver as cuda  # noqa: F401

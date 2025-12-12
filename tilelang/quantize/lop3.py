@@ -1139,7 +1139,8 @@ def get_lop3_intrin_group(
 
     if source_format not in ["int", "uint"]:
         raise ValueError(
-            f"Invalid source_format. Expected 'int' or 'uint', but got {source_format}.")
+            f"Invalid source_format. Expected 'int' or 'uint', but got {source_format}."
+        )
     if with_zeros and source_format == "int":
         raise ValueError(f"Zeros are not supported for signed integers, but got {source_format}")
 

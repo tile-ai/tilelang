@@ -188,13 +188,15 @@ class KernelCache:
                 self.logger.debug(f"Checking disk cache for kernel {func.attrs['global_symbol']}")
 
             # Then check disk cache
-            kernel = self._load_kernel_from_disk(key, norm_target, target_host, out_idx,
-                                                 execution_backend, pass_configs, compile_flags,
-                                                 func, verbose)
+            kernel = self._load_kernel_from_disk(
+                key, norm_target, target_host, out_idx, execution_backend, pass_configs,
+                compile_flags, func, verbose
+            )
             if kernel is not None:
                 if verbose:
                     self.logger.debug(
-                        f"Found kernel in disk cache for {func.attrs['global_symbol']}")
+                        f"Found kernel in disk cache for {func.attrs['global_symbol']}"
+                    )
                 # Populate memory cache with disk result
                 self._memory_cache[key] = kernel
                 return kernel
@@ -262,11 +264,9 @@ class KernelCache:
         executable.export_library(temp_path)
         os.replace(temp_path, path)
 
-    def _save_kernel_to_disk(self,
-                             key: str,
-                             kernel: JITKernel,
-                             func: Callable = None,
-                             verbose: bool = False):
+    def _save_kernel_to_disk(
+        self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False
+    ):
         """
         Persists a compiled kernel to disk cache.
 
@@ -292,8 +292,9 @@ class KernelCache:
             if verbose:
                 self.logger.debug(f"Saving kernel source code to file: {device_kernel_path}")
             if kernel.kernel_source is not None:
-                KernelCache._safe_write_file(device_kernel_path, "w",
-                                             lambda file: file.write(kernel.kernel_source))
+                KernelCache._safe_write_file(
+                    device_kernel_path, "w", lambda file: file.write(kernel.kernel_source)
+                )
         except Exception as e:
             self.logger.error(f"Error saving kernel source code to disk: {e}")
 
@@ -305,11 +306,13 @@ class KernelCache:
             if self.execution_backend == "tvm_ffi":
                 KernelCache._safe_write_file(
                     host_kernel_path, "w",
-                    lambda file: file.write(kernel.adapter.get_host_source()))
+                    lambda file: file.write(kernel.adapter.get_host_source())
+                )
             else:
                 KernelCache._safe_write_file(
                     host_kernel_path, "w",
-                    lambda file: file.write(kernel.adapter.get_kernel_source()))
+                    lambda file: file.write(kernel.adapter.get_kernel_source())
+                )
         except Exception as e:
             self.logger.error(f"Error saving host kernel source code to disk: {e}")
 
@@ -334,7 +337,8 @@ class KernelCache:
                     self.logger.debug(f"Saving kernel nvrtc python code to file: {kernel_py_path}")
                 KernelCache._safe_write_file(
                     kernel_py_path, "wb",
-                    lambda file: file.write(KernelCache._load_binary(src_lib_path)))
+                    lambda file: file.write(KernelCache._load_binary(src_lib_path))
+                )
             elif self.execution_backend == "tvm_ffi":
                 executable = kernel.adapter.executable
                 if verbose:
@@ -346,7 +350,8 @@ class KernelCache:
                     self.logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
                 KernelCache._safe_write_file(
                     kernel_lib_path, "wb",
-                    lambda file: file.write(KernelCache._load_binary(src_lib_path)))
+                    lambda file: file.write(KernelCache._load_binary(src_lib_path))
+                )
 
         except Exception as e:
             self.logger.error(f"Error saving kernel library to disk: {e}")
@@ -356,8 +361,9 @@ class KernelCache:
             params_path = os.path.join(cache_path, PARAMS_PATH)
             if verbose:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
-            KernelCache._safe_write_file(params_path, "wb",
-                                         lambda file: cloudpickle.dump(kernel.params, file))
+            KernelCache._safe_write_file(
+                params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file)
+            )
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
 
@@ -418,7 +424,8 @@ class KernelCache:
         try:
             if verbose:
                 self.logger.debug(
-                    f"Loading wrapped kernel source code from file: {host_kernel_path}")
+                    f"Loading wrapped kernel source code from file: {host_kernel_path}"
+                )
             with open(host_kernel_path) as f:
                 host_kernel_source = f.read()
         except Exception as e:

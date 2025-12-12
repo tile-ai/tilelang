@@ -41,18 +41,20 @@ class CtypesKernelAdapter(BaseKernelAdapter):
     param_dtypes: list[torch.dtype] | None = None  # Cache for parameter dtypes
     param_shapes: list[list] | None = None  # Cache for parameter shapes
 
-    def __init__(self,
-                 params: list[TensorType],
-                 result_idx: list[int],
-                 target: str,
-                 func_or_mod: tir.PrimFunc | tvm.IRModule,
-                 host_mod: tvm.IRModule | None = None,
-                 device_mod: tvm.IRModule | None = None,
-                 host_kernel_source: str | None = None,
-                 device_kernel_source: str | None = None,
-                 verbose: bool = False,
-                 pass_configs: dict[str, Any] | None = None,
-                 compile_flags: list[str] | None = None):
+    def __init__(
+        self,
+        params: list[TensorType],
+        result_idx: list[int],
+        target: str,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_mod: tvm.IRModule | None = None,
+        device_mod: tvm.IRModule | None = None,
+        host_kernel_source: str | None = None,
+        device_kernel_source: str | None = None,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None
+    ):
         """Initialize the adapter with the given TIR function or module.
 
         Args:
@@ -109,17 +111,19 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self._post_init()
 
     @classmethod
-    def from_database(cls,
-                      params: list[TensorType],
-                      result_idx: list[int],
-                      target: str,
-                      func_or_mod: tir.PrimFunc | tvm.IRModule,
-                      host_kernel_source: str,
-                      device_kernel_source: str,
-                      kernel_lib_path: str,
-                      verbose: bool = False,
-                      pass_configs: dict[str, Any] | None = None,
-                      compile_flags: list[str] | None = None):
+    def from_database(
+        cls,
+        params: list[TensorType],
+        result_idx: list[int],
+        target: str,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_kernel_source: str,
+        device_kernel_source: str,
+        kernel_lib_path: str,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None
+    ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)

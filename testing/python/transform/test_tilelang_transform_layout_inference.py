@@ -8,9 +8,11 @@ import pytest
 auto_target = tvm.target.Target(determine_target("auto"))
 
 
-@pytest.mark.parametrize("block_M, block_N, block_K, threads, vec_load_b, dtype", [
-    (64, 64, 32, 128, 8, "float16"),
-])
+@pytest.mark.parametrize(
+    "block_M, block_N, block_K, threads, vec_load_b, dtype", [
+        (64, 64, 32, 128, 8, "float16"),
+    ]
+)
 def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
     N = tvm.te.var("n")
     K = tvm.te.var("k")
@@ -35,7 +37,8 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                                          B[k * block_K + i * (threads * vec_load_b // block_N) +
                                            t // (block_N // vec_load_b), bx * block_N + t %
                                            (block_N // vec_load_b) * (block_N // vec_load_b) + vec],
-                                         T.float16(0))
+                                         T.float16(0)
+                                     )
 
         return tvm.IRModule({'main': main})
 
@@ -62,7 +65,8 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                                              B[k * block_K + i * (threads * vec_load_b // block_N) +
                                                t // (block_N // vec_load_b),
                                                bx * block_N + t % (block_N // vec_load_b) *
-                                               (block_N // vec_load_b) + vec], T.float16(0))
+                                               (block_N // vec_load_b) + vec], T.float16(0)
+                                         )
                         else:
                             for vec in T.serial(vec_load_b):
                                 B_shared[i * (threads * vec_load_b // block_N) + t //
@@ -75,7 +79,8 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                                              B[k * block_K + i * (threads * vec_load_b // block_N) +
                                                t // (block_N // vec_load_b),
                                                bx * block_N + t % (block_N // vec_load_b) *
-                                               (block_N // vec_load_b) + vec], T.float16(0))
+                                               (block_N // vec_load_b) + vec], T.float16(0)
+                                         )
 
         return tvm.IRModule({'main': main})
 

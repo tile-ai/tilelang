@@ -64,7 +64,8 @@ def unwrap_cond(expr):
             f"Python expression `{expr}` is used as condition in TileLang, \n"
             "this is treated as a constant expression. ",
             stack_info=True,
-            stacklevel=3)
+            stacklevel=3
+        )
         return bool(expr)
 
 
@@ -206,7 +207,8 @@ class Builder(BaseBuilder):
         if self.find_frame_idx(BoolOpFrame) is not None:
             raise RuntimeError(
                 f"Macro `{name}` is used inside boolean expressions, "
-                "please use `if` to replace `M and M`, `M or M`, `M if xxx else M` constructs")
+                "please use `if` to replace `M and M`, `M or M`, `M if xxx else M` constructs"
+            )
         save = self.name_inside_frame, self.macro_arg_annot
         self.name_inside_frame = {}
         self.macro_arg_annot = annotations or {}
@@ -247,7 +249,8 @@ class Builder(BaseBuilder):
             logger.warning(
                 'Writing code after continue/break may cause undefined behavior in tilelang.',
                 stack_info=True,
-                stacklevel=3)
+                stacklevel=3
+            )
 
     @contextmanager
     def with_frame(self, frame: AbstractContextManager[Any] | None):
@@ -311,7 +314,8 @@ class Builder(BaseBuilder):
             pass
         else:
             logger.warning(
-                f"Unused return value: {val}({type(val)})", stack_info=True, stacklevel=2)
+                f"Unused return value: {val}({type(val)})", stack_info=True, stacklevel=2
+            )
 
     def ctx_for(self, it):
         self.check_continue_break()
@@ -338,7 +342,8 @@ class Builder(BaseBuilder):
             else:
                 raise TypeError(
                     f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
-                    "range, T.serial, T.unroll, T.grid, T.parallel, T.vectorized, T.thread_binding")
+                    "range, T.serial, T.unroll, T.grid, T.parallel, T.vectorized, T.thread_binding"
+                )
             with self.with_frame(real_frame) as v:
                 IRBuilder.name('_tmp', v)
                 yield it.start + v * it.step
@@ -346,7 +351,8 @@ class Builder(BaseBuilder):
             if not isinstance(it, tir.frame.ForFrame):
                 raise TypeError(
                     f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
-                    "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding")
+                    "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding"
+                )
             with self.with_frame(it) as v:
                 yield v
 
@@ -377,7 +383,8 @@ class Builder(BaseBuilder):
                     'While loop with constant false condition detected in Tilelang, the loop body will never be executed.\n',
                     f'Condition: {cond_v}({type(cond_v)}) => {cond_v_unwrap}({type(cond_v_unwrap)})\n',
                     stack_info=True,
-                    stacklevel=2)
+                    stacklevel=2
+                )
         with self.with_frame(tir.While(cond_v_unwrap)):
             yield None
 
@@ -465,12 +472,13 @@ class Builder(BaseBuilder):
                 )
             return self.enter_frame(value)
         elif isinstance(value, OutTensor):
-            arg = tir.arg(name,
-                          tir.buffer(
-                              shape=value.shape,
-                              dtype=value.dtype,
-                              strides=value.strides,
-                          ))
+            arg = tir.arg(
+                name, tir.buffer(
+                    shape=value.shape,
+                    dtype=value.dtype,
+                    strides=value.strides,
+                )
+            )
             arg._out_idx = self.out_tensor_cnt
             self.out_tensor_cnt += 1
             return arg
@@ -491,7 +499,8 @@ class Builder(BaseBuilder):
         self.check_continue_break()
         if annot is not self.empty:
             logger.warning(
-                "Type annotation in slice assignment has no effect", stack_info=True, stacklevel=2)
+                "Type annotation in slice assignment has no effect", stack_info=True, stacklevel=2
+            )
         if isinstance(lval, Buffer):
             tir.buffer_store(lval, value, sl)
         else:
@@ -622,8 +631,8 @@ class Builder(BaseBuilder):
                 region = [
                     Range(
                         self.bind('_', x.begin),
-                        end=self.bind('_', x.end) if x.end is not None else None)
-                    for x in value.region
+                        end=self.bind('_', x.end) if x.end is not None else None
+                    ) for x in value.region
                 ]
                 return BufferRegion(value.buffer, region=region)
             raise ValueError(
@@ -689,7 +698,8 @@ class PrimFuncCreater(Generic[_P, _T]):
                 'ir_gen': self.ir_gen,
                 'orig_func': self.orig_func
             },
-            indent=2)
+            indent=2
+        )
         return f'{self.__class__.__name__}(\n{fmt}\n)'
 
 
@@ -770,7 +780,8 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
     def impl(func: Callable[_P, _T]) -> Macro[_P, _T]:
         annotations = get_type_hints(func)
         return Macro(
-            name=func.__name__, orig_func=func, ir_gen=mutate(func), annotations=annotations)
+            name=func.__name__, orig_func=func, ir_gen=mutate(func), annotations=annotations
+        )
 
     return impl(func) if func is not None else impl
 
@@ -903,7 +914,8 @@ def prim_func(func: Callable[_P, _T] = None,
                 raise ValueError(
                     f"Cannot create PrimFunc for `{func.__name__}`, some arguments are not compile-time known, \n"
                     f"Annotations:\n{func_annot.annots}"
-                    f"Unknown Args: {unknown_args}")
+                    f"Unknown Args: {unknown_args}"
+                )
             return prim_func_generator
 
     return impl(func) if func is not None else impl

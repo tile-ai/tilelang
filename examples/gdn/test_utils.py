@@ -22,9 +22,8 @@ def assert_similar(x, y, eps=1e-8, name="tensor", data="", raise_assert=True):
         print_red_warning(f'{name} Error: isfinite mask mismatch')
         if raise_assert:
             raise AssertionError
-    if not torch.isclose(
-            x.masked_fill(x_mask, 0), y.masked_fill(y_mask, 0), rtol=0, atol=0,
-            equal_nan=True).all():
+    if not torch.isclose(x.masked_fill(x_mask, 0), y.masked_fill(y_mask, 0), rtol=0, atol=0,
+                         equal_nan=True).all():
         print_red_warning(f'{name} Error: nonfinite value mismatch')
         if raise_assert:
             raise AssertionError

@@ -48,7 +48,8 @@ class MoETorch(nn.Module):
         super().__init__()
         self.config = config
         self.experts = nn.ModuleList(
-            [ExpertTorch(config) for _ in range(config["n_routed_experts"])])
+            [ExpertTorch(config) for _ in range(config["n_routed_experts"])]
+        )
         self.gating_network = MoEGateTorch(config)
         shared_expert_dim = config["d_expert"] * config["n_shared_experts"]
         self.shared_expert = ExpertTorch(config=config, d_expert=shared_expert_dim)
@@ -67,8 +68,9 @@ class MoETorch(nn.Module):
         return routed_output + shared_output
 
     @torch.no_grad()
-    def moe_infer(self, x: torch.Tensor, flat_expert_indices: torch.Tensor,
-                  flat_expert_weights: torch.Tensor) -> torch.Tensor:
+    def moe_infer(
+        self, x: torch.Tensor, flat_expert_indices: torch.Tensor, flat_expert_weights: torch.Tensor
+    ) -> torch.Tensor:
         expert_cache = torch.zeros_like(x)
         # test_expert_cache = torch.zeros((x.shape[0] * self.config["n_experts_per_token"], self.config["d_hidden"]))
         # test_expert_tokens = torch.zeros((x.shape[0] * self.config["n_experts_per_token"], self.config["d_hidden"]))
@@ -92,7 +94,8 @@ class MoETorch(nn.Module):
 
             expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
             expert_cache.scatter_reduce_(
-                0, exp_token_idxs.view(-1, 1).repeat(1, x.shape[-1]), expert_out, reduce='sum')
+                0, exp_token_idxs.view(-1, 1).repeat(1, x.shape[-1]), expert_out, reduce='sum'
+            )
 
         return expert_cache
 
@@ -140,9 +143,10 @@ def ref_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
 # Input generation for the reference code
 
 
-def generate_input(dhidden: int, dexpert: int, nroutedexperts: int, nsharedexperts: int,
-                   nexpertspertoken: int, bs: int, seqlen: int,
-                   seed: int) -> Tuple[torch.Tensor, Dict, Dict]:
+def generate_input(
+    dhidden: int, dexpert: int, nroutedexperts: int, nsharedexperts: int, nexpertspertoken: int,
+    bs: int, seqlen: int, seed: int
+) -> Tuple[torch.Tensor, Dict, Dict]:
 
     # Really dumb but for now _ isn't parsing correctly.
     d_hidden = dhidden
@@ -170,43 +174,46 @@ def generate_input(dhidden: int, dexpert: int, nroutedexperts: int, nsharedexper
     expert_dim = d_expert
     weights = {}
 
-    input_tensor = torch.randn((batch_size, seq_len, d_hidden),
-                               device='cuda',
-                               dtype=torch.float16,
-                               generator=gen).contiguous()
+    input_tensor = torch.randn(
+        (batch_size, seq_len, d_hidden), device='cuda', dtype=torch.float16, generator=gen
+    ).contiguous()
 
     # Initialize router weights
     weights['router.weight'] = torch.randn(
-        (num_experts, d_hidden), device="cuda", dtype=torch.float16,
-        generator=gen) / math.sqrt(d_hidden)
+        (num_experts, d_hidden), device="cuda", dtype=torch.float16, generator=gen
+    ) / math.sqrt(d_hidden)
 
     for i in range(num_experts):
         weights[f'experts.{i}.0.weight'] = torch.randn(
-            (d_hidden, expert_dim), device='cuda', dtype=torch.float16,
-            generator=gen) / math.sqrt(expert_dim)
+            (d_hidden, expert_dim), device='cuda', dtype=torch.float16, generator=gen
+        ) / math.sqrt(expert_dim)
 
         weights[f'experts.{i}.1.weight'] = torch.randn(
-            (d_hidden, expert_dim), device='cuda', dtype=torch.float16,
-            generator=gen) / math.sqrt(expert_dim)
+            (d_hidden, expert_dim), device='cuda', dtype=torch.float16, generator=gen
+        ) / math.sqrt(expert_dim)
 
         weights[f'experts.{i}.2.weight'] = torch.randn(
-            (expert_dim, d_hidden), device='cuda', dtype=torch.float16,
-            generator=gen) / math.sqrt(d_hidden)
+            (expert_dim, d_hidden), device='cuda', dtype=torch.float16, generator=gen
+        ) / math.sqrt(d_hidden)
 
     weights['shared_experts.0.weight'] = torch.randn(
         (d_hidden, expert_dim * n_shared_experts),
         device='cuda',
         dtype=torch.float16,
-        generator=gen) / math.sqrt(expert_dim * n_shared_experts)
+        generator=gen
+    ) / math.sqrt(expert_dim * n_shared_experts)
     weights['shared_experts.1.weight'] = torch.randn(
         (d_hidden, expert_dim * n_shared_experts),
         device='cuda',
         dtype=torch.float16,
-        generator=gen) / math.sqrt(expert_dim * n_shared_experts)
-    weights['shared_experts.2.weight'] = torch.randn((expert_dim * n_shared_experts, d_hidden),
-                                                     device='cuda',
-                                                     dtype=torch.float16,
-                                                     generator=gen) / math.sqrt(d_hidden)
+        generator=gen
+    ) / math.sqrt(expert_dim * n_shared_experts)
+    weights['shared_experts.2.weight'] = torch.randn(
+        (expert_dim * n_shared_experts, d_hidden),
+        device='cuda',
+        dtype=torch.float16,
+        generator=gen
+    ) / math.sqrt(d_hidden)
 
     return (input_tensor, weights, config)
 

@@ -51,11 +51,13 @@ class BufferProxy:
             return self(keys)
         return self(*keys)  # type: ignore[attr-defined] # pylint: disable=no-member
 
-    def from_ptr(self,
-                 pointer_var: Var,
-                 shape: tuple[PrimExpr, ...],
-                 dtype: str = "float32",
-                 strides: tuple[PrimExpr, ...] = None) -> Buffer:
+    def from_ptr(
+        self,
+        pointer_var: Var,
+        shape: tuple[PrimExpr, ...],
+        dtype: str = "float32",
+        strides: tuple[PrimExpr, ...] = None
+    ) -> Buffer:
         """Create a buffer from a pointer, shape, and data type.
 
         Args:
@@ -118,11 +120,13 @@ class BaseTensorProxy:
             keys = (keys,)
         return self(*keys)
 
-    def from_ptr(self,
-                 pointer_var: Var,
-                 shape: tuple[PrimExpr, ...],
-                 dtype: str = "float32",
-                 strides: tuple[PrimExpr, ...] = None) -> tir.Buffer:
+    def from_ptr(
+        self,
+        pointer_var: Var,
+        shape: tuple[PrimExpr, ...],
+        dtype: str = "float32",
+        strides: tuple[PrimExpr, ...] = None
+    ) -> tir.Buffer:
         """Create a buffer from a pointer, shape, and data type.
 
         Args:
@@ -151,11 +155,13 @@ class TensorProxy(BaseTensorProxy):
             strides.append(s)
         return tuple(reversed(strides))
 
-    def __call__(self,
-                 shape: tuple[Any] | PrimExpr | int,
-                 dtype: str = "float32",
-                 data=None,
-                 scope=None) -> tir.Buffer:
+    def __call__(
+        self,
+        shape: tuple[Any] | PrimExpr | int,
+        dtype: str = "float32",
+        data=None,
+        scope=None
+    ) -> tir.Buffer:
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
         return super().__call__(
@@ -163,7 +169,8 @@ class TensorProxy(BaseTensorProxy):
             dtype=dtype,
             strides=TensorProxy._construct_strides(shape),
             data=data,
-            scope=scope)
+            scope=scope
+        )
 
 
 class StridedTensorProxy(BaseTensorProxy):
@@ -172,11 +179,13 @@ class StridedTensorProxy(BaseTensorProxy):
     This class implements the default tensor proxy with global memory scope, with the stride information required.
     """
 
-    def __call__(self,
-                 shape: tuple[Any],
-                 strides: tuple[Any],
-                 dtype: str = "float32",
-                 scope=None) -> tir.Buffer:
+    def __call__(
+        self,
+        shape: tuple[Any],
+        strides: tuple[Any],
+        dtype: str = "float32",
+        scope=None
+    ) -> tir.Buffer:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
         return super().__call__(shape, dtype=dtype, strides=strides, scope=scope)
@@ -242,11 +251,13 @@ if TYPE_CHECKING:
             ...
 
         @classmethod
-        def from_ptr(cls,
-                     pointer_var: Var,
-                     shape: Sequence[PrimExpr, ...],
-                     dtype: str = "float32",
-                     strides: tuple[PrimExpr, ...] = None) -> Self:
+        def from_ptr(
+            cls,
+            pointer_var: Var,
+            shape: Sequence[PrimExpr, ...],
+            dtype: str = "float32",
+            strides: tuple[PrimExpr, ...] = None
+        ) -> Self:
             ...
 
     class Tensor(BaseTensor):
@@ -279,10 +290,9 @@ else:
         ...
 
 
-def ptr(dtype: str | None = None,
-        storage_scope: str = "global",
-        *,
-        is_size_var: bool = False) -> Var:
+def ptr(
+    dtype: str | None = None, storage_scope: str = "global", *, is_size_var: bool = False
+) -> Var:
     """Create a TIR var that represents a pointer.
 
     Parameters
@@ -304,8 +314,10 @@ def ptr(dtype: str | None = None,
     return handle(dtype=dtype, storage_scope=storage_scope, is_size_var=is_size_var)
 
 
-def make_tensor(ptr: Var,
-                shape: tuple[PrimExpr, ...],
-                dtype: str = "float32",
-                strides: tuple[PrimExpr, ...] = None) -> tir.Buffer:
+def make_tensor(
+    ptr: Var,
+    shape: tuple[PrimExpr, ...],
+    dtype: str = "float32",
+    strides: tuple[PrimExpr, ...] = None
+) -> tir.Buffer:
     return Tensor.from_ptr(ptr, shape, dtype, strides)

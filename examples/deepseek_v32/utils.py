@@ -79,69 +79,86 @@ def cal_seq_idx_from_cu_seqlens(cu_seqlens: torch.LongTensor, seq_len: int):
 
 
 @tensor_cache
-def cal_seq_idx_for_q(cu_seqlens_qs: torch.LongTensor, cu_seqlens_qe: torch.LongTensor,
-                      seq_len: int) -> torch.IntTensor:
-    seq_idx_for_q = torch.full((seq_len,),
-                               len(cu_seqlens_qs),
-                               dtype=torch.int32,
-                               device=cu_seqlens_qs.device)
+def cal_seq_idx_for_q(
+    cu_seqlens_qs: torch.LongTensor, cu_seqlens_qe: torch.LongTensor, seq_len: int
+) -> torch.IntTensor:
+    seq_idx_for_q = torch.full(
+        (seq_len,), len(cu_seqlens_qs), dtype=torch.int32, device=cu_seqlens_qs.device
+    )
     for i in range(len(cu_seqlens_qs)):
         seq_idx_for_q[cu_seqlens_qs[i]:cu_seqlens_qe[i]] = i
     return seq_idx_for_q
 
 
 @tensor_cache
-def cal_cu_seqlen_ks_for_q(cu_seqlens_qs: torch.LongTensor, cu_seqlens_qe: torch.LongTensor,
-                           cu_seqlens_ks: torch.LongTensor, seq_len: int) -> torch.IntTensor:
+def cal_cu_seqlen_ks_for_q(
+    cu_seqlens_qs: torch.LongTensor, cu_seqlens_qe: torch.LongTensor,
+    cu_seqlens_ks: torch.LongTensor, seq_len: int
+) -> torch.IntTensor:
     cu_seqlen_ks_for_each_q = torch.gather(
-        input=torch.cat([
-            cu_seqlens_ks,
-            torch.full((1,),
-                       torch.iinfo(torch.int32).max,
-                       dtype=torch.int32,
-                       device=cu_seqlens_qs.device)
-        ]),
+        input=torch.cat(
+            [
+                cu_seqlens_ks,
+                torch.full(
+                    (1,),
+                    torch.iinfo(torch.int32).max,
+                    dtype=torch.int32,
+                    device=cu_seqlens_qs.device
+                )
+            ]
+        ),
         dim=0,
         index=cal_seq_idx_for_q(
-            cu_seqlens_qs=cu_seqlens_qs, cu_seqlens_qe=cu_seqlens_qe, seq_len=seq_len).long())
+            cu_seqlens_qs=cu_seqlens_qs, cu_seqlens_qe=cu_seqlens_qe, seq_len=seq_len
+        ).long()
+    )
     return cu_seqlen_ks_for_each_q.int()
 
 
 @tensor_cache
-def cal_cu_seqlen_ke_for_q(cu_seqlens_qs: torch.LongTensor, cu_seqlens_qe: torch.LongTensor,
-                           cu_seqlens_ks: torch.LongTensor, cu_seqlens_ke: torch.LongTensor,
-                           q_start_idxs: torch.LongTensor, seq_len: int,
-                           kv_stride: int) -> torch.IntTensor:
+def cal_cu_seqlen_ke_for_q(
+    cu_seqlens_qs: torch.LongTensor, cu_seqlens_qe: torch.LongTensor,
+    cu_seqlens_ks: torch.LongTensor, cu_seqlens_ke: torch.LongTensor,
+    q_start_idxs: torch.LongTensor, seq_len: int, kv_stride: int
+) -> torch.IntTensor:
     cu_seqlen_ke_for_each_q = torch.gather(
         input=torch.cat(
             [cu_seqlens_ke,
-             torch.zeros(1, dtype=torch.int32, device=cu_seqlens_qs.device)]),
+             torch.zeros(1, dtype=torch.int32, device=cu_seqlens_qs.device)]
+        ),
         dim=0,
         index=cal_seq_idx_for_q(
-            cu_seqlens_qs=cu_seqlens_qs, cu_seqlens_qe=cu_seqlens_qe, seq_len=seq_len).long())
-    casual_cu_seqlen_ke_for_each_q = torch.zeros((seq_len,),
-                                                 dtype=torch.int32,
-                                                 device=cu_seqlens_qs.device)
+            cu_seqlens_qs=cu_seqlens_qs, cu_seqlens_qe=cu_seqlens_qe, seq_len=seq_len
+        ).long()
+    )
+    casual_cu_seqlen_ke_for_each_q = torch.zeros(
+        (seq_len,), dtype=torch.int32, device=cu_seqlens_qs.device
+    )
     for i in range(len(cu_seqlens_qs)):
-        casual_cu_seqlen_ke_for_each_q[cu_seqlens_qs[i]:cu_seqlens_qe[i]] = (torch.arange(
-            q_start_idxs[i],
-            q_start_idxs[i] + cu_seqlens_qe[i] - cu_seqlens_qs[i],
-            dtype=torch.int32,
-            device=cu_seqlens_qs.device) + 1) // kv_stride + cu_seqlens_ks[i]
+        casual_cu_seqlen_ke_for_each_q[cu_seqlens_qs[i]:cu_seqlens_qe[i]] = (
+            torch.arange(
+                q_start_idxs[i],
+                q_start_idxs[i] + cu_seqlens_qe[i] - cu_seqlens_qs[i],
+                dtype=torch.int32,
+                device=cu_seqlens_qs.device
+            ) + 1
+        ) // kv_stride + cu_seqlens_ks[i]
     cu_seqlen_ke_for_each_q = torch.minimum(casual_cu_seqlen_ke_for_each_q, cu_seqlen_ke_for_each_q)
     return cu_seqlen_ke_for_each_q.int()
 
 
 @tensor_cache
-def cal_ks_ke_from_cu_seqlen_qk(cu_seqlens_q: torch.LongTensor,
-                                cu_seqlens_k: torch.LongTensor = None,
-                                offs_q: torch.LongTensor = None,
-                                *,
-                                seq_len: int,
-                                kv_stride: int = 1,
-                                cp_rank: int = 0,
-                                cp_size: int = 1,
-                                balanced_cp=False):
+def cal_ks_ke_from_cu_seqlen_qk(
+    cu_seqlens_q: torch.LongTensor,
+    cu_seqlens_k: torch.LongTensor = None,
+    offs_q: torch.LongTensor = None,
+    *,
+    seq_len: int,
+    kv_stride: int = 1,
+    cp_rank: int = 0,
+    cp_size: int = 1,
+    balanced_cp=False
+):
     '''
     seq_len: seq len per cp rank
     balanced cp slice assignment: 0 1 2 3 3 2 1 0
@@ -317,10 +334,12 @@ if __name__ == "__main__":
     last_idx = torch.where(cu_seqlens.cumsum(dim=0) >= seq_len)[0][0]
     cu_seqlens_cumsum = cu_seqlens[:last_idx].cumsum(dim=0)
     cu_seqlens_qs = torch.cat(
-        [torch.zeros(1, dtype=torch.int32, device=cu_seqlens.device), cu_seqlens_cumsum])
+        [torch.zeros(1, dtype=torch.int32, device=cu_seqlens.device), cu_seqlens_cumsum]
+    )
     cu_seqlens_qe = torch.cat(
         [cu_seqlens_cumsum,
-         torch.ones(1, dtype=torch.int32, device=cu_seqlens.device) * seq_len])
+         torch.ones(1, dtype=torch.int32, device=cu_seqlens.device) * seq_len]
+    )
 
     from tilelang.profiler import do_bench
 

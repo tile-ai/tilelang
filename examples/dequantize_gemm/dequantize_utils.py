@@ -39,12 +39,13 @@ def torch_convert_bit_twiddling(tensor):
     res0 = val_concat_expanded & mask
     res1 = (val_concat_expanded << 3) & mask
     res2 = (val_concat_expanded << 6) & mask
-    res3 = ((val_concat_expanded << 1) & mask1) | ((val_concat_expanded >> 3) & mask2) | (
-        (val_concat_expanded >> 7) & mask3)
+    res3 = ((val_concat_expanded << 1) & mask1) | ((val_concat_expanded >> 3)
+                                                   & mask2) | ((val_concat_expanded >> 7) & mask3)
 
     # Select the correct result based on position
-    bf16 = torch.where(pos == 0, res0, torch.where(pos == 1, res1,
-                                                   torch.where(pos == 2, res2, res3)))
+    bf16 = torch.where(
+        pos == 0, res0, torch.where(pos == 1, res1, torch.where(pos == 2, res2, res3))
+    )
 
     # Convert to uint16 for .view(torch.bfloat16)
     bf16_uint16 = (bf16 & 0xFFFF).to(torch.uint16)
@@ -135,9 +136,8 @@ def assert_similar(x, y, eps=1e-8, name="tensor", data="", raise_assert=True):
         print_red_warning(f'{name} Error: isfinite mask mismatch')
         if raise_assert:
             raise AssertionError
-    if not torch.isclose(
-            x.masked_fill(x_mask, 0), y.masked_fill(y_mask, 0), rtol=0, atol=0,
-            equal_nan=True).all():
+    if not torch.isclose(x.masked_fill(x_mask, 0), y.masked_fill(y_mask, 0), rtol=0, atol=0,
+                         equal_nan=True).all():
         print_red_warning(f'{name} Error: nonfinite value mismatch')
         if raise_assert:
             raise AssertionError

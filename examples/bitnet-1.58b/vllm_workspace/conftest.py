@@ -166,7 +166,8 @@ class HfRunner:
                 SentenceTransformer(
                     model_name,
                     device="cpu",
-                ).to(dtype=torch_dtype))
+                ).to(dtype=torch_dtype)
+            )
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
@@ -184,7 +185,8 @@ class HfRunner:
                     torch_dtype=torch_dtype,
                     trust_remote_code=True,
                     **model_kwargs,
-                ))
+                )
+            )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
@@ -389,8 +391,10 @@ class HfRunner:
             all_output_strs.append(self.tokenizer.decode(output_ids))
 
         outputs = zip(all_output_ids, all_output_strs, all_logprobs)
-        return [(output_ids, output_str, output_logprobs)
-                for output_ids, output_str, output_logprobs in outputs]
+        return [
+            (output_ids, output_str, output_logprobs)
+            for output_ids, output_str, output_logprobs in outputs
+        ]
 
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts)
@@ -515,11 +519,14 @@ class VllmRunner:
         images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(
-            temperature=0.0, max_tokens=max_tokens, logprobs=num_logprobs)
+            temperature=0.0, max_tokens=max_tokens, logprobs=num_logprobs
+        )
         outputs = self.generate_w_logprobs(prompts, greedy_logprobs_params, images=images)
 
-        return [(output_ids, output_str, output_logprobs)
-                for output_ids, output_str, output_logprobs in outputs]
+        return [
+            (output_ids, output_str, output_logprobs)
+            for output_ids, output_str, output_logprobs in outputs
+        ]
 
     def generate_beam_search(
         self,

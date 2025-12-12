@@ -11,10 +11,12 @@ from tilelang.intrinsics.mfma_layout import (
 )
 
 
-def make_mfma_load_base_layout(dtype: str = "float16",
-                               matrix: Literal["A", "B"] = "A",
-                               k_dim: int = 16,
-                               transposed: bool = False) -> T.Fragment:
+def make_mfma_load_base_layout(
+    dtype: str = "float16",
+    matrix: Literal["A", "B"] = "A",
+    k_dim: int = 16,
+    transposed: bool = False
+) -> T.Fragment:
     """
     Create a layout function for storing MFMA results into a fragment buffer.
     This layout is used in conjunction with `inverse_mfma_store_layout` to
@@ -73,11 +75,13 @@ def make_mfma_load_base_layout(dtype: str = "float16",
     transform_func: Callable = None
     if matrix == "A":
         transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
-            j, i)
+            j, i
+        )
         micro_size_s, micro_size_r = micro_size_x, micro_size_k
     elif matrix == "B":
         transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(
-            j, i)
+            j, i
+        )
         micro_size_s, micro_size_r = micro_size_k, micro_size_y
     else:
         raise ValueError(f"Unsupported matrix {matrix}")
@@ -120,9 +124,9 @@ print(base_layout)
 plot_layout(base_layout, name="base_layout")
 
 # warp layout 32x32
-warp_layout = base_layout.repeat([warp_rows, warp_cols],
-                                 repeat_on_thread=False,
-                                 lower_dim_first=False)
+warp_layout = base_layout.repeat(
+    [warp_rows, warp_cols], repeat_on_thread=False, lower_dim_first=False
+)
 print(warp_layout)
 plot_layout(warp_layout, name="warp_layout")
 

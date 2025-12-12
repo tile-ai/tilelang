@@ -27,10 +27,9 @@ def _read_cmake_bool(i: str | None, default=False):
 def get_git_commit_id() -> str | None:
     """Get the current git commit hash by running git in the current file's directory."""
 
-    r = subprocess.run(['git', 'rev-parse', 'HEAD'],
-                       cwd=ROOT,
-                       capture_output=True,
-                       encoding='utf-8')
+    r = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, encoding='utf-8'
+    )
     if r.returncode == 0:
         _git = r.stdout.strip()
         git_pin.write_text(_git)

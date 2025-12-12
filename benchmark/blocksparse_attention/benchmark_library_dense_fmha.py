@@ -7,10 +7,9 @@ def get_sparse_attn_mask_from_topk(x, topk, use_dense_for_last_block=False):
     bsz, num_head, downsample_len, _ = x.shape
     # N_CTX = downsample_len * BLOCK
     sparse_index = torch.topk(x, topk, dim=-1).indices
-    dense_mask = torch.full([bsz, num_head, downsample_len, downsample_len],
-                            False,
-                            dtype=torch.bool,
-                            device=x.device)
+    dense_mask = torch.full(
+        [bsz, num_head, downsample_len, downsample_len], False, dtype=torch.bool, device=x.device
+    )
     dense_mask.scatter_(-1, sparse_index, True)
     if use_dense_for_last_block:
         dense_mask[:, :, -2:, :] = True

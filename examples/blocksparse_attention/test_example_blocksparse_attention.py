@@ -32,7 +32,8 @@ def test_example_triton_sparse_gqa_decode_varlen_indice():
         dim=128,
         dim_v=128,
         sparse_ratio=0.8,
-        block_size=32)
+        block_size=32
+    )
 
 
 def test_example_triton_sparse_gqa_decode_varlen_mask():
@@ -44,7 +45,8 @@ def test_example_triton_sparse_gqa_decode_varlen_mask():
         dim=128,
         dim_v=128,
         sparse_ratio=0.8,
-        block_size=32)
+        block_size=32
+    )
 
 
 if __name__ == "__main__":

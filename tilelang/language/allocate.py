@@ -92,10 +92,9 @@ def alloc_var(dtype: str, init: PrimExpr | int | float, scope: str = 'local.var'
 
 
 @overload
-def alloc_var(dtype: str,
-              scope: str = 'local.var',
-              *,
-              init: PrimExpr | int | float | None = None) -> Buffer:
+def alloc_var(
+    dtype: str, scope: str = 'local.var', *, init: PrimExpr | int | float | None = None
+) -> Buffer:
     ...
 
 
@@ -143,7 +142,8 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
         parsed_scope = parsed_scope_arg
     elif len(args) > 2:
         raise TypeError(
-            f"alloc_var expected at most 3 positional arguments but got {len(args) + 1}.")
+            f"alloc_var expected at most 3 positional arguments but got {len(args) + 1}."
+        )
 
     if not isinstance(parsed_scope, str):
         raise TypeError("Scope must be a string in alloc_var.")

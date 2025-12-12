@@ -42,18 +42,22 @@ class _NestedLoopCheckVisitor(PyStmtExprVisitor):
 
             # Otherwise
             if self.in_parallel_context:
-                raise ValueError("[Tilelang Semantic Check] "
-                                 "Nested parallel loops are not allowed. "
-                                 "Please check your loop structure.")
+                raise ValueError(
+                    "[Tilelang Semantic Check] "
+                    "Nested parallel loops are not allowed. "
+                    "Please check your loop structure."
+                )
             self.in_parallel_context = True
             super().visit_for_(op)
             self.in_parallel_context = False
             return
         elif is_pipelined_for(op):
             if self.in_parallel_context:
-                raise ValueError("[Tilelang Semantic Check] "
-                                 "Pipelined loop cannot be nested inside a parallel loop. "
-                                 "Please check your loop structure.")
+                raise ValueError(
+                    "[Tilelang Semantic Check] "
+                    "Pipelined loop cannot be nested inside a parallel loop. "
+                    "Please check your loop structure."
+                )
 
         super().visit_for_(op)
 

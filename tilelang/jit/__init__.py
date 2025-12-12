@@ -119,17 +119,19 @@ def compile(
     )
 
 
-def par_compile(funcs: Iterable[PrimFunc[_KP, _T]],
-                out_idx: list[int] | int | None = None,
-                execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc",
-                                           "torch"] = "auto",
-                target: str | Target = "auto",
-                target_host: str | Target | None = None,
-                verbose: bool = False,
-                pass_configs: dict[str, Any] | None = None,
-                compile_flags: list[str] | str | None = None,
-                num_workers: int = None,
-                ignore_error: bool = False) -> list[JITKernel[_KP, _T]]:
+def par_compile(
+    funcs: Iterable[PrimFunc[_KP, _T]],
+    out_idx: list[int] | int | None = None,
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc",
+                               "torch"] = "auto",
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
+    verbose: bool = False,
+    pass_configs: dict[str, Any] | None = None,
+    compile_flags: list[str] | str | None = None,
+    num_workers: int = None,
+    ignore_error: bool = False
+) -> list[JITKernel[_KP, _T]]:
     """
     Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
     Parameters
@@ -302,10 +304,12 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         assert isinstance(tir, PrimFunc), f"target function must be a PrimFunc but got {type(tir)}"
         return tir
 
-    def par_compile(self,
-                    configs: Iterable[dict[str, Any] | tuple[str, Any]],
-                    num_workers: int = None,
-                    ignore_error: bool = False) -> list[JITKernel[_KP, _T]]:
+    def par_compile(
+        self,
+        configs: Iterable[dict[str, Any] | tuple[str, Any]],
+        num_workers: int = None,
+        ignore_error: bool = False
+    ) -> list[JITKernel[_KP, _T]]:
         """
         Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
         Parameters
@@ -345,7 +349,8 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             pass_configs=self.pass_configs,
             compile_flags=self.compile_flags,
             num_workers=num_workers,
-            ignore_error=ignore_error)
+            ignore_error=ignore_error
+        )
 
     def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         func = self.get_tir(*args, **kwargs)
@@ -393,7 +398,8 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             return self.func.func_annot.convert_to_kernel_args(*args, **kwargs, **tune_params)
         else:
             raise NotImplementedError(
-                "convert_arg_to_kernel_args is only implemented for PrimFuncCreater.")
+                "convert_arg_to_kernel_args is only implemented for PrimFuncCreater."
+            )
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         # Separate out the tuning parameters from the user's kwargs
@@ -516,7 +522,8 @@ def jit(  # This is the new public interface
             compile_flags=compile_flags,
             func_source=inspect.getsource(orig_func),
             signature=inspect.signature(orig_func),
-            lazy_jit=False)
+            lazy_jit=False
+        )
 
     if func is not None:
         return decorator(func)
@@ -567,7 +574,8 @@ def lazy_jit(
         verbose=verbose,
         pass_configs=pass_configs,
         debug_root_path=debug_root_path,
-        compile_flags=compile_flags)
+        compile_flags=compile_flags
+    )
 
     def decorator(func: Callable[_P, _T]):
         pf: PrimFunc[_P, _T] | PrimFuncCreater[_P, _T] = prim_func(func, generator=True)
@@ -580,6 +588,7 @@ def lazy_jit(
             **compile_args,
             func_source=inspect.getsource(pf.orig_func),
             signature=inspect.signature(pf.orig_func),
-            lazy_jit=True)
+            lazy_jit=True
+        )
 
     return decorator(func) if func is not None else decorator

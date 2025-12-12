@@ -150,7 +150,8 @@ def macro(*args, hygienic: bool = True) -> Callable:
         return _decorator(args[0])
 
     raise ValueError(
-        "Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])")
+        "Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])"
+    )
 
 
 class BufferProxy:

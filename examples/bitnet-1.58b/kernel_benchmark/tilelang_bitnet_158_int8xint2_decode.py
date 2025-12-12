@@ -102,9 +102,9 @@ def bitnet_158_int8xint2_decode(
 
     @T.prim_func
     def kernel(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, storage_dtype),
-            C: T.Buffer(C_shape, out_dtype),
+        A: T.Buffer(A_shape, in_dtype),
+        B: T.Buffer(B_shape, storage_dtype),
+        C: T.Buffer(C_shape, out_dtype),
     ):
         with T.Kernel(
                 T.ceildiv(N, n_partition),
@@ -134,8 +134,7 @@ def bitnet_158_int8xint2_decode(
                     B_quant_local[v] = B[
                         bx * n_partition + ni,
                         ko * (reduce_thread * micro_size_k_compressed) +
-                        kr * micro_size_k_compressed + v,
-                    ]
+                        kr * micro_size_k_compressed + v,]
 
                 T.call_extern(
                     "handle",
@@ -168,7 +167,8 @@ def bitnet_158_int8xint2_decode(
                         reduced_accum_res[0],
                         kr,
                         dtype="handle",
-                    ))
+                    )
+                )
             if kr == 0:
                 C[by, bx * n_partition + ni] = reduced_accum_res[0]
 
@@ -234,13 +234,9 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
     return new_qweight.view(np.int8)
 
 
-def assert_bitnet_158_int8xint2_decode_correctness(M,
-                                                   N,
-                                                   K,
-                                                   in_dtype,
-                                                   out_dtype,
-                                                   accum_dtype,
-                                                   fast_decoding=True):
+def assert_bitnet_158_int8xint2_decode_correctness(
+    M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding=True
+):
     program = bitnet_158_int8xint2_decode(M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding)
     print(program)
     kernel = tilelang.compile(program)

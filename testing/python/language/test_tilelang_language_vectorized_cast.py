@@ -17,8 +17,8 @@ def vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
 
     @T.prim_func
     def main(
-            A: T.Tensor[(M,), dtype_A],  # noqa: F821
-            B: T.Tensor[(M,), dtype_B],  # noqa: F821
+        A: T.Tensor[(M,), dtype_A],  # noqa: F821
+        B: T.Tensor[(M,), dtype_B],  # noqa: F821
     ):
         with T.Kernel(1, threads=128):
             T.copy(A, B)
@@ -32,8 +32,8 @@ def parallel_vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
 
     @T.prim_func
     def main(
-            A: T.Tensor[(M,), dtype_A],  # noqa: F821
-            B: T.Tensor[(M,), dtype_B],  # noqa: F821
+        A: T.Tensor[(M,), dtype_A],  # noqa: F821
+        B: T.Tensor[(M,), dtype_B],  # noqa: F821
     ):
         with T.Kernel(1, threads=128):
             A_local = T.alloc_fragment((M,), dtype_A)

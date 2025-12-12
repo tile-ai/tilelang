@@ -11,7 +11,8 @@ from tilelang.utils.language import (
     prim_expr_equal,
 )
 from tilelang.language.utils import (
-    buffer_region_to_tile_region,)
+    buffer_region_to_tile_region,
+)
 
 
 def gemm_sp(
@@ -180,7 +181,8 @@ def gemm_sp_v2(
     K = 2 * (A_shape[-2] if transpose_A else A_shape[-1])
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert prim_expr_equal(
-        K, K_B), f"T.gemm_sp K shape check failed: K_A (wo sparse) = {K}, K_B = {K_B}"
+        K, K_B
+    ), f"T.gemm_sp K shape check failed: K_A (wo sparse) = {K}, K_B = {K_B}"
 
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]

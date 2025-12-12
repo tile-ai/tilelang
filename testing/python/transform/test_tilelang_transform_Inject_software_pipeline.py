@@ -11,8 +11,9 @@ def _check(original, transformed):
     mod = tl.transform.Simplify()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     mod = tl.transform.Simplify()(mod)
-    tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"),
-                                   True)
+    tvm.ir.assert_structural_equal(
+        mod["main"], transformed.with_attr("global_symbol", "main"), True
+    )
 
 
 def test_trival_pipeline():
@@ -20,13 +21,8 @@ def test_trival_pipeline():
     @T.prim_func
     def before(A: T.Tensor((16, 1), "float32"), C: T.Tensor((16, 1), "float32")):
         for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
-            for i in T.serial(
-                    0,
-                    1,
-                    annotations={
-                        "software_pipeline_stage": [0, 1],
-                        "software_pipeline_order": [0, 1]
-                    }):
+            for i in T.serial(0, 1, annotations={"software_pipeline_stage": [0, 1],
+                                                 "software_pipeline_order": [0, 1]}):
                 with T.block():
                     T.reads(A[tx, i])
                     T.writes(C[tx, i])

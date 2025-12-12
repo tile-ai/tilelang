@@ -13,7 +13,8 @@ bitblas.set_log_level("INFO")
 def generate_text_batch(model, tokenizer, prompts, max_length=100):
     # Encode the input prompts as a batch
     input_ids = tokenizer(
-        prompts, return_tensors="pt", padding=True, truncation=True).input_ids.to(model.device)
+        prompts, return_tensors="pt", padding=True, truncation=True
+    ).input_ids.to(model.device)
 
     # Generate cos and sin values (commented out as not used in generation)
     seq_length = input_ids.size(1)

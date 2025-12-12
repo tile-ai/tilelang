@@ -32,9 +32,11 @@ def get_configs():
         threads=[128, 256, 512],
         split=[1, 2],
     )
-    return [{
-        k: v for k, v in zip(iter_params, values)
-    } for values in itertools.product(*iter_params.values())]
+    return [
+        {
+            k: v for k, v in zip(iter_params, values)
+        } for values in itertools.product(*iter_params.values())
+    ]
 
 
 @tilelang.autotune(configs=get_configs(),)
@@ -45,21 +47,23 @@ def get_configs():
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
     },
 )
-def matmul(M,
-           N,
-           K,
-           in_dtype,
-           out_dtype,
-           accum_dtype,
-           source_format='uint',
-           num_bits=4,
-           fast_dequant=True,
-           block_M=256,
-           block_N=128,
-           block_K=128,
-           num_stages=2,
-           threads=256,
-           split=1):
+def matmul(
+    M,
+    N,
+    K,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    source_format='uint',
+    num_bits=4,
+    fast_dequant=True,
+    block_M=256,
+    block_N=128,
+    block_K=128,
+    num_stages=2,
+    threads=256,
+    split=1
+):
     """
            Builds a parameterized TileLang/TIR matrix-multiplication kernel that dequantizes 4-bit FP inputs to BF16 on-the-fly and computes C = A @ B^T.
 
@@ -215,8 +219,9 @@ def matmul(M,
         assert in_dtype in ["fp4"]
         assert out_dtype in ["bfloat16"]
 
-        def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr,
-                                  scale: tir.PrimExpr, dtype: str):
+        def _tir_u8_to_f4_to_bf16(
+            nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr, dtype: str
+        ):
             """
                 Convert a 4-bit FP4 value packed in a uint8 byte into a bfloat16 value.
 
@@ -254,8 +259,11 @@ def matmul(M,
             e_bf16 = T.min(e_bf16 + scale, tir.const((1 << 8) - 1, "uint16"))
             m_f4 = f4 & tir.const(1, "uint16")
             val_bf16 = tir.reinterpret(
-                "bfloat16", ((((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16"))
-                             | (m_f4 << tir.const(6, "uint16"))).astype("uint16"))
+                "bfloat16", (
+                    (((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16"))
+                    | (m_f4 << tir.const(6, "uint16"))
+                ).astype("uint16")
+            )
             return val_bf16
 
         @T.macro
@@ -292,9 +300,9 @@ def matmul(M,
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, storage_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, storage_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         """
             Kernel entry for the tiled, pipelined matmul used by the generated prim_func.
@@ -410,7 +418,8 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
     total_flops = 2 * m * n * k
     if tune:
         kernel = matmul(
-            m, n, k, "bfloat16", "bfloat16", "float32", num_bits=4, fast_dequant=fast_dequant)
+            m, n, k, "bfloat16", "bfloat16", "float32", num_bits=4, fast_dequant=fast_dequant
+        )
     else:
         kernel = matmul(
             m,
@@ -426,7 +435,8 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
             block_K=128,
             num_stages=2,
             threads=256,
-            split=1)
+            split=1
+        )
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
     if fast_dequant:
         profiler.assert_allclose(ref_program_twiddling, rtol=0.01, atol=0.01)

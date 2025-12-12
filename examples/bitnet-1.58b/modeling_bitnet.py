@@ -65,7 +65,8 @@ def find_layers(module, layers=None, name=""):
     res = {}
     for name1, child in module.named_children():
         res.update(
-            find_layers(child, layers=layers, name=name + "." + name1 if name != "" else name1))
+            find_layers(child, layers=layers, name=name + "." + name1 if name != "" else name1)
+        )
     return res
 
 
@@ -109,12 +110,9 @@ ALL_LAYERNORM_LAYERS.append(BitnetRMSNorm)
 
 class BitnetRotaryEmbedding(nn.Module):
 
-    def __init__(self,
-                 dim,
-                 max_position_embeddings=2048,
-                 base=10000,
-                 device=None,
-                 scaling_factor=1.0):
+    def __init__(
+        self, dim, max_position_embeddings=2048, base=10000, device=None, scaling_factor=1.0
+    ):
         super().__init__()
         self.scaling_factor = scaling_factor
         self.dim = dim
@@ -122,20 +120,24 @@ class BitnetRotaryEmbedding(nn.Module):
         self.base = base
         inv_freq = 1.0 / (
             self.base
-            **(torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+            **(torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim)
+        )
         self.register_buffer("inv_freq", inv_freq)
         # For BC we register cos and sin cached
         self.max_seq_len_cached = max_position_embeddings
         t = torch.arange(
-            self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
+            self.max_seq_len_cached, device=device, dtype=torch.int64
+        ).type_as(self.inv_freq)
         t = t / self.scaling_factor
         freqs = torch.outer(t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer(
-            "_cos_cached", emb.cos().to(torch.get_default_dtype()), persistent=False)
+            "_cos_cached", emb.cos().to(torch.get_default_dtype()), persistent=False
+        )
         self.register_buffer(
-            "_sin_cached", emb.sin().to(torch.get_default_dtype()), persistent=False)
+            "_sin_cached", emb.sin().to(torch.get_default_dtype()), persistent=False
+        )
 
     @property
     def sin_cached(self):
@@ -162,8 +164,9 @@ class BitnetRotaryEmbedding(nn.Module):
         # Force float32 since bfloat16 loses precision on long contexts
         # See https://github.com/huggingface/transformers/pull/29285
         device_type = x.device.type
-        device_type = device_type if isinstance(device_type,
-                                                str) and device_type != "mps" else "cpu"
+        device_type = device_type if isinstance(
+            device_type, str
+        ) and device_type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
@@ -273,7 +276,8 @@ class BitnetMLPFuseGateUp(nn.Module):
         module = cls(bit_mlp.config)
         # assign the weights
         module.gate_up_proj.weight = nn.Parameter(
-            torch.cat([bit_mlp.gate_proj.weight, bit_mlp.up_proj.weight], dim=0))
+            torch.cat([bit_mlp.gate_proj.weight, bit_mlp.up_proj.weight], dim=0)
+        )
         module.down_proj = bit_mlp.down_proj
         module.ffn_layernorm = bit_mlp.ffn_layernorm
         return module
@@ -295,8 +299,9 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen,
-                                                           head_dim)
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
@@ -311,7 +316,8 @@ class BitnetAttention(nn.Module):
             logger.warning_once(
                 f"Instantiating {self.__class__.__name__} without passing a `layer_idx` is not recommended and will "
                 "lead to errors during the forward call if caching is used. Please make sure to provide a `layer_idx` "
-                "when creating this class.")
+                "when creating this class."
+            )
 
         self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
@@ -326,7 +332,8 @@ class BitnetAttention(nn.Module):
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
-                f" and `num_heads`: {self.num_heads}).")
+                f" and `num_heads`: {self.num_heads})."
+            )
 
         self.q_proj = BitLinear(
             self.hidden_size,
@@ -399,14 +406,15 @@ class BitnetAttention(nn.Module):
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states,
-                                                             self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
-            self.head_dim)
+        attn_weights = torch.matmul(query_states,
+                                    key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
@@ -414,15 +422,18 @@ class BitnetAttention(nn.Module):
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(query_states.dtype)
         attn_weights = nn.functional.dropout(
-            attn_weights, p=self.attention_dropout, training=self.training)
+            attn_weights, p=self.attention_dropout, training=self.training
+        )
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}")
+                f" {attn_output.size()}"
+            )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
@@ -448,7 +459,8 @@ class BitnetAttentionQKVFused(nn.Module):
             logger.warning_once(
                 f"Instantiating {self.__class__.__name__} without passing a `layer_idx` is not recommended and will "
                 "lead to errors during the forward call if caching is used. Please make sure to provide a `layer_idx` "
-                "when creating this class.")
+                "when creating this class."
+            )
 
         self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
@@ -463,7 +475,8 @@ class BitnetAttentionQKVFused(nn.Module):
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
-                f" and `num_heads`: {self.num_heads}).")
+                f" and `num_heads`: {self.num_heads})."
+            )
 
         self.qkv_proj = BitLinear(
             self.hidden_size,
@@ -497,17 +510,24 @@ class BitnetAttentionQKVFused(nn.Module):
         module = cls(bit_attention.config, bit_attention.layer_idx)
         # assign the weights
         module.qkv_proj.weight = nn.Parameter(
-            torch.cat([
-                bit_attention.q_proj.weight, bit_attention.k_proj.weight,
-                bit_attention.v_proj.weight
-            ],
-                      dim=0))
+            torch.cat(
+                [
+                    bit_attention.q_proj.weight, bit_attention.k_proj.weight,
+                    bit_attention.v_proj.weight
+                ],
+                dim=0
+            )
+        )
         if bit_attention.q_proj.bias is not None and bit_attention.k_proj.bias is not None and bit_attention.v_proj.bias is not None:
             module.qkv_proj.bias = nn.Parameter(
-                torch.cat([
-                    bit_attention.q_proj.bias, bit_attention.k_proj.bias, bit_attention.v_proj.bias
-                ],
-                          dim=0))
+                torch.cat(
+                    [
+                        bit_attention.q_proj.bias, bit_attention.k_proj.bias,
+                        bit_attention.v_proj.bias
+                    ],
+                    dim=0
+                )
+            )
         module.o_proj = bit_attention.o_proj
         module.inner_attn_ln = bit_attention.inner_attn_ln
         if bit_attention.config.rope_scaling is None:
@@ -532,7 +552,8 @@ class BitnetAttentionQKVFused(nn.Module):
                 self.num_heads * self.head_dim, self.num_key_value_heads * self.head_dim,
                 self.num_key_value_heads * self.head_dim
             ],
-            dim=-1)
+            dim=-1
+        )
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads,
                                      self.head_dim).transpose(1, 2)
@@ -546,14 +567,15 @@ class BitnetAttentionQKVFused(nn.Module):
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states,
-                                                             self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
-            self.head_dim)
+        attn_weights = torch.matmul(query_states,
+                                    key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
@@ -561,15 +583,18 @@ class BitnetAttentionQKVFused(nn.Module):
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(query_states.dtype)
         attn_weights = nn.functional.dropout(
-            attn_weights, p=self.attention_dropout, training=self.training)
+            attn_weights, p=self.attention_dropout, training=self.training
+        )
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}")
+                f" {attn_output.size()}"
+            )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
@@ -635,8 +660,9 @@ class BitnetFlashAttention2(BitnetAttention):
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states,
-                                                             self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
         # to be able to avoid many of these transpose/reshape/view.
@@ -665,14 +691,16 @@ class BitnetFlashAttention2(BitnetAttention):
             logger.warning_once(
                 f"The input hidden states seems to be silently casted in float32, this might be related to"
                 f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
-                f" {target_dtype}.")
+                f" {target_dtype}."
+            )
 
             query_states = query_states.to(target_dtype)
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
 
         attn_output = self._flash_attention_forward(
-            query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate)
+            query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate
+        )
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
         attn_output = self.inner_attn_ln(attn_output)
@@ -683,14 +711,16 @@ class BitnetFlashAttention2(BitnetAttention):
 
         return attn_output, attn_weights, past_key_value
 
-    def _flash_attention_forward(self,
-                                 query_states,
-                                 key_states,
-                                 value_states,
-                                 attention_mask,
-                                 query_length,
-                                 dropout=0.0,
-                                 softmax_scale=None):
+    def _flash_attention_forward(
+        self,
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        query_length,
+        dropout=0.0,
+        softmax_scale=None
+    ):
         """
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
         first unpad the input, then computes the attention scores and pad the final attention scores.
@@ -720,7 +750,8 @@ class BitnetFlashAttention2(BitnetAttention):
         if attention_mask is not None:
             batch_size = query_states.shape[0]
             query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
-                query_states, key_states, value_states, attention_mask, query_length)
+                query_states, key_states, value_states, attention_mask, query_length
+            )
 
             cu_seqlens_q, cu_seqlens_k = cu_seq_lens
             max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
@@ -746,7 +777,8 @@ class BitnetFlashAttention2(BitnetAttention):
                 value_states,
                 dropout,
                 softmax_scale=softmax_scale,
-                causal=causal)
+                causal=causal
+            )
 
         return attn_output
 
@@ -755,27 +787,31 @@ class BitnetFlashAttention2(BitnetAttention):
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
         key_layer = index_first_axis(
-            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k)
+            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+        )
         value_layer = index_first_axis(
-            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k)
+            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+        )
         if query_length == kv_seq_len:
             query_layer = index_first_axis(
-                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim), indices_k)
+                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim), indices_k
+            )
             cu_seqlens_q = cu_seqlens_k
             max_seqlen_in_batch_q = max_seqlen_in_batch_k
             indices_q = indices_k
         elif query_length == 1:
             max_seqlen_in_batch_q = 1
             cu_seqlens_q = torch.arange(
-                batch_size + 1, dtype=torch.int32,
-                device=query_layer.device)  # There is a memcpy here, that is very bad.
+                batch_size + 1, dtype=torch.int32, device=query_layer.device
+            )  # There is a memcpy here, that is very bad.
             indices_q = cu_seqlens_q[:-1]
             query_layer = query_layer.squeeze(1)
         else:
             # The -q_len: slice assumes left padding.
             attention_mask = attention_mask[:, -query_length:]
             query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(
-                query_layer, attention_mask)
+                query_layer, attention_mask
+            )
 
         return (
             query_layer,
@@ -799,8 +835,8 @@ class BitnetDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](
-            config=config, layer_idx=layer_idx)
+        self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation
+                                                ](config=config, layer_idx=layer_idx)
 
         self.mlp = BitnetMLP(config)
         self.input_layernorm = BitnetRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -834,7 +870,8 @@ class BitnetDecoderLayer(nn.Module):
         if "padding_mask" in kwargs:
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`",
-                stacklevel=2)
+                stacklevel=2
+            )
 
         residual = hidden_states
 
@@ -926,7 +963,8 @@ class BitnetPreTrainedModel(PreTrainedModel):
             else:
                 dtype = layer.self_attn.o_proj.weight.dtype
             layer.self_attn.past_key_value = cache_cls(
-                self.config, max_batch_size, max_cache_len, device=device, dtype=dtype)
+                self.config, max_batch_size, max_cache_len, device=device, dtype=dtype
+            )
 
     def _reset_cache(self):
         for layer in self.model.layers:
@@ -1025,9 +1063,12 @@ class BitnetModel(BitnetPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([
-            BitnetDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                BitnetDecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        )
         self.norm = BitnetRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
 
@@ -1057,7 +1098,8 @@ class BitnetModel(BitnetPreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states
-            if output_hidden_states is not None else self.config.output_hidden_states)
+            if output_hidden_states is not None else self.config.output_hidden_states
+        )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -1086,7 +1128,8 @@ class BitnetModel(BitnetPreTrainedModel):
             cache_position = torch.arange(
                 past_seen_tokens,
                 past_seen_tokens + inputs_embeds.shape[1],
-                device=inputs_embeds.device)
+                device=inputs_embeds.device
+            )
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
@@ -1145,10 +1188,13 @@ class BitnetModel(BitnetPreTrainedModel):
         if use_cache:
             next_cache = (
                 next_decoder_cache.to_legacy_cache()
-                if isinstance(next_decoder_cache, Cache) else next_decoder_cache)
+                if isinstance(next_decoder_cache, Cache) else next_decoder_cache
+            )
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
-                         if v is not None)
+            return tuple(
+                v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+                if v is not None
+            )
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
@@ -1174,12 +1220,12 @@ class BitnetModel(BitnetPreTrainedModel):
         else:  # dynamic cache
             target_length = (
                 attention_mask.shape[-1]
-                if isinstance(attention_mask, torch.Tensor) else cache_position[-1] + 1)
+                if isinstance(attention_mask, torch.Tensor) else cache_position[-1] + 1
+            )
 
-        causal_mask = torch.full((sequence_length, target_length),
-                                 fill_value=min_dtype,
-                                 dtype=dtype,
-                                 device=device)
+        causal_mask = torch.full(
+            (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
+        )
         if sequence_length != 1:
             causal_mask = torch.triu(causal_mask, diagonal=1)
         causal_mask *= torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
@@ -1188,10 +1234,10 @@ class BitnetModel(BitnetPreTrainedModel):
             causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
             if attention_mask.dim() == 2:
                 mask_length = attention_mask.shape[-1]
-                padding_mask = causal_mask[..., :mask_length].eq(
-                    0.0) * attention_mask[:, None, None, :].eq(0.0)
-                causal_mask[..., :mask_length] = causal_mask[..., :mask_length].masked_fill(
-                    padding_mask, min_dtype)
+                padding_mask = causal_mask[
+                    ..., :mask_length].eq(0.0) * attention_mask[:, None, None, :].eq(0.0)
+                causal_mask[..., :mask_length] = causal_mask[
+                    ..., :mask_length].masked_fill(padding_mask, min_dtype)
             elif attention_mask.dim() == 4:
                 # backwards compatibility: we allow passing a 4D attention mask shorter than the input length with
                 # cache. In that case, the 4D attention mask attends to the newest tokens only.
@@ -1281,7 +1327,8 @@ class BitnetForCausalLM(BitnetPreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states
-            if output_hidden_states is not None else self.config.output_hidden_states)
+            if output_hidden_states is not None else self.config.output_hidden_states
+        )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
@@ -1327,13 +1374,15 @@ class BitnetForCausalLM(BitnetPreTrainedModel):
             attentions=outputs.attentions,
         )
 
-    def prepare_inputs_for_generation(self,
-                                      input_ids,
-                                      past_key_values=None,
-                                      attention_mask=None,
-                                      inputs_embeds=None,
-                                      cache_position=None,
-                                      **kwargs):
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        **kwargs
+    ):
         # With static cache, the `past_key_values` is None
         # TODO joao: standardize interface for the different Cache classes and remove of this if
         has_static_cache = False
@@ -1348,9 +1397,11 @@ class BitnetForCausalLM(BitnetPreTrainedModel):
                     0] if cache_position is not None else past_key_values.get_seq_length()
                 max_cache_length = (
                     torch.tensor(past_key_values.get_max_length(), device=input_ids.device)
-                    if past_key_values.get_max_length() is not None else None)
+                    if past_key_values.get_max_length() is not None else None
+                )
                 cache_length = past_length if max_cache_length is None else torch.min(
-                    max_cache_length, past_length)
+                    max_cache_length, past_length
+                )
             # TODO joao: remove this `else` after `generate` prioritizes `Cache` objects
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
@@ -1393,29 +1444,35 @@ class BitnetForCausalLM(BitnetPreTrainedModel):
         input_length = position_ids.shape[-1] if position_ids is not None else input_ids.shape[-1]
         if cache_position is None:
             cache_position = torch.arange(
-                past_length, past_length + input_length, device=input_ids.device)
+                past_length, past_length + input_length, device=input_ids.device
+            )
         else:
             cache_position = cache_position[-input_length:]
 
         if has_static_cache:
             past_key_values = None
 
-        model_inputs.update({
-            "position_ids": position_ids,
-            "cache_position": cache_position,
-            "past_key_values": past_key_values,
-            "use_cache": kwargs.get("use_cache"),
-            "attention_mask": attention_mask,
-        })
+        model_inputs.update(
+            {
+                "position_ids": position_ids,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "use_cache": kwargs.get("use_cache"),
+                "attention_mask": attention_mask,
+            }
+        )
         return model_inputs
 
     @staticmethod
     def _reorder_cache(past_key_values, beam_idx):
         reordered_past = ()
         for layer_past in past_key_values:
-            reordered_past += (tuple(
-                past_state.index_select(0, beam_idx.to(past_state.device))
-                for past_state in layer_past),)
+            reordered_past += (
+                tuple(
+                    past_state.index_select(0, beam_idx.to(past_state.device))
+                    for past_state in layer_past
+                ),
+            )
         return reordered_past
 
     @staticmethod

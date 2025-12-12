@@ -5,8 +5,9 @@ from tvm import arith
 
 class Statement:
 
-    def __init__(self, output: str, dependent_region: dict, var_map: OrderedDict,
-                 range_map: OrderedDict):
+    def __init__(
+        self, output: str, dependent_region: dict, var_map: OrderedDict, range_map: OrderedDict
+    ):
         self.output = output
         self.dependent_region = dependent_region
         self.var_map = var_map

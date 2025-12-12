@@ -56,11 +56,13 @@ def general_compress(lowprecision_weight, source_bits=4, storage_dtype=None):
     int8_weight = torch.zeros(
         (*lowprecision_weight.shape[:-1], lowprecision_weight.shape[-1] // elems_per_byte),
         dtype=torch.int8,
-        device=lowprecision_weight.device)
+        device=lowprecision_weight.device
+    )
     for j in range(lowprecision_weight.shape[-1] // elems_per_byte):
         for k in range(elems_per_byte):
-            int8_weight[..., j] |= (lowprecision_weight[..., j * elems_per_byte + k] <<
-                                    (source_bits * k)).to(torch.int8)
+            int8_weight[
+                ..., j] |= (lowprecision_weight[..., j * elems_per_byte + k] <<
+                            (source_bits * k)).to(torch.int8)
 
     return int8_weight.to(storage_dtype)
 

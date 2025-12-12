@@ -17,31 +17,35 @@ def get_configs():
     threads = [128]
     _configs = list(itertools.product(block_N, block_H, num_split, num_stages, threads))
 
-    configs = [{
-        'block_N': c[0],
-        'block_H': c[1],
-        'num_split': c[2],
-        'num_stages': c[3],
-        'threads': c[4]
-    } for c in _configs]
+    configs = [
+        {
+            'block_N': c[0],
+            'block_H': c[1],
+            'num_split': c[2],
+            'num_stages': c[3],
+            'threads': c[4]
+        } for c in _configs
+    ]
     return configs
 
 
 # @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(out_idx=[-2, -1], debug_root_path="./examples/flash_decoding")
-def flashattn(batch,
-              heads,
-              k_heads,
-              max_seqlen_kv,
-              total_seqlen_k,
-              dim,
-              has_sink,
-              page_block_size,
-              block_N=128,
-              block_H=64,
-              num_split=1,
-              num_stages=1,
-              threads=128):
+def flashattn(
+    batch,
+    heads,
+    k_heads,
+    max_seqlen_kv,
+    total_seqlen_k,
+    dim,
+    has_sink,
+    page_block_size,
+    block_N=128,
+    block_H=64,
+    num_split=1,
+    num_stages=1,
+    threads=128
+):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape_q = [batch, heads, dim]
     shape_k = [total_seqlen_k, k_heads, dim]
@@ -58,14 +62,14 @@ def flashattn(batch,
 
     @T.macro
     def flash_attn(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            cu_seqlens_k: T.Tensor([batch + 1], "int32"),
-            s_aux: T.Tensor([heads], "float32"),
-            BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / block_N)], "int32"),
-            Output: T.Tensor([batch, heads, dim], dtype),
-            S: T.Tensor(shape_s, dtype),
+        Q: T.Tensor(shape_q, dtype),
+        K: T.Tensor(shape_k, dtype),
+        V: T.Tensor(shape_v, dtype),
+        cu_seqlens_k: T.Tensor([batch + 1], "int32"),
+        s_aux: T.Tensor([heads], "float32"),
+        BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / block_N)], "int32"),
+        Output: T.Tensor([batch, heads, dim], dtype),
+        S: T.Tensor(shape_s, dtype),
     ):
         with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
@@ -99,15 +103,18 @@ def flashattn(batch,
             # loop_range = T.ceildiv((seqlen_kv // num_split), block_N)
             loop_range = T.ceildiv((cur_seqlen_k // num_split), block_N)
             for k in T.Pipelined(loop_range, num_stages=num_stages):
-                k_start = BLOCK_TABLE[bid, (k * block_N) // page_block_size] * page_block_size + (
-                    k * block_N) % page_block_size
-                T.copy(K[cur_start_k + k_start:cur_start_k + k_start + block_N, cur_kv_head, :],
-                       K_shared)
+                k_start = BLOCK_TABLE[bid, (k * block_N) // page_block_size
+                                     ] * page_block_size + (k * block_N) % page_block_size
+                T.copy(
+                    K[cur_start_k + k_start:cur_start_k + k_start + block_N, cur_kv_head, :],
+                    K_shared
+                )
                 T.clear(acc_s)
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 for i, j in T.Parallel(block_H, block_N):
-                    acc_s[i, j] = T.if_then_else(k * block_N + j < cur_seqlen_k, acc_s[i, j],
-                                                 -T.infinity(accum_dtype))
+                    acc_s[i, j] = T.if_then_else(
+                        k * block_N + j < cur_seqlen_k, acc_s[i, j], -T.infinity(accum_dtype)
+                    )
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -127,10 +134,12 @@ def flashattn(batch,
                 T.copy(acc_s, acc_s_cast)
                 for i, j in T.Parallel(block_H, dim):
                     acc_o[i, j] *= scores_scale[i]
-                v_start = BLOCK_TABLE[bid, (k * block_N) // page_block_size] * page_block_size + (
-                    k * block_N) % page_block_size
-                T.copy(V[cur_start_k + v_start:cur_start_k + v_start + block_N, cur_kv_head, :],
-                       V_shared)
+                v_start = BLOCK_TABLE[bid, (k * block_N) // page_block_size
+                                     ] * page_block_size + (k * block_N) % page_block_size
+                T.copy(
+                    V[cur_start_k + v_start:cur_start_k + v_start + block_N, cur_kv_head, :],
+                    V_shared
+                )
                 T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             if has_sink:
@@ -145,19 +154,21 @@ def flashattn(batch,
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
             T.copy(acc_o[:valid_block_H, :], O_shared)
             T.copy(O_shared, Output[bid, hid * valid_block_H:(hid + 1) * valid_block_H, :])
-            T.copy(S_shared[:valid_block_H, :], S[bid,
-                                                  hid * valid_block_H:(hid + 1) * valid_block_H, :])
+            T.copy(
+                S_shared[:valid_block_H, :], S[bid,
+                                               hid * valid_block_H:(hid + 1) * valid_block_H, :]
+            )
 
     @T.prim_func
     def flashattn_gqa_decode_no_split(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            cu_seqlens_k: T.Tensor([batch + 1], "int32"),
-            s_aux: T.Tensor([heads], "float32"),
-            BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / page_block_size)], "int32"),
-            Output: T.Tensor(shape_o, dtype),
-            S: T.Tensor(shape_s, dtype),
+        Q: T.Tensor(shape_q, dtype),
+        K: T.Tensor(shape_k, dtype),
+        V: T.Tensor(shape_v, dtype),
+        cu_seqlens_k: T.Tensor([batch + 1], "int32"),
+        s_aux: T.Tensor([heads], "float32"),
+        BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / page_block_size)], "int32"),
+        Output: T.Tensor(shape_o, dtype),
+        S: T.Tensor(shape_s, dtype),
     ):
         flash_attn(Q, K, V, cu_seqlens_k, s_aux, BLOCK_TABLE, Output, S)
 
@@ -195,9 +206,9 @@ def flash_attn_with_attn_pool_decode_tilelang(
     gqa_group_size = q_h // k_h
 
     O_tl = torch.zeros_like(Q)
-    S_tl = torch.zeros((batch, q_h, math.ceil(real_max_k_seqlen / block_size)),
-                       dtype=Q.dtype,
-                       device=Q.device)
+    S_tl = torch.zeros(
+        (batch, q_h, math.ceil(real_max_k_seqlen / block_size)), dtype=Q.dtype, device=Q.device
+    )
     O_tl, S_tl = tl_kernel(Q, K, V, cu_seqlens_k, s_aux, block_table)
 
     if use_per_kv_head_sparse_index:
@@ -240,7 +251,8 @@ def test_equal_seqlen_decode_main(args):
 
     # Generate cumulative sequence lengths
     cu_seqlens_k = torch.arange(
-        0, (batch_size + 1) * k_seqlen, k_seqlen, device='cuda', dtype=torch.int32)
+        0, (batch_size + 1) * k_seqlen, k_seqlen, device='cuda', dtype=torch.int32
+    )
     max_seqlen_k = k_seqlen
 
     print(f"q shape: {q.shape}")
@@ -250,11 +262,14 @@ def test_equal_seqlen_decode_main(args):
     num_tokens, q_h, head_size = q.shape
     batch = cu_seqlens_k.size(0) - 1
     k_h = k_varlen.size(1)
-    tl_kernel = flashattn(batch, q_h, k_h, args.k_seqlen, cu_seqlens_k[-1].item(), head_size,
-                          args.test_sink, page_block_size)
+    tl_kernel = flashattn(
+        batch, q_h, k_h, args.k_seqlen, cu_seqlens_k[-1].item(), head_size, args.test_sink,
+        page_block_size
+    )
 
     block_table = torch.zeros(
-        batch, math.ceil(real_max_k_seqlen / page_block_size), device='cuda', dtype=torch.int32)
+        batch, math.ceil(real_max_k_seqlen / page_block_size), device='cuda', dtype=torch.int32
+    )
     block_cnt = 0
     for i in range(batch):
         cur_seqlen = cu_seqlens_k[i + 1].item() - cu_seqlens_k[i].item()
@@ -274,7 +289,8 @@ def test_equal_seqlen_decode_main(args):
         args.num_split,
         softmax_scale,
         s_aux=sink,
-        block_size=block_size)
+        block_size=block_size
+    )
     O_tilelang, S_tilelang = flash_attn_with_attn_pool_decode_tilelang(
         q,
         k_varlen,
@@ -301,14 +317,16 @@ def test_equal_seqlen_decode_main(args):
 
     if sink is None:
         # Standard scaled dot-product attention
-        logits = torch.matmul(q_expanded, k_repeat.transpose(
-            -2, -1)) * softmax_scale  # [batch, q_heads, 1, seqlen_k]
+        logits = torch.matmul(
+            q_expanded, k_repeat.transpose(-2, -1)
+        ) * softmax_scale  # [batch, q_heads, 1, seqlen_k]
         attn_weights = torch.softmax(logits, dim=-1)
         O_torch = torch.matmul(attn_weights, v_repeat).squeeze(2)  # [batch, q_heads, head_size]
     else:
         # s_aux attention
-        logits = torch.matmul(q_expanded, k_repeat.transpose(
-            -2, -1)) * softmax_scale  # [batch, q_heads, 1, seqlen_k]
+        logits = torch.matmul(
+            q_expanded, k_repeat.transpose(-2, -1)
+        ) * softmax_scale  # [batch, q_heads, 1, seqlen_k]
 
         sink_expanded = sink.view(1, q_heads, 1, 1)  # [1, q_heads, 1, 1]
         logits_max = torch.max(logits, dim=-1, keepdim=True).values
@@ -325,7 +343,8 @@ def test_equal_seqlen_decode_main(args):
         attn_weights.squeeze(2),  # [b, q_heads, k_seqlen]
         kernel_size=(q_heads, block_size),
         stride=(q_heads, block_size),
-        ceil_mode=True).to(torch.float16)
+        ceil_mode=True
+    ).to(torch.float16)
 
     print("S_tilelang", S_tilelang)
     print("attn_score_pooled", attn_score_pooled)
@@ -340,14 +359,17 @@ def test_equal_seqlen_decode_main(args):
     print(f"Max difference in O_tilelang: {max_diff_o_tilelang.item()}")
     print(f"Max difference in S_tilelang: {max_diff_s_tilelang.item()}")
     assert torch.allclose(
-        O_triton, O_torch, atol=1e-2, rtol=1e-2), f"Output mismatch: {max_diff_o.item()}"
+        O_triton, O_torch, atol=1e-2, rtol=1e-2
+    ), f"Output mismatch: {max_diff_o.item()}"
     assert torch.allclose(
-        S_triton, attn_score_pooled, atol=1e-2, rtol=1e-2), f"Score mismatch: {max_diff_s.item()}"
+        S_triton, attn_score_pooled, atol=1e-2, rtol=1e-2
+    ), f"Score mismatch: {max_diff_s.item()}"
     assert torch.allclose(
-        O_tilelang, O_torch, atol=1e-2, rtol=1e-2), f"Output mismatch: {max_diff_o_tilelang.item()}"
+        O_tilelang, O_torch, atol=1e-2, rtol=1e-2
+    ), f"Output mismatch: {max_diff_o_tilelang.item()}"
     assert torch.allclose(
-        S_tilelang, attn_score_pooled, atol=1e-2,
-        rtol=1e-2), f"Score mismatch: {max_diff_s_tilelang.item()}"
+        S_tilelang, attn_score_pooled, atol=1e-2, rtol=1e-2
+    ), f"Score mismatch: {max_diff_s_tilelang.item()}"
     print("✅ All tests passed!")
 
 
@@ -401,11 +423,14 @@ def test_varlen_decode_main(args):
     num_tokens, q_h, head_size = q_decode.shape
     batch = cu_seqlens_k.size(0) - 1
     k_h = k_varlen.size(1)
-    tl_kernel = flashattn(batch, q_h, k_h, args.k_seqlen, cu_seqlens_k[-1].item(), head_size,
-                          args.test_sink, page_block_size)
+    tl_kernel = flashattn(
+        batch, q_h, k_h, args.k_seqlen, cu_seqlens_k[-1].item(), head_size, args.test_sink,
+        page_block_size
+    )
 
     block_table = torch.zeros(
-        batch, math.ceil(real_max_k_seqlen / page_block_size), device='cuda', dtype=torch.int32)
+        batch, math.ceil(real_max_k_seqlen / page_block_size), device='cuda', dtype=torch.int32
+    )
     block_cnt = 0
     for i in range(batch):
         cur_seqlen = cu_seqlens_k[i + 1].item() - cu_seqlens_k[i].item()
@@ -425,7 +450,8 @@ def test_varlen_decode_main(args):
         args.num_split,
         softmax_scale,
         s_aux=sink,
-        block_size=block_size)
+        block_size=block_size
+    )
     O_tilelang, S_tilelang = flash_attn_with_attn_pool_decode_tilelang(
         q_decode,
         k_varlen,
@@ -468,9 +494,11 @@ def test_varlen_decode_main(args):
 
     # Stack to create batched tensors [b, max_seqlen, kv_heads, head_size]
     k_padded_batched = torch.stack(
-        k_padded_list, dim=0).transpose(1, 2)  # [b, kv_heads, max_seqlen, head_size]
+        k_padded_list, dim=0
+    ).transpose(1, 2)  # [b, kv_heads, max_seqlen, head_size]
     v_padded_batched = torch.stack(
-        v_padded_list, dim=0).transpose(1, 2)  # [b, kv_heads, max_seqlen, head_size]
+        v_padded_list, dim=0
+    ).transpose(1, 2)  # [b, kv_heads, max_seqlen, head_size]
 
     # Expand q to match kv heads: [b, q_heads, 1, head_size]
     q_expanded = q_decode.unsqueeze(2)  # [b, q_heads, 1, head_size]
@@ -480,15 +508,18 @@ def test_varlen_decode_main(args):
     print(f"v_padded_batched shape: {v_padded_batched.shape}")
 
     # Compute torch reference
-    k_repeat = repeat_kv(k_padded_batched,
-                         q_heads // kv_heads)  # [b, q_heads, max_seqlen, head_size]
-    v_repeat = repeat_kv(v_padded_batched,
-                         q_heads // kv_heads)  # [b, q_heads, max_seqlen, head_size]
+    k_repeat = repeat_kv(
+        k_padded_batched, q_heads // kv_heads
+    )  # [b, q_heads, max_seqlen, head_size]
+    v_repeat = repeat_kv(
+        v_padded_batched, q_heads // kv_heads
+    )  # [b, q_heads, max_seqlen, head_size]
 
     if sink is None:
         # Standard attention computation: [b, q_heads, 1, head_size] @ [b, q_heads, head_size, max_seqlen]
-        attn_score = torch.matmul(q_expanded, k_repeat.transpose(
-            -2, -1)) * softmax_scale  # [b, q_heads, 1, max_seqlen]
+        attn_score = torch.matmul(
+            q_expanded, k_repeat.transpose(-2, -1)
+        ) * softmax_scale  # [b, q_heads, 1, max_seqlen]
 
         # Apply sequence length masking
         for i in range(batch_size):
@@ -506,8 +537,9 @@ def test_varlen_decode_main(args):
         O_torch = torch.matmul(attn_weights, v_repeat)  # [b, q_heads, 1, head_size]
     else:
         # s_aux attention
-        logits = torch.matmul(q_expanded, k_repeat.transpose(
-            -2, -1)) * softmax_scale  # [b, q_heads, 1, max_seqlen]
+        logits = torch.matmul(
+            q_expanded, k_repeat.transpose(-2, -1)
+        ) * softmax_scale  # [b, q_heads, 1, max_seqlen]
 
         # Apply sequence length masking
         for i in range(batch_size):
@@ -528,8 +560,9 @@ def test_varlen_decode_main(args):
             attn_weights[i, :, :, actual_k_len:] = 0.0
 
         # Compute output: [b, q_heads, 1, max_seqlen] @ [b, q_heads, max_seqlen, head_size]
-        O_torch = torch.matmul(attn_weights.to(v_repeat.dtype),
-                               v_repeat)  # [b, q_heads, 1, head_size]
+        O_torch = torch.matmul(
+            attn_weights.to(v_repeat.dtype), v_repeat
+        )  # [b, q_heads, 1, head_size]
 
     O_torch = O_torch.squeeze(2)  # [b, q_heads, head_size]
 
@@ -538,7 +571,8 @@ def test_varlen_decode_main(args):
         attn_weights.squeeze(2),  # [b, q_heads, max_seqlen]
         kernel_size=(q_heads, block_size),
         stride=(q_heads, block_size),
-        ceil_mode=True).to(dtype=torch.float16)  # [b, 1, ceil(max_seqlen/block_size)]
+        ceil_mode=True
+    ).to(dtype=torch.float16)  # [b, 1, ceil(max_seqlen/block_size)]
 
     print(f"O_triton shape: {O_triton.shape}")
     print(f"O_tilelang shape: {O_tilelang.shape}")
@@ -555,21 +589,26 @@ def test_varlen_decode_main(args):
 
     max_diff_s = torch.max(torch.abs(S_triton - attn_score_pooled))
     max_diff_s_tl = torch.max(
-        torch.abs(S_tilelang[:, :, :math.ceil(max_seqlen_k / block_size)] - attn_score_pooled))
+        torch.abs(S_tilelang[:, :, :math.ceil(max_seqlen_k / block_size)] - attn_score_pooled)
+    )
     print(f"Max difference in S: {max_diff_s.item()}")
     print(f"Max difference in S_tilelang: {max_diff_s_tl.item()}")
 
     assert torch.allclose(
-        O_triton, O_torch, atol=1e-2, rtol=1e-2), f"Output mismatch: {max_diff_o.item()}"
+        O_triton, O_torch, atol=1e-2, rtol=1e-2
+    ), f"Output mismatch: {max_diff_o.item()}"
     assert torch.allclose(
-        S_triton, attn_score_pooled, atol=1e-2, rtol=1e-2), f"Score mismatch: {max_diff_s.item()}"
+        S_triton, attn_score_pooled, atol=1e-2, rtol=1e-2
+    ), f"Score mismatch: {max_diff_s.item()}"
     assert torch.allclose(
-        O_tilelang, O_torch, atol=1e-2, rtol=1e-2), f"Output mismatch: {max_diff_o_tl.item()}"
+        O_tilelang, O_torch, atol=1e-2, rtol=1e-2
+    ), f"Output mismatch: {max_diff_o_tl.item()}"
     assert torch.allclose(
         S_tilelang[:, :, :math.ceil(max_seqlen_k / block_size)],
         attn_score_pooled,
         atol=1e-2,
-        rtol=1e-2), f"Score mismatch: {max_diff_s_tl.item()}"
+        rtol=1e-2
+    ), f"Score mismatch: {max_diff_s_tl.item()}"
 
     print("✅ All tests passed!")
 
@@ -636,11 +675,14 @@ def speed_benchmark_decode_comparison(args):
     num_tokens, q_h, head_size = q_decode.shape
     batch = cu_seqlens_k.size(0) - 1
     k_h = k_varlen.size(1)
-    tl_kernel = flashattn(batch, q_h, k_h, args.k_seqlen, cu_seqlens_k[-1].item(), head_size,
-                          args.test_sink, page_block_size)
+    tl_kernel = flashattn(
+        batch, q_h, k_h, args.k_seqlen, cu_seqlens_k[-1].item(), head_size, args.test_sink,
+        page_block_size
+    )
 
     block_table = torch.zeros(
-        batch, math.ceil(real_max_k_seqlen / page_block_size), device='cuda', dtype=torch.int32)
+        batch, math.ceil(real_max_k_seqlen / page_block_size), device='cuda', dtype=torch.int32
+    )
     block_cnt = 0
     for i in range(batch):
         cur_seqlen = cu_seqlens_k[i + 1].item() - cu_seqlens_k[i].item()
@@ -671,9 +713,10 @@ def speed_benchmark_decode_comparison(args):
 
     # Benchmark
     print("⚡ Benchmarking Triton kernel (100 iterations)...")
-    triton_time = do_bench(flash_attn_with_attn_pool_decode, q_decode, k_varlen, v_varlen,
-                           cu_seqlens_k, max_seqlen_k, args.k_seqlen, 1, softmax_scale, sink,
-                           block_size)
+    triton_time = do_bench(
+        flash_attn_with_attn_pool_decode, q_decode, k_varlen, v_varlen, cu_seqlens_k, max_seqlen_k,
+        args.k_seqlen, 1, softmax_scale, sink, block_size
+    )
     print(f"Average decode kernel time Triton: {triton_time:.3f} ms")
     print(f"Speedup: {(triton_time / tilelang_time):.3f}")
 
@@ -685,17 +728,22 @@ if __name__ == "__main__":
     parser.add_argument('--kv_heads', type=int, default=8, help='Number of key-value heads')
     parser.add_argument('--k_seqlen', type=int, default=8192, help='Key sequence length')
     parser.add_argument(
-        '--head_size', type=int, default=128, choices=[64, 128, 256], help='Head dimension')
+        '--head_size', type=int, default=128, choices=[64, 128, 256], help='Head dimension'
+    )
     parser.add_argument('--block_size', type=int, default=128, help='Block size for computation')
     parser.add_argument(
-        '--dtype', type=str, default='bfloat16', choices=['float16', 'bfloat16'], help='Data type')
+        '--dtype', type=str, default='bfloat16', choices=['float16', 'bfloat16'], help='Data type'
+    )
     parser.add_argument(
-        '--test_varlen', action='store_true', help='Test with truly variable sequence lengths')
+        '--test_varlen', action='store_true', help='Test with truly variable sequence lengths'
+    )
     parser.add_argument(
-        '--test_sink', action='store_true', help='Test with sink attention mechanism')
+        '--test_sink', action='store_true', help='Test with sink attention mechanism'
+    )
     parser.add_argument('--benchmark', action='store_true', help='Run speed benchmark')
     parser.add_argument(
-        '--num_split', type=int, default=1, choices=[1, 16], help='Number of splits')
+        '--num_split', type=int, default=1, choices=[1, 16], help='Number of splits'
+    )
     parser.add_argument('--page_block_size', type=int, default=128, help='Page block size')
     args = parser.parse_args()
     args.test_sink = True

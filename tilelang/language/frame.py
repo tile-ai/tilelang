@@ -129,8 +129,9 @@ class LetFrame(TIRFrame):
                     is_block_load = True
                     break
             if is_block_load:
-                self.value = BufferRegion(self.value.buffer,
-                                          [Range(x.base, x.lanes) for x in indices])
+                self.value = BufferRegion(
+                    self.value.buffer, [Range(x.base, x.lanes) for x in indices]
+                )
 
         _get_let_stack().push(self)
         return self.var
