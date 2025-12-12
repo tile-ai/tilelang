@@ -429,10 +429,8 @@ def get_warp_group_idx(
         args.append(warp_size_expr)
     if warps_per_group_expr is not None:
         if warp_size_expr is None:
-            raise ValueError(
-                "get_warp_group_idx expects `warp_size` when specifying "
-                "`warps_per_group`."
-            )
+            raise ValueError("get_warp_group_idx expects `warp_size` when specifying "
+                             "`warps_per_group`.")
         args.append(warps_per_group_expr)
     return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_group_idx"), *args)
 
@@ -461,12 +459,10 @@ def shuffle_elect(thread_extent: int) -> PrimExpr:
     return tir.call_intrin("bool", tir.op.Op.get("tl.tl_shuffle_elect"), thread_extent)
 
 
-def warpgroup_fence_operand(
-    buffer_or_ptr: tir.Buffer | PrimExpr,
-    offset: int | PrimExpr = 0,
-    num_regs: int | PrimExpr | None = None,
-    dtype: str | None = None
-):
+def warpgroup_fence_operand(buffer_or_ptr: tir.Buffer | PrimExpr,
+                            offset: int | PrimExpr = 0,
+                            num_regs: int | PrimExpr | None = None,
+                            dtype: str | None = None):
     """Insert a warpgroup fence for the destination accumulator registers.
 
     This prevents NVCC from sinking uses of accumulator fragments past the corresponding
@@ -521,8 +517,7 @@ def warpgroup_fence_operand(
                 data_ptr,
                 convert(offset),
                 convert(num_regs),
-            )
-        )
+            ))
 
     if isinstance(buffer_or_ptr, tir.Buffer):
         data_ptr = buffer_or_ptr.data
@@ -537,8 +532,7 @@ def warpgroup_fence_operand(
                     total_elems *= int(dim)
                 else:
                     raise ValueError(
-                        "warpgroup_fence_operand requires num_regs when buffer shape is symbolic."
-                    )
+                        "warpgroup_fence_operand requires num_regs when buffer shape is symbolic.")
             bits_per_elem = DataType(dtype).bits
             num_regs = (total_elems * bits_per_elem + 31) // 32
     elif isinstance(buffer_or_ptr, BufferRegion):
@@ -586,8 +580,7 @@ def warpgroup_fence_operand(
                 data_ptr,
                 convert(offset),
                 convert(num_regs),
-            )
-        )
+            ))
     else:
         data_ptr = buffer_or_ptr
         # Try to infer dtype from common pointer expressions when not provided
@@ -625,8 +618,7 @@ def warpgroup_fence_operand(
             data_ptr,
             convert(offset),
             convert(num_regs),
-        )
-    )
+        ))
 
 
 def wait_wgmma(id: int):
@@ -753,8 +745,8 @@ def initialize_wgmma_descriptor(
                                                descriptor.shape[0] != 1):
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
-    descriptor = descriptor if isinstance(descriptor,
-                                          BufferLoad) else tir.BufferLoad(descriptor, [0])
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
 
     return evaluate(
         tir.call_intrin(
@@ -765,8 +757,7 @@ def initialize_wgmma_descriptor(
             layout_type_,
             int(leading_byte_offset),
             int(stride_byte_offset),
-        )
-    )
+        ))
 
 
 def initialize_tcgen05_descriptor(
@@ -787,8 +778,8 @@ def initialize_tcgen05_descriptor(
                                                descriptor.shape[0] != 1):
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
-    descriptor = descriptor if isinstance(descriptor,
-                                          BufferLoad) else tir.BufferLoad(descriptor, [0])
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
 
     return evaluate(
         tir.call_intrin(
@@ -801,8 +792,7 @@ def initialize_tcgen05_descriptor(
             int(base_offset),
             tir.IntImm("int32", 1 if leading_is_absolute else 0),
             int(swizzle_mode),
-        )
-    )
+        ))
 
 
 def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:
@@ -819,18 +809,16 @@ def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimEx
     if not isinstance(descriptor, (BufferLoad, tir.Buffer)):
         raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
 
-    if isinstance(descriptor, tir.Buffer) and len(descriptor.shape
-                                                 ) != 1 or descriptor.shape[0] != 1:
+    if isinstance(descriptor, tir.Buffer) and len(
+            descriptor.shape) != 1 or descriptor.shape[0] != 1:
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
-    descriptor = descriptor if isinstance(descriptor,
-                                          BufferLoad) else tir.BufferLoad(descriptor, [0])
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
 
     return evaluate(
-        tir.call_intrin(
-            "handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor, offset
-        )
-    )
+        tir.call_intrin("handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor,
+                        offset))
 
 
 def loop_break():
