@@ -123,6 +123,16 @@ tilelang = "tilelang"
 based_on_style = "yapf"
 column_limit = 100
 indent_width = 4
+continuation_indent_width = 4
+continuation_align_style = "SPACE"
+
+# Ensure 4-space hanging indent without double-indent
+split_before_first_argument = true
+split_before_closing_bracket = false
+dedent_closing_brackets = true
+align_closing_bracket_with_visual_indent = false
+split_arguments_when_comma_terminated = false
+
 
 [tool.codespell]
 ignore-words = "docs/spelling_wordlist.txt"

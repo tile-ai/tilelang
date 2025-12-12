@@ -25,5 +25,6 @@ def test_language_ldg_codegen():
     assert "__ldg(" in src, "Expected __ldg call in generated CUDA source"
     assert "__ldg(&" in src or "__ldg(&(" in src, "Expected address-of form in __ldg call"
 
+
 if __name__ == "__main__":
     tilelang.testing.main()
