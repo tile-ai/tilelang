@@ -3,6 +3,7 @@
  * \brief Annotate PrimFunc parameters that are read-only (never written).
  */
 
+#include <string>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
@@ -24,33 +25,79 @@ using namespace ffi;
  */
 class ReadWriteMarker : public StmtExprVisitor {
 public:
-  explicit ReadWriteMarker(const Array<Var> &handle_params) {
-    for (const Var &v : handle_params) {
-      handle_params_.insert(v.get());
-    }
-  }
+  explicit ReadWriteMarker(
+      const std::unordered_set<const VarNode *> &param_or_data_vars)
+      : param_or_data_vars_(param_or_data_vars) {}
 
   const std::unordered_set<const VarNode *> &written() const {
     return written_;
   }
 
+  // Try to resolve the underlying buffer data Var from a pointer-like
+  // argument. Supports:
+  //  - address_of(BufferLoad(...)) -> returns buffer->data
+  //  - BufferLoad(...)             -> returns buffer->data
+  // Otherwise returns nullptr.
+  const VarNode *ResolveDataVarFromPtrArg(const PrimExpr &arg) const {
+    if (const auto *call = arg.as<CallNode>()) {
+      if (call->op.same_as(builtin::address_of())) {
+        if (call->args.size() == 1U) {
+          if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+            return load->buffer->data.get();
+          }
+        }
+      }
+    } else if (const auto *load = arg.as<BufferLoadNode>()) {
+      return load->buffer->data.get();
+    }
+    return nullptr;
+  }
+
   void VisitStmt_(const BufferStoreNode *op) final {
     const VarNode *data = op->buffer->data.get();
-    if (handle_params_.count(data)) {
+    if (param_or_data_vars_.count(data)) {
       written_.insert(data);
     }
     StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitExpr_(const CallNode *op) final {
-    // Detect tvm_access_ptr writes
+    // Detect tvm_access_ptr writes. Be conservative if rw_mask is non-constant.
     if (op->op.same_as(builtin::tvm_access_ptr())) {
       if (op->args.size() == 5U) {
         if (const VarNode *buf = op->args[1].as<VarNode>()) {
-          if (const IntImmNode *flag = op->args[4].as<IntImmNode>()) {
-            if ((flag->value & 2) != 0) {
-              if (handle_params_.count(buf)) {
-                written_.insert(buf);
+          const IntImmNode *flag = op->args[4].as<IntImmNode>();
+          bool maybe_write = true; // default conservative
+          if (flag) {
+            maybe_write = (flag->value & 2) != 0; // write bit set
+          }
+          if (maybe_write && param_or_data_vars_.count(buf)) {
+            written_.insert(buf);
+          }
+        }
+      }
+    } else if (op->op.same_as(builtin::call_extern())) {
+      // Common pattern: call_extern("AtomicAdd*", dst_ptr, value, ...)
+      // Mark the destination buffer as written when we can resolve it.
+      if (!op->args.empty()) {
+        if (const auto *name = op->args[0].as<StringImmNode>()) {
+          const std::string &callee = name->value;
+          auto marks_write_like_atomic = [&]() {
+            // AtomicAdd family
+            if (callee == "AtomicAdd")
+              return true;
+            // Vectorized variants produced by AtomicAddVectorize:
+            // AtomicAddx2/x4
+            if (callee.rfind("AtomicAddx", 0) == 0)
+              return true;
+            return false;
+          }();
+          if (marks_write_like_atomic) {
+            // Destination is the first data argument (index 1)
+            if (op->args.size() >= 2) {
+              const VarNode *data = ResolveDataVarFromPtrArg(op->args[1]);
+              if (data && param_or_data_vars_.count(data)) {
+                written_.insert(data);
               }
             }
           }
@@ -61,7 +108,7 @@ public:
   }
 
 private:
-  std::unordered_set<const VarNode *> handle_params_;
+  std::unordered_set<const VarNode *> param_or_data_vars_;
   std::unordered_set<const VarNode *> written_;
 };
 
@@ -74,27 +121,50 @@ private:
  * `const` qualifiers to enable read-only caching (e.g., __ldg on CUDA).
  */
 static tir::PrimFunc MarkReadOnlyParams(tir::PrimFunc f) {
-  // Collect handle parameters (pointer-like, e.g., buffers in global memory)
-  Array<Var> handle_params;
-  for (const Var &v : f->params) {
-    if (v->dtype.is_handle()) {
-      handle_params.push_back(v);
+  // Gather handle params and their corresponding buffer data vars (aliases).
+  std::unordered_set<const VarNode *> param_or_data_vars;
+  // Map back from data var to parameter index for result attribution.
+  std::unordered_map<const VarNode *, size_t> data_var_to_param_idx;
+
+  for (size_t i = 0; i < f->params.size(); ++i) {
+    const Var &p = f->params[i];
+    if (!p->dtype.is_handle())
+      continue;
+    param_or_data_vars.insert(p.get());
+    // If there is a buffer_map entry for this param, include its data var too.
+    if (auto opt = f->buffer_map.Get(p)) {
+      const VarNode *data = opt.value()->data.get();
+      param_or_data_vars.insert(data);
+      data_var_to_param_idx[data] = i;
     }
   }
-  if (handle_params.empty()) {
+  if (param_or_data_vars.empty())
     return f;
-  }
 
-  ReadWriteMarker marker(handle_params);
+  ReadWriteMarker marker(param_or_data_vars);
   marker(f->body);
 
-  // Determine read-only parameter indices among all params
+  // Determine read-only parameter indices among all params (handle only)
   Array<Integer> readonly_indices;
   for (size_t i = 0; i < f->params.size(); ++i) {
     const Var &v = f->params[i];
     if (!v->dtype.is_handle())
       continue;
-    if (marker.written().count(v.get()) == 0) {
+
+    bool is_written = false;
+    // Direct param var written?
+    if (marker.written().count(v.get())) {
+      is_written = true;
+    } else {
+      // Or any aliased data var written?
+      if (auto opt = f->buffer_map.Get(v)) {
+        if (marker.written().count(opt.value()->data.get())) {
+          is_written = true;
+        }
+      }
+    }
+
+    if (!is_written) {
       readonly_indices.push_back(Integer(static_cast<int>(i)));
     }
   }
