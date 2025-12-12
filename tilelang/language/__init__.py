@@ -96,6 +96,7 @@ from .customize import (
 )
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
+from .builtin import __ldg as __ldg  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
 

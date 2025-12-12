@@ -59,6 +59,35 @@ def create_list_of_mbarrier(*args: Any) -> Call:
         raise TypeError("create_list_of_mbarrier expects a list or one or more arguments.")
 
 
+def __ldg(load_or_buf: BufferLoad | tir.Buffer, index: PrimExpr | int | None = None) -> PrimExpr:
+    """Explicitly load via CUDA read-only data cache.
+
+    Prefer calling with a BufferLoad: `T.__ldg(x[i])` emits `__ldg(&x[i])` on CUDA.
+    On non-CUDA backends, falls back to a regular load.
+
+    Args:
+        load_or_buf: A `BufferLoad` like `x[i]`, or a `Buffer`.
+        index: Optional index when passing a `Buffer` directly.
+
+    Returns:
+        PrimExpr: The loaded value.
+    """
+    if isinstance(load_or_buf, BufferLoad):
+        dtype = load_or_buf.dtype
+        return tir.call_intrin(str(dtype), tir.op.Op.get("tl.__ldg"), load_or_buf)
+    if isinstance(load_or_buf, tir.Buffer):
+        if index is None:
+            raise ValueError("T.__ldg(Buffer, index) requires an index when passing a Buffer.")
+        idx = index
+        if isinstance(index, (list, tuple)):
+            if len(index) != 1:
+                raise ValueError("T.__ldg currently supports 1D flattened indices.")
+            idx = index[0]
+        bl = BufferLoad(load_or_buf, [idx])
+        return tir.call_intrin(str(load_or_buf.dtype), tir.op.Op.get("tl.__ldg"), bl)
+    raise TypeError("T.__ldg expects a BufferLoad or a Buffer.")
+
+
 def get_mbarrier(*args):
     """Retrieve a memory barrier operation.
 
