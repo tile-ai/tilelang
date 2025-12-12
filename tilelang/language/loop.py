@@ -1,4 +1,5 @@
 """The language interface for tl programs."""
+
 from __future__ import annotations
 from typing import Any
 from tvm import tir
@@ -94,11 +95,9 @@ def Pipelined(
     return _ffi_api.Pipelined(start, stop, num_stages, order, stage, sync, group)
 
 
-def serial(start: tir.PrimExpr,
-           stop: tir.PrimExpr | None = None,
-           step: tir.PrimExpr | None = None,
-           *,
-           annotations: dict[str, Any] | None = None) -> frame.ForFrame:
+def serial(
+    start: tir.PrimExpr, stop: tir.PrimExpr | None = None, step: tir.PrimExpr | None = None, *, annotations: dict[str, Any] | None = None
+) -> frame.ForFrame:
     step_is_one = False
     step_is_one |= isinstance(step, int) and step == 1
     step_is_one |= isinstance(step, IntImm) and step.value == 1
@@ -111,13 +110,15 @@ def serial(start: tir.PrimExpr,
         return SerialForWithStep(start, stop, step, annotations=annotations)
 
 
-def unroll(start: tir.PrimExpr,
-           stop: tir.PrimExpr | None = None,
-           step: tir.PrimExpr | None = None,
-           *,
-           explicit: bool = False,
-           unroll_factor: int | None = None,
-           annotations: dict[str, Any] | None = None) -> frame.ForFrame:
+def unroll(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    step: tir.PrimExpr | None = None,
+    *,
+    explicit: bool = False,
+    unroll_factor: int | None = None,
+    annotations: dict[str, Any] | None = None,
+) -> frame.ForFrame:
     """The unrolled For statement.
 
     Parameters

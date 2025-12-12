@@ -9,7 +9,6 @@ from ..utils import get_roller_hints_from_output_nodes, get_tensorized_func_and_
 
 @dataclass
 class FlashAttentionTemplate(BaseTemplate):
-
     _output_nodes: list[OutputNode] = None
 
     # Operation-related configuration parameters
@@ -91,10 +90,7 @@ class FlashAttentionTemplate(BaseTemplate):
                 """
                 A_indices = [b, i, k]
                 B_indices = [b, j, k]
-                return te.sum(
-                    A[tuple(A_indices)].astype(accum_dtype) *
-                    B[tuple(B_indices)].astype(accum_dtype),
-                    axis=k)
+                return te.sum(A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype), axis=k)
 
             # Compute matrix multiplication result
             C = te.compute(

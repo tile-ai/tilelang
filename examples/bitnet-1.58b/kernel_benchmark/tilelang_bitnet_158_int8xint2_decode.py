@@ -102,17 +102,17 @@ def bitnet_158_int8xint2_decode(
 
     @T.prim_func
     def kernel(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, storage_dtype),
-            C: T.Buffer(C_shape, out_dtype),
+        A: T.Buffer(A_shape, in_dtype),
+        B: T.Buffer(B_shape, storage_dtype),
+        C: T.Buffer(C_shape, out_dtype),
     ):
         with T.Kernel(
-                T.ceildiv(N, n_partition),
-                M,
-                threads=(reduce_thread, n_partition),
+            T.ceildiv(N, n_partition),
+            M,
+            threads=(reduce_thread, n_partition),
         ) as (
-                bx,
-                by,
+            bx,
+            by,
         ):
             A_local = T.alloc_local((micro_size_k,), in_dtype)
             B_quant_local = T.alloc_local([micro_size_k_compressed], storage_dtype)
@@ -133,8 +133,7 @@ def bitnet_158_int8xint2_decode(
                 for v in T.vectorized(micro_size_k_compressed):
                     B_quant_local[v] = B[
                         bx * n_partition + ni,
-                        ko * (reduce_thread * micro_size_k_compressed) +
-                        kr * micro_size_k_compressed + v,
+                        ko * (reduce_thread * micro_size_k_compressed) + kr * micro_size_k_compressed + v,
                     ]
 
                 T.call_extern(
@@ -156,9 +155,9 @@ def bitnet_158_int8xint2_decode(
                         accum_res[0] += A_local[ki] * B_dequantize_local[ki]
 
             with T.attr(
-                    T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
-                    "reduce_scope",
-                    T.reinterpret(T.uint64(0), dtype="handle"),
+                T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                "reduce_scope",
+                T.reinterpret(T.uint64(0), dtype="handle"),
             ):
                 T.evaluate(
                     T.tvm_thread_allreduce(
@@ -168,7 +167,8 @@ def bitnet_158_int8xint2_decode(
                         reduced_accum_res[0],
                         kr,
                         dtype="handle",
-                    ))
+                    )
+                )
             if kr == 0:
                 C[by, bx * n_partition + ni] = reduced_accum_res[0]
 
@@ -234,13 +234,7 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
     return new_qweight.view(np.int8)
 
 
-def assert_bitnet_158_int8xint2_decode_correctness(M,
-                                                   N,
-                                                   K,
-                                                   in_dtype,
-                                                   out_dtype,
-                                                   accum_dtype,
-                                                   fast_decoding=True):
+def assert_bitnet_158_int8xint2_decode_correctness(M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding=True):
     program = bitnet_158_int8xint2_decode(M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding)
     print(program)
     kernel = tilelang.compile(program)

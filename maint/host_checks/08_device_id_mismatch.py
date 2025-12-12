@@ -1,5 +1,5 @@
-"""Reproduce: device_id mismatch (requires >=2 CUDA devices).
-"""
+"""Reproduce: device_id mismatch (requires >=2 CUDA devices)."""
+
 import torch
 from common import build_matmul_kernel
 

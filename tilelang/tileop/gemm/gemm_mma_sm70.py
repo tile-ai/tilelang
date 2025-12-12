@@ -2,7 +2,8 @@
 from .gemm_base import GemmBase
 from tilelang.layout import make_volta_swizzled_layout
 from tilelang.intrinsics.mma_sm70_macro_generator import (
-    TensorCoreIntrinEmitter,)
+    TensorCoreIntrinEmitter,
+)
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -12,10 +13,8 @@ from tilelang.transform.simplify import _Simplify
 
 
 class GemmMMASm70(GemmBase):
-
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                            False)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, False)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -45,12 +44,10 @@ class GemmMMASm70(GemmBase):
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         else:
-            raise ValueError(
-                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                            False)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, False)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -140,7 +137,6 @@ class GemmMMASm70(GemmBase):
                     T.clear(C_buf)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,
@@ -155,8 +151,7 @@ class GemmMMASm70(GemmBase):
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
         else:
-            raise ValueError(
-                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)

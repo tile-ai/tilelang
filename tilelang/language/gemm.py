@@ -1,4 +1,5 @@
 """The language interface for tl programs."""
+
 from __future__ import annotations
 from tilelang.primitives.gemm.base import GemmWarpPolicy
 import tilelang.language as T
@@ -11,7 +12,8 @@ from tilelang.utils.language import (
     prim_expr_equal,
 )
 from tilelang.language.utils import (
-    buffer_region_to_tile_region,)
+    buffer_region_to_tile_region,
+)
 from tilelang.env import env as _env
 
 
@@ -68,12 +70,14 @@ def _gemm_impl(
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
     if len(A_shape) > 2:
         for i in range(len(A_shape) - 2):
-            assert A_shape[i] == 1, \
+            assert A_shape[i] == 1, (
                 "current only support A as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
     if len(B_shape) > 2:
         for i in range(len(B_shape) - 2):
-            assert B_shape[i] == 1, \
+            assert B_shape[i] == 1, (
                 "current only support B as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
 
     M, N = C_shape
     K = A_shape[-2] if transpose_A else A_shape[-1]
@@ -96,9 +100,29 @@ def _gemm_impl(
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
-    return tir.call_intrin("handle", tir.op.Op.get(op_key), A_arg, B_arg, C_arg, transpose_A,
-                           transpose_B, M, N, K, policy, clear_accum, stride_a, stride_b, offset_a,
-                           offset_b, k_pack, wg_wait, mbar, C_coords[0], C_coords[1])
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get(op_key),
+        A_arg,
+        B_arg,
+        C_arg,
+        transpose_A,
+        transpose_B,
+        M,
+        N,
+        K,
+        policy,
+        clear_accum,
+        stride_a,
+        stride_b,
+        offset_a,
+        offset_b,
+        k_pack,
+        wg_wait,
+        mbar,
+        C_coords[0],
+        C_coords[1],
+    )
 
 
 # Public wrappers

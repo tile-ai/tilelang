@@ -7,6 +7,7 @@ or a host-side non-NULL pointer check.
 Note: Constructing a true DLTensor with NULL data in PyTorch is not typical; this script
 demonstrates passing None, which still reproduces the intended class of failure.
 """
+
 import torch
 from common import build_matmul_kernel
 

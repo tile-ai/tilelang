@@ -49,17 +49,17 @@ def tl_indexer_bwd_impl(
 
     @T.prim_func
     def tl_indexer_bwd_kernel(
-            IndexQ: T.Tensor(index_q_shape, dtype),
-            Weights: T.Tensor(weights_shape, dtype),
-            IndexK: T.Tensor(index_k_shape, dtype),
-            dIndexQ: T.Tensor(index_q_shape, dtype),
-            dWeights: T.Tensor(weights_shape, dtype),
-            dIndexK: T.Tensor(index_k_shape, dtype),
-            AttnScore: T.Tensor(shape_p, FP32),
-            IndexScore: T.Tensor(shape_p, FP32),
-            TopkIndices: T.Tensor(topk_indices_shape, INT32),
-            Offsets: T.Tensor(offsets_shape, INT32),
-            TokenIndices: T.Tensor(token_indices_shape, INT32),
+        IndexQ: T.Tensor(index_q_shape, dtype),
+        Weights: T.Tensor(weights_shape, dtype),
+        IndexK: T.Tensor(index_k_shape, dtype),
+        dIndexQ: T.Tensor(index_q_shape, dtype),
+        dWeights: T.Tensor(weights_shape, dtype),
+        dIndexK: T.Tensor(index_k_shape, dtype),
+        AttnScore: T.Tensor(shape_p, FP32),
+        IndexScore: T.Tensor(shape_p, FP32),
+        TopkIndices: T.Tensor(topk_indices_shape, INT32),
+        Offsets: T.Tensor(offsets_shape, INT32),
+        TokenIndices: T.Tensor(token_indices_shape, INT32),
     ):
         with T.Kernel(seq_len, threads=num_threads) as (bx):
             i_b, i_t = TokenIndices[bx, 0], TokenIndices[bx, 1]
@@ -81,7 +81,6 @@ def tl_indexer_bwd_impl(
                 index_q_shared[i, j] = index_q_shared[i, j] * sm_scale
 
             for bi_i in T.Pipelined(num_blocks, num_stages=num_stages):
-
                 i_st = bi_i * block_I
                 i_ed = (bi_i + 1) * block_I
 
@@ -91,8 +90,7 @@ def tl_indexer_bwd_impl(
                 index_k_shared = T.alloc_shared([block_I, dim], dtype=dtype)
                 for i, j in T.Parallel(block_I, dim):
                     pos = indices_shared[i]
-                    index_k_shared[i, j] = T.if_then_else((pos > -1) & (pos <= i_t),
-                                                          IndexK[bos + pos, j], 0)
+                    index_k_shared[i, j] = T.if_then_else((pos > -1) & (pos <= i_t), IndexK[bos + pos, j], 0)
 
                 attn_score_shared = T.alloc_shared([block_I], dtype=accum_dtype)
                 index_score_shared = T.alloc_shared([block_I], dtype=accum_dtype)
@@ -115,8 +113,7 @@ def tl_indexer_bwd_impl(
                 # dw
                 d_weights_i = T.alloc_fragment((block_I, heads), accum_dtype)
                 for i, j in T.Parallel(block_I, heads):
-                    d_weights_i[i,
-                                j] = (index_score_shared[i] - attn_score_shared[i]) * logits[i, j]
+                    d_weights_i[i, j] = (index_score_shared[i] - attn_score_shared[i]) * logits[i, j]
                 T.reduce_sum(d_weights_i, d_weights_frag, dim=0, clear=False)
 
                 d_logits_qk = T.alloc_shared((block_I, heads), accum_dtype)
@@ -129,8 +126,7 @@ def tl_indexer_bwd_impl(
                         d_relu = 1.0
                     else:
                         d_relu = 0.0
-                    d_logits_qk[i, j] = (index_score_shared[i] -
-                                         attn_score_shared[i]) * d_relu * weights_shared[j]
+                    d_logits_qk[i, j] = (index_score_shared[i] - attn_score_shared[i]) * d_relu * weights_shared[j]
 
                 # dq
                 T.copy(d_logits_qk, d_logits_qk_cast1)
@@ -157,7 +153,7 @@ def tl_indexer_bwd_impl(
 
                 for i, j in T.Parallel(block_I, dim):
                     pos = indices_shared[i]
-                    if ((pos > -1) & (pos <= i_t)):
+                    if (pos > -1) & (pos <= i_t):
                         T.atomic_add(dIndexK[bos + pos, j], d_index_k_frag[i, j])
 
             for i, j in T.Parallel(heads, dim):
@@ -184,40 +180,35 @@ def indexer_bwd_interface(
     dweights = torch.zeros_like(weights)
     dk = torch.zeros_like(k)
     kernel = tl_indexer_bwd_impl(heads, dim, topk)
-    kernel(q, weights, k, dq, dweights, dk, attn_score, index_score, topk_indices, offsets,
-           token_indices)
+    kernel(q, weights, k, dq, dweights, dk, attn_score, index_score, topk_indices, offsets, token_indices)
     return dq, dweights, dk
 
 
-def ref_indexer_bwd(Q: torch.Tensor, Weights: torch.Tensor, K: torch.Tensor,
-                    TopkIndices: torch.Tensor, AttnScore: torch.Tensor,
-                    offsets: torch.Tensor) -> torch.Tensor:
+def ref_indexer_bwd(
+    Q: torch.Tensor, Weights: torch.Tensor, K: torch.Tensor, TopkIndices: torch.Tensor, AttnScore: torch.Tensor, offsets: torch.Tensor
+) -> torch.Tensor:
     Q.requires_grad_(True)
     Weights.requires_grad_(True)
     K.requires_grad_(True)
-    softmax_scale = Q.shape[-1]**-0.5
+    softmax_scale = Q.shape[-1] ** -0.5
     all_loss = []
     all_log_topk_prob = []
     for i in range(offsets.shape[0] - 1):
         assert (offsets[i + 1] - offsets[i]).item() >= TopkIndices.shape[-1]
-        q = Q[offsets[i]:offsets[i + 1]]
-        weights = Weights[offsets[i]:offsets[i + 1]]
-        k = K[offsets[i]:offsets[i + 1]]
-        topk_indices = TopkIndices[offsets[i]:offsets[i + 1]]
-        attn_score = AttnScore[offsets[i]:offsets[i + 1]]
+        q = Q[offsets[i] : offsets[i + 1]]
+        weights = Weights[offsets[i] : offsets[i + 1]]
+        k = K[offsets[i] : offsets[i + 1]]
+        topk_indices = TopkIndices[offsets[i] : offsets[i + 1]]
+        attn_score = AttnScore[offsets[i] : offsets[i + 1]]
         s = q.shape[0]
         mask = (torch.arange(s)[:, None] >= torch.arange(s)[None, :]).to(q.device)
-        logits = einsum(q, k, 's1 h k, s2 k -> s1 h s2') * softmax_scale
+        logits = einsum(q, k, "s1 h k, s2 k -> s1 h s2") * softmax_scale
         logits = F.relu(logits)
         score = (logits * weights.unsqueeze(-1)).sum(dim=-2, dtype=torch.float32)
-        score = torch.where(mask, score, float('-inf'))
+        score = torch.where(mask, score, float("-inf"))
         topk_value = torch.gather(score, dim=-1, index=topk_indices.to(torch.int64))
         log_topk_prob = F.log_softmax(topk_value, dim=-1, dtype=torch.float32)
-        loss = F.kl_div(
-            log_topk_prob.clip(-100, 0),
-            attn_score.log().clip(-100, 0),
-            log_target=True,
-            reduction="sum")
+        loss = F.kl_div(log_topk_prob.clip(-100, 0), attn_score.log().clip(-100, 0), log_target=True, reduction="sum")
         all_loss.append(loss)
         all_log_topk_prob.append(log_topk_prob)
     loss = torch.stack(all_loss).sum()
@@ -244,15 +235,13 @@ def test_kernel(
         seq_len = (offsets[i + 1] - offsets[i]).item()
         mask = (torch.arange(seq_len)[:, None] >= torch.arange(topk)[None, :]).to(q.device)
         logits = torch.ones(seq_len, topk).cuda()
-        logits = torch.where(mask, logits, float('-inf'))
+        logits = torch.where(mask, logits, float("-inf"))
         attn_score = F.softmax(logits, dim=-1, dtype=torch.float32)
         all_attn_score.append(attn_score)
     attn_score = torch.cat(all_attn_score, dim=0)
 
-    topk_indices = repeat(
-        torch.arange(topk, dtype=torch.int32).cuda(), 'k -> s k', s=S).contiguous()
-    index_score, ref_dq, ref_dw, ref_dk = ref_indexer_bwd(q, w, k, topk_indices, attn_score,
-                                                          offsets)
+    topk_indices = repeat(torch.arange(topk, dtype=torch.int32).cuda(), "k -> s k", s=S).contiguous()
+    index_score, ref_dq, ref_dw, ref_dk = ref_indexer_bwd(q, w, k, topk_indices, attn_score, offsets)
 
     dq, dw, dk = indexer_bwd_interface(q, w, k, attn_score, index_score, topk_indices, offsets)
 
@@ -261,5 +250,5 @@ def test_kernel(
     print(f"dq err: {get_abs_err(dk, ref_dk):.6f} ratio: {get_err_ratio(dk, ref_dk):.6f}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_kernel()

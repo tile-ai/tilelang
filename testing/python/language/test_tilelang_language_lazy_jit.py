@@ -8,7 +8,6 @@ import torch
 
 
 def _gemm_impl():
-
     @T.macro
     def gemm_impl(
         A: T.Tensor[[int, int], Any],
@@ -37,7 +36,6 @@ def _gemm_impl():
 
 
 def test_jit2_gemm_annot():
-
     @tilelang.lazy_jit
     def gemm(
         A: T.Tensor[[int, int], Any],
@@ -54,24 +52,24 @@ def test_jit2_gemm_annot():
         return C
 
     prod = product([T.float16, T.float32], [T.float32])
-    gemm.par_compile([{
-        'A': T.Tensor((1024, 1024), dtype=in_dtype),
-        'B': T.Tensor((1024, 1024), dtype=in_dtype),
-        'out_dtype': out_dtype
-    } for in_dtype, out_dtype in prod])
+    gemm.par_compile(
+        [
+            {"A": T.Tensor((1024, 1024), dtype=in_dtype), "B": T.Tensor((1024, 1024), dtype=in_dtype), "out_dtype": out_dtype}
+            for in_dtype, out_dtype in prod
+        ]
+    )
 
     for in_dtype, out_dtype in prod:
         in_dtype = in_dtype.torch()
         out_dtype = out_dtype.torch()
-        A = torch.randn(1024, 1024, dtype=in_dtype, device='cuda')
-        B = torch.randn(1024, 1024, dtype=in_dtype, device='cuda')
+        A = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
+        B = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
         C_ref = out_dtype(A @ B)
         C = gemm(A, B)
         torch.testing.assert_close(C, C_ref, rtol=1e-2, atol=1e-2)
 
 
 def test_jit2_gemm_ptr():
-
     @tilelang.lazy_jit
     def gemm_ptr(
         A: T.ptr,
@@ -92,23 +90,19 @@ def test_jit2_gemm_ptr():
         _gemm_impl()(A, B, C, out_dtype, block_M, block_N, block_K)
 
     prod = product([T.float16, T.float32], [T.float32])
-    gemm_ptr.par_compile([{
-        'A': T.ptr(),
-        'B': T.ptr(),
-        'C': T.ptr(),
-        'M': 1024,
-        'N': 1024,
-        'K': 1024,
-        'dtype': in_dtype,
-        'out_dtype': out_dtype
-    } for in_dtype, out_dtype in prod])
+    gemm_ptr.par_compile(
+        [
+            {"A": T.ptr(), "B": T.ptr(), "C": T.ptr(), "M": 1024, "N": 1024, "K": 1024, "dtype": in_dtype, "out_dtype": out_dtype}
+            for in_dtype, out_dtype in prod
+        ]
+    )
     for in_dtype, out_dtype in prod:
         in_dtype = in_dtype.torch()
         out_dtype = out_dtype.torch()
-        A = torch.randn(1024, 1024, dtype=in_dtype, device='cuda')
-        B = torch.randn(1024, 1024, dtype=in_dtype, device='cuda')
+        A = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
+        B = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
         C_ref = out_dtype(A @ B)
-        C = torch.empty(1024, 1024, dtype=out_dtype, device='cuda')
+        C = torch.empty(1024, 1024, dtype=out_dtype, device="cuda")
         gemm_ptr(A, B, C, 1024, 1024, 1024, in_dtype, out_dtype)
         torch.testing.assert_close(C, C_ref, atol=1e-2, rtol=1e-2)
 
@@ -129,8 +123,7 @@ def test_jit2_annot():
         AnnotTest(
             annot=T.Tensor[[int, int], T.float32],
             promote=False,
-            match_ok=[torch.randn(1, 1, dtype=torch.float32),
-                      T.Tensor((1, 1), dtype=T.float32)],
+            match_ok=[torch.randn(1, 1, dtype=torch.float32), T.Tensor((1, 1), dtype=T.float32)],
             match_ng=[
                 torch.randn(1, 1, dtype=torch.float16),
                 T.Tensor(1, dtype=T.float32),
@@ -146,8 +139,8 @@ def test_jit2_annot():
                 T.Tensor((1,), dtype=T.float32),
                 T.Tensor((1,), dtype=T.float16),
             ],
-            match_ng=[torch.randn((1, 1), dtype=torch.float32),
-                      T.Tensor((1, 1), dtype=T.float16)]),
+            match_ng=[torch.randn((1, 1), dtype=torch.float32), T.Tensor((1, 1), dtype=T.float16)],
+        ),
         AnnotTest(
             annot=T.Tensor[[int, 1], Any],
             promote=False,
@@ -157,8 +150,8 @@ def test_jit2_annot():
                 T.Tensor((12, 1), T.float32),
                 T.Tensor((12, 1), T.float16),
             ],
-            match_ng=[torch.randn(12, 12, dtype=torch.float32),
-                      T.Tensor((12, 12), T.float32)]),
+            match_ng=[torch.randn(12, 12, dtype=torch.float32), T.Tensor((12, 12), T.float32)],
+        ),
         AnnotTest(
             annot=T.Tensor[[T.dyn, 1], Any],
             promote=False,
@@ -168,43 +161,39 @@ def test_jit2_annot():
                 T.Tensor((12, 1), T.float32),
                 T.Tensor((12, 1), T.float16),
             ],
-            match_ng=[torch.randn(12, 12, dtype=torch.float32),
-                      T.Tensor((12, 12), T.float32)]),
+            match_ng=[torch.randn(12, 12, dtype=torch.float32), T.Tensor((12, 12), T.float32)],
+        ),
         AnnotTest(
             annot=T.Tensor[[1024, 1024], T.float32],
             promote=True,
         ),
-        AnnotTest(annot=T.dyn[int, 'X'], promote=False, match_ok=[1, 2, 3, 4]),
-        AnnotTest(annot=T.dyn, promote=False, match_ok=[1, 2, 3, 4])
+        AnnotTest(annot=T.dyn[int, "X"], promote=False, match_ok=[1, 2, 3, 4]),
+        AnnotTest(annot=T.dyn, promote=False, match_ok=[1, 2, 3, 4]),
     ]
 
     for test in tests:
         promote = test.annot.promote()
         promoted = promote is not None
         if promoted != test.promote:
-            raise AssertionError(
-                f'Promote mismatch for {test.annot}: expected {test.promote}, got {promoted}')
-        with Builder().prim_func('_test'):
+            raise AssertionError(f"Promote mismatch for {test.annot}: expected {test.promote}, got {promoted}")
+        with Builder().prim_func("_test"):
             for match_ok in test.match_ok:
                 try:
                     vt = ArgVarTable()
-                    test.annot.create_prim_func_arg('arg', match_ok, vt)
+                    test.annot.create_prim_func_arg("arg", match_ok, vt)
                 except Exception as e:
                     traceback.print_exc()
-                    raise AssertionError(
-                        f'Match failed for {test.annot} with value {match_ok}: {e}') from e
+                    raise AssertionError(f"Match failed for {test.annot} with value {match_ok}: {e}") from e
             for match_ng in test.match_ng:
                 try:
                     vt = ArgVarTable()
-                    test.annot.create_prim_func_arg('arg', match_ng, vt)
-                    raise AssertionError(
-                        f'Match unexpectedly succeeded for {test.annot} with value {match_ng}')
+                    test.annot.create_prim_func_arg("arg", match_ng, vt)
+                    raise AssertionError(f"Match unexpectedly succeeded for {test.annot} with value {match_ng}")
                 except Exception:
                     pass
 
 
 def test_jit2_many_annot():
-
     @T.macro
     def copy_impl(A, B):
         M, N = A.shape
@@ -213,8 +202,7 @@ def test_jit2_many_annot():
         assert N == N_, f"N mismatch {N} {N_}"
         # assert tuple(A.shape) == tuple(B.shape), f"Invalid tensor shape: {A.shape}, {B.shape}"
         with T.Kernel(T.ceildiv(M, 128), T.ceildiv(N, 128), threads=128) as (bx, by):
-            T.copy(A[bx * 128:bx * 128 + 128, by * 128:by * 128 + 128], B[bx * 128:bx * 128 + 128,
-                                                                          by * 128:by * 128 + 128])
+            T.copy(A[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128], B[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128])
 
     @tilelang.lazy_jit
     def copy1(
@@ -259,20 +247,19 @@ def test_jit2_many_annot():
         copy_impl(A, B)
 
     for copy in [copy1, copy2, copy3, copy4]:
-        A = torch.randn(128, 128, device='cuda')
-        B = torch.empty(128, 128, device='cuda')
+        A = torch.randn(128, 128, device="cuda")
+        B = torch.empty(128, 128, device="cuda")
         copy(A, B)
         assert torch.equal(B, A)
 
     for copy in [copy5, copy6]:
-        A = torch.randn(128, 2, 128, 2, device='cuda')
-        B = torch.randn(128, 2, 128, 2, device='cuda')
+        A = torch.randn(128, 2, 128, 2, device="cuda")
+        B = torch.randn(128, 2, 128, 2, device="cuda")
         copy(A[:, 0, :, 0], B[:, 0, :, 0])
         assert torch.equal(A[:, 0, :, 0], B[:, 0, :, 0])
 
 
 def test_jit2_return():
-
     @T.macro
     def copy_impl(A):
         M, N = A.shape
@@ -283,8 +270,7 @@ def test_jit2_return():
         assert N == N_, f"N mismatch {N} {N_}"
         # assert tuple(A.shape) == tuple(B.shape), f"Invalid tensor shape: {A.shape}, {B.shape}"
         with T.Kernel(T.ceildiv(M, 128), T.ceildiv(N, 128), threads=128) as (bx, by):
-            T.copy(A[bx * 128:bx * 128 + 128, by * 128:by * 128 + 128], B[bx * 128:bx * 128 + 128,
-                                                                          by * 128:by * 128 + 128])
+            T.copy(A[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128], B[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128])
         return B
 
     @tilelang.lazy_jit
@@ -292,41 +278,52 @@ def test_jit2_return():
         return copy_impl(A)
 
     @tilelang.lazy_jit
-    def copy1(A: T.Tensor[[int, int], T.float32],):
+    def copy1(
+        A: T.Tensor[[int, int], T.float32],
+    ):
         return copy_impl(A)
 
     @tilelang.lazy_jit
-    def copy2(A: T.Tensor[[128, 128], T.float32],):
+    def copy2(
+        A: T.Tensor[[128, 128], T.float32],
+    ):
         return copy_impl(A)
 
     @tilelang.lazy_jit
-    def copy3(A: T.Tensor[[int, 128], T.float32],):
+    def copy3(
+        A: T.Tensor[[int, 128], T.float32],
+    ):
         return copy_impl(A)
 
     @tilelang.lazy_jit
-    def copy4(A: T.Tensor[[T.dyn, int], T.float32],):
+    def copy4(
+        A: T.Tensor[[T.dyn, int], T.float32],
+    ):
         return copy_impl(A)
 
     @tilelang.lazy_jit
-    def copy5(A: T.StridedTensor[[int, int], [int, int], T.float32],):
+    def copy5(
+        A: T.StridedTensor[[int, int], [int, int], T.float32],
+    ):
         return copy_impl(A)
 
     @tilelang.lazy_jit
-    def copy6(A: T.StridedTensor[[T.dyn, int], [int, int], T.float32],):
+    def copy6(
+        A: T.StridedTensor[[T.dyn, int], [int, int], T.float32],
+    ):
         return copy_impl(A)
 
     for copy in [copy0, copy1, copy2, copy3, copy4]:
-        A = torch.randn(128, 128, device='cuda')
+        A = torch.randn(128, 128, device="cuda")
         B = copy(A)
         assert torch.equal(B, A)
     for copy in [copy5, copy6]:
-        A = torch.randn(128, 2, 128, 2, device='cuda')
+        A = torch.randn(128, 2, 128, 2, device="cuda")
         B = copy(A[:, 0, :, 0])
         assert torch.equal(A[:, 0, :, 0], B)
 
 
 def test_jit2_deepseek_deepgemm():
-
     @tilelang.lazy_jit
     def deep_gemm(
         A: T.Tensor[[int, int], T.float8_e4m3],
@@ -351,13 +348,9 @@ def test_jit2_deepseek_deepgemm():
         N, K = B.shape
         C = T.empty(M, N, dtype=out_dtype)
 
-        assert out_dtype in [
-            T.bfloat16, T.float32
-        ], f"Expect out_dtype to be one of [T.float16, T.float32], got {out_dtype}"
-        assert scales_a.shape == [M, T.ceildiv(K, group_size)
-                                 ], f"Expect scales_a shape to be f{[M, T.ceildiv(K, group_size)]}"
-        assert scales_b.shape == [N, T.ceildiv(K, group_size)
-                                 ], f"Expect scales_b shape to be f{[N, T.ceildiv(K, group_size)]}"
+        assert out_dtype in [T.bfloat16, T.float32], f"Expect out_dtype to be one of [T.float16, T.float32], got {out_dtype}"
+        assert scales_a.shape == [M, T.ceildiv(K, group_size)], f"Expect scales_a shape to be f{[M, T.ceildiv(K, group_size)]}"
+        assert scales_b.shape == [N, T.ceildiv(K, group_size)], f"Expect scales_b shape to be f{[N, T.ceildiv(K, group_size)]}"
 
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), in_dtype)
@@ -421,5 +414,5 @@ def test_jit2_deepseek_deepgemm():
 #     M, N, K = 1024, 1024, 8192
 #     A = torch.randn((M, K), dtype=torch.float8_e4m3fn, )
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     tilelang.testing.main()

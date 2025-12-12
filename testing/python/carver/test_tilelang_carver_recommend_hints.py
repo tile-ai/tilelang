@@ -4,10 +4,7 @@ from tilelang.carver.arch import auto_infer_current_arch
 from typing import List
 
 
-def run_general_reduction_recommend_hints(structure: str = "SSR",
-                                          shape: List[int] = None,
-                                          dtype: str = "float16",
-                                          topk: int = 20):
+def run_general_reduction_recommend_hints(structure: str = "SSR", shape: List[int] = None, dtype: str = "float16", topk: int = 20):
     arch = auto_infer_current_arch()
     carve_template = carver.GeneralReductionTemplate(
         structure=structure,
@@ -28,9 +25,7 @@ def test_general_reduction_recommend_hints():
     run_general_reduction_recommend_hints("SRS", [1024, 1024, 1024], "float16")
 
 
-def run_elementwise_recommend_hints(shape: List[int] = None,
-                                    dtype: str = "float16",
-                                    topk: int = 20):
+def run_elementwise_recommend_hints(shape: List[int] = None, dtype: str = "float16", topk: int = 20):
     arch = auto_infer_current_arch()
     carve_template = carver.ElementwiseTemplate(
         shape=shape,
@@ -81,11 +76,9 @@ def test_matmul_recommend_hints():
     run_matmul_recommend_hints(1024, 1024, 1024, "float16", "float32", "float16")
 
 
-def run_gemv_recommend_hints(N: int = 1024,
-                             K: int = 1024,
-                             in_dtype: str = "float16",
-                             out_dtype: str = "float16",
-                             accum_dtype: str = "float16"):
+def run_gemv_recommend_hints(
+    N: int = 1024, K: int = 1024, in_dtype: str = "float16", out_dtype: str = "float16", accum_dtype: str = "float16"
+):
     arch = auto_infer_current_arch()
     carve_template = carver.GEMVTemplate(
         N=N,

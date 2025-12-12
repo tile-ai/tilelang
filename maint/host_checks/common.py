@@ -3,20 +3,12 @@ import tilelang.language as T
 import torch
 
 
-def make_matmul_prim(M,
-                     N,
-                     K,
-                     block_M=128,
-                     block_N=128,
-                     block_K=32,
-                     dtype="float16",
-                     accum_dtype="float"):
-
+def make_matmul_prim(M, N, K, block_M=128, block_N=128, block_K=32, dtype="float16", accum_dtype="float"):
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -42,7 +34,6 @@ def build_matmul_kernel(M=1024, N=1024, K=1024, target="cuda"):
 
 
 def build_scalar_check_kernel(target="cuda"):
-
     @T.prim_func
     def scalar_check(x: T.int32, flag: T.bool()):
         T.evaluate(0)

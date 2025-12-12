@@ -1,5 +1,5 @@
-"""Reproduce: ndim (rank) mismatch for A.
-"""
+"""Reproduce: ndim (rank) mismatch for A."""
+
 import torch
 from common import build_matmul_kernel
 

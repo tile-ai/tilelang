@@ -1,4 +1,5 @@
 """TVMScript parser overrides tailored for TileLang."""
+
 from functools import partial
 
 from tvm.script.ir_builder import tir as T
@@ -58,8 +59,12 @@ def tilelang_visit_assign(self, node: doc.Assign) -> None:  # pylint: disable=un
             lhs.ctx = load_ctx
             lhs_value = self.eval_expr(lhs)
             lhs.ctx = store_ctx
-            if (isinstance(lhs_value, BufferLoad) and lhs_value.buffer.scope() == "local.var" and
-                    len(lhs_value.indices) == 1 and lhs_value.indices[0] == 0):
+            if (
+                isinstance(lhs_value, BufferLoad)
+                and lhs_value.buffer.scope() == "local.var"
+                and len(lhs_value.indices) == 1
+                and lhs_value.indices[0] == 0
+            ):
                 T.buffer_store(lhs_value.buffer, rhs, indices=[0])
                 continue
 
@@ -106,8 +111,12 @@ def tilelang_visit_aug_assign(self, node: doc.AugAssign) -> None:  # pylint: dis
         lhs.ctx = load_ctx
         lhs_value = self.eval_expr(lhs)
         lhs.ctx = store_ctx
-        if (isinstance(lhs_value, BufferLoad) and lhs_value.buffer.scope() == "local.var" and
-                len(lhs_value.indices) == 1 and lhs_value.indices[0] == 0):
+        if (
+            isinstance(lhs_value, BufferLoad)
+            and lhs_value.buffer.scope() == "local.var"
+            and len(lhs_value.indices) == 1
+            and lhs_value.indices[0] == 0
+        ):
             T.buffer_store(lhs_value.buffer, rhs, indices=[0])
             return
 
@@ -131,8 +140,12 @@ def tilelang_visit_ann_assign(self, node: doc.AnnAssign) -> None:  # pylint: dis
         lhs.ctx = load_ctx
         lhs_value = self.eval_expr(lhs)
         lhs.ctx = store_ctx
-        if (isinstance(lhs_value, BufferLoad) and lhs_value.buffer.scope() == "local.var" and
-                len(lhs_value.indices) == 1 and lhs_value.indices[0] == 0):
+        if (
+            isinstance(lhs_value, BufferLoad)
+            and lhs_value.buffer.scope() == "local.var"
+            and len(lhs_value.indices) == 1
+            and lhs_value.indices[0] == 0
+        ):
             T.buffer_store(lhs_value.buffer, rhs, indices=[0])
             return
 

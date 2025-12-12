@@ -8,12 +8,10 @@ def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.LetInline()(mod)
-    tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"),
-                                   True)
+    tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), True)
 
 
 def test_let_binding():
-
     @T.prim_func
     def before(A: T.Tensor((128, 128), "float32"), B: T.Tensor((128, 128), "float32")):
         for i in range(128):
@@ -34,7 +32,6 @@ def test_let_binding():
 
 
 def test_parallel_scope():
-
     @T.prim_func
     def before(A: T.Tensor((128,), "float32")):
         for i in T.Parallel(128):

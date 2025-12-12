@@ -4,16 +4,18 @@ from dataclasses import dataclass
 from typing import Callable, Generic, Any, Literal, TypeVar
 from contextlib import AbstractContextManager
 from collections.abc import Iterable
+
 # Python 3.9 compatibility for ParamSpec
 try:
     from typing import ParamSpec
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 import inspect
+
 # from .utils import get_ast, get_compiled_object
 from . import utils
 
-_span_attrs = ['lineno', 'col_offset', 'end_lineno', 'end_col_offset']
+_span_attrs = ["lineno", "col_offset", "end_lineno", "end_col_offset"]
 
 
 def ast_has_span(ast: ast.AST) -> bool:
@@ -34,7 +36,6 @@ def ast_set_span(ast: ast.AST, span: tuple[int, int, int, int]):
 
 
 class QuoteVisitor(ast.NodeTransformer):
-
     def __init__(self, names: dict[str, ast.AST], passes: list[Any] | None = None, span=None):
         self.names = names
         self.passes = passes or []
@@ -76,9 +77,8 @@ def quote_expr(expr: str, **kws) -> ast.expr:
     return res.value
 
 
-Operator = Literal['Add', 'Sub', 'Mult', 'MatMult', 'Div', 'Mod', 'Pow', 'LShift', 'RShift',
-                   'BitOr', 'BitXor', 'BitAnd', 'FloorDiv']
-BoolOp = Literal['And', 'Or', 'Not']
+Operator = Literal["Add", "Sub", "Mult", "MatMult", "Div", "Mod", "Pow", "LShift", "RShift", "BitOr", "BitXor", "BitAnd", "FloorDiv"]
+BoolOp = Literal["And", "Or", "Not"]
 
 
 def get_operator_name(operator: ast.operator) -> Operator:
@@ -89,84 +89,83 @@ def get_boolop_name(boolop: ast.boolop) -> BoolOp:
     return boolop.__class__.__name__
 
 
-_T = TypeVar('_T')
+_T = TypeVar("_T")
 
 
 def eval_op(op: Operator, left: Any, right: Any) -> Any:
-    if op == 'Add':
+    if op == "Add":
         return left + right
-    if op == 'Sub':
+    if op == "Sub":
         return left - right
-    if op == 'Mult':
+    if op == "Mult":
         return left * right
-    if op == 'MatMult':
+    if op == "MatMult":
         return left @ right
-    if op == 'Div':
+    if op == "Div":
         return left / right
-    if op == 'Mod':
+    if op == "Mod":
         return left % right
-    if op == 'Pow':
+    if op == "Pow":
         return left**right
-    if op == 'LShift':
+    if op == "LShift":
         return left << right
-    if op == 'RShift':
+    if op == "RShift":
         return left >> right
-    if op == 'BitOr':
+    if op == "BitOr":
         return left | right
-    if op == 'BitXor':
+    if op == "BitXor":
         return left ^ right
-    if op == 'BitAnd':
+    if op == "BitAnd":
         return left & right
-    if op == 'FloorDiv':
+    if op == "FloorDiv":
         return left // right
-    raise ValueError(f'Unknown operator: {op}')
+    raise ValueError(f"Unknown operator: {op}")
 
 
 def eval_aug_assign(op: Operator, left: Any, sl: slice, right: Any) -> Any:
-    if op == 'Add':
+    if op == "Add":
         left[sl] += right
         return left
-    if op == 'Sub':
+    if op == "Sub":
         left[sl] -= right
         return left
-    if op == 'Mult':
+    if op == "Mult":
         left[sl] *= right
         return left
-    if op == 'MatMult':
+    if op == "MatMult":
         left[sl] @= right
         return left
-    if op == 'Div':
+    if op == "Div":
         left[sl] /= right
         return left
-    if op == 'Mod':
+    if op == "Mod":
         left[sl] %= right
         return left
-    if op == 'Pow':
+    if op == "Pow":
         left[sl] **= right
         return left
-    if op == 'LShift':
+    if op == "LShift":
         left[sl] <<= right
         return left
-    if op == 'RShift':
+    if op == "RShift":
         left[sl] >>= right
         return left
-    if op == 'BitOr':
+    if op == "BitOr":
         left[sl] |= right
         return left
-    if op == 'BitXor':
+    if op == "BitXor":
         left[sl] ^= right
         return left
-    if op == 'BitAnd':
+    if op == "BitAnd":
         left[sl] &= right
         return left
-    if op == 'FloorDiv':
+    if op == "FloorDiv":
         left[sl] //= right
         return left
-    raise ValueError(f'Unknown operator: {op}')
+    raise ValueError(f"Unknown operator: {op}")
 
 
-class _empty:
-    ...
+class _empty: ...
 
 
 class BaseBuilder:
@@ -218,13 +217,13 @@ class BaseBuilder:
         eval_aug_assign(op, target, sl, aug_value)
 
     def boolop(self, op: BoolOp, left: Any, right: Callable[[], Any] | None = None) -> Any:
-        if op == 'And':
+        if op == "And":
             return left and right()
-        if op == 'Or':
+        if op == "Or":
             return left or right()
-        if op == 'Not':
+        if op == "Not":
             return not left
-        raise ValueError(f'Unknown boolop: {op}')
+        raise ValueError(f"Unknown boolop: {op}")
 
     def ifexp(self, cond: Any, then: Callable[[], Any], otherwise: Callable[[], Any]) -> Any:
         return then() if cond else otherwise()
@@ -249,7 +248,6 @@ class BaseBuilder:
 
 
 class DSLMutator(ast.NodeTransformer):
-
     def __init__(self, closure_names: list[str]):
         self.tmp_counter = 0
         self.closure_names = closure_names
@@ -264,19 +262,13 @@ class DSLMutator(ast.NodeTransformer):
         br = self.get_tmp()
         if len(node.orelse) == 0:
             return quote(
-                f"for {br} in __tb.ctx_if(cond):\n"
-                f"  for _ in __tb.ctx_then({br}):\n"
-                "    pass\n",
+                f"for {br} in __tb.ctx_if(cond):\n  for _ in __tb.ctx_then({br}):\n    pass\n",
                 cond=node.test,
                 passes=[node.body],
                 span=node,
             )
         return quote(
-            f"for {br} in __tb.ctx_if(cond):\n"
-            f"  for _ in __tb.ctx_then({br}):\n"
-            f"    pass\n"
-            f"  for _ in __tb.ctx_else({br}):\n"
-            f"    pass\n",
+            f"for {br} in __tb.ctx_if(cond):\n  for _ in __tb.ctx_then({br}):\n    pass\n  for _ in __tb.ctx_else({br}):\n    pass\n",
             cond=node.test,
             passes=[node.body, node.orelse],
             span=node,
@@ -290,7 +282,7 @@ class DSLMutator(ast.NodeTransformer):
         if isinstance(target, ast.Name):
             return f"'{target.id}'"
         elif isinstance(target, ast.Tuple):
-            return ("(" + ",".join([self._parse_names(elt) for elt in target.elts]) + ",)")
+            return "(" + ",".join([self._parse_names(elt) for elt in target.elts]) + ",)"
         else:
             s = ast.unparse(target)
             raise NotImplementedError(f"Unsupported for target `{s}`")
@@ -303,8 +295,7 @@ class DSLMutator(ast.NodeTransformer):
         ast_set_span(var, ast_get_span(node.target))
         stmts = self._emit_assign_target(node.target, var)
         return quote(
-            f"for {tmp} in __tb.ctx_for(range):\n"
-            "  pass\n",
+            f"for {tmp} in __tb.ctx_for(range):\n  pass\n",
             target=node.target,
             range=node.iter,
             passes=[stmts + node.body],
@@ -319,24 +310,15 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         return quote("if __tb.ctx_break(): break", span=node)
 
-    def _emit_assign_target(self,
-                            target: ast.expr,
-                            rval: ast.expr,
-                            annot: ast.expr = None) -> list[ast.AST]:
+    def _emit_assign_target(self, target: ast.expr, rval: ast.expr, annot: ast.expr = None) -> list[ast.AST]:
         if isinstance(target, ast.Name):
             if annot is None:
-                return quote(
-                    f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target)
+                return quote(f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target)
             else:
-                return quote(
-                    f'name = __tb.bind("{target.id}", value, annot)',
-                    name=target,
-                    value=rval,
-                    annot=annot,
-                    span=target)
+                return quote(f'name = __tb.bind("{target.id}", value, annot)', name=target, value=rval, annot=annot, span=target)
         elif isinstance(target, ast.Attribute):
             s = ast.unparse(target)
-            raise NotImplementedError(f'Attribute assignment not supported yet, `{s}`')
+            raise NotImplementedError(f"Attribute assignment not supported yet, `{s}`")
         elif isinstance(target, ast.Subscript):
             if annot is None:
                 return quote(
@@ -356,7 +338,6 @@ class DSLMutator(ast.NodeTransformer):
                     span=target,
                 )
         else:
-
             # flatten nested tuple into a list of (tmp_name, target)
             unpacked = []
 
@@ -374,11 +355,9 @@ class DSLMutator(ast.NodeTransformer):
                     return res
                 else:
                     s = ast.unparse(target)
-                    raise NotImplementedError(f'Attribute assignment not supported yet, `{s}`')
+                    raise NotImplementedError(f"Attribute assignment not supported yet, `{s}`")
 
-            unpack_stmt = ast.Assign(
-                targets=[_visit_target(target)],
-                value=quote_expr('__tb.unwrap_value(rval)', rval=rval, span=rval))
+            unpack_stmt = ast.Assign(targets=[_visit_target(target)], value=quote_expr("__tb.unwrap_value(rval)", rval=rval, span=rval))
             ast_set_span(unpack_stmt, ast_get_span(target))
             stmts = [unpack_stmt]
             bind_lvals = []
@@ -386,8 +365,7 @@ class DSLMutator(ast.NodeTransformer):
 
             def flush_binds():
                 if bind_lvals:
-                    stmts.append(
-                        quote1(f'{", ".join(bind_lvals)}, = {", ".join(bind_rvals)},', span=target))
+                    stmts.append(quote1(f"{', '.join(bind_lvals)}, = {', '.join(bind_rvals)},", span=target))
                     bind_lvals.clear()
                     bind_rvals.clear()
 
@@ -417,15 +395,10 @@ class DSLMutator(ast.NodeTransformer):
                     bind_rvals.append(f'__tb.bind("{target.id}", {tmp})')
                 elif isinstance(target, ast.Subscript):
                     flush_binds()
-                    stmts.append(
-                        quote1(
-                            f'__tb.assign_slice(lval, slice, {tmp})',
-                            lval=target.value,
-                            slice=target.slice,
-                            span=target))
+                    stmts.append(quote1(f"__tb.assign_slice(lval, slice, {tmp})", lval=target.value, slice=target.slice, span=target))
                 else:
                     s = ast.unparse(target)
-                    raise NotImplementedError(f'Unsupported target: {s}')
+                    raise NotImplementedError(f"Unsupported target: {s}")
             flush_binds()
             return stmts
 
@@ -450,11 +423,7 @@ class DSLMutator(ast.NodeTransformer):
         target, rval = node.target, node.value
         op = get_operator_name(node.op)
         if isinstance(target, ast.Name):
-            return quote(
-                f"name = __tb.aug_assign('{op}', {target.id}, value)",
-                name=target,
-                value=rval,
-                span=node)
+            return quote(f"name = __tb.aug_assign('{op}', {target.id}, value)", name=target, value=rval, span=node)
         elif isinstance(target, ast.Subscript):
             return quote(
                 f"__tb.aug_assign_slice('{op}', lval, slice, value)",
@@ -468,16 +437,12 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         node = self.generic_visit(node)
-        rval = node.value or quote_expr('__tb.empty', span=node, annot=node)
+        rval = node.value or quote_expr("__tb.empty", span=node, annot=node)
         return self._emit_assign_target(node.target, rval, annot=node.annotation)
 
     def visit_While(self, node):
         node = self.generic_visit(node)
-        return quote1(
-            "for _ in __tb.ctx_while(lambda: cond):\n  pass",
-            cond=node.test,
-            passes=[node.body],
-            span=node)
+        return quote1("for _ in __tb.ctx_while(lambda: cond):\n  pass", cond=node.test, passes=[node.body], span=node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         node = self.generic_visit(node)
@@ -536,18 +501,14 @@ class DSLMutator(ast.NodeTransformer):
             left = comp
         last = split[-1]
         for i in reversed(range(len(split) - 1)):
-            last = quote_expr(
-                "__tb.boolop('And', left, lambda: right)", left=split[i], right=last, span=node)
+            last = quote_expr("__tb.boolop('And', left, lambda: right)", left=split[i], right=last, span=node)
         return last
 
     def visit_IfExp(self, node: ast.IfExp) -> ast.Expr:
         node = self.generic_visit(node)
         return quote_expr(
-            '__tb.ifexp(cond, lambda: then, lambda: otherwise)',
-            cond=node.test,
-            then=node.body,
-            otherwise=node.orelse,
-            span=node)
+            "__tb.ifexp(cond, lambda: then, lambda: otherwise)", cond=node.test, then=node.body, otherwise=node.orelse, span=node
+        )
 
     def visit_Return(self, node: ast.Return):
         node = self.generic_visit(node)
@@ -569,7 +530,7 @@ class DSLMutator(ast.NodeTransformer):
         return node
 
 
-_P = ParamSpec('_P')
+_P = ParamSpec("_P")
 
 
 @dataclass
@@ -626,7 +587,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
 
     make_closure = utils.get_compiled_object(
         tree,
-        'make_closure',
+        "make_closure",
         filename,
         func.__globals__,  # use the original globalns
     )
