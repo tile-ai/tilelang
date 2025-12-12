@@ -75,6 +75,7 @@ def get_configs():
         )
     return valid_configs
 
+
 @tilelang.autotune(configs=get_configs(), cache_input_tensors=True)
 @tilelang.jit(out_idx=[3])
 def fast_flashattn(
@@ -145,14 +146,9 @@ def fast_flashattn(
                 m_prev = T.alloc_fragment([block_M], accum_dtype)
                 scale_factor = T.alloc_fragment([block_M], accum_dtype)
 
-                T.copy(
-                    Q[bz, q_block_offset:q_block_offset + block_M, by, :],
-                    Q_fragment,
-                    coalesced_width=vec_size)
+                T.copy(Q[bz, q_block_offset : q_block_offset + block_M, by, :], Q_fragment, coalesced_width=vec_size)
 
-                loop_end_k = (
-                    T.ceildiv(q_block_offset +
-                              block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N))
+                loop_end_k = T.ceildiv(q_block_offset + block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
 
                 row_sum = T.alloc_fragment([block_M], accum_dtype)
 
@@ -221,13 +217,8 @@ def fast_flashattn(
 
     return main
 
-def main(batch: int = 1,
-         heads: int = 8,
-         seq_len: int = 4096,
-         dim: int = 128,
-         is_causal: bool = False,
-         groups: int = 1):
 
+def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is_causal: bool = False, groups: int = 1):
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
     if is_causal:
@@ -254,11 +245,11 @@ def main(batch: int = 1,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=2, help='batch size')
-    parser.add_argument('--heads', type=int, default=16, help='heads')
-    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--is_causal', action='store_true', help='causal')
-    parser.add_argument('--groups', type=int, default=1, help='groups')
+    parser.add_argument("--batch", type=int, default=2, help="batch size")
+    parser.add_argument("--heads", type=int, default=16, help="heads")
+    parser.add_argument("--seq_len", type=int, default=4096, help="sequence length")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--is_causal", action="store_true", help="causal")
+    parser.add_argument("--groups", type=int, default=1, help="groups")
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)

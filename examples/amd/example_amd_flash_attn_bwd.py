@@ -87,10 +87,7 @@ def _get_hip_include_options() -> list[str]:
     return options
 
 
-def _compile_hip_to_asm(code: str,
-                        asm_path: str,
-                        arch: str | None = None,
-                        options: list[str] | None = None) -> None:
+def _compile_hip_to_asm(code: str, asm_path: str, arch: str | None = None, options: list[str] | None = None) -> None:
     from tilelang.contrib import hipcc  # pylint: disable=import-outside-toplevel
 
     if arch is None:
@@ -252,10 +249,7 @@ def fast_flashattn(
                 m_prev = T.alloc_fragment([block_M], accum_dtype)
                 scale_factor = T.alloc_fragment([block_M], accum_dtype)
 
-                T.copy(
-                    Q[bz, q_block_offset:q_block_offset + block_M, by, :],
-                    Q_fragment,
-                    coalesced_width=vec_size)
+                T.copy(Q[bz, q_block_offset : q_block_offset + block_M, by, :], Q_fragment, coalesced_width=vec_size)
 
                 loop_end_k = T.ceildiv(q_block_offset + block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
 
@@ -406,16 +400,17 @@ def flashattn_bwd(
     accum_dtype = "float"
 
     @T.prim_func
-    def flash_bwd_kernel(Q: T.Tensor(q_shape,
-                                     dtype), K: T.Tensor(kv_shape,
-                                                         dtype), V: T.Tensor(kv_shape, dtype),
-                         dO: T.Tensor(q_shape, dtype), lse: T.Tensor([batch, heads, seq_len],
-                                                                     accum_dtype),
-                         Delta: T.Tensor([batch, heads, seq_len],
-                                         accum_dtype),
-                         dQ_partial: T.Tensor([batch, T.ceildiv(seq_len, block_M), seq_len, heads,
-                                               dim], dtype),
-                         dK: T.Tensor(kv_shape, accum_dtype), dV: T.Tensor(kv_shape, accum_dtype)):
+    def flash_bwd_kernel(
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
+        dO: T.Tensor(q_shape, dtype),
+        lse: T.Tensor([batch, heads, seq_len], accum_dtype),
+        Delta: T.Tensor([batch, heads, seq_len], accum_dtype),
+        dQ_partial: T.Tensor([batch, T.ceildiv(seq_len, block_M), seq_len, heads, dim], dtype),
+        dK: T.Tensor(kv_shape, accum_dtype),
+        dV: T.Tensor(kv_shape, accum_dtype),
+    ):
         with T.Kernel(head_kv, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bk, by, bz):
             T.use_swizzle(panel_size, enable=enable_rasterization)
 
@@ -438,8 +433,8 @@ def flashattn_bwd(
 
             kv_offset = by * block_M
 
-            T.copy(K[bz, kv_offset:kv_offset + block_M, bk, :], K_shared)
-            T.copy(V[bz, kv_offset:kv_offset + block_M, bk, :], V_fragment)
+            T.copy(K[bz, kv_offset : kv_offset + block_M, bk, :], K_shared)
+            T.copy(V[bz, kv_offset : kv_offset + block_M, bk, :], V_fragment)
             T.clear(dv)
             T.clear(dk)
 
@@ -452,27 +447,22 @@ def flashattn_bwd(
                     continue
 
                 for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
-                    T.copy(Q[bz, k * block_N:(k + 1) * block_N, q_head, :], q_shared)
+                    T.copy(Q[bz, k * block_N : (k + 1) * block_N, q_head, :], q_shared)
                     T.clear(qkT)
 
-                    T.gemm(K_shared,
-                           q_shared,
-                           qkT,
-                           transpose_B=True,
-                           policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(K_shared, q_shared, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
-                    T.copy(lse[bz, q_head, k * block_N:(k + 1) * block_N], lse_shared)
+                    T.copy(lse[bz, q_head, k * block_N : (k + 1) * block_N], lse_shared)
 
                     for i, j in T.Parallel(block_M, block_N):
                         P_acc[i, j] = T.exp(qkT[i, j] * sm_scale - lse_shared[j])
 
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
-                            P_acc[i, j] = T.if_then_else(
-                                kv_offset + i <= k * block_N + j, P_acc[i, j], 0.0)
+                            P_acc[i, j] = T.if_then_else(kv_offset + i <= k * block_N + j, P_acc[i, j], 0.0)
 
-                    T.copy(dO[bz, k * block_N:(k + 1) * block_N, q_head, :], do_shared)
-                    T.copy(Delta[bz, q_head, k * block_N:(k + 1) * block_N], delta_shared)
+                    T.copy(dO[bz, k * block_N : (k + 1) * block_N, q_head, :], do_shared)
+                    T.copy(Delta[bz, q_head, k * block_N : (k + 1) * block_N], delta_shared)
 
                     # Optimized GEMM order: Compute dV first (GEMM1), then dP (GEMM2)
                     # This improves V_fragment reuse since it's already in registers
@@ -484,11 +474,7 @@ def flashattn_bwd(
 
                     # GEMM2: dO @ V^T = dP (compute dP after dV, reusing V_fragment in registers)
                     T.clear(dP)
-                    T.gemm(V_fragment,
-                           do_shared,
-                           dP,
-                           transpose_B=True,
-                           policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(V_fragment, do_shared, dP, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
                     # Compute ds = P * (dP - delta) * sm_scale for dk and dq computation
                     # Create ds_compute fragment directly in loop to avoid layout conflict
@@ -538,6 +524,7 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
 @tilelang.jit(out_idx=[1])
 def flashattn_bwd_reduce_dq(batch, num_tiles, seq_len, heads, dim):
     accum_dtype = "float"
+
     @T.prim_func
     def flash_bwd_reduce(
         dQ_partial: T.Tensor([batch, num_tiles, seq_len, heads, dim], "float16"),
@@ -619,14 +606,15 @@ def benchmark_function(func, *args, warmup=10, repeat=100):
     return np.median(times)
 
 
-def main(batch: int = 1,
-         heads: int = 8,
-         seq_len: int = 4096,
-         dim: int = 128,
-         is_causal: bool = False,
-         groups: int = 1,
-         dump_dir: str | None = None):
-
+def main(
+    batch: int = 1,
+    heads: int = 8,
+    seq_len: int = 4096,
+    dim: int = 128,
+    is_causal: bool = False,
+    groups: int = 1,
+    dump_dir: str | None = None,
+):
     device = "cuda"
     dtype = torch.float16
 
@@ -683,9 +671,7 @@ def main(batch: int = 1,
     block_M = bwd_kernel.config["block_M"]
     num_kv_tiles = math.ceil(seq_len / block_M)
 
-    dQ_partial = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
-                              dtype=torch.float16,
-                              device=device)
+    dQ_partial = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim), dtype=torch.float16, device=device)
     dK_tl = torch.zeros_like(k, dtype=torch.float32)
     dV_tl = torch.zeros_like(v, dtype=torch.float32)
 
@@ -747,13 +733,10 @@ def main(batch: int = 1,
 
         delta_tl_bench = bwd_prep(o_tl_bench, dO)
 
-        dQ_partial_bench = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim),
-                                       dtype=torch.float16,
-                                       device=device)
+        dQ_partial_bench = torch.zeros((batch, num_kv_tiles, seq_len, heads, dim), dtype=torch.float16, device=device)
         dK_bench = torch.zeros_like(k, dtype=torch.float32)
         dV_bench = torch.zeros_like(v, dtype=torch.float32)
-        bwd_kernel(q, k, v, dO, lse_tl_bench, delta_tl_bench, dQ_partial_bench, dK_bench,
-                   dV_bench)
+        bwd_kernel(q, k, v, dO, lse_tl_bench, delta_tl_bench, dQ_partial_bench, dK_bench, dV_bench)
         dQ_bench = reduce_kernel(dQ_partial_bench)
 
         post_kernel(dQ_bench)
@@ -782,17 +765,13 @@ def main(batch: int = 1,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=4, help='batch size')
-    parser.add_argument('--heads', type=int, default=16, help='heads')
-    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
-    parser.add_argument('--dim', type=int, default=64, help='dim')
-    parser.add_argument('--is_causal', action='store_true', help='causal')
-    parser.add_argument('--groups', type=int, default=1, help='groups')
-    parser.add_argument('--dump_dir',
-                        type=str,
-                        default=None,
-                        help='directory to save HIP, HSACO and disassembled files')
+    parser.add_argument("--batch", type=int, default=4, help="batch size")
+    parser.add_argument("--heads", type=int, default=16, help="heads")
+    parser.add_argument("--seq_len", type=int, default=4096, help="sequence length")
+    parser.add_argument("--dim", type=int, default=64, help="dim")
+    parser.add_argument("--is_causal", action="store_true", help="causal")
+    parser.add_argument("--groups", type=int, default=1, help="groups")
+    parser.add_argument("--dump_dir", type=str, default=None, help="directory to save HIP, HSACO and disassembled files")
     args = parser.parse_args()
 
-    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups,
-         args.dump_dir)
+    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups, args.dump_dir)

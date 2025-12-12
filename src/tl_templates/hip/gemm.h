@@ -336,10 +336,12 @@ public:
         for (int i = 0; i < warp_rows; ++i) {
           for (int j = 0; j < warp_cols; ++j) {
             auto acc_ptr = ((float32x4 *)C_local) + ((i * warp_cols) + j);
-            // B is already in register, layout: [inner_k][warp_cols][kPack][local_size_b]
+            // B is already in register, layout:
+            // [inner_k][warp_cols][kPack][local_size_b]
             auto b_ptr = ((B_type *)B_local) +
                          (ki * warp_cols * kPack + j * kPack + kp) * vec_size;
-            // A is loaded from shared memory, layout: [warp_rows][kPack][local_size_a]
+            // A is loaded from shared memory, layout:
+            // [warp_rows][kPack][local_size_a]
             auto a_ptr = ((A_type *)A_local) + (i * kPack + kp) * vec_size;
 
             // Use the trait to select the correct MFMA instruction, either fp8,
