@@ -133,7 +133,6 @@ set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
 
 # Collect source files
 file(GLOB TILE_LANG_SRCS
-  src/arith/*.cc
   src/*.cc
   src/layout/*.cc
   src/transform/*.cc
