@@ -292,6 +292,15 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
     return false;
 
   // Check if expr is invariant within vector boundaries
+  // We're trying to prove the access expression A[f(var)] depends only on
+  // floor(var/vecsize), not on var%vecsize
+  // Mathematically:
+  // \forall var, f(floor(var/vecsize)*vecsize + var%vecsize) ==
+  // f(floor(var/vecsize)*vecsize + 0)
+  // Example: for i in T.vectorized(8):
+  //     A[i] = B[i] * C[i//4]
+  // if vecsize=4, f(i)=i//4 depends only on i//4
+  // Therefore A[i] = B[i] * C[i//4] can be vectorized with vecsize=4
   PrimExpr var_aligned =
       floordiv(var, target_vectorized_size) * target_vectorized_size;
   PrimExpr expr_aligned = Substitute(expr, {{var, var_aligned}});
