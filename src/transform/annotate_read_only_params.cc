@@ -6,10 +6,10 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
-#include <tvm/tir/transform.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt_functor.h>
+#include <tvm/tir/transform.h>
 #include <unordered_set>
 
 namespace tvm {
@@ -19,32 +19,35 @@ using namespace ffi;
 
 /*!
  * \brief A simple visitor that marks handle parameters as written when they
- *        appear on the LHS of a BufferStore or in a tvm_access_ptr with write flag.
+ *        appear on the LHS of a BufferStore or in a tvm_access_ptr with write
+ * flag.
  */
 class ReadWriteMarker : public StmtExprVisitor {
 public:
-  explicit ReadWriteMarker(const Array<Var>& handle_params) {
-    for (const Var& v : handle_params) {
+  explicit ReadWriteMarker(const Array<Var> &handle_params) {
+    for (const Var &v : handle_params) {
       handle_params_.insert(v.get());
     }
   }
 
-  const std::unordered_set<const VarNode*>& written() const { return written_; }
+  const std::unordered_set<const VarNode *> &written() const {
+    return written_;
+  }
 
-  void VisitStmt_(const BufferStoreNode* op) final {
-    const VarNode* data = op->buffer->data.get();
+  void VisitStmt_(const BufferStoreNode *op) final {
+    const VarNode *data = op->buffer->data.get();
     if (handle_params_.count(data)) {
       written_.insert(data);
     }
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  void VisitExpr_(const CallNode* op) final {
+  void VisitExpr_(const CallNode *op) final {
     // Detect tvm_access_ptr writes
     if (op->op.same_as(builtin::tvm_access_ptr())) {
       if (op->args.size() == 5U) {
-        if (const VarNode* buf = op->args[1].as<VarNode>()) {
-          if (const IntImmNode* flag = op->args[4].as<IntImmNode>()) {
+        if (const VarNode *buf = op->args[1].as<VarNode>()) {
+          if (const IntImmNode *flag = op->args[4].as<IntImmNode>()) {
             if ((flag->value & 2) != 0) {
               if (handle_params_.count(buf)) {
                 written_.insert(buf);
@@ -58,8 +61,8 @@ public:
   }
 
 private:
-  std::unordered_set<const VarNode*> handle_params_;
-  std::unordered_set<const VarNode*> written_;
+  std::unordered_set<const VarNode *> handle_params_;
+  std::unordered_set<const VarNode *> written_;
 };
 
 /*!
@@ -73,7 +76,7 @@ private:
 static tir::PrimFunc MarkReadOnlyParams(tir::PrimFunc f) {
   // Collect handle parameters (pointer-like, e.g., buffers in global memory)
   Array<Var> handle_params;
-  for (const Var& v : f->params) {
+  for (const Var &v : f->params) {
     if (v->dtype.is_handle()) {
       handle_params.push_back(v);
     }
@@ -88,8 +91,9 @@ static tir::PrimFunc MarkReadOnlyParams(tir::PrimFunc f) {
   // Determine read-only parameter indices among all params
   Array<Integer> readonly_indices;
   for (size_t i = 0; i < f->params.size(); ++i) {
-    const Var& v = f->params[i];
-    if (!v->dtype.is_handle()) continue;
+    const Var &v = f->params[i];
+    if (!v->dtype.is_handle())
+      continue;
     if (marker.written().count(v.get()) == 0) {
       readonly_indices.push_back(Integer(static_cast<int>(i)));
     }
@@ -116,9 +120,10 @@ Pass AnnotateReadOnlyParams() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.AnnotateReadOnlyParams", AnnotateReadOnlyParams);
+  refl::GlobalDef().def("tl.transform.AnnotateReadOnlyParams",
+                        AnnotateReadOnlyParams);
 }
 
-}  // namespace transform
-}  // namespace tl
-}  // namespace tvm
+} // namespace transform
+} // namespace tl
+} // namespace tvm

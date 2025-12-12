@@ -1,16 +1,14 @@
-import pytest
-
-import tilelang
 import tilelang.language as T
 from tilelang.engine.lower import lower
 from tilelang.jit.adapter.utils import match_declare_kernel
 
 
 def _simple_add_kernel():
+
     @T.prim_func
     def main(
-        x: T.Tensor((128,), "float32"),
-        y: T.Tensor((128,), "float32"),
+            x: T.Tensor((128,), "float32"),
+            y: T.Tensor((128,), "float32"),
     ):
         # One-dimensional kernel; writes y from x without modifying x
         with T.Kernel(128, threads=32) as pid:
@@ -51,6 +49,7 @@ def test_codegen_emits_const_for_readonly_params():
     assert ro is not None, "Expected tl.readonly_param_indices to be present"
     ro_list = [int(i) for i in ro]
     assert 0 in ro_list and 1 not in ro_list
+
 
 if __name__ == "__main__":
     test_codegen_emits_const_for_readonly_params()
