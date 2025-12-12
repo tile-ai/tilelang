@@ -224,7 +224,7 @@ environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs
 manylinux-x86_64-image = "manylinux_2_28"   # AlmaLinux 8
 manylinux-aarch64-image = "manylinux_2_28"  # AlmaLinux 8
 # Install CUDA runtime and stub driver library
-# manylinux_2_28 uses gcc 14, which needs CUDA 12.8
+# manylinux_2_28 uses gcc 14, which needs CUDA >=12.8
 before-all = """
 set -eux
 
@@ -263,7 +263,8 @@ repair-wheel-command = [
 
 [[tool.cibuildwheel.overrides]]
 select = "*linux*x86_64*"
-# TODO
+# x86_64 runners in GitHub Actions have limited storage,
+# pre-install torch without caching to reduce disk usage during install tilelang.
 before-test = [
     "pip install torch --no-cache-dir",
 ]
