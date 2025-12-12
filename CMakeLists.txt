@@ -223,7 +223,6 @@ elseif(USE_CUDA)
 endif()
 
 set(USE_Z3 ON)
-
 # Include tvm after configs have been populated
 add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
 
