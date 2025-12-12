@@ -9,8 +9,8 @@ def vectorize_test(N, M, stride_A, stride_B):
 
     @T.prim_func
     def main(
-            A: T.StridedTensor[(N, M), (1, stride_A), "float32"],  # noqa: F821
-            B: T.StridedTensor[(N, M), (1, stride_B), "float32"],  # noqa: F821
+        A: T.StridedTensor[(N, M), (1, stride_A), "float32"],  # noqa: F821
+        B: T.StridedTensor[(N, M), (1, stride_B), "float32"],  # noqa: F821
     ):
         with T.Kernel(M // 128, threads=128) as (bx):
             tx = T.get_thread_binding(0)
@@ -39,9 +39,7 @@ def run_vectorize(N, M, stride_A, stride_B):
     code = jit_kernel.get_kernel_source()
 
     vectorize_size = 1
-    while vectorize_size <= 2 and \
-          stride_A % (vectorize_size * 2) == 0 and \
-          stride_B % (vectorize_size * 2) == 0:
+    while vectorize_size <= 2 and stride_A % (vectorize_size * 2) == 0 and stride_B % (vectorize_size * 2) == 0:
         vectorize_size *= 2
 
     if vectorize_size == 4:

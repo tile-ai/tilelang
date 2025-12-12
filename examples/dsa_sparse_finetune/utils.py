@@ -66,10 +66,8 @@ def assert_tensors_similar(x, y, eps=1e-8, name="tensor", raise_assert=True):
         raise_assert: Whether to raise assertion error on failure
     """
     sim = calculate_tensor_similarity(x, y, name)
-    diff = 1. - sim
+    diff = 1.0 - sim
     if not (0 <= diff <= eps):
-        print(
-            f"\033[31mERROR: {name} similarity check failed, diff={diff:.2e} (threshold={eps:.2e})\033[0m"
-        )
+        print(f"\033[31mERROR: {name} similarity check failed, diff={diff:.2e} (threshold={eps:.2e})\033[0m")
         if raise_assert:
             assert False  # noqa: B011

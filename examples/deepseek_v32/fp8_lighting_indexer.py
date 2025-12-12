@@ -28,11 +28,11 @@ def validate_tensor_match(a, b, tolerance=1e-8, tensor_name="tensor", should_rai
         if should_raise:
             assert False
     if not torch.isclose(
-            a.masked_fill(a_finite, 0),
-            b.masked_fill(b_finite, 0),
-            rtol=0,
-            atol=0,
-            equal_nan=True,
+        a.masked_fill(a_finite, 0),
+        b.masked_fill(b_finite, 0),
+        rtol=0,
+        atol=0,
+        equal_nan=True,
     ).all():
         display_error_message(f"{tensor_name} Error: nonfinite value mismatch")
         if should_raise:
@@ -55,13 +55,10 @@ def get_configs():
         threads=[128, 256],
         block_Q=[1, 2, 4],
     )
-    return [{
-        k: v for k, v in zip(iter_params, values)
-    } for values in itertools.product(*iter_params.values())]
+    return [{k: v for k, v in zip(iter_params, values)} for values in itertools.product(*iter_params.values())]
 
 
 class SupplyProg:
-
     def __init__(self):
         self.tensors_dict = {}
 
@@ -88,7 +85,8 @@ supply_prog = SupplyProg()
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },)
+    },
+)
 def mqa_attn_return_logits(
     heads,
     index_dim,
@@ -113,16 +111,15 @@ def mqa_attn_return_logits(
 
     @T.prim_func
     def mqa_attn_return_logits_kernel(
-            IndexQ: T.Tensor(index_q_shape, dtype),  # type: ignore
-            IndexK: T.Tensor(index_k_shape, dtype),  # type: ignore
-            IndexKScale: T.Tensor(index_k_scale_shape, accum_dtype),  # type: ignore
-            Logits: T.Tensor(logits_shape, accum_dtype),  # type: ignore
-            Weights: T.Tensor([seq_len, heads], accum_dtype),  # type: ignore
-            CuSeqLenKS: T.Tensor([seq_len], index_dtype),  # type: ignore
-            CuSeqLenKE: T.Tensor([seq_len], index_dtype),  # type: ignore
+        IndexQ: T.Tensor(index_q_shape, dtype),  # type: ignore
+        IndexK: T.Tensor(index_k_shape, dtype),  # type: ignore
+        IndexKScale: T.Tensor(index_k_scale_shape, accum_dtype),  # type: ignore
+        Logits: T.Tensor(logits_shape, accum_dtype),  # type: ignore
+        Weights: T.Tensor([seq_len, heads], accum_dtype),  # type: ignore
+        CuSeqLenKS: T.Tensor([seq_len], index_dtype),  # type: ignore
+        CuSeqLenKE: T.Tensor([seq_len], index_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len, block_Q), threads=threads) as bx:
-
             index_q_shared = T.alloc_shared([block_Q * heads, index_dim], dtype)
             index_k_shared = T.alloc_shared([block_N, index_dim], dtype)
             index_k_scale_fragment = T.alloc_fragment([block_N], accum_dtype)
@@ -140,17 +137,14 @@ def mqa_attn_return_logits(
             cu_k_e_max[0] = -2147483648
 
             for bq_i in T.serial(block_Q):
-                cu_k_s_min[0] = T.min(cu_k_s_min[0], T.min(CuSeqLenKS[seq_len_i + bq_i],
-                                                           seq_len_kv))
+                cu_k_s_min[0] = T.min(cu_k_s_min[0], T.min(CuSeqLenKS[seq_len_i + bq_i], seq_len_kv))
             for bq_i in T.serial(block_Q):
-                cu_k_e_max[0] = T.max(cu_k_e_max[0], T.min(CuSeqLenKE[seq_len_i + bq_i],
-                                                           seq_len_kv))
+                cu_k_e_max[0] = T.max(cu_k_e_max[0], T.min(CuSeqLenKE[seq_len_i + bq_i], seq_len_kv))
 
             T.copy(IndexQ[seq_len_i * heads, 0], index_q_shared)
             T.copy(Weights[seq_len_i, 0], weights)
 
-            for nbn_i in T.Pipelined(
-                    T.ceildiv(cu_k_e_max[0] - cu_k_s_min[0], block_N), num_stages=num_stages):
+            for nbn_i in T.Pipelined(T.ceildiv(cu_k_e_max[0] - cu_k_s_min[0], block_N), num_stages=num_stages):
                 T.copy(IndexK[cu_k_s_min[0] + nbn_i * block_N, 0], index_k_shared)
                 T.copy(IndexKScale[cu_k_s_min[0] + nbn_i * block_N], index_k_scale_fragment)
 
@@ -164,15 +158,14 @@ def mqa_attn_return_logits(
                 )
 
                 for bn_i, bq_i, h_i in T.Parallel(block_N, block_Q, heads):
-                    s_reshaped[bn_i, bq_i,
-                               h_i] = (T.max(s_reshaped[bn_i, bq_i, h_i], 0) *
-                                       weights[bq_i, h_i]) * index_k_scale_fragment[bn_i]
+                    s_reshaped[bn_i, bq_i, h_i] = (T.max(s_reshaped[bn_i, bq_i, h_i], 0) * weights[bq_i, h_i]) * index_k_scale_fragment[
+                        bn_i
+                    ]
 
                 T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
 
                 for bq_i, bn_i in T.Parallel(block_Q, block_N):
-                    Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = (
-                        logits[bn_i, bq_i])
+                    Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = logits[bn_i, bq_i]
 
     return mqa_attn_return_logits_kernel
 
@@ -190,9 +183,9 @@ def clean_logits_(
 
     @T.prim_func
     def clean_logits_kernel(
-            Logits: T.Tensor([seq_len, seq_len_kv], dtype),  # type: ignore
-            CuSeqLenKS: T.Tensor([seq_len], indices_dtype),  # type: ignore
-            CuSeqLenKE: T.Tensor([seq_len], indices_dtype),  # type: ignore
+        Logits: T.Tensor([seq_len, seq_len_kv], dtype),  # type: ignore
+        CuSeqLenKS: T.Tensor([seq_len], indices_dtype),  # type: ignore
+        CuSeqLenKE: T.Tensor([seq_len], indices_dtype),  # type: ignore
     ):
         with T.Kernel(seq_len, threads=threads) as bx:
             tx = T.thread_binding(0, threads, thread="threadIdx.x")
@@ -210,13 +203,7 @@ def clean_logits_(
     return clean_logits_kernel
 
 
-def mqa_attn_return_logits_interface(q,
-                                     kv,
-                                     kv_scales,
-                                     weights,
-                                     cu_seqlen_ks,
-                                     cu_seqlen_ke,
-                                     clean_logits=True):
+def mqa_attn_return_logits_interface(q, kv, kv_scales, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=True):
     seq_len, heads, index_dim = q.shape
     seq_len_kv = kv.shape[0]
 
@@ -238,20 +225,19 @@ def mqa_attn_return_logits_interface(q,
     return logits
 
 
-def ref_fp8_mqa_logits(q: torch.Tensor, kv: torch.Tensor, weights: torch.Tensor,
-                       cu_seqlen_ks: torch.Tensor, cu_seqlen_ke: torch.Tensor):
+def ref_fp8_mqa_logits(q: torch.Tensor, kv: torch.Tensor, weights: torch.Tensor, cu_seqlen_ks: torch.Tensor, cu_seqlen_ke: torch.Tensor):
     k = kv
     q = q.float()
     k = k.float()
 
     seq_len_kv = kv.shape[0]
-    mask_lo = torch.arange(0, seq_len_kv, device='cuda')[None, :] >= cu_seqlen_ks[:, None]
-    mask_hi = torch.arange(0, seq_len_kv, device='cuda')[None, :] < cu_seqlen_ke[:, None]
+    mask_lo = torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+    mask_hi = torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
     mask = mask_lo & mask_hi
 
-    score = torch.einsum('mhd,nd->hmn', q, k)
+    score = torch.einsum("mhd,nd->hmn", q, k)
     logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
-    logits = logits.masked_fill(~mask, float('-inf'))
+    logits = logits.masked_fill(~mask, float("-inf"))
 
     cost = mask.sum()
     return logits, cost
@@ -265,32 +251,22 @@ def test_fp8_lighting_indexer(S=4096, SKV=8192, H=32, HKV=1, D=64, kv_stride=1):
     weights = torch.randn(S, H, device="cuda", dtype=torch.float32)
     p = (torch.randn(S, SKV, device="cuda", dtype=torch.float32) * 4).softmax(dim=-1)
 
-    ks, ke = generate_random_cu_seqlens(
-        per_cp_seqlen=S, cp_size=4, cp_rank=3, kv_stride=kv_stride, average_q_len=2048)
+    ks, ke = generate_random_cu_seqlens(per_cp_seqlen=S, cp_size=4, cp_rank=3, kv_stride=kv_stride, average_q_len=2048)
 
-    logits_ref, cost_ref = ref_fp8_mqa_logits(
-        q=q, kv=kv, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
+    logits_ref, cost_ref = ref_fp8_mqa_logits(q=q, kv=kv, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
 
     q_fp8 = q.to(torch.float8_e4m3fn)
     kv_fp8, kv_scales = per_custom_dims_cast_to_fp8(kv, (0,), False)
 
-    logits_tl = mqa_attn_return_logits_interface(
-        q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
-    diff = validate_tensor_match(
-        logits_ref, logits_tl, tolerance=1e-14, tensor_name="logits", should_raise=False)
+    logits_tl = mqa_attn_return_logits_interface(q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
+    diff = validate_tensor_match(logits_ref, logits_tl, tolerance=1e-14, tensor_name="logits", should_raise=False)
 
     print(f"diff: {diff}")
 
     from tilelang.profiler import do_bench
 
     def logits_fn():
-        return mqa_attn_return_logits_interface(
-            q=q_fp8,
-            kv=kv_fp8,
-            kv_scales=kv_scales,
-            weights=weights,
-            cu_seqlen_ks=ks,
-            cu_seqlen_ke=ke)
+        return mqa_attn_return_logits_interface(q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
 
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
         logits_fn()

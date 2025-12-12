@@ -6,7 +6,6 @@ import tilelang.language as T
 # @tilelang.jit
 @tilelang.jit(out_idx=[2])
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-
     @T.prim_func
     def main(
         A: T.Tensor[(M, K), dtype],

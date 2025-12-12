@@ -1,5 +1,5 @@
-"""Reproduce: strides check failure (non-contiguous A via transpose).
-"""
+"""Reproduce: strides check failure (non-contiguous A via transpose)."""
+
 import torch
 from common import build_matmul_kernel
 

@@ -1,4 +1,4 @@
-from tvm.tir import (BufferStore, For, AttrStmt, ForKind, Var, PrimFunc, BufferLoad, Buffer, IntImm)
+from tvm.tir import BufferStore, For, AttrStmt, ForKind, Var, PrimFunc, BufferLoad, Buffer, IntImm
 from tvm.tir.stmt_functor import ir_transform, post_order_visit
 from tvm.tir.transform import prim_func_pass
 
@@ -97,7 +97,7 @@ def AddWrapperForSingleBufStore():
             Returns:
                 True if the loop is a tile operation (parallel or has num_stages annotation)
             """
-            return loop.kind == ForKind.PARALLEL or 'num_stages' in loop.annotations
+            return loop.kind == ForKind.PARALLEL or "num_stages" in loop.annotations
 
         def pre_visit(statement):
             """
@@ -105,7 +105,7 @@ def AddWrapperForSingleBufStore():
             """
             nonlocal tile_operation_depth
 
-            if isinstance(statement, AttrStmt) and statement.attr_key == 'thread_extent':
+            if isinstance(statement, AttrStmt) and statement.attr_key == "thread_extent":
                 thread_binding_vars.add(statement.node.var)
             elif isinstance(statement, For) and is_tile_operation_loop(statement):
                 tile_operation_depth += 1
@@ -139,7 +139,8 @@ def AddWrapperForSingleBufStore():
                             if isinstance(index, IntImm) and index != 0:
                                 raise ValueError(
                                     f"Fragment buffer access with non-zero index [{index}] is not supported. "
-                                    "Only fragment[0] access is allowed.")
+                                    "Only fragment[0] access is allowed."
+                                )
 
                     # Wrap fragment[0] access with T.Parallel loop
                     return For(Var("_", "int32"), 0, 1, ForKind.PARALLEL, statement)

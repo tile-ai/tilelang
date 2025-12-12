@@ -29,9 +29,7 @@ class _cudaDeviceAttrNames:
 def test_driver_get_device_properties():
     prop = get_cuda_device_properties()
     assert prop is not None, "Failed to get CUDA device properties"
-    assert isinstance(
-        prop,
-        torch.cuda._CudaDeviceProperties), ("Returned object is not of type _CudaDeviceProperties")
+    assert isinstance(prop, torch.cuda._CudaDeviceProperties), "Returned object is not of type _CudaDeviceProperties"
 
 
 def test_device_get_device_name():
@@ -48,8 +46,7 @@ def test_device_get_shared_memory_per_block():
 
 def test_device_get_persisting_l2_cache_size():
     tl_cache_size = get_persisting_l2_cache_max_size()
-    driver_cache_size = get_device_attribute(
-        _cudaDeviceAttrNames.cudaDevAttrMaxPersistingL2CacheSize)
+    driver_cache_size = get_device_attribute(_cudaDeviceAttrNames.cudaDevAttrMaxPersistingL2CacheSize)
     assert tl_cache_size == driver_cache_size, "Persisting L2 cache size values do not match"
 
 
@@ -61,17 +58,14 @@ def test_device_get_num_sms():
 
 def test_device_get_registers_per_block():
     tl_regs_per_block = get_registers_per_block()
-    driver_regs_per_block = get_device_attribute(
-        _cudaDeviceAttrNames.cudaDevAttrMaxRegistersPerBlock)
+    driver_regs_per_block = get_device_attribute(_cudaDeviceAttrNames.cudaDevAttrMaxRegistersPerBlock)
     assert tl_regs_per_block == driver_regs_per_block, "Registers per block values do not match"
 
 
 def test_device_get_max_dynamic_shared_size_bytes():
     tl_dynamic_smem = get_max_dynamic_shared_size_bytes()
-    driver_dynamic_smem = get_device_attribute(
-        _cudaDeviceAttrNames.cudaDevAttrMaxSharedMemoryPerMultiprocessor)
-    assert tl_dynamic_smem == driver_dynamic_smem, (
-        "Max dynamic shared size bytes values do not match")
+    driver_dynamic_smem = get_device_attribute(_cudaDeviceAttrNames.cudaDevAttrMaxSharedMemoryPerMultiprocessor)
+    assert tl_dynamic_smem == driver_dynamic_smem, "Max dynamic shared size bytes values do not match"
 
 
 if __name__ == "__main__":

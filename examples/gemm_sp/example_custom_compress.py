@@ -17,77 +17,76 @@ torch.manual_seed(42)
 
 DEFAULT_CONFIG = {  # take best config from autotune script
     "4090": {
-        'float': {
-            'block_M': 128,
-            'block_N': 64,
-            'block_K': 64,
-            'num_stages': 1,
-            'thread_num': 128,
-            'policy': T.GemmWarpPolicy.Square,
-            'enable_rasterization': True
+        "float": {
+            "block_M": 128,
+            "block_N": 64,
+            "block_K": 64,
+            "num_stages": 1,
+            "thread_num": 128,
+            "policy": T.GemmWarpPolicy.Square,
+            "enable_rasterization": True,
         },
-        'float16': {
-            'block_M': 256,
-            'block_N': 128,
-            'block_K': 64,
-            'num_stages': 2,
-            'thread_num': 128,
-            'policy': T.GemmWarpPolicy.Square,
-            'enable_rasterization': True
-        }
+        "float16": {
+            "block_M": 256,
+            "block_N": 128,
+            "block_K": 64,
+            "num_stages": 2,
+            "thread_num": 128,
+            "policy": T.GemmWarpPolicy.Square,
+            "enable_rasterization": True,
+        },
     },
     "h20": {
-        'float': {
-            'block_M': 128,
-            'block_N': 64,
-            'block_K': 128,
-            'num_stages': 3,
-            'thread_num': 128,
-            'policy': T.GemmWarpPolicy.Square,
-            'enable_rasterization': True
+        "float": {
+            "block_M": 128,
+            "block_N": 64,
+            "block_K": 128,
+            "num_stages": 3,
+            "thread_num": 128,
+            "policy": T.GemmWarpPolicy.Square,
+            "enable_rasterization": True,
         },
-        'float16': {
-            'block_M': 128,
-            'block_N': 64,
-            'block_K': 128,
-            'num_stages': 3,
-            'thread_num': 128,
-            'policy': T.GemmWarpPolicy.Square,
-            'enable_rasterization': True
-        }
-    }
+        "float16": {
+            "block_M": 128,
+            "block_N": 64,
+            "block_K": 128,
+            "num_stages": 3,
+            "thread_num": 128,
+            "policy": T.GemmWarpPolicy.Square,
+            "enable_rasterization": True,
+        },
+    },
 }
 
 ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
 
 
 @tilelang.jit(out_idx=[-1])
-def matmul_sp_fp16_custom_compress(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages,
-                                   thread_num, policy, enable_rasterization, use_cutlass_layout):
+def matmul_sp_fp16_custom_compress(
+    M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy, enable_rasterization, use_cutlass_layout
+):
     e_factor, e_dtype = (16, "int16")
 
     @T.prim_func
     def gemm_sp_fp16_custom_compress(
-            A_sparse: T.Tensor((M, K // 2), 'float16'),
-            E: T.Tensor((M, K // e_factor), e_dtype),
-            B: T.Tensor((K, N), 'float16'),
-            C: T.Tensor((M, N), accum_dtype),
+        A_sparse: T.Tensor((M, K // 2), "float16"),
+        E: T.Tensor((M, K // e_factor), e_dtype),
+        B: T.Tensor((K, N), "float16"),
+        C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K // 2), 'float16')
+            A_shared = T.alloc_shared((block_M, block_K // 2), "float16")
             E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
-            B_shared = T.alloc_shared((block_K, block_N), 'float16')
+            B_shared = T.alloc_shared((block_K, block_N), "float16")
             C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             if use_cutlass_layout:
-                T.annotate_layout({
-                    E:
-                        make_cutlass_metadata_layout(
-                            E, mma_dtype="float16", arch="8.0", block_k=block_K),
-                    E_shared:
-                        make_cutlass_metadata_layout(
-                            E_shared, mma_dtype="float16", arch="8.0", block_k=block_K),
-                })
+                T.annotate_layout(
+                    {
+                        E: make_cutlass_metadata_layout(E, mma_dtype="float16", arch="8.0", block_k=block_K),
+                        E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype="float16", arch="8.0", block_k=block_K),
+                    }
+                )
             T.clear(C_local)
             T.disable_warp_group_reg_alloc()
             T.use_swizzle(panel_size=10, enable=enable_rasterization)
@@ -108,8 +107,7 @@ def torch_compress(dense):
     A naive compression function, where each 4-bit meta matches 4 elements in original matrix in row major layout.
     """
     if dense.dim() != 2:
-        raise RuntimeError(
-            f"Expected 2-dimensional dense tensor, got {dense.dim()}-dimensional tensor")
+        raise RuntimeError(f"Expected 2-dimensional dense tensor, got {dense.dim()}-dimensional tensor")
 
     m, k = dense.shape
 
@@ -131,9 +129,7 @@ def torch_compress(dense):
         if m % 32 != 0:
             raise RuntimeError(f"Number of rows of dense matrix {m} must be divisible by 32")
     if k % (4 * quadbits_per_meta_elem) != 0:
-        raise RuntimeError(
-            f"Number of columns of dense matrix {k} must be divisible by {4 * quadbits_per_meta_elem}"
-        )
+        raise RuntimeError(f"Number of columns of dense matrix {k} must be divisible by {4 * quadbits_per_meta_elem}")
 
     if dense.dtype != torch.float:
         ksparse = 4
@@ -194,19 +190,13 @@ def torch_compress(dense):
         sparse1 = dense_4.gather(-1, idxs1.unsqueeze(-1))
         sparse = torch.stack((sparse0, sparse1), dim=-1).view(m, k // 2)
     else:
-        sparse = dense_2.gather(-1,
-                                idxs0.unsqueeze(-1) // 2).view(
-                                    m, k // 2)  # type: ignore[possibly-undefined]
+        sparse = dense_2.gather(-1, idxs0.unsqueeze(-1) // 2).view(m, k // 2)  # type: ignore[possibly-undefined]
 
     meta_4 = idxs0 | (idxs1 << 2)
     meta_n = meta_4.view((-1, meta_ncols, quadbits_per_meta_elem)).to(meta_dtype)
 
     if quadbits_per_meta_elem == 4:
-        meta = (
-            meta_n[:, :, 0]
-            | (meta_n[:, :, 1] << 4)
-            | (meta_n[:, :, 2] << 8)
-            | (meta_n[:, :, 3] << 12))
+        meta = meta_n[:, :, 0] | (meta_n[:, :, 1] << 4) | (meta_n[:, :, 2] << 8) | (meta_n[:, :, 3] << 12)
     elif quadbits_per_meta_elem == 8:
         meta = (
             meta_n[:, :, 0]
@@ -216,7 +206,8 @@ def torch_compress(dense):
             | (meta_n[:, :, 4] << 16)
             | (meta_n[:, :, 5] << 20)
             | (meta_n[:, :, 6] << 24)
-            | (meta_n[:, :, 7] << 28))
+            | (meta_n[:, :, 7] << 28)
+        )
 
     return (sparse, meta)
 
@@ -234,9 +225,11 @@ def decode_metadata(meta: torch.Tensor) -> torch.Tensor:
 
 
 @tilelang.jit(
-    out_idx=[1, 2], pass_configs={
+    out_idx=[1, 2],
+    pass_configs={
         tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
-    })
+    },
+)
 def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
     e_factor, e_dtype = ARCH_INFO["8.0"]
     e_K = K // e_factor
@@ -249,23 +242,21 @@ def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
 
     @T.prim_func
     def kernel(
-            A: T.Tensor((M, K), dtype),
-            A_sp: T.Tensor((M, K // 2), dtype),
-            E: T.Tensor((M, e_K), e_dtype),
+        A: T.Tensor((M, K), dtype),
+        A_sp: T.Tensor((M, K // 2), dtype),
+        E: T.Tensor((M, e_K), e_dtype),
     ):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(K, block_K), threads=block_M) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             A_sp_shared = T.alloc_shared((block_M, block_K // 2), dtype)
             E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
             if use_cutlass_layout:
-                T.annotate_layout({
-                    E:
-                        make_cutlass_metadata_layout(
-                            E, mma_dtype="float16", arch="8.0", block_k=block_K),
-                    E_shared:
-                        make_cutlass_metadata_layout(
-                            E_shared, mma_dtype="float16", arch="8.0", block_k=block_K),
-                })
+                T.annotate_layout(
+                    {
+                        E: make_cutlass_metadata_layout(E, mma_dtype="float16", arch="8.0", block_k=block_K),
+                        E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype="float16", arch="8.0", block_k=block_K),
+                    }
+                )
             T.clear(A_sp_shared)
             T.clear(E_shared)
             # TODO: alloc_var seems buggy here
@@ -295,8 +286,7 @@ def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
                         non_zero_elt_log_idx[1] = 3
                     for i in T.serial(elem):
                         val = non_zero_elt_log_idx[i]
-                        E_shared[tm, a_k // e_factor] |= T.shift_left(
-                            val, 4 * (g_i % (e_factor // group)) + 2 * i)
+                        E_shared[tm, a_k // e_factor] |= T.shift_left(val, 4 * (g_i % (e_factor // group)) + 2 * i)
             T.copy(A_sp_shared, A_sp[bx * block_M, by * block_K // 2])
             T.copy(E_shared, E[bx * block_M, by * block_K // e_factor])
 
@@ -304,41 +294,27 @@ def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
 
 
 def main():
-
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument(
-        "--use_cutlass_layout", action='store_true', help="Use cutlass layout for E tensor")
-    parser.add_argument(
-        "--use_torch_compressor", action='store_true', help="Use torch sparse for reference")
-    parser.add_argument(
-        "--accum_dtype",
-        type=str,
-        default="float",
-        choices=["float", "float16"],
-        help="Accumulation datatype")
+    parser.add_argument("--use_cutlass_layout", action="store_true", help="Use cutlass layout for E tensor")
+    parser.add_argument("--use_torch_compressor", action="store_true", help="Use torch sparse for reference")
+    parser.add_argument("--accum_dtype", type=str, default="float", choices=["float", "float16"], help="Accumulation datatype")
     parser.add_argument("--cfg", type=str, choices=["4090"], default="4090")
     args = parser.parse_args()
     kernel = matmul_sp_fp16_custom_compress(
-        args.m,
-        args.n,
-        args.k,
-        args.accum_dtype,
-        **DEFAULT_CONFIG[args.cfg][args.accum_dtype],
-        use_cutlass_layout=args.use_cutlass_layout)
+        args.m, args.n, args.k, args.accum_dtype, **DEFAULT_CONFIG[args.cfg][args.accum_dtype], use_cutlass_layout=args.use_cutlass_layout
+    )
 
-    a = randn_semi_sparse(args.m, args.k, device='cuda', dtype=torch.half)
-    b = torch.randn(args.k, args.n, device='cuda', dtype=torch.half)
+    a = randn_semi_sparse(args.m, args.k, device="cuda", dtype=torch.half)
+    b = torch.randn(args.k, args.n, device="cuda", dtype=torch.half)
 
     if args.use_torch_compressor:
         assert not args.use_cutlass_layout, "torch sparse must be used with naive layout"
         a_sparse, e = torch_compress(a)
     else:
-        a_sparse, e = compress_kernel(
-            args.m, args.k, 32, 32, "float16", use_cutlass_layout=args.use_cutlass_layout)(
-                a)
+        a_sparse, e = compress_kernel(args.m, args.k, 32, 32, "float16", use_cutlass_layout=args.use_cutlass_layout)(a)
 
     c = kernel(a_sparse, e, b)
 
@@ -346,9 +322,7 @@ def main():
 
     assert not c.isnan().any(), "Reference result contains NaNs, please report an issue"
     torch_assert_close(c, ref_c.to(c.dtype), rtol=1e-3, atol=1e-3)
-    print(
-        f"Precision check passed. Max diff: {(c - ref_c).abs().max()}, Mean diff: {(c - ref_c).abs().mean()}"
-    )
+    print(f"Precision check passed. Max diff: {(c - ref_c).abs().max()}, Mean diff: {(c - ref_c).abs().mean()}")
 
     latency = do_bench(lambda: kernel(a_sparse, e, b))
     ref_latency = do_bench(lambda: a @ b)
@@ -356,8 +330,8 @@ def main():
     total_flops = 2 * args.m * args.n * args.k
     tflops = total_flops / latency / 1e9
     ref_tflops = total_flops / ref_latency / 1e9
-    print(f"Sparse TFLOPS: {tflops:.2f}, Latency: {latency/1e3} s")
-    print(f"Reference TFLOPS: {ref_tflops:.2f}, Latency: {ref_latency/1e3:} s")
+    print(f"Sparse TFLOPS: {tflops:.2f}, Latency: {latency / 1e3} s")
+    print(f"Reference TFLOPS: {ref_tflops:.2f}, Latency: {ref_latency / 1e3:} s")
 
 
 if __name__ == "__main__":

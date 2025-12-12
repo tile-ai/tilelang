@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Util to invoke C/C++ compilers in the system."""
+
 import functools
 import os
 import shutil
@@ -30,8 +31,7 @@ from tvm.contrib import utils as _utils
 
 
 def _is_linux_like():
-    return (sys.platform == "darwin" or sys.platform.startswith("linux") or
-            sys.platform.startswith("freebsd"))
+    return sys.platform == "darwin" or sys.platform.startswith("linux") or sys.platform.startswith("freebsd")
 
 
 def _is_windows_like():
@@ -90,7 +90,7 @@ def get_cplus_compiler():
 
 
 def is_darwin():
-    return platform.system() == 'Darwin'
+    return platform.system() == "Darwin"
 
 
 def create_shared(output, objects, options=None, cc=None, cwd=None, ccache_env=None):
@@ -287,11 +287,7 @@ create_shared.output_format = "so" if sys.platform != "win32" else "dll"
 create_shared.get_target_triple = get_target_by_dump_machine(os.environ.get("CXX", get_cc()))
 
 
-def cross_compiler(compile_func,
-                   options=None,
-                   output_format=None,
-                   get_target_triple=None,
-                   add_files=None):
+def cross_compiler(compile_func, options=None, output_format=None, get_target_triple=None, add_files=None):
     """Create a cross compiler function by specializing compile_func with options.
 
     This function can be used to construct compile functions that
@@ -363,13 +359,7 @@ def cross_compiler(compile_func,
     return _fcompile
 
 
-def _linux_compile(output,
-                   objects,
-                   options,
-                   compile_cmd,
-                   cwd=None,
-                   ccache_env=None,
-                   compile_shared=False):
+def _linux_compile(output, objects, options, compile_cmd, cwd=None, ccache_env=None, compile_shared=False):
     cmd = [compile_cmd]
     if compile_cmd != "nvcc":
         if compile_shared or output.endswith(".so") or output.endswith(".dylib"):
@@ -430,15 +420,15 @@ def _windows_compile(output, objects, options, cwd=None, ccache_env=None):
             raise ValueError("ccache not found")
 
     try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd, env=env)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd, env=env)
         (out, _) = proc.communicate()
     except FileNotFoundError:
-        raise RuntimeError("Can not find the LLVM clang for Windows clang.exe)."
-                           "Make sure it's installed"
-                           " and the installation directory is in the %PATH% environment "
-                           "variable. Prebuilt binaries can be found at: https://llvm.org/") \
-                               from None
+        raise RuntimeError(
+            "Can not find the LLVM clang for Windows clang.exe)."
+            "Make sure it's installed"
+            " and the installation directory is in the %PATH% environment "
+            "variable. Prebuilt binaries can be found at: https://llvm.org/"
+        ) from None
     if proc.returncode != 0:
         msg = "Compilation error:\n"
         msg += " ".join(cmd) + "\n"

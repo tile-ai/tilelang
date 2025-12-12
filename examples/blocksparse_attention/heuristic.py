@@ -1,8 +1,7 @@
 import math
 
 
-def num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, num_m_blocks, size_one_kv_head,
-                         is_causal_or_local, max_splits):
+def num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, num_m_blocks, size_one_kv_head, is_causal_or_local, max_splits):
     """
     Determines the optimal number of splits for maximizing GPU occupancy while balancing memory efficiency.
 
