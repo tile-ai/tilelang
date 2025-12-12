@@ -89,8 +89,7 @@ TL_DEVICE void cp_async_gs(void *lds_base_ptr, void const *global_base_ptr) {
 
 template <int N>
 TL_DEVICE void cp_async_gs_conditional(void *lds_base_ptr,
-                                       void const *global_base_ptr,
-                                       bool cond) {
+                                       void const *global_base_ptr, bool cond) {
   if constexpr (N == 16) {
     *(uint4 *)lds_base_ptr =
         cond ? *(const uint4 *)global_base_ptr : make_uint4(0, 0, 0, 0);
