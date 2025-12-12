@@ -5,7 +5,6 @@ import tilelang.language as T
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True})
 def vectorize_test(N, M, stride_A, stride_B):
-
     @T.prim_func
     def main(
         A: T.StridedTensor[(N, M), (1, stride_A), "float32"],  # noqa: F821
@@ -59,12 +58,11 @@ def test_vectorize():
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True})
 def vectorize_test_invariant_index(N, M, K):
-
     @T.prim_func
     def main(
-            A: T.Tensor[(N, M), "float32"],  # noqa: F821
-            B: T.Tensor[(N, M), "float32"],  # noqa: F821
-            C: T.Tensor[(N, M // K), "float32"],  # noqa: F821
+        A: T.Tensor[(N, M), "float32"],  # noqa: F821
+        B: T.Tensor[(N, M), "float32"],  # noqa: F821
+        C: T.Tensor[(N, M // K), "float32"],  # noqa: F821
     ):
         with T.Kernel(N // 128, threads=128) as (bx):
             tx = T.get_thread_binding(0)

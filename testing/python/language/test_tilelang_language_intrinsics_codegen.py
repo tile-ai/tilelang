@@ -9,8 +9,8 @@ def test_language_ldg_codegen():
 
     @T.prim_func
     def main(
-            x: T.Tensor((N,), "float32"),
-            y: T.Tensor((N,), "float32"),
+        x: T.Tensor((N,), "float32"),
+        y: T.Tensor((N,), "float32"),
     ):
         with T.Kernel(N, threads=32) as pid:
             # Explicitly request read-only cache load for x[pid]
