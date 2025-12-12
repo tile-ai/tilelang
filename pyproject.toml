@@ -263,7 +263,7 @@ repair-wheel-command = [
 
 [[tool.cibuildwheel.overrides]]
 select = "*linux*x86_64*"
-# CentOS 7 is too old to run import test. Do wheel installation test only.
-test-command = [
-    "echo 'Wheel is installed successfully'",
+# TODO
+before-test = [
+    "pip install torch --index-url https://download.pytorch.org/whl/cu130",
 ]
