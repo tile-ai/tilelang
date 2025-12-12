@@ -196,6 +196,41 @@ def main(
         print("Speedup: {:.2f}x".format(latency_triton / latency_tilelang))
 
 
+def benchmark(
+    batch: int = 1,
+    heads: int = 32,
+    seq_q: int = 256,
+    seq_kv: int = 256,
+    dim: int = 128,
+    groups: int = 8,
+    window_size: Optional[int] = None,
+    dtype: str = "float16",
+    tune: bool = False,
+):
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    block_M = 128
+    block_N = 128
+    num_stages = 2
+    threads = 256
+    kernel = flashattn(
+        batch,
+        heads,
+        seq_q,
+        seq_kv,
+        dim,
+        groups,
+        window_size,
+        block_M=block_M,
+        block_N=block_N,
+        num_stages=num_stages,
+        threads=threads,
+        dtype=dtype)
+
+    Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, groups, dtype=torch_dtype)
+    latency = do_bench(kernel(Q, K, V, sinks), warmup=500, rep=10000)
+    return latency
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='batch size')

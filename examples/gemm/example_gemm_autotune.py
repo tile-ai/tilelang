@@ -261,6 +261,14 @@ def main(M: int = 4096,
     print(f"Ref TFlops: {2 * M * N * K / ref_latency * 1e-9}")
 
 
+def benchmark(M: int = 4096, N: int = 4096, K: int = 4096):
+
+    config = get_heuristic_config()
+    kernel = matmul(M, N, K, **config)
+    profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
+    return profiler.do_bench()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
     parser.add_argument("--m", type=int, default=4096, help="Matrix dimension M")

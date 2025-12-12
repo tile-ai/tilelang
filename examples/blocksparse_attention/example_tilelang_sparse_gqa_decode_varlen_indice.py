@@ -7,6 +7,7 @@ import argparse
 import time
 import math
 from heuristic import num_splits_heuristic
+from tilelang.profiler import do_bench
 
 
 def flashattn(batch, heads, heads_kv, dim, dim_v):
@@ -465,6 +466,74 @@ def main(batch=8,
         out = sparse_kernel(Q, K, V, block_indices, cache_seqlens)
     torch.cuda.synchronize()
     print("sparse time: ", (time.time() - start) / 100 * 1000)
+
+
+def benchmark(batch=8,
+              heads=32,
+              heads_kv=8,
+              max_cache_seqlen=8192,
+              dim=128,
+              dim_v=128,
+              sparse_ratio=0.8,
+              block_size=32):
+    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
+    sparse_ratio = sparse_ratio
+    block_size = block_size
+    max_selected_blocks = int(math.ceil(max_cache_seqlen * (1 - sparse_ratio) / block_size))
+    dtype = torch.float16
+    Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
+    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
+    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device='cuda')
+    cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device='cuda')
+    max_valid_num_blocks = torch.ceil(cache_seqlens / block_size).int()
+    block_indices = torch.full((batch, heads_kv, max_selected_blocks),
+                               -1,
+                               dtype=torch.int32,
+                               device='cuda')
+
+    for b in range(batch):
+        max_valid_block = max_valid_num_blocks[b].item()
+        if max_valid_block > 0:
+            for h in range(heads_kv):
+                valid_indices = torch.randperm(
+                    max_valid_block, device='cuda', dtype=torch.int32)[:max_selected_blocks]
+                block_indices[b, h, :len(valid_indices)] = valid_indices
+
+    block_indices, _ = block_indices.sort(dim=-1, descending=True)
+    sparse_kernel = SparseFlashAttn(batch, heads, heads_kv, dim, dim_v, block_size)
+    batch = sparse_kernel.batch
+    heads = sparse_kernel.heads
+    heads_kv = sparse_kernel.heads_kv
+    dim_v = sparse_kernel.dim_v
+    dim = sparse_kernel.dim
+    block_size = sparse_kernel.block_size
+    max_selected_blocks = block_indices.shape[-1]
+
+    num_m_blocks = 1 * (heads // heads_kv + sparse_kernel.block_H - 1) // sparse_kernel.block_H
+    num_n_blocks = max_selected_blocks
+    size_one_kv_head = max_selected_blocks * block_size * (dim + dim_v) * 2
+    total_mblocks = batch * heads_kv * num_m_blocks
+    num_sm = sparse_kernel.num_sm
+
+    num_split = num_splits_heuristic(
+        total_mblocks,
+        num_sm,
+        num_n_blocks,
+        num_m_blocks,
+        size_one_kv_head,
+        is_causal_or_local=True,
+        max_splits=128)
+
+    glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device='cuda')
+    output_partial = torch.empty((batch, heads, num_split, dim_v),
+                                 dtype=torch.float32,
+                                 device='cuda')
+    kernel = sparse_kernel.kernel
+
+    def run_kernel_only():
+        kernel(Q, K, V, block_indices, cache_seqlens, glse, output_partial)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100)
 
 
 if __name__ == "__main__":

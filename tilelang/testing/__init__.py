@@ -9,6 +9,7 @@ from tvm.testing.utils import (requires_cuda, requires_package, requires_llvm, r
                                requires_rocm, _compose)
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
+from .benchmark import bench
 
 __all__ = [
     'requires_package',
@@ -17,6 +18,7 @@ __all__ = [
     'requires_rocm',
     'requires_llvm',
     'main',
+    'bench',
     'requires_cuda_compute_version',
 ] + [f'requires_cuda_compute_version_{op}' for op in ('ge', 'gt', 'le', 'lt', 'eq')]
 

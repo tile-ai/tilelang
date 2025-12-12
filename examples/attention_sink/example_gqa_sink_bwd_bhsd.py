@@ -507,6 +507,49 @@ def main(BATCH: int = 1,
     print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
 
+def benchmark(
+    BATCH: int = 1,
+    H: int = 8,
+    N_CTX: int = 512,
+    D_HEAD: int = 64,
+    groups: int = 2,
+    window_size: Optional[int] = None,
+    dtype: str = "float16",
+):
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    with torch.no_grad():
+        Q = torch.randn(BATCH, H, N_CTX, D_HEAD, dtype=torch_dtype, device="cuda")
+        K = torch.randn(BATCH, H // groups, N_CTX, D_HEAD, dtype=torch_dtype, device="cuda")
+        V = torch.randn_like(K)
+        sinks = torch.randn(H, dtype=torch_dtype, device="cuda")
+        dO = torch.randn_like(Q)
+        fwd = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, groups, window_size, dtype=dtype)
+        O, lse = fwd(Q, K, V, sinks)
+
+        def maybe_contiguous(x):
+            return x if x.stride(-1) == 1 else x.contiguous()
+
+        do, q, k, v, sinks_c, o = [maybe_contiguous(x) for x in (dO, Q, K, V, sinks, O)]
+        k_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
+        Delta = k_prep(o, do)
+        k_bwd = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, groups, window_size, dtype=dtype)
+        k_dsink = flashattn_bwd_dsink(BATCH, H, N_CTX, dtype=dtype)
+        q_shape = (BATCH, H, N_CTX, D_HEAD)
+        head_kv = H // groups
+        kv_shape = (BATCH, head_kv, N_CTX, D_HEAD)
+        dq = torch.zeros(q_shape, dtype=torch.float32, device="cuda")
+        dk = torch.zeros(kv_shape, dtype=torch.float32, device="cuda")
+        dv = torch.zeros(kv_shape, dtype=torch.float32, device="cuda")
+        k_bwd(q, k, v, do, lse, Delta, dq, dk, dv)
+        _ = k_dsink(sinks_c, Delta, lse).sum(0).sum(1)
+
+        def run_kernel_only():
+            k_bwd(q, k, v, do, lse, Delta, dq, dk, dv)
+
+        latency_ms = do_bench(run_kernel_only, warmup=500, rep=10000)
+        return latency_ms
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='Batch size')
