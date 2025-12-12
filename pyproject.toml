@@ -221,8 +221,8 @@ environment.PYTHONDEVMODE = "1"
 environment.PYTHONUNBUFFERED = "1"
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
-manylinux-x86_64-image = "manylinux_2_28"   # CentOS 7
-manylinux-aarch64-image = "manylinux_2_28" # AlmaLinux 8
+manylinux-x86_64-image = "manylinux_2_28"   # AlmaLinux 8
+manylinux-aarch64-image = "manylinux_2_28"  # AlmaLinux 8
 # Install CUDA runtime and stub driver library
 # manylinux_2_28 uses gcc 14, which needs CUDA 12.8
 before-all = """
@@ -265,5 +265,5 @@ repair-wheel-command = [
 select = "*linux*x86_64*"
 # TODO
 before-test = [
-    "pip install torch --index-url https://download.pytorch.org/whl/cu130",
+    "pip install torch --no-cache-dir",
 ]
