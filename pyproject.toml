@@ -31,7 +31,10 @@ dependencies = [
     # Extra constraint to tvm-ffi for abi issue,
     # should be removed after our tvm's update.
     # See discussion in tilelang#1373 and apache/tvm-ffi#307
-    "apache-tvm-ffi<=0.1.1",
+    "apache-tvm-ffi>=0.1.2",
+    # torch-c-dlpack-ext provides prebuilt torch extensions.
+    # Without it, TVM FFI may require JIT compilation on first import.
+    "torch-c-dlpack-ext",
     "cloudpickle",
     "ml-dtypes",
     "numpy>=1.23.5",
@@ -219,12 +222,10 @@ environment.PYTHONDEVMODE = "1"
 environment.PYTHONUNBUFFERED = "1"
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
-# Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
-# TODO: upgrade to manylinux_2_28 at some time
-manylinux-x86_64-image = "manylinux2014"   # CentOS 7
-manylinux-aarch64-image = "manylinux_2_28" # AlmaLinux 8
+manylinux-x86_64-image  = "manylinux_2_28"  # AlmaLinux 8
+manylinux-aarch64-image = "manylinux_2_28"  # AlmaLinux 8
 # Install CUDA runtime and stub driver library
-# manylinux_2_28 uses gcc 14, which needs CUDA 12.8
+# manylinux_2_28 uses gcc 14, which needs CUDA >=12.8
 before-all = """
 set -eux
 
@@ -233,8 +234,8 @@ uname -a
 
 case "$(uname -m)" in
     "x86_64")
-        DEFAULT_CUDA_VERSION="12.1"
-        yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+        DEFAULT_CUDA_VERSION="12.8"
+        dnf config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
         ;;
     "aarch64")
         DEFAULT_CUDA_VERSION="12.8"
@@ -248,6 +249,7 @@ esac
 cudaver="$(echo "${CUDA_VERSION:-$DEFAULT_CUDA_VERSION}" | cut -d '.' -f-2)"
 v="${cudaver//./-}"
 yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}" nvidia-driver-cuda-libs
+yum clean all
 """
 repair-wheel-command = [
     "auditwheel -v repair --exclude libtvm_ffi.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
@@ -262,7 +264,8 @@ repair-wheel-command = [
 
 [[tool.cibuildwheel.overrides]]
 select = "*linux*x86_64*"
-# CentOS 7 is too old to run import test. Do wheel installation test only.
-test-command = [
-    "echo 'Wheel is installed successfully'",
+# x86_64 runners in GitHub Actions have limited storage,
+# pre-install torch without caching to reduce disk usage during install tilelang.
+before-test = [
+    "pip install torch --no-cache-dir",
 ]

@@ -111,3 +111,9 @@ cmake-build-*/
 
 # host checks logs
 maint/host_checks/logs/*
+
+# ncu
+*.ncu-rep
+
+# csv
+*.csv

@@ -1190,9 +1190,9 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       if (op->value < 0) {
         temp << "-";
       }
-      temp << ((op->dtype.bits() == 32) ? "HIPRT_INF_F" : "HIPRT_INF");
+      temp << ((op->dtype.bits() == 32) ? "HUGE_VALF" : "HUGE_VAL");
     } else if (std::isnan(op->value)) {
-      temp << ((op->dtype.bits() == 32) ? "HIPRT_NAN_F" : "HIPRT_NAN");
+      temp << ((op->dtype.bits() == 32) ? "NAN" : "NAN");
     } else {
       temp << std::scientific << op->value;
       if (op->dtype.bits() == 32)

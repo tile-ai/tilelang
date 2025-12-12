@@ -1,5 +1,5 @@
 # General information about the project.
-project = "Tile Language <br>"
+project = "TileLang <br>"
 author = "Tile Lang Contributors"
 copyright = f"2025-2025, {author}"
 
@@ -62,12 +62,13 @@ todo_include_todos = False
 html_theme = "furo"
 templates_path = []
 html_static_path = ["_static"]
-footer_copyright = "© 2025-2025 Tile Language"
+html_css_files = ["custom.css"]
+footer_copyright = "© 2025-2026 TileLang"
 footer_note = " "
 
 html_theme_options = {
-    "light_logo": "img/logo-row.svg",
-    "dark_logo": "img/logo-row.svg",
+    "light_logo": "img/logo-v2.png",
+    "dark_logo": "img/logo-v2.png",
 }
 
 header_links = [

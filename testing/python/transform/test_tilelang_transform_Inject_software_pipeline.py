@@ -10,6 +10,7 @@ def _check(original, transformed):
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     mod = tl.transform.Simplify()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.Simplify()(mod)
     tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"),
                                    True)
 

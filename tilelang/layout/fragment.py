@@ -203,7 +203,8 @@ class Fragment(Layout):
         str
             A string showing the thread dimension and the index dimension.
         """
-        return f"Fragment<{self.get_input_shape()}->{self.get_output_shape()}, thread={self.thread}, index={self.index}>"
+        return self._DebugOutput()
+        # return f"Fragment<{self.get_input_shape()}->{self.get_output_shape()}, thread={self.thread}, index={self.index}>"
 
     def is_equal(self, other: 'Fragment') -> bool:
         """
