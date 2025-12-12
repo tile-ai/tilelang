@@ -10,10 +10,10 @@ def implies(x, y):
 
 
 def test_hard_prove():
-    a = T.Var('a', T.int32)
-    b = T.Var('b', T.int32)
-    c = T.Var('c', T.int32)
-    d = T.Var('d', T.int32)
+    a = T.Var("a", T.int32)
+    b = T.Var("b", T.int32)
+    c = T.Var("c", T.int32)
+    d = T.Var("d", T.int32)
 
     def check_expr(expr):
         analyzer = Analyzer()
@@ -43,23 +43,21 @@ def test_hard_prove():
 
     @T.macro
     def complex_expr_4():
-        return implies(a >= 0 and a < 128,
-                       (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 +
-                        (a % 32 // 16 + a % 2) % 2 * 8 + 16 - (a // 64 + a % 8 // 4) // 2 * 64) //
-                       512 == (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 +
-                               (a % 32 // 16 + a % 2) % 2 * 8 -
-                               (a // 64 + a % 8 // 4) // 2 * 64) // 512)
+        return implies(
+            a >= 0 and a < 128,
+            (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 + (a % 32 // 16 + a % 2) % 2 * 8 + 16 - (a // 64 + a % 8 // 4) // 2 * 64) // 512
+            == (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 + (a % 32 // 16 + a % 2) % 2 * 8 - (a // 64 + a % 8 // 4) // 2 * 64) // 512,
+        )
 
     check_expr(complex_expr_4())
 
 
 def test_smtlib2():
-
     import z3
 
-    a = T.Var('a', T.int32)
-    b = T.Var('b', T.int32)
-    c = T.Var('c', T.int32)
+    a = T.Var("a", T.int32)
+    b = T.Var("b", T.int32)
+    c = T.Var("c", T.int32)
 
     @T.macro
     def complex_expr_1():
@@ -76,9 +74,9 @@ def test_smtlib2():
 
 
 def test_bind():
-    a = T.Var('a', T.int32)
-    b = T.Var('b', T.int32)
-    c = T.Var('c', T.int32)
+    a = T.Var("a", T.int32)
+    b = T.Var("b", T.int32)
+    c = T.Var("c", T.int32)
 
     analyzer = Analyzer()
     analyzer.bind(a, Range(1, 100000))
@@ -95,5 +93,5 @@ def test_bind():
         raise e
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     tilelang.testing.main()

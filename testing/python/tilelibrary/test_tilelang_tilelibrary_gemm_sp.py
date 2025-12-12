@@ -234,7 +234,8 @@ def run_gemm_sp(
         (512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True, True),
         (512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False, True),
         (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True),
-    ])
+    ],
+)
 def test_gemm_sp_sm90(
     M,
     N,
@@ -299,7 +300,8 @@ def test_gemm_sp_sm90(
         (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 1, 128, False, True),
         (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True),
         (512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 3, 128, False, True),
-    ])
+    ],
+)
 def test_gemm_sp_sm80(
     M,
     N,
