@@ -14,23 +14,18 @@ def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: list
     """Convert a BufferLoad to a tl.region call with explicit extents."""
     indices = list(load.indices)
     if len(indices) > len(extents):
-        extents = [tir.IntImm("int32", 1) for _ in range(len(indices) - len(extents))
-                  ] + list(extents)
+        extents = [tir.IntImm("int32", 1) for _ in range(len(indices) - len(extents))] + list(extents)
     assert len(indices) == len(extents), f"indices = {indices}, extents = {extents}"
     return region(load, access_type, *extents)
 
 
-def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str,
-                                 extents: list[tir.PrimExpr]):
+def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str, extents: list[tir.PrimExpr]):
     """Clamp extents and return a tl.region call."""
     mins = [r.min for r in buffer_region.region]
     region_extents = [r.extent for r in buffer_region.region]
-    assert len(region_extents) >= len(extents), (
-        f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
-    )
+    assert len(region_extents) >= len(extents), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
     clamped_extents = [
-        tir.min(region_extents[i], extents[i]) if i < len(extents) else region_extents[i]
-        for i in range(len(region_extents))
+        tir.min(region_extents[i], extents[i]) if i < len(extents) else region_extents[i] for i in range(len(region_extents))
     ]
     return region(tir.BufferLoad(buffer_region.buffer, mins), access_type, *clamped_extents)
 

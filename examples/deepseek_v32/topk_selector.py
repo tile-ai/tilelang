@@ -127,9 +127,9 @@ def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
                 l_num_input = s_num_input[r_idx]
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     if s * BLOCK_SIZE + tx < l_num_input:
-                        l_bin_id32 = T.Cast("int32", ((
-                            convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >>
-                            (24 - round * 8)) & 0xFF))
+                        l_bin_id32 = T.Cast(
+                            "int32", ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
+                        )
                         T.atomic_add(s_histogram[l_bin_id32], 1)
                 T.sync_threads()
                 # cumsum
@@ -156,23 +156,20 @@ def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     T.sync_threads()
                     if s * BLOCK_SIZE + tx < l_num_input:
-                        l_bin_id32 = T.Cast("int32", ((
-                            convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >>
-                            (24 - round * 8)) & 0xFF))
+                        l_bin_id32 = T.Cast(
+                            "int32", ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
+                        )
                         if l_bin_id32 > l_threshold_bin_id:
-                            pos = T.atomic_add(
-                                s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
+                            pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
                             index[bx, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
                         elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
                             if round == 3:
-                                l_out_pos = T.atomic_add(
-                                    s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
+                                l_out_pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
                                 if l_out_pos < topk:
                                     index[bx, l_out_pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
                             else:
                                 pos = T.atomic_add(s_num_input[r_idx ^ 1], 1, return_prev=True)
-                                s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx,
-                                                                          s * BLOCK_SIZE + tx]
+                                s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
 
     return tl_topk_kernel
 
@@ -186,7 +183,6 @@ def tl_topk(input, starts, ends, topk):
 
 
 def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
-
     batch = 64
     seq_len = 32 * 1024
     topk = 2048
@@ -212,8 +208,7 @@ def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
         set_ref = set(ref_np)
         set_trt = set(trt_np)
         intersection = set_ref & set_trt
-        print("selected/all:", len(intersection), "/", len(set_ref), "=",
-              len(intersection) / len(set_ref))
+        print("selected/all:", len(intersection), "/", len(set_ref), "=", len(intersection) / len(set_ref))
 
     # Performance test with CUDA events
 

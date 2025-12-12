@@ -8,19 +8,20 @@ def ref_program(A, B):
 
 
 def get_configs():
-    configs = [{
-        "block_M": 128,
-        "block_N": 128,
-        "block_K": 64,
-        "num_stages": 2,
-        "thread_num": 256,
-        "enable_rasteration": True,  # keep param name for backward-compat
-    }]
+    configs = [
+        {
+            "block_M": 128,
+            "block_N": 128,
+            "block_K": 64,
+            "num_stages": 2,
+            "thread_num": 256,
+            "enable_rasteration": True,  # keep param name for backward-compat
+        }
+    ]
     return configs
 
 
 def run(M, N, K):
-
     def kernel(
         block_M=None,
         block_N=None,
@@ -34,12 +35,11 @@ def run(M, N, K):
 
         @T.prim_func
         def main(
-                A: T.Tensor((M, K), dtype),
-                B: T.Tensor((N, K), dtype),
-                C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((N, K), dtype),
+            C: T.Tensor((M, N), dtype),
         ):
-            with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
+            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
                 A_shared = T.alloc_shared((block_M, block_K), dtype)
                 B_shared = T.alloc_shared((block_N, block_K), dtype)
                 C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -60,12 +60,16 @@ def run(M, N, K):
 
         return main
 
-    autotuner = AutoTuner.from_kernel(
-        kernel=kernel, configs=get_configs()).set_compile_args(
+    autotuner = (
+        AutoTuner.from_kernel(kernel=kernel, configs=get_configs())
+        .set_compile_args(
             out_idx=[-1],
             target="auto",
-        ).set_profile_args(
-            ref_prog=ref_program,)
+        )
+        .set_profile_args(
+            ref_prog=ref_program,
+        )
+    )
     return autotuner.run(warmup=3, rep=20)
 
 

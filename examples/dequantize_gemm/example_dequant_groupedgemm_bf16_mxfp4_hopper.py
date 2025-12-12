@@ -25,6 +25,7 @@ def get_configs():
         List[dict]: A list of configuration dictionaries covering all combinations.
     """
     import itertools
+
     iter_params = dict(
         block_M=[128],
         block_N=[64, 128, 256],
@@ -33,33 +34,33 @@ def get_configs():
         threads=[128, 256, 512],
         split=[1],
     )
-    return [{
-        k: v for k, v in zip(iter_params, values)
-    } for values in itertools.product(*iter_params.values())]
+    return [{k: v for k, v in zip(iter_params, values)} for values in itertools.product(*iter_params.values())]
 
 
 @tilelang.autotune(configs=get_configs())
 @tilelang.jit(out_idx=[-1])
-def matmul(M,
-           N,
-           K,
-           topk,
-           E,
-           padding_M,
-           in_dtype,
-           out_dtype,
-           accum_dtype,
-           source_format='uint',
-           num_bits=4,
-           scale_size=32,
-           fast_dequant=True,
-           with_bias=False,
-           block_M=128,
-           block_N=256,
-           block_K=128,
-           num_stages=2,
-           threads=256,
-           split=1):
+def matmul(
+    M,
+    N,
+    K,
+    topk,
+    E,
+    padding_M,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    source_format="uint",
+    num_bits=4,
+    scale_size=32,
+    fast_dequant=True,
+    with_bias=False,
+    block_M=128,
+    block_N=256,
+    block_K=128,
+    num_stages=2,
+    threads=256,
+    split=1,
+):
     """
     Construct and return a grouped (Mixture-of-Experts) matrix-multiply TIR kernel that multiplies A (shape MxK) by a quantized, expert-grouped B (shape ExNxQK) and writes an output of shape (M, topk, N) in out_dtype.
 
@@ -115,11 +116,12 @@ def matmul(M,
     Block_QK = block_K // num_elems_per_byte
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, Block_QK)
-    Bias_shared_shape = (block_N)
+    Bias_shared_shape = block_N
     B_dequantize_shared_shape = (block_N, block_K)
     assert K % (block_K * split) == 0
 
     from tilelang.quantize import get_mxfp_intrin_group
+
     # fast_dequant_bf16_fp4_twiddling
     mxfp_intrin_info = get_mxfp_intrin_group(
         out_dtype=in_dtype,
@@ -221,19 +223,16 @@ def matmul(M,
 
                 for v in T.vectorized(0, local_size):
                     index = i * threads * local_size + tx * local_size + v
-                    B_dequantize_shared[index // block_K,
-                                        index % block_K] = B_dequantize_local_thread[v]
+                    B_dequantize_shared[index // block_K, index % block_K] = B_dequantize_local_thread[v]
 
         return fast_dequant_bf16_fp4_twiddling
 
     def get_simple_dequant_func(in_dtype="fp4", out_dtype="bfloat16"):
-
         assert in_dtype in ["fp4"]
         assert out_dtype in ["bfloat16"]
 
         @T.macro
         def simple_dequant_bf16_fp4(B_shared, B_dequantize_shared, Scale_shared, k):
-
             B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
             B_dequantize_local = T.alloc_fragment(B_dequantize_shared_shape, out_dtype)
 
@@ -244,8 +243,8 @@ def matmul(M,
                     B_local[i, j // num_elems_per_byte],
                     j % num_elems_per_byte,
                     Scale_shared[
-                        i, k * block_K // scale_size + j //
-                        scale_size],  # Scale is the exponential part, within the representation of uint8
+                        i, k * block_K // scale_size + j // scale_size
+                    ],  # Scale is the exponential part, within the representation of uint8
                     dtype=out_dtype,
                 ) * T.shift_left(1, (Scale_shared[i, k * block_K // scale_size + j // scale_size]))
             T.copy(B_dequantize_local, B_dequantize_shared)
@@ -254,19 +253,17 @@ def matmul(M,
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), in_dtype),
-            B: T.Tensor((E, N, QK), storage_dtype),
-            Scale: T.Tensor((E, N, K // scale_size), storage_dtype),
-            Bias: T.Tensor((E, N), out_dtype),
-            # Add fusedmoe tensors
-            topk_weights: T.Tensor((M * topk), out_dtype),
-            sorted_token_ids: T.Tensor((padding_M), "int32"),
-            expert_ids: T.Tensor((padding_M // block_M), "int32"),
-            C: T.Tensor((M, topk, N), out_dtype),
+        A: T.Tensor((M, K), in_dtype),
+        B: T.Tensor((E, N, QK), storage_dtype),
+        Scale: T.Tensor((E, N, K // scale_size), storage_dtype),
+        Bias: T.Tensor((E, N), out_dtype),
+        # Add fusedmoe tensors
+        topk_weights: T.Tensor((M * topk), out_dtype),
+        sorted_token_ids: T.Tensor((padding_M), "int32"),
+        expert_ids: T.Tensor((padding_M // block_M), "int32"),
+        C: T.Tensor((M, topk, N), out_dtype),
     ):
-
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(padding_M, block_M), threads=threads) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(padding_M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
             B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype)
@@ -280,17 +277,19 @@ def matmul(M,
             # May use much more shared memory than necessary
             Scale_shared = T.alloc_shared((block_N, K // scale_size), storage_dtype)
 
-            T.annotate_layout({
-                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                C_shared: tilelang.layout.make_swizzled_layout(C_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                    C_shared: tilelang.layout.make_swizzled_layout(C_shared),
+                }
+            )
             T.use_swizzle(10)
 
             if threads == 512:
                 T.disable_warp_group_reg_alloc()
 
-            T.copy(sorted_token_ids[by * block_M:(by + 1) * block_M], sorted_token_ids_shared)
+            T.copy(sorted_token_ids[by * block_M : (by + 1) * block_M], sorted_token_ids_shared)
             expert_id[0] = expert_ids[by]
 
             # Get the topk weights of each token in the current block
@@ -300,11 +299,11 @@ def matmul(M,
 
             # Get bias and scale based on the expert id
             if with_bias:
-                T.copy(Bias[expert_id[0], bx * block_N:(bx + 1) * block_N], Bias_shared)
+                T.copy(Bias[expert_id[0], bx * block_N : (bx + 1) * block_N], Bias_shared)
             else:
                 T.clear(Bias_shared)
 
-            T.copy(Scale[expert_id[0], bx * block_N:(bx + 1) * block_N, :], Scale_shared)
+            T.copy(Scale[expert_id[0], bx * block_N : (bx + 1) * block_N, :], Scale_shared)
 
             for i, j in T.Parallel(block_M, block_N):
                 C_local[i, j] = Bias_shared[j]
@@ -317,14 +316,13 @@ def matmul(M,
                     base = copy_i * threads * 16 + tx * 16
                     if sorted_token_ids_shared[base // block_K] != -1:
                         for copy_j in T.vectorized(16):
-                            A_shared[base // block_K, base % block_K +
-                                     copy_j] = A[sorted_token_ids_shared[base // block_K] // topk,
-                                                 k * block_K + base % block_K + copy_j]
+                            A_shared[base // block_K, base % block_K + copy_j] = A[
+                                sorted_token_ids_shared[base // block_K] // topk, k * block_K + base % block_K + copy_j
+                            ]
 
                 T.copy(B[expert_id[0], bx * block_N, k * block_K // num_elems_per_byte], B_shared)
                 if fast_dequant:
-                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared,
-                                                      k)
+                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared, k)
                 else:
                     get_simple_dequant_func()(B_shared, B_dequantize_shared, Scale_shared, k)
 
@@ -338,10 +336,11 @@ def matmul(M,
                 base = copy_i * threads * 16 + tx * 16
                 if sorted_token_ids_shared[base // block_N] != -1:
                     for copy_j in T.vectorized(16):
-                        C[sorted_token_ids_shared[base // block_N] // topk,
-                          sorted_token_ids_shared[base // block_N] % topk, bx * block_N +
-                          base % block_N + copy_j] = C_shared[base // block_N,
-                                                              base % block_N + copy_j]
+                        C[
+                            sorted_token_ids_shared[base // block_N] // topk,
+                            sorted_token_ids_shared[base // block_N] % topk,
+                            bx * block_N + base % block_N + copy_j,
+                        ] = C_shared[base // block_N, base % block_N + copy_j]
 
     return main
 
@@ -355,7 +354,7 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
     assert scale_size == 32  # MXFP4
 
     # Initialize output tensor
-    C = torch.ones((M, topk, N), dtype=getattr(torch, dtypeC), device='cuda')
+    C = torch.ones((M, topk, N), dtype=getattr(torch, dtypeC), device="cuda")
 
     # Iterate over sorted_token_ids
     for idx in range(len(sorted_token_ids)):  # padding_M
@@ -370,14 +369,11 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
 
         # Dequantize the expert weights
         B = torch_convert_bit_twiddling(qB[expert_id])  # shape: (N, K)
-        B *= 2**(
-            Scale[expert_id][:, (torch.arange(B.shape[1], device=B.device) // scale_size)].to(
-                torch.bfloat16))
+        B *= 2 ** (Scale[expert_id][:, (torch.arange(B.shape[1], device=B.device) // scale_size)].to(torch.bfloat16))
 
         # Compute the output for this token-expert pair
         # token_embedding @ B.T + bias
-        output = torch.matmul(token_embedding.to(torch.bfloat16), B.T.to(
-            torch.bfloat16)) + Bias[expert_id]
+        output = torch.matmul(token_embedding.to(torch.bfloat16), B.T.to(torch.bfloat16)) + Bias[expert_id]
         output = output.to(torch.__getattribute__(dtypeC))
 
         # Apply the topk weight
@@ -391,14 +387,12 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
 
 
 def get_data(m, n, k, qk, scale_size, topk, E, block_M):
-    A = torch.empty(m, k, dtype=torch.bfloat16, device='cuda').uniform_(-1, 1)
-    qB = torch.randint(
-        0, 256, (E, n, qk), dtype=torch.uint8,
-        device='cuda')  #  Quantized weight tensor for E experts.
-    Scale = torch.randint(0, 8, (E, n, k // scale_size), dtype=torch.uint8, device='cuda')
-    Bias = torch.empty(E, n, dtype=torch.bfloat16, device='cuda').uniform_(-1, 1)
+    A = torch.empty(m, k, dtype=torch.bfloat16, device="cuda").uniform_(-1, 1)
+    qB = torch.randint(0, 256, (E, n, qk), dtype=torch.uint8, device="cuda")  #  Quantized weight tensor for E experts.
+    Scale = torch.randint(0, 8, (E, n, k // scale_size), dtype=torch.uint8, device="cuda")
+    Bias = torch.empty(E, n, dtype=torch.bfloat16, device="cuda").uniform_(-1, 1)
 
-    weights = torch.empty(m, E, dtype=torch.bfloat16, device='cuda').uniform_(-1, 1)
+    weights = torch.empty(m, E, dtype=torch.bfloat16, device="cuda").uniform_(-1, 1)
     # topk_weights: Router weights for the top-k experts for each token.
     # Shape: (m, topk)
     # tokens_experts: A flattened tensor of expert assignments for each token.
@@ -420,10 +414,7 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
         pad_len = ((cnt + block_M - 1) // block_M) * block_M - cnt
         if pad_len > 0:
             # -1 for padding (`M` instead in vLLM moe_align_block_size())
-            group_token_ids = torch.cat([
-                group_token_ids,
-                torch.full((pad_len,), -1, dtype=group_token_ids.dtype, device='cuda')
-            ])
+            group_token_ids = torch.cat([group_token_ids, torch.full((pad_len,), -1, dtype=group_token_ids.dtype, device="cuda")])
         padded_token_ids.append(group_token_ids)
         expert_ids.extend([eid] * ((cnt + block_M - 1) // block_M))
         start = end
@@ -431,21 +422,13 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
     # sorted_token_ids: The final flattened and padded tensor of token indices.
     sorted_token_ids = torch.cat(padded_token_ids, dim=0).to(torch.int32)  # (padding_M,)
     # expert_ids: The final tensor of expert IDs corresponding to `sorted_token_ids`.
-    expert_ids = torch.tensor(expert_ids, dtype=torch.int32, device='cuda')  # （padding_M,）
+    expert_ids = torch.tensor(expert_ids, dtype=torch.int32, device="cuda")  # （padding_M,）
     padding_M = sorted_token_ids.shape[0]  # padding_M: token number after padding
 
     return A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M
 
 
-def main(m=256,
-         n=256,
-         k=256,
-         scale_size=32,
-         topk=4,
-         E=32,
-         fast_dequant=True,
-         with_bias=False,
-         tune=False):
+def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, with_bias=False, tune=False):
     # Tunable parameters
     block_M, block_N, block_K = 128, 256, 128  # noqa: F841
     num_stages = 1  # noqa: F841
@@ -456,8 +439,7 @@ def main(m=256,
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
     qk = k // num_elems_per_byte
-    A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M = get_data(
-        m, n, k, qk, scale_size, topk, E, block_M)
+    A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M = get_data(m, n, k, qk, scale_size, topk, E, block_M)
 
     if tune:
         with set_autotune_inputs([A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids]):
@@ -510,14 +492,11 @@ def main(m=256,
         expert_ids,
     )
 
-    print('Tilelang kernel run finished.')
+    print("Tilelang kernel run finished.")
 
-    ref_output = ref_moe(
-        A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids,
-        block_M=block_M)  # Maybe a little bit slow...
+    ref_output = ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=block_M)  # Maybe a little bit slow...
 
-    latency = tilelang.profiler.do_bench(
-        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100)
+    latency = tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100)
     print("Tilelang: {:.2f} ms".format(latency))
     print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
@@ -525,32 +504,19 @@ def main(m=256,
     max_val = diff.max()
     max_idx = diff.argmax()
     print(f"max abs diff: {max_val} at index: {max_idx}")
-    assert_similar(
-        output, ref_output, name="output",
-        eps=2e-5)  # We care about the similarity rather than abs. difference
+    assert_similar(output, ref_output, name="output", eps=2e-5)  # We care about the similarity rather than abs. difference
     print("All checks pass. ✅")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--M", type=int, default=16384, help="M")  # From gpt-oss-20b MoE's first gemm
+    parser.add_argument("--M", type=int, default=16384, help="M")  # From gpt-oss-20b MoE's first gemm
     parser.add_argument("--N", type=int, default=5760, help="N")
     parser.add_argument("--K", type=int, default=2944, help="K")
     parser.add_argument("--scale_size", type=int, default=32, help="scale size")
-    parser.add_argument(
-        "--topk", type=int, default=4, help="topk")  # experts activated for each token
+    parser.add_argument("--topk", type=int, default=4, help="topk")  # experts activated for each token
     parser.add_argument("--E", type=int, default=32, help="E")  # number of experts
     parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
 
-    main(
-        args.M,
-        args.N,
-        args.K,
-        args.scale_size,
-        topk=args.topk,
-        E=args.E,
-        fast_dequant=True,
-        with_bias=True,
-        tune=args.tune)
+    main(args.M, args.N, args.K, args.scale_size, topk=args.topk, E=args.E, fast_dequant=True, with_bias=True, tune=args.tune)

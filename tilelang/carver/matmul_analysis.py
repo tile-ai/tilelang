@@ -1,5 +1,6 @@
 # pylint: disable=missing-docstring, invalid-name
 """A GEMM schedule rule for GPU operators."""
+
 from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
@@ -157,8 +158,7 @@ def find_last_producer_from_buffer(sch, main_block, buffer: tir.Buffer) -> Block
     return block
 
 
-def find_arg_idx_from_buffer_chain(sch: tir.Schedule, main_block: tir.schedule.BlockRV,
-                                   buffer: tir.Buffer) -> int:
+def find_arg_idx_from_buffer_chain(sch: tir.Schedule, main_block: tir.schedule.BlockRV, buffer: tir.Buffer) -> int:
     """traverse to find the arg index from the buffer"""
     producers = sch.get_producers(main_block)
 
@@ -226,9 +226,7 @@ def make_iter_fusion_index_map(
         else:
             fused_iters[trait.kind] = v_i
 
-    final_indices: list[tir.PrimExpr] = [
-        fused_iters.get(kind, tir.IntImm(traits[0].extent.dtype, 0)) for kind in kind_order
-    ]
+    final_indices: list[tir.PrimExpr] = [fused_iters.get(kind, tir.IntImm(traits[0].extent.dtype, 0)) for kind in kind_order]
 
     return tir.IndexMap(input_iters, final_indices, None)
 
@@ -307,8 +305,7 @@ def detect_iter_traits(block: tir.Block) -> tuple[list[IterTrait]] | None:
     return A_traits, B_traits, C_traits, block_traits
 
 
-def get_index_map(block: tir.Block,
-                  layout: list[str] | None = None) -> tuple[tir.IndexMap, ...] | None:
+def get_index_map(block: tir.Block, layout: list[str] | None = None) -> tuple[tir.IndexMap, ...] | None:
     """Get index maps for the block
 
     Parameters
@@ -343,10 +340,7 @@ def get_index_map(block: tir.Block,
         return axes
 
     def is_common_reduce(var: Var) -> bool:
-        for iter_var in block.iter_vars:
-            if iter_var.var == var and iter_var.iter_type == IterVar.CommReduce:
-                return True
-        return False
+        return any(iter_var.var == var and iter_var.iter_type == IterVar.CommReduce for iter_var in block.iter_vars)
 
     def has_common_reduce(var: Var) -> bool:
         vars = collect_vars_from_expr(var)
@@ -384,17 +378,17 @@ def get_index_map(block: tir.Block,
             if kind == "C":
                 return [IterKind.kIter_S, primary_iter, secondary_iter]
             else:
-                return ([IterKind.kIter_S, spatial_iter, reduction_iter] if check_last_trait(region)
-                        else [IterKind.kIter_S, reduction_iter, spatial_iter])
+                return (
+                    [IterKind.kIter_S, spatial_iter, reduction_iter]
+                    if check_last_trait(region)
+                    else [IterKind.kIter_S, reduction_iter, spatial_iter]
+                )
         else:
             raise ValueError(f"Unknown layout {layout}")
 
-    A_index_map = make_iter_fusion_index_map(
-        A_traits, infer_layout(layout[0], block.reads[0].region, kind="A"))
-    B_index_map = make_iter_fusion_index_map(
-        B_traits, infer_layout(layout[1], block.reads[1].region, kind="B"))
-    C_index_map = make_iter_fusion_index_map(
-        C_traits, infer_layout(layout[2], block.writes[0].region, kind="C"))
+    A_index_map = make_iter_fusion_index_map(A_traits, infer_layout(layout[0], block.reads[0].region, kind="A"))
+    B_index_map = make_iter_fusion_index_map(B_traits, infer_layout(layout[1], block.reads[1].region, kind="B"))
+    C_index_map = make_iter_fusion_index_map(C_traits, infer_layout(layout[2], block.writes[0].region, kind="C"))
 
     matmul_index_map = make_iter_fusion_index_map(
         block_traits,
@@ -429,8 +423,7 @@ def get_dequantize_block(sch, blocks) -> BlockRV | None:
         has_uint_input = any("uint" in str(region.buffer.dtype) for region in block_stmt.reads)
         if not has_uint_input:
             return False
-        return not (len(block_stmt.writes) != 1 or
-                    "float" not in str(block_stmt.writes[0].buffer.dtype))
+        return not (len(block_stmt.writes) != 1 or "float" not in str(block_stmt.writes[0].buffer.dtype))
 
     dequantize_blocks = [block for block in blocks if is_dequantize(block)]
     return dequantize_blocks[0] if len(dequantize_blocks) == 1 else None
@@ -452,8 +445,7 @@ def is_identity_or_transpose_block(block_stmt: tir.Block) -> bool:
                 return None
             axes.extend(undefined_vars(r.min))
         # remove trivial axis
-        trivial_vars = set(
-            iter_var.var for iter_var in block_stmt.iter_vars if _is_one(iter_var.dom.extent))
+        trivial_vars = set(iter_var.var for iter_var in block_stmt.iter_vars if _is_one(iter_var.dom.extent))
         axes = [axis for axis in axes if axis not in trivial_vars]
         # remove duplicate axis
         axes = [var for i, var in enumerate(axes) if i == 0 or var != axes[i - 1]]
@@ -462,8 +454,7 @@ def is_identity_or_transpose_block(block_stmt: tir.Block) -> bool:
     lhs_access_vars = get_access_vars(block_stmt.reads[0].region)[-2:]
     rhs_access_vars = get_access_vars(block_stmt.writes[0].region)[-2:]
     is_identity = list(lhs_access_vars) == list(rhs_access_vars)
-    is_transpose = list(lhs_access_vars) != list(rhs_access_vars) and set(lhs_access_vars) == set(
-        rhs_access_vars)
+    is_transpose = list(lhs_access_vars) != list(rhs_access_vars) and set(lhs_access_vars) == set(rhs_access_vars)
     return is_identity, is_transpose
 
 
@@ -491,9 +482,7 @@ def inline_transpose_block(sch: tir.Schedule, blocks: list[tir.schedule.BlockRV]
     return result_blocks
 
 
-def normalize_to_matmul(sch: tir.Schedule,
-                        main_block: BlockRV,
-                        layout: list[str] | None = None) -> tir.Schedule | None:
+def normalize_to_matmul(sch: tir.Schedule, main_block: BlockRV, layout: list[str] | None = None) -> tir.Schedule | None:
     if layout is None:
         layout = ["n", "t", "n"]
     block_stmt = sch.get(main_block)
@@ -526,7 +515,7 @@ def get_tensorized_func_and_tags(
     allow_gemv: bool = False,
 ) -> tuple[tir.PrimFunc, dict[str, list[int] | int]]:
     """
-        transform function to matmul if necessary (e.g. transform conv2d with im2col)
+    transform function to matmul if necessary (e.g. transform conv2d with im2col)
     """
     if layout is None:
         layout = ["a", "a", "a"]
@@ -543,10 +532,7 @@ def get_tensorized_func_and_tags(
         conditions = []
         conditions.append(len(block_stmt.reads) == 2)
         conditions.append(len(block_stmt.writes) == 1)
-        conditions.append(
-            len(
-                collect_block_iter_vars_used_in_access_region(block_stmt,
-                                                              block_stmt.writes[0].region)) > 0)
+        conditions.append(len(collect_block_iter_vars_used_in_access_region(block_stmt, block_stmt.writes[0].region)) > 0)
         return all(conditions)
 
     # step2. transform function to tensorcore matmul (e.g. conv2d with im2col)
@@ -592,10 +578,7 @@ def get_tensorized_func_and_tags(
             return axes
 
         def is_common_reduce(var: Var) -> bool:
-            for iter_var in block_stmt.iter_vars:
-                if iter_var.var == var and iter_var.iter_type == IterVar.CommReduce:
-                    return True
-            return False
+            return any(iter_var.var == var and iter_var.iter_type == IterVar.CommReduce for iter_var in block_stmt.iter_vars)
 
         def has_common_reduce(var: Var) -> bool:
             vars = collect_vars_from_expr(var)
@@ -626,7 +609,7 @@ def get_tensorized_func_and_tags(
         # When the func is a dequantize like ops, we should consider the M
         require_block_reduce = False
         # And we only support float16 for now
-        if (hasattr(func.attrs, "dequantize_info") and in_dtype in ["bfloat16", "float16"]):
+        if hasattr(func.attrs, "dequantize_info") and in_dtype in ["bfloat16", "float16"]:
             for arg in func.params:
                 inp_shape = func.buffer_map[arg].shape
                 M = inp_shape[0]
@@ -645,9 +628,7 @@ def get_tensorized_func_and_tags(
     if target.kind.name == "cuda" and check_sm_version(target.arch) >= 70:
         in_dtype, out_dtype = get_in_out_dtypes(block_stmt)
         if not is_tensorcore_supported_precision(in_dtype, out_dtype, arch=get_arch(target)):
-            logger.debug(
-                f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by tensorcore"
-            )
+            logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by tensorcore")
             return func, None
 
         # reindex and transform functions
@@ -676,7 +657,7 @@ def get_tensorized_func_and_tags(
             else:
                 raise ValueError(f"Unknown IterVar type {iter_type}")
 
-            if (isinstance(extent, tir.expr.IntImm) and extent.value < minimal_tensorize_threshold):
+            if isinstance(extent, tir.expr.IntImm) and extent.value < minimal_tensorize_threshold:
                 return func, None
         tags = analysis_tensorcore_tags(sch, main_block, target)
         return sch.mod["main"], tags
@@ -686,8 +667,10 @@ def get_tensorized_func_and_tags(
 
 def get_propagate_map(trans: bool = True, dtype="float16", matrix_name="A", index_dtype="int32"):
     from bitblas.tl.mma_layout import (  # pylint: disable=import-outside-toplevel
-        ldmatrix_32x8_to_shared_16x16_layout, ldmatrix_trans_32x8_to_shared_16x16_layout,
-        ldmatrix_32x16_to_shared_16x32_layout_a, ldmatrix_32x16_to_shared_16x32_layout_b,
+        ldmatrix_32x8_to_shared_16x16_layout,
+        ldmatrix_trans_32x8_to_shared_16x16_layout,
+        ldmatrix_32x16_to_shared_16x32_layout_a,
+        ldmatrix_32x16_to_shared_16x32_layout_b,
     )
 
     assert dtype in [
@@ -727,9 +710,7 @@ def get_propagate_map(trans: bool = True, dtype="float16", matrix_name="A", inde
         return ldmatrix_layout(thread_id, local_id)
 
     if dtype in ["bfloat16", "float16"]:
-        ldmatrix_index_map = (
-            ldmatrix_trans_permutation_16x16_32x8_16x16
-            if trans else ldmatrix_permutation_16x16_32x8_16x16)
+        ldmatrix_index_map = ldmatrix_trans_permutation_16x16_32x8_16x16 if trans else ldmatrix_permutation_16x16_32x8_16x16
     else:
         ldmatrix_index_map = ldmatrix_permutation_16x32_32x16_32x16
 
@@ -744,7 +725,6 @@ def get_propagate_map(trans: bool = True, dtype="float16", matrix_name="A", inde
 # Ladder weight propagation, which can be used to avoid the ldmatrix
 # Instructions.
 def get_ladder_stage3_map(dtype="float16", index_dtype="int32"):
-
     def shared_32x8_to_mma_32x8_layout(i, j):
         thread_id = (i % 8) * 4 + (j // 2)
         local_id = (i // 8) * 2 + (j % 2)
@@ -837,8 +817,7 @@ def layout_propagate_chain(
                 scaling_factor = 1
                 for i, j in zip(write.buffer.shape, read.buffer.shape):
                     scaling_factor *= i // j
-                final_indices = list(
-                    index_map.map_indices(tmp_index_map.map_indices(write_indices)))
+                final_indices = list(index_map.map_indices(tmp_index_map.map_indices(write_indices)))
                 final_indices[-1] = final_indices[-1] // scaling_factor
                 index_map = IndexMap(
                     write_indices,

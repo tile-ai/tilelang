@@ -28,6 +28,7 @@ class ConvTemplate(BaseTemplate):
         accum_dtype (str): Data type used for accumulation.
         with_bias (bool): Whether to add a bias term.
     """
+
     # Operation-related configuration parameters
     N: int  # The number of input samples processed simultaneously in a batch.
     C: int  # The number of input feature maps.
@@ -69,12 +70,18 @@ class ConvTemplate(BaseTemplate):
             AssertionError: If N, C, H, W, F, K, S, D, P are not positive integers.
         """
         N, C, H, W, F, K, S, D, P = self.N, self.C, self.H, self.W, self.F, self.K, self.S, self.D, self.P
-        assert (isinstance(N, int) and isinstance(C, int) and isinstance(H, int) and
-                isinstance(W, int) and isinstance(F, int) and isinstance(K, int) and
-                isinstance(S, int) and isinstance(D, int) and
-                isinstance(P, int)), "Only Support Integer Params"
-        assert (N > 0 and C > 0 and H > 0 and W > 0 and F > 0 and K > 0 and S > 0 and D > 0 and
-                P > 0), "Params should be positive"
+        assert (
+            isinstance(N, int)
+            and isinstance(C, int)
+            and isinstance(H, int)
+            and isinstance(W, int)
+            and isinstance(F, int)
+            and isinstance(K, int)
+            and isinstance(S, int)
+            and isinstance(D, int)
+            and isinstance(P, int)
+        ), "Only Support Integer Params"
+        assert N > 0 and C > 0 and H > 0 and W > 0 and F > 0 and K > 0 and S > 0 and D > 0 and P > 0, "Params should be positive"
 
         # Load configuration parameters
         in_dtype, out_dtype, accum_dtype = self.in_dtype, self.out_dtype, self.accum_dtype
@@ -123,8 +130,10 @@ class ConvTemplate(BaseTemplate):
                 te.if_then_else(
                     te.all(h_in >= 0, h_in < H, w_in >= 0, w_in < W),
                     A[n, h_in, w_in, c].astype(accum_dtype) * B[kh, kw, c, f].astype(accum_dtype),
-                    tir.const(0, accum_dtype)),
-                axis=[kh, kw, c])
+                    tir.const(0, accum_dtype),
+                ),
+                axis=[kh, kw, c],
+            )
 
         # Compute convolution result
         C = te.compute(

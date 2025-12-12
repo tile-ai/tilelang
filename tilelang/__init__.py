@@ -23,6 +23,7 @@ def _compute_version() -> str:
         if version_file.is_file():
             try:
                 from version_provider import dynamic_metadata  # type: ignore
+
                 return dynamic_metadata("version")
             except Exception:
                 # Fall back to the raw VERSION file if provider isn't available.
@@ -33,6 +34,7 @@ def _compute_version() -> str:
 
     try:
         from importlib.metadata import version as _dist_version  # py3.8+
+
         return _dist_version("tilelang")
     except Exception as exc:
         warnings.warn(

@@ -104,9 +104,7 @@ def get_configs(args, kwargs):
             policy=[T.GemmWarpPolicy.Square],
             enable_rasteration=[True, False],
         )
-        return [{
-            k: v for k, v in zip(iter_params, values)
-        } for values in itertools.product(*iter_params.values())]
+        return [{k: v for k, v in zip(iter_params, values)} for values in itertools.product(*iter_params.values())]
 
     return configs
 
@@ -116,7 +114,9 @@ def get_configs(args, kwargs):
     warmup=3,
     rep=20,
 )
-@jit(out_idx=[2],)
+@jit(
+    out_idx=[2],
+)
 def matmul(
     M,
     N,
@@ -164,9 +164,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         """
         The compiled TVM function for block-level matrix multiplication.
@@ -181,7 +181,6 @@ def matmul(
         # Bind x-dimension to block index in N,
         #     y-dimension to block index in M.
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-
             # Allocate shared memory for A sub-block of shape (block_M, block_K)
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             # Allocate shared memory for B sub-block of shape (block_N, block_K)

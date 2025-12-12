@@ -31,6 +31,5 @@ def find_lib_path(name: str, py_ext=False):
         if os.path.exists(lib_dll_path) and os.path.isfile(lib_dll_path):
             return lib_dll_path
     else:
-        message = (f"Cannot find libraries: {lib_name}\n" + "List of candidates:\n" +
-                   "\n".join(TL_LIBS))
+        message = f"Cannot find libraries: {lib_name}\n" + "List of candidates:\n" + "\n".join(TL_LIBS)
         raise RuntimeError(message)

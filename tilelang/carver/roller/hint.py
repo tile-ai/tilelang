@@ -1,4 +1,5 @@
 """Hint definition for schedule"""
+
 from tvm import DataType
 from . import PrimFuncNode
 import numpy as np
@@ -60,7 +61,7 @@ class Stride:
             strided_elem = original_shape
         else:
             assert self.ax < len(shape)
-            strided_elem = np.prod(shape[0:self.ax + 1]) * self.stride
+            strided_elem = np.prod(shape[0 : self.ax + 1]) * self.stride
             assert strided_elem >= original_shape
         return int(strided_elem)
 
@@ -217,7 +218,7 @@ class Hint:
         return dic
 
     @classmethod
-    def from_dict(cls, dic: dict) -> 'Hint':
+    def from_dict(cls, dic: dict) -> "Hint":
         hint = cls()
         for k, v in dic.items():
             setattr(hint, k, v)

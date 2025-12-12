@@ -5,7 +5,6 @@ import torch
 
 @tilelang.jit(out_idx=[-1])
 def _ceildiv_kernel(a: int, b: int):
-
     @T.prim_func
     def ceildiv_kernel(A: T.Tensor((1,), "int32")):
         with T.Kernel(1, threads=1) as _:
@@ -30,7 +29,6 @@ def test_ceildiv():
 
 @tilelang.jit
 def _ceildiv_kernel_dyn(b: int):
-
     @T.prim_func
     def ceildiv_kernel(A: T.Tensor((1,), "int32"), a: T.int32):
         with T.Kernel(1, threads=1) as _:

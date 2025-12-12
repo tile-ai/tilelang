@@ -9,7 +9,7 @@
 #    bash format.sh --all
 #
 #
-# YAPF + Clang formatter (if installed). This script formats all changed files from the last mergebase.
+# Ruff (format) + Clang formatter (if installed). This script formats all changed files from the last mergebase.
 # You are encouraged to run this locally before pushing changes for review.
 
 # Cause the script to exit if a single command fails

@@ -11,10 +11,7 @@ from tvm.tir.transform import prim_func_pass
 def is_pipelined_for(op: For) -> bool:
     """Check if a for loop is pipelined."""
 
-    anno_keys = [
-        "num_stages", "tl_pipeline_order", "tl_pipeline_stage", "tl_pipeline_sync",
-        "tl_pipeline_group"
-    ]
+    anno_keys = ["num_stages", "tl_pipeline_order", "tl_pipeline_stage", "tl_pipeline_sync", "tl_pipeline_group"]
     return any(key in op.annotations for key in anno_keys)
 
 
@@ -26,7 +23,6 @@ def is_tile_op(op: Call) -> bool:
 
 @tir.functor.visitor
 class _NestedLoopCheckVisitor(PyStmtExprVisitor):
-
     def __init__(self) -> None:
         super().__init__()
         self.in_parallel_context = False
@@ -42,27 +38,24 @@ class _NestedLoopCheckVisitor(PyStmtExprVisitor):
 
             # Otherwise
             if self.in_parallel_context:
-                raise ValueError("[Tilelang Semantic Check] "
-                                 "Nested parallel loops are not allowed. "
-                                 "Please check your loop structure.")
+                raise ValueError("[Tilelang Semantic Check] Nested parallel loops are not allowed. Please check your loop structure.")
             self.in_parallel_context = True
             super().visit_for_(op)
             self.in_parallel_context = False
             return
         elif is_pipelined_for(op):
             if self.in_parallel_context:
-                raise ValueError("[Tilelang Semantic Check] "
-                                 "Pipelined loop cannot be nested inside a parallel loop. "
-                                 "Please check your loop structure.")
+                raise ValueError(
+                    "[Tilelang Semantic Check] Pipelined loop cannot be nested inside a parallel loop. Please check your loop structure."
+                )
 
         super().visit_for_(op)
 
     def visit_call_(self, op: Call) -> None:
         if self.in_parallel_context and is_tile_op(op):
-            raise ValueError("[Tilelang Semantic Check] "
-                             "Only elementwise operations are allowed inside a parallel loop. " \
-                             f"Got a tile-op \"{op.op}\"."
-                             )
+            raise ValueError(
+                f'[Tilelang Semantic Check] Only elementwise operations are allowed inside a parallel loop. Got a tile-op "{op.op}".'
+            )
 
 
 def NestedLoopChecker():

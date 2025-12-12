@@ -16,12 +16,7 @@ from tvm.base import py_str
 from tvm.contrib.rocm import get_rocm_arch, find_rocm_path
 
 
-def compile_hip(code,
-                target_format="hsaco",
-                arch=None,
-                options=None,
-                path_target=None,
-                verbose=False):
+def compile_hip(code, target_format="hsaco", arch=None, options=None, path_target=None, verbose=False):
     """Compile HIP code with hipcc.
 
     Parameters
@@ -61,7 +56,7 @@ def compile_hip(code,
 
     file_target = path_target if path_target else temp_target
     cmd = ["hipcc"]
-    cmd += ["-O3", '-c']
+    cmd += ["-O3", "-c"]
     if isinstance(arch, str):
         cmd += [f"--offload-arch={arch}"]
     if target_format == "hsaco":

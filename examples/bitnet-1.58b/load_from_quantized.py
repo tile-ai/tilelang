@@ -49,7 +49,13 @@ def generate_text(model, tokenizer, prompt, max_length=100):
 
 def main():
     # load quantized model
-    qmodel = BitnetForCausalLM.from_quantized(saved_model_path,).cuda().half()
+    qmodel = (
+        BitnetForCausalLM.from_quantized(
+            saved_model_path,
+        )
+        .cuda()
+        .half()
+    )
     tokenizer = BitnetTokenizer.from_pretrained(model_name_or_path, use_fast=False)
     # print("original model generated text:")
     # print(generate_text(model, tokenizer, "Hi, ", max_length=100))

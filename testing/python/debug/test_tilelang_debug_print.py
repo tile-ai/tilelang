@@ -6,7 +6,6 @@ import tilelang.language as T
 
 
 def debug_print_buffer(M=16, N=16, dtype="float16"):
-
     @T.prim_func
     def program(Q: T.Tensor((M, N), dtype)):
         with T.Kernel(4, 4, 2, threads=128 * 2) as (bx, by, bz):
@@ -19,24 +18,24 @@ def debug_print_buffer(M=16, N=16, dtype="float16"):
 
 
 def test_debug_print_buffer():
-    debug_print_buffer(dtype='bool')
-    debug_print_buffer(dtype='int8')
-    debug_print_buffer(dtype='int16')
-    debug_print_buffer(dtype='int32')
-    debug_print_buffer(dtype='int64')
-    debug_print_buffer(dtype='uint8')
-    debug_print_buffer(dtype='uint16')
-    debug_print_buffer(dtype='uint32')
-    debug_print_buffer(dtype='uint64')
-    debug_print_buffer(dtype='float16')
-    debug_print_buffer(dtype='float32')
-    debug_print_buffer(dtype='float64')
-    debug_print_buffer(dtype='bfloat16')
-    debug_print_buffer(dtype='float8_e4m3')
-    debug_print_buffer(dtype='float8_e4m3fn')
-    debug_print_buffer(dtype='float8_e4m3fnuz')
-    debug_print_buffer(dtype='float8_e5m2')
-    debug_print_buffer(dtype='float8_e5m2fnuz')
+    debug_print_buffer(dtype="bool")
+    debug_print_buffer(dtype="int8")
+    debug_print_buffer(dtype="int16")
+    debug_print_buffer(dtype="int32")
+    debug_print_buffer(dtype="int64")
+    debug_print_buffer(dtype="uint8")
+    debug_print_buffer(dtype="uint16")
+    debug_print_buffer(dtype="uint32")
+    debug_print_buffer(dtype="uint64")
+    debug_print_buffer(dtype="float16")
+    debug_print_buffer(dtype="float32")
+    debug_print_buffer(dtype="float64")
+    debug_print_buffer(dtype="bfloat16")
+    debug_print_buffer(dtype="float8_e4m3")
+    debug_print_buffer(dtype="float8_e4m3fn")
+    debug_print_buffer(dtype="float8_e4m3fnuz")
+    debug_print_buffer(dtype="float8_e5m2")
+    debug_print_buffer(dtype="float8_e5m2fnuz")
 
 
 def debug_print_buffer_conditional(M=16, N=16):

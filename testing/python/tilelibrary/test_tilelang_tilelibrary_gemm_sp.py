@@ -20,27 +20,11 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
             low, high = (0, 4) if is_unsigned else (-2, 2)
         else:
             low, high = (0, 128) if is_unsigned else (-64, 64)
-        A = randint_semi_sparse(
-            M,
-            K,
-            low=low,
-            high=high,
-            dtype=map_torch_type(in_dtype),
-            device='cuda',
-            transposed=trans_A)
-        B = torch.randint(
-            size=(N, K) if trans_B else (K, N),
-            low=low,
-            high=high,
-            dtype=map_torch_type(in_dtype),
-            device='cuda')
+        A = randint_semi_sparse(M, K, low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda", transposed=trans_A)
+        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda")
     else:
-        A = randn_semi_sparse(
-            M, K, dtype=torch.float32, device='cuda',
-            transposed=trans_A).to(map_torch_type(in_dtype))
-        B = torch.randn(
-            (N, K) if trans_B else (K, N), device='cuda',
-            dtype=torch.float32).to(map_torch_type(in_dtype))
+        A = randn_semi_sparse(M, K, dtype=torch.float32, device="cuda", transposed=trans_A).to(map_torch_type(in_dtype))
+        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(map_torch_type(in_dtype))
     return A, B
 
 
@@ -69,24 +53,22 @@ def matmul_sp_sm90(
 
     @T.prim_func
     def main(
-            A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), 'uint8'),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor((M, K // E_factor), "uint8"),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            E_shared = T.alloc_shared((block_M, block_K // E_factor), 'uint8')
+            E_shared = T.alloc_shared((block_M, block_K // E_factor), "uint8")
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout({
-                E:
-                    make_cutlass_metadata_layout(
-                        E, mma_dtype=in_dtype, arch="9.0", block_k=block_K),
-                E_shared:
-                    make_cutlass_metadata_layout(
-                        E_shared, mma_dtype=in_dtype, arch="9.0", block_k=block_K),
-            })
+            T.annotate_layout(
+                {
+                    E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="9.0", block_k=block_K),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="9.0", block_k=block_K),
+                }
+            )
             T.disable_warp_group_reg_alloc()
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -121,7 +103,7 @@ def matmul_sp_sm80(
     trans_B,
 ):
     is_8_bit = "8" in in_dtype
-    metadata_dtype = 'int32' if is_8_bit else 'int16'
+    metadata_dtype = "int32" if is_8_bit else "int16"
     E_factor = SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype]
     A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
     B_shape = (K, N) if not trans_B else (N, K)
@@ -132,20 +114,22 @@ def matmul_sp_sm80(
 
     @T.prim_func
     def main(
-            A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), metadata_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor((M, K // E_factor), metadata_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout({
-                E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
-                E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
-            })
+            T.annotate_layout(
+                {
+                    E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
+                }
+            )
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
@@ -216,7 +200,7 @@ def run_gemm_sp(
 
     C = _matmul(A, B)
 
-    if 'float8' in in_dtype:
+    if "float8" in in_dtype:
         diff = calc_diff(C_sp, C)
         assert diff < 1e-3, f"{diff=}"
     else:
@@ -332,15 +316,11 @@ def test_gemm_sp_sm90():
     run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 128, 256, 0, 128)
     run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 128, 256, 2, 128)
 
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False,
-                     True)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True,
-                     False)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True,
-                     True)
+    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False, True)
+    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True, False)
+    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True, True)
 
-    run_gemm_sp_sm90(512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False,
-                     True)
+    run_gemm_sp_sm90(512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False, True)
     run_gemm_sp_sm90(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True)
 
 
@@ -352,12 +332,9 @@ def test_gemm_sp_sm80():
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32)
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128)
 
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 0, 32, False,
-                     True)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32, False,
-                     True)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False,
-                     True)
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 0, 32, False, True)
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32, False, True)
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False, True)
 
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 1, 128)
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 2, 128)

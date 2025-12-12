@@ -4,25 +4,25 @@ import tilelang.language as T
 
 
 def test_tilelang_intimm():
-    T.int32(0x7fffffff)
-    T.int32(-0x7fffffff - 1)
-    T.uint32(0xffffffff)
-    T.int64(0x7fffffffffffffff)
-    T.int64(-0x7fffffffffffffff - 1)
-    T.uint64(0xffffffffffffffff)
+    T.int32(0x7FFFFFFF)
+    T.int32(-0x7FFFFFFF - 1)
+    T.uint32(0xFFFFFFFF)
+    T.int64(0x7FFFFFFFFFFFFFFF)
+    T.int64(-0x7FFFFFFFFFFFFFFF - 1)
+    T.uint64(0xFFFFFFFFFFFFFFFF)
 
     a = T.int32()
-    a & 0x7fffffff
+    a & 0x7FFFFFFF
 
     a = T.uint32()
-    a & 0xffffffff
+    a & 0xFFFFFFFF
 
     a = T.int64()
-    a & 0x7fffffffffffffff
+    a & 0x7FFFFFFFFFFFFFFF
 
     a = T.uint64()
-    a & T.uint64(0xffffffffffffffff)
+    a & T.uint64(0xFFFFFFFFFFFFFFFF)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     tilelang.testing.main()

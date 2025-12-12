@@ -13,12 +13,11 @@ def calc_diff(x, y):
 
 @tilelang.jit(out_idx=[-1])
 def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
-
     @T.prim_func
     def gemm_fp8(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -41,8 +40,8 @@ def test_gemm_fp8(M, N, K, dtype):
 
     kernel = matmul(M, N, K, 128, 128, 64, dtype)
 
-    a = torch.randn(M, K, dtype=torch.float16, device='cuda').to(dtype=torch_dtype)
-    b = torch.randn(N, K, dtype=torch.float16, device='cuda').to(dtype=torch_dtype)
+    a = torch.randn(M, K, dtype=torch.float16, device="cuda").to(dtype=torch_dtype)
+    b = torch.randn(N, K, dtype=torch.float16, device="cuda").to(dtype=torch_dtype)
 
     c = kernel(a, b)
 
@@ -57,8 +56,8 @@ def test_gemm_fp8(M, N, K, dtype):
 
 
 def main():
-    test_gemm_fp8(1024, 1024, 1024, 'float8_e4m3')
-    test_gemm_fp8(1024, 1024, 1024, 'float8_e5m2')
+    test_gemm_fp8(1024, 1024, 1024, "float8_e4m3")
+    test_gemm_fp8(1024, 1024, 1024, "float8_e5m2")
 
 
 if __name__ == "__main__":

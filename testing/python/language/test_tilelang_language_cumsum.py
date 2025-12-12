@@ -9,8 +9,8 @@ def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype="float3
 
     @T.prim_func
     def cumsum(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
@@ -28,8 +28,8 @@ def cumsum_fragment_test(M, N, block_M, block_N, dim=0, reverse=False, dtype="fl
 
     @T.prim_func
     def cumsum(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
@@ -57,13 +57,16 @@ def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32", sc
         ref_b = torch.empty_like(A)
         for i in range(M // block_M):
             for j in range(N // block_N):
-                ref_b[i * block_M:(i + 1) * block_M,
-                      j * block_N:(j + 1) * block_N] = A[i * block_M:(i + 1) * block_M, j *
-                                                         block_N:(j + 1) * block_N].cumsum(dim=dim)
+                ref_b[i * block_M : (i + 1) * block_M, j * block_N : (j + 1) * block_N] = A[
+                    i * block_M : (i + 1) * block_M, j * block_N : (j + 1) * block_N
+                ].cumsum(dim=dim)
                 if reverse:
-                    ref_b[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) *
-                          block_N] = A[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) *
-                                       block_N].flip(dims=[dim]).cumsum(dim=dim).flip(dims=[dim])
+                    ref_b[i * block_M : (i + 1) * block_M, j * block_N : (j + 1) * block_N] = (
+                        A[i * block_M : (i + 1) * block_M, j * block_N : (j + 1) * block_N]
+                        .flip(dims=[dim])
+                        .cumsum(dim=dim)
+                        .flip(dims=[dim])
+                    )
         return ref_b
 
     tilelang_res = jit_kernel(A)
@@ -76,8 +79,8 @@ def cumsum_smem_test_1d(N, block_N, reverse=False, dtype="float32"):
 
     @T.prim_func
     def cumsum(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared((block_N,), dtype)
@@ -94,8 +97,8 @@ def cumsum_fragment_test_1d(N, block_N, reverse=False, dtype="float32"):
 
     @T.prim_func
     def cumsum(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared((block_N,), dtype)

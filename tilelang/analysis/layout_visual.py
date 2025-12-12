@@ -23,10 +23,7 @@ def print_fragment_format(layout: T.Fragment) -> str:
     if isinstance(layout, T.Fragment):
         input_shape = layout.get_input_shape()
         output_shape = layout.get_output_shape()
-        lines = [
-            f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}",
-            f"  Index:  {layout.forward_index}"
-        ]
+        lines = [f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}", f"  Index:  {layout.forward_index}"]
         print("\n".join(lines))
     else:
         raise ValueError(f"Expected T.Fragment, but got {type(layout).__name__}")
@@ -82,7 +79,6 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
 
 
 def LayoutVisual(formats: str = ""):
-
     def pass_fn(func: tir.PrimFunc, mod, ctx):
         _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func

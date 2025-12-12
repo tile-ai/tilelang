@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any, Callable, Generic, Literal, TypeVar
+
 # Python 3.9 compatibility for ParamSpec
 try:
     from typing import ParamSpec
@@ -14,8 +15,7 @@ import tilelang
 from tilelang import tvm
 from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
-from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
-                                  TVMFFIKernelAdapter, MetalKernelAdapter)
+from tilelang.jit.adapter import BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter, TVMFFIKernelAdapter, MetalKernelAdapter
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
@@ -24,8 +24,8 @@ import os
 
 logger = logging.getLogger(__name__)
 
-_P = ParamSpec('_P')
-_T = TypeVar('_T')
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 class JITKernel(Generic[_P, _T]):
@@ -41,6 +41,7 @@ class JITKernel(Generic[_P, _T]):
     torch_function : Callable
         The compiled function that can be invoked as a PyTorch-compatible function.
     """
+
     prim_func: PrimFunc = None
     artifact: CompiledArtifact = None
     adapter: BaseKernelAdapter = None
@@ -111,9 +112,7 @@ class JITKernel(Generic[_P, _T]):
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
 
-            assert (
-                get_cplus_compiler() is not None
-            ), "Cython backend requires a C++ compiler, please install or use other backends."
+            assert get_cplus_compiler() is not None, "Cython backend requires a C++ compiler, please install or use other backends."
 
         if from_database:
             return
@@ -200,8 +199,7 @@ class JITKernel(Generic[_P, _T]):
         """
         return self.torch_function(*args, **kwds)
 
-    def _compile_and_create_adapter(self, tilelang_func: PrimFunc,
-                                    out_idx: list[int]) -> BaseKernelAdapter:
+    def _compile_and_create_adapter(self, tilelang_func: PrimFunc, out_idx: list[int]) -> BaseKernelAdapter:
         """
         Compiles the given TileLang PrimFunc using TVM and creates a kernel adapter.
 
@@ -233,7 +231,8 @@ class JITKernel(Generic[_P, _T]):
                 target=target,
                 target_host=target_host,
                 enable_host_codegen=enable_host_codegen,
-                enable_device_compile=enable_device_compile)
+                enable_device_compile=enable_device_compile,
+            )
 
         self.artifact = artifact
 
@@ -241,7 +240,7 @@ class JITKernel(Generic[_P, _T]):
         if execution_backend == "tvm_ffi":
             # Use TVMFFIKernelAdapter for interoperability with PyTorch via DLPack.
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
-            assert (artifact.rt_mod is not None), "tvm_ffi backend requires a runtime module."
+            assert artifact.rt_mod is not None, "tvm_ffi backend requires a runtime module."
             adapter = TVMFFIKernelAdapter(
                 params=artifact.params,
                 result_idx=out_idx,
@@ -283,6 +282,7 @@ class JITKernel(Generic[_P, _T]):
             )
         elif execution_backend == "nvrtc":
             from tilelang.jit.adapter import NVRTCKernelAdapter
+
             adapter = NVRTCKernelAdapter(
                 params=artifact.params,
                 result_idx=out_idx,
@@ -315,16 +315,18 @@ class JITKernel(Generic[_P, _T]):
 
         return adapter
 
-    def _create_adapter_from_database(self,
-                                      params: list[KernelParam],
-                                      result_idx: list[int] | int,
-                                      target: str | Target,
-                                      func_or_mod: PrimFunc | tvm.runtime.Module,
-                                      host_kernel_source: str,
-                                      device_kernel_source: str,
-                                      kernel_lib_path: str,
-                                      pass_configs: dict[str, Any] | None = None,
-                                      compile_flags: list[str] | None = None) -> BaseKernelAdapter:
+    def _create_adapter_from_database(
+        self,
+        params: list[KernelParam],
+        result_idx: list[int] | int,
+        target: str | Target,
+        func_or_mod: PrimFunc | tvm.runtime.Module,
+        host_kernel_source: str,
+        device_kernel_source: str,
+        kernel_lib_path: str,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None,
+    ) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
 
@@ -366,6 +368,7 @@ class JITKernel(Generic[_P, _T]):
             )
         elif execution_backend == "nvrtc":
             from tilelang.jit.adapter import NVRTCKernelAdapter
+
             adapter = NVRTCKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
@@ -402,8 +405,7 @@ class JITKernel(Generic[_P, _T]):
         """
         return cls(func=tilelang_func, **kwargs)
 
-    def get_profiler(self,
-                     tensor_supply_type: TensorSupplyType = TensorSupplyType.Auto) -> Profiler:
+    def get_profiler(self, tensor_supply_type: TensorSupplyType = TensorSupplyType.Auto) -> Profiler:
         """
         Creates a profiler to benchmark the compiled runtime module.
 
@@ -417,8 +419,7 @@ class JITKernel(Generic[_P, _T]):
         Profiler
             A Profiler instance for benchmarking the runtime module.
         """
-        return Profiler(self.params, self.out_idx,
-                        tensor_supply_type).with_default_adapter(self.adapter)
+        return Profiler(self.params, self.out_idx, tensor_supply_type).with_default_adapter(self.adapter)
 
     def get_kernel_source(self, kernel_only: bool = True) -> str:
         """
@@ -507,21 +508,19 @@ class JITKernel(Generic[_P, _T]):
                 dir_path = os.path.dirname(kernel_path)
                 if dir_path:
                     os.makedirs(dir_path, exist_ok=True)
-                with open(kernel_path, 'w') as f:
+                with open(kernel_path, "w") as f:
                     f.write(self.get_kernel_source())
             if host_path is not None:
                 dir_path = os.path.dirname(host_path)
                 if dir_path:
                     os.makedirs(dir_path, exist_ok=True)
-                with open(host_path, 'w') as f:
+                with open(host_path, "w") as f:
                     f.write(self.get_host_source())
         except Exception as e:
             logger.error(f"Failed to export sources: {e}")
 
     # Backward compatibility alias (deprecated)
-    def print_source_code(self,
-                          which: Literal["kernel", "host", "both"] = "kernel",
-                          file: str | None = None) -> None:
+    def print_source_code(self, which: Literal["kernel", "host", "both"] = "kernel", file: str | None = None) -> None:
         """
         Deprecated: use show_source() or export_sources() instead.
 
@@ -541,16 +540,14 @@ class JITKernel(Generic[_P, _T]):
         >>> # Old API (still works but deprecated)
         >>> jit_kernel.print_source_code(file="/tmp/kernel.cu")
         """
-        logger.warning(
-            "print_source_code is deprecated; use show_source() or export_sources() instead.")
+        logger.warning("print_source_code is deprecated; use show_source() or export_sources() instead.")
         if file is not None:
             # Historical behavior wrote only kernel source when file provided
             self.export_sources(kernel_path=file)
         else:
             self.show_source(which=which)
 
-    def update_tuner_result(self, latency: float, config: dict[str, Any],
-                            ref_latency: float) -> JITKernel:
+    def update_tuner_result(self, latency: float, config: dict[str, Any], ref_latency: float) -> JITKernel:
         """
         Updates the tuning results for this kernel.
 
@@ -651,8 +648,7 @@ class JITKernel(Generic[_P, _T]):
             verbose = self.verbose
         # Ensure target is set so nvcc picks correct arch via Target.current()
         with self.target:
-            return tl_nvcc.get_ptx_from_source(
-                code, compile_flags=self.compile_flags, verbose=verbose)
+            return tl_nvcc.get_ptx_from_source(code, compile_flags=self.compile_flags, verbose=verbose)
 
     def show_ptx(self) -> None:
         """
@@ -714,8 +710,7 @@ class JITKernel(Generic[_P, _T]):
         if verbose is None:
             verbose = self.verbose
         with self.target:
-            return tl_nvcc.get_sass_from_source(
-                code, compile_flags=self.compile_flags, verbose=verbose)
+            return tl_nvcc.get_sass_from_source(code, compile_flags=self.compile_flags, verbose=verbose)
 
     def show_sass(self) -> None:
         """

@@ -45,7 +45,7 @@ def rms_norm(M, N, blk_m):
             A_local = T.alloc_fragment((blk_m, N), dtype)
             A_powsum = T.alloc_fragment((blk_m,), dtype)
 
-            T.copy(A[bx * blk_m:(bx + 1) * blk_m, :], A_shared)
+            T.copy(A[bx * blk_m : (bx + 1) * blk_m, :], A_shared)
             T.copy(A_shared, A_local)
             for i, j in T.Parallel(blk_m, N):
                 A_pow_local[i, j] = A_local[i, j] * A_local[i, j]
@@ -54,7 +54,7 @@ def rms_norm(M, N, blk_m):
                 A_powsum[i] = T.rsqrt(A_powsum[i] / N + 1e-12)
             for i, j in T.Parallel(blk_m, N):
                 A_local[i, j] *= A_powsum[i]
-            T.copy(A_local, B[bx * blk_m:(bx + 1) * blk_m, :])
+            T.copy(A_local, B[bx * blk_m : (bx + 1) * blk_m, :])
 
     return main
 

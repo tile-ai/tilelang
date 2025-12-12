@@ -32,7 +32,6 @@ block_K = 32
 
 
 def test_warp_specialized():
-
     @T.prim_func
     def before(A: T.Tensor((M, K), dtype), B: T.Tensor((K, N), dtype)):
         bx = T.launch_thread("blockIdx.x", 8)
@@ -47,25 +46,27 @@ def test_warp_specialized():
             for k in T.serial(16, annotations={"num_stages": T.int32(3)}):
                 if v == 0:
                     T.tma_load(
-                        T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2,
-                                                2, 0), 0,
-                        T.tvm_access_ptr(
-                            T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 2),
-                        k * 32, by * 64)
+                        T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                        0,
+                        T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 2),
+                        k * 32,
+                        by * 64,
+                    )
                 if v == 0:
                     T.tma_load(
-                        T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3,
-                                                2, 0), 0,
-                        T.tvm_access_ptr(
-                            T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 2),
-                        bx * 64, k * 32)
+                        T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3, 2, 0),
+                        0,
+                        T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 2),
+                        bx * 64,
+                        k * 32,
+                    )
                 T.call_extern(
-                    "handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
-                    T.tvm_access_ptr(
-                        T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 1),
-                    T.tvm_access_ptr(
-                        T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 1),
-                    T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3))
+                    "handle",
+                    "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+                    T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 1),
+                    T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 1),
+                    T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                )
 
     @T.prim_func
     def after(A: T.Tensor((M, K), dtype), B: T.Tensor((K, N), dtype)):
@@ -85,34 +86,35 @@ def test_warp_specialized():
                     T.mbarrier_expect_tx(T.get_mbarrier(k % 3), 4096)
                 if v - 128 == 0:
                     T.tma_load(
-                        T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2,
-                                                2, 0), T.get_mbarrier(k % 3),
-                        T.tvm_access_ptr(
-                            T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 2),
-                        k * 32, by * 64)
+                        T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                        T.get_mbarrier(k % 3),
+                        T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 2),
+                        k * 32,
+                        by * 64,
+                    )
                 if v - 128 == 0:
                     T.mbarrier_expect_tx(T.get_mbarrier(k % 3), 4096)
                 if v - 128 == 0:
                     T.tma_load(
-                        T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3,
-                                                2, 0), T.get_mbarrier(k % 3),
-                        T.tvm_access_ptr(
-                            T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 2),
-                        bx * 64, k * 32)
+                        T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3, 2, 0),
+                        T.get_mbarrier(k % 3),
+                        T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 2),
+                        bx * 64,
+                        k * 32,
+                    )
                 T.evaluate(tir.Call("handle", "tir.ptx_arrive_barrier", [T.get_mbarrier(k % 3)]))
         else:
             T.set_max_nreg(240, 1)
             for k in range(16):
                 T.mbarrier_wait_parity(T.get_mbarrier(k % 3), k // 3 % 2)
                 T.call_extern(
-                    "handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
-                    T.tvm_access_ptr(
-                        T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 1),
-                    T.tvm_access_ptr(
-                        T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 1),
-                    T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3))
-                T.evaluate(
-                    tir.Call("handle", "tir.ptx_arrive_barrier", [T.get_mbarrier(k % 3 + 3)]))
+                    "handle",
+                    "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+                    T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 1),
+                    T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 1),
+                    T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                )
+                T.evaluate(tir.Call("handle", "tir.ptx_arrive_barrier", [T.get_mbarrier(k % 3 + 3)]))
 
     _check(before, after)
 

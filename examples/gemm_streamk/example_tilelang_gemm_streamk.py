@@ -39,7 +39,7 @@ total_tiles = num_block_m * num_block_n
 
 # Two-tile SK + DP
 streamk_tiles = total_tiles % streamk_programs
-if (total_tiles - streamk_tiles > streamk_programs):  # (total_tiles // total_programs > 1)
+if total_tiles - streamk_tiles > streamk_programs:  # (total_tiles // total_programs > 1)
     streamk_tiles += streamk_programs
 
 blocking_tiles = total_tiles - streamk_tiles
@@ -135,7 +135,6 @@ def tl_matmul_streamk(
         C: T.Tensor,
         C_local: T.LocalBuffer,
     ):
-
         for p in T.serial(sm_patition_factor):
             tile_id = pid + streamk_tiles + p * total_sm
             pid_m = tile_id // T.ceildiv(N, block_N)
@@ -150,12 +149,11 @@ def tl_matmul_streamk(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, dtypeAB),
-            B: T.Tensor(B_shape, dtypeAB),
-            C: T.Tensor((M, N), dtypeC),
+        A: T.Tensor(A_shape, dtypeAB),
+        B: T.Tensor(B_shape, dtypeAB),
+        C: T.Tensor((M, N), dtypeC),
     ):
         with T.Kernel(streamk_programs, threads=threads) as pid:
-
             A_shared = T.alloc_shared(A_shared_shape, dtypeAB)
             B_shared = T.alloc_shared(B_shared_shape, dtypeAB)
             A_shared_full_tiles = T.alloc_shared(A_shared_shape, dtypeAB)

@@ -8,6 +8,7 @@ import argparse
 
 def get_configs():
     import itertools
+
     BLOCK_N = [16, 32, 64, 128]
     BLOCK_H = [16, 32, 64, 128]
     num_split = [1, 2, 4, 8, 16, 32]
@@ -15,30 +16,26 @@ def get_configs():
 
     _configs = list(itertools.product(BLOCK_N, BLOCK_H, num_split, threads))
 
-    return [{
-        "block_N": c[0],
-        "block_H": c[1],
-        "num_split": c[2],
-        "threads": c[3],
-    } for c in _configs]
+    return [
+        {
+            "block_N": c[0],
+            "block_H": c[1],
+            "num_split": c[2],
+            "threads": c[3],
+        }
+        for c in _configs
+    ]
 
 
 @tilelang.autotune(configs=get_configs())
 @tilelang.jit(
-    out_idx=[6], pass_configs={
+    out_idx=[6],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
-def flashmla_decode(batch,
-                    heads,
-                    kv_head_num,
-                    seqlen_kv,
-                    dim,
-                    pe_dim,
-                    block_N,
-                    block_H,
-                    num_split,
-                    threads=128):
-    scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
+    },
+)
+def flashmla_decode(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, threads=128):
+    scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
     kv_group_num = heads // kv_head_num
@@ -47,11 +44,11 @@ def flashmla_decode(batch,
 
     @T.macro
     def flash_attn(
-            Q: T.Tensor([batch, heads, dim], dtype),
-            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(batch, heads // min(block_H, kv_group_num), threads=threads) as (bx, by):
             Q_local = T.alloc_fragment([block_H, dim], dtype)
@@ -70,24 +67,19 @@ def flashmla_decode(batch,
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
 
-            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_local)
-            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_local)
+            T.copy(Q[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_local)
+            T.copy(Q_pe[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_pe_local)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = T.ceildiv(seqlen_kv, block_N)
             for k in T.Pipelined(loop_range, num_stages=0):
-                T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
-                T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
+                T.copy(KV[bx, k * block_N : (k + 1) * block_N, cur_kv_head, :], KV_shared)
+                T.copy(K_pe[bx, k * block_N : (k + 1) * block_N, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
                 T.gemm(Q_local, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                T.gemm(
-                    Q_pe_local,
-                    K_pe_shared,
-                    acc_s,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(Q_pe_local, K_pe_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -107,20 +99,18 @@ def flashmla_decode(batch,
                 T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
             for i, j in T.Parallel(block_H, dim):
                 acc_o[i, j] /= logsum[i]
-            T.copy(acc_o, Output[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
+            T.copy(acc_o, Output[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :])
 
     @T.macro
     def flash_attn_split(
-            Q: T.Tensor([batch, heads, dim], dtype),
-            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
     ):
-        with T.Kernel(
-                batch, heads // min(block_H, kv_group_num), num_split,
-                threads=threads) as (bx, by, bz):
+        with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=threads) as (bx, by, bz):
             Q_local = T.alloc_fragment([block_H, dim], dtype)
             Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)
             KV_shared = T.alloc_shared([block_N, dim], dtype)
@@ -136,8 +126,8 @@ def flashmla_decode(batch,
 
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
-            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_local)
-            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_local)
+            T.copy(Q[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_local)
+            T.copy(Q_pe[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_pe_local)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -150,12 +140,7 @@ def flashmla_decode(batch,
                 T.copy(K_pe[bx, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
                 T.gemm(Q_local, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                T.gemm(
-                    Q_pe_local,
-                    K_pe_shared,
-                    acc_s,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(Q_pe_local, K_pe_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -176,14 +161,14 @@ def flashmla_decode(batch,
                 acc_o[i, j] /= logsum[i]
             for i in T.Parallel(block_H):
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
-            T.copy(logsum, glse[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, bz])
-            T.copy(acc_o, Output_partial[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, bz, :])
+            T.copy(logsum, glse[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, bz])
+            T.copy(acc_o, Output_partial[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, bz, :])
 
     @T.macro
     def combine(
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(heads, batch, threads=128) as (by, bz):
             po_local = T.alloc_fragment([dim], dtype)
@@ -193,9 +178,11 @@ def flashmla_decode(batch,
             lse_max_local = T.alloc_local([1], accum_dtype)
             scale_local = T.alloc_local([1], accum_dtype)
 
-            T.annotate_layout({
-                lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-            })
+            T.annotate_layout(
+                {
+                    lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
+                }
+            )
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
@@ -218,26 +205,26 @@ def flashmla_decode(batch,
 
     @T.prim_func
     def main_split(
-            Q: T.Tensor([batch, heads, dim], dtype),
-            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         flash_attn_split(Q, Q_pe, KV, K_pe, glse, Output_partial)
         combine(glse, Output_partial, Output)
 
     @T.prim_func
     def main_no_split(
-            Q: T.Tensor([batch, heads, dim], dtype),
-            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         flash_attn(Q, Q_pe, KV, K_pe, Output)
 
@@ -262,43 +249,36 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     dim = q.shape[-1]
     pe_dim = q_pe.shape[-1]
     num_head_groups = q.shape[1] // kv.shape[2]
-    scale = (dim + pe_dim)**0.5
-    q = rearrange(
-        q, 'b (h g) d -> b g h d', g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
+    scale = (dim + pe_dim) ** 0.5
+    q = rearrange(q, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
 
-    q_pe = rearrange(
-        q_pe, 'b (h g) d -> b g h d',
-        g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
+    q_pe = rearrange(q_pe, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
 
-    kv = rearrange(kv, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
+    kv = rearrange(kv, "b n h d -> b h n d")  # [batch_size, groups, seqlen_kv, dim]
 
-    k_pe = rearrange(k_pe, 'b n h d -> b h n d')  # [batch_size, num_head_groups, groups, pe_dim]
+    k_pe = rearrange(k_pe, "b n h d -> b h n d")  # [batch_size, num_head_groups, groups, pe_dim]
 
     query = torch.concat([q, q_pe], dim=-1)
     key = torch.concat([kv, k_pe], dim=-1)
 
-    scores = einsum(
-        query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, groups, seqlen_kv]
+    scores = einsum(query, key, "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, groups, seqlen_kv]
 
-    attention = F.softmax(
-        scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
+    attention = F.softmax(scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
 
-    out = einsum(attention, kv,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, groups, dim]
-    out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
+    out = einsum(attention, kv, "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
+    out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=128, help='batch size')
-    parser.add_argument('--heads', type=int, default=128, help='q heads number')
-    parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
-    parser.add_argument('--kv_ctx', type=int, default=8192, help='kv context length')
-    parser.add_argument('--dim', type=int, default=512, help='head dim')
-    parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
-    parser.add_argument('--autotune', action='store_true', help='auto tune')
+    parser.add_argument("--batch", type=int, default=128, help="batch size")
+    parser.add_argument("--heads", type=int, default=128, help="q heads number")
+    parser.add_argument("--kv_heads", type=int, default=1, help="kv heads number")
+    parser.add_argument("--kv_ctx", type=int, default=8192, help="kv context length")
+    parser.add_argument("--dim", type=int, default=512, help="head dim")
+    parser.add_argument("--pe_dim", type=int, default=64, help="pe head dim")
+    parser.add_argument("--autotune", action="store_true", help="auto tune")
     args = parser.parse_args()
     batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
     enable_autotune = args.autotune
@@ -314,17 +294,7 @@ if __name__ == "__main__":
     if enable_autotune:
         kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim)
     else:
-        kernel = flashmla_decode(
-            batch,
-            heads,
-            kv_heads,
-            kv_ctx,
-            dim,
-            pe_dim,
-            BLOCK_N,
-            BLOCK_H,
-            num_split,
-            threads=threads)
+        kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, threads=threads)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)

@@ -24,15 +24,14 @@ def weight_quant(weight, num_bits=1):
 def activation_quant(x, num_bits=8):
     dtype = x.dtype
     x = x.float()
-    Qn = -(2**(num_bits - 1))
-    Qp = 2**(num_bits - 1) - 1
+    Qn = -(2 ** (num_bits - 1))
+    Qp = 2 ** (num_bits - 1) - 1
     s = Qp / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
     result = (x * s).round().clamp(Qn, Qp) / s
     return result.type(dtype)
 
 
 class BitLinearBitBLAS(nn.Module):
-
     def __init__(
         self,
         in_features: int,
@@ -68,7 +67,7 @@ class BitLinearBitBLAS(nn.Module):
         self.bitblas_matmul = self._get_or_create_bitblas_operator(matmul_config, ENABLE_TUNING)
 
         self.format = "bitnet"
-        self.Qp = 2**(self.input_bits - 1) - 1
+        self.Qp = 2 ** (self.input_bits - 1) - 1
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
         if global_operator_cache.size() == 0:
@@ -99,8 +98,7 @@ class BitLinearBitBLAS(nn.Module):
 
     @classmethod
     def from_bit_linear(cls, bitlinear, weight_group=1):
-        bitblas_linear = cls(
-            bitlinear.in_features, bitlinear.out_features, weight_bits=1, input_bits=8)
+        bitblas_linear = cls(bitlinear.in_features, bitlinear.out_features, weight_bits=1, input_bits=8)
         sw, qweight = bitblas_linear.create_bitblas_weights(bitlinear.weight, weight_group)
         bitblas_linear.register_buffer("qweight", qweight)
         bitblas_linear.register_buffer("sw", sw)
@@ -158,8 +156,8 @@ class BitLinearBitBLAS(nn.Module):
     @torch.compile
     def activation_quant(self, x, num_bits=8):
         x = x.float()
-        Qn = -(2**(num_bits - 1))
-        Qp = 2**(num_bits - 1) - 1
+        Qn = -(2 ** (num_bits - 1))
+        Qp = 2 ** (num_bits - 1) - 1
         s = Qp / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
         result = (x * s).round().clamp(Qn, Qp)
         return result.type(torch.int8), s
@@ -173,9 +171,8 @@ class BitLinearBitBLAS(nn.Module):
 
     # for the correctness evaluation.
     def native_forward(self, input):
-        quant_input = (input + (activation_quant(input, self.input_bits) - input).detach())
-        quant_weight = (
-            self.weight + (weight_quant(self.weight, self.weight_bits) - self.weight).detach())
+        quant_input = input + (activation_quant(input, self.input_bits) - input).detach()
+        quant_weight = self.weight + (weight_quant(self.weight, self.weight_bits) - self.weight).detach()
 
         out = nn.functional.linear(quant_input, quant_weight)
         if self.bias is not None:
@@ -214,7 +211,6 @@ class BitLinearBitBLAS(nn.Module):
 
 # Naive BitLinear from HuggingFace
 class BitLinear(nn.Linear):
-
     def __init__(self, *kargs, weight_bits=1, input_bits=8, **kwargs):
         super(BitLinear, self).__init__(*kargs, **kwargs)
         """
@@ -224,10 +220,8 @@ class BitLinear(nn.Linear):
         self.input_bits = input_bits
 
     def forward(self, input):
-
         quant_input = input + (activation_quant(input, self.input_bits) - input).detach()
-        quant_weight = self.weight + (weight_quant(self.weight, self.weight_bits) -
-                                      self.weight).detach()
+        quant_weight = self.weight + (weight_quant(self.weight, self.weight_bits) - self.weight).detach()
 
         out = nn.functional.linear(quant_input, quant_weight)
         if self.bias is not None:

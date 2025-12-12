@@ -6,7 +6,6 @@ from einops import rearrange, repeat
 
 
 class IndexFirstAxis(torch.autograd.Function):
-
     @staticmethod
     def forward(ctx, input, indices):
         ctx.save_for_backward(indices)
@@ -15,9 +14,7 @@ class IndexFirstAxis(torch.autograd.Function):
         second_dim = other_shape.numel()
         # TD [2022-03-04] For some reason torch.gather is a bit faster than indexing.
         # return input[indices]
-        return torch.gather(
-            rearrange(input, "b ... -> b (...)"), 0,
-            repeat(indices, "z -> z d", d=second_dim)).reshape(-1, *other_shape)
+        return torch.gather(rearrange(input, "b ... -> b (...)"), 0, repeat(indices, "z -> z d", d=second_dim)).reshape(-1, *other_shape)
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -40,14 +37,12 @@ index_first_axis = IndexFirstAxis.apply
 
 
 class IndexPutFirstAxis(torch.autograd.Function):
-
     @staticmethod
     def forward(ctx, values, indices, first_axis_dim):
         ctx.save_for_backward(indices)
         assert indices.ndim == 1
         assert values.ndim >= 2
-        output = torch.zeros(
-            first_axis_dim, *values.shape[1:], device=values.device, dtype=values.dtype)
+        output = torch.zeros(first_axis_dim, *values.shape[1:], device=values.device, dtype=values.dtype)
         # TD [2022-03-04] For some reason torch.scatter is a bit faster than indexing.
         output[indices] = values
         # output.scatter_(0, repeat(indices, 'z -> z d', d=values.shape[1]), values)
@@ -66,7 +61,6 @@ index_put_first_axis = IndexPutFirstAxis.apply
 
 
 class IndexFirstAxisResidual(torch.autograd.Function):
-
     @staticmethod
     def forward(ctx, input, indices):
         ctx.save_for_backward(indices)
@@ -128,7 +122,7 @@ def unpad_input_for_concatenated_sequences(hidden_states, attention_mask_in_leng
     """
     Supports concatenating short samples in one sequence. The attention_mask_in_length is utilized to mask other short samples. It helps efficient training of variant lengths-based samples (e.g., the supervised fine-tuning task in large language model).
     The motivation for this function is explained [here](https://github.com/Dao-AILab/flash-attention/issues/432#issuecomment-1668822286).
-    
+
     For example, if batch = 3 and seqlen = 6, the attention_mask_in_length is:
         ```
         [
@@ -177,9 +171,7 @@ def unpad_input_for_concatenated_sequences(hidden_states, attention_mask_in_leng
     """
     length = attention_mask_in_length.sum(dim=-1)
     seqlen = attention_mask_in_length.size(-1)
-    attention_mask_2d = torch.arange(
-        seqlen, device=length.device, dtype=length.dtype).expand(len(length),
-                                                                 seqlen) < length.unsqueeze(1)
+    attention_mask_2d = torch.arange(seqlen, device=length.device, dtype=length.dtype).expand(len(length), seqlen) < length.unsqueeze(1)
     real_indices_idx = torch.nonzero(attention_mask_in_length.flatten(), as_tuple=False).flatten()
     seqlens_in_batch = attention_mask_in_length.flatten()[real_indices_idx]
     indices = torch.nonzero(attention_mask_2d.flatten(), as_tuple=False).flatten()

@@ -7,11 +7,10 @@ import torch
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 def tilelang_composable_copy(M, N, block_M, block_N, dtype="float16"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M * N), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M * N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
@@ -35,7 +34,8 @@ def run_tilelang_composable_copy(M=1024, N=1024, block_M=128, block_N=128, dtype
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
     torch.testing.assert_close(b.flatten(), a.flatten(), rtol=1e-2, atol=1e-2)

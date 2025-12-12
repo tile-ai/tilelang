@@ -30,11 +30,10 @@ Rule:
 
 @tilelang.jit(out_idx=[1])
 def nested_continuous_parallels(length=256, block=16, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.Parallel(length // block):
@@ -46,29 +45,26 @@ def nested_continuous_parallels(length=256, block=16, dtype="float32"):
 
 @tilelang.jit(out_idx=[1])
 def nested_triple_continuous_parallels(length=256, block1=8, block2=2, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.Parallel(length // block1 // block2):
                 for j in T.Parallel(block1):
                     for k in T.Parallel(block2):
-                        B[i * block1 * block2 + j * block2 +
-                          k] = A[i * block1 * block2 + j * block2 + k] + 1.0
+                        B[i * block1 * block2 + j * block2 + k] = A[i * block1 * block2 + j * block2 + k] + 1.0
 
     return main
 
 
 @tilelang.jit(out_idx=[1])
 def nested_noncontinuous_parallels(length=256, block=16, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.Parallel(length // block):
@@ -103,8 +99,9 @@ is OK.
 """
 
 
-def matmul_nested_pipelines(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype,
-                            out_dtype, accum_dtype, threads, order, stage, extra_pipeline_repeats):
+def matmul_nested_pipelines(
+    M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, threads, order, stage, extra_pipeline_repeats
+):
     A_shape = (K, M) if trans_A else (M, K)
     B_shape = (N, K) if trans_B else (K, N)
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
@@ -114,9 +111,9 @@ def matmul_nested_pipelines(M, N, K, block_M, block_N, block_K, trans_A, trans_B
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -180,7 +177,8 @@ def run_gemm_nested_pipelines(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -193,8 +191,8 @@ def run_gemm_nested_pipelines(
         if in_dtype == "float32":
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
-            A = ((A.view(torch.int32) - 0x1000)).view(torch.float32)
-            B = ((B.view(torch.int32) - 0x1000)).view(torch.float32)
+            A = (A.view(torch.int32) - 0x1000).view(torch.float32)
+            B = (B.view(torch.int32) - 0x1000).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -218,11 +216,10 @@ is OK.
 
 @tilelang.jit(out_idx=[1])
 def nested_continuous_serials(length=256, block=16, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.serial(length // block):
@@ -234,11 +231,10 @@ def nested_continuous_serials(length=256, block=16, dtype="float32"):
 
 @tilelang.jit(out_idx=[1])
 def nested_noncontinuous_serials(length=256, block=16, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.serial(length // block):
@@ -277,11 +273,10 @@ Rule:
 
 @tilelang.jit(out_idx=[1])
 def nested_continuous_sp(length=256, block=16, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.serial(length // block):
@@ -293,11 +288,10 @@ def nested_continuous_sp(length=256, block=16, dtype="float32"):
 
 @tilelang.jit(out_idx=[1])
 def nested_continuous_ps(length=256, block=16, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.Parallel(length // block):
@@ -309,36 +303,32 @@ def nested_continuous_ps(length=256, block=16, dtype="float32"):
 
 @tilelang.jit(out_idx=[1])
 def nested_continuous_psp(length=256, block1=8, block2=2, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.Parallel(length // block1 // block2):
                 for j in T.serial(block1):
                     for k in T.Parallel(block2):
-                        B[i * block1 * block2 + j * block2 +
-                          k] = A[i * block1 * block2 + j * block2 + k] + 1.0
+                        B[i * block1 * block2 + j * block2 + k] = A[i * block1 * block2 + j * block2 + k] + 1.0
 
     return main
 
 
 @tilelang.jit(out_idx=[1])
 def nested_continuous_sps(length=256, block1=8, block2=2, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.serial(length // block1 // block2):
                 for j in T.Parallel(block1):
                     for k in T.serial(block2):
-                        B[i * block1 * block2 + j * block2 +
-                          k] = A[i * block1 * block2 + j * block2 + k] + 1.0
+                        B[i * block1 * block2 + j * block2 + k] = A[i * block1 * block2 + j * block2 + k] + 1.0
 
     return main
 
@@ -399,9 +389,9 @@ def matmul_nested_pipa(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -444,9 +434,9 @@ def matmul_nested_papipa(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -505,7 +495,8 @@ def run_gemm_mixed_pp(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -514,8 +505,8 @@ def run_gemm_mixed_pp(
         if in_dtype == "float32":
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
-            A = ((A.view(torch.int32) - 0x1000)).view(torch.float32)
-            B = ((B.view(torch.int32) - 0x1000)).view(torch.float32)
+            A = (A.view(torch.int32) - 0x1000).view(torch.float32)
+            B = (B.view(torch.int32) - 0x1000).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -543,7 +534,8 @@ def run_gemm_mixed_pp(
             pass_configs={
                 tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
                 tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            })
+            },
+        )
 
 
 def test_mixed_pp():
@@ -576,9 +568,9 @@ def matmul_with_parallel(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -637,7 +629,8 @@ def run_gemm_tiled_op_with_parallel(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -646,8 +639,8 @@ def run_gemm_tiled_op_with_parallel(
         if in_dtype == "float32":
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
-            A = ((A.view(torch.int32) - 0x1000)).view(torch.float32)
-            B = ((B.view(torch.int32) - 0x1000)).view(torch.float32)
+            A = (A.view(torch.int32) - 0x1000).view(torch.float32)
+            B = (B.view(torch.int32) - 0x1000).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -675,16 +668,16 @@ def run_gemm_tiled_op_with_parallel(
             pass_configs={
                 tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
                 tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            })
+            },
+        )
 
 
 @tilelang.jit(out_idx=[1])
 def tir_op_with_parallel(length=256, block=16, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.Parallel(length // block):
@@ -696,11 +689,10 @@ def tir_op_with_parallel(length=256, block=16, dtype="float32"):
 
 @tilelang.jit(out_idx=[1])
 def customize_op_with_parallel(length=256, block=16, dtype="float32"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((length,), dtype),
-            B: T.Tensor((length,), dtype),
+        A: T.Tensor((length,), dtype),
+        B: T.Tensor((length,), dtype),
     ):
         with T.Kernel(1, threads=length) as _:
             for i in T.Parallel(length // block):

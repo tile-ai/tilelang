@@ -28,9 +28,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -74,9 +74,9 @@ def matmu_jit_kernel(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -144,6 +144,7 @@ def run_gemm_jit_kernel(
 
     def ref_program(A, B):
         import torch
+
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(out_dtype)
         return C
@@ -171,19 +172,9 @@ def test_gemm_jit_kernel():
     )
 
 
-def run_tvm_ffi_kernel_do_bench(M,
-                                N,
-                                K,
-                                trans_A,
-                                trans_B,
-                                in_dtype,
-                                out_dtype,
-                                dtypeAccum,
-                                block_M,
-                                block_N,
-                                block_K,
-                                num_stages=3,
-                                num_threads=128):
+def run_tvm_ffi_kernel_do_bench(
+    M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
+):
     program = matmul(
         M,
         N,
@@ -216,23 +207,12 @@ def run_tvm_ffi_kernel_do_bench(M,
 
 
 def test_tvm_ffi_kernel_do_bench():
-    run_tvm_ffi_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128,
-                                256, 32, 2)
+    run_tvm_ffi_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
 
-def run_tvm_ffi_kernel_multi_stream(M,
-                                    N,
-                                    K,
-                                    trans_A,
-                                    trans_B,
-                                    in_dtype,
-                                    out_dtype,
-                                    dtypeAccum,
-                                    block_M,
-                                    block_N,
-                                    block_K,
-                                    num_stages=3,
-                                    num_threads=128):
+def run_tvm_ffi_kernel_multi_stream(
+    M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
+):
     program = matmul(
         M,
         N,
@@ -269,23 +249,12 @@ def run_tvm_ffi_kernel_multi_stream(M,
 
 
 def test_tvm_ffi_kernel_multi_stream():
-    run_tvm_ffi_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16",
-                                    128, 256, 32, 2)
+    run_tvm_ffi_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
 
-def run_tvm_ffi_dynamic_shape(M,
-                              N,
-                              K,
-                              trans_A,
-                              trans_B,
-                              in_dtype,
-                              out_dtype,
-                              dtypeAccum,
-                              block_M,
-                              block_N,
-                              block_K,
-                              num_stages=3,
-                              num_threads=128):
+def run_tvm_ffi_dynamic_shape(
+    M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
+):
     program = matmul(
         M,
         N,
@@ -325,21 +294,17 @@ def run_tvm_ffi_dynamic_shape(M,
     matmul_kernel(tensor_a, tensor_b, tensor_c)
 
     tensor_ref_c = torch.matmul(tensor_a.to(torch.float), tensor_b.to(torch.float)).to(out_dtype)
-    tilelang.testing.torch_assert_close(
-        tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+    tilelang.testing.torch_assert_close(tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_tvm_ffi_dynamic_shape():
-    run_tvm_ffi_dynamic_shape(
-        T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_tvm_ffi_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+
+    run_tvm_ffi_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
     run_tvm_ffi_dynamic_shape(
-        T.dynamic("m"), T.dynamic("n"), 768, False, False, "float16", "float16", "float16", 128,
-        256, 32, 2)
-
-    run_tvm_ffi_dynamic_shape(
-        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16",
-        "float16", 128, 256, 32, 2)
+        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16", "float16", 128, 256, 32, 2
+    )
 
 
 def check_hopper():
@@ -350,35 +315,18 @@ def check_hopper():
     return compute_capability == (9, 0)
 
 
-def convolution_im2col(N,
-                       C,
-                       H,
-                       W,
-                       F,
-                       K,
-                       S,
-                       D,
-                       P,
-                       block_M,
-                       block_N,
-                       block_K,
-                       num_stages,
-                       threads,
-                       dtype="float16",
-                       accum_dtype="float"):
+def convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages, threads, dtype="float16", accum_dtype="float"):
     KH, KW = K, K
     OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
 
     @T.prim_func
     def main(
-            data: T.Tensor((N, H, W, C), dtype),
-            kernel: T.Tensor((KH, KW, C, F), dtype),
-            out: T.Tensor((N, OH, OW, F), dtype),
+        data: T.Tensor((N, H, W, C), dtype),
+        kernel: T.Tensor((KH, KW, C, F), dtype),
+        out: T.Tensor((N, OH, OW, F), dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M),
-                threads=threads) as (bx, by):
+        with T.Kernel(T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M), threads=threads) as (bx, by):
             data_shared = T.alloc_shared((block_M, block_K), dtype)
             kernel_shared = T.alloc_shared((block_K, block_N), dtype)
             out_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -387,11 +335,13 @@ def convolution_im2col(N,
             kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)
             out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
 
-            T.annotate_layout({
-                out_shared: tilelang.layout.make_swizzled_layout(out_shared),
-                data_shared: tilelang.layout.make_swizzled_layout(data_shared),
-                kernel_shared: tilelang.layout.make_swizzled_layout(kernel_shared),
-            })
+            T.annotate_layout(
+                {
+                    out_shared: tilelang.layout.make_swizzled_layout(out_shared),
+                    data_shared: tilelang.layout.make_swizzled_layout(data_shared),
+                    kernel_shared: tilelang.layout.make_swizzled_layout(kernel_shared),
+                }
+            )
 
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
@@ -405,23 +355,9 @@ def convolution_im2col(N,
     return main
 
 
-def run_tvm_ffi_im2col_tma_desc(N,
-                                C,
-                                H,
-                                W,
-                                F,
-                                K,
-                                S,
-                                D,
-                                P,
-                                block_M,
-                                block_N,
-                                block_K,
-                                num_stages=3,
-                                num_threads=256):
+def run_tvm_ffi_im2col_tma_desc(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages=3, num_threads=256):
     """Test im2col TMA descriptor functionality in tvm_ffi backend."""
-    program = convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages,
-                                 num_threads)
+    program = convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages, num_threads)
 
     conv_kernel = tilelang.compile(program, out_idx=-1, execution_backend="tvm_ffi")
 
@@ -439,32 +375,20 @@ def run_tvm_ffi_im2col_tma_desc(N,
         return C
 
     ref_c = ref_program(a, b)
-    tilelang.testing.torch_assert_close(
-        out_c, ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+    tilelang.testing.torch_assert_close(out_c, ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_tvm_ffi_im2col_tma_desc():
     """Test im2col TMA descriptor with tvm_ffi backend."""
     if not check_hopper():
         import pytest
+
         pytest.skip("Test requires Hopper GPU (compute capability 9.0)")
 
     # Small test case for im2col TMA descriptor
     run_tvm_ffi_im2col_tma_desc(
-        N=4,
-        C=64,
-        H=32,
-        W=32,
-        F=64,
-        K=3,
-        S=1,
-        D=1,
-        P=1,
-        block_M=64,
-        block_N=128,
-        block_K=32,
-        num_stages=3,
-        num_threads=256)
+        N=4, C=64, H=32, W=32, F=64, K=3, S=1, D=1, P=1, block_M=64, block_N=128, block_K=32, num_stages=3, num_threads=256
+    )
 
 
 def test_tvm_ffi_l2_persistent_map():
@@ -481,12 +405,11 @@ def test_tvm_ffi_l2_persistent_map():
         block_size=256,
         dtype="float32",
     ):
-
         @T.prim_func
         def kernel(
-                A: T.Tensor((M, N), dtype),
-                B: T.Tensor((M, N), dtype),
-                C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, N), dtype),
+            B: T.Tensor((M, N), dtype),
+            C: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(M * N // block_size, threads=block_size) as bx:
                 # Annotate L2 persistent cache for buffer B
@@ -506,8 +429,12 @@ def test_tvm_ffi_l2_persistent_map():
     kernel = elementwise_add_with_l2_cache(M, N)
 
     source = kernel.get_host_source()
-    assert "__tvm_cuda_stream_set_access_policy_window_packed" in source, "Expected __tvm_cuda_stream_set_access_policy_window_packed in the kernel source"
-    assert "__tvm_cuda_stream_reset_access_policy_window_packed" in source, "Expected __tvm_cuda_stream_reset_access_policy_window_packed in the kernel source"
+    assert "__tvm_cuda_stream_set_access_policy_window_packed" in source, (
+        "Expected __tvm_cuda_stream_set_access_policy_window_packed in the kernel source"
+    )
+    assert "__tvm_cuda_stream_reset_access_policy_window_packed" in source, (
+        "Expected __tvm_cuda_stream_reset_access_policy_window_packed in the kernel source"
+    )
 
     # Create test tensors
     a = torch.randn(M, N, dtype=torch.float32).cuda()

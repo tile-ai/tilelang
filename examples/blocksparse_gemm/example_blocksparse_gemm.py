@@ -19,8 +19,7 @@ parser.add_argument("--m", type=int, default=1024, help="Matrix dimension M")
 parser.add_argument("--n", type=int, default=1024, help="Matrix dimension N")
 parser.add_argument("--k", type=int, default=1024, help="Matrix dimension K")
 parser.add_argument("--sparsity", type=float, default=0.5, help="Sparsity ratio (0-1)")
-parser.add_argument(
-    "--use_autotune", action="store_true", default=False, help="Whether to use autotune")
+parser.add_argument("--use_autotune", action="store_true", default=False, help="Whether to use autotune")
 
 args, _ = parser.parse_known_args()
 M, N, K = args.m, args.n, args.k
@@ -41,17 +40,19 @@ def get_configs():
     thread_num = [128, 256]
     enable_rasterization = [True, False]
 
-    _configs = list(
-        itertools.product(block_M, block_N, block_K, num_stages, thread_num, enable_rasterization))
+    _configs = list(itertools.product(block_M, block_N, block_K, num_stages, thread_num, enable_rasterization))
 
-    return [{
-        "block_M": c[0],
-        "block_N": c[1],
-        "block_K": c[2],
-        "num_stages": c[3],
-        "thread_num": c[4],
-        "enable_rasteration": c[5],
-    } for c in _configs]
+    return [
+        {
+            "block_M": c[0],
+            "block_N": c[1],
+            "block_K": c[2],
+            "num_stages": c[3],
+            "thread_num": c[4],
+            "enable_rasteration": c[5],
+        }
+        for c in _configs
+    ]
 
 
 def ref_program(A, B, BlockMask, block_M, block_N, block_K):
@@ -61,12 +62,10 @@ def ref_program(A, B, BlockMask, block_M, block_N, block_K):
             accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=A.device)
             for k in range(K // block_K):
                 if BlockMask[i, j, k]:
-                    accu += (
-                        A[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
-                            torch.float32) @ B[k * block_K:(k + 1) * block_K,
-                                               j * block_N:(j + 1) * block_N].to(torch.float32))
-            ref_c[i * block_M:(i + 1) * block_M,
-                  j * block_N:(j + 1) * block_N] = accu.to(torch.float16)
+                    accu += A[i * block_M : (i + 1) * block_M, k * block_K : (k + 1) * block_K].to(torch.float32) @ B[
+                        k * block_K : (k + 1) * block_K, j * block_N : (j + 1) * block_N
+                    ].to(torch.float32)
+            ref_c[i * block_M : (i + 1) * block_M, j * block_N : (j + 1) * block_N] = accu.to(torch.float16)
     return ref_c
 
 
@@ -89,28 +88,21 @@ def supply_program(params: List[KernelParam]):
     return input_tensors
 
 
-@tilelang.autotune(configs=get_configs(),)
+@tilelang.autotune(
+    configs=get_configs(),
+)
 @tilelang.jit(out_idx=[-1])
-def blocksparse_matmul(M,
-                       N,
-                       K,
-                       block_M,
-                       block_N,
-                       block_K,
-                       num_stages,
-                       thread_num,
-                       enable_rasteration,
-                       dtype="float16",
-                       accum_dtype="float"):
-
+def blocksparse_matmul(
+    M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_rasteration, dtype="float16", accum_dtype="float"
+):
     block_mask_shape = (M // block_M, N // block_N, K // block_K)
 
     @T.prim_func
     def block_sparse_matmul(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            BlockMask: T.Tensor(block_mask_shape, "bool"),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        BlockMask: T.Tensor(block_mask_shape, "bool"),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -134,7 +126,6 @@ def blocksparse_matmul(M,
 
 
 def main():
-
     # Initialize input matrices A and B on the GPU with half precision
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(K, N).cuda().half()
@@ -147,8 +138,7 @@ def main():
 
         best_config = kernel.config
         best_latency = kernel.latency
-        block_M, block_N, block_K = best_config["block_M"], best_config["block_N"], best_config[
-            "block_K"]
+        block_M, block_N, block_K = best_config["block_M"], best_config["block_N"], best_config["block_K"]
 
         print(f"Best Config: {best_config}")
         print(f"Sparsity Ratio: {sparsity}")
@@ -163,7 +153,8 @@ def main():
             block_K=DEFAULT_BLOCK_K,
             num_stages=DEFAULT_NUM_STAGES,
             thread_num=DEFAULT_THREAD_NUM,
-            enable_rasteration=DEFAULT_ENABLE_RASTERIZATION)
+            enable_rasteration=DEFAULT_ENABLE_RASTERIZATION,
+        )
         block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
         print(f"Using default kernel with block size ({block_M}, {block_N}, {block_K})")
     # Create block mask with desired sparsity

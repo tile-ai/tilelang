@@ -9,7 +9,7 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
     block_N = 64
     num_stages = 0
     threads = 128
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
 
     batch = T.int32(batch)
     heads = T.int32(heads)
@@ -24,7 +24,6 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
     block_mask_dtype = "bool"
 
     def kernel_func(block_M, block_N, num_stages, threads):
-
         @T.macro
         def MMA0(
             K: T.Tensor(shape, dtype),
@@ -36,37 +35,36 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
             by: T.int32,
             bz: T.int32,
         ):
-            T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
+            T.copy(K[bz, by, k * block_N : (k + 1) * block_N, :], K_shared)
             if is_causal:
                 for i, j in T.Parallel(block_M, block_N):
-                    acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
-                                                 -T.infinity(acc_s.dtype))
+                    acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype))
             else:
                 T.clear(acc_s)
             T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
         @T.macro
         def MMA1(
-                V: T.Tensor(shape, dtype),
-                V_shared: T.Tensor([block_M, dim], dtype),
-                acc_s_cast: T.Tensor([block_M, block_N], dtype),
-                acc_o: T.Tensor([block_M, dim], accum_dtype),
-                k: T.int32,
-                by: T.int32,
-                bz: T.int32,
+            V: T.Tensor(shape, dtype),
+            V_shared: T.Tensor([block_M, dim], dtype),
+            acc_s_cast: T.Tensor([block_M, block_N], dtype),
+            acc_o: T.Tensor([block_M, dim], accum_dtype),
+            k: T.int32,
+            by: T.int32,
+            bz: T.int32,
         ):
-            T.copy(V[bz, by, k * block_N:(k + 1) * block_N, :], V_shared)
+            T.copy(V[bz, by, k * block_N : (k + 1) * block_N, :], V_shared)
             T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
         @T.macro
         def Softmax(
-                acc_s: T.Tensor([block_M, block_N], accum_dtype),
-                acc_s_cast: T.Tensor([block_M, block_N], dtype),
-                scores_max: T.Tensor([block_M], accum_dtype),
-                scores_max_prev: T.Tensor([block_M], accum_dtype),
-                scores_scale: T.Tensor([block_M], accum_dtype),
-                scores_sum: T.Tensor([block_M], accum_dtype),
-                logsum: T.Tensor([block_M], accum_dtype),
+            acc_s: T.Tensor([block_M, block_N], accum_dtype),
+            acc_s_cast: T.Tensor([block_M, block_N], dtype),
+            scores_max: T.Tensor([block_M], accum_dtype),
+            scores_max_prev: T.Tensor([block_M], accum_dtype),
+            scores_scale: T.Tensor([block_M], accum_dtype),
+            scores_sum: T.Tensor([block_M], accum_dtype),
+            logsum: T.Tensor([block_M], accum_dtype),
         ):
             T.copy(scores_max, scores_max_prev)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -92,22 +90,21 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
 
         @T.macro
         def Rescale(
-                acc_o: T.Tensor([block_M, dim], accum_dtype),
-                scores_scale: T.Tensor([block_M], accum_dtype),
+            acc_o: T.Tensor([block_M, dim], accum_dtype),
+            scores_scale: T.Tensor([block_M], accum_dtype),
         ):
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] *= scores_scale[i]
 
         @T.prim_func
         def main(
-                Q: T.Tensor(shape, dtype),
-                K: T.Tensor(shape, dtype),
-                V: T.Tensor(shape, dtype),
-                BlockSparseMask: T.Tensor(block_mask_shape, block_mask_dtype),
-                Output: T.Tensor(shape, dtype),
+            Q: T.Tensor(shape, dtype),
+            K: T.Tensor(shape, dtype),
+            V: T.Tensor(shape, dtype),
+            BlockSparseMask: T.Tensor(block_mask_shape, block_mask_dtype),
+            Output: T.Tensor(shape, dtype),
         ):
-            with T.Kernel(
-                    T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
+            with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -122,7 +119,7 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                 logsum = T.alloc_fragment([block_M], accum_dtype)
                 block_mask = T.alloc_local([downsample_len], block_mask_dtype)
 
-                T.copy(Q[bz, by, bx * block_M:(bx + 1) * block_M, :], Q_shared)
+                T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
                 T.fill(acc_o, 0)
                 T.fill(logsum, 0)
                 T.fill(scores_max, -T.infinity(accum_dtype))
@@ -131,19 +128,18 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                     block_mask[vj] = BlockSparseMask[bz, by, bx, vj]
 
                 loop_range = (
-                    T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
-                        (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N))
+                    T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N)
+                )
 
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
                     MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                    Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
-                            scores_sum, logsum)
+                    Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum)
                     Rescale(acc_o, scores_scale)
                     MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
                 for i, j in T.Parallel(block_M, dim):
                     acc_o[i, j] /= logsum[i]
                 T.copy(acc_o, O_shared)
-                T.copy(O_shared, Output[bz, by, bx * block_M:(bx + 1) * block_M, :])
+                T.copy(O_shared, Output[bz, by, bx * block_M : (bx + 1) * block_M, :])
 
         return main
 

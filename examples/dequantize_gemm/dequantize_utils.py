@@ -39,12 +39,10 @@ def torch_convert_bit_twiddling(tensor):
     res0 = val_concat_expanded & mask
     res1 = (val_concat_expanded << 3) & mask
     res2 = (val_concat_expanded << 6) & mask
-    res3 = ((val_concat_expanded << 1) & mask1) | ((val_concat_expanded >> 3) & mask2) | (
-        (val_concat_expanded >> 7) & mask3)
+    res3 = ((val_concat_expanded << 1) & mask1) | ((val_concat_expanded >> 3) & mask2) | ((val_concat_expanded >> 7) & mask3)
 
     # Select the correct result based on position
-    bf16 = torch.where(pos == 0, res0, torch.where(pos == 1, res1,
-                                                   torch.where(pos == 2, res2, res3)))
+    bf16 = torch.where(pos == 0, res0, torch.where(pos == 1, res1, torch.where(pos == 2, res2, res3)))
 
     # Convert to uint16 for .view(torch.bfloat16)
     bf16_uint16 = (bf16 & 0xFFFF).to(torch.uint16)
@@ -110,7 +108,7 @@ def print_bit(name, val):
         val (torch.Tensor): A scalar PyTorch tensor (numeric) whose 32-bit binary representation will be shown.
     """
     val_cpu = val.cpu().item()
-    binary_repr = f'{val_cpu:032b}'
+    binary_repr = f"{val_cpu:032b}"
     print(name, binary_repr)
 
 
@@ -122,7 +120,7 @@ def calc_sim(x, y, name="tensor"):
     x, y = x.data.double(), y.data.double()
     denominator = (x * x + y * y).sum()
     if denominator == 0:
-        print_red_warning(f'{name} all zero')
+        print_red_warning(f"{name} all zero")
         return 1
     sim = 2 * (x * y).sum() / denominator
     return sim
@@ -132,21 +130,19 @@ def assert_similar(x, y, eps=1e-8, name="tensor", data="", raise_assert=True):
     x_mask = torch.isfinite(x)
     y_mask = torch.isfinite(y)
     if not torch.all(x_mask == y_mask):
-        print_red_warning(f'{name} Error: isfinite mask mismatch')
+        print_red_warning(f"{name} Error: isfinite mask mismatch")
         if raise_assert:
             raise AssertionError
-    if not torch.isclose(
-            x.masked_fill(x_mask, 0), y.masked_fill(y_mask, 0), rtol=0, atol=0,
-            equal_nan=True).all():
-        print_red_warning(f'{name} Error: nonfinite value mismatch')
+    if not torch.isclose(x.masked_fill(x_mask, 0), y.masked_fill(y_mask, 0), rtol=0, atol=0, equal_nan=True).all():
+        print_red_warning(f"{name} Error: nonfinite value mismatch")
         if raise_assert:
             raise AssertionError
     x = x.masked_fill(~x_mask, 0)
     y = y.masked_fill(~y_mask, 0)
     sim = calc_sim(x, y, name)
-    diff = (1. - sim).item()
-    print(f'{diff=}')
+    diff = (1.0 - sim).item()
+    print(f"{diff=}")
     if not (0 <= diff <= eps):
-        print_red_warning(f'{name} Error: {diff=}')
+        print_red_warning(f"{name} Error: {diff=}")
         if raise_assert:
             raise AssertionError

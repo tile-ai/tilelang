@@ -28,9 +28,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared.dyn")
@@ -66,7 +66,8 @@ def _compile_and_check(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
             # tilelang.PassConfigKey.TIR_USE_ASYNC_COPY: False,
-        })
+        },
+    )
 
     print(kernel.get_kernel_source())
 
@@ -151,9 +152,9 @@ def matmul_rs(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared.dyn")
@@ -238,9 +239,9 @@ def matmul_sr(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared.dyn")
@@ -326,9 +327,9 @@ def matmul_rr(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared.dyn")
@@ -394,37 +395,48 @@ M_VALUES = [64, 128, 256]
 N_VALUES = [16, 32, 64, 128, 256, 512]
 K_VALUES = [16, 32, 64, 128]
 K_VALUES_8Bit = [32, 64, 128]
-FALSE_TRUE_CASES = ([
-    pytest.param(
-        k,
-        "float16",
-        "float16",
-        "float16",
-        id=f"K{k}-float16-float16-float16",
-    ) for k in K_VALUES
-] + [pytest.param(
-    k,
-    "int8",
-    "int32",
-    "int32",
-    id="K32-int8-int32-int32",
-) for k in K_VALUES_8Bit] + [
-    pytest.param(
-        k,
-        "float8_e5m2",
-        "float32",
-        "float32",
-        id="K32-float8_e5m2-float32-float32",
-    ) for k in K_VALUES_8Bit
-] + [
-    pytest.param(
-        k,
-        "float8_e4m3",
-        "float32",
-        "float32",
-        id="K32-float8_e4m3-float32-float32",
-    ) for k in K_VALUES_8Bit
-])
+FALSE_TRUE_CASES = (
+    [
+        pytest.param(
+            k,
+            "float16",
+            "float16",
+            "float16",
+            id=f"K{k}-float16-float16-float16",
+        )
+        for k in K_VALUES
+    ]
+    + [
+        pytest.param(
+            k,
+            "int8",
+            "int32",
+            "int32",
+            id="K32-int8-int32-int32",
+        )
+        for k in K_VALUES_8Bit
+    ]
+    + [
+        pytest.param(
+            k,
+            "float8_e5m2",
+            "float32",
+            "float32",
+            id="K32-float8_e5m2-float32-float32",
+        )
+        for k in K_VALUES_8Bit
+    ]
+    + [
+        pytest.param(
+            k,
+            "float8_e4m3",
+            "float32",
+            "float32",
+            id="K32-float8_e4m3-float32-float32",
+        )
+        for k in K_VALUES_8Bit
+    ]
+)
 
 
 def _ensure_torch_dtypes(*dtype_names):

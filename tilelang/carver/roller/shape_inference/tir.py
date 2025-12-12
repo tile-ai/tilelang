@@ -5,7 +5,6 @@ from tvm import arith, tir
 
 
 class Statement:
-
     def __init__(self, block_analyzer, block: BlockRV):
         self.block_analyzer = block_analyzer
         self.block = block
@@ -21,9 +20,7 @@ class Statement:
         if len(self.dependent_region[input_name]) != 1:
             return None
         indices = self.dependent_region[input_name][0]
-        iter_map_range = {
-            _iter.var: _iter.dom for _iter in self.block_analyzer.get_spatial_axis(self.block)
-        }
+        iter_map_range = {_iter.var: _iter.dom for _iter in self.block_analyzer.get_spatial_axis(self.block)}
         iter_map_result = arith.detect_iter_map(
             indices,
             iter_map_range,
@@ -77,7 +74,6 @@ class TensorDepNode:
 
 
 class DependencyAnalysis:
-
     def __init__(self, deps):
         self.deps = deps
         # issue: duplicate name when we have two same ops.
@@ -112,8 +108,7 @@ class DependencyAnalysis:
 
     def traverse_dependencies(self, compute):
         if isinstance(compute, Statement):
-            node = self.get_or_create_node(
-                compute.block_analyzer.get_output_buffers(compute.block)[0].name)
+            node = self.get_or_create_node(compute.block_analyzer.get_output_buffers(compute.block)[0].name)
             # Loop through input tensors
             for input_buffer in compute.block_analyzer.get_input_buffers(compute.block):
                 # Get the input node
@@ -167,7 +162,6 @@ class DependencyAnalysis:
 
 
 class InputShapeInference:
-
     def __init__(self, deps: list[Statement]):
         self.deps = deps
         self.target_mapping = {}
@@ -183,16 +177,11 @@ class InputShapeInference:
         if targets in self.target_mapping:
             return self.target_mapping[targets]
         # should be buffer name instead of block name
-        name2dep = {
-            dep.block_analyzer.get_output_buffers(dep.block)[0].name: dep for dep in self.deps
-        }
+        name2dep = {dep.block_analyzer.get_output_buffers(dep.block)[0].name: dep for dep in self.deps}
         mapping = {}
         input_vars = []
         for target in targets:
-            vars = [
-                iter.var
-                for iter in name2dep[target].block_analyzer.get_spatial_axis(name2dep[target].block)
-            ]
+            vars = [iter.var for iter in name2dep[target].block_analyzer.get_spatial_axis(name2dep[target].block)]
             input_vars.append(vars)
             mapping[target] = [vars]
         ana = arith.Analyzer()
@@ -221,13 +210,8 @@ class InputShapeInference:
                     mapping[input_name] = []
                 for indices in indices_list:
                     for region in regions:
-                        vmap = {
-                            k: (tir.Cast(k.dtype, v) if v.dtype != k.dtype else v)
-                            for k, v in zip(ax_vars, indices)
-                        }
-                        region = [
-                            ana.simplify(tir.stmt_functor.substitute(ax, vmap)) for ax in region
-                        ]
+                        vmap = {k: (tir.Cast(k.dtype, v) if v.dtype != k.dtype else v) for k, v in zip(ax_vars, indices)}
+                        region = [ana.simplify(tir.stmt_functor.substitute(ax, vmap)) for ax in region]
                         if not region_exist_in_list(region, mapping[input_name]):
                             mapping[input_name].append(region)
         buffers = []
@@ -241,10 +225,7 @@ class InputShapeInference:
         self.target_mapping[targets] = input_vars, mapping
         return input_vars, mapping
 
-    def infer(self,
-              shape: dict[str, list[arith.ConstIntBound]],
-              rstep: dict[str, int] = None,
-              targets=None):
+    def infer(self, shape: dict[str, list[arith.ConstIntBound]], rstep: dict[str, int] = None, targets=None):
         if rstep is None:
             rstep = {}
         compute_targets = tuple(shape.keys())
@@ -258,8 +239,7 @@ class InputShapeInference:
         for ax in self.reduce_axes:
             # assume the dom.min is always 0, maybe we can extend the IterInfo to include the min value.
             if ax.var.name in rstep:
-                bound = arith.ConstIntBound(
-                    int(ax.dom.min), int(ax.dom.min + min(ax.dom.extent, rstep[ax.var.name]) - 1))
+                bound = arith.ConstIntBound(int(ax.dom.min), int(ax.dom.min + min(ax.dom.extent, rstep[ax.var.name]) - 1))
             else:
                 bound = arith.ConstIntBound(int(ax.dom.min), int(ax.dom.min + ax.dom.extent - 1))
             ana.update(ax.var, bound, True)
@@ -312,14 +292,11 @@ class InputShapeInference:
 
         for name, regions in mapping.items():
             region = regions[0]
-            result[name] = [
-                ana.simplify(tir.stmt_functor.substitute(index, vmap)) for index in region
-            ]
+            result[name] = [ana.simplify(tir.stmt_functor.substitute(index, vmap)) for index in region]
         return result
 
 
 def region_exist_in_list(a, list) -> bool:
-
     def expr_is_same(a, b) -> bool:
         if isinstance(a, tir.IntImm) and isinstance(b, tir.IntImm):
             return a.value == b.value

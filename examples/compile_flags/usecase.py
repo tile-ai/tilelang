@@ -4,12 +4,11 @@ import tilelang.language as T
 
 # @tilelang.jit(compile_flags=["-O3", "--use_fast_math", "--expt-relaxed-constexpr"])
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
@@ -36,8 +35,7 @@ block_K = 32
 
 func = matmul(M, N, K, block_M, block_N, block_K)
 
-jit_kernel = tilelang.compile(
-    func, out_idx=[2], target="cuda", compile_flags="-O3 --use_fast_math --expt-relaxed-constexpr")
+jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", compile_flags="-O3 --use_fast_math --expt-relaxed-constexpr")
 # or jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", compile_flags=["-O3", "--use_fast_math", "--expt-relaxed-constexpr"])
 # or jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", compile_flags=["-O3 --use_fast_math --expt-relaxed-constexpr"])
 

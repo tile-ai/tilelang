@@ -19,6 +19,7 @@
 # Modifications Copyright (c) Microsoft.
 # The code below is mostly copied from apache/tvm common_schedules.py in dlight.
 """Common schedule strategies for TIR."""
+
 from typing import Callable
 
 from tvm import tir

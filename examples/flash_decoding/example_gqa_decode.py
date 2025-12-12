@@ -20,13 +20,7 @@ def get_configs():
     threads = [128]
     _configs = list(itertools.product(block_N, block_H, num_split, num_stages, threads))
 
-    configs = [{
-        'block_N': c[0],
-        'block_H': c[1],
-        'num_split': c[2],
-        'num_stages': c[3],
-        'threads': c[4]
-    } for c in _configs]
+    configs = [{"block_N": c[0], "block_H": c[1], "num_split": c[2], "num_stages": c[3], "threads": c[4]} for c in _configs]
     return configs
 
 
@@ -48,17 +42,13 @@ def get_heuristic_config() -> Tuple[Dict, int]:
 
 # TODO(lei): fix warp specialized and tma lower pass
 def get_pass_configs():
-    return {
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
-    }
+    return {tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(out_idx=[6], pass_configs=get_pass_configs())
-def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split, num_stages,
-              threads):
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split, num_stages, threads):
+    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     shape_q = [batch, heads, dim]
     shape_k = [batch, seqlen_kv, groups, dim]
     shape_v = [batch, seqlen_kv, groups, dim]
@@ -73,11 +63,11 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
 
     @T.macro
     def flash_attn(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
-            Output: T.Tensor([batch, heads, dim], dtype),
+        Q: T.Tensor(shape_q, dtype),
+        K: T.Tensor(shape_k, dtype),
+        V: T.Tensor(shape_v, dtype),
+        mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+        Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
@@ -98,20 +88,19 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
             hid = by
             cur_kv_head = hid // (kv_group_num // valid_block_H)
 
-            T.copy(Q[bid, hid * valid_block_H:hid * valid_block_H + block_H, :], Q_shared)
+            T.copy(Q[bid, hid * valid_block_H : hid * valid_block_H + block_H, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = T.ceildiv((seqlen_kv // num_split), block_N)
             for k in T.Pipelined(loop_range, num_stages=num_stages):
-                T.copy(K[bid, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_shared)
-                T.copy(mask[bid, k * block_N:(k + 1) * block_N, cur_kv_head], mask_local)
+                T.copy(K[bid, k * block_N : (k + 1) * block_N, cur_kv_head, :], K_shared)
+                T.copy(mask[bid, k * block_N : (k + 1) * block_N, cur_kv_head], mask_local)
                 T.clear(acc_s)
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 for i, j in T.Parallel(block_H, block_N):
-                    acc_s[i, j] = T.if_then_else(mask_local[j] != 0, acc_s[i, j],
-                                                 -T.infinity(accum_dtype))
+                    acc_s[i, j] = T.if_then_else(mask_local[j] != 0, acc_s[i, j], -T.infinity(accum_dtype))
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -127,23 +116,23 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
                 T.copy(acc_s, acc_s_cast)
                 for i, j in T.Parallel(block_H, dim):
                     acc_o[i, j] *= scores_scale[i]
-                T.copy(V[bid, k * block_N:(k + 1) * block_N, cur_kv_head, :], V_shared)
+                T.copy(V[bid, k * block_N : (k + 1) * block_N, cur_kv_head, :], V_shared)
                 T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
             for i, j in T.Parallel(block_H, dim):
                 acc_o[i, j] /= logsum[i]
             for i in T.Parallel(block_H):
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
             T.copy(acc_o[:valid_block_H, :], O_shared)
-            T.copy(O_shared, Output[bid, hid * valid_block_H:(hid + 1) * valid_block_H, :])
+            T.copy(O_shared, Output[bid, hid * valid_block_H : (hid + 1) * valid_block_H, :])
 
     @T.macro
     def flash_attn_split(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor(part_shape, dtype),
+        Q: T.Tensor(shape_q, dtype),
+        K: T.Tensor(shape_k, dtype),
+        V: T.Tensor(shape_v, dtype),
+        mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor(part_shape, dtype),
     ):
         with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
@@ -165,7 +154,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
             sid = bz
             cur_kv_head = hid // (kv_group_num // valid_block_H)
 
-            T.copy(Q[bid, hid * valid_block_H:hid * valid_block_H + block_H, :], Q_shared)
+            T.copy(Q[bid, hid * valid_block_H : hid * valid_block_H + block_H, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -174,19 +163,26 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
 
             for k in T.Pipelined(loop_range, num_stages=num_stages):
                 T.copy(
-                    K[bid, (seqlen_kv // num_split) * sid +
-                      k * valid_block_N:(seqlen_kv // num_split) * sid + (k + 1) * valid_block_N,
-                      cur_kv_head, :], K_shared)
+                    K[
+                        bid,
+                        (seqlen_kv // num_split) * sid + k * valid_block_N : (seqlen_kv // num_split) * sid + (k + 1) * valid_block_N,
+                        cur_kv_head,
+                        :,
+                    ],
+                    K_shared,
+                )
                 T.copy(
-                    mask[bid, (seqlen_kv // num_split) * sid +
-                         k * valid_block_N:(seqlen_kv // num_split) * sid + (k + 1) * valid_block_N,
-                         cur_kv_head], mask_local)
+                    mask[
+                        bid,
+                        (seqlen_kv // num_split) * sid + k * valid_block_N : (seqlen_kv // num_split) * sid + (k + 1) * valid_block_N,
+                        cur_kv_head,
+                    ],
+                    mask_local,
+                )
                 T.clear(acc_s)
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 for i, j in T.Parallel(block_H, block_N):
-                    acc_s[i,
-                          j] = T.if_then_else((mask_local[j] != 0) & (j < seqlen_kv // num_split),
-                                              acc_s[i, j], -T.infinity(accum_dtype))
+                    acc_s[i, j] = T.if_then_else((mask_local[j] != 0) & (j < seqlen_kv // num_split), acc_s[i, j], -T.infinity(accum_dtype))
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -203,9 +199,14 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
                 for i, j in T.Parallel(block_H, dim):
                     acc_o[i, j] *= scores_scale[i]
                 T.copy(
-                    V[bid, (seqlen_kv // num_split) * sid +
-                      k * valid_block_N:(seqlen_kv // num_split) * sid + (k + 1) * valid_block_N,
-                      cur_kv_head, :], V_shared)
+                    V[
+                        bid,
+                        (seqlen_kv // num_split) * sid + k * valid_block_N : (seqlen_kv // num_split) * sid + (k + 1) * valid_block_N,
+                        cur_kv_head,
+                        :,
+                    ],
+                    V_shared,
+                )
                 T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
             for i, j in T.Parallel(block_H, dim):
                 acc_o[i, j] /= logsum[i]
@@ -216,14 +217,13 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
                 if i < valid_block_H:
                     glse[bid, hid * valid_block_H + i, sid] = logsum[i]
             T.copy(acc_o[:valid_block_H, :], O_shared)
-            T.copy(O_shared, Output_partial[bid, hid * valid_block_H:(hid + 1) * valid_block_H,
-                                            sid, :])
+            T.copy(O_shared, Output_partial[bid, hid * valid_block_H : (hid + 1) * valid_block_H, sid, :])
 
     @T.macro
     def combine(
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor(part_shape, dtype),
-            Output: T.Tensor(shape_o, dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor(part_shape, dtype),
+        Output: T.Tensor(shape_o, dtype),
     ):
         with T.Kernel(heads, batch, threads=128) as (by, bz):
             po_local = T.alloc_fragment([dim], dtype)
@@ -233,12 +233,14 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
             lse_max_local = T.alloc_fragment([128], accum_dtype)
             scale_local = T.alloc_fragment([128], accum_dtype)
 
-            T.annotate_layout({
-                lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-                lse_max_local: T.Fragment(lse_max_local.shape, forward_thread_fn=lambda i: i),
-                # lse_local: (local_id, thread_id)
-                lse_local: T.Fragment(lse_local.shape, forward_fn=lambda i, j: (j, i)),
-            })
+            T.annotate_layout(
+                {
+                    lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
+                    lse_max_local: T.Fragment(lse_max_local.shape, forward_thread_fn=lambda i: i),
+                    # lse_local: (local_id, thread_id)
+                    lse_local: T.Fragment(lse_local.shape, forward_fn=lambda i, j: (j, i)),
+                }
+            )
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
@@ -263,26 +265,26 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
 
     @T.prim_func
     def flashattn_gqa_decode_split(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor(part_shape, dtype),
-            Output: T.Tensor(shape_o, dtype),
+        Q: T.Tensor(shape_q, dtype),
+        K: T.Tensor(shape_k, dtype),
+        V: T.Tensor(shape_v, dtype),
+        mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor(part_shape, dtype),
+        Output: T.Tensor(shape_o, dtype),
     ):
         flash_attn_split(Q, K, V, mask, glse, Output_partial)
         combine(glse, Output_partial, Output)
 
     @T.prim_func
     def flashattn_gqa_decode_no_split(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
-            glse: T.Tensor([batch, heads, num_split], dtype),
-            Output_partial: T.Tensor(part_shape, dtype),
-            Output: T.Tensor(shape_o, dtype),
+        Q: T.Tensor(shape_q, dtype),
+        K: T.Tensor(shape_k, dtype),
+        V: T.Tensor(shape_v, dtype),
+        mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor(part_shape, dtype),
+        Output: T.Tensor(shape_o, dtype),
     ):
         flash_attn(Q, K, V, mask, Output)
 
@@ -305,27 +307,21 @@ def ref_program(query, key, value, mask, glse, Output_partial):
     dim = query.shape[-1]
     num_head_groups = query.shape[1] // key.shape[2]
     scale = dim**0.5
-    key = rearrange(key, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
-    value = rearrange(value, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
+    key = rearrange(key, "b n h d -> b h n d")  # [batch_size, groups, seqlen_kv, dim]
+    value = rearrange(value, "b n h d -> b h n d")  # [batch_size, groups, seqlen_kv, dim]
 
-    query = rearrange(
-        query, 'b (h g) d -> b g h d',
-        g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
+    query = rearrange(query, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
 
-    scores = einsum(
-        query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, groups, seqlen_kv]
+    scores = einsum(query, key, "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, groups, seqlen_kv]
     if mask is not None:
-        mask = rearrange(mask, 'b s h -> b h s')
+        mask = rearrange(mask, "b s h -> b h s")
         mask = mask.unsqueeze(1)
-        scores = scores.masked_fill(mask == 0, float('-inf'))
+        scores = scores.masked_fill(mask == 0, float("-inf"))
 
-    attention = F.softmax(
-        scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
+    attention = F.softmax(scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
 
-    out = einsum(attention, value,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, groups, dim]
-    out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
+    out = einsum(attention, value, "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
+    out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 
 
@@ -339,16 +335,12 @@ def flash_split_ref(Q, K, V, mask):
     seqlen_kv = K.size(1)
     num_head_groups = nheads // groups
 
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     acc_s = torch.empty((batch, num_head_groups, groups, block_N), device="cuda", dtype=torch.float)
-    acc_s_cast = torch.empty((batch, num_head_groups, groups, block_N),
-                             device="cuda",
-                             dtype=torch.float16)
+    acc_s_cast = torch.empty((batch, num_head_groups, groups, block_N), device="cuda", dtype=torch.float16)
     acc_o = torch.empty((batch, num_head_groups, groups, dim), device="cuda", dtype=torch.float)
     scores_max = torch.empty((batch, num_head_groups, groups), device="cuda", dtype=torch.float)
-    scores_max_prev = torch.empty((batch, num_head_groups, groups),
-                                  device="cuda",
-                                  dtype=torch.float)
+    scores_max_prev = torch.empty((batch, num_head_groups, groups), device="cuda", dtype=torch.float)
     scores_scale = torch.empty((batch, num_head_groups, groups), device="cuda", dtype=torch.float)
     scores_sum = torch.empty((batch, num_head_groups, groups), device="cuda", dtype=torch.float)
     logsum = torch.empty((batch, num_head_groups, groups), device="cuda", dtype=torch.float)
@@ -356,25 +348,25 @@ def flash_split_ref(Q, K, V, mask):
     glogsum = torch.empty((num_split, batch, nheads), device="cuda", dtype=torch.float)
 
     Q_ = Q * scale
-    Q_ = rearrange(Q_, 'b (h g) d -> b g h d', g=num_head_groups)
+    Q_ = rearrange(Q_, "b (h g) d -> b g h d", g=num_head_groups)
 
     for ks in range(num_split):
         acc_o.fill_(0)
         logsum.fill_(0)
-        scores_max.fill_(float('-inf'))
-        scores_max_prev.fill_(float('-inf'))
+        scores_max.fill_(float("-inf"))
+        scores_max_prev.fill_(float("-inf"))
         for i in range(int((seqlen_kv // num_split) / block_N)):
             acc_s.fill_(0)
-            acc_s = torch.einsum('bghd,bkhd->bghk', Q_,
-                                 K[:, (seqlen_kv // num_split) * ks +
-                                   i * block_N:(seqlen_kv // num_split) * ks +
-                                   (i + 1) * block_N, :, :])  # [batch, nheads, block_N]
+            acc_s = torch.einsum(
+                "bghd,bkhd->bghk",
+                Q_,
+                K[:, (seqlen_kv // num_split) * ks + i * block_N : (seqlen_kv // num_split) * ks + (i + 1) * block_N, :, :],
+            )  # [batch, nheads, block_N]
             if mask is not None:
-                mask_local = mask[:, (seqlen_kv // num_split) * ks +
-                                  i * block_N:(seqlen_kv // num_split) * ks + (i + 1) * block_N, :]
-                mask_local = rearrange(mask_local, 'b s h -> b h s')
+                mask_local = mask[:, (seqlen_kv // num_split) * ks + i * block_N : (seqlen_kv // num_split) * ks + (i + 1) * block_N, :]
+                mask_local = rearrange(mask_local, "b s h -> b h s")
                 mask_local = mask_local.unsqueeze(1)
-                acc_s = acc_s.masked_fill(mask_local == 0, float('-inf'))
+                acc_s = acc_s.masked_fill(mask_local == 0, float("-inf"))
             scores_max_prev = scores_max
             scores_max = acc_s.max(dim=-1, keepdim=False).values  # [batch, nheads]
             scores_scale = torch.exp2(scores_max_prev - scores_max)  # [batch, nheads]
@@ -382,15 +374,16 @@ def flash_split_ref(Q, K, V, mask):
             acc_s = torch.exp2(acc_s - scores_max[:, :, :, None])
             acc_s_cast = acc_s.to(torch.float16)  # [batch, nheads, block_N]
             acc_o += torch.einsum(
-                'bghk,bkhd->bghd', acc_s_cast,
-                V[:, (seqlen_kv // num_split) * ks + i * block_N:(seqlen_kv // num_split) * ks +
-                  (i + 1) * block_N, :, :])
+                "bghk,bkhd->bghd",
+                acc_s_cast,
+                V[:, (seqlen_kv // num_split) * ks + i * block_N : (seqlen_kv // num_split) * ks + (i + 1) * block_N, :, :],
+            )
             scores_sum = acc_s.sum(dim=-1, keepdim=False)
             logsum = logsum * scores_scale + scores_sum
-        acc_o_out = rearrange(acc_o, 'b g h d->b (h g) d')
-        logsum_out = rearrange(logsum, 'b g h->b (h g)')
+        acc_o_out = rearrange(acc_o, "b g h d->b (h g) d")
+        logsum_out = rearrange(logsum, "b g h->b (h g)")
         acc_o_out /= logsum_out[:, :, None]
-        logsum_out = torch.log2(logsum_out) + rearrange(scores_max, 'b g h->b (h g)')
+        logsum_out = torch.log2(logsum_out) + rearrange(scores_max, "b g h->b (h g)")
         gacc_o[ks, :, :, :] = acc_o_out
         glogsum[ks, :, :] = logsum_out
 
@@ -426,7 +419,7 @@ def calc_sim(x, y, name="tensor"):
     x, y = x.data.double(), y.data.double()
     denominator = (x * x + y * y).sum()
     if denominator == 0:
-        print_red_warning(f'{name} all zero')
+        print_red_warning(f"{name} all zero")
         return 1
     sim = 2 * (x * y).sum() / denominator
     return sim
@@ -434,28 +427,23 @@ def calc_sim(x, y, name="tensor"):
 
 def assert_similar(x, y, eps=1e-2, name="tensor", assert_=False, print_=True):
     sim = calc_sim(x, y, name)
-    diff = 1. - sim
+    diff = 1.0 - sim
     if not (0 <= diff <= eps):
-        print_red_warning(f'{name} Error: {diff}')
+        print_red_warning(f"{name} Error: {diff}")
         if assert_:
-            raise AssertionError(f'{name} Error: {diff}')
+            raise AssertionError(f"{name} Error: {diff}")
     else:
         if print_:
-            print(f'passed: {name} diff={diff}')
+            print(f"passed: {name} diff={diff}")
 
 
-def main(batch: int = 1,
-         heads: int = 32,
-         groups: int = 8,
-         kv_seqlen: int = 8192,
-         dim: int = 128,
-         tune: bool = False):
+def main(batch: int = 1, heads: int = 32, groups: int = 8, kv_seqlen: int = 8192, dim: int = 128, tune: bool = False):
     batch, heads, groups, kv_seqlen, dim = batch, heads, groups, kv_seqlen, dim
     qk_flops = 2 * batch * heads * kv_seqlen * dim
     pv_flops = 2 * batch * heads * kv_seqlen * dim
     total_flops = qk_flops + pv_flops
 
-    if (not tune):
+    if not tune:
         config, sm_version = get_heuristic_config()
         kernel = flashattn(batch, heads, groups, kv_seqlen, dim, **config)
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
@@ -497,11 +485,11 @@ def main(batch: int = 1,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=1, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--groups', type=int, default=8, help='groups')
-    parser.add_argument('--kv_seqlen', type=int, default=8192, help='kv sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--tune', action='store_true', help='tune configs')
+    parser.add_argument("--batch", type=int, default=1, help="batch size")
+    parser.add_argument("--heads", type=int, default=32, help="heads")
+    parser.add_argument("--groups", type=int, default=8, help="groups")
+    parser.add_argument("--kv_seqlen", type=int, default=8192, help="kv sequence length")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
     main(args.batch, args.heads, args.groups, args.kv_seqlen, args.dim, args.tune)

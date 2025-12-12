@@ -1,5 +1,5 @@
-"""Reproduce: scalar parameter type mismatch (int/bool).
-"""
+"""Reproduce: scalar parameter type mismatch (int/bool)."""
+
 from common import build_scalar_check_kernel
 
 

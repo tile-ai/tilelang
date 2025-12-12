@@ -27,9 +27,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -42,15 +42,7 @@ def matmul(
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 T.copy(B[bx * block_N, k * block_K], B_shared)
-                T.gemm(
-                    A_shared,
-                    B_shared,
-                    C_tmem,
-                    trans_A,
-                    trans_B,
-                    mbar=mbar,
-                    wg_wait=-1,
-                    clear_accum=k == 0)
+                T.gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, mbar=mbar, wg_wait=-1, clear_accum=k == 0)
                 T.mbarrier_wait_parity(mbar, k % 2)
 
             T.copy(C_tmem, C_local)
@@ -74,7 +66,8 @@ def _compile_and_check(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
 
     print(kernel.get_kernel_source())
 
@@ -138,14 +131,15 @@ M_VALUES = [32, 64, 128, 256]
 N_VALUES = [64, 128, 256, 512]
 K_VALUES = [16, 32, 64, 128]
 K_VALUES_8Bit = [32, 64, 128]
-FALSE_TRUE_CASES = ([
+FALSE_TRUE_CASES = [
     pytest.param(
         k,
         "float16",
         "float32",
         "float32",
         id=f"K{k}-float16-float-float",
-    ) for k in K_VALUES
+    )
+    for k in K_VALUES
 ] + [
     pytest.param(
         k,
@@ -153,8 +147,9 @@ FALSE_TRUE_CASES = ([
         "float32",
         "float32",
         id="K32-float8_e5m2-float32-float32",
-    ) for k in K_VALUES_8Bit
-])
+    )
+    for k in K_VALUES_8Bit
+]
 
 TRANS_CASES = [
     pytest.param(False, True, id="nt"),

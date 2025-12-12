@@ -3,27 +3,16 @@ import tilelang.language as T
 
 
 @tilelang.jit
-def matmul(M,
-           N,
-           K,
-           block_M,
-           block_N,
-           block_K,
-           split_k,
-           dtype="float16",
-           accum_dtype="float",
-           out_dtype="float32"):
-
+def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_dtype="float", out_dtype="float32"):
     splitK = K // split_k
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), split_k, threads=128) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), split_k, threads=128) as (bx, by, bz):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)

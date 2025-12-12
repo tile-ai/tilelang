@@ -3,6 +3,7 @@
 We pass an integer for A; wrapper forwards it to the host where a pointer is expected.
 Expected: error like "Expect buffer A_handle to be pointer or tensor" (exact name depends on kernel param).
 """
+
 import torch
 from common import build_matmul_kernel
 

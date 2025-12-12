@@ -5,6 +5,7 @@ from tvm import tir
 from tvm.ir.expr import PrimExpr
 from tvm.script.ir_builder.tir import buffer
 from typing import Any, Callable, Literal, TypeVar, Generic, TYPE_CHECKING
+
 # Python 3.9 compatibility for advanced typing features
 try:
     from typing import ParamSpec, TypeVarTuple, Unpack, Self  # type: ignore[attr-defined]
@@ -37,16 +38,16 @@ from tvm.script.ir_builder import IRBuilder
 import torch
 import inspect
 
-_Shapes = TypeVarTuple('_Shapes')
-_Shape = ParamSpec('_Shape')
-_Stride = ParamSpec('_Stride')
-_DType = TypeVar('_DType')
+_Shapes = TypeVarTuple("_Shapes")
+_Shape = ParamSpec("_Shape")
+_Stride = ParamSpec("_Stride")
+_DType = TypeVar("_DType")
 
-Scope = Literal['global', 'shared.dyn', 'local', 'local.fragment']
+Scope = Literal["global", "shared.dyn", "local", "local.fragment"]
 
 
 class Annot(ABC):
-    '''
+    """
     Base class for tilelang kernel annotations
     Tilelang kernel annotations are used to specify how to interpret each argument of the jit kernel
 
@@ -54,12 +55,12 @@ class Annot(ABC):
     1. determine whether the argument is a kernel argument (i.e., needs to be passed at kernel launch time)
     2. parse the argument value into a hash key for jit caching
     3. convert the argument into a tvm tir argument (tir.Var | tir.Buffer) for prim func generation
-    '''
+    """
 
     def is_kernel_arg(self) -> bool:
-        '''
+        """
         Determine whether the argument is a kernel argument (i.e., needs to be passed at kernel launch time)
-        '''
+        """
         return False
 
     @abstractmethod
@@ -68,29 +69,29 @@ class Annot(ABC):
 
     @abstractmethod
     def get_key_parser(self) -> Callable[[str, Any], tuple[Any, ...]]:
-        '''
+        """
         Return a parser function that converts the argument value into a hash key for jit caching
-        '''
+        """
 
     @abstractmethod
     def create_prim_func_arg(self, name: str, value: Any, vt: ArgVarTable) -> tir.Var | tir.Buffer:
-        '''
+        """
         Convert the argument into a tvm tir argument (tir.Var | tir.Buffer) for prim func generation
-        '''
+        """
 
     def promote(self) -> TIRAnnot | None:
-        '''
+        """
         Try to promote the annotation into a FixedAnnot if possible
         Return None if not promotable
-        '''
+        """
         return None
 
 
 @dataclass
 class ArgVarTable:
-    '''
+    """
     ArgVarTable is used to manage the mapping from argument names to tir.Var objects
-    '''
+    """
 
     var_tab: dict[str, tir.Var] = field(default_factory=dict)
     tmp_name_idx: int = 0
@@ -103,50 +104,49 @@ class ArgVarTable:
         return self.var_tab[name]
 
     def create_tmp_name(self) -> str:
-        name = f'varg_{self.tmp_name_idx}'
+        name = f"varg_{self.tmp_name_idx}"
         self.tmp_name_idx += 1
         return name
 
 
 @dataclass
 class Value(Annot):
-    kind: Literal['static', 'dynamic'] = 'dynamic'
+    kind: Literal["static", "dynamic"] = "dynamic"
     name: str | None = None
     dtype: dt.dtype | None = dt.int32
     value: int | tir.Var | None = None
     creator: Callable[[], Any] | None = None
 
     def is_kernel_arg(self) -> bool:
-        return self.kind == 'dynamic'
+        return self.kind == "dynamic"
 
     @classmethod
     def from_value(cls, value: Any, prefer_name: str = None) -> Value:
         if isinstance(value, int):
             # handle A: T.Tensor[[1024, 1024], ...]
-            return Value(kind='static', name=prefer_name, dtype=dt.int32, value=value)
+            return Value(kind="static", name=prefer_name, dtype=dt.int32, value=value)
         elif isinstance(value, float):
-            return Value(kind='static', name=prefer_name, dtype=dt.float32, value=value)
+            return Value(kind="static", name=prefer_name, dtype=dt.float32, value=value)
         elif isinstance(value, dt.dtype):
             # handle A: T.float32
-            return Value(kind='dynamic', name=prefer_name, dtype=value, value=None)
+            return Value(kind="dynamic", name=prefer_name, dtype=value, value=None)
         elif isinstance(value, Value):
             # handle A: T.dyn
             return value
         elif isinstance(value, TypeVar):
-            return Value(kind='static', name=value.__name__, value=None)
+            return Value(kind="static", name=value.__name__, value=None)
         elif isinstance(value, (tir.Var, PrimExpr)):
             # handle A: T.Tensor[[M, N, K], ...]
             # or primexpr annotation like A: T.Tensor[[M, N * 4 +1]]
             name = value.name if isinstance(value, tir.Var) else prefer_name
-            return Value(kind='dynamic', name=name, dtype=value.dtype, value=value)
-        elif value is Any or value is None or value is dt.dtype or isinstance(
-                value, (type,) + _GenericAliasTypes):
+            return Value(kind="dynamic", name=name, dtype=value.dtype, value=value)
+        elif value is Any or value is None or value is dt.dtype or isinstance(value, (type,) + _GenericAliasTypes):
             # A # no annotation
             # A: Any
             # A: _T
             # A: dt.dtype
             # A: tuple[...]
-            return Value(kind='static', name=prefer_name, value=None)
+            return Value(kind="static", name=prefer_name, value=None)
         else:
             raise TypeError(f"Unsupported Value annotation: {value!r}, type: {type(value)}")
 
@@ -154,7 +154,7 @@ class Value(Annot):
         return Value(kind=self.kind, name=self.name or name, dtype=self.dtype, value=self.value)
 
     def get_key_parser(self):
-        if self.kind == 'static':
+        if self.kind == "static":
             if self.value is not None:
                 expected_value = self.value
 
@@ -172,7 +172,7 @@ class Value(Annot):
         return self.get_key_parser()(target)
 
     def create_prim_func_arg(self, name: str, value: Any, vt: ArgVarTable, create_arg: bool = True):
-        if self.kind == 'static':
+        if self.kind == "static":
             if self.value:
                 assert self.value == value, f"static value mismatch for {name}: expected {self.value}, got {value}"
             return value
@@ -187,18 +187,18 @@ class Value(Annot):
             return tb_tir.arg(name, arg) if create_arg else arg
 
     def __repr__(self):
-        if self.kind == 'static':
+        if self.kind == "static":
             if self.value is not None:
                 return repr(self.value)
             else:
-                return (str(self.name) or '$unnamed') + '$'
+                return (str(self.name) or "$unnamed") + "$"
         else:
             if self.value is not None:
                 return repr(self.value)
             elif self.creator is not None:
                 return repr(self.creator())
             else:
-                return (str(self.name) or '$unnamed') + '$dyn'
+                return (str(self.name) or "$unnamed") + "$dyn"
 
 
 def _canonicalize_dtype(val: Any) -> dt.dtype | None:
@@ -226,7 +226,7 @@ def _shape_with_name(shape: Sequence[Value], base_name: str) -> list[Value]:
         return None
     res = []
     for i, dim in enumerate(shape):
-        dim = dim.with_name(f'{base_name}_{i}')
+        dim = dim.with_name(f"{base_name}_{i}")
         res.append(dim)
     return res
 
@@ -236,7 +236,7 @@ def _try_convert_static_shape(shape: Sequence[Value]):
         return None
     res = []
     for s in shape:
-        if s.kind == 'static' and s.value is not None or s.kind == 'dynamic' and s.value is not None:
+        if s.kind == "static" and s.value is not None or s.kind == "dynamic" and s.value is not None:
             res.append(s.value)
     if len(res) == len(shape):
         return res
@@ -253,7 +253,7 @@ class BufferAnnot(Annot):
 
     @property
     def scope(self):
-        return 'global'
+        return "global"
 
     def __call__(
         self,
@@ -290,8 +290,8 @@ class BufferAnnot(Annot):
         return self.__class__(shape, strides=self.strides, dtype=dtype)
 
     def with_name(self, name: str):
-        shape = _shape_with_name(self.shape, base_name=f'{name}_shape')
-        strides = _shape_with_name(self.strides, base_name=f'{name}_stride')
+        shape = _shape_with_name(self.shape, base_name=f"{name}_shape")
+        strides = _shape_with_name(self.strides, base_name=f"{name}_stride")
         return self.__class__(shape, strides, self.dtype)
 
     def get_key_parser(self):
@@ -299,14 +299,14 @@ class BufferAnnot(Annot):
         if self.shape is not None:
             raw_shapes = False
             shape_len = len(self.shape)
-            static_shape_idx = [i for i, dim in enumerate(self.shape) if dim.kind == 'static']
+            static_shape_idx = [i for i, dim in enumerate(self.shape) if dim.kind == "static"]
             # static_fixed_shape_idx = [i for i, dim in enumerate(self.shape) if dim.kind == 'static' and dim.value is not None]
             # static_fixed_shape_values = [dim.value for dim in self.shape if dim.kind == 'static' and dim.value is not None]
         raw_strides = True
         if self.strides is not None:
             raw_strides = False
             strides_len = len(self.strides)
-            strides_shape_idx = [i for i, dim in enumerate(self.strides) if dim.kind == 'static']
+            strides_shape_idx = [i for i, dim in enumerate(self.strides) if dim.kind == "static"]
             # static_fixed_strides_idx = [i for i, dim in enumerate(self.strides) if dim.kind == 'static' and dim.value is not None]
             # static_fixed_strides_values = [dim.value for dim in self.strides if dim.kind == 'static' and dim.value is not None]
         raw_dtype = True
@@ -340,9 +340,7 @@ class BufferAnnot(Annot):
             if not raw_dtype:
                 dtype = dt.dtype(dtype)
                 if dtype != expected_dtype:
-                    raise TypeError(
-                        f"Tensor dtype mismatch for argument `{name}`, expected {expected_dtype}, got {dtype}"
-                    )
+                    raise TypeError(f"Tensor dtype mismatch for argument `{name}`, expected {expected_dtype}, got {dtype}")
             return shape, strides, dtype
 
         return key_parser
@@ -384,7 +382,6 @@ class BufferAnnot(Annot):
 
 
 class TensorAnnot(BufferAnnot):
-
     @staticmethod
     def _construct_strides(shape: tuple[Any]):
         s, strides = 1, [1]
@@ -419,7 +416,8 @@ class TensorAnnot(BufferAnnot):
             align=align,
             offset_factor=offset_factor,
             buffer_type=buffer_type,
-            axis_separators=axis_separators)
+            axis_separators=axis_separators,
+        )
 
     def promote(self):
         shape = _try_convert_static_shape(self.shape)
@@ -430,7 +428,6 @@ class TensorAnnot(BufferAnnot):
 
 
 class StridedTensorAnnot(BufferAnnot):
-
     def __call__(
         self,
         shape,
@@ -466,30 +463,27 @@ class StridedTensorAnnot(BufferAnnot):
 
 
 class FragmentBufferAnnot(BufferAnnot):
-
     @property
     def scope(self):
-        return 'local.fragment'
+        return "local.fragment"
 
 
 class SharedBufferAnnot(BufferAnnot):
-
     @property
     def scope(self):
-        return 'shared.dyn'
+        return "shared.dyn"
 
 
 class LocalBufferAnnot(BufferAnnot):
-
     @property
     def scope(self):
-        return 'local'
+        return "local"
 
 
 class DynAnnot(Value):
-    '''
+    """
     Dynamic variable annotation represents a tvm tir.Var argument
-    '''
+    """
 
     def __call__(self, dtype: AnyDType = dt.float32, name: str | None = None) -> DynAnnot:
         return tir.Var(name, dtype)
@@ -499,16 +493,16 @@ class DynAnnot(Value):
             params = (params,)
         dtype = None
         if len(params) == 1:
-            name, = params
+            (name,) = params
         if len(params) == 2:
             dtype, name = params
         dtype = _canonicalize_dtype(dtype) or dt.int32
-        return DynAnnot(kind='dynamic', dtype=dtype, name=name)
+        return DynAnnot(kind="dynamic", dtype=dtype, name=name)
 
 
 @dataclass
 class DTypeAnnot(Annot):
-    '''
+    """
     Data type annotation ensures automatically conversion from AnyDType to dtype
     >>> def foo(A: T.dtype): print(A)
     >>> foo(torch.float32)
@@ -517,7 +511,8 @@ class DTypeAnnot(Annot):
     dtype('float32')
     >>> foo('float32')
     dtype('float32')
-    '''
+    """
+
     name: str | None = None
 
     def is_kernel_arg(self) -> bool:
@@ -533,15 +528,16 @@ class DTypeAnnot(Annot):
         return dt.dtype(value)
 
     def __repr__(self):
-        return self.name + '$dtype'
+        return self.name + "$dtype"
 
 
 @dataclass
 class TIRAnnot(Annot):
-    '''
+    """
     TIR annotation is used to directly pass tir.Buffer or tir.Var as kernel arguments
     >>> def foo(A: T.Buffer((128,), T.float32)): ...
-    '''
+    """
+
     data: tir.Buffer | tir.Var
 
     def is_kernel_arg(self) -> bool:
@@ -564,7 +560,6 @@ class TIRAnnot(Annot):
 if TYPE_CHECKING:
 
     class Buffer(Generic[_Shape, _DType]):
-
         def __init__(
             shape: tuple[Unpack[_Shapes]],
             dtype: _DType = "float32",
@@ -576,26 +571,20 @@ if TYPE_CHECKING:
             offset_factor=0,
             buffer_type="",
             axis_separators=None,
-        ) -> Buffer[Callable[[Unpack[_Shapes]]], _DType]:
-            ...
+        ) -> Buffer[Callable[[Unpack[_Shapes]]], _DType]: ...
 
         @property
-        def shape(self: Buffer[Callable[[Unpack[_Shapes]]], _DType]) -> tuple[Unpack[_Shapes]]:
-            ...
+        def shape(self: Buffer[Callable[[Unpack[_Shapes]]], _DType]) -> tuple[Unpack[_Shapes]]: ...
 
         @property
-        def dtype(self: Buffer[Callable[[Unpack[_Shapes]]], _DType]) -> dt.dtype[_DType]:
-            ...
+        def dtype(self: Buffer[Callable[[Unpack[_Shapes]]], _DType]) -> dt.dtype[_DType]: ...
 
         @property
-        def strides(self) -> tuple[tir.PrimExpr]:
-            ...
+        def strides(self) -> tuple[tir.PrimExpr]: ...
 
-        def scope(self) -> Scope:
-            ...
+        def scope(self) -> Scope: ...
 
     class Tensor(Generic[_Shape, _DType], Buffer[_Shape, _DType]):
-
         def __new__(
             shape: tuple[Unpack[_Shapes]],
             dtype: _DType = "float32",
@@ -607,11 +596,9 @@ if TYPE_CHECKING:
             offset_factor=0,
             buffer_type="",
             axis_separators=None,
-        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
-            ...
+        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
 
     class StridedTensor(Generic[_Shape, _Stride, _DType], Buffer[_Shape, _DType]):
-
         def __new__(
             shape: tuple[Unpack[_Shapes]],
             strides=None,
@@ -623,8 +610,7 @@ if TYPE_CHECKING:
             offset_factor=0,
             buffer_type="",
             axis_separators=None,
-        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
-            ...
+        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
 
     class FragmentBuffer(Generic[_Shape, _DType], Buffer[_Shape, _DType]):
         pass
@@ -636,16 +622,12 @@ if TYPE_CHECKING:
         pass
 
     class dyn(tir.Var):
-
-        def __new__(cls, dtype: _DType = "float32", name: str | None = None) -> dyn[_DType]:
-            ...
+        def __new__(cls, dtype: _DType = "float32", name: str | None = None) -> dyn[_DType]: ...
 
         @property
-        def dtype(self: dyn[_DType]) -> dt.dtype[_DType]:
-            ...
+        def dtype(self: dyn[_DType]) -> dt.dtype[_DType]: ...
 
 else:
-
     Buffer = BufferAnnot()
     Tensor = TensorAnnot()
     StridedTensor = StridedTensorAnnot()
@@ -670,7 +652,7 @@ class FuncAnnot:
         ker_arg_names = []
         for param in sig.parameters.values():
             name = param.name
-            annot = func_annots.get(name, Value('static', name))
+            annot = func_annots.get(name, Value("static", name))
             if not isinstance(annot, Annot):
                 if not isinstance(annot, type) and callable(annot):
                     annot = annot()
@@ -679,7 +661,7 @@ class FuncAnnot:
                 elif isinstance(annot, (tir.Buffer, tir.Var)):
                     annot = TIRAnnot(data=annot)
                 else:
-                    annot = Value(kind='static', name=name)
+                    annot = Value(kind="static", name=name)
             annot = annot.promote() or annot
             annots[name] = annot.with_name(name)
             if annot.is_kernel_arg():
@@ -689,9 +671,9 @@ class FuncAnnot:
         return FuncAnnot(sig, arg_names, annots, arg_parser, ker_arg_names)
 
     def parse_key(self, *args, **kws):
-        '''
+        """
         Parse arguments and generates the cache key for jit caching
-        '''
+        """
         args = {name: arg for name, arg in zip(self.arg_names, args)}
         arg_dict = dict(**args, **kws)
         parsed = []
@@ -706,15 +688,15 @@ class FuncAnnot:
         return [arg_dict[name] for name in self.ker_arg_names]
 
     def create_argument(self, name: str, value: Any, vt: ArgVarTable):
-        '''
+        """
         Convert the argument into a tvm tir argument (tir.Var | tir.Buffer) for prim func generation
-        '''
+        """
         return self.annots[name].create_prim_func_arg(name, value, vt)
 
     def is_all_static(self):
-        '''
+        """
         Check if all arguments are static (i.e., can be fully determined at compile time)
-        '''
+        """
         return all(isinstance(annot, TIRAnnot) for annot in self.annots.values())
 
     def get_all_static_args(self):

@@ -12,8 +12,7 @@ bitblas.set_log_level("INFO")
 
 def generate_text_batch(model, tokenizer, prompts, max_length=100):
     # Encode the input prompts as a batch
-    input_ids = tokenizer(
-        prompts, return_tensors="pt", padding=True, truncation=True).input_ids.to(model.device)
+    input_ids = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).input_ids.to(model.device)
 
     # Generate cos and sin values (commented out as not used in generation)
     seq_length = input_ids.size(1)
@@ -37,9 +36,7 @@ def generate_text_batch(model, tokenizer, prompts, max_length=100):
     end_time = time.time()
 
     # Decode the output ids to text
-    generated_texts = [
-        tokenizer.decode(output_id, skip_special_tokens=True) for output_id in output_ids
-    ]
+    generated_texts = [tokenizer.decode(output_id, skip_special_tokens=True) for output_id in output_ids]
 
     generation_time = end_time - start_time
     num_tokens = sum(len(output_id) for output_id in output_ids)
@@ -52,8 +49,8 @@ def generate_text_batch(model, tokenizer, prompts, max_length=100):
 
 
 def profile(model, input_data):
-
     import numpy as np
+
     model = model.cuda()
     model.eval()
 
@@ -74,25 +71,29 @@ def profile(model, input_data):
     return np.mean(times)
 
 
-model_path = '1bitLLM/bitnet_b1_58-3B'
+model_path = "1bitLLM/bitnet_b1_58-3B"
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bs', default=16, type=int)
-    parser.add_argument('--in_seq_len', default=32, type=int)
-    parser.add_argument('--out_seq_len', default=128, type=int)
-    parser.add_argument('--bitblas', action='store_true')
+    parser.add_argument("--bs", default=16, type=int)
+    parser.add_argument("--in_seq_len", default=32, type=int)
+    parser.add_argument("--out_seq_len", default=128, type=int)
+    parser.add_argument("--bitblas", action="store_true")
     args = parser.parse_args()
     bs = args.bs
     in_seq_len = args.in_seq_len
     out_seq_len = args.out_seq_len
     is_bitblas = args.bitblas
-    model = BitnetForCausalLM.from_pretrained(
-        model_path,
-        use_flash_attention_2=True,
-        torch_dtype=torch.float16,
-    ).cuda().half()
+    model = (
+        BitnetForCausalLM.from_pretrained(
+            model_path,
+            use_flash_attention_2=True,
+            torch_dtype=torch.float16,
+        )
+        .cuda()
+        .half()
+    )
     if is_bitblas:
         with torch.no_grad():
             model.quantize()
@@ -109,5 +110,5 @@ def main():
     print(generate_text_batch(model, tokenizer, prompts, max_length=max_length))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

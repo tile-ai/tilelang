@@ -2,12 +2,14 @@ from __future__ import annotations
 import tilelang.language as T
 
 
-def plot_layout(layout: T.Fragment,
-                save_directory="./tmp",
-                name: str = "layout",
-                colormap: str = "RdPu",
-                verbose: bool = False,
-                formats: str | list[str] = "png") -> None:
+def plot_layout(
+    layout: T.Fragment,
+    save_directory="./tmp",
+    name: str = "layout",
+    colormap: str = "RdPu",
+    verbose: bool = False,
+    formats: str | list[str] = "png",
+) -> None:
     """
     Plot the layout of a buffer.
 
@@ -90,11 +92,13 @@ def plot_layout(layout: T.Fragment,
     # Warn if the number of threads is less than the warp size
     if num_threads < warp_size:
         import warnings
+
         warnings.warn(
             f"Layout visualization has {num_threads} threads, which is less than the warp size ({warp_size}). "
             f"For the best viewing experience, it is recommended to have at least {warp_size} threads.",
             UserWarning,
-            stacklevel=2)
+            stacklevel=2,
+        )
     spectral_camp = plt.get_cmap("hsv", warp_size * 6)
 
     for i in range(min(warp_size, num_threads)):
@@ -118,12 +122,7 @@ def plot_layout(layout: T.Fragment,
 
             color = colors[thread_ids[0]]  # Select color based on thread ID
             # Create a rectangle patch for visualization
-            rect = patches.Rectangle((j, i),
-                                     1,
-                                     1,
-                                     linewidth=0.5,
-                                     edgecolor='black',
-                                     facecolor=color)
+            rect = patches.Rectangle((j, i), 1, 1, linewidth=0.5, edgecolor="black", facecolor=color)
             ax.add_patch(rect)  # Add the rectangle to the plot
 
             # Add text annotations inside the rectangles
@@ -139,41 +138,19 @@ def plot_layout(layout: T.Fragment,
             thread_fontsize = min(font_size, font_size * (4 / len(thread_str)))
 
             # Add thread ID text with adjusted font size
-            ax.text(
-                j + 0.5,
-                i + 0.3,
-                thread_str,
-                ha='center',
-                va='center',
-                color='black',
-                fontsize=thread_fontsize)
+            ax.text(j + 0.5, i + 0.3, thread_str, ha="center", va="center", color="black", fontsize=thread_fontsize)
             # Add local ID text with original font size
-            ax.text(
-                j + 0.5,
-                i + 0.7,
-                f"L{local_id}",
-                ha='center',
-                va='center',
-                color='black',
-                fontsize=font_size)
+            ax.text(j + 0.5, i + 0.7, f"L{local_id}", ha="center", va="center", color="black", fontsize=font_size)
 
     # Add row labels to the left side of the plot
     for i in range(nrows):
         text = f"row {i}"
-        ax.text(-0.75, i + 0.5, text, ha='center', va='center', color='black', fontsize=font_size)
+        ax.text(-0.75, i + 0.5, text, ha="center", va="center", color="black", fontsize=font_size)
 
     # Add column labels at the top of the plot
     for j in range(ncols):
         text = f"col {j}"
-        ax.text(
-            j + 0.5,
-            -0.5,
-            text,
-            ha='center',
-            va='center',
-            color='black',
-            fontsize=font_size,
-            rotation=45)
+        ax.text(j + 0.5, -0.5, text, ha="center", va="center", color="black", fontsize=font_size, rotation=45)
 
     # Set the plot limits
     ax.set_xlim(0, ncols)
@@ -189,17 +166,15 @@ def plot_layout(layout: T.Fragment,
     legend_x = 1.0 + (0.5 / fig_width)  # Adjust x position based on figure width
     legend_y = 1.0 + (1.7 / fig_height)  # Adjust y position based on figure height
 
-    legend_patches = [
-        patches.Patch(color='black', label="T: Thread ID"),
-        patches.Patch(color='black', label="L: Local ID")
-    ]
+    legend_patches = [patches.Patch(color="black", label="T: Thread ID"), patches.Patch(color="black", label="L: Local ID")]
     ax.legend(
         handles=legend_patches,
         loc="upper right",
         fontsize=font_size - 4,
         frameon=False,
         bbox_to_anchor=(legend_x, legend_y),  # Dynamic position
-        ncols=2)
+        ncols=2,
+    )
 
     # Create the output directory if it does not exist
     tmp_directory = pathlib.Path(save_directory)
@@ -211,28 +186,29 @@ def plot_layout(layout: T.Fragment,
 
     if isinstance(formats, str):
         formats_str = formats.strip().lower()
-        if formats_str == 'all':
-            formats_list = ['pdf', 'png', 'svg']
+        if formats_str == "all":
+            formats_list = ["pdf", "png", "svg"]
         elif "," in formats_str:
-            formats_list = [f.strip() for f in formats_str.split(',')]
+            formats_list = [f.strip() for f in formats_str.split(",")]
         else:
             formats_list = [formats_str]
     else:
-        raise TypeError(f"Expected str, but got {type(formats).__name__}. "
-                        f"Please pass a string like 'png', 'pdf', 'svg', 'all', or 'png,pdf'.")
+        raise TypeError(
+            f"Expected str, but got {type(formats).__name__}. Please pass a string like 'png', 'pdf', 'svg', 'all', or 'png,pdf'."
+        )
 
     # Save the figure
-    if 'pdf' in formats_list:
+    if "pdf" in formats_list:
         pdf_path = tmp_directory / f"{name}.pdf"
         plt.savefig(pdf_path, bbox_inches="tight")
         print(f"Saved pdf format into {pdf_path}")
 
-    if 'png' in formats_list:
+    if "png" in formats_list:
         png_path = tmp_directory / f"{name}.png"
         plt.savefig(png_path, bbox_inches="tight", transparent=False, dpi=255)
         print(f"Saved png format into {png_path}")
 
-    if 'svg' in formats_list:
+    if "svg" in formats_list:
         svg_path = tmp_directory / f"{name}.svg"
         plt.savefig(svg_path, bbox_inches="tight", format="svg")
         print(f"Saved svg format into {svg_path}")

@@ -131,7 +131,7 @@ class GemmWarpPolicy(IntEnum):
             # Try to find the best balanced partition
             best_m = 1
             best_n = 1
-            best_balance = float('inf')
+            best_balance = float("inf")
 
             # Try all possible combinations that satisfy the constraints
             for m in range(1, min(max_m_warps, num_warps) + 1):
@@ -202,7 +202,7 @@ class GemmBaseParams:
     warp_row_tiles: int | None = None
     warp_col_tiles: int | None = None
     chunk: int | None = None
-    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    policy: GemmWarpPolicy = (GemmWarpPolicy.Square,)
     k_pack: int = 1
 
     def get_warp_size(self) -> int:
@@ -267,17 +267,17 @@ class GemmBaseParams:
 
         # Determine whether block partition parameters need to be inferred
         require_infer = (
-            block_row_warps is None or block_col_warps is None or warp_row_tiles is None or
-            warp_col_tiles is None or chunk is None)
+            block_row_warps is None or block_col_warps is None or warp_row_tiles is None or warp_col_tiles is None or chunk is None
+        )
 
         A_shape, B_shape = A.shape, B.shape
 
         if require_infer:
-            assert (threads is not None), "threads must be provided for auto inference"
+            assert threads is not None, "threads must be provided for auto inference"
             # Auto-inference only supports 2D matrix multiplication
-            assert (
-                len(A_shape) == 2 and len(B_shape) == 2
-            ), f"Only support 2D matrix multiplication, got {len(A_shape)}D and {len(B_shape)}D"
+            assert len(A_shape) == 2 and len(B_shape) == 2, (
+                f"Only support 2D matrix multiplication, got {len(A_shape)}D and {len(B_shape)}D"
+            )
 
             # Analyze A/B shapes
             AM = A_shape[1] if transpose_A else A_shape[0]  # M dimension
@@ -291,8 +291,7 @@ class GemmBaseParams:
             num_warps = threads // warp_size
 
             # Infer block partition using a user-specified policy
-            block_row_warps, block_col_warps = policy.compute_warp_partition(
-                block_M, block_N, num_warps)
+            block_row_warps, block_col_warps = policy.compute_warp_partition(block_M, block_N, num_warps)
             warp_row_tiles = block_M // block_row_warps
             warp_col_tiles = block_N // block_col_warps
             chunk = int(AK)

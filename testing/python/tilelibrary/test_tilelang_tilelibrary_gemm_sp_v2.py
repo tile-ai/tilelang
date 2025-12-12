@@ -34,20 +34,22 @@ def matmul(
 
     @T.prim_func
     def main(
-            A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), metadata_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor((M, K // E_factor), metadata_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout({
-                E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
-                E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
-            })
+            T.annotate_layout(
+                {
+                    E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
+                }
+            )
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
@@ -80,7 +82,7 @@ def run_gemm_ss(
     num_stages=3,
     num_threads=128,
 ):
-    metadata_dtype = 'int32' if ('8' in in_dtype) else 'int16'
+    metadata_dtype = "int32" if ("8" in in_dtype) else "int16"
     program = matmul(
         M,
         N,
@@ -105,7 +107,8 @@ def run_gemm_ss(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
 
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
@@ -142,26 +145,11 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
             low, high = (0, 4) if is_unsigned else (-2, 2)
         else:
             low, high = (0, 128) if is_unsigned else (-64, 64)
-        A = randint_semi_sparse(
-            M,
-            K,
-            low=low,
-            high=high,
-            dtype=map_torch_type(in_dtype),
-            device='cuda',
-            transposed=trans_A)
-        B = torch.randint(
-            size=(N, K) if trans_B else (K, N),
-            low=low,
-            high=high,
-            dtype=map_torch_type(in_dtype),
-            device='cuda')
+        A = randint_semi_sparse(M, K, low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda", transposed=trans_A)
+        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda")
     else:
-        A = randn_semi_sparse(
-            M, K, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
-        B = torch.randn(
-            (N, K) if trans_B else (K, N), device='cuda',
-            dtype=torch.float32).to(map_torch_type(in_dtype))
+        A = randn_semi_sparse(M, K, dtype=map_torch_type(in_dtype), device="cuda", transposed=trans_A)
+        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(map_torch_type(in_dtype))
     return A, B
 
 
@@ -184,8 +172,7 @@ def test_gemm_ss():
     run_gemm_ss(128, 128, 128, True, True, "int8", "int8", "int32", 128, 128, 64, 2)
 
     # float8 tests
-    run_gemm_ss(128, 128, 128, False, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 64,
-                2)
+    run_gemm_ss(128, 128, 128, False, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 64, 2)
     run_gemm_ss(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 64, 2)
 
     # tfloat32 test
@@ -222,10 +209,10 @@ def matmul_rs(
 
     @T.prim_func
     def main(
-            A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), metadata_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor((M, K // E_factor), metadata_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -233,11 +220,13 @@ def matmul_rs(
             E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)
             A_frag = T.alloc_fragment(A_frag_shape, in_dtype)
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout({
-                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
-                E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                    E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
+                }
+            )
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
@@ -271,7 +260,7 @@ def run_gemm_rs(
     num_stages=3,
     num_threads=128,
 ):
-    metadata_dtype = 'int32' if ('8' in in_dtype) else 'int16'
+    metadata_dtype = "int32" if ("8" in in_dtype) else "int16"
     program = matmul_rs(
         M,
         N,
@@ -296,7 +285,8 @@ def run_gemm_rs(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
     C_sp = kernel(A_sparse, E, B)
@@ -376,10 +366,10 @@ def matmul_sr(
 
     @T.prim_func
     def main(
-            A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), metadata_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor((M, K // E_factor), metadata_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -387,11 +377,13 @@ def matmul_sr(
             E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)
             B_frag = T.alloc_fragment(B_frag_shape, in_dtype)
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout({
-                B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
-                E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
-            })
+            T.annotate_layout(
+                {
+                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                    E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
+                }
+            )
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
@@ -425,7 +417,7 @@ def run_gemm_sr(
     num_stages=3,
     num_threads=128,
 ):
-    metadata_dtype = 'int32' if ('8' in in_dtype) else 'int16'
+    metadata_dtype = "int32" if ("8" in in_dtype) else "int16"
     program = matmul_sr(
         M,
         N,
@@ -450,7 +442,8 @@ def run_gemm_sr(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
     C_sp = kernel(A_sparse, E, B)
@@ -531,10 +524,10 @@ def matmul_rr(
 
     @T.prim_func
     def main(
-            A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), metadata_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor((M, K // E_factor), metadata_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -543,12 +536,14 @@ def matmul_rr(
             A_frag = T.alloc_fragment(A_frag_shape, in_dtype)
             B_frag = T.alloc_fragment(B_frag_shape, in_dtype)
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout({
-                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
-                E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                    E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, arch="8.0"),
+                }
+            )
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
@@ -583,7 +578,7 @@ def run_gemm_rr(
     num_stages=3,
     num_threads=128,
 ):
-    metadata_dtype = 'int32' if ('8' in in_dtype) else 'int16'
+    metadata_dtype = "int32" if ("8" in in_dtype) else "int16"
     program = matmul_rr(
         M,
         N,
@@ -608,7 +603,8 @@ def run_gemm_rr(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
     C_sp = kernel(A_sparse, E, B)

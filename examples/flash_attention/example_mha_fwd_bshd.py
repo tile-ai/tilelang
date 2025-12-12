@@ -15,19 +15,13 @@ def get_configs():
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(
-    out_idx=[3], pass_configs={
+    out_idx=[3],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
-def flashattn(batch,
-              heads,
-              seq_len,
-              dim,
-              is_causal,
-              block_M=64,
-              block_N=64,
-              num_stages=1,
-              threads=128):
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    },
+)
+def flashattn(batch, heads, seq_len, dim, is_causal, block_M=64, block_N=64, num_stages=1, threads=128):
+    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
     dtype = "float16"
     accum_dtype = "float"
@@ -43,16 +37,14 @@ def flashattn(batch,
         by: T.int32,
         bz: T.int32,
     ):
-        T.copy(K[bz, k * block_N:(k + 1) * block_N, by, :], K_shared)
+        T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
         if is_causal:
             for i, j in T.Parallel(block_M, block_N):
-                acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
-                                             -T.infinity(acc_s.dtype))
+                acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype))
         else:
             # We shall fill -inf for OOB positions
             for i, j in T.Parallel(block_M, block_N):
-                acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype),
-                                             0)
+                acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0)
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
@@ -65,18 +57,18 @@ def flashattn(batch,
         by: T.int32,
         bz: T.int32,
     ):
-        T.copy(V[bz, k * block_N:(k + 1) * block_N, by, :], V_shared)
+        T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
     def Softmax(
-            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
-            scores_max: T.FragmentBuffer([block_M], accum_dtype),
-            scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-            scores_sum: T.FragmentBuffer([block_M], accum_dtype),
-            logsum: T.FragmentBuffer([block_M], accum_dtype),
+        acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+        acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+        scores_max: T.FragmentBuffer([block_M], accum_dtype),
+        scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+        scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+        scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+        logsum: T.FragmentBuffer([block_M], accum_dtype),
     ):
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
@@ -102,18 +94,18 @@ def flashattn(batch,
 
     @T.macro
     def Rescale(
-            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+        acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+        scores_scale: T.FragmentBuffer([block_M], accum_dtype),
     ):
         for i, j in T.Parallel(block_M, dim):
             acc_o[i, j] *= scores_scale[i]
 
     @T.prim_func
     def main(
-            Q: T.Tensor(shape, dtype),
-            K: T.Tensor(shape, dtype),
-            V: T.Tensor(shape, dtype),
-            Output: T.Tensor(shape, dtype),
+        Q: T.Tensor(shape, dtype),
+        K: T.Tensor(shape, dtype),
+        V: T.Tensor(shape, dtype),
+        Output: T.Tensor(shape, dtype),
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
@@ -129,40 +121,39 @@ def flashattn(batch,
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.copy(Q[bz, bx * block_M:(bx + 1) * block_M, by, :], Q_shared)
+            T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = (
-                T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
-                    (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N))
+                T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N)
+            )
 
             for k in T.Pipelined(loop_range, num_stages=num_stages):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
-                        logsum)
+                Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum)
                 Rescale(acc_o, scores_scale)
                 MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[bz, bx * block_M:(bx + 1) * block_M, by, :])
+            T.copy(O_shared, Output[bz, bx * block_M : (bx + 1) * block_M, by, :])
 
     return main
 
 
 def ref_program(Q, K, V, is_causal):
     dim = Q.size(-1)
-    scores = torch.einsum('bqhd,bkhd->bhqk', Q, K)
+    scores = torch.einsum("bqhd,bkhd->bhqk", Q, K)
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
     if is_causal:
         seq_len = Q.size(1)
         mask = torch.tril(torch.ones(seq_len, seq_len, device=scores.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
-        scores = scores.masked_fill(mask == 0, float('-inf'))
+        scores = scores.masked_fill(mask == 0, float("-inf"))
     attention_weights = F.softmax(scores, dim=-1)
-    output = torch.einsum('bhqk,bkhd->bqhd', attention_weights, V)
+    output = torch.einsum("bhqk,bkhd->bqhd", attention_weights, V)
     return output
 
 
@@ -179,17 +170,8 @@ def main(
     if is_causal:
         total_flops *= 0.5
 
-    if (not tune):
-        kernel = flashattn(
-            batch,
-            heads,
-            seq_len,
-            dim,
-            is_causal,
-            block_M=128,
-            block_N=128,
-            num_stages=1,
-            threads=128)
+    if not tune:
+        kernel = flashattn(batch, heads, seq_len, dim, is_causal, block_M=128, block_N=128, num_stages=1, threads=128)
         ref_program_processed = partial(ref_program, is_causal=is_causal)
         profiler = kernel.get_profiler()
         profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
@@ -213,11 +195,11 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--is_causal', action='store_true', help='causal')
-    parser.add_argument('--tune', action='store_true', help='tune configs')
+    parser.add_argument("--batch", type=int, default=8, help="batch size")
+    parser.add_argument("--heads", type=int, default=32, help="heads")
+    parser.add_argument("--seq_len", type=int, default=4096, help="sequence length")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--is_causal", action="store_true", help="causal")
+    parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.tune)

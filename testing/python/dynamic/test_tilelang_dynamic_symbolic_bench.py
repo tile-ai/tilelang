@@ -25,10 +25,8 @@ def tl_matmul_block_static(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
-    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
-        (M, N), out_dtype)):
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
+    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor((M, N), out_dtype)):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -137,10 +135,8 @@ def tl_matmul_block_dynamic_m(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
-    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
-        (M, N), out_dtype)):
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
+    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor((M, N), out_dtype)):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -247,10 +243,8 @@ def tl_matmul_block_dynamic_mn(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
-    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
-        (M, N), out_dtype)):
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
+    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor((M, N), out_dtype)):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -357,10 +351,8 @@ def tl_matmul_block_dynamic_mnk(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
-    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
-        (M, N), out_dtype)):
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
+    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor((M, N), out_dtype)):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -445,8 +437,7 @@ def assert_tl_matmul_block_dynamic_mnk(
 
 
 def run_assert_tl_matmul_block_static(M, N, K, block_M, block_N, block_K):
-    assert_tl_matmul_block_static(M, N, K, block_M, block_N, block_K, False, False, "float16",
-                                  "float16", "float32")
+    assert_tl_matmul_block_static(M, N, K, block_M, block_N, block_K, False, False, "float16", "float16", "float32")
 
 
 def run_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
@@ -462,10 +453,8 @@ def run_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
         "float16",
         "float16",
         "float32",
-        pass_configs={
-            "tl.disable_dynamic_tail_split": True,
-            "tl.dynamic_alignment": 8
-        })
+        pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 8},
+    )
     assert_tl_matmul_block_dynamic_m(
         M,
         N,
@@ -478,7 +467,8 @@ def run_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
         "float16",
         "float16",
         "float32",
-        pass_configs={"tl.disable_dynamic_tail_split": False})
+        pass_configs={"tl.disable_dynamic_tail_split": False},
+    )
 
 
 def run_assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K):
@@ -494,10 +484,8 @@ def run_assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K):
         "float16",
         "float16",
         "float32",
-        pass_configs={
-            "tl.disable_dynamic_tail_split": True,
-            "tl.dynamic_alignment": 8
-        })
+        pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 8},
+    )
     assert_tl_matmul_block_dynamic_mn(
         M,
         N,
@@ -510,7 +498,8 @@ def run_assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K):
         "float16",
         "float16",
         "float32",
-        pass_configs={"tl.disable_dynamic_tail_split": False})
+        pass_configs={"tl.disable_dynamic_tail_split": False},
+    )
 
 
 def run_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
@@ -526,10 +515,8 @@ def run_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
         "float16",
         "float16",
         "float32",
-        pass_configs={
-            "tl.disable_dynamic_tail_split": True,
-            "tl.dynamic_alignment": 4
-        })
+        pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 4},
+    )
     assert_tl_matmul_block_dynamic_mnk(
         M,
         N,
@@ -542,7 +529,8 @@ def run_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
         "float16",
         "float16",
         "float32",
-        pass_configs={"tl.disable_dynamic_tail_split": False})
+        pass_configs={"tl.disable_dynamic_tail_split": False},
+    )
 
 
 def test_all():

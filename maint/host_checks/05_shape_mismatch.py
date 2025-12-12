@@ -1,5 +1,5 @@
-"""Reproduce: shape constant/symbol mismatch on A.
-"""
+"""Reproduce: shape constant/symbol mismatch on A."""
+
 import torch
 from common import build_matmul_kernel
 

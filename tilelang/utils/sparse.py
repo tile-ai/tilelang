@@ -15,7 +15,7 @@ os.makedirs(_CACHE_DIR, exist_ok=True)
 
 
 def _get_cached_lib():
-    name = 'compress_lib'
+    name = "compress_lib"
 
     if os.path.exists(os.path.join(_CACHE_DIR, f"{name}.so")):
         try:
@@ -32,24 +32,22 @@ def _get_cached_lib():
         name=name,
         sources=[compress_util],
         extra_cuda_cflags=[
-            '-O2',
-            '-std=c++17',
-            '-lineinfo',
-            f'-I{env.CUTLASS_INCLUDE_DIR}',
-            f'-I{env.CUTLASS_INCLUDE_DIR}/../tools/util/include',
-            '-arch=sm_90',
+            "-O2",
+            "-std=c++17",
+            "-lineinfo",
+            f"-I{env.CUTLASS_INCLUDE_DIR}",
+            f"-I{env.CUTLASS_INCLUDE_DIR}/../tools/util/include",
+            "-arch=sm_90",
         ],
         build_directory=_CACHE_DIR,
     )
 
 
-def compress_sm90(A: torch.Tensor, block_k: int,
-                  transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
+def compress_sm90(A: torch.Tensor, block_k: int, transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
     if block_k > 128:
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
-        warnings.warn(
-            f"block_k {block_k} is too large, set to 128 for sm90 compression.", stacklevel=2)
+        warnings.warn(f"block_k {block_k} is too large, set to 128 for sm90 compression.", stacklevel=2)
     # Load the library (will use cache if available)
     compress_lib = _get_cached_lib()
 
@@ -60,8 +58,9 @@ def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torc
     try:
         from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
     except ImportError as err:
-        raise ImportError("SparseSemiStructuredTensor is not available in this version of PyTorch. "
-                          "Please install a compatible version.") from err
+        raise ImportError(
+            "SparseSemiStructuredTensor is not available in this version of PyTorch. Please install a compatible version."
+        ) from err
     orig_val = SparseSemiStructuredTensor._FORCE_CUTLASS
     try:
         SparseSemiStructuredTensor._FORCE_CUTLASS = True
@@ -73,10 +72,7 @@ def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torc
         SparseSemiStructuredTensor._FORCE_CUTLASS = orig_val
 
 
-def compress(A: torch.Tensor,
-             transposed: bool,
-             arch: str | None = None,
-             **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+def compress(A: torch.Tensor, transposed: bool, arch: str | None = None, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compress a tensor using the appropriate method based on the CUDA architecture.
     """
@@ -101,11 +97,10 @@ def compress(A: torch.Tensor,
             A_sp = A_sp.t().contiguous()
         return A_sp, E
     else:
-        raise ValueError(f"Unsupported CUDA compute version: {compute_version}. "
-                         "Supported versions are sm_80 and sm_90.")
+        raise ValueError(f"Unsupported CUDA compute version: {compute_version}. Supported versions are sm_80 and sm_90.")
 
 
-def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transposed: bool = False):
+def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device="cuda", transposed: bool = False):
     """
     Generate a random semi-sparse tensor. The generated tensor will have 2:4 sparsity along the K dimension.
     Args:
@@ -127,13 +122,7 @@ def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transp
     return tensor.to(dtype)  # dtype like float8 might not have randn kernel
 
 
-def randint_semi_sparse(M: int,
-                        K: int,
-                        low: int,
-                        high: int,
-                        dtype=torch.int32,
-                        device='cuda',
-                        transposed: bool = False):
+def randint_semi_sparse(M: int, K: int, low: int, high: int, dtype=torch.int32, device="cuda", transposed: bool = False):
     """
     Generate a random semi-sparse integer tensor. The generated tensor will have 2:4 sparsity along the K dimension.
     Args:
@@ -157,11 +146,7 @@ def randint_semi_sparse(M: int,
     return tensor
 
 
-def arange_semi_sparse(M: int,
-                       K: int,
-                       dtype=torch.float16,
-                       device='cuda',
-                       transposed: bool = False):
+def arange_semi_sparse(M: int, K: int, dtype=torch.float16, device="cuda", transposed: bool = False):
     """
     Generate a semi-sparse tensor with values from 0 to M*K-1. The generated tensor will have 2:4 sparsity along the K dimension.
     Args:

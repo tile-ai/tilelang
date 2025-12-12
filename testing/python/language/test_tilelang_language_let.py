@@ -4,7 +4,6 @@ from tilelang import language as T
 
 
 def test_let_vectorize_load():
-
     @T.prim_func
     def main(A_ptr: T.handle):
         A = T.match_buffer(A_ptr, (16, 16), dtype="float32", align=16)

@@ -33,13 +33,13 @@ args = parser.parse_args()
 ckpt_path = args.ckpt_path
 
 with VllmRunner(
-        ckpt_path,
-        dtype="half",
-        quantization="bitnet_bitblas",
-        gpu_memory_utilization=0.5,
-        # set enforce_eager = False to enable cuda graph
-        # set enforce_eager = True to disable cuda graph
-        enforce_eager=False,
+    ckpt_path,
+    dtype="half",
+    quantization="bitnet_bitblas",
+    gpu_memory_utilization=0.5,
+    # set enforce_eager = False to enable cuda graph
+    # set enforce_eager = True to disable cuda graph
+    enforce_eager=False,
 ) as bitnet_model:
     bitbnet_outputs = bitnet_model.generate_greedy(["Hi, tell me about microsoft?"], max_tokens=128)
     print("bitnet inference output:")

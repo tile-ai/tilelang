@@ -1,7 +1,8 @@
 from .gemm_base import GemmBase
 from tilelang.layout import make_tcgen05mma_swizzled_layout
 from tilelang.intrinsics.tcgen05_macro_generator import (
-    TensorCoreIntrinEmitter,)
+    TensorCoreIntrinEmitter,
+)
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from tvm import tir
@@ -18,10 +19,8 @@ _FLOAT8_DTYPES = {
 
 
 class GemmTCGEN5(GemmBase):
-
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                            True)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, True)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -40,27 +39,20 @@ class GemmTCGEN5(GemmBase):
         b_is_k_major = self.trans_B
 
         if self.is_gemm_ss():
-
             a_continuity = self.M if a_is_k_major else 4 * self.K // m_warp
             b_continuity = self.K if b_is_k_major else self.N // n_warp
 
             return {
                 # WGMMA does not support padding
-                self.A:
-                    make_tcgen05mma_swizzled_layout(
-                        self.A, continuity=a_continuity, k_major=a_is_k_major),
-                self.B:
-                    make_tcgen05mma_swizzled_layout(
-                        self.B, continuity=b_continuity, k_major=b_is_k_major),
-                self.C:
-                    mma_emitter.make_mma_store_layout(self.C),
+                self.A: make_tcgen05mma_swizzled_layout(self.A, continuity=a_continuity, k_major=a_is_k_major),
+                self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         # No special swizzle requirement; rely on existing layout.
         return {}
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                            True)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, True)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -82,11 +74,9 @@ class GemmTCGEN5(GemmBase):
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
 
         if not self.is_gemm_ss():
-            raise ValueError(f"TCGEN5MMA currently only supports gemm_ss, got "
-                             f"A scope {self.A.scope()}, B scope {self.B.scope()}")
+            raise ValueError(f"TCGEN5MMA currently only supports gemm_ss, got A scope {self.A.scope()}, B scope {self.B.scope()}")
 
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.get_tcgen5_mma_meta(
-            self.M, self.N, self.K)
+        atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K)
 
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
             raise ValueError(f"Unsupported A scope for TCGEN5MMA: {self.A.scope()}")
@@ -108,7 +98,7 @@ class GemmTCGEN5(GemmBase):
             raise ValueError("TCGEN5MMA expects 2D coordinates for C buffer access")
 
         accum_dtype = str(self.C.dtype)
-        if accum_dtype not in ["float32", 'float16']:
+        if accum_dtype not in ["float32", "float16"]:
             raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
 
         A_shared = self.ARegion

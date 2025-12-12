@@ -2354,6 +2354,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr
            << ")), \"r\"((int)" << guard << ")\n";
     stream << ");\n";
+  } else if (op->op.same_as(tl::__ldg())) {
+    // Explicit read-only cached load. Preferred form: __ldg(BufferLoad(...)).
+    // Fallback form: __ldg(buffer, index)
+    const BufferLoadNode *bl = nullptr;
+    if (!op->args.empty()) {
+      bl = op->args[0].as<BufferLoadNode>();
+    }
+    if (bl == nullptr) {
+      LOG(FATAL) << "T.__ldg expects a BufferLoad as the first argument.";
+    }
+    const BufferNode *buffer = bl->buffer.get();
+    ICHECK_EQ(bl->indices.size(), 1)
+        << "T.__ldg currently supports flattened 1D buffer accesses.";
+    PrimExpr base = bl->indices[0];
+    // Emit __ldg(&buffer_ref)
+    auto buffer_ref = this->GetBufferRef(op->dtype, buffer, base);
+    os << "__ldg(&(" << buffer_ref << "))";
   } else if (op->op.same_as(builtin::reinterpret())) {
     DataType tgt_dtype = op->dtype;
     DataType src_dtype = op->args[0]->dtype;

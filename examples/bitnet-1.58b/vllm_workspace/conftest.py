@@ -20,7 +20,7 @@ from transformers import (
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig
-from vllm.distributed import (destroy_distributed_environment, destroy_model_parallel)
+from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.sequence import SampleLogprobs
@@ -56,12 +56,13 @@ else:
 
 
 class _ImageAssets(_ImageAssetsBase):
-
     def __init__(self) -> None:
-        super().__init__([
-            ImageAsset("stop_sign"),
-            ImageAsset("cherry_blossom"),
-        ])
+        super().__init__(
+            [
+                ImageAsset("stop_sign"),
+                ImageAsset("cherry_blossom"),
+            ]
+        )
 
     def prompts(self, prompts: _ImageAssetPrompts) -> List[str]:
         """
@@ -136,7 +137,6 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
 
 
 class HfRunner:
-
     def wrap_device(self, input: _T) -> _T:
         if not is_cpu():
             return input.to("cuda")
@@ -166,7 +166,8 @@ class HfRunner:
                 SentenceTransformer(
                     model_name,
                     device="cpu",
-                ).to(dtype=torch_dtype))
+                ).to(dtype=torch_dtype)
+            )
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
@@ -184,7 +185,8 @@ class HfRunner:
                     torch_dtype=torch_dtype,
                     trust_remote_code=True,
                     **model_kwargs,
-                ))
+                )
+            )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
@@ -204,8 +206,7 @@ class HfRunner:
             )
         except Exception:
             logger.warning(
-                "Unable to auto-load processor from HuggingFace for "
-                "model %s. Using tokenizer instead.",
+                "Unable to auto-load processor from HuggingFace for model %s. Using tokenizer instead.",
                 model_name,
             )
             self.processor = self.tokenizer
@@ -362,7 +363,7 @@ class HfRunner:
                     last_hidden_states,
                     self.model.get_output_embeddings().weight.t(),
                 )
-                if (getattr(self.model.get_output_embeddings(), "bias", None) is not None):
+                if getattr(self.model.get_output_embeddings(), "bias", None) is not None:
                     logits += self.model.get_output_embeddings().bias.unsqueeze(0)
                 logprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
                 seq_logprobs.append(logprobs)
@@ -389,8 +390,7 @@ class HfRunner:
             all_output_strs.append(self.tokenizer.decode(output_ids))
 
         outputs = zip(all_output_ids, all_output_strs, all_logprobs)
-        return [(output_ids, output_str, output_logprobs)
-                for output_ids, output_str, output_logprobs in outputs]
+        return [(output_ids, output_str, output_logprobs) for output_ids, output_str, output_logprobs in outputs]
 
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts)
@@ -409,7 +409,6 @@ def hf_runner():
 
 
 class VllmRunner:
-
     def __init__(
         self,
         model_name: str,
@@ -514,12 +513,10 @@ class VllmRunner:
         num_logprobs: int,
         images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
-        greedy_logprobs_params = SamplingParams(
-            temperature=0.0, max_tokens=max_tokens, logprobs=num_logprobs)
+        greedy_logprobs_params = SamplingParams(temperature=0.0, max_tokens=max_tokens, logprobs=num_logprobs)
         outputs = self.generate_w_logprobs(prompts, greedy_logprobs_params, images=images)
 
-        return [(output_ids, output_str, output_logprobs)
-                for output_ids, output_str, output_logprobs in outputs]
+        return [(output_ids, output_str, output_logprobs) for output_ids, output_str, output_logprobs in outputs]
 
     def generate_beam_search(
         self,

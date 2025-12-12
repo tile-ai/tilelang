@@ -55,6 +55,7 @@ class LibraryGenerator:
         verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
+
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
@@ -65,15 +66,12 @@ class LibraryGenerator:
                     "TL_ENABLE_FAST_MATH",
                     "0.1.7",
                 )
-                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH,
-                                                             True)
+                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, True)
             else:
                 enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
 
-            ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL,
-                                                      None)
-            verbose_ptxas_output = self.pass_configs.get(
-                PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
+            ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+            verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
 
             command = [
                 get_nvcc_compiler(),
@@ -102,6 +100,7 @@ class LibraryGenerator:
 
         elif is_hip_target(target):
             from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
+
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
@@ -119,6 +118,7 @@ class LibraryGenerator:
             ]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
+
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
 
@@ -134,9 +134,7 @@ class LibraryGenerator:
         ]
 
         if self.compile_flags:
-            command += [
-                item for flag in self.compile_flags for item in flag.split() if item not in command
-            ]
+            command += [item for flag in self.compile_flags for item in flag.split() if item not in command]
 
         command += ["-o", libpath]
 
@@ -151,8 +149,7 @@ class LibraryGenerator:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
         if ret.returncode != 0:
-            raise RuntimeError(f"Compilation Failed! {command}"
-                               f"\n {self.lib_code}")
+            raise RuntimeError(f"Compilation Failed! {command}\n {self.lib_code}")
 
         self.srcpath = src.name
         self.libpath = libpath

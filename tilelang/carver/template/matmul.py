@@ -65,9 +65,8 @@ class MatmulTemplate(BaseTemplate):
         M, N, K = self.M, self.N, self.K
 
         # Ensure M, N, K are valid positive integers
-        assert (isinstance(M, int) and isinstance(N, int) and
-                isinstance(K, int)), "Only Support Integer M, N, K"
-        assert (M > 0 and N > 0 and K > 0), "M, N, K should be positive"
+        assert isinstance(M, int) and isinstance(N, int) and isinstance(K, int), "Only Support Integer M, N, K"
+        assert M > 0 and N > 0 and K > 0, "M, N, K should be positive"
 
         # Load configuration parameters
         trans_A, trans_B = self.trans_A, self.trans_B
@@ -101,9 +100,7 @@ class MatmulTemplate(BaseTemplate):
             """
             A_indices = [i, k] if not trans_A else [k, i]  # Adjust indexing if A is transposed
             B_indices = [k, j] if not trans_B else [j, k]  # Adjust indexing if B is transposed
-            return te.sum(
-                A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype),
-                axis=k)
+            return te.sum(A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype), axis=k)
 
         # Compute matrix multiplication result
         C = te.compute(

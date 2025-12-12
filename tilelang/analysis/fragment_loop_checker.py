@@ -1,6 +1,6 @@
 from __future__ import annotations
 from tvm import tir
-from tvm.tir import (PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLoad, IntImm)
+from tvm.tir import PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLoad, IntImm
 from tvm.tir.transform import prim_func_pass
 from tvm.tir.stmt_functor import post_order_visit
 
@@ -22,14 +22,14 @@ class _LoopVarUseAnalyzer(PyStmtExprVisitor):
 
 def collect_local_buffer_accesses(statement) -> list[BufferLoad | BufferStore]:
     """
-        Collect local buffer accesses in the loop body.
+    Collect local buffer accesses in the loop body.
 
-        Args:
-            statement: The TIR statement to analyze
+    Args:
+        statement: The TIR statement to analyze
 
-        Returns:
-            Tuple of buffer accesses in the loop body.
-        """
+    Returns:
+        Tuple of buffer accesses in the loop body.
+    """
 
     buffer_accesses = []
 
@@ -44,7 +44,6 @@ def collect_local_buffer_accesses(statement) -> list[BufferLoad | BufferStore]:
 
 @tir.functor.visitor
 class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -75,7 +74,8 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
                         raise ValueError(
                             "[Tilelang Semantic Check] "
                             f"Loop variable {loop.loop_var} in a T.Parallel loop with symbolic range (min={loop.min}, extent={loop.extent}) is used to index "
-                            "a local/fragment buffer, which is not allowed in Tilelang.")
+                            "a local/fragment buffer, which is not allowed in Tilelang."
+                        )
 
             return
 

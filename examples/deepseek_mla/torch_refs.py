@@ -11,7 +11,7 @@ def flash_split_ref(Q, Q_pe, KV, K_pe):
     block_N = 64
     seqlen_kv = KV.size(1)
 
-    scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)
     acc_s = torch.empty((batch, nheads, block_N), device="cuda", dtype=torch.float)
     acc_s_cast = torch.empty((batch, nheads, block_N), device="cuda", dtype=torch.float16)
     acc_o = torch.empty((batch, nheads, dim), device="cuda", dtype=torch.float)
@@ -31,18 +31,20 @@ def flash_split_ref(Q, Q_pe, KV, K_pe):
     for ks in range(num_split):
         acc_o.fill_(0)
         logsum.fill_(0)
-        scores_max.fill_(float('-inf'))
-        scores_max_prev.fill_(float('-inf'))
+        scores_max.fill_(float("-inf"))
+        scores_max_prev.fill_(float("-inf"))
         for i in range(int((seqlen_kv // num_split) / block_N)):
             acc_s.fill_(0)
-            acc_s = torch.einsum('bhd,bkhd->bhk', Q_,
-                                 KV_[:, (seqlen_kv // num_split) * ks +
-                                     i * block_N:(seqlen_kv // num_split) * ks +
-                                     (i + 1) * block_N, :, :])  # [batch, nheads, block_N]
+            acc_s = torch.einsum(
+                "bhd,bkhd->bhk",
+                Q_,
+                KV_[:, (seqlen_kv // num_split) * ks + i * block_N : (seqlen_kv // num_split) * ks + (i + 1) * block_N, :, :],
+            )  # [batch, nheads, block_N]
             acc_s += torch.einsum(
-                'bhd,bkhd->bhk', Q_pe_,
-                K_pe_[:, (seqlen_kv // num_split) * ks + i * block_N:(seqlen_kv // num_split) * ks +
-                      (i + 1) * block_N, :, :])
+                "bhd,bkhd->bhk",
+                Q_pe_,
+                K_pe_[:, (seqlen_kv // num_split) * ks + i * block_N : (seqlen_kv // num_split) * ks + (i + 1) * block_N, :, :],
+            )
             scores_max_prev = scores_max
             scores_max = acc_s.max(dim=-1, keepdim=False).values  # [batch, nheads]
             scores_scale = torch.exp2(scores_max_prev - scores_max)  # [batch, nheads]
@@ -50,9 +52,10 @@ def flash_split_ref(Q, Q_pe, KV, K_pe):
             acc_s = torch.exp2(acc_s - scores_max[:, :, None])
             acc_s_cast = acc_s.to(torch.float16)  # [batch, nheads, block_N]
             acc_o += torch.einsum(
-                'bhk,bkhd->bhd', acc_s_cast,
-                KV_[:, (seqlen_kv // num_split) * ks + i * block_N:(seqlen_kv // num_split) * ks +
-                    (i + 1) * block_N, :, :])
+                "bhk,bkhd->bhd",
+                acc_s_cast,
+                KV_[:, (seqlen_kv // num_split) * ks + i * block_N : (seqlen_kv // num_split) * ks + (i + 1) * block_N, :, :],
+            )
             scores_sum = acc_s.sum(dim=-1, keepdim=False)
             logsum = logsum * scores_scale + scores_sum
         acc_o /= logsum[:, :, None]

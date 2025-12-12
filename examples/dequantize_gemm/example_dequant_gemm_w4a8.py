@@ -42,8 +42,8 @@ def _convert_test(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
 
     @T.prim_func
     def main(
-            B: T.Tensor(B_shape, storage_dtype),
-            C: T.Tensor((N, K), in_dtype),
+        B: T.Tensor(B_shape, storage_dtype),
+        C: T.Tensor((N, K), in_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
@@ -66,13 +66,12 @@ def _convert_test(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
 
 
 def torch_convert(tensor):
-
     def _convert(val, pos):
         assert val.dtype == torch.uint8
         val = val.view(torch.int8)
         mask = (1 << 4) - 1
-        i4_shifted = ((val >> (pos * 4)) & mask)
-        i4 = ((i4_shifted << 4) >> 4)
+        i4_shifted = (val >> (pos * 4)) & mask
+        i4 = (i4_shifted << 4) >> 4
 
         return i4.view(torch.int8)
 
@@ -94,7 +93,6 @@ def ref_program(A, qB):
 
 
 def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
-
     @tilelang.jit(out_idx=[2])
     def kernel_func(block_M, block_N, block_K, num_stages, threads):
         num_elems_per_byte = 8 // num_bits
@@ -109,12 +107,11 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
 
         @T.prim_func
         def main(
-                A: T.Tensor(A_shape, in_dtype),
-                B: T.Tensor(B_shape, storage_dtype),
-                Ct: T.Tensor((N, M), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, storage_dtype),
+            Ct: T.Tensor((N, M), out_dtype),
         ):
-            with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
                 A_shared = T.alloc_shared(A_shared_shape, in_dtype)
                 B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
                 B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
@@ -123,10 +120,12 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
                 Ct_local = T.alloc_fragment((block_N, block_M), accum_dtype)
                 Ct_shared = T.alloc_shared((block_N, block_M), out_dtype)
 
-                T.annotate_layout({
-                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                    Ct_shared: tilelang.layout.make_swizzled_layout(Ct_shared),
-                })
+                T.annotate_layout(
+                    {
+                        B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                        Ct_shared: tilelang.layout.make_swizzled_layout(Ct_shared),
+                    }
+                )
 
                 T.clear(Ct_local)
                 for k in T.Pipelined(K // block_K, num_stages=num_stages):
@@ -143,8 +142,7 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
                     T.copy(B_dequantize_local, B_dequantize_prev_local)
                     T.gemm(B_dequantize_prev_local, A_shared, Ct_local, transpose_B=True)
                 T.copy(Ct_local, Ct_shared)
-                T.copy(Ct_shared, Ct[bx * block_N:(bx + 1) * block_N,
-                                     by * block_M:(by + 1) * block_M])
+                T.copy(Ct_shared, Ct[bx * block_N : (bx + 1) * block_N, by * block_M : (by + 1) * block_M])
 
         return main
 
@@ -167,10 +165,10 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
 
 def main(m=128, n=256, k=256, tune=False):
     total_flops = 2 * m * n * k
-    if (not tune):
-        kernel = matmul_int8xint4(
-            m, n, k, "int8", "int32", "int32", num_bits=4, tune=tune)(
-                block_M=32, block_N=32, block_K=128, num_stages=1, threads=128)
+    if not tune:
+        kernel = matmul_int8xint4(m, n, k, "int8", "int32", "int32", num_bits=4, tune=tune)(
+            block_M=32, block_N=32, block_K=128, num_stages=1, threads=128
+        )
         profiler = kernel.get_profiler()
         profiler.assert_allclose(ref_program, rtol=1e-2, atol=1e-2)
         print("All checks pass.")

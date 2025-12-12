@@ -3,7 +3,8 @@ from tvm import tir
 from tilelang.utils import is_local, is_fragment, is_shared
 from tilelang.primitives.gemm.base import GemmWarpPolicy
 from tilelang.primitives.gemm.gemm_mma import (
-    GemmPrimitiveMMA,)
+    GemmPrimitiveMMA,
+)
 
 
 def gemm(
@@ -20,12 +21,9 @@ def gemm(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     k_pack: int = 1,
 ):
-    assert is_local(A) or is_fragment(A) or is_shared(A), (
-        f"Expected A to be a local, fragment, or shared buffer, but got {A.scope()}")
-    assert is_local(B) or is_fragment(B) or is_shared(B), (
-        f"Expected B to be a local, fragment, or shared buffer, but got {B.scope()}")
-    assert is_local(C) or is_fragment(C), (
-        f"Expected C to be a local, fragment, but got {C.scope()}")
+    assert is_local(A) or is_fragment(A) or is_shared(A), f"Expected A to be a local, fragment, or shared buffer, but got {A.scope()}"
+    assert is_local(B) or is_fragment(B) or is_shared(B), f"Expected B to be a local, fragment, or shared buffer, but got {B.scope()}"
+    assert is_local(C) or is_fragment(C), f"Expected C to be a local, fragment, but got {C.scope()}"
     # TODO(lei): Now we only support Nvidia GPUs
     # Must enhance the design to implement runtime lowering
     # for different targets (hip mfma for example)

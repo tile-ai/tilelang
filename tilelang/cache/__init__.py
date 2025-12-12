@@ -1,4 +1,5 @@
 """The cache utils with class and database persistence - Init file"""
+
 from __future__ import annotations
 
 from typing import Literal
@@ -18,8 +19,7 @@ def cached(
     *args,
     target: str | Target = "auto",
     target_host: str | Target = None,
-    execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"]
-    | None = "auto",
+    execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] | None = "auto",
     verbose: bool | None = False,
     pass_configs: dict | None = None,
     compile_flags: list[str] | str | None = None,
@@ -36,7 +36,8 @@ def cached(
         execution_backend=execution_backend,
         verbose=verbose,
         pass_configs=pass_configs,
-        compile_flags=compile_flags)
+        compile_flags=compile_flags,
+    )
 
 
 def clear_cache():
@@ -47,9 +48,11 @@ def clear_cache():
         RuntimeError: Always raised to warn users to clear the cache manually.
     """
     cache_dir = env.TILELANG_CACHE_DIR
-    raise RuntimeError("tilelang.clear_cache() is disabled because deleting the cache directory "
-                       "is dangerous. If you accept the risk, remove it manually with "
-                       f"`rm -rf '{cache_dir}'`.")
+    raise RuntimeError(
+        "tilelang.clear_cache() is disabled because deleting the cache directory "
+        "is dangerous. If you accept the risk, remove it manually with "
+        f"`rm -rf '{cache_dir}'`."
+    )
 
 
 if env.TILELANG_CLEAR_CACHE.lower() in ("1", "true", "yes", "on"):

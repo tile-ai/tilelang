@@ -12,7 +12,6 @@ from tilelang.engine.param import KernelParam
 
 
 class MetalKernelAdapter(BaseKernelAdapter):
-
     def __init__(
         self,
         params: list[KernelParam],
@@ -28,10 +27,10 @@ class MetalKernelAdapter(BaseKernelAdapter):
     ):
         self.kernel_global_source = kernel_global_source
         if isinstance(func_or_mod, tir.PrimFunc):
-            func_name = func_or_mod.attrs['global_symbol']
+            func_name = func_or_mod.attrs["global_symbol"]
         else:
             func_name = func_or_mod.__name__
-        self.kernel_name = func_name + '_kernel'
+        self.kernel_name = func_name + "_kernel"
         self.verbose = verbose
 
         self.block_info = [1, 1, 1]
@@ -39,7 +38,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
 
         for var, func in device_mod.functions.items():
             assert var.name_hint == self.kernel_name
-            thread_extent = func.attrs['thread_extent']
+            thread_extent = func.attrs["thread_extent"]
             for tag, extent in thread_extent.items():
                 if "threadIdx" in tag:
                     self.block_info["xyz".index(tag[-1])] = extent
@@ -47,7 +46,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
                     self.grid_info["xyz".index(tag[-1])] = extent
             break
         else:
-            raise AssertionError(f'no kernel with name {func_name}')
+            raise AssertionError(f"no kernel with name {func_name}")
 
         # print(self.block_info, self.grid_info)
         super().__init__(func_or_mod, result_idx=result_idx, params=params)
@@ -55,15 +54,12 @@ class MetalKernelAdapter(BaseKernelAdapter):
     _kernel = None
 
     def _convert_torch_func(self) -> Callable:
-
         if self._kernel is None:
-
             _kernel = getattr(torch.mps.compile_shader(self.kernel_global_source), self.kernel_name)
             _threads = [x * y for (x, y) in zip(self.block_info, self.grid_info)]
 
             @wraps(_kernel)
             def launcher(*args: torch.Tensor):
-
                 return _kernel(
                     *args,
                     threads=_threads,

@@ -5,7 +5,7 @@ import tilelang.testing
 from tvm import DataType
 import tilelang.language as T
 from tilelang.intrinsics.utils import get_swizzle_layout
-from tilelang.intrinsics.mma_macro_generator import (TensorCoreIntrinEmitter)
+from tilelang.intrinsics.mma_macro_generator import TensorCoreIntrinEmitter
 
 tilelang.testing.set_random_seed(0)
 
@@ -96,12 +96,11 @@ def tl_matmul_macro(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
@@ -109,10 +108,12 @@ def tl_matmul_macro(
             B_local = T.alloc_local((warp_cols * local_size), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size), accum_dtype)
 
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)
@@ -120,7 +121,6 @@ def tl_matmul_macro(
             T.clear(C_local)
 
             for ko in T.Pipelined((K // block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -130,7 +130,6 @@ def tl_matmul_macro(
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -207,8 +206,7 @@ def tl_matmul_block(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
-    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
-        (M, N), out_dtype)):
+    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor((M, N), out_dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
@@ -306,8 +304,7 @@ def tl_matmul_block_all_dynamic(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
-    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
-        (M, N), out_dtype)):
+    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor((M, N), out_dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
@@ -417,7 +414,7 @@ def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
     )
     pass_configs = {
         tilelang.PassConfigKey.TL_DISABLE_DYNAMIC_TAIL_SPLIT: dynamic_alignment != 0,
-        tilelang.PassConfigKey.TL_DYNAMIC_ALIGNMENT: dynamic_alignment
+        tilelang.PassConfigKey.TL_DYNAMIC_ALIGNMENT: dynamic_alignment,
     }
     if M % 64 == 0 or N % 64 == 0 or K % 64 != 0:
         # workaround for hopper tma lower pass
@@ -462,55 +459,31 @@ def test_assert_tl_matmul_macro():
 
 
 def test_assert_tl_matmul_block():
-    assert_tl_matmul_block_correctness(128, 128, 128, False, False, "float16", "float16", "float16",
-                                       64, 64, 32)
-    assert_tl_matmul_block_correctness(67, 128, 128, False, False, "float16", "float16", "float16",
-                                       64, 64, 32)
-    assert_tl_matmul_block_correctness(36, 128, 128, False, False, "float16", "float16", "float16",
-                                       64, 64, 32)
+    assert_tl_matmul_block_correctness(128, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
+    assert_tl_matmul_block_correctness(67, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
+    assert_tl_matmul_block_correctness(36, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
 
 
 def test_assert_tl_matmul_block_all_dynamic():
-    assert_tl_matmul_block_all_dynamic_correctness(128, 128, 128, False, False, "float16",
-                                                   "float16", "float16", 64, 64, 32)
-    assert_tl_matmul_block_all_dynamic_correctness(67, 128, 128, False, False, "float16", "float16",
-                                                   "float16", 64, 64, 32)
-    assert_tl_matmul_block_all_dynamic_correctness(36, 128, 128, False, False, "float16", "float16",
-                                                   "float16", 64, 64, 32)
+    assert_tl_matmul_block_all_dynamic_correctness(128, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
+    assert_tl_matmul_block_all_dynamic_correctness(67, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
+    assert_tl_matmul_block_all_dynamic_correctness(36, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
 
 
 def test_assert_tl_matmul_block_all_dynamic_with_pass_config():
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        128,
-        128,
-        128,
-        False,
-        False,
-        "float16",
-        "float16",
-        "float16",
-        64,
-        64,
-        32,
-        dynamic_alignment=8)
+        128, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=8
+    )
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        64,
-        128,
-        128,
-        False,
-        False,
-        "float16",
-        "float16",
-        "float16",
-        64,
-        64,
-        32,
-        dynamic_alignment=8)
+        64, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=8
+    )
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        64, 128, 60, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=4)
+        64, 128, 60, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=4
+    )
     # Tail split is enabled with dynamic alignment 0
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        64, 128, 64, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=0)
+        64, 128, 64, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=0
+    )
 
 
 if __name__ == "__main__":
