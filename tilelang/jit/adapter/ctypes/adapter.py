@@ -1,4 +1,5 @@
 """The profiler and convert to torch utils"""
+
 from __future__ import annotations
 import torch
 from ..base import BaseKernelAdapter
@@ -41,18 +42,20 @@ class CtypesKernelAdapter(BaseKernelAdapter):
     param_dtypes: list[torch.dtype] | None = None  # Cache for parameter dtypes
     param_shapes: list[list] | None = None  # Cache for parameter shapes
 
-    def __init__(self,
-                 params: list[TensorType],
-                 result_idx: list[int],
-                 target: str,
-                 func_or_mod: tir.PrimFunc | tvm.IRModule,
-                 host_mod: tvm.IRModule | None = None,
-                 device_mod: tvm.IRModule | None = None,
-                 host_kernel_source: str | None = None,
-                 device_kernel_source: str | None = None,
-                 verbose: bool = False,
-                 pass_configs: dict[str, Any] | None = None,
-                 compile_flags: list[str] | None = None):
+    def __init__(
+        self,
+        params: list[TensorType],
+        result_idx: list[int],
+        target: str,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_mod: tvm.IRModule | None = None,
+        device_mod: tvm.IRModule | None = None,
+        host_kernel_source: str | None = None,
+        device_kernel_source: str | None = None,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None,
+    ):
         """Initialize the adapter with the given TIR function or module.
 
         Args:
@@ -109,17 +112,19 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self._post_init()
 
     @classmethod
-    def from_database(cls,
-                      params: list[TensorType],
-                      result_idx: list[int],
-                      target: str,
-                      func_or_mod: tir.PrimFunc | tvm.IRModule,
-                      host_kernel_source: str,
-                      device_kernel_source: str,
-                      kernel_lib_path: str,
-                      verbose: bool = False,
-                      pass_configs: dict[str, Any] | None = None,
-                      compile_flags: list[str] | None = None):
+    def from_database(
+        cls,
+        params: list[TensorType],
+        result_idx: list[int],
+        target: str,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_kernel_source: str,
+        device_kernel_source: str,
+        kernel_lib_path: str,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None,
+    ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -175,15 +180,13 @@ class CtypesKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
-                    if (isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and
-                        (shape not in params)):
+                    if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
                         dynamic_symbolic_map[shape] = (0, i, j)
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, stride in enumerate(buffer.strides):
-                    if (isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and
-                        (stride not in params)):
+                    if isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
@@ -192,9 +195,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         Converts PyTorch tensor pointers to C void pointers for ctypes interface.
         """
-        ctypes_args = [
-            ctypes.c_void_p(arr.data_ptr()) if not isinstance(arr, int) else arr for arr in args
-        ]
+        ctypes_args = [ctypes.c_void_p(arr.data_ptr()) if not isinstance(arr, int) else arr for arr in args]
         ctypes_args.append(ctypes.c_void_p(stream))
         self.lib.call(*ctypes_args)
 
@@ -288,7 +289,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
     @property
     def is_dynamic(self):
         """Indicates whether the kernel handles dynamic shapes."""
-        return (self.dynamic_symbolic_map is not None and len(self.dynamic_symbolic_map) > 0)
+        return self.dynamic_symbolic_map is not None and len(self.dynamic_symbolic_map) > 0
 
     def get_kernel_source(self, kernel_only: bool = False):
         """Returns the source code of the compiled kernel."""

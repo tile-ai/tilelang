@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Wrapping functions to bridge frameworks with DLPack support to TVM"""
+
 from tvm import runtime
 
 
@@ -45,12 +46,8 @@ def convert_func(tvm_func, tensor_type, to_dlpack_func):
 
     def adapt_tensor(arg):
         if isinstance(arg, tensor_type):
-            if arg.dtype in {
-                    torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2,
-                    torch.float8_e5m2fnuz
-            }:
-                return runtime.from_dlpack(to_dlpack_func(arg.view(torch.int8)))._create_view(
-                    arg.shape, dtype=float8_dtype_map[arg.dtype])
+            if arg.dtype in {torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz}:
+                return runtime.from_dlpack(to_dlpack_func(arg.view(torch.int8)))._create_view(arg.shape, dtype=float8_dtype_map[arg.dtype])
             return runtime.from_dlpack(to_dlpack_func(arg))
         return arg
 

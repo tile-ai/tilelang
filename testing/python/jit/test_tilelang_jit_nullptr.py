@@ -7,22 +7,13 @@ from tilelang.utils import map_torch_type
 
 
 @tl.jit
-def tensor_null_test(M,
-                     N,
-                     K,
-                     block_M,
-                     block_N,
-                     block_K,
-                     dtype="float16",
-                     accum_dtype="float",
-                     with_bias=False):
-
+def tensor_null_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float", with_bias=False):
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), accum_dtype),
-            Bias: T.Tensor((N), accum_dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), accum_dtype),
+        Bias: T.Tensor((N), accum_dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
@@ -48,12 +39,10 @@ def tensor_null_test(M,
 
 
 def run_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-
     a = torch.randn(M, K, device="cuda", dtype=map_torch_type(dtype))
     b = torch.randn(N, K, device="cuda", dtype=map_torch_type(dtype))
     c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))
-    kernel = tensor_null_test(
-        M, N, K, block_M, block_N, block_K, dtype, accum_dtype, with_bias=False)
+    kernel = tensor_null_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype, with_bias=False)
     kernel(a, b, c, None)
 
 

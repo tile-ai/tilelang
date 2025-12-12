@@ -8,7 +8,6 @@ from tvm.tir.expr import IntImm, Var
 
 
 def test_argument():
-
     @T.prim_func
     def test_argument(
         t_1: T.bool,
@@ -41,6 +40,7 @@ def test_argument():
 
 def test_expr():
     from tilelang.language.v2.dtypes import _all_dtypes
+
     errors = []
     for name in _all_dtypes:
         dtype = getattr(T, name)
@@ -116,33 +116,32 @@ def test_expr():
 
 
 def test_dtype_str_repr():
-
     @T.prim_func
     def test_str_repr():
-        buf_1 = T.alloc_buffer((1,), dtype=T.bool, scope='shared')  # noqa F841
-        buf_2 = T.alloc_buffer((1,), dtype=T.short, scope='shared')  # noqa F841
-        buf_3 = T.alloc_buffer((1,), dtype=T.int, scope='shared')  # noqa F841
-        buf_4 = T.alloc_buffer((1,), dtype=T.long, scope='shared')  # noqa F841
-        buf_5 = T.alloc_buffer((1,), dtype=T.half, scope='shared')  # noqa F841
-        buf_6 = T.alloc_buffer((1,), dtype=T.float, scope='shared')  # noqa F841
-        buf_7 = T.alloc_buffer((1,), dtype=T.long, scope='shared')  # noqa F841
-        buf_8 = T.alloc_buffer((1,), dtype=T.int8, scope='shared')  # noqa F841
-        buf_9 = T.alloc_buffer((1,), dtype=T.int16, scope='shared')  # noqa F841
-        buf_10 = T.alloc_buffer((1,), dtype=T.int32, scope='shared')  # noqa F841
-        buf_11 = T.alloc_buffer((1,), dtype=T.int64, scope='shared')  # noqa F841
-        buf_12 = T.alloc_buffer((1,), dtype=T.uint8, scope='shared')  # noqa F841
-        buf_13 = T.alloc_buffer((1,), dtype=T.uint16, scope='shared')  # noqa F841
-        buf_14 = T.alloc_buffer((1,), dtype=T.uint32, scope='shared')  # noqa F841
-        buf_15 = T.alloc_buffer((1,), dtype=T.uint64, scope='shared')  # noqa F841
-        buf_16 = T.alloc_buffer((1,), dtype=T.float8_e4m3fn, scope='shared')  # noqa F841
-        buf_17 = T.alloc_buffer((1,), dtype=T.float8_e4m3fnuz, scope='shared')  # noqa F841
-        buf_18 = T.alloc_buffer((1,), dtype=T.float8_e5m2, scope='shared')  # noqa F841
-        buf_19 = T.alloc_buffer((1,), dtype=T.float8_e5m2fnuz, scope='shared')  # noqa F841
-        buf_20 = T.alloc_buffer((1,), dtype=T.float8_e8m0fnu, scope='shared')  # noqa F841
-        buf_21 = T.alloc_buffer((1,), dtype=T.float16, scope='shared')  # noqa F841
-        buf_22 = T.alloc_buffer((1,), dtype=T.bfloat16, scope='shared')  # noqa F841
-        buf_23 = T.alloc_buffer((1,), dtype=T.float32, scope='shared')  # noqa F841
-        buf_24 = T.alloc_buffer((1,), dtype=T.float64, scope='shared')  # noqa F841
+        buf_1 = T.alloc_buffer((1,), dtype=T.bool, scope="shared")  # noqa F841
+        buf_2 = T.alloc_buffer((1,), dtype=T.short, scope="shared")  # noqa F841
+        buf_3 = T.alloc_buffer((1,), dtype=T.int, scope="shared")  # noqa F841
+        buf_4 = T.alloc_buffer((1,), dtype=T.long, scope="shared")  # noqa F841
+        buf_5 = T.alloc_buffer((1,), dtype=T.half, scope="shared")  # noqa F841
+        buf_6 = T.alloc_buffer((1,), dtype=T.float, scope="shared")  # noqa F841
+        buf_7 = T.alloc_buffer((1,), dtype=T.long, scope="shared")  # noqa F841
+        buf_8 = T.alloc_buffer((1,), dtype=T.int8, scope="shared")  # noqa F841
+        buf_9 = T.alloc_buffer((1,), dtype=T.int16, scope="shared")  # noqa F841
+        buf_10 = T.alloc_buffer((1,), dtype=T.int32, scope="shared")  # noqa F841
+        buf_11 = T.alloc_buffer((1,), dtype=T.int64, scope="shared")  # noqa F841
+        buf_12 = T.alloc_buffer((1,), dtype=T.uint8, scope="shared")  # noqa F841
+        buf_13 = T.alloc_buffer((1,), dtype=T.uint16, scope="shared")  # noqa F841
+        buf_14 = T.alloc_buffer((1,), dtype=T.uint32, scope="shared")  # noqa F841
+        buf_15 = T.alloc_buffer((1,), dtype=T.uint64, scope="shared")  # noqa F841
+        buf_16 = T.alloc_buffer((1,), dtype=T.float8_e4m3fn, scope="shared")  # noqa F841
+        buf_17 = T.alloc_buffer((1,), dtype=T.float8_e4m3fnuz, scope="shared")  # noqa F841
+        buf_18 = T.alloc_buffer((1,), dtype=T.float8_e5m2, scope="shared")  # noqa F841
+        buf_19 = T.alloc_buffer((1,), dtype=T.float8_e5m2fnuz, scope="shared")  # noqa F841
+        buf_20 = T.alloc_buffer((1,), dtype=T.float8_e8m0fnu, scope="shared")  # noqa F841
+        buf_21 = T.alloc_buffer((1,), dtype=T.float16, scope="shared")  # noqa F841
+        buf_22 = T.alloc_buffer((1,), dtype=T.bfloat16, scope="shared")  # noqa F841
+        buf_23 = T.alloc_buffer((1,), dtype=T.float32, scope="shared")  # noqa F841
+        buf_24 = T.alloc_buffer((1,), dtype=T.float64, scope="shared")  # noqa F841
 
 
 # not supported now
@@ -205,7 +204,6 @@ def test_dtype_str_repr():
 
 
 def test_var_assign():
-
     @tilelang.jit(out_idx=-1)
     @T.prim_func
     def test_var_assign(A: T.Tensor((2,), T.int32)):
@@ -223,7 +221,6 @@ def test_var_assign():
 
 
 def test_marco_return():
-
     @T.macro
     def macro_return_constant():
         return 0
@@ -258,11 +255,10 @@ def test_marco_return():
 
 
 def test_prim_func_generator():
-
     @T.prim_func(generator=True)
     def prim_func_gen(
-            A=T.Tensor((128,), T.float32),  # noqa: B008
-            B=T.Tensor((128,), T.float32),  # noqa: B008
+        A=T.Tensor((128,), T.float32),  # noqa: B008
+        B=T.Tensor((128,), T.float32),  # noqa: B008
     ):
         with T.Kernel(128) as (tx,):
             T.copy(A[tx], B[tx])
@@ -277,7 +273,6 @@ def test_prim_func_generator():
 
 
 def test_serial_for_with_step():
-
     @tilelang.jit(out_idx=-1)
     @T.prim_func
     def test_stepped_serial(A: T.Tensor((10,), T.int32)):
@@ -291,7 +286,7 @@ def test_serial_for_with_step():
 
     ker = test_stepped_serial()
     res = ker()
-    ref = torch.tensor([1, 2, 1, 2, 1, 2, 1, 2, 1, 2], dtype=torch.int32, device='cuda')
+    ref = torch.tensor([1, 2, 1, 2, 1, 2, 1, 2, 1, 2], dtype=torch.int32, device="cuda")
     assert torch.all(res == ref), f"Expected {ref}, but got {res}"
 
     @tilelang.jit(out_idx=-1)
@@ -304,17 +299,16 @@ def test_serial_for_with_step():
 
     ker = test_serial_step_neg()
     res = ker()
-    ref = torch.tensor([10, 9, 8, 7, 6, 5, 4, 3, 2, 1], dtype=torch.int32, device='cuda')
+    ref = torch.tensor([10, 9, 8, 7, 6, 5, 4, 3, 2, 1], dtype=torch.int32, device="cuda")
     assert torch.all(res == ref), f"Expected {ref}, but got {res}"
 
     assert isinstance(T.serial(1, 10, 1), IRBuilderFrame)
-    assert isinstance(T.serial(1, 10, IntImm('int32', 1)), IRBuilderFrame)
-    assert not isinstance(T.serial(1, 10, Var('tmp', 'int32')), IRBuilderFrame)
+    assert isinstance(T.serial(1, 10, IntImm("int32", 1)), IRBuilderFrame)
+    assert not isinstance(T.serial(1, 10, Var("tmp", "int32")), IRBuilderFrame)
     assert not isinstance(T.serial(10, -1, -1), IRBuilderFrame)
 
 
 def test_swap_logic():
-
     @tilelang.jit
     @T.prim_func
     def swap_var(A: T.Tensor[(2,), T.float32]):
@@ -344,7 +338,6 @@ def test_swap_logic():
 
 
 def test_while_loop():
-
     @tilelang.jit(out_idx=-1)
     @T.prim_func
     def test_while_loop(A: T.Tensor((1,), T.int32)):
@@ -374,7 +367,7 @@ def test_var_macro():
                 x = T.alloc_var(T.int32)
                 macro_with_var(x)
 
-        assert 'x[0] = 1' in prim_call_macro.script()
+        assert "x[0] = 1" in prim_call_macro.script()
     finally:
         pass
 
@@ -406,7 +399,7 @@ def test_var_macro():
                 x = T.alloc_var(T.int32)
                 macro_with_var(x)
 
-        assert 'x[0] = 1' in prim_call_macro.script()
+        assert "x[0] = 1" in prim_call_macro.script()
     finally:
         pass
 
@@ -428,10 +421,8 @@ def test_var_macro():
 
 
 def test_frame_inside_macro():
-
     @tilelang.jit
     def get_sample_kernel():
-
         @T.macro
         def transform(x):
             return x + 1
@@ -442,7 +433,7 @@ def test_frame_inside_macro():
             idx_out: T.Tensor[(32,), T.int32],
         ):
             with T.Kernel(num_blocks, threads=32) as block_idx:  # noqa: F841
-                fragment = T.alloc_fragment(32, 'int32')
+                fragment = T.alloc_fragment(32, "int32")
                 T.copy(idx_out, fragment)
 
                 for i in T.Parallel(32):
@@ -467,10 +458,10 @@ def test_buffer_slice_step():
 
 
 def test_boolop():
-    a = Var('a', 'int32')
-    b = Var('b', 'int32')
-    c = Var('c', 'int32')
-    d = Var('d', 'int32')
+    a = Var("a", "int32")
+    b = Var("b", "int32")
+    c = Var("c", "int32")
+    d = Var("d", "int32")
 
     @T.macro
     def cond():
@@ -479,5 +470,5 @@ def test_boolop():
     cond()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     tilelang.testing.main()

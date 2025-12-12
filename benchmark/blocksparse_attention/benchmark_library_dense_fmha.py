@@ -7,10 +7,7 @@ def get_sparse_attn_mask_from_topk(x, topk, use_dense_for_last_block=False):
     bsz, num_head, downsample_len, _ = x.shape
     # N_CTX = downsample_len * BLOCK
     sparse_index = torch.topk(x, topk, dim=-1).indices
-    dense_mask = torch.full([bsz, num_head, downsample_len, downsample_len],
-                            False,
-                            dtype=torch.bool,
-                            device=x.device)
+    dense_mask = torch.full([bsz, num_head, downsample_len, downsample_len], False, dtype=torch.bool, device=x.device)
     dense_mask.scatter_(-1, sparse_index, True)
     if use_dense_for_last_block:
         dense_mask[:, :, -2:, :] = True
@@ -28,15 +25,15 @@ def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=F
 
 def benchmark_topk_sparse_attention():
     from benchmark_configs import configs
+
     torch.manual_seed(0)
 
     # Config
     for BATCH, N_HEADS, SEQ_LEN, D_HEAD, TOPK, BLOCK in configs:
-
         # Create inputs
-        q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-        k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-        v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+        q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+        k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+        v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
 
         import flash_attn
 

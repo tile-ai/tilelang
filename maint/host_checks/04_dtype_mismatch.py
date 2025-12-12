@@ -1,5 +1,5 @@
-"""Reproduce: dtype mismatch for A (float32 vs expected float16).
-"""
+"""Reproduce: dtype mismatch for A (float32 vs expected float16)."""
+
 import torch
 from common import build_matmul_kernel
 

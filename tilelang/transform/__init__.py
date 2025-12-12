@@ -110,8 +110,7 @@ def LowerHopperIntrin():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return (_ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f
-           )  # type: ignore
+    return _ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f  # type: ignore
 
 
 def WarpSpecializedPipeline():
@@ -365,8 +364,7 @@ def FlattenBuffer():
 
 
 def EliminateStorageSyncForMBarrier():
-    """EliminateStorageSyncForMBarrier
-    """
+    """EliminateStorageSyncForMBarrier"""
     return _ffi_api.EliminateStorageSyncForMBarrier()  # type: ignore
 
 
@@ -378,19 +376,16 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_by
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge,
-                                                 align_bytes)  # type: ignore
+    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge, align_bytes)  # type: ignore
 
 
 def LowerL2Persistent():
-    """LowerL2Persistent
-    """
+    """LowerL2Persistent"""
     return _ffi_api.LowerL2Persistent()  # type: ignore
 
 
 def PersistThreadblock():
-    """PersistThreadblock
-    """
+    """PersistThreadblock"""
     return _ffi_api.PersistThreadblock()  # type: ignore
 
 
@@ -409,8 +404,7 @@ def AlignDynamicSharedMemoryAllocations(align_bytes: int = 16):
 
 
 def LowerSharedBarrier():
-    """LowerSharedBarrier
-    """
+    """LowerSharedBarrier"""
     return _ffi_api.LowerSharedBarrier()  # type: ignore
 
 
@@ -437,20 +431,17 @@ def StorageRewrite():
 
 
 def LowerOpaqueBlock():
-    """LowerOpaqueBlock
-    """
+    """LowerOpaqueBlock"""
     return _ffi_api.LowerOpaqueBlock()  # type: ignore
 
 
 def LowerThreadAllreduce():
-    """LowerThreadAllreduce
-    """
+    """LowerThreadAllreduce"""
     return _ffi_api.LowerThreadAllreduce()  # type: ignore
 
 
 def LowerIntrin():
-    """LowerIntrin
-    """
+    """LowerIntrin"""
     return _ffi_api.LowerIntrin()  # type: ignore
 
 
@@ -468,8 +459,7 @@ def LowerDeviceKernelLaunch():
 
 
 def LowerSharedTmem():
-    """LowerSharedTmem
-    """
+    """LowerSharedTmem"""
     return _ffi_api.LowerSharedTmem()  # type: ignore
 
 

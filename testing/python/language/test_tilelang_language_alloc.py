@@ -10,8 +10,8 @@ def alloc_var(
 
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared([block_N], dtype)
@@ -50,8 +50,8 @@ def alloc_var_add(
 
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared([block_N], dtype)
@@ -91,8 +91,8 @@ def alloc_var_with_initializer(
 
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             tmp = T.alloc_var(dtype, init_value)
@@ -129,8 +129,8 @@ def alloc_multi_vars_with_initializer(
 
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             tmp0 = T.alloc_var(dtype, 1)

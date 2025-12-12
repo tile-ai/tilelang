@@ -1,4 +1,5 @@
 """The profiler and convert to torch utils"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -8,7 +9,6 @@ import torch
 
 
 class BaseKernelAdapter(ABC):
-
     func: Callable | None = None
 
     def __init__(self, mod, params: list[KernelParam], result_idx: list[int]) -> None:
@@ -24,18 +24,14 @@ class BaseKernelAdapter(ABC):
             result_idx = []
         elif isinstance(result_idx, int):
             if result_idx > len(params) or result_idx < -len(params):
-                raise ValueError(
-                    f"result_idx should be an integer between {-len(params) - 1} and {len(params) - 1}"
-                )
+                raise ValueError(f"result_idx should be an integer between {-len(params) - 1} and {len(params) - 1}")
             if result_idx < 0:
                 result_idx = len(params) + result_idx
             result_idx = [result_idx]
         elif isinstance(result_idx, list):
             for i, idx in enumerate(result_idx):
                 if idx >= len(params) or idx < -len(params):
-                    raise ValueError(
-                        f"result_idx should be an integer between {-len(params) - 1} and {len(params) - 1}"
-                    )
+                    raise ValueError(f"result_idx should be an integer between {-len(params) - 1} and {len(params) - 1}")
                 if idx < 0:
                     result_idx[i] = len(params) + idx
         else:

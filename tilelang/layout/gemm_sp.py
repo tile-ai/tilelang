@@ -1,4 +1,5 @@
 """Wrapping Layouts."""
+
 # pylint: disable=invalid-name, unsupported-binary-operation
 from __future__ import annotations
 import tvm
@@ -114,8 +115,7 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tir.Buffer, mma_dtype: str):
     if mma_dtype in ["float16", "bfloat16"] and buffer.dtype not in ["uint16", "int16"]:
         raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
 
-    if mma_dtype in ["float8_e4m3", "float8_e5m2", "int8", "uint8"
-                    ] and buffer.dtype not in ["uint32", "int32"]:
+    if mma_dtype in ["float8_e4m3", "float8_e5m2", "int8", "uint8"] and buffer.dtype not in ["uint32", "int32"]:
         raise ValueError(f"metadata should be 32 bit, got {buffer.dtype}")
 
     m, k = buffer.shape
@@ -134,10 +134,7 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tir.Buffer, mma_dtype: str):
     return T.Layout(buffer.shape, ColumnMajorInterleaved)
 
 
-def make_cutlass_metadata_layout(buffer: tvm.tir.Buffer,
-                                 mma_dtype: str = "float16",
-                                 arch: str | None = None,
-                                 **extra_args):
+def make_cutlass_metadata_layout(buffer: tvm.tir.Buffer, mma_dtype: str = "float16", arch: str | None = None, **extra_args):
     if arch is None:
         arch = nvcc.get_target_compute_version()
 

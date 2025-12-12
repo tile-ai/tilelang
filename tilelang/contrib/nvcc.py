@@ -1,6 +1,7 @@
 # pylint: disable=invalid-name
 # modified from apache tvm python/tvm/contrib/nvcc.py
 """Utility to invoke nvcc compiler in the system"""
+
 from __future__ import annotations
 
 import os
@@ -18,12 +19,7 @@ from tvm.base import py_str
 from tvm.contrib import utils
 
 
-def compile_cuda(code,
-                 target_format="ptx",
-                 arch=None,
-                 options=None,
-                 path_target=None,
-                 verbose=False):
+def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False):
     """Compile cuda code with NVCC from env.
 
     Parameters
@@ -67,7 +63,7 @@ def compile_cuda(code,
     temp_target = temp.relpath(f"{file_name}.{target_format}")
 
     pass_context = tvm.get_global_func("transform.GetCurrentPassContext")()
-    kernels_output_dir = (pass_context.config.get("cuda.kernels_output_dir", None))
+    kernels_output_dir = pass_context.config.get("cuda.kernels_output_dir", None)
     if kernels_output_dir is not None:
         if not os.path.isdir(kernels_output_dir):
             os.makedirs(kernels_output_dir)
@@ -114,10 +110,7 @@ def compile_cuda(code,
         print(py_str(out))
 
     if proc.returncode != 0:
-        msg = f"{code}\n" \
-            f"Compilation error:\n" \
-            f"{py_str(out)}\n" \
-            f"Command: {' '.join(cmd)}\n"
+        msg = f"{code}\nCompilation error:\n{py_str(out)}\nCommand: {' '.join(cmd)}\n"
         raise RuntimeError(msg)
 
     with open(file_target, "rb") as f:
@@ -165,6 +158,7 @@ def default_compile_options(compile_flags: list[str] | None = None) -> list[str]
     # (e.g., multiple "-gencode" pairs or repeated "-Xcompiler" entries).
     if compile_flags:
         import shlex
+
         for flag in compile_flags:
             # Split each string like a shell would, preserving quoted args
             tokens = shlex.split(flag) if isinstance(flag, str) else [str(flag)]
@@ -172,9 +166,7 @@ def default_compile_options(compile_flags: list[str] | None = None) -> list[str]
     return options
 
 
-def get_ptx_from_source(code: str,
-                        compile_flags: list[str] | None = None,
-                        verbose: bool = False) -> str:
+def get_ptx_from_source(code: str, compile_flags: list[str] | None = None, verbose: bool = False) -> str:
     """
     Compile CUDA C++ source to PTX using NVCC and return as text.
 
@@ -212,9 +204,7 @@ def _find_tool(name: str) -> str | None:
     return None
 
 
-def get_sass_from_source(code: str,
-                         compile_flags: list[str] | None = None,
-                         verbose: bool = False) -> str:
+def get_sass_from_source(code: str, compile_flags: list[str] | None = None, verbose: bool = False) -> str:
     """
     Compile CUDA C++ source to CUBIN and disassemble to SASS.
 
@@ -246,9 +236,7 @@ def get_sass_from_source(code: str,
     cand_nvdisasm = _find_tool("nvdisasm")
     cand_cuobjdump = _find_tool("cuobjdump")
     if not cand_nvdisasm and not cand_cuobjdump:
-        raise RuntimeError(
-            "Cannot find 'nvdisasm' or 'cuobjdump'. Please ensure CUDA toolkit is installed and in PATH."
-        )
+        raise RuntimeError("Cannot find 'nvdisasm' or 'cuobjdump'. Please ensure CUDA toolkit is installed and in PATH.")
     last_err: str | None = None
     try:
         # Attempt nvdisasm first
@@ -268,8 +256,7 @@ def get_sass_from_source(code: str,
                 return text
             last_err = f"{tool_name} rc={proc.returncode}, output:\n{text}"
         # If we reach here, all attempts failed
-        raise RuntimeError(f"SASS disassembly failed. Tried tools: "
-                           f"{', '.join(name for name, _ in tools_to_try)}\n{last_err or ''}")
+        raise RuntimeError(f"SASS disassembly failed. Tried tools: {', '.join(name for name, _ in tools_to_try)}\n{last_err or ''}")
     finally:
         with contextlib.suppress(Exception):
             os.remove(cubin_path)
@@ -438,8 +425,7 @@ def get_target_compute_version(target=None):
     if tvm.cuda(0).exist:
         return tvm.cuda(0).compute_version
 
-    raise ValueError("No CUDA architecture was specified or GPU detected."
-                     "Try specifying it by adding '-arch=sm_xx' to your target.")
+    raise ValueError("No CUDA architecture was specified or GPU detected.Try specifying it by adding '-arch=sm_xx' to your target.")
 
 
 def parse_compute_version(compute_version) -> tuple[int, int]:
@@ -524,7 +510,8 @@ def have_tensorcore(compute_version=None, target=None):
                 warnings.warn(
                     "Tensorcore will be disabled due to no CUDA architecture specified."
                     "Try specifying it by adding '-arch=sm_xx' to your target.",
-                    stacklevel=2)
+                    stacklevel=2,
+                )
                 return False
             compute_version = target.attrs["arch"]
             # Compute version will be in the form "sm_{major}{minor}"
