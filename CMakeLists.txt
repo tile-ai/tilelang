@@ -145,6 +145,11 @@ file(GLOB TILE_LANG_SRCS
   src/target/intrin_rule*.cc
 )
 
+# Always include CPU-safe runtime helpers
+list(APPEND TILE_LANG_SRCS
+  src/runtime/error_helpers.cc
+)
+
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
@@ -206,7 +211,7 @@ elseif(USE_CUDA)
   cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
 
   file(GLOB TILE_LANG_CUDA_SRCS
-    src/runtime/*.cc
+    src/runtime/runtime.cc
     src/target/ptx.cc
     src/target/codegen_cuda.cc
     src/target/rt_mod_cuda.cc
@@ -223,7 +228,11 @@ add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
 
 add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
+
+# Set debug mode compile definitions
+# We open the deubg option of TVM, i.e. TVM_LOG_DEBUG
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message(STATUS "Building TileLang with DEBUG mode")
   target_compile_definitions(tilelang_objs PRIVATE "TVM_LOG_DEBUG")
 endif()
 
@@ -233,6 +242,18 @@ add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 add_library(tilelang_module SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime tvm)
 target_link_libraries(tilelang_module PUBLIC tvm)
+
+# Place dev build outputs under build/lib for consistency
+set_target_properties(tilelang PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+set_target_properties(tilelang_module PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
@@ -252,11 +273,19 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-# Install extension into the tilelang package directory
+
+# Ensure dev builds drop the extension into build/lib alongside other shared libs
+set_target_properties(tilelang_cython_wrapper PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+
+# Install the extension into tilelang/lib inside the wheel
 install(TARGETS tilelang_cython_wrapper
-        LIBRARY DESTINATION tilelang
-        RUNTIME DESTINATION tilelang
-        ARCHIVE DESTINATION tilelang)
+        LIBRARY DESTINATION tilelang/lib
+        RUNTIME DESTINATION tilelang/lib
+        ARCHIVE DESTINATION tilelang/lib)
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)

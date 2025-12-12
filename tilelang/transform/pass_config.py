@@ -5,6 +5,7 @@ from enum import Enum
 
 class PassConfigKey(str, Enum):
     """Pass configuration keys for TileLang compiler."""
+
     # TileLang specific configs
     TL_SIMPLIFY = "tl.Simplify"
     """Enable/disable TileLang simplification passes. Default: True"""
@@ -68,6 +69,15 @@ class PassConfigKey(str, Enum):
 
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
+
+    TL_LAYOUT_VISUALIZATION_ENABLE = "tl.layout_visualization_enable"
+    """Enable layout inference visualization. Default: False"""
+
+    TL_LAYOUT_VISUALIZATION_FORMATS = "tl.layout_visualization_formats"
+    """Layout visualization formats.
+    Acceptable values: "pdf", "png", "svg", "all"
+
+    """
 
     TL_STORAGE_REWRITE_DETECT_INPLACE = "tl.storage_rewrite_detect_inplace"
     """Control StorageRewrite inplace detection.

@@ -14,18 +14,11 @@ tilelang.testing.set_random_seed(0)
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
-def native_sparse_attention(batch,
-                            heads,
-                            seq_len,
-                            dim,
-                            is_causal,
-                            scale=None,
-                            block_size=64,
-                            groups=1,
-                            selected_blocks=16):
+    },
+)
+def native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale=None, block_size=64, groups=1, selected_blocks=16):
     if scale is None:
-        scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+        scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     else:
         scale = scale * 1.44269504  # log2(e)
 
@@ -52,11 +45,11 @@ def native_sparse_attention(batch,
 
     @T.prim_func
     def native_sparse_attention(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(kv_shape, dtype),
-            V: T.Tensor(kv_shape, dtype),
-            BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
-            Output: T.Tensor(q_shape, dtype),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
+        BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
+        Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([G, BK], dtype)
@@ -77,7 +70,7 @@ def native_sparse_attention(batch,
             i_b, i_h = i_bh // head_kv, i_bh % head_kv
 
             NS = S
-            T.copy(Q[i_b, i_t, i_h * G:(i_h + 1) * G, :], Q_shared)
+            T.copy(Q[i_b, i_t, i_h * G : (i_h + 1) * G, :], Q_shared)
 
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -87,21 +80,15 @@ def native_sparse_attention(batch,
                 i_s = BlockIndices[i_b, i_t, i_h, i] * BS
                 if i_s <= i_t and i_s >= 0:
                     # [BS, BK]
-                    T.copy(K[i_b, i_s:i_s + BS, i_h, :], K_shared)
+                    T.copy(K[i_b, i_s : i_s + BS, i_h, :], K_shared)
 
                     if is_causal:
                         for i, j in T.Parallel(G, BS):
-                            acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0,
-                                                         -T.infinity(acc_s.dtype))
+                            acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
 
-                    T.gemm(
-                        Q_shared,
-                        K_shared,
-                        acc_s,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
                     # Softmax
                     T.copy(scores_max, scores_max_prev)
@@ -121,13 +108,13 @@ def native_sparse_attention(batch,
                         acc_o[i, j] *= scores_scale[i]
 
                     # V * softmax(Q * K)
-                    T.copy(V[i_b, i_s:i_s + BS, i_h, i_v * BV:(i_v + 1) * BV], V_shared)
+                    T.copy(V[i_b, i_s : i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared)
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             for i, j in T.Parallel(G, BV):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[i_b, i_t, i_h * G:(i_h + 1) * G, i_v * BV:(i_v + 1) * BV])
+            T.copy(O_shared, Output[i_b, i_t, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV])
 
     return native_sparse_attention
 
@@ -148,20 +135,20 @@ def main():
     )
     print(kernel.get_kernel_source())
     torch.random.manual_seed(0)
-    Q = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    g_slc = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
-    g_swa = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
-    DO = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device='cuda')
+    Q = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device="cuda").requires_grad_(True)
+    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    g_slc = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    g_swa = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    DO = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device="cuda")
 
-    block_indices = torch.full((B, SEQ_LEN, H, S), SEQ_LEN, dtype=torch.long, device='cuda')
-    block_counts = torch.zeros((B, SEQ_LEN, H), dtype=torch.long, device='cuda')
+    block_indices = torch.full((B, SEQ_LEN, H, S), SEQ_LEN, dtype=torch.long, device="cuda")
+    block_counts = torch.zeros((B, SEQ_LEN, H), dtype=torch.long, device="cuda")
     for b in range(B):
         for t in range(SEQ_LEN):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
-                block_indices[b, t, h, :len(i_i)] = i_i
+                block_indices[b, t, h, : len(i_i)] = i_i
                 block_counts[b, t, h] = (block_indices[b, t, h] != SEQ_LEN).sum().item()
     block_indices = block_indices.sort(-1)[0]
 

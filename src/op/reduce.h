@@ -125,7 +125,7 @@ class ReduceOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceOp, TileOperator,
                                              ReduceOpNode);
-  TVM_DLL ReduceOp(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL ReduceOp(Array<PrimExpr> args);
   static const Op &Get();
 };
 
@@ -133,8 +133,10 @@ public:
 class CumSumOpNode : public TileOperatorNode {
 public:
   tir::Buffer src, dst; ///< Source and destination buffers
-  int dim;              ///< Dimension along which to compute cumulative sum
-  bool reverse;         ///< Whether to compute in reverse order
+  // Optional: keep the original regions used to construct this op
+  BufferRegion srcRegion_, dstRegion_;
+  int dim;      ///< Dimension along which to compute cumulative sum
+  bool reverse; ///< Whether to compute in reverse order
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.CumSumOp", CumSumOpNode,
                                     TileOperatorNode);
 
@@ -143,6 +145,8 @@ public:
     refl::ObjectDef<CumSumOpNode>()
         .def_ro("src", &CumSumOpNode::src)
         .def_ro("dst", &CumSumOpNode::dst)
+        .def_ro("srcRegion", &CumSumOpNode::srcRegion_)
+        .def_ro("dstRegion", &CumSumOpNode::dstRegion_)
         .def_ro("dim", &CumSumOpNode::dim)
         .def_ro("reverse", &CumSumOpNode::reverse);
   }
@@ -159,7 +163,7 @@ class CumSumOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CumSumOp, TileOperator,
                                              CumSumOpNode);
-  TVM_DLL CumSumOp(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL CumSumOp(Array<PrimExpr> args);
   static const Op &Get();
 };
 

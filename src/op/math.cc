@@ -33,6 +33,7 @@ TVM_REGISTER_OP("tl.pow_of_int")
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure))
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "pow_of_int")
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", pow_of_int_op)
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", pow_of_int_op);
 
 PrimExpr infinity_op(PrimExpr args) {

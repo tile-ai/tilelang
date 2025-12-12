@@ -1,4 +1,5 @@
 """The language interface for tl programs."""
+
 from __future__ import annotations
 from tilelang.primitives.gemm.base import GemmWarpPolicy
 import tilelang.language as T
@@ -7,9 +8,11 @@ from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
     retrieve_stride,
-    retrieve_ptr,
     retrieve_offset,
     prim_expr_equal,
+)
+from tilelang.language.utils import (
+    buffer_region_to_tile_region,
 )
 from tilelang.env import env as _env
 
@@ -50,29 +53,31 @@ def _gemm_impl(
     C = legalize_arguments(C)
     mbar = legalize_arguments(mbar) if mbar is not None else None
 
-    # Normalize A/B/C to BufferRegion to pass into tl.gemm
-    A = to_buffer_region(A)
-    B = to_buffer_region(B)
-    C = to_buffer_region(C)
+    # Normalize A/B/C to BufferRegion for shape/stride/offset analysis
+    A_region = to_buffer_region(A)
+    B_region = to_buffer_region(B)
+    C_region = to_buffer_region(C)
 
-    A_shape = retrieve_shape(A)
-    B_shape = retrieve_shape(B)
-    C_shape = retrieve_shape(C)
+    A_shape = retrieve_shape(A_region)
+    B_shape = retrieve_shape(B_region)
+    C_shape = retrieve_shape(C_region)
 
-    A_stride = retrieve_stride(A)
-    B_stride = retrieve_stride(B)
+    A_stride = retrieve_stride(A_region)
+    B_stride = retrieve_stride(B_region)
 
     assert len(C_shape) == 2, "current only support C as a 2D tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
     if len(A_shape) > 2:
         for i in range(len(A_shape) - 2):
-            assert A_shape[i] == 1, \
+            assert A_shape[i] == 1, (
                 "current only support A as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
     if len(B_shape) > 2:
         for i in range(len(B_shape) - 2):
-            assert B_shape[i] == 1, \
+            assert B_shape[i] == 1, (
                 "current only support B as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
 
     M, N = C_shape
     K = A_shape[-2] if transpose_A else A_shape[-1]
@@ -82,18 +87,42 @@ def _gemm_impl(
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
 
-    A_offset = retrieve_offset(A)
-    B_offset = retrieve_offset(B)
+    A_offset = retrieve_offset(A_region)
+    B_offset = retrieve_offset(B_region)
     assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
     assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
     offset_a = A_offset[-1]
     offset_b = B_offset[-1]
 
-    mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else tir.const(0, "uint32")
-    C_coords = [r.min for r in C.region]
-    return tir.call_intrin("handle", tir.op.Op.get(op_key), A, B, C, transpose_A, transpose_B, M, N,
-                           K, policy, clear_accum, stride_a, stride_b, offset_a, offset_b, k_pack,
-                           wg_wait, mbarptr, C_coords[0], C_coords[1])
+    mbar = to_buffer_region(mbar, access_type="rw") if mbar is not None else tir.const(0, "uint32")
+    C_coords = [r.min for r in C_region.region]
+    # Convert BufferRegion to tl.region calls for arguments
+    A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
+    B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
+    C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get(op_key),
+        A_arg,
+        B_arg,
+        C_arg,
+        transpose_A,
+        transpose_B,
+        M,
+        N,
+        K,
+        policy,
+        clear_accum,
+        stride_a,
+        stride_b,
+        offset_a,
+        offset_b,
+        k_pack,
+        wg_wait,
+        mbar,
+        C_coords[0],
+        C_coords[1],
+    )
 
 
 # Public wrappers
@@ -111,7 +140,7 @@ def gemm_v1(
 ):
     """GEMM v1: use op tl.gemm."""
     return _gemm_impl(
-        "tl.gemm",
+        "tl.tileop.gemm",
         A,
         B,
         C,
@@ -140,7 +169,7 @@ def gemm_v2(
 ):
     """GEMM v2: use op tl.gemm_py."""
     return _gemm_impl(
-        "tl.gemm_py",
+        "tl.tileop.gemm_py",
         A,
         B,
         C,

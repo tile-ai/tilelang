@@ -14,60 +14,24 @@
 #include "../op/parallel.h"
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
-#include "region.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm/tir/stmt.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-// Normalize an argument (BufferRegion/BufferLoad/tl.region)
-// to BufferRegion so Reduce can uniformly consume regions.
-static BufferRegion NormalizeToBufferRegion(const PrimExpr &arg,
-                                            const BufferMap &vmap) {
-  // Case 1: Already a BufferRegion
-  if (arg->IsInstance<BufferRegionNode>()) {
-    return Downcast<BufferRegion>(arg);
-  }
+// NormalizeToBufferRegion moved to src/op/utils.{h,cc}
 
-  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
-  // extent=1)
-  if (const auto *load = arg.as<BufferLoadNode>()) {
-    Array<Range> ranges;
-    for (const PrimExpr &index : load->indices) {
-      if (const auto *ramp = index.as<RampNode>()) {
-        ICHECK(ramp->stride.as<IntImmNode>()) << "Ramp stride must be IntImm";
-        ICHECK_EQ(ramp->stride.as<IntImmNode>()->value, 1)
-            << "Only stride-1 Ramp is supported in region conversion";
-        ICHECK(ramp->lanes.as<IntImmNode>())
-            << "Scalable vector lanes not supported in region conversion";
-        ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
-      } else {
-        ranges.push_back(Range::FromMinExtent(index, 1));
-      }
-    }
-    return BufferRegion(load->buffer, ranges);
-  }
+// MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
 
-  // Case 3: Call nodes (only tl.region)
-  if (const auto *call = arg.as<CallNode>()) {
-    // tl.region(...) — reconstruct via RegionOp
-    if (call->op.same_as(RegionOp::Get())) {
-      RegionOp region(call->args, vmap);
-      return BufferRegion(region->GetBuffer(), region->GetRanges());
-    }
-  }
-
-  LOG(FATAL) << "Unsupported argument for BufferRegion in reduce: " << arg;
-  throw; // Unreachable
-}
-
-ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
+ReduceOp::ReduceOp(Array<PrimExpr> args) {
   ObjectPtr<ReduceOpNode> node = tvm::ffi::make_object<ReduceOpNode>();
-  // Accept BufferRegion/BufferLoad/tl.region for src/dst
-  node->srcRegion_ = NormalizeToBufferRegion(args[0], vmap);
-  node->dstRegion_ = NormalizeToBufferRegion(args[1], vmap);
+  // Accept BufferRegion/BufferLoad for src/dst
+  node->srcRegion_ = NormalizeToBufferRegion(args[0]);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1]);
   node->src = node->srcRegion_->buffer;
   node->dst = node->dstRegion_->buffer;
   std::string reduce_type = args[2].as<StringImm>().value()->value;
@@ -231,6 +195,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto dst_scope = this->dst.scope();
 
   if (src_scope == "local.fragment" && dst_scope == "local.fragment") {
+
     Buffer src_buffer = get_buffer(this->src);
     Buffer dst_buffer = get_buffer(this->dst);
     Fragment src_layout = T.layout_map[this->src].as<Fragment>().value();
@@ -513,12 +478,22 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
   return {};
 }
 
-TIR_REGISTER_TL_OP(ReduceOp, reduce)
+TIR_REGISTER_TL_TILE_OP(ReduceOp, reduce)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
+// Normalize "Buffer" to BufferRegion. Use the shape of the buffer as the
+// ranges.
+static BufferRegion ConvertBufferToBufferRegion(const Buffer &buf) {
+  Array<Range> ranges;
+  for (PrimExpr extent : buf->shape) {
+    ranges.push_back(Range(IntImm(extent->dtype, 0), extent));
+  }
+  return BufferRegion(buf, ranges);
+}
+
+CumSumOp::CumSumOp(Array<PrimExpr> args) {
   /// CumSum constructor arguments:
   /// - src: input buffer
   /// - dst: output buffer
@@ -526,11 +501,19 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
   /// - reverse: whether to cumsum in reverse order
   CHECK_EQ(args.size(), 4);
   ObjectPtr<CumSumOpNode> node = tvm::ffi::make_object<CumSumOpNode>();
-  node->src = vmap[GetVarFromAccessPtr(args[0])];
-  node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  // node->src = vmap[GetVarFromAccessPtr(args[0])];
+  // node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  node->srcRegion_ = NormalizeToBufferRegion(args[0]);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1]);
+  node->src = node->srcRegion_->buffer;
+  node->dst = node->dstRegion_->buffer;
   node->dim = args[2].as<IntImm>().value()->value;
   node->reverse = args[3].as<Bool>().value();
-  CHECK_LT(node->dim, static_cast<int>(node->src->shape.size()));
+  CHECK_LT(node->dim, static_cast<int>(node->src->shape.size()))
+      << "The dim of cumsum should be less than the number of dimensions. Got "
+         "dim="
+      << node->dim << ", but src has " << node->src->shape.size() << " dims.";
+
   data_ = std::move(node);
 }
 
@@ -546,18 +529,22 @@ Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto threads = T.thread_bounds->extent;
     Array<PrimExpr> args;
     int ndim = static_cast<int>(src->shape.size());
+
+    // Build access pointers from regions locally
+    PrimExpr srcPtr = MakeAccessPtrFromRegion(srcRegion_, 1);
+    PrimExpr dstPtr = MakeAccessPtrFromRegion(dstRegion_, 2);
+
     if (ndim == 1) {
       ICHECK_EQ(dim, 0) << "Cumulative sum over a 1D buffer only supports dim "
                            "= 0.";
       ss << "tl::CumSum1D<" << threads << ", " << (reverse ? "true" : "false")
          << ">::run";
-      args = {StringImm(ss.str()), src.access_ptr(1), dst.access_ptr(3),
-              src->shape[0]};
+      args = {StringImm(ss.str()), srcPtr, dstPtr, src->shape[0]};
     } else if (ndim == 2) {
       ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
          << (reverse ? "true" : "false") << ">::run";
-      args = {StringImm(ss.str()), src.access_ptr(1), dst.access_ptr(3),
-              src->shape[0], src->shape[1]};
+      args = {StringImm(ss.str()), srcPtr, dstPtr, src->shape[0],
+              src->shape[1]};
     } else {
       LOG(FATAL) << "CumSum currently supports only 1D or 2D buffers, got "
                  << ndim << "D.";
@@ -576,7 +563,7 @@ LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &T,
   return {};
 }
 
-TIR_REGISTER_TL_OP(CumSumOp, cumsum)
+TIR_REGISTER_TL_TILE_OP(CumSumOp, cumsum)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

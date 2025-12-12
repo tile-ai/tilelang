@@ -13,18 +13,30 @@ Available allocation functions:
 Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
 """
-from __future__ import annotations
 
-from typing import overload, Literal
+from __future__ import annotations
+from typing import TypeVar, overload, Literal, Callable
+
+# Python 3.9 compatibility for advanced typing features (PEP 646)
+try:
+    from typing import TypeVarTuple, Unpack  # type: ignore[attr-defined]
+except Exception:
+    from typing_extensions import TypeVarTuple, Unpack  # type: ignore
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
 from tvm.tir.buffer import Buffer
 from tvm.tir.expr import FloatImm, IntImm
+from .v2.dtypes import dtype as tl_dtype
+from .v2.builder import OutTensor
+from .v2.annot import Tensor, SharedBuffer, LocalBuffer, FragmentBuffer
+
+_Shapes = TypeVarTuple("_Shapes")
+_DType = TypeVar("_DType")
 
 
-def alloc_shared(shape, dtype, scope="shared.dyn"):
+def alloc_shared(shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="shared.dyn") -> SharedBuffer[Callable[[Unpack[_Shapes]]], _DType]:
     """Allocate a shared memory buffer for inter-thread communication.
 
     Args:
@@ -42,7 +54,7 @@ def alloc_shared(shape, dtype, scope="shared.dyn"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_local(shape, dtype, scope="local"):
+def alloc_local(shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="local") -> LocalBuffer[Callable[[Unpack[_Shapes]]], _DType]:
     """Allocate a local memory buffer for thread-private storage.
 
     Args:
@@ -56,7 +68,9 @@ def alloc_local(shape, dtype, scope="local"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_fragment(shape, dtype, scope="local.fragment"):
+def alloc_fragment(
+    shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="local.fragment"
+) -> FragmentBuffer[Callable[[Unpack[_Shapes]]], _DType]:
     """Allocate a fragment memory buffer for specialized operations.
 
     Args:
@@ -71,16 +85,11 @@ def alloc_fragment(shape, dtype, scope="local.fragment"):
 
 
 @overload
-def alloc_var(dtype: str, init: PrimExpr | int | float, scope: str = 'local.var') -> Buffer:
-    ...
+def alloc_var(dtype: str, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
 
 
 @overload
-def alloc_var(dtype: str,
-              scope: str = 'local.var',
-              *,
-              init: PrimExpr | int | float | None = None) -> Buffer:
-    ...
+def alloc_var(dtype: str, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
 
 
 def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
@@ -126,8 +135,7 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
             raise TypeError("Scope must be provided as a string in alloc_var.")
         parsed_scope = parsed_scope_arg
     elif len(args) > 2:
-        raise TypeError(
-            f"alloc_var expected at most 3 positional arguments but got {len(args) + 1}.")
+        raise TypeError(f"alloc_var expected at most 3 positional arguments but got {len(args) + 1}.")
 
     if not isinstance(parsed_scope, str):
         raise TypeError("Scope must be a string in alloc_var.")
@@ -135,7 +143,7 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
     buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
         if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
-            block_attr({"tl.local_var_init": {buffer.data: parsed_init}})
+            block_attr({"tl.local_var_init": {buffer.data: tl_dtype(dtype)(parsed_init)}})
         else:
             T.buffer_store(buffer, parsed_init, 0)
     return buffer
@@ -255,3 +263,18 @@ def alloc_tcgen05_instruction_desc(dtype: str = "uint32"):
 # Alias: short name consistent with imports
 def alloc_tcgen05_instr_desc(dtype: str = "uint32"):
     return alloc_tcgen05_instruction_desc(dtype)
+
+
+@overload
+def empty(shape: tuple[Unpack[_Shapes]], dtype: str = "float32") -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
+
+
+def empty(*shape: Unpack[_Shapes], dtype: str = "float32") -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+        return OutTensor(shape[0], dtype)
+    elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):
+        return OutTensor(shape[0], shape[1])
+    elif all([isinstance(x, (int, PrimExpr)) for x in shape]):
+        return OutTensor(shape, dtype)
+    else:
+        raise RuntimeError(f"Invalid shape {shape}")

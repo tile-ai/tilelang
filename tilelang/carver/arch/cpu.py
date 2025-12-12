@@ -10,7 +10,6 @@ def is_cpu_arch(arch: TileDevice) -> bool:
 # For LLVM Backend, we do not provide the detailed information of the CPU
 # As the LLVM backend do not required tuning, just maintain the consistency
 class CPU(TileDevice):
-
     def __init__(self, target: Target):
         self.target = target
         device = tvm.runtime.cpu(0)
@@ -21,6 +20,6 @@ class CPU(TileDevice):
 
 
 __all__ = [
-    'is_cpu_arch',
-    'CPU',
+    "is_cpu_arch",
+    "CPU",
 ]

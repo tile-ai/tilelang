@@ -1,4 +1,5 @@
 """Wrapping Layouts."""
+
 # pylint: disable=invalid-name, unsupported-binary-operation
 import tvm_ffi
 from tvm.ir import Node, Range
@@ -9,7 +10,6 @@ from tilelang import _ffi_api
 # Register the Layout class as a TVM object under the name "tl.Layout"
 @tvm_ffi.register_object("tl.Layout")
 class Layout(Node):
-
     def __init__(self, shape, forward_fn):
         """
         Initialize a Layout object.
@@ -114,13 +114,13 @@ class Layout(Node):
         index_map = IndexMap(
             initial_indices=forward_vars,  # The original iteration variables
             final_indices=forward_indexes,  # The computed forward indices
-            inverse_index_map=None  # No inverse mapping provided at this stage
+            inverse_index_map=None,  # No inverse mapping provided at this stage
         )
 
         # Map the provided indices using the constructed index mapping
         return index_map.map_indices(indices)
 
-    def inverse(self) -> 'Layout':
+    def inverse(self) -> "Layout":
         """
         Compute the inverse of the current layout transformation.
 
@@ -131,7 +131,7 @@ class Layout(Node):
         """
         return _ffi_api.Layout_inverse(self)
 
-    def is_equal(self, other: 'Layout') -> bool:
+    def is_equal(self, other: "Layout") -> bool:
         """
         Check if the current layout is equal to another layout.
 
@@ -143,4 +143,5 @@ class Layout(Node):
         return _ffi_api.Layout_is_equal(self, other)
 
     def __repr__(self):
-        return f"Layout<{self.get_input_shape()}->{self.get_output_shape()}, {self.get_forward_vars()} -> {self.get_forward_index()}>"
+        return self._DebugOutput()
+        # return f"Layout<{self.get_input_shape()}->{self.get_output_shape()}, {self.get_forward_vars()} -> {self.get_forward_index()}>"

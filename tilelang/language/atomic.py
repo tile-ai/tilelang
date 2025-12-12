@@ -1,13 +1,13 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """Atomic operations for tilelang."""
+
 from __future__ import annotations
 
 import tilelang.language as T
-from tvm import ir, tir
+from tvm import ir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
-from tilelang.language.utils import buffer_region_to_tile_region, buffer_load_to_tile_region
-from tilelang.utils.language import get_buffer_region_from_load, legalize_pairwise_extents
+from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 
 _MEMORY_ORDER_ID_MAP = {
     "relaxed": 0,
@@ -19,10 +19,7 @@ _MEMORY_ORDER_ID_MAP = {
 }
 
 
-def atomic_max(dst: Buffer,
-               value: PrimExpr,
-               memory_order: str | None = None,
-               return_prev: bool = False) -> PrimExpr:
+def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:
     """
     Perform an atomic maximum on the value stored at dst with an optional memory-order.
 
@@ -65,10 +62,7 @@ def atomic_max(dst: Buffer,
         return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
 
 
-def atomic_min(dst: Buffer,
-               value: PrimExpr,
-               memory_order: str | None = None,
-               return_prev: bool = False) -> PrimExpr:
+def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:
     """
     Atomically update the value at dst to the minimum of its current value and value.
 
@@ -113,11 +107,7 @@ def atomic_min(dst: Buffer,
         return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
 
 
-def atomic_add(dst: Buffer,
-               value: PrimExpr,
-               memory_order: str | None = None,
-               return_prev: bool = False,
-               use_tma: bool = False) -> PrimExpr:
+def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False, use_tma: bool = False) -> PrimExpr:
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
 
@@ -192,8 +182,7 @@ def atomic_add(dst: Buffer,
         if memory_order is None:
             return T.call_extern(return_type, func_name, dst, value)
         else:
-            return T.call_extern(return_type, func_name, dst, value,
-                                 _MEMORY_ORDER_ID_MAP[memory_order])
+            return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
 
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
@@ -203,36 +192,18 @@ def atomic_add(dst: Buffer,
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
-    def _to_region(data, access_type, extent):
-        if isinstance(data, tir.Var) and T.has_let_value(data):
-            data = T.get_let_value(data)
-        if isinstance(data, tir.Buffer):
-            zeros = [tir.IntImm("int32", 0) for _ in extent]
-            return buffer_load_to_tile_region(tir.BufferLoad(data, zeros), access_type, extent)
-        elif isinstance(data, tir.BufferRegion):
-            return buffer_region_to_tile_region(data, access_type, extent)
-        elif isinstance(data, tir.BufferLoad):
-            region = get_buffer_region_from_load(data)
-            if region is None:
-                return buffer_load_to_tile_region(data, access_type, extent)
-            return buffer_region_to_tile_region(region, access_type, extent)
-        else:
-            return buffer_load_to_tile_region(data, access_type, extent)
-
-    value = _to_region(value, "r", src_extent)
-    dst = _to_region(dst, "w", dst_extent)
+    value = to_buffer_region(value, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     # Note: tile-region-based atomic operations don't support return_prev yet
     # This would need to be implemented in the tile runtime
     if return_prev:
-        raise NotImplementedError(
-            "return_prev is not supported for tile-region-based atomic operations")
+        raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
     if memory_order is None:
-        return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst, use_tma, 0)
+        return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, use_tma, 0)
     else:
-        return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst, use_tma,
-                             _MEMORY_ORDER_ID_MAP[memory_order])
+        return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, use_tma, _MEMORY_ORDER_ID_MAP[memory_order])
 
 
 def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:

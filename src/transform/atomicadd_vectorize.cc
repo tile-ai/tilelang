@@ -203,7 +203,8 @@ private:
         vmap.Set(old_var, new_var * vector_size_);
         Stmt body = Substitute(fnode->body, vmap);
         return For(new_var, 0, extent / vector_size_, fnode->kind, body,
-                   fnode->thread_binding, fnode->annotations, fnode->span);
+                   fnode->thread_binding, fnode->annotations, fnode->step,
+                   fnode->span);
       }
     }
     return ret;

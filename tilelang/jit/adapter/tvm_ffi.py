@@ -5,6 +5,7 @@ via light-weight callables so that, when the wrapped function is invoked,
 the execution observes the same stream context as the active Torch code.
 On non-CUDA builds, the stream/device fall back to 0/CPU semantics.
 """
+
 from __future__ import annotations
 
 from typing import Callable, Any
@@ -31,6 +32,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     - The stream pointer returned is a raw CUDA stream handle compatible with
       TVM's device API; on CPU or when CUDA is unavailable, we return 0.
     """
+
     # Class attributes to store compiled kernel information
     target: str | Target = "cuda"
     ir_module: tvm.IRModule | None = None
@@ -51,19 +53,21 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     dynamic_symbolic_map: dict[tir.Var, tuple[int, int, int]] | None = None
 
     # Stream/device functors are inherited from BaseKernelAdapter
-    def __init__(self,
-                 params: list[KernelParam],
-                 result_idx: list[int],
-                 target: str | Target,
-                 func_or_mod: tir.PrimFunc | tvm.IRModule,
-                 host_mod: tvm.IRModule | None = None,
-                 device_mod: tvm.IRModule | None = None,
-                 rt_mod: tvm.runtime.Module | None = None,
-                 host_kernel_source: str | None = None,
-                 device_kernel_source: str | None = None,
-                 verbose: bool = False,
-                 pass_configs: dict[str, Any] | None = None,
-                 compile_flags: list[str] | None = None):
+    def __init__(
+        self,
+        params: list[KernelParam],
+        result_idx: list[int],
+        target: str | Target,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_mod: tvm.IRModule | None = None,
+        device_mod: tvm.IRModule | None = None,
+        rt_mod: tvm.runtime.Module | None = None,
+        host_kernel_source: str | None = None,
+        device_kernel_source: str | None = None,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None,
+    ):
         """Initialize the adapter with the given TIR function or module.
 
         Args:
@@ -107,18 +111,19 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         buffer_map = func.buffer_map
         dynamic_symbolic_map = {}
         for i, param in enumerate(params):
+            if isinstance(param, tir.Var) and (param not in dynamic_symbolic_map):
+                dynamic_symbolic_map[param] = (2, i, -1)
+        for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
-                    if (isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and
-                        (shape not in params)):
+                    if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
                         dynamic_symbolic_map[shape] = (0, i, j)
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, stride in enumerate(buffer.strides):
-                    if (isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and
-                        (stride not in params)):
+                    if isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
@@ -166,8 +171,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             else:
                 expected_dtype_strs.append(None)
                 is_buffer_param.append(False)
-        # Global function name used in error messages
-        global_symbol = str(prim_func.attrs.get("global_symbol", "main"))
 
         # Map torch dtype to TVM-style dtype string
         def torch_dtype_to_tvm_str(dtype: torch.dtype) -> str:
@@ -196,9 +199,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             # Validate input count strictly
             expected_inputs = len(self.params) - len(self.result_idx)
             if len(inputs) != expected_inputs:
-                raise ValueError(
-                    f"Expected {expected_inputs} inputs, got {len(inputs)} (params={len(self.params)}, outputs={len(self.result_idx)})"
-                )
+                raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.
@@ -217,10 +218,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     for s in param_shapes[i]:
                         if isinstance(s, tir.Var):
                             for key in dynamic_symbolic_map:
-                                if (str(s) == str(key)):
-                                    ref_id, ref_tensor_idx, ref_shape_idx = dynamic_symbolic_map[
-                                        key]
-                                    shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
+                                if str(s) == str(key):
+                                    ref_id, ref_tensor_idx, ref_shape_idx = dynamic_symbolic_map[key]
+                                    if ref_id == 2:
+                                        shape.append(inputs[ref_tensor_idx])
+                                    elif ref_id == 0:
+                                        shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
+                                    elif ref_id == 1:
+                                        shape.append(tensor_list[ref_tensor_idx].stride()[ref_shape_idx])
                         else:  # Already converted to Python int during initialization
                             shape.append(s)
 
@@ -228,29 +233,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         out_device = current_device_functor()
 
                     if len(shape) == 0:
-                        param_name = self.params[i].name if hasattr(self.params[i],
-                                                                    'name') else f'parameter_{i}'
+                        param_name = self.params[i].name if hasattr(self.params[i], "name") else f"parameter_{i}"
                         raise ValueError(
                             f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
-                            f"Expected shape: {shape}")
+                            f"Expected shape: {shape}"
+                        )
                     tensor = torch.empty(*shape, dtype=dtype, device=out_device)
                 else:
                     tensor = inputs[ins_idx]
-                    # Input dtype validation with clear error message
-                    if is_buffer_param[i]:
-                        expected_dtype_str = expected_dtype_strs[i]
-                        expected_torch_dtype = param_dtypes[i]
-                        # Only check when the argument is a tensor and expected dtype is known
-                        if isinstance(
-                                tensor, torch.Tensor
-                        ) and expected_dtype_str is not None and tensor.dtype != expected_torch_dtype:
-                            param_var = params[i]
-                            # Reconstruct TVM-like handle name A_handle for error clarity
-                            handle_name = f"{param_var.name}_handle"
-                            actual_dtype_str = torch_dtype_to_tvm_str(tensor.dtype)
-                            raise RuntimeError(
-                                f"{global_symbol}.{handle_name}.dtype is expected to be {expected_dtype_str}, but got {actual_dtype_str}"
-                            )
                     ins_idx += 1
                 tensor_list.append(tensor)
 
@@ -264,17 +254,19 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         return func
 
     @classmethod
-    def from_database(cls,
-                      params: list[TensorType],
-                      result_idx: list[int],
-                      target: str,
-                      func_or_mod: tir.PrimFunc | tvm.IRModule,
-                      host_kernel_source: str,
-                      device_kernel_source: str,
-                      kernel_lib_path: str,
-                      verbose: bool = False,
-                      pass_configs: dict[str, Any] | None = None,
-                      compile_flags: list[str] | None = None):
+    def from_database(
+        cls,
+        params: list[TensorType],
+        result_idx: list[int],
+        target: str,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_kernel_source: str,
+        device_kernel_source: str,
+        kernel_lib_path: str,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None,
+    ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)

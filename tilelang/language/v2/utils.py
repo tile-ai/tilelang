@@ -4,6 +4,7 @@ import inspect
 from typing import Any, Callable, Literal
 from tilelang import env
 from hashlib import sha256
+from tvm import tir
 import linecache
 
 
@@ -11,11 +12,12 @@ def disk_compile(source, name):
     cache_dir = env.TILELANG_CACHE_DIR
     if cache_dir is not None:
         import os
+
         save_dir = os.path.join(cache_dir, "py-cache")
         os.makedirs(save_dir, exist_ok=True)
-        hash_sfx = sha256(source.encode('utf-8')).hexdigest()[:8]
+        hash_sfx = sha256(source.encode("utf-8")).hexdigest()[:8]
         path = os.path.join(save_dir, f"{name}.{hash_sfx}.py")
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             f.write(source)
     linecache.cache[path] = (len(source), None, source.splitlines(), path)
     return compile(source, path, "exec")
@@ -58,29 +60,39 @@ def get_ast(func: Callable):
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
     source = inspect.getsource(func)
     source = _remove_leading_ident(source)
-    source = '\n' * (start - 1) + source
+    source = "\n" * (start - 1) + source
     tree = ast.parse(source, filename=filename)
     return tree
 
 
-CompileMethod = Literal['direct', 'disk']
+CompileMethod = Literal["direct", "disk"]
 
 
-def get_compiled_object(source: str | ast.AST,
-                        name: str,
-                        filename: str = None,
-                        globals: dict[str, Any] = None):
+def get_compiled_object(source: str | ast.AST, name: str, filename: str = None, globals: dict[str, Any] = None):
     if isinstance(source, ast.AST):
         assert filename is not None, "filename must be provided when source is an AST"
     try:
         if isinstance(source, ast.AST):
             ast.fix_missing_locations(source)
-            compiled = compile(source, filename, 'exec')
+            compiled = compile(source, filename, "exec")
         else:
             compiled = disk_compile(source, name)
     except Exception as e:
         source_str = source if isinstance(source, str) else ast.unparse(source)
-        raise RuntimeError(f'Failed to compile source for {name}, Error: {e}:\n{source_str}') from e
+        raise RuntimeError(f"Failed to compile source for {name}, Error: {e}:\n{source_str}") from e
     locs = {}
     exec(compiled, globals, locs)
     return locs[name]
+
+
+def construct_strides(shape: tuple[Any, ...], allow_prim_expr: bool = True) -> tuple[Any, ...]:
+    """Construct row-major strides from shape."""
+    strides = []
+    stride = 1
+    for s in shape[::-1]:
+        strides.append(stride)
+        stride *= s
+        if not allow_prim_expr and isinstance(stride, tir.PrimExpr):
+            raise ValueError("Cannot construct strides with PrimExpr when allow_prim_expr is False.")
+    strides = tuple(reversed(strides))
+    return strides

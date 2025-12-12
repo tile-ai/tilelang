@@ -17,8 +17,8 @@ def vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
 
     @T.prim_func
     def main(
-            A: T.Tensor[(M,), dtype_A],  # noqa: F821
-            B: T.Tensor[(M,), dtype_B],  # noqa: F821
+        A: T.Tensor[(M,), dtype_A],  # noqa: F821
+        B: T.Tensor[(M,), dtype_B],  # noqa: F821
     ):
         with T.Kernel(1, threads=128):
             T.copy(A, B)
@@ -32,8 +32,8 @@ def parallel_vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
 
     @T.prim_func
     def main(
-            A: T.Tensor[(M,), dtype_A],  # noqa: F821
-            B: T.Tensor[(M,), dtype_B],  # noqa: F821
+        A: T.Tensor[(M,), dtype_A],  # noqa: F821
+        B: T.Tensor[(M,), dtype_B],  # noqa: F821
     ):
         with T.Kernel(1, threads=128):
             A_local = T.alloc_fragment((M,), dtype_A)
@@ -73,8 +73,7 @@ def run_vectorized_cast(src_dtype_str: str, dst_dtype_str: str, check_str: str, 
     code = kernel.get_kernel_source()
     code_parallel = kernel_parallel.get_kernel_source()
 
-    assert check_str in code and check_str in code_parallel, \
-        f"Cast {src_dtype_str} to {dst_dtype_str} with {lanes=} is not vectorized!"
+    assert check_str in code and check_str in code_parallel, f"Cast {src_dtype_str} to {dst_dtype_str} with {lanes=} is not vectorized!"
 
 
 def test_vectorized_cast():
