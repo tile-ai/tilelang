@@ -179,10 +179,17 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
         func_name = "AtomicAddRet" if return_prev else "AtomicAdd"
         return_type = dst.dtype if return_prev else "handle"
 
+        # Pass destination by pointer to match device signature
         if memory_order is None:
-            return T.call_extern(return_type, func_name, dst, value)
+            return T.call_extern(return_type, func_name, T.address_of(dst), value)
         else:
-            return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
+            return T.call_extern(
+                return_type,
+                func_name,
+                T.address_of(dst),
+                value,
+                _MEMORY_ORDER_ID_MAP[memory_order],
+            )
 
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
