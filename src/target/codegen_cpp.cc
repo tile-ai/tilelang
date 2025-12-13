@@ -29,6 +29,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "../support/ffi_aliases.h"
 #include "support/str_escape.h"
 #include "target/build_common.h"
@@ -260,6 +261,21 @@ void CodeGenTileLangCPP::AddFunction(const PrimFunc &f) {
   ICHECK(global_symbol)
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
   bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
+  std::unordered_set<const VarNode *> non_restrict;
+  std::unordered_set<std::string> non_restrict_names;
+  auto normalize = [](const std::string &s) {
+    if (s.size() >= 8 && s.rfind("_handle") == s.size() - 7) {
+      return s.substr(0, s.size() - 7);
+    }
+    return s;
+  };
+  if (auto opt =
+          f->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
+    for (const tir::Var &v : opt.value()) {
+      non_restrict.insert(v.get());
+      non_restrict_names.insert(normalize(v->name_hint));
+    }
+  }
 
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
@@ -294,7 +310,8 @@ void CodeGenTileLangCPP::AddFunction(const PrimFunc &f) {
         }
       }
 
-      if (no_alias) {
+      if (no_alias && !non_restrict.count(v.get()) &&
+          !non_restrict_names.count(normalize(v->name_hint))) {
         PrintRestrict(v, stream);
       }
     } else {

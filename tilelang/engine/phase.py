@@ -179,6 +179,13 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # TODO(lei): return to tir pass when kSymbolicBound simplification
     # is merged into tvm.
     mod = tilelang.transform.Simplify()(mod)
+    # Hoist any root-block annotations to PrimFunc attrs if pass is available
+    try:
+        from . import transform as _tl_transform
+        if hasattr(_tl_transform._ffi_api, "HoistNonRestrictParams"):
+            mod = _tl_transform.HoistNonRestrictParams()(mod)
+    except Exception:
+        pass
     return mod
 
 
