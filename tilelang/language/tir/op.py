@@ -724,8 +724,7 @@ def tvm_load_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout):
     return _tvm_op.tvm_load_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout)
 
 
-def tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c,
-                 index_c):
+def tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c):
     """TVM intrinsic for tensor core mma_sync operators
 
     Parameters
@@ -759,12 +758,10 @@ def tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, 
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b,
-                                fragment_c, index_c)
+    return _tvm_op.tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c)
 
 
-def tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c,
-                  index_c):
+def tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c):
     """TVM intrinsic for tensor core bmma_sync operators
 
     Parameters
@@ -798,8 +795,7 @@ def tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b,
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b,
-                                 fragment_c, index_c)
+    return _tvm_op.tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c)
 
 
 def tvm_fill_fragment(fragment, m, n, k, index, value):
@@ -1121,7 +1117,6 @@ def ptx_wgmma_rs(
     scale_in_a,
     scale_in_b,
 ):
-
     return call_intrin(
         dtype,
         _tvm_op.Op.get("tl.ptx_wgmma_rs"),
@@ -1345,8 +1340,7 @@ def ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, sme
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr,
-                                smem_offset)
+    return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset)
 
 
 def ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes):
@@ -1381,8 +1375,7 @@ def ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, by
     return _tvm_op.ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes)
 
 
-def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes,
-                      barrier_id):
+def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id):
     """TVM intrinsic for ptx async copy from global to shared memory using cp.async.bulk
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk
 
@@ -1414,8 +1407,7 @@ def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offse
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset,
-                                     bytes, barrier_id)
+    return _tvm_op.ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id)
 
 
 def ptx_commit_group():
@@ -2951,8 +2943,7 @@ def q_multiply_shift_per_axis(
     z : PrimExpr
         The result.
     """
-    return _tvm_op.q_multiply_shift_per_axis(x, y, ls, rs, q, is_lshift_required,
-                                             is_rshift_required)
+    return _tvm_op.q_multiply_shift_per_axis(x, y, ls, rs, q, is_lshift_required, is_rshift_required)
 
 
 def shift_left(x, y, span=None):
@@ -3302,8 +3293,7 @@ def TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint, dt
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint,
-                                            dtype_bits_hint)
+    return _tvm_op.TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint, dtype_bits_hint)
 
 
 def TVMBackendFreeWorkspace(device_type, device_id, ptr):

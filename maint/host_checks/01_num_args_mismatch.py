@@ -3,6 +3,7 @@
 Note: The adapter-level wrapper expects only inputs (A, B) because C is marked as output.
 Calling with the wrong number of inputs raises a ValueError before host entry.
 """
+
 import torch
 from common import build_matmul_kernel
 

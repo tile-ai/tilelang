@@ -2354,6 +2354,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr
            << ")), \"r\"((int)" << guard << ")\n";
     stream << ");\n";
+  } else if (op->op.same_as(tl::__ldg())) {
+    // Explicit read-only cached load. Preferred form: __ldg(BufferLoad(...)).
+    // Fallback form: __ldg(buffer, index)
+    const BufferLoadNode *bl = nullptr;
+    if (!op->args.empty()) {
+      bl = op->args[0].as<BufferLoadNode>();
+    }
+    if (bl == nullptr) {
+      LOG(FATAL) << "T.__ldg expects a BufferLoad as the first argument.";
+    }
+    const BufferNode *buffer = bl->buffer.get();
+    ICHECK_EQ(bl->indices.size(), 1)
+        << "T.__ldg currently supports flattened 1D buffer accesses.";
+    PrimExpr base = bl->indices[0];
+    // Emit __ldg(&buffer_ref)
+    auto buffer_ref = this->GetBufferRef(op->dtype, buffer, base);
+    os << "__ldg(&(" << buffer_ref << "))";
   } else if (op->op.same_as(builtin::reinterpret())) {
     DataType tgt_dtype = op->dtype;
     DataType src_dtype = op->args[0]->dtype;
@@ -3244,6 +3261,14 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
       non_restrict_names.insert(normalize(v->name_hint));
     }
   }
+  // Read-only param indices attribute, if present.
+  std::unordered_set<int> ro_param_indices;
+  if (auto opt =
+          func->GetAttr<ffi::Array<Integer>>("tl.readonly_param_indices")) {
+    for (const auto &idx : opt.value()) {
+      ro_param_indices.insert(static_cast<int>(Downcast<Integer>(idx)->value));
+    }
+  }
   os << " " << function_name << "(";
   for (size_t i = 0; i < func->params.size(); ++i) {
     tir::Var v = func->params[i];
@@ -3268,7 +3293,10 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
       if (it != alloc_storage_scope_.end()) {
         PrintStorageScope(it->second, os);
       }
-
+      // If marked read-only, emit const qualifier before type.
+      if (ro_param_indices.count(static_cast<int>(i))) {
+        os << "const ";
+      }
       CodeGenC::PrintType(GetType(v), os);
       if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
         if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
@@ -3328,6 +3356,13 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
       non_restrict_names.insert(normalize2(v->name_hint));
     }
   }
+  // Read-only param indices attribute, if present.
+  std::unordered_set<int> ro_param_indices;
+  if (auto opt = f->GetAttr<ffi::Array<Integer>>("tl.readonly_param_indices")) {
+    for (const auto &idx : opt.value()) {
+      ro_param_indices.insert(static_cast<int>(Downcast<Integer>(idx)->value));
+    }
+  }
 
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
@@ -3355,7 +3390,10 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
       if (it != alloc_storage_scope_.end()) {
         PrintStorageScope(it->second, stream);
       }
-
+      // If marked read-only, emit const qualifier before type.
+      if (ro_param_indices.count(static_cast<int>(i))) {
+        stream << "const ";
+      }
       CodeGenC::PrintType(GetType(v), stream);
       if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
         if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {

@@ -1,5 +1,5 @@
-"""Reproduce: device_type mismatch by passing CPU tensors to a CUDA kernel.
-"""
+"""Reproduce: device_type mismatch by passing CPU tensors to a CUDA kernel."""
+
 import torch
 from common import build_matmul_kernel
 

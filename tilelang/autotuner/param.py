@@ -1,5 +1,5 @@
-"""The auto-tune parameters.
-"""
+"""The auto-tune parameters."""
+
 from __future__ import annotations
 
 import tilelang
@@ -50,7 +50,7 @@ class CompileArgs:
 
     out_idx: list[int] | int | None = None
     execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "auto"
-    target: Literal['auto', 'cuda', 'hip'] = 'auto'
+    target: Literal["auto", "cuda", "hip"] = "auto"
     target_host: str | Target = None
     verbose: bool = False
     pass_configs: dict[str, Any] | None = None
@@ -62,24 +62,20 @@ class CompileArgs:
             target=self.target,
             target_host=self.target_host,
             verbose=self.verbose,
-            pass_configs=self.pass_configs)
+            pass_configs=self.pass_configs,
+        )
 
     def __hash__(self):
         data = {
-            "execution_backend":
-                self.execution_backend,
-            "target":
-                str(self.target),
-            "target_host":
-                str(self.target_host) if self.target_host else None,
-            "verbose":
-                self.verbose,
-            "pass_configs":
-                json.dumps(self.pass_configs, sort_keys=True) if self.pass_configs else None,
+            "execution_backend": self.execution_backend,
+            "target": str(self.target),
+            "target_host": str(self.target_host) if self.target_host else None,
+            "verbose": self.verbose,
+            "pass_configs": json.dumps(self.pass_configs, sort_keys=True) if self.pass_configs else None,
         }
 
-        hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode('utf-8'))
-        return int.from_bytes(hash_obj.digest(), byteorder='big')
+        hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
+        return int.from_bytes(hash_obj.digest(), byteorder="big")
 
 
 @dataclass(frozen=True)
@@ -104,6 +100,7 @@ class ProfileArgs:
         manual_check_prog: Callable = None
         cache_input_tensors: bool = True
     """
+
     warmup: int = 25
     rep: int = 100
     timeout: int = 30
@@ -127,8 +124,8 @@ class ProfileArgs:
             "atol": self.atol,
             "max_mismatched_ratio": self.max_mismatched_ratio,
         }
-        hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode('utf-8'))
-        return int.from_bytes(hash_obj.digest(), byteorder='big')
+        hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
+        return int.from_bytes(hash_obj.digest(), byteorder="big")
 
 
 @dataclass(frozen=True)
@@ -143,6 +140,7 @@ class AutotuneResult:
         func: Optimized function.
         kernel: Compiled kernel function.
     """
+
     latency: float | None = None
     config: dict | None = None
     ref_latency: float | None = None
@@ -199,8 +197,7 @@ class AutotuneResult:
             if verbose:
                 logger.debug(f"Saving kernel source code to file: {device_kernel_path}")
             if kernel.kernel_source is not None:
-                self._safe_write_file(device_kernel_path, "w",
-                                      lambda f: f.write(kernel.kernel_source))
+                self._safe_write_file(device_kernel_path, "w", lambda f: f.write(kernel.kernel_source))
         except Exception as e:
             logger.error(f"Error saving kernel source code to disk: {e}")
 
@@ -211,11 +208,9 @@ class AutotuneResult:
                 logger.debug(f"Saving wrapped kernel source code to file: {host_kernel_path}")
             # Match kernel_cache behavior: use host source for tvm_ffi, otherwise wrapped kernel
             if kernel.execution_backend == "tvm_ffi":
-                self._safe_write_file(host_kernel_path, "w",
-                                      lambda f: f.write(kernel.adapter.get_host_source()))
+                self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_host_source()))
             else:
-                self._safe_write_file(host_kernel_path, "w",
-                                      lambda f: f.write(kernel.adapter.get_kernel_source()))
+                self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_kernel_source()))
         except Exception as e:
             logger.error(f"Error saving wrapped kernel source code to disk: {e}")
 
@@ -237,12 +232,10 @@ class AutotuneResult:
                 py_src_path = src_lib_path.replace(".cubin", ".py")
                 if verbose:
                     logger.debug(f"Saving kernel nvrtc python code to file: {kernel_py_path}")
-                self._safe_write_file(kernel_py_path, "wb",
-                                      lambda f: f.write(self._load_binary(py_src_path)))
+                self._safe_write_file(kernel_py_path, "wb", lambda f: f.write(self._load_binary(py_src_path)))
                 if verbose:
                     logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
-                self._safe_write_file(kernel_lib_path, "wb",
-                                      lambda f: f.write(self._load_binary(src_lib_path)))
+                self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
             elif kernel.execution_backend == "tvm_ffi":
                 executable = kernel.adapter.executable
                 if verbose:
@@ -252,8 +245,7 @@ class AutotuneResult:
                 src_lib_path = kernel.adapter.libpath
                 if verbose:
                     logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
-                self._safe_write_file(kernel_lib_path, "wb",
-                                      lambda f: f.write(self._load_binary(src_lib_path)))
+                self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
 
         except Exception as e:
             logger.error(f"Error saving kernel library to disk: {e}")
@@ -370,14 +362,12 @@ class AutotuneResult:
         # save best config (atomic)
         if verbose:
             logger.debug(f"Saving best config to file: {path / BEST_CONFIG_PATH}")
-        self._safe_write_file(
-            str(path / BEST_CONFIG_PATH), "w", lambda f: json.dump(self.config, f))
+        self._safe_write_file(str(path / BEST_CONFIG_PATH), "w", lambda f: json.dump(self.config, f))
 
         # save function (atomic)
         if verbose:
             logger.debug(f"Saving function to file: {path / FUNCTION_PATH}")
-        self._safe_write_file(
-            str(path / FUNCTION_PATH), "wb", lambda f: cloudpickle.dump(self.func, f))
+        self._safe_write_file(str(path / FUNCTION_PATH), "wb", lambda f: cloudpickle.dump(self.func, f))
 
         # save ref latency (atomic)
         if verbose:
@@ -385,10 +375,13 @@ class AutotuneResult:
         self._safe_write_file(
             str(path / LATENCY_PATH),
             "w",
-            lambda f: json.dump({
-                "latency": self.latency,
-                "ref_latency": self.ref_latency,
-            }, f),
+            lambda f: json.dump(
+                {
+                    "latency": self.latency,
+                    "ref_latency": self.ref_latency,
+                },
+                f,
+            ),
         )
 
         # save kernel
@@ -403,8 +396,8 @@ class AutotuneResult:
         # Normalize target and resolve execution backend for loading
         from tilelang.utils.target import determine_target as _determine_target
         from tilelang.jit.execution_backend import resolve_execution_backend
-        norm_target = Target(_determine_target(compile_args.target)) if isinstance(
-            compile_args.target, str) else compile_args.target
+
+        norm_target = Target(_determine_target(compile_args.target)) if isinstance(compile_args.target, str) else compile_args.target
         requested_backend = compile_args.execution_backend
         resolved_backend = resolve_execution_backend(requested_backend, norm_target)
         # load best config

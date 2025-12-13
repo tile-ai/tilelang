@@ -828,6 +828,16 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::__ldg())) {
+    // HIP fallback: regular load
+    const BufferLoadNode *bl = op->args[0].as<BufferLoadNode>();
+    ICHECK(bl) << "T.__ldg expects a BufferLoad as the first argument.";
+    ICHECK_EQ(bl->indices.size(), 1)
+        << "T.__ldg currently supports flattened 1D buffer accesses.";
+    const BufferNode *buffer = bl->buffer.get();
+    PrimExpr base = bl->indices[0];
+    auto buffer_ref = this->GetBufferRef(op->dtype, buffer, base);
+    os << buffer_ref;
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);

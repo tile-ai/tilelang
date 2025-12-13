@@ -1,4 +1,5 @@
 """The language interface for tl programs."""
+
 from __future__ import annotations
 from tvm import tir
 from tilelang.language import copy, macro, alloc_shared, alloc_fragment
@@ -30,15 +31,13 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
         tir.Call: Handle to the reduction operation
     """
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
-    expected_shapes = [
-        buffer.shape[:dim] + buffer.shape[dim + 1:],
-        buffer.shape[:dim] + [1] + buffer.shape[dim + 1:]
-    ]
+    expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
     if list(out.shape) not in expected_shapes:
-        expected_shapes_str = ' or '.join(map(str, expected_shapes))
+        expected_shapes_str = " or ".join(map(str, expected_shapes))
         raise ValueError(
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
-            f"output shape is {out.shape}, expected shapes are {expected_shapes_str}")
+            f"output shape is {out.shape}, expected shapes are {expected_shapes_str}"
+        )
 
     @macro
     def reduce_macro(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool):

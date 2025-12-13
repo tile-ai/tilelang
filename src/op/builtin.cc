@@ -368,5 +368,10 @@ TIR_DEFINE_TL_BUILTIN(warp_reduce_bitor)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// __ldg(BufferLoad | Buffer, idx?) -> value
+// Treat as a pure call that returns the loaded value.
+TIR_DEFINE_TL_BUILTIN(__ldg).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
 } // namespace tl
 } // namespace tvm

@@ -1,4 +1,5 @@
 """The profiler and convert to torch utils"""
+
 from __future__ import annotations
 from typing import Callable, Any, Literal
 from functools import partial
@@ -45,8 +46,7 @@ class Profiler:
             result_idx = []
         elif isinstance(result_idx, int):
             if result_idx > len(params) or result_idx < -len(params):
-                raise ValueError(
-                    f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
+                raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
             if result_idx < 0:
                 result_idx = len(params) + result_idx
             result_idx = [result_idx]
@@ -113,8 +113,7 @@ class Profiler:
         ref_tensors = ins + ref_outs
         lib_tensors = ins + lib_outs
 
-        assert len(lib_tensors) == len(
-            ref_tensors), "len(lib_tensors) not equals to len(ref_tensors) !"
+        assert len(lib_tensors) == len(ref_tensors), "len(lib_tensors) not equals to len(ref_tensors) !"
         # torch.set_printoptions(edgeitems=torch.inf)
         for lhs, rhs in zip(lib_tensors, ref_tensors):
             # close_mask = torch.isclose(lhs, rhs, rtol=rtol, atol=atol)
@@ -252,10 +251,9 @@ class Profiler:
             )
         elif profiler == "tvm":
             assert func is not None, "func should not be None"
-            assert isinstance(
-                func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
+            assert isinstance(func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
 
-            ins = (self._get_inputs(with_output=True) if input_tensors is None else input_tensors)
+            ins = self._get_inputs(with_output=True) if input_tensors is None else input_tensors
             target = "cuda"
 
             with suppress(Exception):
@@ -264,8 +262,7 @@ class Profiler:
             assert target in ["cuda", "hip"], f"Unknown target: {target}"
 
             device = tvm.cuda(0) if target == "cuda" else tvm.rocm(0)
-            time_evaluator = self.mod.time_evaluator(
-                self.mod.entry_name, device, number=rep, repeat=n_repeat)
+            time_evaluator = self.mod.time_evaluator(self.mod.entry_name, device, number=rep, repeat=n_repeat)
             # Transform Latency to ms
             return time_evaluator(*ins).mean * 1e3
         else:

@@ -23,7 +23,8 @@ def _compile_kernel_without_inplace():
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_STORAGE_REWRITE_DETECT_INPLACE: True,
-    },)
+    },
+)
 def _compile_kernel_with_inplace():
     num_tokens = T.symbolic("num_tokens")
 

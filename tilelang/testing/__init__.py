@@ -5,20 +5,19 @@ import random
 import torch
 import numpy as np
 from tilelang.contrib import nvcc
-from tvm.testing.utils import (requires_cuda, requires_package, requires_llvm, requires_metal,
-                               requires_rocm, _compose)
+from tvm.testing.utils import requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
 
 __all__ = [
-    'requires_package',
-    'requires_cuda',
-    'requires_metal',
-    'requires_rocm',
-    'requires_llvm',
-    'main',
-    'requires_cuda_compute_version',
-] + [f'requires_cuda_compute_version_{op}' for op in ('ge', 'gt', 'le', 'lt', 'eq')]
+    "requires_package",
+    "requires_cuda",
+    "requires_metal",
+    "requires_rocm",
+    "requires_llvm",
+    "main",
+    "requires_cuda_compute_version",
+] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
 
 
 # pytest.main() wrapper to allow running single test file

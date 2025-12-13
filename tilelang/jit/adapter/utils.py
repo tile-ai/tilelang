@@ -70,7 +70,6 @@ def get_annotated_mod(
     target_host: str | Target | None = None,
     model_type: Literal["device", "host", "all"] = "all",
 ) -> IRModule | tuple[IRModule, IRModule]:
-
     # Validate model_type early
     if model_type not in {"device", "host", "all"}:
         raise ValueError(f"Invalid model type: {model_type}")
@@ -95,21 +94,15 @@ def get_annotated_mod(
 
     # Define dispatch dictionary for different model types
     dispatch = {
-        "device":
-            lambda m: tir.transform.Filter(_is_device_call)(m),
-        "host":
-            lambda m: tir.transform.Filter(_is_host_call)(m),
-        "all":
-            lambda m: (tir.transform.Filter(_is_device_call)(m), tir.transform.Filter(_is_host_call)
-                       (m)),
+        "device": lambda m: tir.transform.Filter(_is_device_call)(m),
+        "host": lambda m: tir.transform.Filter(_is_host_call)(m),
+        "all": lambda m: (tir.transform.Filter(_is_device_call)(m), tir.transform.Filter(_is_host_call)(m)),
     }
 
     return dispatch[model_type](mod)
 
 
-def pythonic_expr(expr: tvm.tir.PrimExpr,
-                  dtype_map: dict[str, str] | None = None,
-                  ignore_cast: bool = False) -> str:
+def pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: dict[str, str] | None = None, ignore_cast: bool = False) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
 
@@ -168,9 +161,23 @@ def pythonic_expr(expr: tvm.tir.PrimExpr,
                 s = f"({type_str}){value_str}"
             p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
-                node,
-            (tvm.tir.Mul, tvm.tir.FloorDiv, tvm.tir.Add, tvm.tir.Sub, tvm.tir.FloorMod, tvm.tir.LT,
-             tvm.tir.LE, tvm.tir.GT, tvm.tir.GE, tvm.tir.EQ, tvm.tir.NE, tvm.tir.And, tvm.tir.Or)):
+            node,
+            (
+                tvm.tir.Mul,
+                tvm.tir.FloorDiv,
+                tvm.tir.Add,
+                tvm.tir.Sub,
+                tvm.tir.FloorMod,
+                tvm.tir.LT,
+                tvm.tir.LE,
+                tvm.tir.GT,
+                tvm.tir.GE,
+                tvm.tir.EQ,
+                tvm.tir.NE,
+                tvm.tir.And,
+                tvm.tir.Or,
+            ),
+        ):
             op_map = {
                 tvm.tir.Mul: "*",
                 tvm.tir.FloorDiv: "/",
@@ -222,10 +229,7 @@ def pythonic_expr(expr: tvm.tir.PrimExpr,
     return next(iter(node_to_result_map[expr]), "")
 
 
-def maybe_desc_name(name: str,
-                    matches: list[str],
-                    i: int,
-                    desc_name_map: dict[str, str] | None = None) -> bool:
+def maybe_desc_name(name: str, matches: list[str], i: int, desc_name_map: dict[str, str] | None = None) -> bool:
     """
     Check if a parameter name corresponds to a TMA descriptor.
 
@@ -290,8 +294,7 @@ def parse_function_call_args(
                 else:
                     call_args.append(match)
                 if desc_name_var_map is not None and function_params is not None:
-                    assert len(call_args) <= len(function_params), \
-                        f"Too many arguments: {len(call_args)} > {len(function_params)}"
+                    assert len(call_args) <= len(function_params), f"Too many arguments: {len(call_args)} > {len(function_params)}"
                     desc_name_var_map[match] = function_params[len(call_args) - 1]
 
     return call_args
@@ -300,12 +303,7 @@ def parse_function_call_args(
 class TMADescriptorParams:
     """Parsed TMA descriptor parameters."""
 
-    def __init__(self,
-                 handle_name: str,
-                 dtype: str,
-                 tensor_rank: int,
-                 global_address: Any,
-                 is_img2col: bool = False):
+    def __init__(self, handle_name: str, dtype: str, tensor_rank: int, global_address: Any, is_img2col: bool = False):
         self.handle_name = handle_name
         self.dtype = dtype
         self.tensor_rank = tensor_rank
@@ -355,22 +353,19 @@ def parse_tma_descriptor_args(
     results = []
 
     for handle_name, _ in desc_name_map.items():
-        assert handle_name in desc_name_var_map, \
-            f"Handle name {handle_name} not found in desc_name_var_map"
+        assert handle_name in desc_name_var_map, f"Handle name {handle_name} not found in desc_name_var_map"
         desc_var = desc_name_var_map[handle_name]
 
-        assert desc_var in tma_descriptor_args, \
-            f"TMA descriptor {desc_var} not found in {tma_descriptor_args}"
+        assert desc_var in tma_descriptor_args, f"TMA descriptor {desc_var} not found in {tma_descriptor_args}"
         args = tma_descriptor_args[desc_var]
 
         # Skip __tvm_tensormap_create_tiled and second element (like CUDA version)
         if len(args) < 3:
-            raise ValueError(
-                f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
+            raise ValueError(f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
 
         tma_create_str, _, dtype, tensor_rank, global_address, *remaining_args = args
 
-        is_img2col = (tma_create_str.value == "__tvm_tensormap_create_im2col")
+        is_img2col = tma_create_str.value == "__tvm_tensormap_create_im2col"
 
         # Convert basic fields
         dtype = pythonic_expr_func(dtype)
@@ -386,60 +381,45 @@ def parse_tma_descriptor_args(
             # Tiled mode
             expected_args_len = 4 * tensor_rank + 4
             if len(remaining_args) < expected_args_len:
-                raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
-                                 f"expected {expected_args_len} for tensor_rank {tensor_rank}")
+                raise ValueError(
+                    f"Insufficient remaining args: got {len(remaining_args)}, expected {expected_args_len} for tensor_rank {tensor_rank}"
+                )
 
             # Extract dimensions and strides
             params.global_dim = [pythonic_expr_func(i) for i in remaining_args[:tensor_rank]]
-            params.global_stride = [
-                pythonic_expr_func(i) for i in remaining_args[tensor_rank:2 * tensor_rank]
-            ]
-            params.box_dim = [
-                pythonic_expr_func(i) for i in remaining_args[2 * tensor_rank:3 * tensor_rank]
-            ]
-            params.element_strides = [
-                pythonic_expr_func(i) for i in remaining_args[3 * tensor_rank:4 * tensor_rank]
-            ]
+            params.global_stride = [pythonic_expr_func(i) for i in remaining_args[tensor_rank : 2 * tensor_rank]]
+            params.box_dim = [pythonic_expr_func(i) for i in remaining_args[2 * tensor_rank : 3 * tensor_rank]]
+            params.element_strides = [pythonic_expr_func(i) for i in remaining_args[3 * tensor_rank : 4 * tensor_rank]]
 
             # Extract remaining parameters
             try:
-                interleave, swizzle, l2_promotion, oob_fill = remaining_args[4 * tensor_rank:4 *
-                                                                             tensor_rank + 4]
+                interleave, swizzle, l2_promotion, oob_fill = remaining_args[4 * tensor_rank : 4 * tensor_rank + 4]
                 params.interleave = pythonic_expr_func(interleave)
                 params.swizzle = pythonic_expr_func(swizzle)
                 params.l2_promotion = pythonic_expr_func(l2_promotion)
                 params.oob_fill = pythonic_expr_func(oob_fill)
             except ValueError as e:
-                raise ValueError(
-                    "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"
-                ) from e
+                raise ValueError("Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)") from e
         else:
             # Im2col mode
             expected_args_len = 5 * tensor_rank + 2
             if len(remaining_args) < expected_args_len:
-                raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
-                                 f"expected {expected_args_len} for tensor_rank {tensor_rank}")
+                raise ValueError(
+                    f"Insufficient remaining args: got {len(remaining_args)}, expected {expected_args_len} for tensor_rank {tensor_rank}"
+                )
 
             # Extract dimensions and strides
             params.global_dim = [pythonic_expr_func(i) for i in remaining_args[:tensor_rank]]
-            params.global_stride = [
-                pythonic_expr_func(i) for i in remaining_args[tensor_rank:2 * tensor_rank]
-            ]
-            params.element_strides = [
-                pythonic_expr_func(i) for i in remaining_args[2 * tensor_rank:3 * tensor_rank]
-            ]
-            params.lower_corner = [
-                pythonic_expr_func(i) for i in remaining_args[3 * tensor_rank:4 * tensor_rank - 2]
-            ]
-            params.upper_corner = [
-                pythonic_expr_func(i)
-                for i in remaining_args[4 * tensor_rank - 2:5 * tensor_rank - 4]
-            ]
+            params.global_stride = [pythonic_expr_func(i) for i in remaining_args[tensor_rank : 2 * tensor_rank]]
+            params.element_strides = [pythonic_expr_func(i) for i in remaining_args[2 * tensor_rank : 3 * tensor_rank]]
+            params.lower_corner = [pythonic_expr_func(i) for i in remaining_args[3 * tensor_rank : 4 * tensor_rank - 2]]
+            params.upper_corner = [pythonic_expr_func(i) for i in remaining_args[4 * tensor_rank - 2 : 5 * tensor_rank - 4]]
 
             # Extract remaining parameters
             try:
-                smem_box_pixel, smem_box_channel, interleave, swizzle, l2_promotion, oob_fill = \
-                    remaining_args[5 * tensor_rank - 4:5 * tensor_rank + 2]
+                smem_box_pixel, smem_box_channel, interleave, swizzle, l2_promotion, oob_fill = remaining_args[
+                    5 * tensor_rank - 4 : 5 * tensor_rank + 2
+                ]
                 params.smem_box_pixel = pythonic_expr_func(smem_box_pixel)
                 params.smem_box_channel = pythonic_expr_func(smem_box_channel)
                 params.interleave = pythonic_expr_func(interleave)

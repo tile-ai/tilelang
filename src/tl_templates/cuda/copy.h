@@ -26,7 +26,8 @@ template <int N> TL_DEVICE void cp_async_wait() {
 }
 
 template <int N>
-TL_DEVICE void cp_async_gs(void const *const smem_addr, void *global_ptr) {
+TL_DEVICE void cp_async_gs(void const *const smem_addr,
+                           void const *global_ptr) {
   static_assert(N == 16 || N == 8 || N == 4);
   unsigned int addr = smem_ptr_to_uint(smem_addr);
   if constexpr (N == 16) {
@@ -37,7 +38,7 @@ TL_DEVICE void cp_async_gs(void const *const smem_addr, void *global_ptr) {
         "cp.async.cg.shared.global [%0], [%1], %2;"
 #endif
         ::"r"(addr),
-        "l"((void *)(global_ptr)), "n"(N));
+        "l"((void const *)(global_ptr)), "n"(N));
   } else {
     asm volatile(
 #if TL_ENABLE_L2_PREFETCH
@@ -46,13 +47,13 @@ TL_DEVICE void cp_async_gs(void const *const smem_addr, void *global_ptr) {
         "cp.async.ca.shared.global [%0], [%1], %2;"
 #endif
         ::"r"(addr),
-        "l"((void *)(global_ptr)), "n"(N));
+        "l"((void const *)(global_ptr)), "n"(N));
   }
 }
 
 template <int N>
 TL_DEVICE void cp_async_gs_conditional(void const *const smem_addr,
-                                       void *global_ptr, bool cond) {
+                                       void const *global_ptr, bool cond) {
   static_assert(N == 16 || N == 8 || N == 4);
   int bytes = cond ? N : 0;
   unsigned int addr = smem_ptr_to_uint(smem_addr);
@@ -64,7 +65,7 @@ TL_DEVICE void cp_async_gs_conditional(void const *const smem_addr,
         "cp.async.cg.shared.global [%0], [%1], %2, %3;"
 #endif
         ::"r"(addr),
-        "l"((void *)(global_ptr)), "n"(N), "r"(bytes));
+        "l"((void const *)(global_ptr)), "n"(N), "r"(bytes));
   } else {
     asm volatile(
 #if TL_ENABLE_L2_PREFETCH
@@ -73,7 +74,7 @@ TL_DEVICE void cp_async_gs_conditional(void const *const smem_addr,
         "cp.async.ca.shared.global [%0], [%1], %2, %3;"
 #endif
         ::"r"(addr),
-        "l"((void *)(global_ptr)), "n"(N), "r"(bytes));
+        "l"((void const *)(global_ptr)), "n"(N), "r"(bytes));
   }
 }
 

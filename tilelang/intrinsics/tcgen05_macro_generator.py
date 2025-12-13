@@ -88,9 +88,22 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         is_m_first: bool = False,
         thread_var: Var | None = None,
     ):
-        super().__init__(a_dtype, b_dtype, accum_dtype, a_transposed, b_transposed, block_row_warps,
-                         block_col_warps, warp_row_tiles, warp_col_tiles, chunk, reduce_k,
-                         num_elems_per_byte, is_m_first, thread_var)
+        super().__init__(
+            a_dtype,
+            b_dtype,
+            accum_dtype,
+            a_transposed,
+            b_transposed,
+            block_row_warps,
+            block_col_warps,
+            warp_row_tiles,
+            warp_col_tiles,
+            chunk,
+            reduce_k,
+            num_elems_per_byte,
+            is_m_first,
+            thread_var,
+        )
 
     def _assign_a_shared_layout(self, layout: Layout):
         self.a_shared_layout = layout
@@ -137,13 +150,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         else:
             raise ValueError(f"Unsupported swizzle mode: {layout}")
 
-    def tcgen05mma(self,
-                   A_buf: Buffer,
-                   B_buf: Buffer,
-                   C_local_buf: Buffer,
-                   mbar,
-                   clear_accum: PrimExpr = False):
-
+    def tcgen05mma(self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, mbar, clear_accum: PrimExpr = False):
         if is_tensor_memory(A_buf):
             return self.tcgen05mma_rs(A_buf, B_buf, C_local_buf, clear_accum)
 
@@ -164,22 +171,20 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         elems_in_bits = DataType(self.a_dtype).bits
         elems_in_bytes = elems_in_bits // 8
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none(
-        ) else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
         meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
         if len(meta) != 5:
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
-                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}")
+                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
+            )
         atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
 
         # by default, we utilize non-swizzle layout offset
-        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim *
-                                                                               elems_in_bytes)
-        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 *
-                                                                                  elems_in_bytes)
+        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
+        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
 
         if not a_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
@@ -202,11 +207,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 else:
                     a_stride_byte_offset = 8 * elems_in_bytes * a_swizzle_atom_elems
 
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim *
-                                                                               elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim *
-                                elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else
-                                                                      (8 * 8 * elems_in_bytes))
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
         if not b_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
             # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
@@ -312,21 +314,26 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                     for ki in T.unroll(0, (k_dim // micro_size_k)):
                         scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
                         A_elem_offset = (
-                            ki % ak_atom_size
-                        ) * micro_size_k + i * atom_m * a_swizzle_atom_elems + (
-                            ki // ak_atom_size
-                        ) * m_dim * a_swizzle_atom_elems if a_is_k_major else i * atom_m * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                            (ki % ak_atom_size) * micro_size_k
+                            + i * atom_m * a_swizzle_atom_elems
+                            + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                            if a_is_k_major
+                            else i * atom_m * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                        )
 
-                        B_elem_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
-                            ki % bk_atom_size
-                        ) * micro_size_k + j * atom_n * b_swizzle_atom_elems if b_is_k_major else (
-                            ki * b_swizzle_atom_elems * micro_size_k + j * atom_n *
-                            (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1))
+                        B_elem_offset = (
+                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                            + (ki % bk_atom_size) * micro_size_k
+                            + j * atom_n * b_swizzle_atom_elems
+                            if b_is_k_major
+                            else (
+                                ki * b_swizzle_atom_elems * micro_size_k + j * atom_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
+                            )
+                        )
 
                         A_byte_offset = A_elem_offset * elems_in_bytes
                         B_byte_offset = B_elem_offset * elems_in_bytes
-                        C_offset = (i * n_dim + j * tmem_col_step
-                                   ) * accum_dtype_in_bits // 32  # 32 bits per tmem bank
+                        C_offset = (i * n_dim + j * tmem_col_step) * accum_dtype_in_bits // 32  # 32 bits per tmem bank
 
                         T.ptx_tcgen05_mma_ss(
                             a_dtype_abbrv,
@@ -373,8 +380,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         """
         assert is_tensor_memory(tmem_buf), "tmem_buf must reside in tensor memory (shared.tmem)"
         if len(tmem_buf.shape) != 2:
-            raise ValueError(
-                f"TCGEN5MMA expects a 2-D tensor-memory buffer, got shape {tmem_buf.shape}")
+            raise ValueError(f"TCGEN5MMA expects a 2-D tensor-memory buffer, got shape {tmem_buf.shape}")
 
         m = int(tmem_buf.shape[0])
         n = int(tmem_buf.shape[1])
@@ -382,14 +388,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         meta = self.get_tcgen5_mma_meta(m, n, k)
         if len(meta) != 5:
-            raise ValueError(f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, "
-                             f"A dtype={self.a_dtype}, accum dtype={self.accum_dtype}")
+            raise ValueError(
+                f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
+            )
         atom_m, atom_n, _, _, _ = (int(x) for x in meta)
 
         if m % atom_m != 0 or n % atom_n != 0:
-            raise ValueError(
-                f"Invalid TCGEN5MMA store layout for shape ({m}, {n}) with atoms ({atom_m}, {atom_n})"
-            )
+            raise ValueError(f"Invalid TCGEN5MMA store layout for shape ({m}, {n}) with atoms ({atom_m}, {atom_n})")
 
         def forward(i: PrimExpr, j: PrimExpr):
             atom_idx = (i // atom_m) + (j // atom_n) * (m // atom_m)
@@ -422,11 +427,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return Layout([m, n], forward)
 
     def get_tcgen5_mma_meta(self, m: int, n: int, k: int):
-        return _ffi_api.get_tcgen5_mma_meta(
-            int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype))
+        return _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype))
 
-    def get_tcgen5_instr_desc(self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool,
-                              b_is_k_major: bool, scale_in_a: int, scale_in_b: int) -> PrimExpr:
+    def get_tcgen5_instr_desc(
+        self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool, b_is_k_major: bool, scale_in_a: int, scale_in_b: int
+    ) -> PrimExpr:
         desc = _ffi_api.get_tcgen5_instr_desc(
             atom_m,
             atom_n,

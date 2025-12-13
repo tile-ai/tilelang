@@ -12,6 +12,7 @@ Key design:
 - Dict-based deduplication ensures TMA descriptors created only once
 - Generates pure Python using cuda.bindings.driver for zero C++ dependency
 """
+
 from __future__ import annotations
 from typing import Any, ClassVar
 
@@ -21,8 +22,7 @@ from tvm.tir.stmt_functor import post_order_visit
 
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
-from tilelang.jit.adapter.utils import (match_declare_kernel, pythonic_expr,
-                                        parse_function_call_args, parse_tma_descriptor_args)
+from tilelang.jit.adapter.utils import match_declare_kernel, pythonic_expr, parse_function_call_args, parse_tma_descriptor_args
 
 PREDEF_HOST_FUNC_PY = """
 from cuda.bindings.driver import (
@@ -235,13 +235,15 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
     _generated_host_func: str | None = None
 
-    def __init__(self,
-                 scheduled_ir_module: IRModule,
-                 source: str,
-                 target: Target,
-                 device_mod: IRModule | None = None,
-                 host_mod: IRModule | None = None,
-                 pass_configs: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        scheduled_ir_module: IRModule,
+        source: str,
+        target: Target,
+        device_mod: IRModule | None = None,
+        host_mod: IRModule | None = None,
+        pass_configs: dict[str, Any] | None = None,
+    ):
         """Initialize NVRTC wrapper with compiled IR modules.
 
         Args:
@@ -303,15 +305,16 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append({
-                    "name": buffer.data.name,
-                    "type": "ctypes.c_void_p",
-                })
+                function_args.append(
+                    {
+                        "name": buffer.data.name,
+                        "type": "ctypes.c_void_p",
+                    }
+                )
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
-                raise ValueError(
-                    f"Parameter {param} is not in the buffer map of the primary function.")
+                raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
         for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
             if dyn_sym not in [arg["name"] for arg in function_args]:
@@ -359,9 +362,9 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     return (f"{name}.data_ptr()", arg_type)
                 return (name, arg_type)
 
-            call_args = parse_function_call_args(declaration, function_args, function_params,
-                                                 desc_name_map, desc_name_var_map,
-                                                 transform_nvrtc_arg)
+            call_args = parse_function_call_args(
+                declaration, function_args, function_params, desc_name_map, desc_name_var_map, transform_nvrtc_arg
+            )
 
             for arg_name, arg_type in call_args:
                 if arg_type == "ctypes.c_void_p":
@@ -369,26 +372,28 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     break
 
             # Store kernel info for second pass
-            kernel_info_list.append({
-                'function_name': function_name,
-                'block_info': block_info,
-                'grid_info': grid_info,
-                'dynamic_smem_buf': dynamic_smem_buf,
-                'call_args': call_args,
-                'device_index': device_index,
-            })
+            kernel_info_list.append(
+                {
+                    "function_name": function_name,
+                    "block_info": block_info,
+                    "grid_info": grid_info,
+                    "dynamic_smem_buf": dynamic_smem_buf,
+                    "call_args": call_args,
+                    "device_index": device_index,
+                }
+            )
 
         # Generate TMA descriptor initialization code once for all kernels
         kernel_launch_code += self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
 
         # Second pass: generate kernel launch code for each kernel
         for kernel_info in kernel_info_list:
-            function_name = kernel_info['function_name']
-            block_info = kernel_info['block_info']
-            grid_info = kernel_info['grid_info']
-            dynamic_smem_buf = kernel_info['dynamic_smem_buf']
-            call_args = kernel_info['call_args']
-            device_index = kernel_info['device_index']
+            function_name = kernel_info["function_name"]
+            block_info = kernel_info["block_info"]
+            grid_info = kernel_info["grid_info"]
+            dynamic_smem_buf = kernel_info["dynamic_smem_buf"]
+            call_args = kernel_info["call_args"]
+            device_index = kernel_info["device_index"]
 
             arg_names = ", ".join([arg[0] for arg in call_args])
             arg_types = ", ".join([arg[1] for arg in call_args])
@@ -399,23 +404,26 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             kernel_launch_code += init_l2_persistent_map
 
             # Generate kernel launch code
-            kernel_launch_code += KERNEL_LAUNCH_FUNC_PY.format(function_name,
-                                                               self._pythonic_expr(grid_info[0]),
-                                                               self._pythonic_expr(grid_info[1]),
-                                                               self._pythonic_expr(grid_info[2]),
-                                                               self._pythonic_expr(block_info[0]),
-                                                               self._pythonic_expr(block_info[1]),
-                                                               self._pythonic_expr(block_info[2]),
-                                                               smem_str, arg_names, arg_types,
-                                                               device_index)
+            kernel_launch_code += KERNEL_LAUNCH_FUNC_PY.format(
+                function_name,
+                self._pythonic_expr(grid_info[0]),
+                self._pythonic_expr(grid_info[1]),
+                self._pythonic_expr(grid_info[2]),
+                self._pythonic_expr(block_info[0]),
+                self._pythonic_expr(block_info[1]),
+                self._pythonic_expr(block_info[2]),
+                smem_str,
+                arg_names,
+                arg_types,
+                device_index,
+            )
 
         # Reset L2 persistent map after all kernel execution
         if has_l2_persistent_map:
             kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE_PY
 
         # Wrap the kernel dispatch logic in an external C function
-        host_func = PREDEF_HOST_FUNC_PY.format(
-            repr(list(function_informations.keys())), def_args, kernel_launch_code)
+        host_func = PREDEF_HOST_FUNC_PY.format(repr(list(function_informations.keys())), def_args, kernel_launch_code)
         return host_func
 
     def generate_l2_persistent_map(self, function_name: str) -> str:
@@ -434,23 +442,21 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         if function_name not in self.l2_persistent_map:
             return ""
         init_l2_persistent_map = ""
-        for buffer_name, (hit_ratio,
-                          size_in_bytes) in self.l2_persistent_map[function_name].items():
+        for buffer_name, (hit_ratio, size_in_bytes) in self.l2_persistent_map[function_name].items():
             # Get persisting_l2_cache_max_size
             from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
+
             persisting_l2_cache_max_size = get_persisting_l2_cache_max_size()
             try:
                 num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
             except TypeError:
                 # as size_in_bytes may be a symbolic expression
                 num_bytes = persisting_l2_cache_max_size
-            init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC_PY.format(
-                buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes))
+            init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC_PY.format(buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes))
 
         return init_l2_persistent_map
 
-    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str],
-                                     desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
+    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
         """Generate Python code to initialize TMA descriptors.
 
         TMA (Tensor Memory Accelerator) descriptors are opaque CUDA objects
@@ -470,28 +476,43 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             return tma_descriptor_init
 
         # Parse TMA descriptor arguments using the common utility
-        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map,
-                                                  desc_name_var_map, self._pythonic_expr)
+        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr)
 
         # Generate Python code from parsed parameters
         for params in parsed_params:
             if not params.is_img2col:
                 tma_descriptor_init += TMA_DESC_INIT_FUNC_PY.format(
-                    params.handle_name, params.dtype, params.tensor_rank, params.global_address,
+                    params.handle_name,
+                    params.dtype,
+                    params.tensor_rank,
+                    params.global_address,
                     ", ".join(map(lambda x: f"cuuint64_t({x})", params.global_dim)),
                     ", ".join(map(lambda x: f"cuuint64_t({x})", params.global_stride)),
                     ", ".join(map(lambda x: f"cuuint32_t({x})", params.box_dim)),
                     ", ".join(map(lambda x: f"cuuint32_t({x})", params.element_strides)),
-                    params.interleave, params.swizzle, params.l2_promotion, params.oob_fill)
+                    params.interleave,
+                    params.swizzle,
+                    params.l2_promotion,
+                    params.oob_fill,
+                )
             else:
                 tma_descriptor_init += TMA_IM2COL_DESC_INIT_FUNC_PY.format(
-                    params.handle_name, params.dtype, params.tensor_rank, params.global_address,
+                    params.handle_name,
+                    params.dtype,
+                    params.tensor_rank,
+                    params.global_address,
                     ", ".join(map(lambda x: f"cuuint64_t({x})", params.global_dim)),
                     ", ".join(map(lambda x: f"cuuint64_t({x})", params.global_stride)),
-                    ", ".join(map(lambda x: f"cuuint32_t({x})",
-                                  params.element_strides)), ", ".join(params.lower_corner),
-                    ", ".join(params.upper_corner), params.smem_box_channel, params.smem_box_pixel,
-                    params.interleave, params.swizzle, params.l2_promotion, params.oob_fill)
+                    ", ".join(map(lambda x: f"cuuint32_t({x})", params.element_strides)),
+                    ", ".join(params.lower_corner),
+                    ", ".join(params.upper_corner),
+                    params.smem_box_channel,
+                    params.smem_box_pixel,
+                    params.interleave,
+                    params.swizzle,
+                    params.l2_promotion,
+                    params.oob_fill,
+                )
 
         return tma_descriptor_init
 
@@ -527,17 +548,14 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
                 nonlocal function_params
                 if isinstance(node, tvm.tir.Call):
-                    if not (hasattr(node, "op") and
-                            node.op == tvm.ir.Op.get("tir.tvm_call_packed")):
+                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tir.tvm_call_packed")):
                         return
                     args = node.args
                     if not args or args[0] != fn:
                         return
                     if len(args) < 1 + param_cnt:
-                        raise AssertionError(
-                            "tvm_call_packed should have at least 1 argument and match device function parameters"
-                        )
-                    function_params = args[1:1 + param_cnt]
+                        raise AssertionError("tvm_call_packed should have at least 1 argument and match device function parameters")
+                    function_params = args[1 : 1 + param_cnt]
 
             post_order_visit(self.host_func.body, visitor)
             assert function_params is not None, "function_params should not be None"

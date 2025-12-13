@@ -8,22 +8,14 @@ import math
 
 
 @tilelang.jit(
-    out_idx=[8], pass_configs={
+    out_idx=[8],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
-def mla_decode_tilelang(batch,
-                        h_q,
-                        h_kv,
-                        max_seqlen_pad,
-                        dv,
-                        dpe,
-                        block_N,
-                        block_H,
-                        num_split,
-                        block_size,
-                        softmax_scale=None):
+    },
+)
+def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, block_H, num_split, block_size, softmax_scale=None):
     if softmax_scale is None:
-        softmax_scale = (dv + dpe)**-0.5
+        softmax_scale = (dv + dpe) ** -0.5
     scale = float(softmax_scale * 1.44269504)  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
@@ -34,13 +26,13 @@ def mla_decode_tilelang(batch,
 
     @T.macro
     def flash_mla_kernel(
-            Q: T.Tensor([batch, h_q, dv], dtype),
-            Q_pe: T.Tensor([batch, h_q, dpe], dtype),
-            KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
-            K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
-            BLOCK_TABLE: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
-            CACHE_SEQLENS: T.Tensor([batch], "int32"),
-            Output: T.Tensor([batch, h_q, dv], dtype),
+        Q: T.Tensor([batch, h_q, dv], dtype),
+        Q_pe: T.Tensor([batch, h_q, dpe], dtype),
+        KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
+        K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
+        BLOCK_TABLE: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
+        CACHE_SEQLENS: T.Tensor([batch], "int32"),
+        Output: T.Tensor([batch, h_q, dv], dtype),
     ):
         with T.Kernel(batch, h_q // min(block_H, kv_group_num), threads=256) as (bx, by):
             Q_shared = T.alloc_shared([block_H, dv], dtype)
@@ -59,13 +51,15 @@ def mla_decode_tilelang(batch,
 
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
-            T.annotate_layout({
-                O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                S_shared: tilelang.layout.make_swizzled_layout(S_shared),
-            })
+            T.annotate_layout(
+                {
+                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
+                    S_shared: tilelang.layout.make_swizzled_layout(S_shared),
+                }
+            )
 
-            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_shared)
+            T.copy(Q_pe[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -73,25 +67,17 @@ def mla_decode_tilelang(batch,
             loop_range = T.ceildiv(CACHE_SEQLENS[bx], block_N)
             for kr in T.Pipelined(loop_range, num_stages=2):
                 k = loop_range - 1 - kr
-                kv_start = BLOCK_TABLE[bx, (k * block_N) //
-                                       block_size] * block_size + (k * block_N) % block_size
-                T.copy(KV[kv_start:kv_start + block_N, cur_kv_head, :], KV_shared)
-                T.copy(K_pe[kv_start:kv_start + block_N, cur_kv_head, :], K_pe_shared)
+                kv_start = BLOCK_TABLE[bx, (k * block_N) // block_size] * block_size + (k * block_N) % block_size
+                T.copy(KV[kv_start : kv_start + block_N, cur_kv_head, :], KV_shared)
+                T.copy(K_pe[kv_start : kv_start + block_N, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
-                T.gemm(
-                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-                T.gemm(
-                    Q_pe_shared,
-                    K_pe_shared,
-                    acc_s,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(Q_pe_shared, K_pe_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 if kr == 0:
                     for i, j in T.Parallel(block_H, block_N):
-                        acc_s[i, j] = T.if_then_else(k * block_N + j >= CACHE_SEQLENS[bx],
-                                                     -T.infinity(accum_dtype), acc_s[i, j])
+                        acc_s[i, j] = T.if_then_else(k * block_N + j >= CACHE_SEQLENS[bx], -T.infinity(accum_dtype), acc_s[i, j])
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_H):
                     scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
@@ -109,21 +95,20 @@ def mla_decode_tilelang(batch,
             for i, j in T.Parallel(block_H, dv):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
+            T.copy(O_shared, Output[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :])
 
     @T.macro
     def flash_mla_split_kv_kernel(
-            Q: T.Tensor([batch, h_q, dv], dtype),
-            Q_pe: T.Tensor([batch, h_q, dpe], dtype),
-            KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
-            K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
-            BLOCK_TABLE: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
-            CACHE_SEQLENS: T.Tensor([batch], "int32"),
-            glse: T.Tensor([batch, h_q, num_split], dtype),
-            Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
+        Q: T.Tensor([batch, h_q, dv], dtype),
+        Q_pe: T.Tensor([batch, h_q, dpe], dtype),
+        KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
+        K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
+        BLOCK_TABLE: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
+        CACHE_SEQLENS: T.Tensor([batch], "int32"),
+        glse: T.Tensor([batch, h_q, num_split], dtype),
+        Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
     ):
-        with T.Kernel(
-                batch, h_q // min(block_H, kv_group_num), num_split, threads=256) as (bx, by, bz):
+        with T.Kernel(batch, h_q // min(block_H, kv_group_num), num_split, threads=256) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_H, dv], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
             Q_pe_shared = T.alloc_shared([block_H, dpe], dtype)
@@ -141,13 +126,15 @@ def mla_decode_tilelang(batch,
 
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
-            T.annotate_layout({
-                O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                S_shared: tilelang.layout.make_swizzled_layout(S_shared),
-            })
+            T.annotate_layout(
+                {
+                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
+                    S_shared: tilelang.layout.make_swizzled_layout(S_shared),
+                }
+            )
 
-            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_shared)
+            T.copy(Q_pe[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -155,28 +142,20 @@ def mla_decode_tilelang(batch,
             total_blocks = T.ceildiv(CACHE_SEQLENS[bx], block_N)
             blocks_per_split = T.floordiv(total_blocks, num_split)
             remaining_blocks = T.floormod(total_blocks, num_split)
-            loop_range = (blocks_per_split + T.if_then_else(bz < remaining_blocks, 1, 0))
+            loop_range = blocks_per_split + T.if_then_else(bz < remaining_blocks, 1, 0)
             start = (blocks_per_split * bz + T.min(bz, remaining_blocks)) * block_N
 
             for k in T.Pipelined(loop_range, num_stages=2):
-                kv_start = BLOCK_TABLE[bx, (start + k * block_N) //
-                                       block_size] * block_size + (k * block_N) % block_size
-                T.copy(KV[kv_start:kv_start + block_N, cur_kv_head, :], KV_shared)
-                T.copy(K_pe[kv_start:kv_start + block_N, cur_kv_head, :], K_pe_shared)
+                kv_start = BLOCK_TABLE[bx, (start + k * block_N) // block_size] * block_size + (k * block_N) % block_size
+                T.copy(KV[kv_start : kv_start + block_N, cur_kv_head, :], KV_shared)
+                T.copy(K_pe[kv_start : kv_start + block_N, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
-                T.gemm(
-                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-                T.gemm(
-                    Q_pe_shared,
-                    K_pe_shared,
-                    acc_s,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(Q_pe_shared, K_pe_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 for i, j in T.Parallel(block_H, block_N):
-                    acc_s[i, j] = T.if_then_else(start + k * block_N + j >= CACHE_SEQLENS[bx],
-                                                 -T.infinity(accum_dtype), acc_s[i, j])
+                    acc_s[i, j] = T.if_then_else(start + k * block_N + j >= CACHE_SEQLENS[bx], -T.infinity(accum_dtype), acc_s[i, j])
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_H):
                     scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
@@ -196,15 +175,15 @@ def mla_decode_tilelang(batch,
                 acc_o[i, j] /= logsum[i]
             for i in T.Parallel(block_H):
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
-            T.copy(logsum, glse[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, bz])
+            T.copy(logsum, glse[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, bz])
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output_partial[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, bz, :])
+            T.copy(O_shared, Output_partial[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, bz, :])
 
     @T.macro
     def combine(
-            glse: T.Tensor([batch, h_q, num_split], dtype),
-            Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
-            Output: T.Tensor([batch, h_q, dv], dtype),
+        glse: T.Tensor([batch, h_q, num_split], dtype),
+        Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
+        Output: T.Tensor([batch, h_q, dv], dtype),
     ):
         with T.Kernel(h_q, batch, threads=128) as (by, bz):
             po_local = T.alloc_fragment([dv], dtype)
@@ -214,9 +193,11 @@ def mla_decode_tilelang(batch,
             lse_max_local = T.alloc_local([1], accum_dtype)
             scale_local = T.alloc_local([1], accum_dtype)
 
-            T.annotate_layout({
-                lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-            })
+            T.annotate_layout(
+                {
+                    lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
+                }
+            )
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
@@ -239,31 +220,30 @@ def mla_decode_tilelang(batch,
 
     @T.prim_func
     def main_split(
-            Q: T.Tensor([batch, h_q, dv], dtype),
-            Q_pe: T.Tensor([batch, h_q, dpe], dtype),
-            KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
-            K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
-            block_table: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
-            cache_seqlens: T.Tensor([batch], "int32"),
-            glse: T.Tensor([batch, h_q, num_split], dtype),
-            Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
-            Output: T.Tensor([batch, h_q, dv], dtype),
+        Q: T.Tensor([batch, h_q, dv], dtype),
+        Q_pe: T.Tensor([batch, h_q, dpe], dtype),
+        KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
+        K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
+        block_table: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
+        cache_seqlens: T.Tensor([batch], "int32"),
+        glse: T.Tensor([batch, h_q, num_split], dtype),
+        Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
+        Output: T.Tensor([batch, h_q, dv], dtype),
     ):
-        flash_mla_split_kv_kernel(Q, Q_pe, KV, K_pe, block_table, cache_seqlens, glse,
-                                  Output_partial)
+        flash_mla_split_kv_kernel(Q, Q_pe, KV, K_pe, block_table, cache_seqlens, glse, Output_partial)
         combine(glse, Output_partial, Output)
 
     @T.prim_func
     def main_no_split(
-            Q: T.Tensor([batch, h_q, dv], dtype),
-            Q_pe: T.Tensor([batch, h_q, dpe], dtype),
-            KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
-            K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
-            block_table: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
-            cache_seqlens: T.Tensor([batch], "int32"),
-            glse: T.Tensor([batch, h_q, num_split], dtype),
-            Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
-            Output: T.Tensor([batch, h_q, dv], dtype),
+        Q: T.Tensor([batch, h_q, dv], dtype),
+        Q_pe: T.Tensor([batch, h_q, dpe], dtype),
+        KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
+        K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
+        block_table: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
+        cache_seqlens: T.Tensor([batch], "int32"),
+        glse: T.Tensor([batch, h_q, num_split], dtype),
+        Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
+        Output: T.Tensor([batch, h_q, dv], dtype),
     ):
         flash_mla_kernel(Q, Q_pe, KV, K_pe, block_table, cache_seqlens, Output)
 
@@ -284,8 +264,7 @@ def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
         s_q = query.shape[-2]
         s_k = key.shape[-2]
         attn_bias = torch.zeros(s_q, s_k, dtype=query.dtype, device=query.device)
-        temp_mask = torch.ones(
-            s_q, s_k, dtype=torch.bool, device=query.device).tril(diagonal=s_k - s_q)
+        temp_mask = torch.ones(s_q, s_k, dtype=torch.bool, device=query.device).tril(diagonal=s_k - s_q)
         attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
         attn_bias.to(query.dtype)
         attn_weight += attn_bias
@@ -295,8 +274,7 @@ def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
 
 
 @torch.inference_mode()
-def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q,
-                  h_kv, d, dv, causal, dtype):
+def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
     # q: [b, s_q, h_q, d]
     # block_table: [b, max_seqlen_pad // block_size]
     # blocked_k: [b * max_seqlen_pad // block_size, block_size, h_kv, d]
@@ -325,13 +303,10 @@ def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
     return out_torch
 
 
-def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens,
-                     h_q, h_kv, d, dv, causal, dtype):
-
+def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
     assert d > dv, "mla with rope dim should be larger than no rope dim"
     q_nope, q_pe = q[..., :dv].contiguous(), q[..., dv:].contiguous()
-    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[...,
-                                                                               dv:].contiguous()
+    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[..., dv:].contiguous()
 
     dpe = d - dv
     num_kv_splits = 1
@@ -341,8 +316,7 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
 
     out_partial = torch.empty(b, h_q, num_kv_splits, dv, dtype=dtype, device=q.device)
     glse = torch.empty(b, h_q, num_kv_splits, dtype=dtype, device=q.device)
-    kernel = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H,
-                                 num_kv_splits, block_size, softmax_scale)
+    kernel = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H, num_kv_splits, block_size, softmax_scale)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 
     def flash_mla_tilelang():
@@ -360,8 +334,7 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
 
     out_flash = flash_mla_tilelang()
     t = do_bench(flash_mla_tilelang)
-    out_ref = run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
-                            cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
+    out_ref = run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
     torch.testing.assert_close(out_flash, out_ref, rtol=0.01, atol=0.01)
     print("All close")
     return out_flash, t
@@ -369,12 +342,12 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=128, help='batch size')
-    parser.add_argument('--h_q', type=int, default=128, help='q heads number')
-    parser.add_argument('--h_kv', type=int, default=1, help='kv heads number')
-    parser.add_argument('--cache_seqlen', type=int, default=8192, help='kv cache context length')
-    parser.add_argument('--d', type=int, default=576, help='query/key head dim, d = dv + dpe')
-    parser.add_argument('--dv', type=int, default=512, help='value head dim')
+    parser.add_argument("--batch", type=int, default=128, help="batch size")
+    parser.add_argument("--h_q", type=int, default=128, help="q heads number")
+    parser.add_argument("--h_kv", type=int, default=1, help="kv heads number")
+    parser.add_argument("--cache_seqlen", type=int, default=8192, help="kv cache context length")
+    parser.add_argument("--d", type=int, default=576, help="query/key head dim, d = dv + dpe")
+    parser.add_argument("--dv", type=int, default=512, help="value head dim")
     args = parser.parse_args()
     b, h_q, h_kv, cache_seqlen, d, dv = args.batch, args.h_q, args.h_kv, args.cache_seqlen, args.d, args.dv
 
@@ -383,9 +356,7 @@ if __name__ == "__main__":
 
     s_q = 1  # for decode, s_q = 1
     block_size = 64
-    cache_seqlens = torch.tensor([cache_seqlen + 2 * i for i in range(b)],
-                                 dtype=torch.int32,
-                                 device=device)
+    cache_seqlens = torch.tensor([cache_seqlen + 2 * i for i in range(b)], dtype=torch.int32, device=device)
     dpe = d - dv
     causal = True
 
@@ -397,12 +368,11 @@ if __name__ == "__main__":
     total_flops = s_q * total_seqlens * h_q * d * 2
 
     q = torch.randn(b, s_q, h_q, d, dtype=dtype, device=device)
-    block_table = torch.arange(
-        b * max_seqlen_pad // block_size, dtype=torch.int32,
-        device=device).view(b, max_seqlen_pad // block_size)
+    block_table = torch.arange(b * max_seqlen_pad // block_size, dtype=torch.int32, device=device).view(b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d, dtype=dtype, device=device)
-    out_flash, latency = run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b,
-                                          s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
+    out_flash, latency = run_tilelang_mla(
+        q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype
+    )
 
     print("Tile-lang: {:.2f} ms".format(latency))
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))

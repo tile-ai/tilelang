@@ -6,13 +6,14 @@ from modeling_bitnet import BitnetForCausalLM
 torch.set_grad_enabled(False)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--hf_path', default='1bitLLM/bitnet_b1_58-3B', type=str)
+parser.add_argument("--hf_path", default="1bitLLM/bitnet_b1_58-3B", type=str)
 
 
 def profile(model, input_data):
     import time
 
     import numpy as np
+
     model = model.cuda()
     model.eval()
 
@@ -35,8 +36,8 @@ def profile(model, input_data):
 
 def main():
     model = BitnetForCausalLM.from_pretrained(
-        '1bitLLM/bitnet_b1_58-3B',
-        device_map='auto',
+        "1bitLLM/bitnet_b1_58-3B",
+        device_map="auto",
         low_cpu_mem_usage=True,
         use_flash_attention_2=True,
         torch_dtype=torch.float16,
@@ -52,5 +53,5 @@ def main():
         print(f"Batch size: {batch_size}, Seq len: {seq_len}, Latency: {latency}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

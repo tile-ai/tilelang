@@ -5,7 +5,9 @@ import functools
 from typing import Callable, Any
 
 
-def tensor_cache(fn: Callable[..., torch.Tensor],) -> Callable[..., torch.Tensor]:
+def tensor_cache(
+    fn: Callable[..., torch.Tensor],
+) -> Callable[..., torch.Tensor]:
     """
     A decorator that caches the most recent result of a function with tensor inputs.
 
@@ -29,10 +31,12 @@ def tensor_cache(fn: Callable[..., torch.Tensor],) -> Callable[..., torch.Tensor
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         nonlocal last_args, last_kwargs, last_result
 
-        if (last_args is not None and last_kwargs is not None) and \
-            (len(args) == len(last_args) and len(kwargs) == len(last_kwargs)) and \
-                all(a is b for a, b in zip(args, last_args, strict=False)) and \
-                    all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()):
+        if (
+            (last_args is not None and last_kwargs is not None)
+            and (len(args) == len(last_args) and len(kwargs) == len(last_kwargs))
+            and all(a is b for a, b in zip(args, last_args, strict=False))
+            and all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items())
+        ):
             return last_result
 
         result = fn(*args, **kwargs)
@@ -56,16 +60,15 @@ def prepare_cu_seqlens_from_lens(
 
 
 @tensor_cache
-def prepare_lens_from_cu_seqlens(cu_seqlens: torch.LongTensor,) -> torch.LongTensor:
+def prepare_lens_from_cu_seqlens(
+    cu_seqlens: torch.LongTensor,
+) -> torch.LongTensor:
     return torch.diff(cu_seqlens)
 
 
 @tensor_cache
 def prepare_position_ids(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
-    return torch.cat([
-        torch.arange(n, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
-        for n in prepare_lens(cu_seqlens).unbind()
-    ])
+    return torch.cat([torch.arange(n, dtype=cu_seqlens.dtype, device=cu_seqlens.device) for n in prepare_lens(cu_seqlens).unbind()])
 
 
 @tensor_cache

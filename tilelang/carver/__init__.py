@@ -1,4 +1,5 @@
 """Base infra"""
+
 from .analysis import (
     BlockInfo,  # noqa: F401
     IterInfo,  # noqa: F401
