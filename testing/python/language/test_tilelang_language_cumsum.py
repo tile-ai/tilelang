@@ -237,8 +237,10 @@ def cumsum_region_test_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype="f
             chunk_end_N = (bx + 1) * block_N
             # Test cumsum with 2D region input
             T.cumsum(InputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N], dim=dim, reverse=reverse)
-            T.copy(InputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N], 
-                   OutputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N])
+            T.copy(
+                InputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N],
+                OutputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N],
+            )
 
     return cumsum_region
 

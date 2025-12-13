@@ -242,7 +242,27 @@ def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
 
 
 @macro
-def cumsum_fragment(src: tir.Buffer | tir.BufferRegion | tir.BufferLoad, dst: tir.Buffer | tir.BufferRegion | tir.BufferLoad, dim: int, reverse: bool) -> tir.PrimExpr:
+def cumsum_fragment(
+    src: tir.Buffer | tir.BufferRegion | tir.BufferLoad,
+    dst: tir.Buffer | tir.BufferRegion | tir.BufferLoad,
+    dim: int,
+    reverse: bool,
+) -> tir.PrimExpr:
+    """
+    Compute cumulative sum for fragment buffers by copying to shared memory first.
+
+    This macro handles cumulative sum operations on fragment buffers by first copying
+    the data to shared memory, performing the cumsum operation, and then copying back.
+
+    Args:
+        src: Source buffer (Buffer, BufferRegion, or BufferLoad) containing input data.
+        dst: Destination buffer (Buffer, BufferRegion, or BufferLoad) for output data.
+        dim: Dimension along which to compute cumulative sum.
+        reverse: If True, compute cumulative sum in reverse order.
+
+    Returns:
+        tir.PrimExpr: A handle to the cumulative sum operation.
+    """
     src_shape = retrieve_shape(src)
     src_buffer = _get_buffer(src)
     # Get dtype from the buffer
@@ -263,7 +283,12 @@ def cumsum_fragment(src: tir.Buffer | tir.BufferRegion | tir.BufferLoad, dst: ti
     copy(cumsum_smem, dst)
 
 
-def cumsum(src: tir.Buffer | tir.BufferRegion | tir.BufferLoad, dst: tir.Buffer | tir.BufferRegion | tir.BufferLoad | None = None, dim: int = 0, reverse: bool = False):
+def cumsum(
+    src: tir.Buffer | tir.BufferRegion | tir.BufferLoad,
+    dst: tir.Buffer | tir.BufferRegion | tir.BufferLoad | None = None,
+    dim: int = 0,
+    reverse: bool = False,
+):
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
@@ -316,7 +341,7 @@ def cumsum(src: tir.Buffer | tir.BufferRegion | tir.BufferLoad, dst: tir.Buffer 
 
     if dst is None:
         dst = src
-    
+
     # Get the underlying buffer to check scope
     src_buffer = _get_buffer(src)
     if src_buffer.scope() == "local.fragment":
