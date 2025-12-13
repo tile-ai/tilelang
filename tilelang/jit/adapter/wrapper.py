@@ -4,8 +4,10 @@ from tilelang import tvm as tvm
 from typing import Any
 from tvm import IRModule
 from tvm.target import Target
+
 from .utils import (
     is_metal_target,
+    is_cutedsl_target,
     match_declare_kernel,
     match_declare_kernel_cpu,
     is_cuda_target,
@@ -198,7 +200,9 @@ class TLCUDASourceWrapper:
         self.lib_code: str | None = self.update_lib_code(source)
 
     def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
-        return pythonic_expr(expr, self._TYPE_MAP)
+        # This wrapper generates C/CUDA source. C/C++ integer division uses '/',
+        # and '//' is not a valid operator in C/C++.
+        return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="/")
 
     def _lookup_type(self, dtype: str | Any) -> str:
         key = dtype if isinstance(dtype, str) else str(dtype)
@@ -326,9 +330,9 @@ class TLCUDASourceWrapper:
         return init_l2_persistent_map
 
     def generate_tma_descriptor_args(self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
-        tma_descripter_init = ""
+        tma_descriptor_init = ""
         if self.tma_descriptor_args is None:
-            return tma_descripter_init
+            return tma_descriptor_init
 
         # Parse TMA descriptor arguments using the common utility
         parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr)
@@ -336,7 +340,7 @@ class TLCUDASourceWrapper:
         # Generate C++ code from parsed parameters
         for params in parsed_params:
             if not params.is_img2col:
-                tma_descripter_init += TMA_DESC_INIT_FUNC.format(
+                tma_descriptor_init += TMA_DESC_INIT_FUNC.format(
                     params.handle_name,
                     params.dtype,
                     params.tensor_rank,
@@ -351,7 +355,7 @@ class TLCUDASourceWrapper:
                     params.oob_fill,
                 )
             else:
-                tma_descripter_init += TMA_IM2COL_DESC_INIT_FUNC.format(
+                tma_descriptor_init += TMA_IM2COL_DESC_INIT_FUNC.format(
                     params.handle_name,
                     params.dtype,
                     params.tensor_rank,
@@ -369,7 +373,7 @@ class TLCUDASourceWrapper:
                     params.oob_fill,
                 )
 
-        return tma_descripter_init
+        return tma_descriptor_init
 
     def parse_source_information(self):
         if self.device_mod is None or self.host_mod is None:
@@ -817,6 +821,9 @@ class TLMetalSourceWrapper:
         return self.lib_code
 
 
+# TLCuTeDSLSourceWrapper has been moved to tilelang.jit.adapter.cutedsl.wrapper
+
+
 class TLWrapper(BaseWrapper):
     """
     A wrapper class for the TileLang backend.
@@ -875,9 +882,13 @@ class TLPyWrapper(TLWrapper):
     def __init__(self, target: Target):
         super().__init__(target)
 
-    def wrap(self, c_source: str):
+    def wrap(self, py_source: str):
         # assert self.scheduled_ir_module is not None, "Please assign optimized module first."
-        if is_cuda_target(self.target):
+        if is_cutedsl_target(self.target):
+            from tilelang.jit.adapter.cutedsl import TLCuTeDSLSourceWrapper
+
+            wrapper_class = TLCuTeDSLSourceWrapper
+        elif is_cuda_target(self.target):
             from tilelang.jit.adapter.nvrtc import TLNVRTCSourceWrapper
 
             wrapper_class = TLNVRTCSourceWrapper
@@ -885,10 +896,17 @@ class TLPyWrapper(TLWrapper):
             raise ValueError(f"Unsupported target for NVRTC backend: {self.target}")
         wrapper = wrapper_class(
             scheduled_ir_module=self.scheduled_ir_module,
-            source=c_source,
+            source=py_source,
             target=self.target,
             device_mod=self.device_mod,
             host_mod=self.host_mod,
             pass_configs=self.pass_configs,
         )
-        return wrapper.host_func, wrapper.function_names
+        return {
+            "host_func": getattr(wrapper, "host_func", None),
+            "function_names": getattr(wrapper, "function_names", None),
+            "tma_cpp_init_code": getattr(wrapper, "tma_cpp_init_code", None),
+            "tma_lib_name": getattr(wrapper, "tma_lib_name", None),
+            "launcher_cpp_code": getattr(wrapper, "launcher_cpp_code", None),
+            "launcher_lib_name": getattr(wrapper, "launcher_lib_name", None),
+        }

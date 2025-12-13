@@ -273,7 +273,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
         Casts are noise in generated Python code - Python is dynamically typed.
         """
-        return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True)
+        return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True, floor_div_op="//")
 
     def create_dispatch_func(self, code, function_informations):
         """Generate Python dispatch function that launches multiple CUDA kernels.

@@ -7,7 +7,7 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 
-from tilelang.jit.adapter.utils import is_metal_target, is_cuda_target
+from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target
 from tvm.target import Target
 from tvm.tir import PrimFunc
 
@@ -15,7 +15,14 @@ import tilelang
 from tilelang import tvm
 from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
-from tilelang.jit.adapter import BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter, TVMFFIKernelAdapter, MetalKernelAdapter
+from tilelang.jit.adapter import (
+    BaseKernelAdapter,
+    CtypesKernelAdapter,
+    CythonKernelAdapter,
+    CuTeDSLKernelAdapter,
+    TVMFFIKernelAdapter,
+    MetalKernelAdapter,
+)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
@@ -56,7 +63,7 @@ class JITKernel(Generic[_P, _T]):
         self,
         func: PrimFunc = None,
         out_idx: list[int] | int = None,
-        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         target: str | Target = "auto",
         target_host: str | Target = None,
         verbose: bool = False,
@@ -73,7 +80,7 @@ class JITKernel(Generic[_P, _T]):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+        execution_backend : Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"], optional
             Execution backend to use for kernel execution.
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
@@ -108,6 +115,7 @@ class JITKernel(Generic[_P, _T]):
             "cython",
             "nvrtc",
             "torch",
+            "cutedsl",
         ], f"Invalid execution backend. {execution_backend}"
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
@@ -309,6 +317,20 @@ class JITKernel(Generic[_P, _T]):
                 # pass_configs=pass_configs,
                 # compile_flags=compile_flags,
             )
+        elif execution_backend == "cutedsl":
+            assert is_cutedsl_target(target)
+            adapter = CuTeDSLKernelAdapter(
+                params=artifact.params,
+                result_idx=out_idx,
+                target=target,
+                func_or_mod=tilelang_func,
+                host_mod=artifact.host_mod,
+                device_mod=artifact.device_mod,
+                device_kernel_source=artifact.kernel_source,
+                verbose=verbose,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
         else:
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
@@ -380,6 +402,18 @@ class JITKernel(Generic[_P, _T]):
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
+        elif execution_backend == "cutedsl":
+            adapter = CuTeDSLKernelAdapter.from_database(
+                params=params,
+                result_idx=result_idx,
+                target=target,
+                func_or_mod=func_or_mod,
+                host_kernel_source=host_kernel_source,
+                device_kernel_source=device_kernel_source,
+                kernel_lib_path=kernel_lib_path,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
         else:
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
@@ -430,7 +464,7 @@ class JITKernel(Generic[_P, _T]):
         str
             The source code of the compiled kernel function.
         """
-        if self.execution_backend in {"ctypes", "cython", "nvrtc", "tvm_ffi"}:
+        if self.execution_backend in {"ctypes", "cython", "nvrtc", "tvm_ffi", "cutedsl"}:
             return self.adapter.get_kernel_source(kernel_only=kernel_only)
         return self.artifact.kernel_source
 
@@ -438,7 +472,7 @@ class JITKernel(Generic[_P, _T]):
         """
         Returns the source code of the host function.
         """
-        if self.execution_backend in {"ctypes", "cython", "nvrtc", "tvm_ffi"}:
+        if self.execution_backend in {"ctypes", "cython", "nvrtc", "tvm_ffi", "cutedsl"}:
             return self.adapter.get_host_source()
         assert self.artifact.host_mod is not None, "host_mod is not available"
         return str(self.artifact.host_mod)

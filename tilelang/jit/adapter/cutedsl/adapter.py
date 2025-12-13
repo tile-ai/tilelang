@@ -9,23 +9,17 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
+from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter
-from tilelang.jit.adapter.nvrtc import is_nvrtc_available, check_nvrtc_available
-
-from .libgen import NVRTCLibraryGenerator
 
 logger = logging.getLogger(__name__)
 
-# Import cuda bindings if available
-if is_nvrtc_available:
-    import cuda.bindings.driver as cuda
 
-
-class NVRTCKernelAdapter(BaseKernelAdapter):
+class CuTeDSLKernelAdapter(BaseKernelAdapter):
     pymodule = None
-    kernels = {}
 
     def __init__(
         self,
@@ -35,15 +29,17 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         func_or_mod: tir.PrimFunc | tvm.IRModule,
         host_mod: tvm.IRModule | None = None,
         device_mod: tvm.IRModule | None = None,
+        host_kernel_source: str | None = None,
         device_kernel_source: str | None = None,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):
-        check_nvrtc_available()
+        check_cutedsl_available()
 
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
+        self.host_kernel_source = host_kernel_source
         self.device_kernel_source = device_kernel_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
@@ -66,7 +62,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                     native_shape.append(dim)
             self.param_shapes.append(native_shape)
 
-        self.dynamic_symbolic_map = self._process_dynamic_symbolic()
+        self.dynamic_symbolic_map, self.dynamic_symbolic_order = self._process_dynamic_symbolic()
 
         self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
@@ -78,19 +74,24 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         wrapper_result = self.wrapper.wrap(device_kernel_source)
         self.host_func = wrapper_result["host_func"]
         self.function_names = wrapper_result["function_names"]
+        self.tma_cpp_init_code = wrapper_result["tma_cpp_init_code"]
+        self.tma_lib_name = wrapper_result["tma_lib_name"]
+        self.launcher_cpp_code = wrapper_result.get("launcher_cpp_code", None)
+        self.launcher_lib_name = wrapper_result.get("launcher_lib_name", None)
 
-        self.lib_generator = NVRTCLibraryGenerator(self.target, self.verbose)
+        self.lib_generator = CuTeDSLLibraryGenerator(self.target, self.verbose)
         self.lib_generator.update_lib_code(self.device_kernel_source)
         self.lib_generator.update_host_func(self.host_func)
+        self.lib_generator.update_tma_cpp_init_code(self.tma_cpp_init_code)
+        self.lib_generator.update_tma_lib_name(self.tma_lib_name)
+        self.lib_generator.update_launcher_cpp_code(self.launcher_cpp_code)
+        self.lib_generator.update_launcher_lib_name(self.launcher_lib_name)
         self.lib_generator.assign_compile_flags(compile_flags)
         self.lib_generator.compile_lib()
         self.lib_generator.load_lib()
         self.libpath = self.lib_generator.libpath
+        self.device_kernel_source = open(self.libpath).read()
         self.pymodule = self.lib_generator.pymodule
-        culib = self.lib_generator.culib
-        for name in self.function_names:
-            result, self.kernels[name] = cuda.cuLibraryGetKernel(culib, bytes(name, "utf-8"))
-            assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to get kernel: {name}"
 
         self._post_init()
 
@@ -134,62 +135,123 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                     native_shape.append(dim)
             adapter.param_shapes.append(native_shape)
 
-        adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
+        adapter.dynamic_symbolic_map, adapter.dynamic_symbolic_order = adapter._process_dynamic_symbolic()
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
-        adapter.lib_generator = NVRTCLibraryGenerator(adapter.target, adapter.verbose)
+        adapter.lib_generator = CuTeDSLLibraryGenerator(adapter.target, adapter.verbose)
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
+        adapter.kernel_global_source = open(kernel_lib_path).read()
         adapter.pymodule = adapter.lib_generator.pymodule
-        adapter.function_names = adapter.pymodule._function_names
-
-        culib = adapter.lib_generator.culib
-        for name in adapter.function_names:
-            result, adapter.kernels[name] = cuda.cuLibraryGetKernel(culib, bytes(name, "utf-8"))
-            assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to get kernel: {name}"
 
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int]]:
-        """Extract information about dynamic shapes from the TIR function.
+    def _process_dynamic_symbolic(self) -> tuple[dict[tir.Var, tuple[int, int, int]], list[tir.Var]]:
+        """Extract information about dynamic symbols from the TIR function.
 
-        Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
-        for runtime shape resolution.
+        We follow the same ordering semantics as `TLCUDASourceWrapper.get_dynamic_symbolic_set()`:
+        1) dynamic symbols in buffer shapes (in prim_func param order)
+        2) then dynamic symbols in buffer strides
 
-        Returns
-        -------
-        Dict[tir.Var, Tuple[int, int]]
-            Mapping from symbolic variable to (buffer_index, shape_dimension)
+        The mapping encodes:
+        - id=0: shape var -> (0, buffer_param_index, dim_index)
+        - id=1: stride var -> (1, buffer_param_index, stride_index)
+
+        Returns:
+            (dynamic_symbolic_map, dynamic_symbolic_order)
         """
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
-        dynamic_symbolic_map = {}
+        dynamic_symbolic_map: dict[tir.Var, tuple[int, int, int]] = {}
+        dynamic_symbolic_order: list[tir.Var] = []
+
+        def unique_push_back(v: tir.Var, entry: tuple[int, int, int]):
+            if v in dynamic_symbolic_map:
+                return
+            dynamic_symbolic_map[v] = entry
+            dynamic_symbolic_order.append(v)
+
+        # 1) Shapes
         for i, param in enumerate(params):
+            if param not in buffer_map:
+                continue
             buffer = buffer_map[param]
             for j, shape in enumerate(buffer.shape):
-                if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
-                    dynamic_symbolic_map[shape] = (i, j)
-        return dynamic_symbolic_map
+                if isinstance(shape, tir.Var):
+                    unique_push_back(shape, (0, i, j))
+
+        # 2) Strides
+        for i, param in enumerate(params):
+            if param not in buffer_map:
+                continue
+            buffer = buffer_map[param]
+            for j, stride in enumerate(buffer.strides):
+                if isinstance(stride, tir.Var):
+                    unique_push_back(stride, (1, i, j))
+
+        return dynamic_symbolic_map, dynamic_symbolic_order
 
     def get_kernel_source(self, kernel_only: bool = True) -> str | None:
         """Get the CUDA kernel source code.
 
         Returns
         -------
-        Optional[str]
+        str | None
             The kernel source code, or None if not available
         """
-        if kernel_only:
-            return self.device_kernel_source
-        else:
-            return self.host_func
+        return self.device_kernel_source
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
         """Low-level function to call the compiled CUDA kernel."""
-        return self.pymodule.call(self.kernels, *args, stream=stream)
+        result = self.pymodule.call(*args, stream=stream)
+
+        # After first call, save cubin to cache if needed
+        self._save_cubin_to_cache_if_needed()
+
+        return result
+
+    def _save_cubin_to_cache_if_needed(self):
+        """Save cubin to cache directory after first execution.
+
+        This is called after the first kernel execution to ensure the generated
+        cubin file is copied to the cache directory for future reuse.
+        """
+        if getattr(self, "_cubin_saved_to_cache", False):
+            return
+        self._cubin_saved_to_cache = True
+
+        # Check if we have a cache path (set by kernel_cache)
+        cache_path = getattr(self, "_cache_path", None)
+        if cache_path is None:
+            return
+
+        import os
+        import shutil
+
+        # Source cubin path (in temp directory)
+        src_py_path = self.libpath
+        src_py_stem = os.path.splitext(os.path.basename(src_py_path))[0]
+        src_dir = os.path.dirname(src_py_path)
+        src_cubin_path = os.path.join(src_dir, f"{src_py_stem}.cubin")
+
+        if not os.path.exists(src_cubin_path):
+            return
+
+        # Destination cubin path (in cache directory)
+        dst_cubin_path = os.path.join(cache_path, "kernel.cubin")
+
+        if os.path.exists(dst_cubin_path):
+            return
+
+        # Copy cubin to cache
+        try:
+            shutil.copy2(src_cubin_path, dst_cubin_path)
+            logger.debug(f"Saved CuTeDSL cubin to cache: {dst_cubin_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save cubin to cache: {e}")
 
     def _wrap_forward_from_prebuild_lib(self, *ins: list[torch.Tensor], stream: int | None = None):
         """High-level wrapper for kernel execution.
@@ -222,8 +284,14 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                 # Now working with native Python list, no FFI calls needed
                 for s in self.param_shapes[i]:
                     if isinstance(s, tir.Var):
-                        ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[s]
-                        shape.append(ins[ref_tensor_idx].shape[ref_shape_idx])
+                        ref_id, ref_tensor_idx, ref_dim_idx = self.dynamic_symbolic_map[s]
+                        if ref_id == 0:
+                            shape.append(ins[ref_tensor_idx].shape[ref_dim_idx])
+                        elif ref_id == 1:
+                            # Stride vars are not expected in output shapes, but handle defensively.
+                            shape.append(ins[ref_tensor_idx].stride()[ref_dim_idx])
+                        else:
+                            raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
                 device = ins[0].device if len(ins) > 0 else torch.cuda.current_device()
@@ -234,8 +302,14 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             args.append(tensor)
 
         # dynamic symbolics
-        for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
-            args.append(ins[buffer_idx].shape[shape_idx])
+        for sym in self.dynamic_symbolic_order:
+            ref_id, buffer_idx, dim_idx = self.dynamic_symbolic_map[sym]
+            if ref_id == 0:
+                args.append(ins[buffer_idx].shape[dim_idx])
+            elif ref_id == 1:
+                args.append(ins[buffer_idx].stride()[dim_idx])
+            else:
+                raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:
@@ -256,7 +330,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         Returns
         -------
-        Callable[..., Union[torch.Tensor, List[torch.Tensor]]]
+        Callable[..., torch.Tensor | list[torch.Tensor]]
             A callable function that takes tensors and returns tensor(s)
         """
         return self._wrap_forward_from_prebuild_lib
