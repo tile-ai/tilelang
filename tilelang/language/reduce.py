@@ -3,7 +3,7 @@
 from __future__ import annotations
 from tvm import tir
 from tilelang.language import copy, macro, alloc_shared, alloc_fragment
-from tilelang.utils.language import to_buffer_region
+from tilelang.utils.language import to_buffer_region, retrieve_shape, _get_buffer
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.script.ir_builder import IRBuilder
 
@@ -242,8 +242,15 @@ def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
 
 
 @macro
-def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -> tir.PrimExpr:
-    cumsum_smem = alloc_shared(src.shape, src.dtype, "shared.dyn")
+def cumsum_fragment(src: tir.Buffer | tir.BufferRegion | tir.BufferLoad, dst: tir.Buffer | tir.BufferRegion | tir.BufferLoad, dim: int, reverse: bool) -> tir.PrimExpr:
+    src_shape = retrieve_shape(src)
+    src_buffer = _get_buffer(src)
+    # Get dtype from the buffer
+    if isinstance(src, tir.Buffer):
+        dtype = src.dtype
+    else:
+        dtype = src_buffer.dtype
+    cumsum_smem = alloc_shared(src_shape, dtype, "shared.dyn")
     copy(src, cumsum_smem)
     tir.call_intrin(
         "handle",
@@ -256,11 +263,13 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     copy(cumsum_smem, dst)
 
 
-def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse: bool = False):
+def cumsum(src: tir.Buffer | tir.BufferRegion | tir.BufferLoad, dst: tir.Buffer | tir.BufferRegion | tir.BufferLoad | None = None, dim: int = 0, reverse: bool = False):
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
     Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src.scope() == "local.fragment"`, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
+
+    Supports Buffer, BufferRegion, and BufferLoad inputs, allowing operations on buffer slices/regions.
 
     Examples:
         A 1D inclusive scan that writes the result into a separate shared-memory buffer:
@@ -285,11 +294,21 @@ def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse
         ...         T.cumsum(src=tile, dim=1, reverse=True)
         ...         T.copy(tile, B)
 
+        Operating on a buffer region (slice):
+
+        >>> import tilelang.language as T
+        >>> @T.prim_func
+        ... def kernel_region(InputG_fragment: T.Tensor((128,), "float32"), chunk_size: T.int32):
+        ...     with T.Kernel(1, threads=128):
+        ...         i = T.int32(0)
+        ...         T.cumsum(InputG_fragment[i * chunk_size:(i + 1) * chunk_size], dim=0)
+
     Returns:
         tir.Call: A handle to the emitted cumulative-sum operation.
     """
 
-    shape = src.shape
+    # Get shape from src (supports Buffer, BufferRegion, BufferLoad)
+    shape = retrieve_shape(src)
     if dim >= len(shape) or dim <= -len(shape):
         raise ValueError(f"Dimension {dim} is out of bounds for buffer with shape {shape}")
     if dim < 0:
@@ -297,7 +316,10 @@ def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse
 
     if dst is None:
         dst = src
-    if src.scope() == "local.fragment":
+    
+    # Get the underlying buffer to check scope
+    src_buffer = _get_buffer(src)
+    if src_buffer.scope() == "local.fragment":
         return cumsum_fragment(src, dst, dim, reverse)
     return tir.call_intrin(
         "handle",
