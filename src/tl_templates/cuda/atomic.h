@@ -171,10 +171,9 @@ TL_DEVICE T1 AtomicMinRet(T1 &ref, T2 val,
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 890))
 template <typename T1, typename T2>
-TL_DEVICE void AtomicAdd(T1 &ref, T2 val,
+TL_DEVICE void AtomicAdd(T1 *address, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  T1 *address = &ref;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
     if (memory_order == int(cuda::memory_order_relaxed)) {
@@ -242,19 +241,18 @@ TL_DEVICE void AtomicAdd(T1 &ref, T2 val,
 }
 #else
 template <typename T1, typename T2>
-TL_DEVICE void AtomicAdd(T1 &ref, T2 val,
+TL_DEVICE void AtomicAdd(T1 *address, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
   (void)memory_order;
-  atomicAdd(reinterpret_cast<NT1 *>(&ref), cuda_cast<NT1>(val));
+  atomicAdd(reinterpret_cast<NT1 *>(address), cuda_cast<NT1>(val));
 }
 #endif
 
 template <typename T1, typename T2>
-TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val,
+TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
                           int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  T1 *address = &ref;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
     if (memory_order == int(cuda::memory_order_relaxed)) {
