@@ -167,5 +167,4 @@ def test_oob_store():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_vectorize_access_with_atmoic_add()
+    tilelang.testing.main()
