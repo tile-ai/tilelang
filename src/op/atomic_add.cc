@@ -279,7 +279,8 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
     src_value = Cast(dst->dtype, src_value);
 
   // Build a pointer to destination element using tvm_access_ptr
-  PrimExpr dst_ptr = Call(DataType::Handle(), builtin::address_of(), {BufferLoad(dst, dst_indices)});
+  PrimExpr dst_ptr = Call(DataType::Handle(), builtin::address_of(),
+                          {BufferLoad(dst, dst_indices)});
 
   new_args.push_back(dst_ptr);
   new_args.push_back(src_value);
