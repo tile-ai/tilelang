@@ -76,27 +76,19 @@ public:
           }
         }
       }
-    } else if (op->op.same_as(builtin::call_extern())) {
-      // Common pattern: call_extern("AtomicAdd*", dst_ptr, value, ...)
-      // Mark the destination buffer as written when we can resolve it.
-      if (!op->args.empty()) {
-        if (const auto *name = op->args[0].as<StringImmNode>()) {
-          const std::string &callee = name->value;
-          auto marks_write_like_atomic = [&]() {
-            // AtomicAdd family
-            if (callee == "AtomicAdd")
-              return true;
-            // Vectorized variants produced by AtomicAddVectorize:
-            // AtomicAddx2/x4
-            if (callee.rfind("AtomicAddx", 0) == 0)
-              return true;
-            return false;
-          }();
-          if (marks_write_like_atomic) {
-            // Destination is the first data argument (index 1)
-            if (op->args.size() >= 2) {
-              const VarNode *data = ResolveDataVarFromPtrArg(op->args[1]);
-              if (data && param_or_data_vars_.count(data)) {
+    } else {
+      // Generic fallback: mark buffers that appear as
+      // address_of(BufferLoad(...)) in call arguments as written. This matches
+      // patterns like
+      //   tl.tma_store(address_of(smem[..]), address_of(gmem[..]), ...)
+      //   call_extern("AtomicAdd*", address_of(gmem[..]), ...)
+      // and avoids over-marking plain BufferLoad used for reads.
+      for (const PrimExpr &a : op->args) {
+        if (const auto *c = a.as<CallNode>()) {
+          if (c->op.same_as(builtin::address_of()) && c->args.size() == 1U) {
+            if (const auto *bl = c->args[0].as<BufferLoadNode>()) {
+              const VarNode *data = bl->buffer->data.get();
+              if (param_or_data_vars_.count(data)) {
                 written_.insert(data);
               }
             }
