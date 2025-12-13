@@ -11,7 +11,7 @@ def calc_diff(x, y):
     return 1 - sim
 
 
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit(out_idx=[-1], execution_backend="nvrtc", verbose=True)
 def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
     @T.prim_func
     def gemm_fp8(
