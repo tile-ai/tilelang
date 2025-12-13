@@ -368,7 +368,7 @@ void CodeGenTileLangPY::VisitExpr_(const RampNode *op,
 void CodeGenTileLangPY::VisitExpr_(const CallNode *op,
                                    std::ostream &os) { // NOLINT(*)
   if (auto opt_call_op = op->op.as<Op>()) {
-    auto call_op = opt_call_op.value();
+    const auto& call_op = opt_call_op.value();
 
     if (op->op.same_as(builtin::ret())) {
       os << "return " << RemoveOutermostParentheses(PrintExpr_(op->args[0]));
@@ -438,7 +438,7 @@ void CodeGenTileLangPY::VisitExpr_(const CallNode *op,
       LOG(FATAL) << "Unresolved call " << op->op;
     }
   } else if (auto opt = op->op.as<GlobalVar>()) {
-    auto gvar = opt.value();
+    const auto& gvar = opt.value();
     auto callee_name = GetFunctionName_(gvar);
     PrintCallExtern_(GetType(ffi::GetRef<PrimExpr>(op)), callee_name, op->args,
                      false, os);

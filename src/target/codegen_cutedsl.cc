@@ -803,7 +803,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
 void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
   if (op->attr_key == tir::attr::thread_extent) {
     IterVar iv = Downcast<IterVar>(op->node);
-    if (iv->thread_tag.length() != 0) {
+    if (!iv->thread_tag.empty()) {
       if (!var_idmap_.count(iv->var.get())) {
         BindThreadIndex_(iv);
       }
