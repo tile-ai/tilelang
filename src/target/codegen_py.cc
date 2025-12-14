@@ -166,9 +166,13 @@ void CodeGenTileLangPY::PrintType(DataType type,
     case 32:
     case 64: {
       os << "int";
+      break;
     }
     case 1:
       os << "bool";
+      break;
+    default:
+      LOG(FATAL) << "Cannot convert uint" << type.bits() << " to Python type";
     }
   } else if (type.is_int()) {
     switch (type.bits()) {
@@ -177,7 +181,13 @@ void CodeGenTileLangPY::PrintType(DataType type,
     case 32:
     case 64: {
       os << "int";
+      break;
     }
+    case 1:
+      os << "bool";
+      break;
+    default:
+      LOG(FATAL) << "Cannot convert int" << type.bits() << " to Python type";
     }
   } else {
     LOG(FATAL) << "Cannot convert type " << type << " to Python type";
