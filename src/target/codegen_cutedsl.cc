@@ -150,9 +150,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
       PrintType(op->dtype, temp);
       temp << "(float('nan'))";
     } else {
-      // For CuTeDSL, use Python decimal format instead of C hexfloat
+      // For CuTeDSL, use Python's float.fromhex() with hexfloat for full
+      // precision
       PrintType(op->dtype, temp);
-      temp << "(" << std::scientific << op->value << ")";
+      temp << "(float.fromhex('" << std::hexfloat << op->value << "'))";
     }
     MarkConst(temp.str());
     os << temp.str();
