@@ -112,9 +112,9 @@ def benchmark(M, N, K):
     accum_dtype = "float32"
     num_stages = 3
     threads = 128
-    kernel = matmul_dynamic_mnk(block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
-                                accum_dtype, num_stages, threads)
+    kernel = matmul_dynamic_mnk(block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, num_stages, threads)
     import torch
+
     if trans_A:
         A = torch.rand(K, M, device="cuda", dtype=getattr(torch, in_dtype))
     else:

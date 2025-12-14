@@ -32,6 +32,7 @@ def suppress_output():
 
 def process_func(func, *args, name=None, **kwargs):
     import torch
+
     latency = None
     try:
         with suppress_output():
@@ -57,8 +58,7 @@ def analyze_records(records, out_dir):
     # Analyze the data and draw a chart
     records.sort(key=lambda x: x[1])
     headers = ["Functions", "Avg Latency (ms)"]
-    print(
-        tabulate(_RECORDS, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
+    print(tabulate(_RECORDS, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
 
     names = [r[0] for r in records]
     lats = [r[1] for r in records]
@@ -85,6 +85,7 @@ def _load_module(full_path):
 
 def _bench_worker(file_path, func_name, queue):
     import torch
+
     a = torch.randn(1, device="cuda")
     b = torch.randn(1, device="cuda")
     (a + b).sum().item()

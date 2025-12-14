@@ -7,8 +7,6 @@ import warnings
 from pathlib import Path
 from tqdm.auto import tqdm
 
-print("haha")
-
 
 def _compute_version() -> str:
     """Return the package version without being polluted by unrelated installs.

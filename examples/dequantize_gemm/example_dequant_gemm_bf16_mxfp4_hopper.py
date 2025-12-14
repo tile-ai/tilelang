@@ -555,7 +555,8 @@ def benchmark(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=F
         threads=256,
         split=1,
         fast_dequant=fast_dequant,
-        with_bias=with_bias)
+        with_bias=with_bias,
+    )
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
     return profiler.do_bench(warmup=500)
 

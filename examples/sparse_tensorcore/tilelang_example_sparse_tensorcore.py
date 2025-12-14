@@ -115,7 +115,19 @@ def main():
 
 
 def benchmark():
-    M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, num_threads = 512, 1024, 768, 128, 128, 128, "float16", "float16", "float32", 2, 128
+    M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, num_threads = (
+        512,
+        1024,
+        768,
+        128,
+        128,
+        128,
+        "float16",
+        "float16",
+        "float32",
+        2,
+        128,
+    )
     kernel = matmul_sp(
         M,
         N,
@@ -129,9 +141,9 @@ def benchmark():
         num_stages,
         num_threads,
     )
-    A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device='cuda')
+    A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device="cuda")
     A_sparse, E = compress_sm90(A, block_k=block_K, transposed=False)
-    B = torch.randn((K, N), device='cuda', dtype=torch.float16)
+    B = torch.randn((K, N), device="cuda", dtype=torch.float16)
 
     from tilelang.profiler import do_bench
 

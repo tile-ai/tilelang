@@ -235,19 +235,34 @@ def benchmark():
     group_size = -1
     with_scaling = False
 
-    kernel = dequantize_gemv(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits, storage_dtype,
-                             source_format, n_partition, reduce_thread, fast_decoding, trans_A,
-                             trans_B, group_size, with_scaling)
+    kernel = dequantize_gemv(
+        M,
+        N,
+        K,
+        in_dtype,
+        out_dtype,
+        accum_dtype,
+        num_bits,
+        storage_dtype,
+        source_format,
+        n_partition,
+        reduce_thread,
+        fast_decoding,
+        trans_A,
+        trans_B,
+        group_size,
+        with_scaling,
+    )
 
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
     num_elems_per_byte = storage_nbit // num_bits
     A = torch.rand(M, K, dtype=getattr(torch, in_dtype)).cuda()
-    qB = torch.randint(
-        0, 127, (N, K // num_elems_per_byte), dtype=getattr(torch, storage_dtype)).cuda()
+    qB = torch.randint(0, 127, (N, K // num_elems_per_byte), dtype=getattr(torch, storage_dtype)).cuda()
     C = torch.zeros(M, N, dtype=getattr(torch, accum_dtype)).cuda()
 
     if fast_decoding:
         from tilelang.quantize.utils import interleave_weight
+
         qB = interleave_weight(qB, num_bits, in_dtype)
     kernel(A, qB, C)
 

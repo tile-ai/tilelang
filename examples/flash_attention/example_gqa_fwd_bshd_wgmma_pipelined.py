@@ -244,17 +244,7 @@ def benchmark(
     if is_causal:
         total_flops *= 0.5
 
-    kernel = flashattn(
-        batch,
-        heads,
-        seq_len,
-        dim,
-        is_causal,
-        groups=groups,
-        block_M=128,
-        block_N=128,
-        num_stages=2,
-        threads=256)
+    kernel = flashattn(batch, heads, seq_len, dim, is_causal, groups=groups, block_M=128, block_N=128, num_stages=2, threads=256)
 
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
     return profiler.do_bench(warmup=500)

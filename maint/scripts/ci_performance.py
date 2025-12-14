@@ -20,13 +20,11 @@ def parse_output(output):
 
 
 output_v1 = subprocess.run(
-    ['./tl/bin/python', '-c', 'import tilelang.testing.benchmark as b; b.bench_all()'],
-    capture_output=True,
-    text=True).stdout
+    ["./tl/bin/python", "-c", "import tilelang.testing.benchmark as b; b.bench_all()"], capture_output=True, text=True
+).stdout
 output_v2 = subprocess.run(
-    ['./tl/bin/python', '-c', 'import tilelang.testing.benchmark as b; b.bench_all()'],
-    capture_output=True,
-    text=True).stdout
+    ["./tl/bin/python", "-c", "import tilelang.testing.benchmark as b; b.bench_all()"], capture_output=True, text=True
+).stdout
 
 data_v1 = parse_output(output_v1)
 data_v2 = parse_output(output_v2)
@@ -39,8 +37,7 @@ table.sort(key=lambda x: x[-1])
 headers = ["File", "Original Latency", "Current Latency", "Speedup"]
 
 with open("bench.md", "w") as f:
-    f.write(
-        tabulate(table, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
+    f.write(tabulate(table, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
     f.write("\n")
 
 df = pd.DataFrame(table, columns=headers)
@@ -56,17 +53,9 @@ label_idx = set(top3_idx.tolist() + bot3_idx.tolist())
 
 for i, val in enumerate(df["Speedup"]):
     if i in label_idx:
-        plt.text(
-            i,
-            val + 0.02,
-            f"{val:.2f}x",
-            ha="center",
-            va="bottom",
-            color="red",
-            fontsize=8,
-            fontweight="bold")
+        plt.text(i, val + 0.02, f"{val:.2f}x", ha="center", va="bottom", color="red", fontsize=8, fontweight="bold")
 
-plt.xticks(range(len(df)), df["File"], rotation=70, ha='right', fontsize=12)
+plt.xticks(range(len(df)), df["File"], rotation=70, ha="right", fontsize=12)
 plt.ylabel("Current Speedup vs Original", fontsize=14)
 plt.title("Current Speedup vs Original", fontsize=14, fontweight="bold")
 plt.ylim(0, max(df["Speedup"]) * 1.2)

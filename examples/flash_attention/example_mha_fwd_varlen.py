@@ -306,8 +306,7 @@ def benchmark(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 1
         output_pad_fn,
         dq_pad_fn,
         dk_pad_fn,
-    ) = generate_qkv(
-        q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
+    ) = generate_qkv(q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
     UQ = q_unpad.shape[0]
     UK = k_unpad.shape[0]
     UKV = k_unpad.shape[0]

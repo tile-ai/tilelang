@@ -193,10 +193,10 @@ def main(B=1, S=1024, H=16, D=128):
 
 
 def benchmark(B=1, S=1024, H=16, D=128):
-    q = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16, requires_grad=True)
-    k = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16, requires_grad=True)
-    v = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16, requires_grad=True)
-    do = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
+    q = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16, requires_grad=True)
+    k = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16, requires_grad=True)
+    v = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16, requires_grad=True)
+    do = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
     q = l2norm_fwd(q)[0].requires_grad_(True)
     k = l2norm_fwd(k)[0].requires_grad_(True)
     kernel = tl_fused_chunk_bwd_kernel(B, S, H, D, D)
@@ -204,10 +204,10 @@ def benchmark(B=1, S=1024, H=16, D=128):
     dK = torch.zeros_like(k, dtype=torch.float32)
     dV = torch.zeros_like(v, dtype=torch.float32)
     kernel(q, k, v, do, dQ, dK, dV)
-    return do_bench(lambda: kernel(q, k, v, do, dQ, dK, dV), backend='cupti')
+    return do_bench(lambda: kernel(q, k, v, do, dQ, dK, dV), backend="cupti")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--B", type=int, default=8, help="Batch size")
     parser.add_argument("--S", type=int, default=1024, help="Seq len")

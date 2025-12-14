@@ -177,7 +177,6 @@ def main():
 
 
 def benchmark():
-
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(K, N).cuda().half()
 
@@ -190,7 +189,8 @@ def benchmark():
         block_K=DEFAULT_BLOCK_K,
         num_stages=DEFAULT_NUM_STAGES,
         thread_num=DEFAULT_THREAD_NUM,
-        enable_rasteration=DEFAULT_ENABLE_RASTERIZATION)
+        enable_rasteration=DEFAULT_ENABLE_RASTERIZATION,
+    )
     block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
     mask_shape = (M // block_M, N // block_N, K // block_K)
     block_mask = torch.rand(mask_shape).cuda() > sparsity

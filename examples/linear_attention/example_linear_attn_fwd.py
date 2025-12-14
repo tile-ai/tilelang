@@ -131,40 +131,26 @@ def main(B=1, S=512, H=16, D=128):
     assert torch.allclose(h, h_ref, atol=1e-2, rtol=1e-2), f"h max err: {(h - h_ref).abs().max()}"
     print("Passed all tests!✅")
 
-    t1 = do_bench(
-        lambda: fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False),
-        backend='cupti')
-    t2 = do_bench(lambda: tl_fused_chunk_fwd(q, k, v), backend='cupti')
-    print(f'Triton latency: {t1:.3f} ms')
-    print(f'TileLang latency: {t2:.3f} ms')
-    print(f'Speedup: {t1/t2:.3f}x')
+    t1 = do_bench(lambda: fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False), backend="cupti")
+    t2 = do_bench(lambda: tl_fused_chunk_fwd(q, k, v), backend="cupti")
+    print(f"Triton latency: {t1:.3f} ms")
+    print(f"TileLang latency: {t2:.3f} ms")
+    print(f"Speedup: {t1 / t2:.3f}x")
 
 
 def benchmark(B=1, S=512, H=16, D=128):
-    q = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
-    k = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
-    v = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
+    q = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    k = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    v = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
     q, _ = l2norm_fwd(q)
     k, _ = l2norm_fwd(k)
     B, S, H, D = q.shape
     kernel = tl_fused_chunk_fwd_kernel(B, S, H, D, D)
-    o = torch.zeros((B, S, H, D), device='cuda', dtype=torch.float32)
-    return do_bench(lambda: kernel(q, k, v, o), backend='cupti')
+    o = torch.zeros((B, S, H, D), device="cuda", dtype=torch.float32)
+    return do_bench(lambda: kernel(q, k, v, o), backend="cupti")
 
 
-def benchmark(B=1, S=512, H=16, D=128):
-    q = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
-    k = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
-    v = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
-    q, _ = l2norm_fwd(q)
-    k, _ = l2norm_fwd(k)
-    B, S, H, D = q.shape
-    kernel = tl_fused_chunk_fwd_kernel(B, S, H, D, D)
-    o = torch.zeros((B, S, H, D), device='cuda', dtype=torch.float32)
-    return do_bench(lambda: kernel(q, k, v, o), backend='cupti')
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--B", type=int, default=8, help="Batch size")
     parser.add_argument("--S", type=int, default=1024, help="Seq len")

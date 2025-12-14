@@ -241,7 +241,6 @@ def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
 
 
 def benchmark(batch=64, seq_len=32 * 1024, topk=2048):
-
     batch = 64
     seq_len = 32 * 1024
     topk = 2048
@@ -261,8 +260,7 @@ def benchmark(batch=64, seq_len=32 * 1024, topk=2048):
         set_ref = set(ref_np)
         set_trt = set(trt_np)
         intersection = set_ref & set_trt
-        print("selected/all:", len(intersection), "/", len(set_ref), "=",
-              len(intersection) / len(set_ref))
+        print("selected/all:", len(intersection), "/", len(set_ref), "=", len(intersection) / len(set_ref))
 
     from tilelang.profiler import do_bench
 

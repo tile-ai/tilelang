@@ -453,7 +453,8 @@ def benchmark(m=256, n=256, k=256, fast_dequant=True, tune=False):
         block_K=128,
         num_stages=2,
         threads=256,
-        split=1)
+        split=1,
+    )
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
     return profiler.do_bench(warmup=500)
 

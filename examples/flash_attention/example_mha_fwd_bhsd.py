@@ -221,17 +221,7 @@ def benchmark(
     if is_causal:
         total_flops *= 0.5
 
-    kernel = flashattn(
-        batch,
-        heads,
-        seq_q,
-        seq_kv,
-        dim,
-        is_causal,
-        block_M=64,
-        block_N=64,
-        num_stages=1,
-        threads=128)
+    kernel = flashattn(batch, heads, seq_q, seq_kv, dim, is_causal, block_M=64, block_N=64, num_stages=1, threads=128)
     profiler = kernel.get_profiler()
     return profiler.do_bench(warmup=500)
 

@@ -67,6 +67,7 @@ def main():
 def benchmark():
     kernel = matmul(1024, 1024, 1024, 128, 128, 32)
     import torch
+
     a = torch.randn(1024, 1024).cuda().half()
     b = torch.randn(1024, 1024).cuda().half()
     from tilelang.profiler import do_bench

@@ -520,13 +520,7 @@ def main(d_hidden=7168, d_expert=2048, n_routed_experts=8, n_shared_experts=1, n
     print("✅ Tilelang and Torch match")
 
 
-def benchmark(d_hidden=7168,
-              d_expert=2048,
-              n_routed_experts=8,
-              n_shared_experts=1,
-              n_experts_per_token=4,
-              batch_size=1,
-              seq_len=8192):
+def benchmark(d_hidden=7168, d_expert=2048, n_routed_experts=8, n_shared_experts=1, n_experts_per_token=4, batch_size=1, seq_len=8192):
     config = {
         "dhidden": d_hidden,
         "dexpert": d_expert,
@@ -535,9 +529,10 @@ def benchmark(d_hidden=7168,
         "nexpertspertoken": n_experts_per_token,
         "bs": batch_size,
         "seqlen": seq_len,
-        "seed": 81394
+        "seed": 81394,
     }
     from tilelang.profiler import do_bench
+
     data = generate_input(**config)
 
     x, weights, config = data
@@ -549,7 +544,8 @@ def benchmark(d_hidden=7168,
         config["d_expert"],
         config["n_shared_experts"],
         dtype=dtype_str,
-        num_tokens=config["batch_size"] * config["seq_len"])
+        num_tokens=config["batch_size"] * config["seq_len"],
+    )
     routed_kernel = moe_forward_tilelang_routed(
         config["d_hidden"],
         config["d_expert"],
@@ -563,7 +559,8 @@ def benchmark(d_hidden=7168,
         threads=256,
         num_stages=1,
         k_pack=1,
-        coalesced_width=2)
+        coalesced_width=2,
+    )
 
     moe = MoE(config, shared_kernel, routed_kernel, weights, padding_M=128)
     batch_size, seq_len, hidden_dim = x.shape
@@ -589,11 +586,12 @@ def benchmark(d_hidden=7168,
     group_offset = torch.tensor(tokens_per_expert - counts, dtype=torch.int32, device=moe.device)
     group_padded_offsets = [0 for _ in range(len(group_sizes))]
     for i in range(1, len(group_sizes)):
-        group_padded_offsets[i] = group_padded_offsets[i - 1] + math.ceil(
-            (counts[i - 1] + 1) / moe.padding_M) * moe.padding_M
+        group_padded_offsets[i] = group_padded_offsets[i - 1] + math.ceil((counts[i - 1] + 1) / moe.padding_M) * moe.padding_M
     block_token = 128
-    M = math.ceil(moe.config["batch_size"] * moe.config["seq_len"] *
-                  moe.config["n_experts_per_token"] / block_token) + moe.config["n_routed_experts"]
+    M = (
+        math.ceil(moe.config["batch_size"] * moe.config["seq_len"] * moe.config["n_experts_per_token"] / block_token)
+        + moe.config["n_routed_experts"]
+    )
     group_idx_for_bx = [0 for _ in range(M)]
     for bx in range(M):
         m_start_padded = bx * block_token
@@ -604,22 +602,36 @@ def benchmark(d_hidden=7168,
     group_idx_for_bx = torch.tensor(group_idx_for_bx, dtype=torch.int32, device=moe.device)
 
     def run_shared_kernel_only():
-        moe.routed_kernel(moe.stacked_expert_tokens, moe.stacked_expert_w_gate,
-                          moe.stacked_expert_w_up, moe.stacked_expert_w_down,
-                          moe.stacked_expert_weights, group_sizes, group_offset,
-                          group_padded_offsets, group_idx_for_bx, moe.up_logits_routed,
-                          moe.expert_output_routed)
+        moe.routed_kernel(
+            moe.stacked_expert_tokens,
+            moe.stacked_expert_w_gate,
+            moe.stacked_expert_w_up,
+            moe.stacked_expert_w_down,
+            moe.stacked_expert_weights,
+            group_sizes,
+            group_offset,
+            group_padded_offsets,
+            group_idx_for_bx,
+            moe.up_logits_routed,
+            moe.expert_output_routed,
+        )
 
     def run_routed_kernel_only():
-        moe.routed_kernel(moe.stacked_expert_tokens, moe.stacked_expert_w_gate,
-                          moe.stacked_expert_w_up, moe.stacked_expert_w_down,
-                          moe.stacked_expert_weights, group_sizes, group_offset,
-                          group_padded_offsets, group_idx_for_bx, moe.up_logits_routed,
-                          moe.expert_output_routed)
+        moe.routed_kernel(
+            moe.stacked_expert_tokens,
+            moe.stacked_expert_w_gate,
+            moe.stacked_expert_w_up,
+            moe.stacked_expert_w_down,
+            moe.stacked_expert_weights,
+            group_sizes,
+            group_offset,
+            group_padded_offsets,
+            group_idx_for_bx,
+            moe.up_logits_routed,
+            moe.expert_output_routed,
+        )
 
-    return do_bench(
-        run_shared_kernel_only, warmup=100, rep=1000) + do_bench(
-            run_routed_kernel_only, warmup=100, rep=1000)
+    return do_bench(run_shared_kernel_only, warmup=100, rep=1000) + do_bench(run_routed_kernel_only, warmup=100, rep=1000)
 
 
 if __name__ == "__main__":

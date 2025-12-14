@@ -186,19 +186,19 @@ def benchmark():
         selected_blocks=S,
     )
 
-    Q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+    Q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device="cuda").requires_grad_(True)
+    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
 
-    mask = torch.randint(0, 2, (B, SEQ_LEN, groups), device='cuda')
-    DO = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device='cuda')
+    mask = torch.randint(0, 2, (B, SEQ_LEN, groups), device="cuda")
+    DO = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device="cuda")
 
-    block_indices = torch.full((B, SEQ_LEN_Q, H, S), SEQ_LEN, dtype=torch.long, device='cuda')
+    block_indices = torch.full((B, SEQ_LEN_Q, H, S), SEQ_LEN, dtype=torch.long, device="cuda")
     for b in range(B):
         for t in range(SEQ_LEN_Q):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
-                block_indices[b, t, h, :len(i_i)] = i_i
+                block_indices[b, t, h, : len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
 
     from tilelang.profiler import do_bench

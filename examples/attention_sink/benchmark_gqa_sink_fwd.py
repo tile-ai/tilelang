@@ -222,7 +222,8 @@ def benchmark(
         block_N=block_N,
         num_stages=num_stages,
         threads=threads,
-        dtype=dtype)
+        dtype=dtype,
+    )
 
     Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, groups, dtype=torch_dtype)
     latency = do_bench(kernel(Q, K, V, sinks), warmup=500, rep=10000)

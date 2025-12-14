@@ -299,10 +299,9 @@ def benchmark(
     BLOCK_N = 64
     BLOCK_H = min(64, heads // kv_heads)
     num_split = 1
-    softmax_scale = (dim + pe_dim)**-0.5
+    softmax_scale = (dim + pe_dim) ** -0.5
 
-    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split,
-                       softmax_scale)
+    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, softmax_scale)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
     return profiler.do_bench(warmup=500)

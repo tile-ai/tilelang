@@ -133,8 +133,7 @@ def benchmark(M=4096, N=4096, K=4096):
     threads = 256
     num_stages = 3
     persistent_kernel = matmul_persistent(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, threads, num_stages)
-    persistent_profiler = persistent_kernel.get_profiler(
-        tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    persistent_profiler = persistent_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     return persistent_profiler.do_bench(warmup=500)
 
 

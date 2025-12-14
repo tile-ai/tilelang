@@ -11,31 +11,21 @@ def bench_topk_selector():
 
 
 def bench_fp8_lighting_indexer():
-    tilelang.testing.benchmark.process_func(
-        fp8_lighting_indexer.benchmark, S=512, SKV=1024, H=32, HKV=1, D=64, kv_stride=1)
+    tilelang.testing.benchmark.process_func(fp8_lighting_indexer.benchmark, S=512, SKV=1024, H=32, HKV=1, D=64, kv_stride=1)
 
 
 def bench_sparse_mla_fwd():
-    tilelang.testing.benchmark.process_func(
-        sparse_mla_fwd.benchmark, S=256, SKV=1024, H=64, HKV=1, DQK=576, DV=512, topk=256)
+    tilelang.testing.benchmark.process_func(sparse_mla_fwd.benchmark, S=256, SKV=1024, H=64, HKV=1, DQK=576, DV=512, topk=256)
 
 
 def bench_sparse_mla_fwd_pipelined():
-    tilelang.testing.benchmark.process_func(
-        sparse_mla_fwd_pipelined.benchmark, S=256, SKV=512, H=64, HKV=1, DQK=576, DV=512, topk=256)
+    tilelang.testing.benchmark.process_func(sparse_mla_fwd_pipelined.benchmark, S=256, SKV=512, H=64, HKV=1, DQK=576, DV=512, topk=256)
 
 
 def bench_sparse_mla_bwd():
     tilelang.testing.benchmark.process_func(
-        sparse_mla_bwd.benchmark,
-        S=256,
-        SKV=512,
-        H=64,
-        HKV=1,
-        DQKV=576,
-        DV=512,
-        topk=256,
-        check_correctness=False)
+        sparse_mla_bwd.benchmark, S=256, SKV=512, H=64, HKV=1, DQKV=576, DV=512, topk=256, check_correctness=False
+    )
 
 
 if globals().get("__name__") == "__main__":

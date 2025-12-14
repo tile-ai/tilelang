@@ -109,15 +109,15 @@ def main(argv=None):
 
 def benchmark(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n', type=int, default=128, help='n')
-    parser.add_argument('--c', type=int, default=128, help='c')
-    parser.add_argument('--h', type=int, default=64, help='h')
-    parser.add_argument('--w', type=int, default=64, help='w')
-    parser.add_argument('--f', type=int, default=128, help='f')
-    parser.add_argument('--k', type=int, default=3, help='k')
-    parser.add_argument('--s', type=int, default=1, help='s')
-    parser.add_argument('--d', type=int, default=1, help='d')
-    parser.add_argument('--p', type=int, default=1, help='p')
+    parser.add_argument("--n", type=int, default=128, help="n")
+    parser.add_argument("--c", type=int, default=128, help="c")
+    parser.add_argument("--h", type=int, default=64, help="h")
+    parser.add_argument("--w", type=int, default=64, help="w")
+    parser.add_argument("--f", type=int, default=128, help="f")
+    parser.add_argument("--k", type=int, default=3, help="k")
+    parser.add_argument("--s", type=int, default=1, help="s")
+    parser.add_argument("--d", type=int, default=1, help="d")
+    parser.add_argument("--p", type=int, default=1, help="p")
 
     args = parser.parse_args(argv)
     N, C, H, W, F, K, S, D, P = args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p

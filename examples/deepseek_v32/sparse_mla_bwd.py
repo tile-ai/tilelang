@@ -337,28 +337,20 @@ def test_sparse_mla_bwd(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, to
     print(f"bwd tflops = ", per_token_flop * S / (ms * 1e-3) / 1e12)
 
 
-def benchmark(B=1,
-              S=4096,
-              SKV=8192,
-              H=64,
-              HKV=1,
-              DQKV=576,
-              DV=512,
-              topk=2048,
-              dtype=torch.bfloat16,
-              check_correctness=True):
-    q = torch.randn((B, S, H, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
-    kv = torch.randn((B, SKV, HKV, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
-    do = torch.randn((B, S, H, DV), dtype=dtype, device='cuda')
+def benchmark(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, topk=2048, dtype=torch.bfloat16, check_correctness=True):
+    q = torch.randn((B, S, H, DQKV), dtype=dtype, device="cuda").requires_grad_(True)
+    kv = torch.randn((B, SKV, HKV, DQKV), dtype=dtype, device="cuda").requires_grad_(True)
+    do = torch.randn((B, S, H, DV), dtype=dtype, device="cuda")
 
-    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device='cuda')
+    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
     for b in range(B):
         for t in range(S):
             for h in range(HKV):
                 i_i = torch.randperm(max(1, t))[:topk]
-                indices[b, t, h, :len(i_i)] = i_i
+                indices[b, t, h, : len(i_i)] = i_i
 
     from sparse_mla_fwd import sparse_mla_fwd_interface
+
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
     B, S, H, dim_plus_tail_dim = q.shape
     _, S_kv, kv_group, _ = kv.shape

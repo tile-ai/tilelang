@@ -278,18 +278,7 @@ def test_sparse_mla_fwd(
     print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
-def benchmark(B=1,
-              S=4096,
-              SKV=8192,
-              H=128,
-              HKV=1,
-              DQK=576,
-              DV=512,
-              topk=2048,
-              dtype=torch.bfloat16,
-              block_I=64,
-              num_stages=2,
-              threads=256):
+def benchmark(B=1, S=4096, SKV=8192, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16, block_I=64, num_stages=2, threads=256):
     torch.random.manual_seed(0)
     q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
     kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
@@ -299,7 +288,7 @@ def benchmark(B=1,
         for t in range(S):
             for h in range(HKV):
                 i_i = torch.randperm(max(1, t))[:topk]
-                indices[b, t, h, :len(i_i)] = i_i
+                indices[b, t, h, : len(i_i)] = i_i
 
     is_casual = True
     _, _, heads, dim_plus_tail_dim = q.shape
@@ -307,17 +296,7 @@ def benchmark(B=1,
     dim = 512
     tail_dim = dim_plus_tail_dim - dim
     _, _, _, topk = indices.shape
-    kernel = sparse_mla_fwd(
-        heads,
-        dim,
-        tail_dim,
-        topk,
-        kv_group,
-        None,
-        is_casual,
-        block_I=block_I,
-        num_stages=num_stages,
-        threads=threads)
+    kernel = sparse_mla_fwd(heads, dim, tail_dim, topk, kv_group, None, is_casual, block_I=block_I, num_stages=num_stages, threads=threads)
 
     def run_kernel_only():
         kernel(q, kv, indices)

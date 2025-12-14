@@ -8,6 +8,7 @@ import math
 import time
 from heuristic import num_splits_heuristic
 
+
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps, num_stages=num_stages) for num_warps in [1, 2, 4] for num_stages in [1, 2, 3, 4, 7]],
     key=["BLOCK_H", "BLOCK_N", "BLOCK_D"],

@@ -66,6 +66,7 @@ def benchmark():
     split_k = 4
     kernel = matmul(M, N, K, block_M, block_N, block_K, split_k)
     import torch
+
     torch.random.manual_seed(42)
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(K, N).cuda().half()

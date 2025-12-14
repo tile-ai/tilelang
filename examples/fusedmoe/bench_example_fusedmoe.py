@@ -11,7 +11,8 @@ def bench_example_fusedmoe_tilelang():
         n_shared_experts=1,
         n_experts_per_token=4,
         batch_size=1,
-        seq_len=1024)
+        seq_len=1024,
+    )
 
 
 if globals().get("__name__") == "__main__":

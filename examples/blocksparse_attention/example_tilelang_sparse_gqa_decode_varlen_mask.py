@@ -406,39 +406,32 @@ def main(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=12
     print("sparse time: ", (time.time() - start) / 100 * 1000)
 
 
-def benchmark(batch=8,
-              heads=32,
-              heads_kv=8,
-              max_cache_seqlen=8192,
-              dim=128,
-              dim_v=128,
-              sparse_ratio=0.8,
-              block_size=32):
+def benchmark(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=128, sparse_ratio=0.8, block_size=32):
     batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
     sparse_ratio = sparse_ratio
     block_size = block_size
     max_selected_blocks = int(math.ceil(max_cache_seqlen * (1 - sparse_ratio) / block_size))
     dtype = torch.float16
 
-    Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
-    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
-    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device='cuda')
-    cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device='cuda')
-    random_index = torch.randint(0, batch, (1,), device='cuda').item()
+    Q = torch.randn((batch, heads, dim), dtype=dtype, device="cuda")
+    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device="cuda")
+    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device="cuda")
+    cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device="cuda")
+    random_index = torch.randint(0, batch, (1,), device="cuda").item()
     cache_seqlens[random_index] = max_cache_seqlen
 
     num_blocks = (max_cache_seqlen + block_size - 1) // block_size
 
     valid_num_blocks = torch.ceil(cache_seqlens * (1 - sparse_ratio) / block_size).int()
     max_valid_num_blocks = torch.ceil(cache_seqlens / block_size).int()
-    block_mask = torch.zeros((batch, heads_kv, num_blocks), dtype=torch.bool, device='cuda')
+    block_mask = torch.zeros((batch, heads_kv, num_blocks), dtype=torch.bool, device="cuda")
 
     for b in range(batch):
         max_valid_block = max_valid_num_blocks[b].item()
         valid_num_block = valid_num_blocks[b].item()
         if valid_num_block > 0:
             for h in range(heads_kv):
-                perm = torch.randperm(max_valid_block, device='cuda')[:valid_num_block]
+                perm = torch.randperm(max_valid_block, device="cuda")[:valid_num_block]
                 block_mask[b, h, perm] = True
 
     model = SparseFlashAttn(batch, heads, heads_kv, dim, dim_v, block_size)
@@ -458,17 +451,10 @@ def benchmark(batch=8,
     total_mblocks = batch * heads_kv * num_m_blocks
     num_sm = model.num_sm
     num_split = num_splits_heuristic(
-        total_mblocks,
-        num_sm,
-        num_n_blocks,
-        num_m_blocks,
-        size_one_kv_head,
-        is_causal_or_local=True,
-        max_splits=128)
-    glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device='cuda')
-    Output_partial = torch.empty((batch, heads, num_split, dim_v),
-                                 dtype=torch.float32,
-                                 device='cuda')
+        total_mblocks, num_sm, num_n_blocks, num_m_blocks, size_one_kv_head, is_causal_or_local=True, max_splits=128
+    )
+    glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device="cuda")
+    Output_partial = torch.empty((batch, heads, num_split, dim_v), dtype=torch.float32, device="cuda")
     kernel = model.kernel
 
     def run_kernel_only():

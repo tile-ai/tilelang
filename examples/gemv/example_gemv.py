@@ -371,7 +371,7 @@ def benchmark():
         splitk_gemv(N, K, 32, 32, 32),
         splitk_gemv_vectorized(N, K, 2, 32),
         splitk_gemv_vectorized_tvm(N, K, 2, 32),
-        gemv_alloc_reducer(N, K, block_M=128, block_N=128)
+        gemv_alloc_reducer(N, K, block_M=128, block_N=128),
     ]
     for kernel in kernel_list:
         profiler = kernel.get_profiler()

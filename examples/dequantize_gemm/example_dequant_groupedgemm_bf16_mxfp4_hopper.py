@@ -508,15 +508,7 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
     print("All checks pass. ✅")
 
 
-def benchmark(m=256,
-              n=256,
-              k=256,
-              scale_size=32,
-              topk=4,
-              E=32,
-              fast_dequant=True,
-              with_bias=False,
-              tune=False):
+def benchmark(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, with_bias=False, tune=False):
     block_M, block_N, block_K = 128, 256, 128
     num_stages = 1
     threads = 512
@@ -524,8 +516,7 @@ def benchmark(m=256,
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
     qk = k // num_elems_per_byte
-    A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M = get_data(
-        m, n, k, qk, scale_size, topk, E, block_M)
+    A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M = get_data(m, n, k, qk, scale_size, topk, E, block_M)
 
     if tune:
         with set_autotune_inputs([A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids]):
@@ -567,8 +558,7 @@ def benchmark(m=256,
             split=split,
         )
 
-    return tilelang.profiler.do_bench(
-        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100)
+    return tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100)
 
 
 if __name__ == "__main__":

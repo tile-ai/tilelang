@@ -483,12 +483,7 @@ def main(batch: int = 1, heads: int = 32, groups: int = 8, kv_seqlen: int = 8192
         print(f"Ref latency: {ref_latency}")
 
 
-def benchmark(batch: int = 1,
-              heads: int = 32,
-              groups: int = 8,
-              kv_seqlen: int = 8192,
-              dim: int = 128,
-              tune: bool = False):
+def benchmark(batch: int = 1, heads: int = 32, groups: int = 8, kv_seqlen: int = 8192, dim: int = 128, tune: bool = False):
     batch, heads, groups, kv_seqlen, dim = batch, heads, groups, kv_seqlen, dim
     config, sm_version = get_heuristic_config()
     kernel = flashattn(batch, heads, groups, kv_seqlen, dim, **config)

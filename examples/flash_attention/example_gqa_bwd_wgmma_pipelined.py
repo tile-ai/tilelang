@@ -359,17 +359,8 @@ def benchmark():
     with torch.no_grad():
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
         kernel = flashattn_bwd(
-            BATCH,
-            H,
-            N_CTX,
-            D_HEAD_QK,
-            D_HEAD_V,
-            causal,
-            block_M=128,
-            block_N=32,
-            threads=256,
-            num_stages=2,
-            groups=groups)
+            BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, causal, block_M=128, block_N=32, threads=256, num_stages=2, groups=groups
+        )
     dQ = torch.zeros_like(Q, dtype=torch.float32)
     dK = torch.zeros(BATCH, N_CTX, head_kv, D_HEAD_QK, device=device, dtype=torch.float32)
     dV = torch.zeros(BATCH, N_CTX, head_kv, D_HEAD_V, device=device, dtype=torch.float32)
