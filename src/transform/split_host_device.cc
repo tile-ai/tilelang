@@ -48,7 +48,9 @@ public:
       : device_mod_(device_mod), var_supply_(std::move(var_supply)) {}
 
   void SetNonRestrictParams(Optional<Array<tir::Var>> params) {
-    non_restrict_params_ = std::move(params);
+    for (auto param : params.value()) {
+      non_restrict_params_.push_back(param);
+    }
   }
 
   tir::Stmt VisitStmt_(const tir::AttrStmtNode *op) final {
@@ -68,9 +70,10 @@ public:
 
 private:
   bool found_device_region_{false};
-  Optional<Array<tir::Var>> non_restrict_params_;
+  Array<tir::Var> non_restrict_params_;
 
   tir::Stmt SplitDeviceFunc(tir::Stmt body, tvm::Target device_target) {
+
     auto [params, buffers_to_declare] =
         [&]() -> std::tuple<Array<tir::Var>, Array<tir::Buffer>> {
       tir::VarUseDefAnalyzer use_def(/*defined_vars=*/{},
@@ -115,35 +118,11 @@ private:
     }
     tir::PrimFunc device_func(params, body, kernel_ret_type);
     device_func =
-        WithAttrs(std::move(device_func), {{tvm::attr::kTarget, device_target},
-                                           {tir::attr::kNoAlias, true},
-                                           {tir::attr::kIsGlobalFunc, true}});
-    // Propagate per-parameter non-restrict annotations from the host PrimFunc
-    // if set
-    if (non_restrict_params_.defined()) {
-      // Map host-side vars to device params by name to account for new Var
-      // nodes
-      std::unordered_set<std::string> names;
-      auto normalize = [](const std::string &s) {
-        if (s.size() >= 8 && s.rfind("_handle") == s.size() - 7) {
-          return s.substr(0, s.size() - 7);
-        }
-        return s;
-      };
-      for (const tir::Var &v : non_restrict_params_.value()) {
-        names.insert(normalize(v->name_hint));
-      }
-      Array<tir::Var> dev_non_restrict;
-      for (const tir::Var &p : params) {
-        if (names.count(normalize(p->name_hint))) {
-          dev_non_restrict.push_back(p);
-        }
-      }
-      if (!dev_non_restrict.empty()) {
-        device_func = WithAttr(std::move(device_func),
-                               tl::attr::kNonRestrictParams, dev_non_restrict);
-      }
-    }
+        WithAttrs(std::move(device_func),
+                  {{tvm::attr::kTarget, device_target},
+                   {tir::attr::kNoAlias, true},
+                   {tir::attr::kIsGlobalFunc, true},
+                   {tl::attr::kNonRestrictParams, non_restrict_params_}});
 
     GlobalVar kernel_symbol_global = var_supply_();
     (*device_mod_)->Add(kernel_symbol_global, device_func);
@@ -198,7 +177,6 @@ tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule *device_mod,
       }
     }
   }
-
   return func;
 }
 
@@ -229,7 +207,6 @@ tvm::transform::Pass SplitHostDevice() {
         }
       }
     }
-
     mod->Update(updates);
     mod->Update(device_mod);
     return tir::transform::ConvertSSA()(mod);

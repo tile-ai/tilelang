@@ -1325,7 +1325,8 @@ void CodeGenTileLangHIP::AddFunction(const PrimFunc &f) {
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
           f->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
-    for (const tir::Var &v : opt.value()) non_restrict.insert(v.get());
+    for (const tir::Var &v : opt.value())
+      non_restrict.insert(v.get());
   }
 
   this->PrintFuncPrefix(stream);

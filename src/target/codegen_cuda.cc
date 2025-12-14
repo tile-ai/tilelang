@@ -3249,7 +3249,8 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
           func->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
-    for (const tir::Var &v : opt.value()) non_restrict.insert(v.get());
+    for (const tir::Var &v : opt.value())
+      non_restrict.insert(v.get());
   }
   // Read-only param indices attribute, if present.
   std::unordered_set<int> ro_param_indices;
@@ -3333,7 +3334,8 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
           f->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
-    for (const tir::Var &v : opt.value()) non_restrict.insert(v.get());
+    for (const tir::Var &v : opt.value())
+      non_restrict.insert(v.get());
   }
   // Read-only param indices attribute, if present.
   std::unordered_set<int> ro_param_indices;
