@@ -43,6 +43,6 @@ def test_cuda_restrict_annotation_removes_restrict():
     # No parameter should be emitted with __restrict__
     assert "__restrict__" not in sig1
 
+
 if __name__ == "__main__":
     tilelang.disable_cache()
-    test_cuda_restrict_annotation_removes_restrict()

@@ -4,7 +4,6 @@ from typing import Callable
 
 from tilelang.layout import Layout
 from tvm.script.parser.tir import attr, block_attr
-from tilelang.language.ast.ir import func_attr as _func_attr
 from tvm.tir import FloatImm
 
 __all__ = [
@@ -78,18 +77,6 @@ def annotate_restrict_buffers(*buffers):
         try:
             data_vars.append(buf.data)
         except Exception as e:
-            raise TypeError(
-                f"annotate_restrict_buffers expects Buffer arguments, got {type(buf)}") from e
-    # Set function-level attr for codegen consumption.
-    # Note: Call this once per PrimFunc to avoid duplicate key error in TIR builder.
-    _func_attr({"tl.non_restrict_params": data_vars})
-    # For compatibility with older codegen (without per-param support),
-    # conservatively disable function-level noalias to drop all __restrict__.
-    # If codegen understands tl.non_restrict_params, it will still honor
-    # per-parameter behavior and can be extended to ignore this toggle.
-    try:
-        _func_attr({"tir.noalias": False})
-    except Exception:
-        pass
+            raise TypeError(f"annotate_restrict_buffers expects Buffer arguments, got {type(buf)}") from e
     # Also return as block attribute (root block exists by default) for readability/tools.
     return block_attr({"tl.non_restrict_params": data_vars})

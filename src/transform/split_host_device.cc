@@ -178,6 +178,9 @@ tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule *device_mod,
   // Propagate non-restrict parameter list from host func to device kernels
   if (auto opt = func->GetAttr<Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
     splitter.SetNonRestrictParams(opt.value());
+    // Remove the attribute from host-side PrimFunc; it only matters for device
+    // codegen.
+    func = tvm::WithoutAttr(std::move(func), tl::attr::kNonRestrictParams);
   }
 
   if (auto body = splitter(func->body); !body.same_as(func->body)) {
