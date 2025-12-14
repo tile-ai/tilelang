@@ -43,7 +43,10 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         self.device_kernel_source = device_kernel_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
-            self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+            gsym = func_or_mod.attrs.get("global_symbol")
+            if gsym is None:
+                raise ValueError("PrimFunc is missing required attr 'global_symbol'")
+            self.ir_module = tvm.IRModule({gsym: func_or_mod})
         else:
             self.ir_module = func_or_mod
 
@@ -116,7 +119,10 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         adapter.device_kernel_source = device_kernel_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
-            adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+            gsym = func_or_mod.attrs.get("global_symbol")
+            if gsym is None:
+                raise ValueError("PrimFunc is missing required attr 'global_symbol'")
+            adapter.ir_module = tvm.IRModule({gsym: func_or_mod})
         else:
             adapter.ir_module = func_or_mod
 
