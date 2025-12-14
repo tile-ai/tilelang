@@ -215,6 +215,7 @@ elseif(USE_CUDA)
     src/target/ptx.cc
     src/target/codegen_cuda.cc
     src/target/codegen_py.cc
+    src/target/codegen_utils.cc
     src/target/codegen_cutedsl.cc
     src/target/rt_mod_cuda.cc
     src/target/rt_mod_cutedsl.cc

@@ -3,6 +3,7 @@
  */
 
 #include "codegen_cutedsl.h"
+#include "codegen_utils.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/tir/index_map.h>
@@ -18,33 +19,8 @@
 
 namespace tvm {
 namespace codegen {
-
 namespace {
-bool CheckOutermostParenthesesMatch(const std::string &s) {
-  if (!s.empty() && s.front() == '(' && s.back() == ')') {
-    size_t len = s.size();
-    int n_unmatched = 0;
-    for (size_t i = 0; i < len; ++i) {
-      if (s[i] == '(') {
-        n_unmatched++;
-      } else if (s[i] == ')') {
-        n_unmatched--;
-      }
-      if (n_unmatched == 0) {
-        return i == len - 1;
-      }
-    }
-  }
-  return false;
-}
 
-std::string RemoveOutermostParentheses(const std::string &s) {
-  if (CheckOutermostParenthesesMatch(s)) {
-    return s.substr(1, s.size() - 2);
-  } else {
-    return s;
-  }
-}
 
 void ReplaceAll(std::string &str, const std::string &from,
                 const std::string &to) {
