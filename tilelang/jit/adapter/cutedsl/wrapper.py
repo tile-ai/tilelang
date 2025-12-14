@@ -1231,7 +1231,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tir.tvm_call_packed")):
                         return
                     args = node.args
-                    if args[0] != fn:
+                    if not args or args[0] != fn:
                         return
                     if len(args) < 1 + param_cnt:
                         raise AssertionError("tvm_call_packed should have at least 1 argument and match device function parameters")
