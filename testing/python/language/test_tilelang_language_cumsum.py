@@ -186,12 +186,12 @@ def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype="float32"):
         with T.Kernel(T.ceildiv(N, chunk_size), threads=chunk_size) as bx:
             i = bx
             chunk_start = i * chunk_size
-            chunk_end = T.min((i + 1) * chunk_size, N)
             # Test cumsum with region input - out-of-place operation
+            # Note: For non-divisible sizes, the system will handle bounds checking automatically
             # This demonstrates the feature: T.cumsum(InputG_fragment[i * chunk_size:(i + 1) * chunk_size], dim=0)
             T.cumsum(
-                src=InputG_fragment[chunk_start:chunk_end],
-                dst=OutputG_fragment[chunk_start:chunk_end],
+                src=InputG_fragment[chunk_start : chunk_start + chunk_size],
+                dst=OutputG_fragment[chunk_start : chunk_start + chunk_size],
                 dim=0,
                 reverse=reverse,
             )
@@ -236,13 +236,12 @@ def cumsum_region_test_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype="f
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
             chunk_start_M = by * block_M
-            chunk_end_M = T.min((by + 1) * block_M, M)
             chunk_start_N = bx * block_N
-            chunk_end_N = T.min((bx + 1) * block_N, N)
             # Test cumsum with 2D region input - out-of-place operation
+            # Note: For non-divisible sizes, the system will handle bounds checking automatically
             T.cumsum(
-                src=InputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N],
-                dst=OutputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N],
+                src=InputG_fragment[chunk_start_M : chunk_start_M + block_M, chunk_start_N : chunk_start_N + block_N],
+                dst=OutputG_fragment[chunk_start_M : chunk_start_M + block_M, chunk_start_N : chunk_start_N + block_N],
                 dim=dim,
                 reverse=reverse,
             )
