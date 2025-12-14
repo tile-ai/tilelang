@@ -2,7 +2,6 @@ from __future__ import annotations
 from enum import IntEnum
 
 
-
 class GemmWarpPolicy(IntEnum):
     """
     Enumeration for GEMM Warp Partitioning Policies.
@@ -159,7 +158,7 @@ class GemmWarpPolicy(IntEnum):
         return m_warp, n_warp
 
     @classmethod
-    def from_warp_partition(cls, m_warp: int, n_warp: int) -> "GemmWarpPolicy":
+    def from_warp_partition(cls, m_warp: int, n_warp: int) -> GemmWarpPolicy:
         """
         Determine the warp policy based on the given warp partitioning.
 
