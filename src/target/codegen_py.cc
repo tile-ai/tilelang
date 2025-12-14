@@ -234,7 +234,7 @@ void CodeGenTileLangPY::VisitExpr_(const FloatImmNode *op,
 
 void CodeGenTileLangPY::VisitExpr_(const StringImmNode *op,
                                    std::ostream &os) { // NOLINT(*)
-  os << "\"" << op->value << "\"";
+  EscapeStringLiteral_(op->value, os);
 }
 
 void CodeGenTileLangPY::VisitExpr_(const CastNode *op,
@@ -562,7 +562,9 @@ void CodeGenTileLangPY::VisitStmt_(const AssertStmtNode *op) {
   std::string cond = PrintExpr_(op->condition);
   PrintIndent();
   if (const auto *str = op->message.as<StringImmNode>()) {
-    stream << "assert " << cond << ", \"" << str->value << "\"\n";
+    stream << "assert " << cond << ", ";
+    EscapeStringLiteral_(str->value, stream);
+    stream << "\n";
   } else {
     stream << "assert " << cond << "\n";
   }
@@ -657,6 +659,49 @@ bool CodeGenTileLangPY::HandleTypeMatch_(const VarNode *buf_var,
   if (it == handle_data_type_.end())
     return false;
   return it->second == t;
+}
+
+void CodeGenTileLangPY::EscapeStringLiteral_(const std::string &s,
+                                             std::ostream &os) {
+  os << '"';
+  for (unsigned char c : s) {
+    switch (c) {
+    case '\\':
+      os << "\\\\";
+      break;
+    case '"':
+      os << "\\\"";
+      break;
+    case '\n':
+      os << "\\n";
+      break;
+    case '\r':
+      os << "\\r";
+      break;
+    case '\t':
+      os << "\\t";
+      break;
+    case '\f':
+      os << "\\f";
+      break;
+    case '\b':
+      os << "\\b";
+      break;
+    default:
+      // Handle non-printable and non-ASCII characters
+      if (c < 32 || c == 127) {
+        // Output as \xHH
+        os << "\\x";
+        const char hex[] = "0123456789abcdef";
+        os << hex[(c >> 4) & 0xF];
+        os << hex[c & 0xF];
+      } else {
+        os << c;
+      }
+      break;
+    }
+  }
+  os << '"';
 }
 
 } // namespace codegen

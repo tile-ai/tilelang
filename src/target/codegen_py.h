@@ -241,6 +241,13 @@ private:
 
   /* \brief Name supply to generate unique function names */
   NameSupply func_name_supply_;
+
+  /*!
+   * \brief Escape a string to be a valid Python double-quoted string literal.
+   * \param s The input string to escape.
+   * \param os The output stream to write the escaped string to.
+   */
+  void EscapeStringLiteral_(const std::string &s, std::ostream &os);
 };
 
 } // namespace codegen
