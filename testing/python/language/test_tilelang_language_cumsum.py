@@ -186,7 +186,7 @@ def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype="float32"):
         with T.Kernel(T.ceildiv(N, chunk_size), threads=chunk_size) as bx:
             i = bx
             chunk_start = i * chunk_size
-            chunk_end = (i + 1) * chunk_size
+            chunk_end = T.min((i + 1) * chunk_size, N)
             # Test cumsum with region input - out-of-place operation
             # This demonstrates the feature: T.cumsum(InputG_fragment[i * chunk_size:(i + 1) * chunk_size], dim=0)
             T.cumsum(
@@ -236,9 +236,9 @@ def cumsum_region_test_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype="f
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
             chunk_start_M = by * block_M
-            chunk_end_M = (by + 1) * block_M
+            chunk_end_M = T.min((by + 1) * block_M, M)
             chunk_start_N = bx * block_N
-            chunk_end_N = (bx + 1) * block_N
+            chunk_end_N = T.min((bx + 1) * block_N, N)
             # Test cumsum with 2D region input - out-of-place operation
             T.cumsum(
                 src=InputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N],
