@@ -12,8 +12,6 @@
 namespace tvm {
 namespace codegen {
 
-using namespace tir;
-
 void CodeGenTileLangPY::AddFunction(const GlobalVar &gvar, const PrimFunc &f) {
   RegisterFunction_(gvar, f);
   auto function_name = GetFunctionName_(gvar);
