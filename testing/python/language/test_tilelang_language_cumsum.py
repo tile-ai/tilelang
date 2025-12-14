@@ -187,10 +187,14 @@ def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype="float32"):
             i = bx
             chunk_start = i * chunk_size
             chunk_end = (i + 1) * chunk_size
-            # Test cumsum with region input - in-place operation
+            # Test cumsum with region input - out-of-place operation
             # This demonstrates the feature: T.cumsum(InputG_fragment[i * chunk_size:(i + 1) * chunk_size], dim=0)
-            T.cumsum(InputG_fragment[chunk_start:chunk_end], dim=0, reverse=reverse)
-            T.copy(InputG_fragment[chunk_start:chunk_end], OutputG_fragment[chunk_start:chunk_end])
+            T.cumsum(
+                src=InputG_fragment[chunk_start:chunk_end],
+                dst=OutputG_fragment[chunk_start:chunk_end],
+                dim=0,
+                reverse=reverse,
+            )
 
     return cumsum_region
 
@@ -235,11 +239,12 @@ def cumsum_region_test_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype="f
             chunk_end_M = (by + 1) * block_M
             chunk_start_N = bx * block_N
             chunk_end_N = (bx + 1) * block_N
-            # Test cumsum with 2D region input
-            T.cumsum(InputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N], dim=dim, reverse=reverse)
-            T.copy(
-                InputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N],
-                OutputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N],
+            # Test cumsum with 2D region input - out-of-place operation
+            T.cumsum(
+                src=InputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N],
+                dst=OutputG_fragment[chunk_start_M:chunk_end_M, chunk_start_N:chunk_end_N],
+                dim=dim,
+                reverse=reverse,
             )
 
     return cumsum_region
@@ -284,6 +289,8 @@ def test_cumsum_region_1d():
     # Test with different chunk sizes
     run_cumsum_region_1d(512, 64)
     run_cumsum_region_1d(2048, 256)
+    # Tail coverage (non-divisible size)
+    run_cumsum_region_1d(1000, 128)
 
 
 def test_cumsum_region_2d():
@@ -294,6 +301,8 @@ def test_cumsum_region_2d():
     run_cumsum_region_2d(1024, 1024, 128, 128, dim=1)
     # Test reverse cumsum
     run_cumsum_region_2d(512, 512, 64, 64, dim=1, reverse=True)
+    # Tail coverage (non-divisible size)
+    run_cumsum_region_2d(1000, 1000, 128, 128, dim=1)
 
 
 if __name__ == "__main__":

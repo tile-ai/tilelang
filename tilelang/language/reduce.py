@@ -334,13 +334,22 @@ def cumsum(
 
     # Get shape from src (supports Buffer, BufferRegion, BufferLoad)
     shape = retrieve_shape(src)
-    if dim >= len(shape) or dim <= -len(shape):
+    if dim >= len(shape) or dim < -len(shape):
         raise ValueError(f"Dimension {dim} is out of bounds for buffer with shape {shape}")
     if dim < 0:
         dim = len(shape) + dim
 
     if dst is None:
         dst = src
+    else:
+        # Validate that dst shape matches src shape
+        dst_shape = retrieve_shape(dst)
+        if len(dst_shape) != len(shape):
+            raise ValueError(f"cumsum dst shape {dst_shape} must match src shape {shape} (rank mismatch)")
+        # Check each dimension matches
+        for i in range(len(shape)):
+            if not tir.analysis.expr_deep_equal(dst_shape[i], shape[i]):
+                raise ValueError(f"cumsum dst shape {dst_shape} must match src shape {shape} (dim {i} mismatch)")
 
     # Get the underlying buffer to check scope
     src_buffer = _get_buffer(src)
