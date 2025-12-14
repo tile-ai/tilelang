@@ -110,7 +110,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
 
 @tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
-def tilelang_callback_hip_compile(code, target):
+def tilelang_callback_hip_compile(code, target, pass_config=None):
     project_root = osp.join(osp.dirname(__file__), "../..")
     tl_template_path = osp.abspath(osp.join(project_root, "src"))
 
@@ -121,14 +121,28 @@ def tilelang_callback_hip_compile(code, target):
     else:
         ck_path = osp.abspath(osp.join(project_root, "3rdparty/composable_kernel/include"))
 
+    # Read pass-config keys (string-valued) like in cuda compile callback.
+    cfg = pass_config or {}
+    if cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH.value, False):
+        deprecated_warning("TL_DISABLE_FAST_MATH", "TL_ENABLE_FAST_MATH", "0.1.7")
+        disable_fast_math = bool(cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH.value, True))
+        enable_fast_math = not disable_fast_math
+    else:
+        enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH.value, False))
+
+    options = [
+        "-std=c++17",
+        "-I" + tl_template_path,
+        "-I" + ck_path,
+    ]
+    # hipcc/clang fast-math (ROCm). Roughly analogous to nvcc --use_fast_math.
+    if enable_fast_math:
+        options.append("-ffast-math")
+
     hsaco = hipcc.compile_hip(
         code,
         target_format="hsaco",
-        options=[
-            "-std=c++17",
-            "-I" + tl_template_path,
-            "-I" + ck_path,
-        ],
+        options=options,
         verbose=False,
     )
 

@@ -113,6 +113,8 @@ class LibraryGenerator:
                 "--shared",
                 src.name,
             ]
+            if enable_fast_math:
+                command += ["-ffast-math"]
             command += [
                 "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
             ]

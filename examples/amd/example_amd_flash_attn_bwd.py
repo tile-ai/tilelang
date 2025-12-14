@@ -179,7 +179,7 @@ def dump_kernel_artifacts(kernel, dump_dir: str | None, tag: str) -> None:
 
 
 @tilelang.autotune(configs=get_fwd_configs(), cache_input_tensors=True)
-@tilelang.jit(out_idx=[3, 4])
+@tilelang.jit(out_idx=[3, 4], pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def fast_flashattn(
     batch,
     heads,
@@ -350,7 +350,7 @@ def get_bwd_configs():
     return configs
 
 
-@tilelang.jit(out_idx=[2])
+@tilelang.jit(out_idx=[2], pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     dtype = "float16"
     accum_dtype = "float"
@@ -377,7 +377,7 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 
 
 @tilelang.autotune(configs=get_bwd_configs(), cache_input_tensors=True)
-@tilelang.jit
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def flashattn_bwd(
     batch,
     heads,
@@ -503,7 +503,7 @@ def flashattn_bwd(
     return flash_bwd_kernel
 
 
-@tilelang.jit(out_idx=[1])
+@tilelang.jit(out_idx=[1], pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     dtype = "float16"
     accum_dtype = "float"
@@ -521,7 +521,7 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     return flash_bwd_post
 
 
-@tilelang.jit(out_idx=[1])
+@tilelang.jit(out_idx=[1], pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def flashattn_bwd_reduce_dq(batch, num_tiles, seq_len, heads, dim):
     accum_dtype = "float"
 
