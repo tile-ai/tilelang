@@ -57,9 +57,15 @@ def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     return_type = dst.dtype if return_prev else "handle"
 
     if memory_order is None:
-        return T.call_extern(return_type, func_name, dst, value)
+        return T.call_extern(return_type, func_name, T.address_of(dst), value)
     else:
-        return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
+        return T.call_extern(
+            return_type,
+            func_name,
+            T.address_of(dst),
+            value,
+            _MEMORY_ORDER_ID_MAP[memory_order],
+        )
 
 
 def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:
@@ -102,9 +108,15 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     return_type = dst.dtype if return_prev else "handle"
 
     if memory_order is None:
-        return T.call_extern(return_type, func_name, dst, value)
+        return T.call_extern(return_type, func_name, T.address_of(dst), value)
     else:
-        return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
+        return T.call_extern(
+            return_type,
+            func_name,
+            T.address_of(dst),
+            value,
+            _MEMORY_ORDER_ID_MAP[memory_order],
+        )
 
 
 def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False, use_tma: bool = False) -> PrimExpr:
@@ -325,7 +337,7 @@ def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
         >>> counter = T.Tensor([1], "int64", name="counter")
         >>> current_count = atomic_load(counter, memory_order="relaxed")
     """
-    return T.call_extern(src.dtype, "AtomicLoad", src, _MEMORY_ORDER_ID_MAP[memory_order])
+    return T.call_extern(src.dtype, "AtomicLoad", T.address_of(src), _MEMORY_ORDER_ID_MAP[memory_order])
 
 
 def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> PrimExpr:
@@ -378,4 +390,4 @@ def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> P
         >>> log_counter = T.Tensor([1], "int64", name="log_counter")
         >>> atomic_store(log_counter, 0)  # Reset counter atomically
     """
-    return T.call_extern("handle", "AtomicStore", dst, src, _MEMORY_ORDER_ID_MAP[memory_order])
+    return T.call_extern("handle", "AtomicStore", T.address_of(dst), src, _MEMORY_ORDER_ID_MAP[memory_order])
