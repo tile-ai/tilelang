@@ -362,4 +362,5 @@ def test_tile_atomic_add():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    run_atomic_max(4, 64, 64, 16, 16)
