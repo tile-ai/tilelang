@@ -156,8 +156,10 @@ void CodeGenTileLangPY::PrintSSAAssign(const std::string &target,
 void CodeGenTileLangPY::PrintType(DataType type,
                                   std::ostream &os) { // NOLINT(*)
   if (type.is_float()) {
-    if (type.bits() == 32 || type.bits() == 64) {
+    if (type.bits() == 16 || type.bits() == 32 || type.bits() == 64) {
       os << "float";
+    } else {
+      LOG(FATAL) << "Cannot convert float" << type.bits() << " to Python type";
     }
   } else if (type.is_uint()) {
     switch (type.bits()) {
