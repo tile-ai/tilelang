@@ -45,4 +45,4 @@ def test_cuda_restrict_annotation_removes_restrict():
 
 
 if __name__ == "__main__":
-    tilelang.disable_cache()
+    tilelang.testing.main()
