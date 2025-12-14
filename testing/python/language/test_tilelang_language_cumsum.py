@@ -186,15 +186,14 @@ def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype="float32"):
         with T.Kernel(T.ceildiv(N, chunk_size), threads=chunk_size) as bx:
             i = bx
             chunk_start = i * chunk_size
-            # Test cumsum with region input - out-of-place operation
-            # Note: For non-divisible sizes, the system will handle bounds checking automatically
-            # This demonstrates the feature: T.cumsum(InputG_fragment[i * chunk_size:(i + 1) * chunk_size], dim=0)
-            T.cumsum(
-                src=InputG_fragment[chunk_start : chunk_start + chunk_size],
-                dst=OutputG_fragment[chunk_start : chunk_start + chunk_size],
-                dim=0,
-                reverse=reverse,
-            )
+            # Copy region to shared memory first (cumsum only supports shared memory)
+            A_shared = T.alloc_shared((chunk_size,), dtype)
+            T.copy(InputG_fragment[chunk_start : chunk_start + chunk_size], A_shared)
+            # Test cumsum with region input - in-place operation on shared memory
+            # This demonstrates the feature: T.cumsum(region, dim=0)
+            T.cumsum(src=A_shared, dim=0, reverse=reverse)
+            # Copy result back to global memory
+            T.copy(A_shared, OutputG_fragment[chunk_start : chunk_start + chunk_size])
 
     return cumsum_region
 
@@ -237,13 +236,18 @@ def cumsum_region_test_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype="f
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
             chunk_start_M = by * block_M
             chunk_start_N = bx * block_N
-            # Test cumsum with 2D region input - out-of-place operation
-            # Note: For non-divisible sizes, the system will handle bounds checking automatically
-            T.cumsum(
-                src=InputG_fragment[chunk_start_M : chunk_start_M + block_M, chunk_start_N : chunk_start_N + block_N],
-                dst=OutputG_fragment[chunk_start_M : chunk_start_M + block_M, chunk_start_N : chunk_start_N + block_N],
-                dim=dim,
-                reverse=reverse,
+            # Copy region to shared memory first (cumsum only supports shared memory)
+            A_shared = T.alloc_shared((block_M, block_N), dtype)
+            T.copy(
+                InputG_fragment[chunk_start_M : chunk_start_M + block_M, chunk_start_N : chunk_start_N + block_N],
+                A_shared,
+            )
+            # Test cumsum with 2D region input - in-place operation on shared memory
+            T.cumsum(src=A_shared, dim=dim, reverse=reverse)
+            # Copy result back to global memory
+            T.copy(
+                A_shared,
+                OutputG_fragment[chunk_start_M : chunk_start_M + block_M, chunk_start_N : chunk_start_N + block_N],
             )
 
     return cumsum_region
