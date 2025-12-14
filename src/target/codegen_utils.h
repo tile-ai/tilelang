@@ -17,7 +17,7 @@ namespace codegen {
  * \return true if the first character is '(' and the last character is ')'
  *         and they form a matching pair
  */
-bool CheckOutermostParenthesesMatch(const std::string& s);
+bool CheckOutermostParenthesesMatch(const std::string &s);
 
 /*!
  * \brief Remove outermost parentheses if they match
@@ -25,10 +25,9 @@ bool CheckOutermostParenthesesMatch(const std::string& s);
  * \return The string with outermost parentheses removed if they match,
  *         otherwise return the original string
  */
-std::string RemoveOutermostParentheses(const std::string& s);
+std::string RemoveOutermostParentheses(const std::string &s);
 
-}  // namespace codegen
-}  // namespace tvm
+} // namespace codegen
+} // namespace tvm
 
-#endif  // TVM_TARGET_CODEGEN_UTILS_H_
-
+#endif // TVM_TARGET_CODEGEN_UTILS_H_

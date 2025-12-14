@@ -21,7 +21,6 @@ namespace tvm {
 namespace codegen {
 namespace {
 
-
 void ReplaceAll(std::string &str, const std::string &from,
                 const std::string &to) {
   auto pos = str.find(from);

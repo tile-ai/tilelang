@@ -8,7 +8,7 @@
 namespace tvm {
 namespace codegen {
 
-bool CheckOutermostParenthesesMatch(const std::string& s) {
+bool CheckOutermostParenthesesMatch(const std::string &s) {
   if (!s.empty() && s.front() == '(' && s.back() == ')') {
     size_t len = s.size();
     int n_unmatched = 0;
@@ -26,7 +26,7 @@ bool CheckOutermostParenthesesMatch(const std::string& s) {
   return false;
 }
 
-std::string RemoveOutermostParentheses(const std::string& s) {
+std::string RemoveOutermostParentheses(const std::string &s) {
   if (CheckOutermostParenthesesMatch(s)) {
     return s.substr(1, s.size() - 2);
   } else {
@@ -34,6 +34,5 @@ std::string RemoveOutermostParentheses(const std::string& s) {
   }
 }
 
-}  // namespace codegen
-}  // namespace tvm
-
+} // namespace codegen
+} // namespace tvm
