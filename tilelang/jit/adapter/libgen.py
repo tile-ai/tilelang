@@ -105,6 +105,19 @@ class LibraryGenerator:
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
             arch = get_rocm_arch(rocm_path)
+
+            # Support fast-math for HIP/clang via pass_configs.
+            # Keep behavior aligned with CUDA: TL_ENABLE_FAST_MATH turns on fast math.
+            if self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH):
+                deprecated_warning(
+                    "TL_DISABLE_FAST_MATH",
+                    "TL_ENABLE_FAST_MATH",
+                    "0.1.7",
+                )
+                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, True)
+            else:
+                enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
+
             command = [
                 "hipcc",
                 "-std=c++17",
@@ -158,6 +171,21 @@ class LibraryGenerator:
 
     def remove_lib(self):
         if self.libpath:
+            os.remove(self.libpath)
+        self.libpath = None
+
+    def get_source_path(self):
+        return self.srcpath
+
+    def get_lib_path(self):
+        return self.libpath
+
+    def set_lib_path(self, libpath):
+        self.libpath = libpath
+
+    def set_src_path(self, srcpath):
+        self.srcpath = srcpath
+
             os.remove(self.libpath)
         self.libpath = None
 
