@@ -506,8 +506,10 @@ void CodeGenTileLangPY::VisitStmt_(const ForNode *op) {
   if (is_zero(op->min)) {
     PrintExpr_(op->extent, stream);
   } else {
-    stream << op->min << ", "
-           << arith::Analyzer().Simplify(op->extent + op->min);
+    PrintExpr_(op->min, stream);
+    stream << ", ";
+    PrimExpr upper_bound = arith::Analyzer().Simplify(op->extent + op->min);
+    PrintExpr_(upper_bound, stream);
   }
   stream << "):\n";
   int for_scope = BeginScope();
