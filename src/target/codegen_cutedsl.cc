@@ -1259,6 +1259,8 @@ void CodeGenTileLangCuTeDSL::PrintStorageSync_(const CallNode *op) {
     }
   } else if (sync == "global") {
     LOG(FATAL) << "PrintStorageSync_ for global is not supported for now";
+  } else {
+    LOG(FATAL) << "Unknown storage sync scope: " << sync;
   }
 }
 
