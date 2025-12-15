@@ -148,7 +148,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator = CuTeDSLLibraryGenerator(adapter.target, adapter.verbose)
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
-        adapter.kernel_global_source = open(kernel_lib_path).read()
+        adapter.libpath = kernel_lib_path
+        adapter.kernel_global_source = open(adapter.libpath).read()
         adapter.pymodule = adapter.lib_generator.pymodule
 
         adapter._post_init()
