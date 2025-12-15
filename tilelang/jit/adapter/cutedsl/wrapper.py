@@ -1130,7 +1130,11 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         for desc_name in desc_names:
             info = self.tma_desc_info[desc_name]
-            tensor_name = self._pythonic_expr(info["globalAddress"])
+            # Extract the base buffer variable name (must be a Var, not arbitrary expression)
+            global_addr = info["globalAddress"]
+            if not isinstance(global_addr, tvm.tir.Var):
+                raise ValueError(f"TMA globalAddress must be a buffer Var, got {type(global_addr)}: {global_addr}")
+            tensor_name = global_addr.name
 
             if tensor_name not in tensor_args:
                 tensor_args.append(tensor_name)
