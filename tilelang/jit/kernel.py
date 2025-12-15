@@ -95,9 +95,9 @@ class JITKernel(Generic[_P, _T]):
 
         if pass_configs is None:
             pass_configs = {}
-        self.pass_configs = pass_configs
+        self.pass_configs = pass_configs 
 
-        self.compile_flags = compile_flags
+        self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
 
         # Ensure the target is always a valid TVM Target object.
         self.target = determine_target(target, return_object=True)
