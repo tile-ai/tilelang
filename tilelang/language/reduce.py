@@ -6,7 +6,6 @@ from tilelang.language import copy, macro, alloc_shared, alloc_fragment
 from tilelang.utils.language import to_buffer_region, retrieve_shape, _get_buffer
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.script.ir_builder import IRBuilder
-from typing import Union
 
 
 def _legalize_dim(buffer: tir.Buffer, dim: int):
