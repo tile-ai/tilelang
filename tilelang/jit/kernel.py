@@ -223,10 +223,11 @@ class JITKernel(Generic[_P, _T]):
 
         compile_flags = self.compile_flags
 
-        compile_flags_cfg = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
-        pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = (
-            compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
-        )
+        if compile_flags is not None:
+            compile_flags_cfg = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
+            pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = (
+                compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
+            )
 
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "tvm_ffi"
