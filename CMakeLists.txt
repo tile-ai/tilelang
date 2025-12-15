@@ -370,7 +370,7 @@ install(CODE [[
     $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.so
     $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.dylib
   )
-  foreach(f in LISTS SHARED_LIBS)
+  foreach(f IN LISTS SHARED_FILES)
     if(APPLE)
       execute_process(
         COMMAND otool -L ${f}
