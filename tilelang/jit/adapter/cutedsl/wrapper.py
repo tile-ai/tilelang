@@ -807,7 +807,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             desc_init_code="\n".join(desc_inits),
         )
 
-    def _generate_tma_launch_init(self, desc_names: list[str], tma_tensors: list[str], scalar_args: list[dict[str, str]], num_tma_descs: int) -> str:
+    def _generate_tma_launch_init(
+        self, desc_names: list[str], tma_tensors: list[str], scalar_args: list[dict[str, str]], num_tma_descs: int
+    ) -> str:
         """Generate TMA initialization code for launch function (host memory mode).
 
         TMA descriptors stay on host. cuLaunchKernel copies them to param space
