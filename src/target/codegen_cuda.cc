@@ -3246,6 +3246,14 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   CodeGenC::PrintType(func->ret_type, os);
   CodeGenC::PrintExtraAttrs(func, os);
   bool no_alias = func->HasNonzeroAttr(tir::attr::kNoAlias);
+  // Read-only param indices attribute, if present.
+  std::unordered_set<int> ro_param_indices;
+  if (auto opt =
+          func->GetAttr<ffi::Array<Integer>>("tl.readonly_param_indices")) {
+    for (const auto &idx : opt.value()) {
+      ro_param_indices.insert(static_cast<int>(Downcast<Integer>(idx)->value));
+    }
+  }
   os << " " << function_name << "(";
   for (size_t i = 0; i < func->params.size(); ++i) {
     tir::Var v = func->params[i];
@@ -3270,7 +3278,10 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
       if (it != alloc_storage_scope_.end()) {
         PrintStorageScope(it->second, os);
       }
-
+      // If marked read-only, emit const qualifier before type.
+      if (ro_param_indices.count(static_cast<int>(i))) {
+        os << "const ";
+      }
       CodeGenC::PrintType(GetType(v), os);
       if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
         if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
@@ -3314,6 +3325,13 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   ICHECK(global_symbol)
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
   bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
+  // Read-only param indices attribute, if present.
+  std::unordered_set<int> ro_param_indices;
+  if (auto opt = f->GetAttr<ffi::Array<Integer>>("tl.readonly_param_indices")) {
+    for (const auto &idx : opt.value()) {
+      ro_param_indices.insert(static_cast<int>(Downcast<Integer>(idx)->value));
+    }
+  }
 
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
@@ -3341,7 +3359,10 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
       if (it != alloc_storage_scope_.end()) {
         PrintStorageScope(it->second, stream);
       }
-
+      // If marked read-only, emit const qualifier before type.
+      if (ro_param_indices.count(static_cast<int>(i))) {
+        stream << "const ";
+      }
       CodeGenC::PrintType(GetType(v), stream);
       if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
         if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {

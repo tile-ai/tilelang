@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import tilelang
 import tilelang.language as T
-from tilelang.primitives.gemm.base import GemmWarpPolicy
+from tilelang.tileop.base import GemmWarpPolicy
 import itertools
 import argparse
 from functools import partial

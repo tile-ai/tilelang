@@ -8,7 +8,7 @@ from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
-from tilelang.ir import GemmWarpPolicy
+from tilelang.tileop.base import GemmWarpPolicy
 from .gemm_sp_mma import GemmSPMMA
 
 
