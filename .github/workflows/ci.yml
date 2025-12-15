@@ -316,6 +316,7 @@ jobs:
           CXX_FILES=$(find src -type f -iname "*.[ch]pp" -o -iname "*.cc" -o -iname "*.c" -o -iname "*.h")
           rc=0
           "${CLANG_TIDY[@]}" -clang-tidy-binary="$(command -v clang-tidy)" \
+            -exclude-header-filter='^(3rdparty|tvm)/.*$' \
             -p="cmake-build" ${CXX_FILES} || rc="$?"
           rm -rf cmake-build run-clang-tidy.py
           if (( rc != 0 )); then
