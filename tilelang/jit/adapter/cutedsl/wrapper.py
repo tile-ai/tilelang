@@ -194,7 +194,7 @@ static bool g_kernels_initialized = false;
 // PTX: .param .align 128 .b8 xxx_param[128]
 static CUtensorMap g_tma_descs[{num_tma_descs}];
 
-// Find kernel by pattern (substring match)
+// Find kernel by pattern (substring match, prefer base name over _N variants)
 CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction* out_func) {{
   CUresult result;
   unsigned int num_funcs = 0;
@@ -212,6 +212,12 @@ CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction
     return result;
   }}
 
+  // Collect substring matches, separating base name from _N variants
+  std::vector<std::pair<std::string, CUfunction>> base_matches;     // pattern not followed by _digit
+  std::vector<std::pair<std::string, CUfunction>> variant_matches;  // pattern followed by _digit
+
+  size_t pattern_len = std::strlen(pattern);
+
   for (unsigned int i = 0; i < num_funcs; i++) {{
     const char* func_name = nullptr;
     result = cuFuncGetName(&func_name, func_list[i]);
@@ -220,15 +226,66 @@ CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction
       return result;
     }}
 
-    if (std::string(func_name).find(pattern) != std::string::npos) {{
-      *out_func = func_list[i];
-      return CUDA_SUCCESS;
+    std::string name_str(func_name);
+    size_t pos = name_str.find(pattern);
+
+    if (pos != std::string::npos) {{
+      // Found substring match
+      size_t after_pattern = pos + pattern_len;
+
+      // Check what follows the pattern
+      if (after_pattern < name_str.length() &&
+          name_str[after_pattern] == '_' &&
+          after_pattern + 1 < name_str.length() &&
+          std::isdigit(name_str[after_pattern + 1])) {{
+        // Pattern followed by _digit (e.g., "main_kernel_1")
+        variant_matches.push_back({{name_str, func_list[i]}});
+      }} else {{
+        // Pattern not followed by _digit (e.g., "main_kernel" itself)
+        base_matches.push_back({{name_str, func_list[i]}});
+      }}
     }}
   }}
 
+  // Decision logic: prefer base matches over variant matches
+  if (!base_matches.empty()) {{
+    if (base_matches.size() == 1) {{
+      *out_func = base_matches[0].second;
+      return CUDA_SUCCESS;
+    }}
+
+    // Multiple base matches - ambiguous
+    std::cerr << "Error: Pattern '" << pattern << "' matched " << base_matches.size()
+              << " base kernels (ambiguous). Matches found:\\n";
+    for (const auto& match : base_matches) {{
+      std::cerr << "  - " << match.first << "\\n";
+    }}
+    std::cerr << "Please use a more specific pattern.\\n";
+    return CUDA_ERROR_NOT_FOUND;
+  }}
+
+  // No base matches, try variant matches
+  if (!variant_matches.empty()) {{
+    if (variant_matches.size() == 1) {{
+      *out_func = variant_matches[0].second;
+      return CUDA_SUCCESS;
+    }}
+
+    // Multiple variant matches - ambiguous
+    std::cerr << "Error: Pattern '" << pattern << "' matched " << variant_matches.size()
+              << " variant kernels (ambiguous). Matches found:\\n";
+    for (const auto& match : variant_matches) {{
+      std::cerr << "  - " << match.first << "\\n";
+    }}
+    std::cerr << "Please use a more specific pattern (e.g., '" << pattern << "_1').\\n";
+    return CUDA_ERROR_NOT_FOUND;
+  }}
+
+  // No matches at all
   std::cerr << "Failed to find kernel matching pattern '" << pattern << "'\\n";
   return CUDA_ERROR_NOT_FOUND;
 }}
+
 
 // Initialize CUDA module (called once on first launch)
 static CUresult tilelang_init_cuda_module(const char* cubin_path) {{
