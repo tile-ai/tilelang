@@ -195,6 +195,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             if param not in buffer_map:
                 continue
             buffer = buffer_map[param]
+            if buffer.strides is None:
+                continue
             for j, stride in enumerate(buffer.strides):
                 if isinstance(stride, tir.Var):
                     unique_push_back(stride, (1, i, j))
