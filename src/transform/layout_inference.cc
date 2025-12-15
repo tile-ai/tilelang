@@ -20,6 +20,7 @@
 #include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
+#include "../target/utils.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -1170,9 +1171,15 @@ private:
       // If a cast operation exists, vectorization may still be required
       bool has_cast_operations = false;
       PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-        if (const auto *store = obj.as<BufferStoreNode>()) {
+        if (const auto *cast = obj.as<CastNode>()) {
           // Check if this is a non-reducer store with Cast operation
-          if (store->value.as<CastNode>()) {
+          DataType src_type = cast->value.dtype();
+          DataType dst_type = cast->dtype;
+          bool src_ok = src_type.is_float() || src_type.is_bfloat() ||
+                        src_type.is_float8_e4m3() || src_type.is_float8_e5m2();
+          bool dst_ok = dst_type.is_float() || dst_type.is_bfloat() ||
+                        dst_type.is_float8_e4m3() || dst_type.is_float8_e5m2();
+          if (src_ok && dst_ok && TargetIsCuda(Target::Current())) {
             has_cast_operations = true;
           }
         }
