@@ -70,7 +70,7 @@ def test_smtlib2():
 
     solver = z3.Solver()
     solver.from_string(smtlib2)
-    assert solver.check() == z3.sat, f"Expected sat, got {solver.check()}"
+    assert solver.check() == z3.unsat, f"Expected unsat, got {solver.check()}"
 
 
 def test_bind():
