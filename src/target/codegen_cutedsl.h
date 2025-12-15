@@ -25,6 +25,9 @@ namespace codegen {
 const int64_t LOOP_UNROLL_THRESHOLD = 64;
 
 class CodeGenTileLangCuTeDSL final : public CodeGenTileLangPY {
+public:
+  CodeGenTileLangCuTeDSL();
+
 protected:
   void PrintFuncDecorator_(std::ostream &os) override; // NOLINT(*)
   void PreFunctionBody_(const PrimFunc &f) override;
@@ -83,6 +86,15 @@ protected:
 
   virtual void PrintStorageSync_(const CallNode *op);
 
+  /*!
+   * \brief Get fastmath parameter string for CuTeDSL math functions
+   * \return "True" or "False" based on enable_fastmath_ flag
+   */
+  const char *GetFastmathString() const;
+
+  const std::string
+  CanonicalizeFastmathFunctionName_(const std::string &func_name) const;
+
 private:
   // The name of the mbarrier array in shared memory
   const std::string mbarrier_name_ = "mbarrier";
@@ -91,6 +103,9 @@ private:
 
   std::vector<std::string> eviction_policy_names_ = {
       "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};
+
+  // Fastmath configuration (read from PassContext)
+  bool enable_fastmath_ = false;
 };
 
 } // namespace codegen

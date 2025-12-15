@@ -6,6 +6,7 @@
 #include "codegen_utils.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
+#include <tvm/ir/transform.h>
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
@@ -32,6 +33,36 @@ void ReplaceAll(std::string &str, const std::string &from,
 }
 
 } // namespace
+
+CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
+  // Read fastmath configuration from current PassContext
+  auto pass_ctx = tvm::transform::PassContext::Current();
+
+  // Read tl.enable_fast_math config, default to false
+  enable_fastmath_ =
+      pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
+}
+
+const char *CodeGenTileLangCuTeDSL::GetFastmathString() const {
+  return enable_fastmath_ ? "True" : "False";
+}
+
+const std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
+    const std::string &func_name) const {
+  static const std::unordered_map<std::string, std::string> kFastMathMap = {
+      {"divf", "tl.divf"},   {"exp", "tl.exp"},    {"expf", "tl.exp"},
+      {"exp2", "tl.exp2"},   {"exp2f", "tl.exp2"}, {"log", "tl.log"},
+      {"logf", "tl.log"},    {"log2", "tl.log2"},  {"log2f", "tl.log2"},
+      {"log10", "tl.log10"}, {"tan", "tl.tan"},    {"cos", "tl.cos"},
+      {"sin", "tl.sin"},     {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
+  };
+
+  auto it = kFastMathMap.find(func_name);
+  if (it != kFastMathMap.end()) {
+    return it->second;
+  }
+  return "";
+}
 
 void CodeGenTileLangCuTeDSL::PrintFuncDecorator_(
     std::ostream &os) { // NOLINT(*)
@@ -1061,17 +1092,13 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
 
   // Special cases:
   // Map C math functions to Python/cutedsl equivalents
-  if (global_symbol_str == "exp2f" || global_symbol_str == "exp2") {
-    global_symbol_str = "tl.exp2";
-  } else if (global_symbol_str == "expf" || global_symbol_str == "exp") {
-    global_symbol_str = "tl.exp";
-  } else if (global_symbol_str == "logf" || global_symbol_str == "log") {
-    global_symbol_str = "tl.log";
-  } else if (global_symbol_str == "log2f" || global_symbol_str == "log2") {
-    global_symbol_str = "tl.log2";
-  } else if (global_symbol_str == "sqrtf" || global_symbol_str == "sqrt") {
-    global_symbol_str = "tl.sqrt";
+  const auto canonicalized_global_symbol_str =
+      CanonicalizeFastmathFunctionName_(global_symbol_str);
+  const bool canonicalized = !canonicalized_global_symbol_str.empty();
+  if (canonicalized) {
+    global_symbol_str = canonicalized_global_symbol_str;
   }
+
   // Atomic Functions
   if (global_symbol_str.substr(0, 6) == "Atomic") {
     global_symbol_str = "tl." + global_symbol_str;
@@ -1120,6 +1147,12 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
               i, scall);
         }
       }
+      if (canonicalized) {
+        if (!sargs.empty()) {
+          scall << ", ";
+        }
+        scall << "fastmath=" << GetFastmathString();
+      }
       scall << ")";
       PrintVecElemStore_(sret, ret_dtype, i, scall.str());
     }
@@ -1131,6 +1164,12 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
         os << ", ";
       }
       os << sargs[i];
+    }
+    if (canonicalized) {
+      if (!sargs.empty()) {
+        os << ", ";
+      }
+      os << "fastmath=" << GetFastmathString();
     }
     os << ")";
   }
