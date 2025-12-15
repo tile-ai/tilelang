@@ -260,7 +260,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             shutil.copy2(src_cubin_path, dst_cubin_path)
             logger.debug(f"Saved CuTeDSL cubin to cache: {dst_cubin_path}")
         except Exception as e:
-            logger.warning(f"Failed to save cubin to cache: {e}")
+            logger.warning(f"Failed to save cubin to cache: {e}", exc_info=True)
 
     def _wrap_forward_from_prebuild_lib(self, *ins: list[torch.Tensor], stream: int | None = None):
         """High-level wrapper for kernel execution.
