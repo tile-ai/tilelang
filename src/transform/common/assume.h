@@ -8,6 +8,7 @@
 #define TVM_TL_TRANSFORM_COMMON_ASSUME_H_
 
 #include "tvm/tir/stmt.h"
+#include <optional>
 
 namespace tvm {
 namespace tl {
