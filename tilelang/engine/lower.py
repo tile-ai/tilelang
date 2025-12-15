@@ -95,6 +95,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     extra_flags = cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS, None)
     if extra_flags:
         import shlex
+
         if isinstance(extra_flags, str):
             tokens = shlex.split(extra_flags)
         else:
