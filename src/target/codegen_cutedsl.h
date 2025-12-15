@@ -18,12 +18,6 @@
 namespace tvm {
 namespace codegen {
 
-// The threshold of the loop extent to use cutlass.range_constexpr
-// Higher values would lead to DSLOptimizationWarning:
-// This static loop has 128 iterations, which may be very slow to compile,
-//  consider using `cutlass.range(..., unroll_full=True)` instead.
-const int64_t LOOP_UNROLL_THRESHOLD = 64;
-
 class CodeGenTileLangCuTeDSL final : public CodeGenTileLangPY {
 public:
   CodeGenTileLangCuTeDSL();

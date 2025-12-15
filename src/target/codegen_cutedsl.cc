@@ -22,6 +22,12 @@ namespace tvm {
 namespace codegen {
 namespace {
 
+// The threshold of the loop extent to use cutlass.range_constexpr
+// Higher values would lead to DSLOptimizationWarning:
+// This static loop has 128 iterations, which may be very slow to compile,
+//  consider using `cutlass.range(..., unroll_full=True)` instead.
+const int64_t LOOP_UNROLL_THRESHOLD = 64;
+
 void ReplaceAll(std::string &str, const std::string &from,
                 const std::string &to) {
   ICHECK(!from.empty()) << "ReplaceAll(): `from` must be non-empty";
@@ -580,8 +586,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     auto ptr_str = GetBufferPtr_(load->buffer.get(), index);
     os << "tl.make_tensor_at_offset(tl.recast_ptr(" << ptr_str << ", dtype=";
     PrintType(tgt_dtype.element_of(), os);
-    os << "), 0, (" << tgt_dtype.lanes() << ",), div_by=" << tgt_dtype.lanes()
-       << ").load()";
+    os << "), 0, (" << tgt_dtype.lanes() << ",)).load()";
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else if (op->op.same_as(tl::tl_gemm())) {
@@ -810,8 +815,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     if (scope == "shared") {
       stream << vid << " = tl.make_tensor_at_offset(tl.alloc_smem(";
       PrintType(op->dtype, stream);
-      stream << ", " << constant_size << "), 0, (" << constant_size
-             << ",), div_by=" << op->dtype.bytes() * op->dtype.lanes() << ")\n";
+      stream << ", " << constant_size << "), 0, (" << constant_size << ",))\n";
     } else if (scope == "shared.barrier") {
       ICHECK(false) << "Unsupported scope: " << scope;
     } else if (scope == "local") {
@@ -1272,7 +1276,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     } else {
       std::ostringstream os;
       os << "tl.make_tensor_at_offset(" << ptr_str << ", " << index_str
-         << ", (1,))";
+         << ", (1,), div_by=" << buffer_element_dtype.lanes() << ")";
       // for vector data types, ".load()" (added by BufferLoadNode) is neeed
       // instead of "[0]"
       if (buffer_element_dtype.is_scalar()) {
