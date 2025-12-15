@@ -687,7 +687,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
 
       std::string vid = GetVarID(buffer_var.get());
       const RampNode *ramp = index.as<RampNode>();
-      ICHECK(ramp) << "Expected Ramp index for vectorized non-contiguous access";
+      ICHECK(ramp)
+          << "Expected Ramp index for vectorized non-contiguous access";
       for (int i = 0; i < value_lanes; ++i) {
         auto idx_expr =
             arith::Analyzer().Simplify(ramp->base + ramp->stride * i);
