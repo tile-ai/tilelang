@@ -6,6 +6,7 @@ from tilelang.language import copy, macro, alloc_shared, alloc_fragment
 from tilelang.utils.language import to_buffer_region, retrieve_shape, _get_buffer
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.script.ir_builder import IRBuilder
+from typing import Union
 
 
 def _legalize_dim(buffer: tir.Buffer, dim: int):
@@ -243,8 +244,8 @@ def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
 
 @macro
 def cumsum_fragment(
-    src: tir.Buffer | tir.BufferRegion | tir.BufferLoad,
-    dst: tir.Buffer | tir.BufferRegion | tir.BufferLoad,
+    src: tir.Buffer,
+    dst: tir.Buffer,
     dim: int,
     reverse: bool,
 ) -> tir.PrimExpr:
