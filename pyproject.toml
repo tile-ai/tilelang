@@ -43,7 +43,7 @@ dependencies = [
     "torch>=2.7; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
-    "z3-solver>=4.13.0; platform_system == 'Linux'",
+    "z3-solver>=4.13.0",
 ]
 
 [project.optional-dependencies]
@@ -57,7 +57,7 @@ vis = ["matplotlib"]
 requires = [
     "cython>=3.0.0",
     "scikit-build-core",
-    "z3-solver>=4.13.0; platform_system == 'Linux'",
+    "z3-solver>=4.13.0",
     "patchelf>=0.17.2; platform_system == 'Linux'",
 ]
 build-backend = "scikit_build_core.build"
