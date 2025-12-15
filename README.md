@@ -21,7 +21,7 @@ Check out the preview here:
 This includes implementations across two branches:
 [ascendc_pto](https://github.com/tile-ai/tilelang-ascend) and
 [npuir](https://github.com/tile-ai/tilelang-ascend/tree/npuir).
-Feel free to explore and share your feedback! 
+Feel free to explore and share your feedback!
 - 07/04/2025 🚀: Introduced `T.gemm_sp` for 2:4 sparse tensor core support, check out [Pull Request #526](https://github.com/tile-ai/tilelang/pull/526) for details.
 - 06/05/2025 ✨: Added [NVRTC Backend](https://github.com/tile-ai/tilelang/pull/461) to significantly reduce compilation time for cute templates!
 - 04/14/2025 🚀: Added high-performance FlashMLA implementation for AMD MI300X, achieving performance parity with hand-optimized assembly kernels of Aiter! See [example_mla_amd](./examples/deepseek_mla/amd/README.md) for details.
@@ -61,7 +61,7 @@ TileLang achieves exceptional performance across a variety of computational patt
       <img src="./examples/deepseek_mla/figures/bs128_float16.png" alt="mla decode performance bs128 on H100" width="100%" />
     </div>
   </div>
-  
+
 - Flash Attention Performance on H100
 
   <div align="center">    <img src="./images/mha_performance_h100.png" alt="operator performance on H100" width=80% />
@@ -168,7 +168,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
                 # Perform a tile-level GEMM on the shared buffers
                 # Currently we dispatch to the cute/hip on Nvidia/AMD GPUs
                 T.gemm(A_shared, B_shared, C_local)
-            
+
             # relu
             for i, j in T.Parallel(block_M, block_N):
                 C_local[i, j] = T.max(C_local[i, j], 0)

@@ -171,7 +171,7 @@ Register control
 - `T.annotate_producer_reg_dealloc(n=24)`, `T.annotate_consumer_reg_alloc(n=240)`.
 - `T.no_set_max_nreg()`, `T.disable_warp_group_reg_alloc()`.
 
- 
+
 
 ## Notes on Dtypes
 

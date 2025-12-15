@@ -1,6 +1,6 @@
 # Carver: A Tile-Structure Based Hint Recommend Framework for Machine Learning Compilers
 
-**Carver** is a lightweight framework for generating and ranking tile configurations (also known as **tiling strategies**, **blocking schemes**, or **scheduling hints**) for common GPU, CPU, and accelerator backends. It helps you explore efficient mappings of loops for operations such as matrix multiplication, elementwise transforms, and other reduction-oriented kernels. 
+**Carver** is a lightweight framework for generating and ranking tile configurations (also known as **tiling strategies**, **blocking schemes**, or **scheduling hints**) for common GPU, CPU, and accelerator backends. It helps you explore efficient mappings of loops for operations such as matrix multiplication, elementwise transforms, and other reduction-oriented kernels.
 
 Carver combines hardware architecture information, user-defined tile structures, and built-in heuristics to recommend tiling strategies (or "hints"). The recommended hints are easily adaptable to multiple backends, including [TVM](https://tvm.apache.org/), [triton](https://github.com/openai/triton), [tilelang](https://github.com/tile-ai/tilelang) (or other domain-specific compilers).
 
@@ -33,8 +33,8 @@ arch = CUDA("nvidia/geforce-rtx-4090")
 #         for k in Reduce(1024):
 #             ...
 carve_template = carver.GeneralReductionTemplate(
-    structure="SSR",          
-    shape=[1024, 1024, 1024], 
+    structure="SSR",
+    shape=[1024, 1024, 1024],
     dtype="float16",
 ).with_arch(arch)
 
@@ -207,4 +207,3 @@ You can also create your own specialized templates if you have unique loop struc
 ## TODO Items
 
 - [ ] **Adapt to tile language**: Provide ready-made scheduling calls or wrappers for [tilelang](https://github.com/LeiYanggh/tilelang) to streamline end-to-end integration.
-

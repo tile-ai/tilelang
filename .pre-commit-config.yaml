@@ -13,9 +13,8 @@ repos:
     hooks:
       - id: check-symlinks
       - id: destroyed-symlinks
-      # FIXME: enable these hooks
-      # - id: trailing-whitespace
-      # - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
       - id: check-added-large-files
       - id: check-merge-conflict
         fail_fast: true
