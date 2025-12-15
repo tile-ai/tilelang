@@ -223,7 +223,7 @@ elseif(USE_CUDA)
 endif()
 
 set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
-if(NOT APPLE)
+if(UNIX AND NOT APPLE)
   set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
 else()
   set(USE_PYPI_Z3 OFF CACHE BOOL  "Use Z3 provided by PyPI z3-solver package")
@@ -335,31 +335,17 @@ if(USE_Z3 AND USE_PYPI_Z3)
   # This is needed because PyPI z3-solver package uses a custom soname
   # which may not be found by our shared libraries at runtime.
   # We only need to do this on Linux where sonames are strictly enforced.
-  set(_install_code [[
-    set(_patchelf "@PATCHELF_EXECUTABLE@")
-    set(_z3_soname "@Z3_SONAME@")
-    set(PATCH_FILES $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/libtvm.so)
-    foreach(f IN LISTS PATCH_FILES)
-      message("-- Patching Z3 soname in ${f} from ${_z3_soname} to libz3.so")
-      execute_process(COMMAND ${_patchelf} --replace-needed ${_z3_soname} libz3.so "${f}")
-    endforeach()
-  ]])
-  string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
-  install(CODE "${_install_code_configured}")
+  if(UNIX AND NOT APPLE)
+    set(_install_code [[
+      set(_patchelf "@PATCHELF_EXECUTABLE@")
+      set(_z3_soname "@Z3_SONAME@")
+      set(PATCH_FILES $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/libtvm.so)
+      foreach(f IN LISTS PATCH_FILES)
+        message("-- Patching Z3 soname in ${f} from ${_z3_soname} to libz3.so")
+        execute_process(COMMAND ${_patchelf} --replace-needed ${_z3_soname} libz3.so "${f}")
+      endforeach()
+    ]])
+    string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
+    install(CODE "${_install_code_configured}")
+  endif()
 endif()
-
-install(CODE [[
-  file(GLOB_RECURSE
-    SHARED_FILES
-    $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.so
-    $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.dylib
-  )
-  foreach(f IN LISTS SHARED_FILES)
-    execute_process(
-      COMMAND ldd ${f}
-      OUTPUT_VARIABLE DEPS_OUTPUT
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    message("-- Shared library dependencies for ${f}: ${DEPS_OUTPUT}")
-  endforeach()
-]])
