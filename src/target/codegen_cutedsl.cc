@@ -436,8 +436,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::stringstream ss;
     auto need_reduce = op->args[op->args.size() - 2].as<IntImmNode>()->value;
     if (need_reduce) {
-      print_extern_call_stmt("tl::tma_store_add", 0, 2);
-      return;
+      LOG(FATAL) << "Currently unsupported op: " << op->op;
     }
     auto eviction_policy = eviction_policy_names_
         [op->args[op->args.size() - 1].as<IntImmNode>()->value];
