@@ -375,8 +375,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
-    auto eviction_policy = eviction_policy_names_
-        [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    auto pol = op->args[op->args.size() - 1].as<IntImmNode>();
+    ICHECK(pol) << "Eviction policy must be IntImm";
+    ICHECK_GE(pol->value, 0);
+    ICHECK_LT(static_cast<size_t>(pol->value), eviction_policy_names_.size());
+    auto eviction_policy = eviction_policy_names_[pol->value];
     // Simplify the code by using the default eviction policy
     if (eviction_policy != "EVICT_NORMAL") {
       LOG(FATAL) << "Eviction policy " << eviction_policy
