@@ -679,26 +679,69 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 desc_name_map[param] = name_str
             return True
 
-        paren_start = declaration.find("(")
-        paren_end = declaration.rfind(")")
-        if paren_start == -1 or paren_end == -1:
-            return []
+        def extract_param_names_ast(decl: str) -> list[str] | None:
+            """Extract parameter names using AST parsing."""
+            import ast
+            import warnings
 
-        params_str = declaration[paren_start + 1 : paren_end].strip()
-        if not params_str:
-            return []
+            try:
+                # Build a syntactically valid function by adding a body
+                func_stub = decl.rstrip()
+                if not func_stub.endswith(":"):
+                    func_stub += ":"
+                func_stub += "\n    pass"
 
-        param_parts = params_str.split(",")
-        param_names = []
-        for param in param_parts:
-            param = param.strip()
-            if not param or param == "self":
-                continue
-            if ":" in param:
-                param_name = param.split(":")[0].strip()
-            else:
-                param_name = param.strip()
-            param_names.append(param_name)
+                # Parse and locate the FunctionDef
+                tree = ast.parse(func_stub)
+                func_def = None
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.FunctionDef):
+                        func_def = node
+                        break
+
+                if func_def is None:
+                    return None
+
+                # Extract parameter names, skipping 'self'
+                param_names = []
+                for arg in func_def.args.args:
+                    if arg.arg != "self":
+                        param_names.append(arg.arg)
+
+                return param_names
+            except Exception as e:
+                warnings.warn(f"AST parsing failed for function declaration, falling back to split-based parsing: {e}", stacklevel=2)
+                return None
+
+        def extract_param_names_split(decl: str) -> list[str]:
+            """Fallback: extract parameter names using naive split-based parsing."""
+            paren_start = decl.find("(")
+            paren_end = decl.rfind(")")
+            if paren_start == -1 or paren_end == -1:
+                return []
+
+            params_str = decl[paren_start + 1 : paren_end].strip()
+            if not params_str:
+                return []
+
+            param_parts = params_str.split(",")
+            param_names = []
+            for param in param_parts:
+                param = param.strip()
+                if not param or param == "self":
+                    continue
+                if ":" in param:
+                    param_name = param.split(":")[0].strip()
+                else:
+                    param_name = param.strip()
+                param_names.append(param_name)
+
+            return param_names
+
+        # Try AST-based extraction first, fallback to split-based
+        param_names = extract_param_names_ast(declaration)
+        if param_names is None:
+            param_names = extract_param_names_split(declaration)
 
         call_args = []
         for i, param_name in enumerate(param_names):
