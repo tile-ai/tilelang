@@ -1,4 +1,10 @@
+/*!
+ * \file inject_assumes.cc
+ * \brief Inject assumes on buffer's shape boundary check. Also convert
+ * existing assumes to AttrNodes.
+ */
 
+#include "common/assume.h"
 #include "tvm/arith/analyzer.h"
 #include "tvm/ffi/optional.h"
 #include "tvm/ir/expr.h"
@@ -10,6 +16,7 @@
 #include "tvm/tir/stmt.h"
 #include "tvm/tir/stmt_functor.h"
 #include "tvm/tir/transform.h"
+
 #include <sstream>
 
 namespace tvm::tl {
@@ -27,11 +34,12 @@ public:
   }
 
 private:
-  struct AssertCreator {
+  struct AssumeCreator {
     struct Item {
       PrimExpr expr;
       std::vector<Buffer> buffers;
     };
+
     tvm::StructuralHash sh;
     tvm::StructuralEqual se;
     // grouped by expr, since the amount of variadic shape symbols is usually
@@ -53,6 +61,7 @@ private:
         items[*it].buffers.push_back(buffer);
       }
     }
+
     void addBuffer(Buffer buf) {
       for (auto shape : buf->shape) {
         if (shape->IsInstance<IntImmNode>())
@@ -60,6 +69,7 @@ private:
         addExpr(shape, buf);
       }
     }
+
     Stmt build(Stmt body) {
       auto analyzer = arith::Analyzer{};
       for (const auto &e : items) {
@@ -79,32 +89,37 @@ private:
       return body;
     }
   };
+
   Stmt VisitStmt_(const DeclBufferNode *op) final {
     auto body = VisitStmt(op->body);
-    AssertCreator c;
+    AssumeCreator c;
     c.addBuffer(op->buffer);
     return DeclBuffer(op->buffer, c.build(body), op->span);
   }
-  std::optional<PrimExpr> getAssumeExpr(Stmt stmt) {
-    auto eval = stmt.as<EvaluateNode>();
-    if (!eval)
-      return std::nullopt;
-    auto call = eval->value.as<CallNode>();
-    if (!call)
-      return std::nullopt;
-    if (!call->op.same_as(builtin::assume()))
-      return std::nullopt;
-    return call->args[0];
-  }
+
   Stmt VisitStmt_(const SeqStmtNode *op) final {
     struct AssumeGroup {
       std::optional<PrimExpr> e;
       std::vector<Stmt> stmts;
     };
     std::vector<AssumeGroup> groups = {AssumeGroup{std::nullopt, {}}};
-    for (auto i = 0; i < op->seq.size(); i++) {
+    for (size_t i = 0; i < op->seq.size(); i++) {
       auto stmt = VisitStmt(op->seq[i]);
-      if (auto e = getAssumeExpr(stmt)) {
+      // Convert assume in evaluate form to assume attribute.
+      // By default, we have the following IR:
+      //    T.assume(cond1)
+      //    Stmt1
+      //    Stmt2
+      //    T.assume(cond2)
+      // This SeqStmt will be converted to:
+      //    With(attr::tilelang_assume, cond1) {
+      //      Stmt1
+      //      Stmt2
+      //    }
+      //    With(attr::tilelang_assume, cond2) {
+      //      ...
+      //    }
+      if (auto e = GetAssumeExprInEvaluateForm(stmt)) {
         groups.push_back(AssumeGroup{*e, {}});
       } else {
         groups.back().stmts.push_back(stmt);
@@ -127,10 +142,14 @@ private:
                                        : SeqStmt(groups[0].stmts);
     // return SeqStmt(groups[0].stmts);
   }
+
   Stmt VisitStmt_(const BlockNode *op) final {
     auto body = VisitStmt(op->body);
-    AssertCreator c;
-    if (root_node) {
+    AssumeCreator c;
+
+    // NOTE(chaofan): We only inject assumes from function arguments in the
+    // root block.
+    if (op->name_hint == "root") {
       for (auto item : f->buffer_map) {
         c.addBuffer(item.second);
       }
@@ -141,12 +160,13 @@ private:
     for (auto item : op->match_buffers) {
       c.addBuffer(item->buffer);
     }
+
     return Block(op->iter_vars, op->reads, op->writes, op->name_hint,
                  c.build(body), op->init, op->alloc_buffers, op->match_buffers,
                  op->annotations, op->span);
   }
+
   PrimFunc f;
-  bool root_node{true};
 };
 
 using namespace tir::transform;

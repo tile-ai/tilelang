@@ -19,6 +19,7 @@ from tilelang.jit.adapter import BaseKernelAdapter, CtypesKernelAdapter, CythonK
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
+from tilelang.transform import PassConfigKey
 import logging
 import os
 
@@ -96,7 +97,7 @@ class JITKernel(Generic[_P, _T]):
             pass_configs = {}
         self.pass_configs = pass_configs
 
-        self.compile_flags = compile_flags
+        self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
 
         # Ensure the target is always a valid TVM Target object.
         self.target = determine_target(target, return_object=True)
@@ -218,9 +219,15 @@ class JITKernel(Generic[_P, _T]):
         target_host = self.target_host
 
         execution_backend = self.execution_backend
-        pass_configs = self.pass_configs
+        pass_configs = self.pass_configs or {}
 
         compile_flags = self.compile_flags
+
+        if compile_flags is not None:
+            compile_flags_cfg = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
+            pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = (
+                compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
+            )
 
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "tvm_ffi"

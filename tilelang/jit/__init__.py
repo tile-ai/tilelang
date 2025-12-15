@@ -80,9 +80,6 @@ def compile(
 
     assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
 
-    if isinstance(compile_flags, str):
-        compile_flags = [compile_flags]
-
     if hasattr(func, "out_idx_override"):
         if func.out_idx_override is not None and out_idx is not None:
             raise ValueError("Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors")
@@ -492,8 +489,6 @@ def jit(  # This is the new public interface
         Either a JIT-compiled wrapper around the input function, or a configured decorator
         instance that can then be applied to a function.
     """
-    if isinstance(compile_flags, str):
-        compile_flags = [compile_flags]
 
     def decorator(func: Callable[_P, _T]) -> JITImpl[_P, _T]:
         if isinstance(func, (PrimFunc, PrimFuncCreater)):
@@ -550,9 +545,6 @@ def lazy_jit(
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
 ):
-    if isinstance(compile_flags, str):
-        compile_flags = [compile_flags]
-
     compile_args = dict(
         out_idx=None,
         execution_backend=execution_backend,
