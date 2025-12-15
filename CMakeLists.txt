@@ -311,33 +311,25 @@ if(USE_Z3 AND USE_PYPI_Z3)
   set_property(TARGET tvm APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/bin)
 endif()
 
-# let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
+  set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     # some z3 is placed in lib/ and some in bin/, we add both in rpath
-    set_target_properties(tilelang        PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
-    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
-    set_target_properties(tvm             PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
-    set_target_properties(tvm_runtime     PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
-  else()
-    set_target_properties(tilelang        PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-    set_target_properties(tvm             PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-    set_target_properties(tvm_runtime     PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+    list(APPEND TILELANG_INSTALL_RPATH "@loader_path/../../z3/lib" "@loader_path/../../z3/bin")
   endif()
 elseif(UNIX)
+  set(TILELANG_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
-    set_target_properties(tilelang        PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib")
-    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib")
-    set_target_properties(tvm             PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib")
-    set_target_properties(tvm_runtime     PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib")
-  else()
-    set_target_properties(tilelang        PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-    set_target_properties(tvm             PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-    set_target_properties(tvm_runtime     PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+    # cmake uses ; by default, we explicitly use : for linux
+    string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../z3/lib")
   endif()
 endif()
+
+# let libtilelang to search tvm/tvm_runtime in same dir
+set_target_properties(tilelang        PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
+set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
+set_target_properties(tvm             PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
+set_target_properties(tvm_runtime     PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
 
 install(
   TARGETS tvm tvm_runtime tilelang_module tilelang
