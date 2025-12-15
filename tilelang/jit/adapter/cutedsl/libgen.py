@@ -68,10 +68,14 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
                 f.write(self.host_func)
 
             # Compile TMA init library if needed
-            tma_src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             if self.tma_cpp_init_code is not None:
-                with open(tma_src.name, "w") as f:
-                    f.write(self.tma_cpp_init_code)
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    suffix=".cpp",
+                    delete=False,
+                ) as tma_src:
+                    tma_src.write(self.tma_cpp_init_code)
+                    tma_src_path = tma_src.name
 
                 # Generate tma lib under the same directory as the source file
                 tma_lib_path = os.path.join(os.path.dirname(src_path), self.tma_lib_name)
@@ -83,7 +87,7 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
                         "-lcuda",
                         "-o",
                         tma_lib_path,
-                        tma_src.name,
+                        tma_src_path,
                     ],
                     check=True,
                 )
@@ -91,10 +95,14 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
                 self.tma_libname = self.tma_lib_name
 
             # Compile C++ launcher library if needed
-            launcher_src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             if self.launcher_cpp_code is not None:
-                with open(launcher_src.name, "w") as f:
-                    f.write(self.launcher_cpp_code)
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    suffix=".cpp",
+                    delete=False,
+                ) as launcher_src:
+                    launcher_src.write(self.launcher_cpp_code)
+                    launcher_src_path = launcher_src.name
 
                 # Generate launcher lib under the same directory as the source file
                 launcher_lib_path = os.path.join(os.path.dirname(src_path), self.launcher_lib_name)
@@ -123,7 +131,7 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
                     *tvm_ldflags,
                     "-o",
                     launcher_lib_path,
-                    launcher_src.name,
+                    launcher_src_path,
                 ]
 
                 result = subprocess.run(compile_cmd, check=False, capture_output=True, text=True)
