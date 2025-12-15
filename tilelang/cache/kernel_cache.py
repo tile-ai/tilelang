@@ -442,14 +442,14 @@ class KernelCache:
                     self.logger.debug(f"Loading kernel source code from file: {device_kernel_path}")
                 with open(device_kernel_path) as f:
                     device_kernel_source = f.read()
-            except Exception as e:
+            except Exception:
                 self.logger.exception("Error loading kernel source code from disk")
             try:
                 if verbose:
                     self.logger.debug(f"Loading wrapped kernel source code from file: {host_kernel_path}")
                 with open(host_kernel_path) as f:
                     host_kernel_source = f.read()
-            except Exception as e:
+            except Exception:
                 self.logger.exception("Error loading host kernel source code from disk")
         else:
             # For CuTeDSL, set empty strings since sources aren't loaded from cache

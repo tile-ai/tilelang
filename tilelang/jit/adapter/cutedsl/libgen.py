@@ -50,11 +50,15 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
 
     def load_lib(self, lib_path: str | None = None):
         if lib_path is None:
+            if self.libpath is None:
+                raise RuntimeError("CuTeDSLLibraryGenerator.libpath is not set; call compile_lib() first or pass lib_path explicitly.")
             lib_path = self.libpath
 
         self.pymodule = self.import_from_file("kernel", lib_path)
 
     def compile_lib(self, timeout: float = None):
+        if self.host_func is None:
+            raise RuntimeError("CuTeDSLLibraryGenerator.host_func is not set; call update_host_func() before compile_lib().")
         target = self.target
         if is_cutedsl_target(target):
             # Use a dedicated temp directory per kernel so CuTeDSL artifacts (e.g. kept .cubin)
