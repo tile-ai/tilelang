@@ -221,7 +221,20 @@ elseif(USE_CUDA)
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
-set(USE_Z3 ON)
+set(USE_Z3 ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
+set(USE_PYPI_Z3 ON CACHE BOOL "Use Z3 provided by PyPI z3-solver package")
+if(USE_Z3 AND USE_PYPI_Z3)
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/pypi-z3")
+  find_package(Z3 REQUIRED)
+  find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
+  execute_process(
+    COMMAND ${PATCHELF_EXECUTABLE} --print-soname ${Z3_LIBRARY}
+    OUTPUT_VARIABLE Z3_SONAME
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  message("-- Z3 SONAME: ${Z3_SONAME}")
+endif()
+
 # Include tvm after configs have been populated
 add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
 
@@ -288,20 +301,61 @@ install(TARGETS tilelang_cython_wrapper
         RUNTIME DESTINATION tilelang/lib
         ARCHIVE DESTINATION tilelang/lib)
 
+# add python z3 lib path to rpath for running tests and dev in current folder
+if(USE_Z3 AND USE_PYPI_Z3)
+  foreach(lib IN ITEMS tvm tvm_runtime tilelang tilelang_module)
+    set_property(TARGET ${lib} APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/bin)
+    set_property(TARGET ${lib} APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/lib)
+  endforeach()
+endif()
+
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
-  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-  set_target_properties(tvm PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  if(USE_Z3 AND USE_PYPI_Z3)
+    set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
+    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
+    set_target_properties(tvm PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
+    set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
+  else()
+    set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+    set_target_properties(tvm PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+    set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  endif()
 elseif(UNIX)
-  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-  set_target_properties(tvm PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  if(USE_Z3 AND USE_PYPI_Z3)
+    set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib:\$ORIGIN/../../z3/bin")
+    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib:\$ORIGIN/../../z3/bin")
+    set_target_properties(tvm PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib:\$ORIGIN/../../z3/bin")
+    set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib:\$ORIGIN/../../z3/bin")
+  else()
+    set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+    set_target_properties(tvm PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+    set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  endif()
 endif()
 
 install(
   TARGETS tvm tvm_runtime tilelang_module tilelang
   LIBRARY DESTINATION tilelang/lib
 )
+set(_install_code [=[
+  set(_patchelf "@PATCHELF_EXECUTABLE@")
+  set(_z3_soname "@Z3_SONAME@")
+  file(GLOB_RECURSE
+    bins
+    $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.so*
+    $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.dylib*
+  )
+  foreach(f IN LISTS bins)
+    execute_process(COMMAND patchelf --print-needed "${f}"
+      RESULT_VARIABLE r OUTPUT_VARIABLE need ERROR_QUIET)
+    if(r EQUAL 0 AND need MATCHES "${_z3_soname}")
+      message("-- Patching Z3 soname in ${f}")
+      execute_process(COMMAND ${_patchelf} --replace-needed ${_z3_soname} libz3.so "${f}")
+    endif()
+  endforeach()
+]=])
+string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
+install(CODE "${_install_code_configured}")
