@@ -234,15 +234,6 @@ if(USE_Z3 AND USE_PYPI_Z3)
       OUTPUT_VARIABLE Z3_SONAME
       OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-  elseif(APPLE)
-    find_program(INSTALL_NAME_TOOL_EXECUTABLE install_name_tool REQUIRED)
-    execute_process(
-      COMMAND ${INSTALL_NAME_TOOL_EXECUTABLE} -id ${Z3_LIBRARY} ${Z3_LIBRARY}
-      OUTPUT_VARIABLE Z3_SONAME
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-  else()
-    message(FATAL_ERROR "Unsupported platform for PyPI Z3 integration")
   endif()
   message("-- Z3 SONAME: ${Z3_SONAME}")
 endif()
@@ -370,21 +361,29 @@ if(USE_Z3 AND USE_PYPI_Z3)
     ]=])
     string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
     install(CODE "${_install_code_configured}")
-  elseif(APPLE)
-    # On macOS, ensure Z3 library ID is set correctly
-    message(STATUS "Adding install step to set Z3 library ID")
-    set(_install_code [=[
-      set(_install_name_tool "@INSTALL_NAME_TOOL_EXECUTABLE@")
-      set(_z3_soname "@Z3_SONAME@")
-      set(PATCH_FILES $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/libtvm.so)
-      foreach(f IN LISTS ${PATCH_FILES})
-        message("-- Patching Z3 soname in ${f} from ${_z3_soname} to libz3.dylib")
-        execute_process(COMMAND ${_install_name_tool} -change "@Z3_SONAME@" "libz3.dylib" "${f}")
-      endforeach()
-    ]=])
-    string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
-    install(CODE "${_install_code_configured}")
-  else()
-    message(WARNING "Skipping Z3 soname patching on unsupported platform")
   endif()
 endif()
+
+install(CODE [[
+  file(GLOB_RECURSE
+    SHARED_FILES
+    $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.so
+    $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.dylib
+  )
+  foreach(f in LISTS SHARED_LIBS)
+    if(APPLE)
+      execute_process(
+        COMMAND otool -L ${f}
+        OUTPUT_VARIABLE DEPS_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+    elseif(UNIX)
+      execute_process(
+        COMMAND ldd ${f}
+        OUTPUT_VARIABLE DEPS_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+    endif()
+    message("-- Shared library dependencies for ${f}: ${DEPS_OUTPUT}")
+  endforeach()
+]])
