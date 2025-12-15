@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 echo "Check MIT License boilerplate..."
 PWD="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # To source code root
