@@ -18,6 +18,9 @@ bool CheckOutermostParenthesesMatch(const std::string &s) {
       } else if (s[i] == ')') {
         n_unmatched--;
       }
+      if (n_unmatched < 0) {
+        return false;
+      }
       if (n_unmatched == 0) {
         return i == len - 1;
       }
