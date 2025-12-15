@@ -20,6 +20,7 @@ BYTES_PER_POINTER = 8
 
 def cp_async_gs(size, dst, dst_offset, src, src_offset):
     assert size in [16, 8, 4]
+    # use CG (cache global) to by pass L1 when loading contiguous 128B.
     mode = nvvm.LoadCacheModifierKind.CG if size == 16 else nvvm.LoadCacheModifierKind.CA
     if isinstance(src, cute.Tensor):
         src_ptr = src.iterator
@@ -56,7 +57,7 @@ def extract_tensormap_ptr(tma_atom: cute.CopyAtom, *, loc=None, ip=None) -> cute
 
 
 @dsl_user_op
-def tma_load(tma_desc, mbar: cute.Pointer, smem_ptr: cute.Pointer, crd: tuple[Int, ...], *, loc=None, ip=None) -> None:
+def tma_load(tma_desc, mbar: cute.Pointer, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, loc=None, ip=None) -> None:
     """
     Load data from global memory to shared memory using TMA (Tensor Memory Access).
 
@@ -72,8 +73,8 @@ def tma_load(tma_desc, mbar: cute.Pointer, smem_ptr: cute.Pointer, crd: tuple[In
     arch = CuTeDSL._get_dsl().envar.arch
     check_value_in(arch, ["sm_90", "sm_90a", "sm_100a"], "arch")
 
-    if not isinstance(crd, tuple):
-        # BUG: in cuda/tl_template, the api is tma_load(void *smem_ptr, void *gmem_ptr, BarrierType &smem_mbar, uint32_t size)
+    if not isinstance(crd, tuple) and isinstance(tma_desc, cute.Pointer):
+        # Legacy signature: tma_load(smem_ptr, gmem_ptr, mbar, size)
         _smem_ptr = tma_desc
         _gmem_ptr = mbar
         _mbar = smem_ptr
@@ -121,6 +122,8 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
     arch = CuTeDSL._get_dsl().envar.arch
     check_value_in(arch, ["sm_90", "sm_90a", "sm_100a"], "arch")
     if not isinstance(crd, tuple):
+        if arch not in ("sm_90", "sm_90a"):
+            raise NotImplementedError("tma_store(size) path is only implemented for sm_90/sm_90a")
         gmem_ptr = tma_desc.align(smem_ptr.alignment)
         _cute_nvgpu_ir.arch_copy_SM90_bulk_copy_s2g(
             dsmem_data_addr=smem_ptr.value,

@@ -69,7 +69,9 @@ def ptx_ldmatrix_x4(smem_ptr: Pointer, local_ptr: Pointer, *, loc=None, ip=None)
 @dsl_user_op
 def ptx_ldmatrix_x1_trans(smem_ptr: Pointer, local_ptr: Pointer, *, loc=None, ip=None) -> None:
     """Load 1 matrix (8x8) with transpose from shared memory"""
-    _ldmatrix(smem_ptr, local_ptr, 1, True, loc, ip)
+    out_i32 = nvvm.ldmatrix(T.i32(), smem_ptr.llvm_ptr, num=1, layout=nvvm.MMALayout.col, loc=loc, ip=ip)
+    out = cute.make_tensor(cute.recast_ptr(local_ptr, dtype=cute.Int32), 1)
+    out[0] = cute.Int32(out_i32)
 
 
 @dsl_user_op
