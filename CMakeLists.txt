@@ -306,11 +306,8 @@ install(TARGETS tilelang_cython_wrapper
 
 # add python z3 lib path to rpath for running tests and dev in current folder
 if(USE_Z3 AND USE_PYPI_Z3)
-  if(APPLE)
-    set_property(TARGET tvm APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/bin)
-  elseif(UNIX)
-    set_property(TARGET tvm APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/lib)
-  endif()
+  set_property(TARGET tvm APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/lib)
+  set_property(TARGET tvm APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/bin)
 endif()
 
 # let libtilelang to search tvm/tvm_runtime in same dir
