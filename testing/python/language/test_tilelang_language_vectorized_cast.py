@@ -60,9 +60,10 @@ def run_vectorized_cast(src_dtype_str: str, dst_dtype_str: str, check_str: str, 
     kernel = vectorized_cast_kernel(M, src_dtype_str, dst_dtype_str)
     kernel_parallel = parallel_vectorized_cast_kernel(M, src_dtype_str, dst_dtype_str)
 
-    A = torch.randn(M, dtype=str2dtype[src_dtype_str]).cuda()
-    B = torch.zeros(M, dtype=str2dtype[dst_dtype_str]).cuda()
-    C = torch.zeros(M, dtype=str2dtype[dst_dtype_str]).cuda()
+    A_float = torch.randn(M, dtype=torch.float32, device="cuda")
+    A = A_float.to(str2dtype[src_dtype_str])
+    B = torch.zeros(M, dtype=str2dtype[dst_dtype_str], device="cuda")
+    C = torch.zeros(M, dtype=str2dtype[dst_dtype_str], device="cuda")
 
     kernel(A, B)
     kernel_parallel(A, C)
@@ -100,6 +101,14 @@ def test_vectorized_cast():
     # bf16 -> fp32
     run_vectorized_cast("bfloat16", "float32", "__bfloat1622float2", 2)
     run_vectorized_cast("bfloat16", "float32", "__bfloat1622float2", 4)
+
+    # fp8_e4m3 -> fp32
+    run_vectorized_cast("float8_e4m3", "float32", "__tl_cvt_fp8x2_to_float2", 2)
+    run_vectorized_cast("float8_e4m3", "float32", "__tl_cvt_fp8x2_to_float2", 4)
+
+    # fp8_e5m2 -> fp32
+    run_vectorized_cast("float8_e5m2", "float32", "__tl_cvt_fp8x2_to_float2", 2)
+    run_vectorized_cast("float8_e5m2", "float32", "__tl_cvt_fp8x2_to_float2", 4)
 
 
 if __name__ == "__main__":

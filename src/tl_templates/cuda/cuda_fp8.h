@@ -33,7 +33,7 @@ struct __CUDA_ALIGN__(32) fp8_e4_32_t {
   fp8_e4_16_t x;
   fp8_e4_16_t y;
 
-  __device__ __forceinline__ fp8_e4_32_t &operator=(const ulonglong4 &rhs) {
+  TL_DEVICE fp8_e4_32_t &operator=(const ulonglong4 &rhs) {
     x.x = *(fp8_e4_8_t *)&rhs.x;
     x.y = *(fp8_e4_8_t *)&rhs.y;
     y.x = *(fp8_e4_8_t *)&rhs.z;
@@ -68,7 +68,7 @@ struct __CUDA_ALIGN__(32) fp8_e5_32_t {
   fp8_e5_16_t x;
   fp8_e5_16_t y;
 
-  __device__ __forceinline__ fp8_e5_32_t &operator=(const ulonglong4 &rhs) {
+  TL_DEVICE fp8_e5_32_t &operator=(const ulonglong4 &rhs) {
     x.x = *(fp8_e5_8_t *)&rhs.x;
     x.y = *(fp8_e5_8_t *)&rhs.y;
     y.x = *(fp8_e5_8_t *)&rhs.z;
@@ -78,7 +78,7 @@ struct __CUDA_ALIGN__(32) fp8_e5_32_t {
 };
 
 // Pack two fp8_e4_t values.
-__forceinline__ __device__ fp8_e4_2_t make_fp8_e4_2_t(fp8_e4_t x, fp8_e4_t y) {
+TL_DEVICE fp8_e4_2_t make_fp8_e4_2_t(fp8_e4_t x, fp8_e4_t y) {
   fp8_e4_2_t result;
   result.x = x;
   result.y = y;
@@ -86,9 +86,8 @@ __forceinline__ __device__ fp8_e4_2_t make_fp8_e4_2_t(fp8_e4_t x, fp8_e4_t y) {
 }
 
 // Pack four fp8_e4_t values.
-__forceinline__ __device__ fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x0, fp8_e4_t x1,
-                                                      fp8_e4_t x2,
-                                                      fp8_e4_t x3) {
+TL_DEVICE fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+                                     fp8_e4_t x3) {
   fp8_e4_4_t result;
   result.x = x0;
   result.y = x1;
@@ -98,11 +97,9 @@ __forceinline__ __device__ fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x0, fp8_e4_t x1,
 }
 
 // Pack eight fp8_e4_t values.
-__forceinline__ __device__ fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x0, fp8_e4_t x1,
-                                                      fp8_e4_t x2, fp8_e4_t x3,
-                                                      fp8_e4_t x4, fp8_e4_t x5,
-                                                      fp8_e4_t x6,
-                                                      fp8_e4_t x7) {
+TL_DEVICE fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+                                     fp8_e4_t x3, fp8_e4_t x4, fp8_e4_t x5,
+                                     fp8_e4_t x6, fp8_e4_t x7) {
   fp8_e4_8_t result;
   result.x = make_fp8_e4_4_t(x0, x1, x2, x3);
   result.y = make_fp8_e4_4_t(x4, x5, x6, x7);
@@ -110,11 +107,12 @@ __forceinline__ __device__ fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x0, fp8_e4_t x1,
 }
 
 // Pack sixteen fp8_e4_t values.
-__forceinline__ __device__ fp8_e4_16_t
-make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2, fp8_e4_t x3,
-                 fp8_e4_t x4, fp8_e4_t x5, fp8_e4_t x6, fp8_e4_t x7,
-                 fp8_e4_t y0, fp8_e4_t y1, fp8_e4_t y2, fp8_e4_t y3,
-                 fp8_e4_t y4, fp8_e4_t y5, fp8_e4_t y6, fp8_e4_t y7) {
+TL_DEVICE fp8_e4_16_t make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+                                       fp8_e4_t x3, fp8_e4_t x4, fp8_e4_t x5,
+                                       fp8_e4_t x6, fp8_e4_t x7, fp8_e4_t y0,
+                                       fp8_e4_t y1, fp8_e4_t y2, fp8_e4_t y3,
+                                       fp8_e4_t y4, fp8_e4_t y5, fp8_e4_t y6,
+                                       fp8_e4_t y7) {
   fp8_e4_16_t result;
   result.x = make_fp8_e4_8_t(x0, x1, x2, x3, x4, x5, x6, x7);
   result.y = make_fp8_e4_8_t(y0, y1, y2, y3, y4, y5, y6, y7);
@@ -122,7 +120,7 @@ make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2, fp8_e4_t x3,
 }
 
 // Pack thirty-two fp8_e4_t values.
-__forceinline__ __device__ fp8_e4_32_t make_fp8_e4_32_t(
+TL_DEVICE fp8_e4_32_t make_fp8_e4_32_t(
     fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2, fp8_e4_t x3, fp8_e4_t x4,
     fp8_e4_t x5, fp8_e4_t x6, fp8_e4_t x7, fp8_e4_t x8, fp8_e4_t x9,
     fp8_e4_t x10, fp8_e4_t x11, fp8_e4_t x12, fp8_e4_t x13, fp8_e4_t x14,
@@ -139,7 +137,7 @@ __forceinline__ __device__ fp8_e4_32_t make_fp8_e4_32_t(
 }
 
 // Pack two fp8_e5_t values.
-__forceinline__ __device__ fp8_e5_2_t make_fp8_e5_2_t(fp8_e5_t x, fp8_e5_t y) {
+TL_DEVICE fp8_e5_2_t make_fp8_e5_2_t(fp8_e5_t x, fp8_e5_t y) {
   fp8_e5_2_t result;
   result.x = x;
   result.y = y;
@@ -147,9 +145,8 @@ __forceinline__ __device__ fp8_e5_2_t make_fp8_e5_2_t(fp8_e5_t x, fp8_e5_t y) {
 }
 
 // Pack four fp8_e5_t values.
-__forceinline__ __device__ fp8_e5_4_t make_fp8_e5_4_t(fp8_e5_t x0, fp8_e5_t x1,
-                                                      fp8_e5_t x2,
-                                                      fp8_e5_t x3) {
+TL_DEVICE fp8_e5_4_t make_fp8_e5_4_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+                                     fp8_e5_t x3) {
   fp8_e5_4_t result;
   result.x = x0;
   result.y = x1;
@@ -159,11 +156,9 @@ __forceinline__ __device__ fp8_e5_4_t make_fp8_e5_4_t(fp8_e5_t x0, fp8_e5_t x1,
 }
 
 // Pack eight fp8_e5_t values.
-__forceinline__ __device__ fp8_e5_8_t make_fp8_e5_8_t(fp8_e5_t x0, fp8_e5_t x1,
-                                                      fp8_e5_t x2, fp8_e5_t x3,
-                                                      fp8_e5_t x4, fp8_e5_t x5,
-                                                      fp8_e5_t x6,
-                                                      fp8_e5_t x7) {
+TL_DEVICE fp8_e5_8_t make_fp8_e5_8_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+                                     fp8_e5_t x3, fp8_e5_t x4, fp8_e5_t x5,
+                                     fp8_e5_t x6, fp8_e5_t x7) {
   fp8_e5_8_t result;
   result.x = make_fp8_e5_4_t(x0, x1, x2, x3);
   result.y = make_fp8_e5_4_t(x4, x5, x6, x7);
@@ -171,11 +166,12 @@ __forceinline__ __device__ fp8_e5_8_t make_fp8_e5_8_t(fp8_e5_t x0, fp8_e5_t x1,
 }
 
 // Pack sixteen fp8_e5_t values.
-__forceinline__ __device__ fp8_e5_16_t
-make_fp8_e5_16_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2, fp8_e5_t x3,
-                 fp8_e5_t x4, fp8_e5_t x5, fp8_e5_t x6, fp8_e5_t x7,
-                 fp8_e5_t y0, fp8_e5_t y1, fp8_e5_t y2, fp8_e5_t y3,
-                 fp8_e5_t y4, fp8_e5_t y5, fp8_e5_t y6, fp8_e5_t y7) {
+TL_DEVICE fp8_e5_16_t make_fp8_e5_16_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+                                       fp8_e5_t x3, fp8_e5_t x4, fp8_e5_t x5,
+                                       fp8_e5_t x6, fp8_e5_t x7, fp8_e5_t y0,
+                                       fp8_e5_t y1, fp8_e5_t y2, fp8_e5_t y3,
+                                       fp8_e5_t y4, fp8_e5_t y5, fp8_e5_t y6,
+                                       fp8_e5_t y7) {
   fp8_e5_16_t result;
   result.x = make_fp8_e5_8_t(x0, x1, x2, x3, x4, x5, x6, x7);
   result.y = make_fp8_e5_8_t(y0, y1, y2, y3, y4, y5, y6, y7);
@@ -183,7 +179,7 @@ make_fp8_e5_16_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2, fp8_e5_t x3,
 }
 
 // Pack thirty-two fp8_e5_t values.
-__forceinline__ __device__ fp8_e5_32_t make_fp8_e5_32_t(
+TL_DEVICE fp8_e5_32_t make_fp8_e5_32_t(
     fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2, fp8_e5_t x3, fp8_e5_t x4,
     fp8_e5_t x5, fp8_e5_t x6, fp8_e5_t x7, fp8_e5_t x8, fp8_e5_t x9,
     fp8_e5_t x10, fp8_e5_t x11, fp8_e5_t x12, fp8_e5_t x13, fp8_e5_t x14,
@@ -196,5 +192,16 @@ __forceinline__ __device__ fp8_e5_32_t make_fp8_e5_32_t(
                               x12, x13, x14, x15);
   result.y = make_fp8_e5_16_t(y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11,
                               y12, y13, y14, y15);
+  return result;
+}
+
+// e4m3x2 -> float2
+TL_DEVICE float2
+__tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
+                         const __nv_fp8_interpretation_t fp8_interpretation) {
+  half2 tmp = __nv_cvt_fp8x2_to_halfraw2(x, fp8_interpretation);
+  float2 result;
+  result.x = (float)tmp.x;
+  result.y = (float)tmp.y;
   return result;
 }
