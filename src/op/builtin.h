@@ -55,6 +55,7 @@ static constexpr const char *kLayoutVisualizationEnable =
     "tl.layout_visualization_enable";
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
+static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
 /*!
  * \brief Whether to disable dynamic tail split
  *
