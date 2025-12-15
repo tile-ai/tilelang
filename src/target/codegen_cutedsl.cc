@@ -775,6 +775,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     stream << vid << " = tl.make_tensor_at_offset(tl.get_dyn_smem(";
     PrintType(op->dtype, stream);
     // there is no bound check for Tensor access, so just set shape to 1
+    // also, div_by doesn't matter when offset==0, so set it to 1
     stream << ", alignment=1024), 0, (1,), div_by=1)\n";
   } else {
     size_t constant_size = op->ConstantAllocationSize();
@@ -786,7 +787,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
       stream << vid << " = tl.make_tensor_at_offset(tl.alloc_smem(";
       PrintType(op->dtype, stream);
       stream << ", " << constant_size << "), 0, (" << constant_size
-             << ",), div_by=" << op->dtype.bytes() * op->dtype.lanes() << ")\n";
+             << ",), div_by=1)\n";
     } else if (scope == "shared.barrier") {
       ICHECK(false) << "Unsupported scope: " << scope;
     } else if (scope == "local") {
