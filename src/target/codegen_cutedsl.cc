@@ -658,6 +658,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
     }
     os << ref;
   } else {
+    ICHECK_GE(value_lanes, element_dtype.lanes())
+        << "Unsupported load/store: value lanes < buffer element lanes";
     bool is_contiguous = false;
     arith::PVar<PrimExpr> base;
     if (arith::ramp(base, 1, value_lanes / element_dtype.lanes())
@@ -684,9 +686,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
       stream << ")\n";
 
       std::string vid = GetVarID(buffer_var.get());
+      const RampNode *ramp = index.as<RampNode>();
+      ICHECK(ramp) << "Expected Ramp index for vectorized non-contiguous access";
       for (int i = 0; i < value_lanes; ++i) {
-        const RampNode *ramp = index.as<RampNode>();
-        ICHECK(ramp);
         auto idx_expr =
             arith::Analyzer().Simplify(ramp->base + ramp->stride * i);
 
@@ -772,7 +774,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     stream << vid << " = tl.make_tensor_at_offset(tl.get_dyn_smem(";
     PrintType(op->dtype, stream);
     // there is no bound check for Tensor access, so just set shape to 1
-    stream << ", alignment=1024), 0, (1,), div_by=1024)\n";
+    stream << ", alignment=1024), 0, (1,), div_by=1)\n";
   } else {
     size_t constant_size = op->ConstantAllocationSize();
     ICHECK_GT(constant_size, 0)
@@ -1253,9 +1255,10 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
       return os.str();
     }
   } else {
-    int buffer_size =
-        t.bits() * t.lanes() /
-        (buffer_element_dtype.bits() * buffer_element_dtype.lanes());
+    const int num = t.bits() * t.lanes();
+    const int den = buffer_element_dtype.bits() * buffer_element_dtype.lanes();
+    ICHECK_EQ(num % den, 0) << "Cannot form view: bitwidth not divisible";
+    int buffer_size = num / den;
 
     std::ostringstream os;
     os << "tl.make_tensor_at_offset(" << ptr_str << ", " << index_str << ", ("
