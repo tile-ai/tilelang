@@ -23,6 +23,7 @@ namespace {
 
 void ReplaceAll(std::string &str, const std::string &from,
                 const std::string &to) {
+  ICHECK(!from.empty()) << "ReplaceAll(): `from` must be non-empty";
   auto pos = str.find(from);
   while (pos != std::string::npos) {
     str.replace(pos, from.size(), to);
