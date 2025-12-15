@@ -11,7 +11,7 @@ Key features:
 """
 
 from __future__ import annotations
-from typing import Any
+from typing import Any, ClassVar
 
 from tvm import IRModule
 from tvm.target import Target
@@ -537,7 +537,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     - Supports both single and multiple kernel scenarios
     """
 
-    _TYPE_MAP = {
+    _TYPE_MAP: ClassVar[dict[str, str]] = {
         "float32": "cutlass.Float32",
         "float16": "cutlass.Float16",
         "bfloat16": "cutlass.BFloat16",
@@ -557,7 +557,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
     # C++ launcher code must not depend on cutlass Python types.
     # Use plain C/C++ types for expression rendering inside generated .cpp.
-    _CXX_TYPE_MAP = {
+    _CXX_TYPE_MAP: ClassVar[dict[str, str]] = {
         "float32": "float",
         "float64": "double",
         "int64": "int64_t",
@@ -570,7 +570,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         "uint16": "uint16_t",
     }
 
-    _CTYPES_MAP = {
+    _CTYPES_MAP: ClassVar[dict[str, str]] = {
         "buffer": "ctypes.c_uint64",
         "cutlass.Float32": "ctypes.c_float",
         "cutlass.Float16": "ctypes.c_uint16",
@@ -953,7 +953,6 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
     def _generate_cubin_gen_code(
         self,
-        code: str,
         kernel_metadata_list: list[dict],
         buffer_args: list[str],
         all_desc_names: list[str],
@@ -1051,7 +1050,6 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
     def _generate_python_wrapper(
         self,
-        function_name: str,
         function_args: list[dict],
         cubin_gen_code: str,
         cubin_gen_params: str,
@@ -1103,7 +1101,6 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         self,
         desc_name_map: dict[str, str],
         desc_name_var_map: dict[str, tvm.tir.Var],
-        device_index: int,
         tma_desc_code_map: dict[str, str],
     ) -> list[str]:
         """Generate TMA descriptor information for C++ code generation.
@@ -1211,7 +1208,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             )
 
             tma_desc_code_map = {}
-            desc_names = self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map, 0, tma_desc_code_map)
+            desc_names = self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map, tma_desc_code_map)
 
             tma_tensor_args, _ = self._process_tma_descriptors(desc_names)
 
@@ -1250,11 +1247,10 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         # Generate cubin generation code (includes lib_code with @cute.kernel definitions)
         cubin_gen_code = self._generate_cubin_gen_code(
-            code, kernel_metadata, buffer_args, all_desc_names_union, lib_code=getattr(self, "lib_code", "")
+            kernel_metadata, buffer_args, all_desc_names_union, lib_code=getattr(self, "lib_code", "")
         )
 
         # Generate Python wrapper
-        primary_kernel_name = kernel_metadata[0]["function_name"]
         buffer_names = [arg["name"] for arg in function_args if arg["type"] == "buffer"]
         # Cubin generation may reference scalar args (e.g., dynamic symbols like m/n/k)
         # inside `kernel_wrapper` and `cute.compile(...)`. They must be visible in
@@ -1262,7 +1258,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         scalar_names = [arg["name"] for arg in function_args if arg["type"] != "buffer"]
         cubin_gen_params = ", ".join(buffer_names + scalar_names)
 
-        python_wrapper = self._generate_python_wrapper(primary_kernel_name, function_args, cubin_gen_code, cubin_gen_params)
+        python_wrapper = self._generate_python_wrapper(function_args, cubin_gen_code, cubin_gen_params)
 
         return python_wrapper
 
