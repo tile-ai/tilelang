@@ -14,27 +14,6 @@ from tvm.target import Target
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cutedsl_target
 
-try:
-    tvm_cxxflags = (
-        subprocess.check_output(
-            ["tvm-ffi-config", "--cxxflags"],
-            text=True,
-        )
-        .strip()
-        .split()
-    )
-    tvm_ldflags = (
-        subprocess.check_output(
-            ["tvm-ffi-config", "--ldflags"],
-            text=True,
-        )
-        .strip()
-        .split()
-    )
-except (subprocess.CalledProcessError, FileNotFoundError):
-    tvm_cxxflags = []
-    tvm_ldflags = []
-
 
 class CuTeDSLLibraryGenerator(LibraryGenerator):
     host_func: str | None = None
@@ -119,6 +98,20 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
 
                 # Generate launcher lib under the same directory as the source file
                 launcher_lib_path = os.path.join(os.path.dirname(src_path), self.launcher_lib_name)
+
+                # Get TVM FFI compiler flags using tvm_ffi.libinfo API
+                try:
+                    import tvm_ffi.libinfo
+
+                    include_paths = tvm_ffi.libinfo.include_paths()
+                    tvm_cxxflags = [f"-I{path}" for path in include_paths]
+                    lib_path = tvm_ffi.libinfo.find_libtvm_ffi()
+                    lib_dir = os.path.dirname(lib_path)
+                    tvm_ldflags = [f"-L{lib_dir}", "-ltvm_ffi"]
+                except (ImportError, RuntimeError):
+                    # tvm_ffi unavailable or libinfo functions failed
+                    tvm_cxxflags = []
+                    tvm_ldflags = []
 
                 # Compile with nvcc (need CUDA driver API)
                 compile_cmd = [
