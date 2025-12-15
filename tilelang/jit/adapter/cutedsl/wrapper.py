@@ -648,10 +648,13 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             else:
                 raise ValueError(f"Parameter {param} not in buffer map")
 
+        existing_names = {arg["name"] for arg in function_args}
         for dyn_sym in self.get_dynamic_symbolic_set(self.prim_func):
-            if dyn_sym not in [arg["name"] for arg in function_args]:
-                dyn_sym_name = dyn_sym[0] if isinstance(dyn_sym, tuple) else dyn_sym
-                function_args.append({"name": dyn_sym_name, "type": "int"})
+            dyn_sym_name, dyn_sym_dtype = dyn_sym if isinstance(dyn_sym, tuple) else (dyn_sym, "int32")
+            if dyn_sym_name in existing_names:
+                continue
+            existing_names.add(dyn_sym_name)
+            function_args.append({"name": dyn_sym_name, "type": self._TYPE_MAP.get(dyn_sym_dtype, "int")})
 
         return function_args, buffer_args
 
