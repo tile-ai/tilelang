@@ -44,6 +44,13 @@ namespace tl {
 using namespace ffi;
 namespace tir = tvm::tir;
 
+// This pass traverses the AST, split the target function into host part and
+// device part and copies all assume attribute statements to the device side.
+
+// 1. Traverse AST and collect all assume statements into host_assumes_.
+// 2. Until the first AttrStmtNode with tvm::attr::kTarget.
+// 3. Call SplitDeviceFunc, which will create a new device function and replace
+//    the original body with a call to that function.
 class HostDeviceSplitter : public tir::StmtMutator {
 public:
   explicit HostDeviceSplitter(IRModule *device_mod,
