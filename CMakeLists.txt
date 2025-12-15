@@ -222,10 +222,11 @@ elseif(USE_CUDA)
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
-set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
 if(UNIX AND NOT APPLE)
+  set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
   set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
 else()
+  set(USE_Z3      OFF CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
   set(USE_PYPI_Z3 OFF CACHE BOOL  "Use Z3 provided by PyPI z3-solver package")
 endif()
 
