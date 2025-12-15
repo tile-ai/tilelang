@@ -256,7 +256,7 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     copy(cumsum_smem, dst)
 
 
-def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse: bool = False):
+def cumsum(src: tir.Buffer, dst: tir.Buffer = None, dim: int = 0, reverse: bool = False):
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
