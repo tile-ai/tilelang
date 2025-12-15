@@ -800,6 +800,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     stream << vid << " = tl.make_tensor_at_offset(tl.get_dyn_smem(";
     PrintType(op->dtype, stream);
     // there is no bound check for Tensor access, so just set shape to 1
+    // div_by is set to 16 intentionally for smem
     stream << ", alignment=1024), 0, (1,), div_by=16)\n";
   } else {
     size_t constant_size = op->ConstantAllocationSize();
