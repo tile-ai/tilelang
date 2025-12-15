@@ -227,12 +227,23 @@ set(USE_PYPI_Z3 ON CACHE BOOL "Use Z3 provided by PyPI z3-solver package")
 if(USE_Z3 AND USE_PYPI_Z3)
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/pypi-z3")
   find_package(Z3 REQUIRED)
-  find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
-  execute_process(
-    COMMAND ${PATCHELF_EXECUTABLE} --print-soname ${Z3_LIBRARY}
-    OUTPUT_VARIABLE Z3_SONAME
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
+    execute_process(
+      COMMAND ${PATCHELF_EXECUTABLE} --print-soname ${Z3_LIBRARY}
+      OUTPUT_VARIABLE Z3_SONAME
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+  elseif(APPLE)
+    find_program(INSTALL_NAME_TOOL_EXECUTABLE install_name_tool REQUIRED)
+    execute_process(
+      COMMAND ${INSTALL_NAME_TOOL_EXECUTABLE} -id ${Z3_LIBRARY} ${Z3_LIBRARY}
+      OUTPUT_VARIABLE Z3_SONAME
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+  else()
+    message(FATAL_ERROR "Unsupported platform for PyPI Z3 integration")
+  endif()
   message("-- Z3 SONAME: ${Z3_SONAME}")
 endif()
 
@@ -341,22 +352,39 @@ install(
   TARGETS tvm tvm_runtime tilelang_module tilelang
   LIBRARY DESTINATION tilelang/lib
 )
-set(_install_code [=[
-  set(_patchelf "@PATCHELF_EXECUTABLE@")
-  set(_z3_soname "@Z3_SONAME@")
-  file(GLOB_RECURSE
-    bins
-    $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.so*
-    $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.dylib*
-  )
-  foreach(f IN LISTS bins)
-    execute_process(COMMAND patchelf --print-needed "${f}"
-      RESULT_VARIABLE r OUTPUT_VARIABLE need ERROR_QUIET)
-    if(r EQUAL 0 AND need MATCHES "${_z3_soname}")
-      message("-- Patching Z3 soname in ${f}")
-      execute_process(COMMAND ${_patchelf} --replace-needed ${_z3_soname} libz3.so "${f}")
-    endif()
-  endforeach()
-]=])
-string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
-install(CODE "${_install_code_configured}")
+if(USE_Z3 AND USE_PYPI_Z3)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Patch Z3 soname in dependent shared libraries to libz3.so
+    # This is needed because PyPI z3-solver package uses a custom soname
+    # which may not be found by our shared libraries at runtime.
+    # We only need to do this on Linux where sonames are strictly enforced.
+    message(STATUS "Adding install step to patch Z3 soname in dependent shared libraries")
+    set(_install_code [=[
+      set(_patchelf "@PATCHELF_EXECUTABLE@")
+      set(_z3_soname "@Z3_SONAME@")
+      set(PATCH_FILES $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/libtvm.so)
+      foreach(f IN LISTS PATCH_FILES)
+        message("-- Patching Z3 soname in ${f} from ${_z3_soname} to libz3.so")
+        execute_process(COMMAND ${_patchelf} --replace-needed ${_z3_soname} libz3.so "${f}")
+      endforeach()
+    ]=])
+    string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
+    install(CODE "${_install_code_configured}")
+  elseif(APPLE)
+    # On macOS, ensure Z3 library ID is set correctly
+    message(STATUS "Adding install step to set Z3 library ID")
+    set(_install_code [=[
+      set(_install_name_tool "@INSTALL_NAME_TOOL_EXECUTABLE@")
+      set(_z3_soname "@Z3_SONAME@")
+      set(PATCH_FILES $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/libtvm.so)
+      foreach(f IN LISTS ${PATCH_FILES})
+        message("-- Patching Z3 soname in ${f} from ${_z3_soname} to libz3.dylib")
+        execute_process(COMMAND ${_install_name_tool} -change "@Z3_SONAME@" "libz3.dylib" "${f}")
+      endforeach()
+    ]=])
+    string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
+    install(CODE "${_install_code_configured}")
+  else()
+    message(WARNING "Skipping Z3 soname patching on unsupported platform")
+  endif()
+endif()
