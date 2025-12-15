@@ -29,7 +29,7 @@ from tilelang.jit.adapter.utils import (
 # C++ LAUNCHER TEMPLATES (using named parameters for clarity)
 # =============================================================================
 
-# TMA single descriptor initialization template (writes directly to global host array)
+# TMA single descriptor initialization template (writes to caller-provided host array)
 # No device copy needed - cuLaunchKernel handles __grid_constant__ params automatically
 CPP_TMA_DESC_INIT_TEMPLATE = """\
   // Descriptor {desc_idx}: {desc_name} (tensor: {tensor_name})
@@ -40,7 +40,7 @@ CPP_TMA_DESC_INIT_TEMPLATE = """\
     uint32_t elemStrides[{rank}] = {{{elem_stride_values}}};
 
     result = cuTensorMapEncodeTiled(
-        &g_tma_descs[{desc_idx}],
+        &tma_descs[{desc_idx}],
         static_cast<CUtensorMapDataType>({dtype}),
         {rank},
         reinterpret_cast<void*>({tensor_name}_ptr),
@@ -61,7 +61,7 @@ CPP_TMA_DESC_INIT_TEMPLATE = """\
   }}
 """
 
-# TMA single im2col descriptor initialization template (writes directly to global host array)
+# TMA single im2col descriptor initialization template (writes to caller-provided host array)
 # Align field ordering with NVRTC wrapper (cuTensorMapEncodeIm2col signature).
 CPP_TMA_IM2COL_DESC_INIT_TEMPLATE = """\
   // Descriptor {desc_idx}: {desc_name} (tensor: {tensor_name}) [im2col]
@@ -73,7 +73,7 @@ CPP_TMA_IM2COL_DESC_INIT_TEMPLATE = """\
     int32_t upperCorner[{rank_minus_two}] = {{{upper_corner_values}}};
 
     result = cuTensorMapEncodeIm2col(
-        &g_tma_descs[{desc_idx}],
+        &tma_descs[{desc_idx}],
         static_cast<CUtensorMapDataType>({dtype}),
         {rank},
         reinterpret_cast<void*>({tensor_name}_ptr),
@@ -97,11 +97,11 @@ CPP_TMA_IM2COL_DESC_INIT_TEMPLATE = """\
   }}
 """
 
-# TMA initialization function template (creates descriptors directly in global host array)
+# TMA initialization function template (writes to caller-provided host array)
 # __grid_constant__ allows kernel to receive TMA descriptor by value via param space
 CPP_TMA_INIT_FUNC_TEMPLATE = """\
-CUresult tma_init({func_args}) {{
-  // Initialize {num_descs} TMA descriptor(s) directly in host array
+CUresult tma_init(CUtensorMap* tma_descs, {func_args}) {{
+  // Initialize {num_descs} TMA descriptor(s) in caller-provided host array
   // cuLaunchKernel will copy 128-byte CUtensorMap to kernel param space automatically
   CUresult result;
 
@@ -134,11 +134,14 @@ CPP_KERNEL_INIT_TEMPLATE = """\
 # TMA launch initialization template (host memory mode - uses __grid_constant__)
 # Kernel receives TMA descriptor by value: .param .align 128 .b8 xxx_param[128]
 CPP_TMA_LAUNCH_INIT_TEMPLATE = """\
+  // Declare stack-local TMA descriptor array (eliminates concurrency race)
+  CUtensorMap tma_descs[{num_tma_descs}];
+
   // Initialize TMA descriptors (HOST memory - passed via __grid_constant__)
   // NOTE: We intentionally do NOT reuse/cached descriptors across launches.
   // Pointer-only reuse is a correctness trap (shape/stride may change with same ptr),
   // and correctness beats micro-optimizations.
-  result = tma_init({tma_tensor_args});
+  result = tma_init(tma_descs, {tma_tensor_args});
   if (result != CUDA_SUCCESS) {{
     std::cerr << "Failed to initialize TMA descriptors: " << result << "\\n";
     return result;
@@ -188,11 +191,6 @@ static bool g_module_initialized = false;
 // Cached kernel functions
 static CUfunction g_kernels[{num_kernels}] = {{nullptr}};
 static bool g_kernels_initialized = false;
-
-// TMA descriptors on HOST memory (passed via __grid_constant__)
-// Kernel receives 128-byte CUtensorMap by value in param space
-// PTX: .param .align 128 .b8 xxx_param[128]
-static CUtensorMap g_tma_descs[{num_tma_descs}];
 
 // Find kernel by pattern (substring match, prefer base name over _N variants)
 CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction* out_func) {{
@@ -777,9 +775,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         tensor_arg_map: dict[str, tuple[str, int]],
         scalar_args: list[dict[str, str]],
     ) -> str:
-        """Generate TMA init function code (creates descriptors in host array).
+        """Generate TMA init function code (creates descriptors in caller-provided host array).
 
-        TMA descriptors are stored in g_tma_descs[] host array.
+        TMA descriptors are stored in stack-local tma_descs[] array in launch_kernel.
         cuLaunchKernel automatically handles __grid_constant__ params.
         """
         if not desc_names:
@@ -809,7 +807,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             desc_init_code="\n".join(desc_inits),
         )
 
-    def _generate_tma_launch_init(self, desc_names: list[str], tma_tensors: list[str], scalar_args: list[dict[str, str]]) -> str:
+    def _generate_tma_launch_init(self, desc_names: list[str], tma_tensors: list[str], scalar_args: list[dict[str, str]], num_tma_descs: int) -> str:
         """Generate TMA initialization code for launch function (host memory mode).
 
         TMA descriptors stay on host. cuLaunchKernel copies them to param space
@@ -823,6 +821,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         tma_tensor_args = ", ".join(call_args_parts)
 
         return CPP_TMA_LAUNCH_INIT_TEMPLATE.format(
+            num_tma_descs=num_tma_descs,
             tma_tensor_args=tma_tensor_args,
         )
 
@@ -856,7 +855,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 # For __grid_constant__ CUtensorMap: pass host pointer directly
                 # cuLaunchKernel will copy 128-byte CUtensorMap to param space
                 desc_idx = all_desc_names.index(arg_name)
-                kernel_args.append(f"&g_tma_descs[{desc_idx}]")
+                kernel_args.append(f"&tma_descs[{desc_idx}]")
             elif arg_type == "buffer":
                 kernel_args.append(f"&{arg_name}_ptr")
             else:
@@ -893,7 +892,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     ) -> str:
         """Generate complete C++ launcher code using templates.
 
-        TMA descriptors are stored on HOST memory in g_tma_descs[].
+        TMA descriptors are stored on HOST memory in stack-local tma_descs[] array.
         cuLaunchKernel automatically copies 128-byte CUtensorMap to kernel param space
         when kernel uses __grid_constant__ parameter.
         """
@@ -925,7 +924,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 func_sig_parts.append(f"int32_t {arg['name']}")
 
         # Generate TMA init in launch
-        tma_init_in_launch = self._generate_tma_launch_init(all_desc_names, all_tma_tensors, scalar_args)
+        tma_init_in_launch = self._generate_tma_launch_init(all_desc_names, all_tma_tensors, scalar_args, num_tma_descs)
 
         # Generate kernel launches
         kernel_launches = "\n".join(self._generate_kernel_launch(km, idx, all_desc_names) for idx, km in enumerate(kernel_metadata_list))
