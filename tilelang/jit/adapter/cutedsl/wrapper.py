@@ -286,13 +286,14 @@ CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction
 
 
 // Initialize CUDA module (called once on first launch)
-static CUresult tilelang_init_cuda_module(const char* cubin_path) {{
+static CUresult tilelang_init_cuda_module(const std::string& cubin_path) {{
   if (g_module_initialized) return CUDA_SUCCESS;
 
   CUresult result;
-  cuInit(0);
+  result = cuInit(0);
+  if (result != CUDA_SUCCESS) return result;
 
-  std::ifstream cubin_file(cubin_path, std::ios::binary);
+  std::ifstream cubin_file(cubin_path.c_str(), std::ios::binary);
   if (!cubin_file) {{
     std::cerr << "Failed to open cubin file: " << cubin_path << "\\n";
     return CUDA_ERROR_FILE_NOT_FOUND;
@@ -335,7 +336,8 @@ static CUresult tilelang_init_kernels() {{
 extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, tvm::ffi::Bytes cubin_path) {{
   CUresult result;
 
-  result = tilelang_init_cuda_module(reinterpret_cast<const char*>(cubin_path.data()));
+  std::string cubin_path_str(reinterpret_cast<const char*>(cubin_path.data()), cubin_path.size());
+  result = tilelang_init_cuda_module(cubin_path_str);
   if (result != CUDA_SUCCESS) return result;
 
   result = tilelang_init_kernels();
