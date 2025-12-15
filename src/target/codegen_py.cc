@@ -147,6 +147,10 @@ void CodeGenTileLangPY::ReserveKeywordsAsUnique_() {
   name_supply_->ReserveName("unsigned");
   name_supply_->ReserveName("short");
   name_supply_->ReserveName("long");
+
+  name_supply_->ReserveName("cutlass");
+  name_supply_->ReserveName("cute");
+  name_supply_->ReserveName("tl");
 }
 
 void CodeGenTileLangPY::PrintSSAAssign(const std::string &target,
