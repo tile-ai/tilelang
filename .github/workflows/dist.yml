@@ -92,7 +92,7 @@ jobs:
       - name: Upload SDist
         # Not PR to save artifact storage, as SDist is only needed for releases.
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -168,7 +168,7 @@ jobs:
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
           path: wheelhouse/*.whl
@@ -201,7 +201,7 @@ jobs:
         run: ls -lh dist/*
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: artifacts
           path: dist/*
