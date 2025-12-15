@@ -92,7 +92,8 @@ def LegalizeNegativeIndex():
 
 
 def InjectAssumes():
-    """Inject Assumes
+    """Inject Assumes for natural shape boundary conditions. And convert Assumes in Evaluate(Call(...)) form
+    (tvm builtin assume call) to AttrNode form.
 
     Returns:
     -------
@@ -301,6 +302,21 @@ def SplitHostDevice():
         The result pass
     """
     return _ffi_api.SplitHostDevice()  # type: ignore
+
+
+def AnnotateReadOnlyParams():
+    """Annotate read-only handle parameters for PrimFuncs.
+
+    Adds attribute `tl.readonly_param_indices` listing param indices that are
+    never written, enabling CUDA codegen to emit `const` qualifiers to unlock
+    read-only cache loads.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AnnotateReadOnlyParams()  # type: ignore
 
 
 def VectorizeLoop(enable_vectorize: bool = True):

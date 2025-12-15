@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 
 from __future__ import annotations
-from tilelang.primitives.gemm.base import GemmWarpPolicy
+from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir
 from tilelang.utils.language import (
