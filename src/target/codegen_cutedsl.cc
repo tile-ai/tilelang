@@ -43,11 +43,7 @@ CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
       pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
 }
 
-const char *CodeGenTileLangCuTeDSL::GetFastmathString() const {
-  return enable_fastmath_ ? "True" : "False";
-}
-
-const std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
+std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
     const std::string &func_name) const {
   static const std::unordered_map<std::string, std::string> kFastMathMap = {
       {"divf", "tl.divf"},   {"exp", "tl.exp"},    {"expf", "tl.exp"},
@@ -227,7 +223,12 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const DivNode *op,
   if (op->dtype.is_int() || op->dtype.is_uint()) {
     PrintBinaryExpr_("//", op->dtype, op->a, op->b, os);
   } else {
-    PrintBinaryExpr_("tl.divf", op->dtype, op->a, op->b, os);
+    if (enable_fastmath_) {
+      os << "tl.divf(" << PrintExpr_(op->a) << ", " << PrintExpr_(op->b)
+         << ", fastmath=True)";
+    } else {
+      PrintBinaryExpr_("tl.divf", op->dtype, op->a, op->b, os);
+    }
   }
 }
 void CodeGenTileLangCuTeDSL::VisitExpr_(const MinNode *op,
@@ -775,8 +776,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     stream << vid << " = tl.make_tensor_at_offset(tl.get_dyn_smem(";
     PrintType(op->dtype, stream);
     // there is no bound check for Tensor access, so just set shape to 1
-    // also, div_by doesn't matter when offset==0, so set it to 1
-    stream << ", alignment=1024), 0, (1,), div_by=1)\n";
+    stream << ", alignment=1024), 0, (1,), div_by=16)\n";
   } else {
     size_t constant_size = op->ConstantAllocationSize();
     ICHECK_GT(constant_size, 0)
@@ -787,7 +787,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
       stream << vid << " = tl.make_tensor_at_offset(tl.alloc_smem(";
       PrintType(op->dtype, stream);
       stream << ", " << constant_size << "), 0, (" << constant_size
-             << ",), div_by=1)\n";
+             << ",), div_by=" << op->dtype.bytes() * op->dtype.lanes() << ")\n";
     } else if (scope == "shared.barrier") {
       ICHECK(false) << "Unsupported scope: " << scope;
     } else if (scope == "local") {
@@ -1150,11 +1150,11 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
               i, scall);
         }
       }
-      if (canonicalized) {
+      if (canonicalized && enable_fastmath_) {
         if (!sargs.empty()) {
           scall << ", ";
         }
-        scall << "fastmath=" << GetFastmathString();
+        scall << "fastmath=True";
       }
       scall << ")";
       PrintVecElemStore_(sret, ret_dtype, i, scall.str());
@@ -1168,11 +1168,11 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
       }
       os << sargs[i];
     }
-    if (canonicalized) {
+    if (canonicalized && enable_fastmath_) {
       if (!sargs.empty()) {
         os << ", ";
       }
-      os << "fastmath=" << GetFastmathString();
+      os << "fastmath=True";
     }
     os << ")";
   }

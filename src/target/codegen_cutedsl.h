@@ -86,13 +86,7 @@ protected:
 
   virtual void PrintStorageSync_(const CallNode *op);
 
-  /*!
-   * \brief Get fastmath parameter string for CuTeDSL math functions
-   * \return "True" or "False" based on enable_fastmath_ flag
-   */
-  const char *GetFastmathString() const;
-
-  const std::string
+  std::string
   CanonicalizeFastmathFunctionName_(const std::string &func_name) const;
 
 private:
