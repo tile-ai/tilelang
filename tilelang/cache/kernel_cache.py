@@ -451,6 +451,10 @@ class KernelCache:
                     host_kernel_source = f.read()
             except Exception as e:
                 self.logger.error(f"Error loading host kernel source code from disk: {e}")
+        else:
+            # For CuTeDSL, set empty strings since sources aren't loaded from cache
+            device_kernel_source = ""
+            host_kernel_source = ""
 
         # Load kernel parameters
         try:
