@@ -262,7 +262,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         except Exception as e:
             logger.warning(f"Failed to save cubin to cache: {e}", exc_info=True)
 
-    def _wrap_forward_from_prebuild_lib(self, *ins: list[torch.Tensor], stream: int | None = None):
+    def _wrap_forward_from_prebuild_lib(self, *ins: Any, stream: int | None = None):
         """High-level wrapper for kernel execution.
 
         Handles:
@@ -272,7 +272,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         4. CUDA stream management
 
         Args:
-            ins: Input PyTorch tensors
+            ins: Input arguments (may include scalars and tensors)
             stream: Optional CUDA stream for asynchronous execution
 
         Returns:
@@ -282,8 +282,21 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             raise ValueError(
                 f"Expected {len(self.params)} inputs, got {len(ins) + len(self.result_idx)} with {len(ins)} inputs and {len(self.result_idx)} outputs"
             )
+
+        # Materialize args in PrimFunc param order (inputs + allocated outputs)
         ins_idx = 0
-        args = []
+        param_values: list[Any] = [None] * len(self.params)
+        for i in range(len(self.params)):
+            if i in self.result_idx:
+                continue
+            param_values[i] = ins[ins_idx]
+            ins_idx += 1
+
+        first_tensor = next((v for v in param_values if isinstance(v, torch.Tensor)), None)
+        if first_tensor is None:
+            raise ValueError("Expected at least one torch.Tensor argument to infer CUDA device")
+
+        args: list[Any] = []
 
         # tensor pointers
         for i in range(len(self.params)):
@@ -293,30 +306,35 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                 # Now working with native Python list, no FFI calls needed
                 for s in self.param_shapes[i]:
                     if isinstance(s, tir.Var):
-                        ref_id, ref_tensor_idx, ref_dim_idx = self.dynamic_symbolic_map[s]
+                        ref_id, ref_param_idx, ref_dim_idx = self.dynamic_symbolic_map[s]
+                        ref_val = param_values[ref_param_idx]
+                        if not isinstance(ref_val, torch.Tensor):
+                            raise TypeError(f"Dynamic shape/stride var {s} refers to a non-tensor param at index {ref_param_idx}")
                         if ref_id == 0:
-                            shape.append(ins[ref_tensor_idx].shape[ref_dim_idx])
+                            shape.append(ref_val.shape[ref_dim_idx])
                         elif ref_id == 1:
                             # Stride vars are not expected in output shapes, but handle defensively.
-                            shape.append(ins[ref_tensor_idx].stride()[ref_dim_idx])
+                            shape.append(ref_val.stride()[ref_dim_idx])
                         else:
                             raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
-                device = ins[0].device if len(ins) > 0 else torch.cuda.current_device()
-                tensor = torch.empty(*shape, dtype=dtype, device=device)
+                tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
+                param_values[i] = tensor
             else:
-                tensor = ins[ins_idx]
-                ins_idx += 1
+                tensor = param_values[i]
             args.append(tensor)
 
         # dynamic symbolics
         for sym in self.dynamic_symbolic_order:
             ref_id, buffer_idx, dim_idx = self.dynamic_symbolic_map[sym]
+            ref_val = param_values[buffer_idx]
+            if not isinstance(ref_val, torch.Tensor):
+                raise TypeError(f"Dynamic symbolic var {sym} refers to a non-tensor param at index {buffer_idx}")
             if ref_id == 0:
-                args.append(ins[buffer_idx].shape[dim_idx])
+                args.append(ref_val.shape[dim_idx])
             elif ref_id == 1:
-                args.append(ins[buffer_idx].stride()[dim_idx])
+                args.append(ref_val.stride()[dim_idx])
             else:
                 raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
 
