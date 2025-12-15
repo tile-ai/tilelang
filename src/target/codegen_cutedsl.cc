@@ -435,12 +435,36 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::tma_store())) {
     std::stringstream ss;
-    auto need_reduce = op->args[op->args.size() - 2].as<IntImmNode>()->value;
+    // Check minimum argument count (desc, data, at least one coord,
+    // need_reduce, eviction)
+    ICHECK_GE(op->args.size(), 4) << "tma_store requires at least 4 arguments "
+                                     "(desc, data, coords..., need_reduce, "
+                                     "eviction_policy), got "
+                                  << op->args.size();
+
+    // Safely extract need_reduce flag
+    auto need_reduce_ptr = op->args[op->args.size() - 2].as<IntImmNode>();
+    ICHECK(need_reduce_ptr)
+        << "tma_store need_reduce flag (args[-2]) must be IntImm, got "
+        << op->args[op->args.size() - 2]->GetTypeKey();
+    auto need_reduce = need_reduce_ptr->value;
     if (need_reduce) {
       LOG(FATAL) << "Currently unsupported op: " << op->op;
     }
-    auto eviction_policy = eviction_policy_names_
-        [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+
+    // Safely extract and validate eviction policy index
+    auto eviction_idx_ptr = op->args[op->args.size() - 1].as<IntImmNode>();
+    ICHECK(eviction_idx_ptr)
+        << "tma_store eviction policy (args[-1]) must be IntImm, got "
+        << op->args[op->args.size() - 1]->GetTypeKey();
+    ICHECK_GE(eviction_idx_ptr->value, 0)
+        << "tma_store eviction policy index must be >= 0, got "
+        << eviction_idx_ptr->value;
+    ICHECK_LT(static_cast<size_t>(eviction_idx_ptr->value),
+              eviction_policy_names_.size())
+        << "tma_store eviction policy index " << eviction_idx_ptr->value
+        << " out of bounds (max " << eviction_policy_names_.size() - 1 << ")";
+    auto eviction_policy = eviction_policy_names_[eviction_idx_ptr->value];
 
     ss << "tl.tma_store(";
     auto desc = op->args[0];
