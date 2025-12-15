@@ -53,7 +53,7 @@ ffi::Module BuildTileLangCuTeDSLWithoutCompile(IRModule mod, Target target) {
 
   std::string code = cg.Finish();
   if (const auto f =
-          ffi::Function::GetGlobal("tilelang_callback_cuda_postproc")) {
+          ffi::Function::GetGlobal("tilelang_callback_cutedsl_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
   return runtime::CUDAModuleCreate("ptx", "ptx", ExtractFuncInfo(mod), code);
