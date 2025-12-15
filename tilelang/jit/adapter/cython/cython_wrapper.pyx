@@ -32,7 +32,8 @@ cdef class CythonKernelWrapper:
         self.params = params
         self.lib = lib
         # Convert TVM types to native Python types during initialization
-        self.param_dtypes = [param.dtype for param in params]
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        self.param_dtypes = [param.torch_dtype() for param in params]
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
         self.get_current_device = torch.cuda.current_device
