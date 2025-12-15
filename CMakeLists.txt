@@ -223,21 +223,21 @@ elseif(USE_CUDA)
 endif()
 
 set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
-set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
+if(NOT APPLE)
+  set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
+else()
+  set(USE_PYPI_Z3 OFF CACHE BOOL  "Use Z3 provided by PyPI z3-solver package")
+endif()
+
 if(USE_Z3 AND USE_PYPI_Z3)
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/pypi-z3")
   find_package(Z3 REQUIRED)
-  if(Apple)
-    message(WARNING "Pypi Z3 is not supported on macOS currently.")
-    set(USE_PYPI_Z3 OFF CACHE BOOL "Use Z3 provided by PyPI z3-solver package" FORCE)
-  elseif(UNIX)
-    find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
-    execute_process(
-      COMMAND ${PATCHELF_EXECUTABLE} --print-soname ${Z3_LIBRARY}
-      OUTPUT_VARIABLE Z3_SONAME
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-  endif()
+  find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
+  execute_process(
+    COMMAND ${PATCHELF_EXECUTABLE} --print-soname ${Z3_LIBRARY}
+    OUTPUT_VARIABLE Z3_SONAME
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
   message("-- Z3 SONAME: ${Z3_SONAME}")
 endif()
 
