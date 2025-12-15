@@ -383,12 +383,12 @@ class KernelCache:
         self,
         key: str,
         target: str | Target = "auto",
-        target_host: str | Target = None,
-        out_idx: list[int] = None,
+        target_host: str | Target | None = None,
+        out_idx: list[int] | None = None,
         execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
-        pass_configs: dict = None,
+        pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,
-        func: Callable = None,
+        func: Callable | None = None,
         verbose: bool = False,
     ) -> JITKernel | None:
         """

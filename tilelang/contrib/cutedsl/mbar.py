@@ -13,6 +13,7 @@ from cutlass.cute.arch import cp_async_mbarrier_arrive_noinc as mbarrier_cp_asyn
 
 import cutlass.cute.arch as arch
 
+
 @dsl_user_op
 def mbarrier_wait(mbar_ptr: Pointer, phase: Int, timeout_ns: Int = 10000000, *, loc=None, ip=None) -> None:
     """Waits on a mbarrier with a specified phase."""
