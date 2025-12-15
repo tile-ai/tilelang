@@ -44,7 +44,7 @@ extern "C" int init() {{
 """
 
 PREDEF_INIT_TABLE_FUNC = """
-extern "C" int init_table(const void* host_table, size_t n) {{
+extern "C" int init_table(const void* host_table, size_t n, cudaStream_t stream) {{
     if (error_buf) error_buf[0] = '\\0';
 
     if (host_table == nullptr) {{
@@ -56,9 +56,9 @@ extern "C" int init_table(const void* host_table, size_t n) {{
     }}
 
     size_t bytes = n * sizeof(uint64_t);
-    cudaError_t err = cudaMemcpyToSymbol(meta_data, host_table, bytes, 0, cudaMemcpyHostToDevice);
+    cudaError_t err = cudaMemcpyToSymbolAsync(meta_data, host_table, bytes, 0, cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess) {{
-        if (error_buf) std::snprintf(error_buf, 256, "cudaMemcpyToSymbol failed: %s", cudaGetErrorString(err));
+        if (error_buf) std::snprintf(error_buf, 256, "cudaMemcpyToSymbolAsync failed: %s", cudaGetErrorString(err));
         return static_cast<int>(err);
     }}
     return 0;

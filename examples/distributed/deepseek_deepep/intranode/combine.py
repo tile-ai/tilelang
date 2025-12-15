@@ -8,7 +8,7 @@ import torch
 import tilelang
 import tilelang.language as T
 
-# tilelang.disable_cache()
+tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
@@ -82,12 +82,13 @@ def cached_notify_combine(
     channel_head_idx: torch.Tensor,
     channel_tail_idx: torch.Tensor,
     barrier_signal: torch.Tensor,    
-    allocator
+    allocator,
+    comm_stream=None
 ):
     kernel = cached_notify_combine_kernel(num_ranks, num_sms)
-    kernel.initialize(allocator=allocator)
+    kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
 
-    kernel(send_head, channel_head_idx, channel_tail_idx, barrier_signal)
+    kernel(send_head, channel_head_idx, channel_tail_idx, barrier_signal, stream=comm_stream.cuda_stream)
 
 
 @tilelang.jit(
@@ -338,6 +339,7 @@ def intranode_combine(
     config,
     handle,
     topk_weights, 
+    comm_stream=None
 ):
     assert handle is not None
     rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, _, send_head = handle  
@@ -350,7 +352,7 @@ def intranode_combine(
     num_recv_tokens = send_head.shape[0]
     
     # notify combine
-    cached_notify_combine(num_ranks, config.num_sms, send_head, channel_head_idx, channel_tail_idx, barrier_signal, allocator)
+    cached_notify_combine(num_ranks, config.num_sms, send_head, channel_head_idx, channel_tail_idx, barrier_signal, allocator, comm_stream=comm_stream)
 
     # combine
     recv_x = torch.empty((num_recv_tokens, hidden), dtype=x.dtype, device='cuda')
@@ -366,7 +368,7 @@ def intranode_combine(
         config.num_sms,
         dtype='bfloat16'
     )
-    kernel.initialize(allocator=allocator)
+    kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
     kernel(
         x,
         topk_weights,
@@ -381,5 +383,8 @@ def intranode_combine(
         channel_x_buffers,
         channel_src_idx_buffers,
         channel_topk_weights_buffers,
+        stream=comm_stream.cuda_stream
     )
+    compute_stream = torch.cuda.current_stream()
+    compute_stream.wait_stream(comm_stream)
     return recv_x, recv_topk_weights

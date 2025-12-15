@@ -13,7 +13,7 @@ from typing import Optional, Tuple
 from tilelang.distributed.utils import init_dist
 from utils import Config, ep_ext  # noqa: F403
 
-# tilelang.disable_cache()
+tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
 
 
@@ -148,6 +148,7 @@ def notify_dispatch(
     channel_tail_idx: torch.Tensor,
     # allocator
     allocator,
+    comm_stream=None,
 ):
     kernel = notify_dispatch_kernel(
         rank,
@@ -156,7 +157,7 @@ def notify_dispatch(
         num_channels,
         expert_alignment,
     )
-    kernel.initialize(allocator=allocator)
+    kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
 
     rank_prefix_matrix = torch.empty([num_ranks, num_ranks], dtype=torch.int32, device='cuda')
     channel_prefix_matrix = torch.empty([num_ranks, num_channels], dtype=torch.int32, device='cuda')
@@ -180,6 +181,7 @@ def notify_dispatch(
         channel_end_offset,
         channel_head_idx,
         channel_tail_idx,
+        stream=comm_stream.cuda_stream
     )
 
     num_recv_tokens, num_recv_tokens_per_expert_list = ep_ext.wait_for_counters_ready(moe_recv_counter, moe_recv_expert_counter)
@@ -222,16 +224,17 @@ def cached_notify_dispatch(
     # barrier
     barrier_signal: torch.Tensor,
     # allocator
-    allocator
+    allocator,
+    comm_stream=None,
 ):
     kernel = cached_notify_dispatch_kernel(num_ranks, num_channels)
-    kernel.initialize(allocator=allocator)  # we still comm on barrier_signal
-    kernel(barrier_signal, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx)
+    kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)  # we still comm on barrier_signal
+    kernel(barrier_signal, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, stream=comm_stream.cuda_stream)
 
 
 @tilelang.jit(
     pass_configs={"tl.disable_tma_lower": True,  # enable TMA later
-        "tl.disable_warp_specialized": True}, debug_root_path='/home/wt/debug/dispatch_static')
+        "tl.disable_warp_specialized": True}, debug_root_path='/home/yu/debug/dispatch_static')
 def dispatch_kernel(
     rank, 
     num_ranks,
@@ -730,7 +733,8 @@ def intranode_dispatch(
     topk_idx: Optional[torch.Tensor] = None,
     topk_weights: Optional[torch.Tensor] = None,
     expert_alignment: int = 1,
-    kernel = None
+    kernel = None,
+    comm_stream = None,
     # todo: support num_worst_tokens
     # todo: support async functionality
 ):
@@ -772,9 +776,10 @@ def intranode_dispatch(
             channel_head_idx,
             channel_tail_idx,
             allocator,
+            comm_stream=comm_stream,
         )
     else:
-        cached_notify_dispatch(num_ranks, config.num_channels, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, barrier_signal, allocator)
+        cached_notify_dispatch(num_ranks, config.num_channels, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, barrier_signal, allocator, comm_stream=comm_stream)
         num_recv_tokens = recv_src_idx.size(0)
 
     recv_x = torch.empty((num_recv_tokens, hidden), dtype=x.dtype, device='cuda')
@@ -789,11 +794,11 @@ def intranode_dispatch(
     if handle is None:
         # kernel = dispatch_kernel(rank, num_ranks, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens, hidden, num_topk, num_experts, config.num_sms, 'bfloat16')
         # kernel.initialize(allocator=allocator)
-        kernel(recv_x, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_prefix_matrix, send_head, x, topk_idx, topk_weights, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers)
+        kernel(recv_x, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_prefix_matrix, send_head, x, topk_idx, topk_weights, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers, stream=comm_stream.cuda_stream)
         handle = (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
         return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle
     else:
         kernel = cached_dispatch_kernel(rank, num_ranks, num_tokens, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens, hidden, num_topk, num_experts, config.num_sms, 'bfloat16')
-        kernel.initialize(allocator=allocator)
-        kernel(recv_x, recv_src_idx, recv_channel_prefix_matrix, send_head, x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers)
+        kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
+        kernel(recv_x, recv_src_idx, recv_channel_prefix_matrix, send_head, x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, stream=comm_stream.cuda_stream)
         return recv_x
