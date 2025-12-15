@@ -1261,10 +1261,6 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         return python_wrapper
 
-    def get_tma_cpp_init_code(self) -> str:
-        """Get the generated C++ TMA initialization code."""
-        return getattr(self, "tma_cpp_init_code", "")
-
     def get_launcher_cpp_code(self) -> str:
         """Get the generated C++ launcher code."""
         return getattr(self, "launcher_cpp_code", "")
