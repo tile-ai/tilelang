@@ -222,12 +222,15 @@ elseif(USE_CUDA)
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
-set(USE_Z3 ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
-set(USE_PYPI_Z3 ON CACHE BOOL "Use Z3 provided by PyPI z3-solver package")
+set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
+set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
 if(USE_Z3 AND USE_PYPI_Z3)
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/pypi-z3")
   find_package(Z3 REQUIRED)
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(Apple)
+    message(WARNING "Pypi Z3 is not supported on macOS currently.")
+    set(USE_PYPI_Z3 OFF CACHE BOOL "Use Z3 provided by PyPI z3-solver package" FORCE)
+  elseif(UNIX)
     find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
     execute_process(
       COMMAND ${PATCHELF_EXECUTABLE} --print-soname ${Z3_LIBRARY}
@@ -312,29 +315,15 @@ endif()
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
-  if(USE_Z3 AND USE_PYPI_Z3)
-    set_target_properties(tilelang PROPERTIES        INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
-    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
-    set_target_properties(tvm PROPERTIES             INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
-    set_target_properties(tvm_runtime PROPERTIES     INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib;@loader_path/../../z3/lib;@loader_path/../../z3/bin")
-  else()
-    set_target_properties(tilelang PROPERTIES        INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-    set_target_properties(tvm PROPERTIES             INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-    set_target_properties(tvm_runtime PROPERTIES     INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
-  endif()
+  set_target_properties(tilelang PROPERTIES        INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  set_target_properties(tvm PROPERTIES             INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  set_target_properties(tvm_runtime PROPERTIES     INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
 elseif(UNIX)
-  if(USE_Z3 AND USE_PYPI_Z3)
-    set_target_properties(tilelang PROPERTIES        INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib:\$ORIGIN/../../z3/bin")
-    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib:\$ORIGIN/../../z3/bin")
-    set_target_properties(tvm PROPERTIES             INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib:\$ORIGIN/../../z3/bin")
-    set_target_properties(tvm_runtime PROPERTIES     INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib:\$ORIGIN/../../z3/lib:\$ORIGIN/../../z3/bin")
-  else()
-    set_target_properties(tilelang PROPERTIES        INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-    set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-    set_target_properties(tvm PROPERTIES             INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-    set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
-  endif()
+  set_target_properties(tilelang PROPERTIES        INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  set_target_properties(tvm PROPERTIES             INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  set_target_properties(tvm_runtime PROPERTIES     INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
 endif()
 
 install(
@@ -342,24 +331,21 @@ install(
   LIBRARY DESTINATION tilelang/lib
 )
 if(USE_Z3 AND USE_PYPI_Z3)
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # Patch Z3 soname in dependent shared libraries to libz3.so
-    # This is needed because PyPI z3-solver package uses a custom soname
-    # which may not be found by our shared libraries at runtime.
-    # We only need to do this on Linux where sonames are strictly enforced.
-    message(STATUS "Adding install step to patch Z3 soname in dependent shared libraries")
-    set(_install_code [=[
-      set(_patchelf "@PATCHELF_EXECUTABLE@")
-      set(_z3_soname "@Z3_SONAME@")
-      set(PATCH_FILES $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/libtvm.so)
-      foreach(f IN LISTS PATCH_FILES)
-        message("-- Patching Z3 soname in ${f} from ${_z3_soname} to libz3.so")
-        execute_process(COMMAND ${_patchelf} --replace-needed ${_z3_soname} libz3.so "${f}")
-      endforeach()
-    ]=])
-    string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
-    install(CODE "${_install_code_configured}")
-  endif()
+  # Patch Z3 soname in dependent shared libraries to libz3.so
+  # This is needed because PyPI z3-solver package uses a custom soname
+  # which may not be found by our shared libraries at runtime.
+  # We only need to do this on Linux where sonames are strictly enforced.
+  set(_install_code [[
+    set(_patchelf "@PATCHELF_EXECUTABLE@")
+    set(_z3_soname "@Z3_SONAME@")
+    set(PATCH_FILES $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/libtvm.so)
+    foreach(f IN LISTS PATCH_FILES)
+      message("-- Patching Z3 soname in ${f} from ${_z3_soname} to libz3.so")
+      execute_process(COMMAND ${_patchelf} --replace-needed ${_z3_soname} libz3.so "${f}")
+    endforeach()
+  ]])
+  string(CONFIGURE "${_install_code}" _install_code_configured @ONLY)
+  install(CODE "${_install_code_configured}")
 endif()
 
 install(CODE [[
@@ -369,19 +355,11 @@ install(CODE [[
     $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/tilelang/lib/*.dylib
   )
   foreach(f IN LISTS SHARED_FILES)
-    if(APPLE)
-      execute_process(
-        COMMAND otool -l ${f}
-        OUTPUT_VARIABLE DEPS_OUTPUT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-      )
-    elseif(UNIX)
-      execute_process(
-        COMMAND ldd ${f}
-        OUTPUT_VARIABLE DEPS_OUTPUT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-      )
-    endif()
+    execute_process(
+      COMMAND ldd ${f}
+      OUTPUT_VARIABLE DEPS_OUTPUT
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
     message("-- Shared library dependencies for ${f}: ${DEPS_OUTPUT}")
   endforeach()
 ]])
