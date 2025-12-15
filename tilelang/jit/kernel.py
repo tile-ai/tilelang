@@ -95,7 +95,7 @@ class JITKernel(Generic[_P, _T]):
 
         if pass_configs is None:
             pass_configs = {}
-        self.pass_configs = pass_configs 
+        self.pass_configs = pass_configs
 
         self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
 

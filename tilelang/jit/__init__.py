@@ -545,7 +545,6 @@ def lazy_jit(
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
 ):
-
     compile_args = dict(
         out_idx=None,
         execution_backend=execution_backend,
