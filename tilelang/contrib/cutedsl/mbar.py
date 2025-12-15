@@ -3,7 +3,7 @@ Simple wrappers that delegate to cutlass.cute.arch implementations.
 We use the existing implementations from cutlass rather than reinventing the wheel.
 """
 
-from cutlass.cute.typing import Pointer, Int, Boolean  # noqa: F401
+from cutlass.cute.typing import Pointer, Int, Int32, Boolean  # noqa: F401
 from cutlass.cutlass_dsl import CuTeDSL, dsl_user_op  # noqa: F401
 from cutlass._mlir.dialects import nvvm
 
@@ -13,10 +13,16 @@ from cutlass.cute.arch import cp_async_mbarrier_arrive_noinc as mbarrier_cp_asyn
 
 import cutlass.cute.arch as arch
 
-
-def mbarrier_wait(mbar_ptr: Pointer, phase: Int, timeout_ns: Int = 10000000):
+@dsl_user_op
+def mbarrier_wait(mbar_ptr: Pointer, phase: Int, timeout_ns: Int = 10000000, *, loc=None, ip=None) -> None:
     """Waits on a mbarrier with a specified phase."""
-    arch.mbarrier_wait(mbar_ptr, phase)
+    nvvm.mbarrier_try_wait_parity_shared(
+        mbar_ptr.llvm_ptr,
+        Int32(phase).ir_value(loc=loc, ip=ip),
+        Int32(timeout_ns).ir_value(loc=loc, ip=ip),
+        loc=loc,
+        ip=ip,
+    )
 
 
 @dsl_user_op
