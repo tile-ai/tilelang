@@ -71,33 +71,6 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
                 # write host_func here. This ensures cute imports are lazy-loaded.
                 f.write(self.host_func)
 
-            # Compile TMA init library if needed
-            if self.tma_cpp_init_code is not None:
-                with tempfile.NamedTemporaryFile(
-                    mode="w",
-                    suffix=".cpp",
-                    delete=False,
-                ) as tma_src:
-                    tma_src.write(self.tma_cpp_init_code)
-                    tma_src_path = tma_src.name
-
-                # Generate tma lib under the same directory as the source file
-                tma_lib_path = os.path.join(os.path.dirname(src_path), self.tma_lib_name)
-                subprocess.run(
-                    [
-                        "nvcc",
-                        "-shared",
-                        "-Xcompiler=-fPIC",
-                        "-lcuda",
-                        "-o",
-                        tma_lib_path,
-                        tma_src_path,
-                    ],
-                    check=True,
-                )
-                self.tma_libpath = tma_lib_path
-                self.tma_libname = self.tma_lib_name
-
             # Compile C++ launcher library if needed
             if self.launcher_cpp_code is not None:
                 with tempfile.NamedTemporaryFile(
@@ -138,7 +111,7 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
                     launcher_src_path,
                 ]
 
-                result = subprocess.run(compile_cmd, check=False, capture_output=True, text=True)
+                result = subprocess.run(compile_cmd, check=False, capture_output=True, text=True, timeout=timeout)
                 if result.returncode != 0:
                     raise RuntimeError(f"Failed to compile C++ launcher: {result.stderr}")
 
