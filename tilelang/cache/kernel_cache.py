@@ -299,7 +299,7 @@ class KernelCache:
                 if kernel.kernel_source is not None:
                     KernelCache._safe_write_file(device_kernel_path, "w", lambda file: file.write(kernel.kernel_source))
         except Exception as e:
-            self.logger.error(f"Error saving kernel source code to disk: {e}")
+            self.logger.exception(f"Error saving kernel source code to disk: {e}")
 
         # Save wrapped kernel source code
         try:
@@ -311,7 +311,7 @@ class KernelCache:
             else:
                 KernelCache._safe_write_file(host_kernel_path, "w", lambda file: file.write(kernel.adapter.get_kernel_source()))
         except Exception as e:
-            self.logger.error(f"Error saving host kernel source code to disk: {e}")
+            self.logger.exception(f"Error saving host kernel source code to disk: {e}")
 
         # Save the kernel library
         try:
@@ -368,7 +368,7 @@ class KernelCache:
                     KernelCache._safe_write_file(kernel_lib_path, "wb", lambda file: file.write(KernelCache._load_binary(src_lib_path)))
 
         except Exception as e:
-            self.logger.error(f"Error saving kernel library to disk: {e}")
+            self.logger.exception(f"Error saving kernel library to disk: {e}")
 
         # Save kernel parameters
         try:
@@ -377,7 +377,7 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
         except Exception as e:
-            self.logger.error(f"Error saving kernel parameters to disk: {e}")
+            self.logger.exception(f"Error saving kernel parameters to disk: {e}")
 
     def _load_kernel_from_disk(
         self,
@@ -443,14 +443,14 @@ class KernelCache:
                 with open(device_kernel_path) as f:
                     device_kernel_source = f.read()
             except Exception as e:
-                self.logger.error(f"Error loading kernel source code from disk: {e}")
+                self.logger.exception("Error loading kernel source code from disk")
             try:
                 if verbose:
                     self.logger.debug(f"Loading wrapped kernel source code from file: {host_kernel_path}")
                 with open(host_kernel_path) as f:
                     host_kernel_source = f.read()
             except Exception as e:
-                self.logger.error(f"Error loading host kernel source code from disk: {e}")
+                self.logger.exception("Error loading host kernel source code from disk")
         else:
             # For CuTeDSL, set empty strings since sources aren't loaded from cache
             device_kernel_source = ""
@@ -463,7 +463,7 @@ class KernelCache:
             with open(params_path, "rb") as f:
                 kernel_params = cloudpickle.load(f)
         except Exception as e:
-            self.logger.error(f"Error loading kernel parameters from disk: {e}")
+            self.logger.exception(f"Error loading kernel parameters from disk: {e}")
 
         if ((host_kernel_source and device_kernel_source) or self.execution_backend == "cutedsl") and kernel_params:
             return JITKernel.from_database(
@@ -498,4 +498,4 @@ class KernelCache:
             # Re-create the cache directory
             KernelCache._create_dirs()
         except Exception as e:
-            self.logger.error(f"Error clearing disk cache: {e}")
+            self.logger.exception(f"Error clearing disk cache: {e}")
