@@ -584,9 +584,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     }
 
     auto ptr_str = GetBufferPtr_(load->buffer.get(), index);
-    os << "tl.make_tensor_at_offset(tl.recast_ptr(" << ptr_str << ", dtype=";
+    os << "tl.make_tensor(tl.recast_ptr(" << ptr_str << ", dtype=";
     PrintType(tgt_dtype.element_of(), os);
-    os << "), 0, (" << tgt_dtype.lanes() << ",)).load()";
+    os << "), (" << tgt_dtype.lanes() << ",)).load()";
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else if (op->op.same_as(tl::tl_gemm())) {
@@ -802,10 +802,10 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     LOG(FATAL) << "Currently unsupported scope: " << scope;
   } else if (scope == "shared.dyn") {
-    stream << vid << " = tl.make_tensor_at_offset(tl.get_dyn_smem(";
+    stream << vid << " = tl.make_tensor(tl.get_dyn_smem(";
     PrintType(op->dtype, stream);
     // there is no bound check for Tensor access, so just set shape to 1
-    stream << ", alignment=1024), 0, (1,))\n";
+    stream << ", alignment=1024), (1,))\n";
   } else {
     size_t constant_size = op->ConstantAllocationSize();
     ICHECK_GT(constant_size, 0)
@@ -813,9 +813,9 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
         << constant_size << " for " << op->buffer_var->name_hint;
 
     if (scope == "shared") {
-      stream << vid << " = tl.make_tensor_at_offset(tl.alloc_smem(";
+      stream << vid << " = tl.make_tensor(tl.alloc_smem(";
       PrintType(op->dtype, stream);
-      stream << ", " << constant_size << "), 0, (" << constant_size << ",))\n";
+      stream << ", " << constant_size << "), (" << constant_size << ",))\n";
     } else if (scope == "shared.barrier") {
       ICHECK(false) << "Unsupported scope: " << scope;
     } else if (scope == "local") {
