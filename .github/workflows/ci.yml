@@ -316,9 +316,11 @@ jobs:
 
           CXX_FILES=$(find src -type f -iname "*.[ch]pp" -o -iname "*.cc" -o -iname "*.c" -o -iname "*.h")
           rc=0
+          echo "::group::run-clang-tidy"
           "${RUN_CLANG_TIDY[@]}" -clang-tidy-binary="$(command -v clang-tidy)" \
             -exclude-header-filter='^(3rdparty|tvm)/.*$' \
             -p="cmake-build" ${CXX_FILES} || rc="$?"
+          echo "::endgroup::"
           rm -rf cmake-build run-clang-tidy.py
           if (( rc != 0 )); then
             echo "::error::clang-tidy found issues (exit code: ${rc}). Please run 'clang-tidy --fix' locally to fix them."
