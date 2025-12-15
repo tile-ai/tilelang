@@ -42,8 +42,9 @@ def make_filled_tensor(shape, value):
     return t
 
 
-def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=None):
-    offset = cute.assume(cutlass.as_numeric(offset), divby=div_by)
+def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1):
+    if div_by != 1:
+        offset = cute.assume(cutlass.as_numeric(offset), divby=div_by)
     return cute.make_tensor(ptr + offset, shape)
 
 

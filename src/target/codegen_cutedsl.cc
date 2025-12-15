@@ -800,8 +800,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
     stream << vid << " = tl.make_tensor_at_offset(tl.get_dyn_smem(";
     PrintType(op->dtype, stream);
     // there is no bound check for Tensor access, so just set shape to 1
-    // div_by is set to 16 intentionally for smem
-    stream << ", alignment=1024), 0, (1,), div_by=16)\n";
+    stream << ", alignment=1024), 0, (1,))\n";
   } else {
     size_t constant_size = op->ConstantAllocationSize();
     ICHECK_GT(constant_size, 0)
@@ -1273,7 +1272,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     } else {
       std::ostringstream os;
       os << "tl.make_tensor_at_offset(" << ptr_str << ", " << index_str
-         << ", (1,), div_by=1)";
+         << ", (1,))";
       // for vector data types, ".load()" (added by BufferLoadNode) is neeed
       // instead of "[0]"
       if (buffer_element_dtype.is_scalar()) {
