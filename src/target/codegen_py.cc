@@ -60,6 +60,9 @@ void CodeGenTileLangPY::RegisterFunction_(const GlobalVar &gvar,
       func_name_supply_->ReserveName(name);
       return name;
     } else {
+      ICHECK(!func_name_supply_->ContainsName(gvar->name_hint))
+          << "Function " << gvar << " must use name hint " << gvar->name_hint
+          << ", but this name has already been used.";
       func_name_supply_->ReserveName(gvar->name_hint);
       return gvar->name_hint;
     }
