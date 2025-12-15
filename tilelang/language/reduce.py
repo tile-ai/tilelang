@@ -351,9 +351,8 @@ def cumsum(
             if not tir.analysis.expr_deep_equal(dst_shape[i], shape[i]):
                 raise ValueError(f"cumsum dst shape {dst_shape} must match src shape {shape} (dim {i} mismatch)")
 
-    # Get the underlying buffer to check scope
-    src_buffer = _get_buffer(src)
-    if src_buffer.scope() == "local.fragment":
+    # Check if src is a fragment buffer
+    if is_fragment(src):
         return cumsum_fragment(src, dst, dim, reverse)
     return tir.call_intrin(
         "handle",
