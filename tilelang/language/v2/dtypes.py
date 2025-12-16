@@ -68,6 +68,16 @@ _TORCH_DTYPE_TO_STR = {
     torch.bfloat16: "bfloat16",
 }
 
+_CANONICAL_TO_DISPLAY_STR = {
+    "double": "float64",
+    "float": "float32",
+    "int": "int32",
+    "long": "int64",
+    "short": "int16",
+    "uint": "uint32",
+    "ulong": "uint64",
+}
+
 # _STR_TO_TORCH_DTYPE = {v: k for k, v in _TORCH_DTYPE_TO_STR.items()}
 
 # _STR_TO_NUMPY_DTYPE = {v: k for k, v in _NUMPY_DTYPE_TO_STR.items()}
@@ -134,7 +144,7 @@ __orig_dtype_new = dtype.__new__
 
 def __dtype_new__(cls, value: AnyDType) -> dtype:
     if isinstance(value, str):
-        return __orig_dtype_new(cls, value)
+        return __orig_dtype_new(cls, _CANONICAL_TO_DISPLAY_STR.get(value, value))
     elif value in _DTYPE_TO_STR:
         return __orig_dtype_new(cls, _DTYPE_TO_STR[value])
     else:

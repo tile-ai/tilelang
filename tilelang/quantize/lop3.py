@@ -1138,11 +1138,9 @@ def get_lop3_intrin_group(
     target_dtype = dtype_mapping[out_dtype]
 
     if source_format not in [T.int, T.uint]:
-        raise ValueError(f"Invalid source_format. Expected 'int' or 'uint', but got {source_format}.")
+        raise ValueError(f"Invalid source_format. Expected 'int' or 'uint', but got {source_format}, {type(source_format)}.")
     if with_zeros and source_format == T.int:
         raise ValueError(f"Zeros are not supported for signed integers, but got {source_format}")
-
-    source_symbol = "i" if source_format == T.int else "u"
 
     import_c_map = {
         "i4_to_f16": decode_i4_to_f16,
@@ -1186,7 +1184,7 @@ def get_lop3_intrin_group(
         d4f = "i4s"
     else:
         raise ValueError(f"Unsupported target dtype: {target_dtype}")
-    source_symbol = "u" if source_format == "uint" else "s"
+    source_symbol = "u" if source_format == T.uint else "s"
     func_name = f"decode_i{source_bit}{source_symbol}_to_{d4f}"
     if with_scaling:
         func_name += "_scale"
