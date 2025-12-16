@@ -5,7 +5,45 @@
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 #include <cuda_fp4.h>
 
-using fp4_e2_t = __nv_fp4_e2m1;
+// Wrapper for __nv_fp4_e2m1 with implicit conversions
+struct fp4_e2_t {
+  __nv_fp4_storage_t __x;
+
+  TL_DEVICE fp4_e2_t() = default;
+
+  // Constructor from __nv_fp4_e2m1
+  TL_DEVICE fp4_e2_t(__nv_fp4_e2m1 x) : __x(x.__x) {}
+
+  // Constructor from storage type
+  TL_DEVICE fp4_e2_t(__nv_fp4_storage_t x) : __x(x) {}
+
+  // Constructor from float
+  TL_DEVICE explicit fp4_e2_t(float x) {
+    __nv_fp4_e2m1 tmp(x);
+    __x = tmp.__x;
+  }
+
+  // Conversion to __nv_fp4_e2m1
+  TL_DEVICE operator __nv_fp4_e2m1() const {
+    __nv_fp4_e2m1 tmp;
+    tmp.__x = __x;
+    return tmp;
+  }
+
+  // Conversion to float
+  TL_DEVICE operator float() const {
+    __nv_fp4_e2m1 tmp;
+    tmp.__x = __x;
+    return float(tmp);
+  }
+
+  // Implicit conversion to half_t (cutlass::half_t)
+  TL_DEVICE operator half_t() const { return half_t(float(*this)); }
+
+  // Implicit conversion to __half
+  TL_DEVICE operator __half() const { return __half(float(*this)); }
+};
+
 using fp4_e2x2_t = __nv_fp4x2_e2m1;
 using fp4_e2x4_t = __nv_fp4x4_e2m1;
 
