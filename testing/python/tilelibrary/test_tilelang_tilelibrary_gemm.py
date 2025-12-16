@@ -108,30 +108,27 @@ def run_gemm_ss(
 
 
 @pytest.mark.skip(reason="Temporarily disabling until GEMM SS issues are resolved")
-def test_gemm_ss():
-    # More test case can be found in kernel/test_tilelang_kernel_gemm.py
-    # GEMM tests for float16
-    run_gemm_ss(512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 128, 32, 2)
-    run_gemm_ss(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 128, 32, 2)
-    run_gemm_ss(512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 128, 32, 2)
-    run_gemm_ss(512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 128, 32, 2)
-    # n8 test
-    run_gemm_ss(128, 8, 32, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 0, 128)
-
-    # int8 test
-    run_gemm_ss(128, 128, 128, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-
-    # float8 tests
-    run_gemm_ss(128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2)
-
-    # tfloat32 test
-    run_gemm_ss(128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2)
+@pytest.mark.parametrize(
+    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
+    [
+        (512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 128, 32, 2, 128),
+        (512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 128, 32, 2, 128),
+        (512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 128, 32, 2, 128),
+        (512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 128, 32, 2, 128),
+        (128, 8, 32, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 0, 128),
+        (128, 128, 128, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+    ],
+)
+def test_gemm_ss(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):
+    run_gemm_ss(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads)
 
 
 def matmul_rs(
@@ -244,30 +241,27 @@ def run_gemm_rs(
 
 
 @pytest.mark.skip(reason="Temporarily disabling until GEMM RS issues are resolved")
-def test_gemm_rs():
-    # GEMM tests for float16
-    run_gemm_rs(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_rs(512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_rs(512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_rs(512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-
-    # n8 tests
-    run_gemm_rs(128, 8, 32, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 0, 128)
-
-    # int8 tests
-    run_gemm_rs(128, 128, 128, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-
-    # float8 tests
-    run_gemm_rs(128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2)
-
-    # float32 tests
-    run_gemm_rs(128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2)
+@pytest.mark.parametrize(
+    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
+    [
+        (512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (128, 8, 32, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 0, 128),
+        (128, 128, 128, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+    ],
+)
+def test_gemm_rs(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):
+    run_gemm_rs(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads)
 
 
 def matmul_sr(
@@ -379,31 +373,27 @@ def run_gemm_sr(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
-def test_gemm_sr():
-    # GEMM tests for float16
-    run_gemm_sr(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_sr(512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_sr(512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_sr(512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-
-    # n8 tests
-    run_gemm_sr(128, 8, 32, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 0, 128)
-
-    # int8 tests
-    run_gemm_sr(128, 128, 32, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 32, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 32, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 32, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-
-    # float8 tests
-    run_gemm_sr(128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2)
-
-    # float32 tests
-    # TODO(lei): fix in future
-    run_gemm_sr(128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2)
+@pytest.mark.parametrize(
+    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
+    [
+        (512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (128, 8, 32, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 0, 128),
+        (128, 128, 32, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 32, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 32, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 32, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+    ],
+)
+def test_gemm_sr(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):
+    run_gemm_sr(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads)
 
 
 def matmul_rr(
@@ -521,31 +511,29 @@ def run_gemm_rr(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
-def test_gemm_rr():
-    # GEMM tests for float16
-    run_gemm_rr(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_rr(512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_rr(512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_rr(512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
-    run_gemm_rr(512, 1024, 768, False, True, "bfloat16", "bfloat16", T.float, 128, 256, 32, 2)
-    # n8 tests
-    run_gemm_rr(128, 8, 128, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 2)
-    run_gemm_rr(128, 8, 128, False, True, T.int8, T.int8, T.int32, 128, 8, 32, 2)
-
-    # int8 tests
-    run_gemm_rr(128, 128, 128, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
-
-    # float8 tests
-    run_gemm_rr(128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2)
-
-    # float32 tests
-    run_gemm_rr(128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2)
+@pytest.mark.parametrize(
+    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
+    [
+        (512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 256, 32, 2, 128),
+        (512, 1024, 768, False, True, T.bfloat16, T.bfloat16, T.float, 128, 256, 32, 2, 128),
+        (128, 8, 128, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 2, 128),
+        (128, 8, 128, False, True, T.int8, T.int8, T.int32, 128, 8, 32, 2, 128),
+        (128, 128, 128, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+    ],
+)
+def test_gemm_rr(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):
+    run_gemm_rr(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads)
 
 
 if __name__ == "__main__":
