@@ -243,7 +243,7 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
     parser.add_argument("--disable_cache", action="store_true")
-    parser.add_argument("--accum_dtype", type=str, default=T.float, choices=[T.float, T.float16], help="Accumulation datatype")
+    parser.add_argument("--accum_dtype", type=str, default="float", choices=["float", "float16"], help="Accumulation datatype")
     parser.add_argument(
         "--bench_torch_sparse",
         type=str,

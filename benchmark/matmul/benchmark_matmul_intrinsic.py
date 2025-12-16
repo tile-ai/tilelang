@@ -291,13 +291,13 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
     parser.add_argument("--with_roller", type=bool, default=False, help="Whether to use roller to deduce search spaces")
-    parser.add_argument("--dtype", type=str, default=T.float16, choices=[T.float16, "int8"], help="Input data type")
+    parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "int8"], help="Input data type")
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    in_dtype = args.dtype
-    out_dtype = T.float32 if in_dtype == "int8" else T.float16
-    accum_dtype = T.float32 if in_dtype == "int8" else T.float16
+    in_dtype = T.dtype(args.dtype)
+    out_dtype = T.float32 if in_dtype == T.int8 else T.float16
+    accum_dtype = T.float32 if in_dtype == T.int8 else T.float16
     with_roller = args.with_roller
     with_roller = True
     # Compute total floating-point operations
