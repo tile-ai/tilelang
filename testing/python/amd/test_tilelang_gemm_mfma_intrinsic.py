@@ -1,3 +1,4 @@
+import pytest
 import torch
 import tilelang.testing
 from tilelang import tvm as tvm
@@ -207,17 +208,33 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.parametrize(
+    "M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack",
+    [
+        (128, 128, 128, "float16", "float16", "float32", False, True, 1),
+        (128, 256, 256, "float16", "float32", "float32", False, True, 1),
+        (128, 256, 256, "float16", "float32", "float32", False, True, 2),
+        (128, 128, 128, "int8", "int32", "int32", False, True, 1),
+        (128, 256, 256, "int8", "int32", "int32", False, True, 1),
+        (128, 256, 256, "int8", "int32", "int32", False, True, 2),
+        (128, 256, 256, "int8", "int32", "int32", False, False, 1),
+        (128, 256, 256, "int8", "int32", "int32", False, False, 2),
+        (128, 128, 128, "float8_e4m3fnuz", "float16", "float32", False, True, 1),
+    ],
+)
 @tilelang.testing.requires_rocm
-def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16")
-    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32")
-    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", k_pack=2)
-    assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", accum_dtype="int32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype="int32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype="int32", k_pack=2)
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32", k_pack=2)
-    assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3fnuz", "float16")
+def test_assert_tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack):
+    assert_tl_matmul_correctness(
+        M,
+        N,
+        K,
+        in_dtype,
+        out_dtype,
+        accum_dtype=accum_dtype,
+        a_transposed=a_transposed,
+        b_transposed=b_transposed,
+        k_pack=k_pack,
+    )
     assert_tl_matmul_correctness(128, 256, 256, "float8_e4m3fnuz", "float32")
     assert_tl_matmul_correctness(128, 256, 256, "float8_e4m3fnuz", "float32", k_pack=2)
     assert_tl_matmul_correctness(128, 256, 256, "float8_e4m3fnuz", "float32", b_transposed=False)

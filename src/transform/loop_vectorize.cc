@@ -192,7 +192,8 @@ private:
                                          vector_size_, analyzer_)) {
       // If not, tight vectorize bound with buffer dtype constraint
       vector_size_ = arith::ZeroAwareGCD(
-          vector_size_, vector_load_bits_max_ / buffer->dtype.bits());
+          vector_size_, vector_load_bits_max_ /
+                            (buffer->dtype.bits() * buffer->dtype.lanes()));
     }
     // 4. Try to vectorize buffer load
     while (!IndiceCanVectorize(elem_offset, inner_for_->loop_var,

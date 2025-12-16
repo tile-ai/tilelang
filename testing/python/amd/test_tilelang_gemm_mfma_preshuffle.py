@@ -1,3 +1,4 @@
+import pytest
 import torch
 import tilelang.testing
 from tilelang import tvm as tvm
@@ -257,19 +258,46 @@ def assert_tl_matmul_correctness(
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.parametrize(
+    "M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack, b_preshuffle, b_g2l_load",
+    [
+        (256, 256, 512, "int8", "int32", "int32", False, True, 1, True, False),
+        (256, 256, 512, "int8", "int32", "int32", False, False, 1, True, False),
+        (256, 256, 512, "int8", "int32", "int32", False, True, 2, True, False),
+        (256, 256, 512, "int8", "int32", "int32", False, False, 2, True, False),
+        (256, 256, 512, "float8_e4m3fnuz", "float32", "float32", False, True, 1, True, False),
+        (256, 256, 512, "float8_e4m3fnuz", "float32", "float32", False, False, 1, True, False),
+        (256, 256, 512, "float8_e4m3fnuz", "float32", "float32", False, True, 2, True, False),
+        (256, 256, 512, "float8_e4m3fnuz", "float32", "float32", False, False, 2, True, False),
+    ],
+)
 @tilelang.testing.requires_rocm
-def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype="int32", b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype="int32", b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", b_transposed=False, accum_dtype="int32", b_preshuffle=True)
-
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype="int32", k_pack=2, b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", b_transposed=False, accum_dtype="int32", k_pack=2, b_preshuffle=True)
-
-    assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", b_transposed=False, b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", k_pack=2, b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", k_pack=2, b_transposed=False, b_preshuffle=True)
+def test_assert_tl_matmul(
+    M,
+    N,
+    K,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    a_transposed,
+    b_transposed,
+    k_pack,
+    b_preshuffle,
+    b_g2l_load,
+):
+    assert_tl_matmul_correctness(
+        M,
+        N,
+        K,
+        in_dtype,
+        out_dtype,
+        accum_dtype=accum_dtype,
+        a_transposed=a_transposed,
+        b_transposed=b_transposed,
+        k_pack=k_pack,
+        b_preshuffle=b_preshuffle,
+        b_g2l_load=b_g2l_load,
+    )
 
 
 if __name__ == "__main__":

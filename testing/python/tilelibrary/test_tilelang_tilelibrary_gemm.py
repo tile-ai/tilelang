@@ -110,7 +110,7 @@ def run_gemm_ss(
 
 @pytest.mark.skip(reason="Temporarily disabling until GEMM SS issues are resolved")
 @pytest.mark.parametrize(
-    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtype_accum, block_M, block_N, block_K, num_stages, num_threads",
+    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
     [
         (512, 1024, 768, False, True, "float16", "float16", "float16", 128, 128, 32, 2, 128),
         (512, 1024, 768, False, False, "float16", "float16", "float16", 128, 128, 32, 2, 128),
@@ -128,36 +128,8 @@ def run_gemm_ss(
         (128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2, 128),
     ],
 )
-def test_gemm_ss(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtype_accum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages,
-    num_threads,
-):
-    run_gemm_ss(
-        M,
-        N,
-        K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtype_accum,
-        block_M,
-        block_N,
-        block_K,
-        num_stages,
-        num_threads,
-    )
+def test_gemm_ss(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):
+    run_gemm_ss(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads)
 
 
 def matmul_rs(
@@ -273,7 +245,7 @@ def run_gemm_rs(
 
 @pytest.mark.skip(reason="Temporarily disabling until GEMM RS issues are resolved")
 @pytest.mark.parametrize(
-    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtype_accum, block_M, block_N, block_K, num_stages, num_threads",
+    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
     [
         (512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2, 128),
         (512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32, 2, 128),
@@ -291,36 +263,8 @@ def run_gemm_rs(
         (128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2, 128),
     ],
 )
-def test_gemm_rs(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtype_accum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages,
-    num_threads,
-):
-    run_gemm_rs(
-        M,
-        N,
-        K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtype_accum,
-        block_M,
-        block_N,
-        block_K,
-        num_stages,
-        num_threads,
-    )
+def test_gemm_rs(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):
+    run_gemm_rs(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads)
 
 
 def matmul_sr(
@@ -435,7 +379,7 @@ def run_gemm_sr(
 
 
 @pytest.mark.parametrize(
-    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtype_accum, block_M, block_N, block_K, num_stages, num_threads",
+    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
     [
         (512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2, 128),
         (512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32, 2, 128),
@@ -447,43 +391,14 @@ def run_gemm_sr(
         (128, 128, 32, True, False, "int8", "int8", "int32", 128, 128, 32, 2, 128),
         (128, 128, 32, True, True, "int8", "int8", "int32", 128, 128, 32, 2, 128),
         (128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2, 128),
-        # TODO(lei): fix float32 coverage
         (128, 128, 128, False, False, "float", "float", "float32", 128, 128, 32, 2, 128),
         (128, 128, 128, False, True, "float", "float", "float32", 128, 128, 32, 2, 128),
         (128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 2, 128),
         (128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2, 128),
     ],
 )
-def test_gemm_sr(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtype_accum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages,
-    num_threads,
-):
-    run_gemm_sr(
-        M,
-        N,
-        K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtype_accum,
-        block_M,
-        block_N,
-        block_K,
-        num_stages,
-        num_threads,
-    )
+def test_gemm_sr(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):
+    run_gemm_sr(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads)
 
 
 def matmul_rr(
@@ -602,7 +517,7 @@ def run_gemm_rr(
 
 
 @pytest.mark.parametrize(
-    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtype_accum, block_M, block_N, block_K, num_stages, num_threads",
+    "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
     [
         (512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2, 128),
         (512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32, 2, 128),
@@ -622,36 +537,8 @@ def run_gemm_rr(
         (128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2, 128),
     ],
 )
-def test_gemm_rr(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtype_accum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages,
-    num_threads,
-):
-    run_gemm_rr(
-        M,
-        N,
-        K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtype_accum,
-        block_M,
-        block_N,
-        block_K,
-        num_stages,
-        num_threads,
-    )
+def test_gemm_rr(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):
+    run_gemm_rr(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads)
 
 
 if __name__ == "__main__":

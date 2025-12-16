@@ -1,3 +1,4 @@
+import pytest
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -95,31 +96,49 @@ def run_gemm(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize(
+    "trans_A, trans_B, k_pack",
+    [
+        (False, False, 1),
+        (False, True, 1),
+        (True, True, 1),
+        (True, False, 1),
+        (False, True, 2),
+    ],
+)
 @tilelang.testing.requires_rocm
-def test_gemm_f16f32f32_nt():
-    run_gemm(1024, 1024, 1024, False, False, "float16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "float16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, True, "float16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, False, "float16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "float16", "float32", "float32", 128, 128, 32, k_pack=2)
+def test_gemm_f16f32f32_nt(trans_A, trans_B, k_pack):
+    run_gemm(1024, 1024, 1024, trans_A, trans_B, "float16", "float32", "float32", 128, 128, 32, k_pack=k_pack)
 
 
+@pytest.mark.parametrize(
+    "trans_A, trans_B, k_pack",
+    [
+        (False, False, 1),
+        (False, True, 1),
+        (True, True, 1),
+        (True, False, 1),
+        (False, True, 2),
+    ],
+)
 @tilelang.testing.requires_rocm
-def test_gemm_bf16f32f32_nt():
-    run_gemm(1024, 1024, 1024, False, False, "bfloat16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "bfloat16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, True, "bfloat16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, False, "bfloat16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "bfloat16", "float32", "float32", 128, 128, 32, k_pack=2)
+def test_gemm_bf16f32f32_nt(trans_A, trans_B, k_pack):
+    run_gemm(1024, 1024, 1024, trans_A, trans_B, "bfloat16", "float32", "float32", 128, 128, 32, k_pack=k_pack)
 
 
+@pytest.mark.parametrize(
+    "trans_A, trans_B, k_pack",
+    [
+        (False, False, 1),
+        (False, True, 1),
+        (True, True, 1),
+        (True, False, 1),
+        (False, True, 2),
+    ],
+)
 @tilelang.testing.requires_rocm
-def test_gemm_bf16bf16f32():
-    run_gemm(1024, 1024, 1024, False, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "bfloat16", "bfloat16", "float32", 128, 128, 32, k_pack=2)
+def test_gemm_bf16bf16f32(trans_A, trans_B, k_pack):
+    run_gemm(1024, 1024, 1024, trans_A, trans_B, "bfloat16", "bfloat16", "float32", 128, 128, 32, k_pack=k_pack)
 
 
 def matmul_rs(
