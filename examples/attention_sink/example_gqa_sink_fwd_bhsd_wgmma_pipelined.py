@@ -41,7 +41,7 @@ def flashattn(
     block_N=128,
     num_stages=2,
     threads=256,
-    dtype: str = T.float16,
+    dtype: str = "float16",
 ):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -53,7 +53,7 @@ def flashattn(
     head_kv = heads // groups
     q_shape = [batch, heads, seq_q, dim]
     kv_shape = [batch, head_kv, seq_kv, dim]
-    accum_dtype = T.float32
+    accum_dtype = "float32"
 
     past_len = seq_kv - seq_q
     assert past_len >= 0, "seq_kv must be greater than or equal to seq_q"
@@ -263,10 +263,10 @@ def main(
     dim: int = 128,
     groups: int = 8,
     window_size: Optional[int] = None,
-    dtype: str = T.float16,
+    dtype: str = "float16",
     tune: bool = False,
 ):
-    torch_dtype = {T.float16: torch.float16, T.bfloat16: torch.bfloat16}[dtype]
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:
         print("Using sliding window attention.")
         assert window_size <= seq_q
@@ -325,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument("--dim", type=int, default=128, help="dim")
     parser.add_argument("--groups", type=int, default=8, help="groups")
     parser.add_argument("--window_size", type=int, default=None, help="window size (default: None, which means full attention)")
-    parser.add_argument("--dtype", type=str, default=T.float16, help="dtype, can be float16 or bfloat16")
+    parser.add_argument("--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
     parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.groups, args.window_size, args.dtype, args.tune)
