@@ -41,7 +41,8 @@ __device__ __forceinline__ void st_global_256(longlong4 *ptr, longlong4 &val) {
 }
 
 // 256-bit store for ulonglong4 with non-const reference
-__device__ __forceinline__ void st_global_256(ulonglong4 *ptr, ulonglong4 &val) {
+__device__ __forceinline__ void st_global_256(ulonglong4 *ptr,
+                                              ulonglong4 &val) {
   asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
                :
                : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
@@ -71,7 +72,8 @@ __device__ __forceinline__ void st_global_256(T *ptr, T &val) {
   ulonglong4 &val_u64 = *((ulonglong4 *)&val);
   asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
                :
-               : "l"(ptr), "l"(val_u64.x), "l"(val_u64.y), "l"(val_u64.z), "l"(val_u64.w));
+               : "l"(ptr), "l"(val_u64.x), "l"(val_u64.y), "l"(val_u64.z),
+                 "l"(val_u64.w));
 }
 
 __device__ __forceinline__ unsigned long long

@@ -192,8 +192,8 @@ std::string GetTileLangFP4Type(DataType type) {
   } else if (lanes == 64) {
     vec = "_64";
   } else {
-    LOG(FATAL)
-        << "Only support scalar and vector types of width (2, 4, 8, 16, 32, 64) for FP4";
+    LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16, "
+                  "32, 64) for FP4";
   }
 
   std::string suffix;
@@ -740,8 +740,9 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
     os << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2]
        << ")))->" << access[i % 2];
   } else if (t.is_float4_e2m1fn()) {
-    os << "([](__nv_fp4_storage_t v) { __nv_fp4_e2m1 t; t.__x = v; return t; })((" << vec
-       << ".__x >> " << i * 4 << ") & 0xF)";
+    os << "([](__nv_fp4_storage_t v) { __nv_fp4_e2m1 t; t.__x = v; return t; "
+          "})(("
+       << vec << ".__x >> " << i * 4 << ") & 0xF)";
   } else {
     os << vec << "." << access[i];
   }
@@ -2894,7 +2895,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
 
 void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
                                      std::ostream &os) { // NOLINT(*)
-  LOG(INFO) << "VisitExpr_(const BufferLoadNode *op, std::ostream &os): " << op->dtype;
+  LOG(INFO) << "VisitExpr_(const BufferLoadNode *op, std::ostream &os): "
+            << op->dtype;
   ICHECK_EQ(op->indices.size(), 1)
       << "Load from non-flat memory not supported.";
   ICHECK(!op->predicate.defined())
@@ -2913,11 +2915,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   } else {
     bool can_vector_load = false;
     arith::PVar<PrimExpr> base;
-    // For sub-byte types with lanes > 1 in element_dtype, adjust the ramp pattern
+    // For sub-byte types with lanes > 1 in element_dtype, adjust the ramp
+    // pattern
     int ramp_lanes = (element_dtype.lanes() > 1 && element_dtype.bits() < 8)
                          ? value_dtype.lanes() / element_dtype.lanes()
                          : value_dtype.lanes();
-                         if (arith::ramp(base, 1, ramp_lanes).Match(index)) {
+    if (arith::ramp(base, 1, ramp_lanes).Match(index)) {
       const RampNode *ramp = index.as<RampNode>();
       ICHECK(ramp);
       can_vector_load = true;
@@ -2963,8 +2966,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
-  ICHECK_EQ(op->indices.size(), 1)
-      << "Store to non-flat memory not supported.";
+  ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
   ICHECK(!op->predicate.defined())
       << "Predicated buffer store is not supported.";
 
@@ -2975,12 +2977,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
 
   if (value_dtype.lanes() == element_dtype.lanes()) {
     std::string value = this->PrintExpr(op->value);
-    std::string ref = this->GetBufferRef(value_dtype, op->buffer.get(), index_expr);
+    std::string ref =
+        this->GetBufferRef(value_dtype, op->buffer.get(), index_expr);
     this->PrintIndent();
     stream << ref << " = " << value << ";\n";
   } else {
     arith::PVar<PrimExpr> base;
-    // For sub-byte types with lanes > 1 in element_dtype, adjust the ramp pattern
+    // For sub-byte types with lanes > 1 in element_dtype, adjust the ramp
+    // pattern
     int ramp_lanes = (element_dtype.lanes() > 1 && element_dtype.bits() < 8)
                          ? value_dtype.lanes() / element_dtype.lanes()
                          : value_dtype.lanes();
@@ -2989,8 +2993,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
       std::string value = this->PrintExpr(op->value);
       this->PrintVecStore(op->buffer.get(), value_dtype, base.Eval(), value);
     } else {
-      // The assignment below introduces side-effect, and the resulting value cannot
-      // be reused across multiple expression, thus a new scope is needed
+      // The assignment below introduces side-effect, and the resulting value
+      // cannot be reused across multiple expression, thus a new scope is needed
       int vec_scope = BeginScope();
 
       // store elements separately
