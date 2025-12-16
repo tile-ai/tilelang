@@ -51,10 +51,10 @@ class BitLinearBitBLAS(nn.Module):
         matmul_config = MatmulConfig(
             N=self.out_features,  # N dimension
             K=self.in_features,  # K dimension
-            A_dtype=T.int8,  # activation A dtype
+            A_dtype="int8",  # activation A dtype
             W_dtype="int2",  # weight W dtype
-            accum_dtype=T.int32,  # accumulation dtype
-            out_dtype=T.float32,  # output dtype
+            accum_dtype="int32",  # accumulation dtype
+            out_dtype="float32",  # output dtype
             layout="nt",  # matrix layout, "nt" indicates the layout of A is non-transpose and the layout of W is transpose
             with_bias=False,  # bias
             # configs for weight only quantization

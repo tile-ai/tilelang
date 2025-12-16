@@ -36,7 +36,7 @@ def run_view(N, M, dtype, new_dtype=None):
 
     def ref_program(A):
         if new_dtype:
-            torch_dtype = T.dtype(new_dtype)..as_torch()
+            torch_dtype = T.dtype(new_dtype).as_torch()
             return A.view(N // M, M).view(dtype=torch_dtype)
         return A.view(N // M, M)
 

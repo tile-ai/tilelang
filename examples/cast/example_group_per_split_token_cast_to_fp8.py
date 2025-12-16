@@ -194,7 +194,7 @@ def main(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
         x_fp8_tilelang_, x_amax_tilelang_ = kernel(x, batch_sizes)
         return x_fp8_tilelang_, x_amax_tilelang_
 
-    def run_.as_torch():
+    def run_torch():
         x_fp8_torch_, x_amax_torch_ = ref_program(x, batch_sizes)
         return x_fp8_torch_, x_amax_torch_
 

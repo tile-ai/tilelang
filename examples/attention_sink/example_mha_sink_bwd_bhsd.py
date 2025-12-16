@@ -435,7 +435,7 @@ def ref_program(
 
 def main(BATCH: int = 1, H: int = 1, N_CTX: int = 512, D_HEAD: int = 128, window_size: Optional[int] = None, dtype: str = T.float16):
     dtype = T.dtype(dtype)
-    torch_dtype = dtype..as_torch()
+    torch_dtype = dtype.as_torch()
     if window_size is not None:
         print("Using sliding window attention.")
         assert window_size <= N_CTX

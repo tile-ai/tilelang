@@ -144,10 +144,7 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     dtype_str = str(self)
     if dtype_str in _STR_TO_TORCH_DTYPE:
         return _STR_TO_TORCH_DTYPE[dtype_str]
-    raise ValueError(
-        f"Cannot convert dtype '{dtype_str}' to torch.dtype. "
-        f"Supported dtypes: {list(_STR_TO_TORCH_DTYPE.keys())}"
-    )
+    raise ValueError(f"Cannot convert dtype '{dtype_str}' to torch.dtype. Supported dtypes: {list(_STR_TO_TORCH_DTYPE.keys())}")
 
 
 __orig_dtype_new = dtype.__new__

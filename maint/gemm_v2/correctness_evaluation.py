@@ -2,6 +2,8 @@
 import pytest
 from tilelang import tvm as tvm
 import tilelang.testing
+from tilelang import language as T
+import torch
 
 
 def matmul(
@@ -23,8 +25,6 @@ def matmul(
     B_shape = (N, K) if trans_B else (K, N)
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(
@@ -74,8 +74,6 @@ def _compile_and_check(
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
     def ref_program(A, B):
-        import torch
-
         if trans_A:
             A = A.T
         if trans_B:
@@ -147,8 +145,6 @@ def matmul_rs(
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
     A_frag_shape = A_shared_shape
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(
@@ -235,8 +231,6 @@ def matmul_sr(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
     B_frag_shape = B_shared_shape
 
-    import tilelang.language as T
-
     @T.prim_func
     def main(
         A: T.Tensor(A_shape, in_dtype),
@@ -322,8 +316,6 @@ def matmul_rr(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
     A_frag_shape = A_shared_shape
     B_frag_shape = B_shared_shape
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(

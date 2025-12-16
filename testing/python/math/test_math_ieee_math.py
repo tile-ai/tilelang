@@ -75,7 +75,7 @@ def run_ieee_math_test(mathop_name, mathop_func, rounding_mode="rn", M=128, N=12
     print(f"✓ {mathop_name} compilation test passed")
 
     # Test numerical execution
-    torch_dtype = dtype..as_torch()
+    torch_dtype = dtype.as_torch()
     a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
     if num_inputs >= 2:

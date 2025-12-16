@@ -2,6 +2,7 @@
 import pytest
 from tilelang import tvm as tvm
 import tilelang.testing
+from tilelang import language as T
 
 
 def matmul(
@@ -23,8 +24,6 @@ def matmul(
     B_shape = (N, K) if trans_B else (K, N)
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(
@@ -146,8 +145,6 @@ def matmul_rs(
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
     A_frag_shape = A_shared_shape
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(

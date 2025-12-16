@@ -1,7 +1,6 @@
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.utils.tensor import map_torch_type
 
 
 @tilelang.jit(out_idx=[-1])
@@ -55,7 +54,7 @@ def calc_diff(x, y):
 
 
 def test_gemm_fp8(M, N, K, dtype):
-    torch_dtype = T.dtype(dtype)..as_torch()
+    torch_dtype = T.dtype(dtype).as_torch()
 
     kernel = matmul(M, N, K, 128, 128, 64, dtype)
 
