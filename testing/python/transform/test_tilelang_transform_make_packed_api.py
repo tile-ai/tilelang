@@ -23,8 +23,7 @@ from tilelang import tvm as tvm
 import tvm
 import tilelang.testing
 from tvm import tir
-import tilelang.language as T
-from tvm.script import ir as I
+from tvm.script import tir as T, ir as I
 
 
 def _find_assignment(stmt, var_name):
@@ -82,7 +81,7 @@ def test_target_host_removed():
     @I.ir_module
     class before:
         @T.prim_func
-        def main(A: T.Buffer(1, T.float32)):
+        def main(A: T.Buffer(1, "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("cuda", host=host)})
             T.evaluate(0)
 
@@ -103,13 +102,13 @@ def test_internal_subroutine_call():
     @I.ir_module
     class before:
         @T.prim_func
-        def main(A: T.Buffer(1, T.float32)):
+        def main(A: T.Buffer(1, "float32")):
             T.func_attr({"target": T.target("llvm", host="llvm")})
             before.subroutine(A.data)
 
         # this test fails if it's made public
         @T.prim_func(private=True)
-        def subroutine(A_data: T.handle(T.float32)):
+        def subroutine(A_data: T.handle("float32")):
             T.func_attr({"target": T.target("llvm")})
             T.evaluate(A_data)
 
@@ -136,12 +135,12 @@ def test_subroutine_call_to_externally_visible_subroutine():
     @I.ir_module
     class before:
         @T.prim_func
-        def main(A: T.Buffer(1, T.float32)):
+        def main(A: T.Buffer(1, "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("llvm", host="llvm")})
             before.subroutine(A.data)
 
         @T.prim_func
-        def subroutine(A_data: T.handle(T.float32)):
+        def subroutine(A_data: T.handle("float32")):
             T.func_attr({"global_symbol": "subroutine", "target": T.target("llvm", host="llvm")})
             T.evaluate(A_data)
 
@@ -165,10 +164,10 @@ def test_function_call_with_wrong_argument_count():
 
     @T.prim_func
     def func(
-        A: T.Buffer([16, 16], T.int32),
-        B: T.Buffer([16, 16], T.int32),
-        C: T.Buffer([16, 16], T.int32),
-        D: T.Buffer([16, 16], T.int32),
+        A: T.Buffer([16, 16], "int32"),
+        B: T.Buffer([16, 16], "int32"),
+        C: T.Buffer([16, 16], "int32"),
+        D: T.Buffer([16, 16], "int32"),
     ):
         pass
 
@@ -183,7 +182,7 @@ def test_function_call_with_wrong_type_code():
     """Type codes must be checked before accessing the arguments"""
 
     @T.prim_func
-    def func(A: T.Buffer([16, 16], T.int32)):
+    def func(A: T.Buffer([16, 16], "int32")):
         pass
 
     built = tvm.compile(func, target="llvm")
@@ -197,14 +196,14 @@ def test_function_call_with_null_data_pointer():
     """The data pointer must be checked before accessing the array"""
 
     @T.prim_func
-    def func(A: T.Buffer([16, 16], T.int32), B: T.Buffer([16, 16], T.int32)):
+    def func(A: T.Buffer([16, 16], "int32"), B: T.Buffer([16, 16], "int32")):
         for i, j in T.grid(16, 16):
             B[i, j] = A[i, j]
 
     built = tvm.compile(func, target="llvm")
 
-    A = tvm.nd.array(np.zeros([16], dtype=T.int32))
-    B = tvm.nd.empty([16, 16], T.int32, tvm.cpu())
+    A = tvm.nd.array(np.zeros([16], dtype="int32"))
+    B = tvm.nd.empty([16, 16], "int32", tvm.cpu())
 
     with pytest.raises(tvm.TVMError):
         built(A, B)
@@ -215,14 +214,14 @@ def test_function_call_with_wrong_dimensionality():
     """The dimensionality must be checked before validating the shape"""
 
     @T.prim_func
-    def func(A: T.Buffer([16, 16], T.int32), B: T.Buffer([16, 16], T.int32)):
+    def func(A: T.Buffer([16, 16], "int32"), B: T.Buffer([16, 16], "int32")):
         for i, j in T.grid(16, 16):
             B[i, j] = A[i, j]
 
     built = tvm.compile(func, target="llvm")
 
-    A = tvm.nd.array(np.zeros([16], dtype=T.int32))
-    B = tvm.nd.empty([16], T.int32, tvm.cpu())
+    A = tvm.nd.array(np.zeros([16], dtype="int32"))
+    B = tvm.nd.empty([16], "int32", tvm.cpu())
 
     with pytest.raises(tvm.TVMError):
         built(A, B)

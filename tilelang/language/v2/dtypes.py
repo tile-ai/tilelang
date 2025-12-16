@@ -76,7 +76,9 @@ _DTYPE_TO_STR = {**_PYTHON_DTYPE_TO_STR, **_NUMPY_DTYPE_TO_STR, **_TORCH_DTYPE_T
 
 _STR_TO_TVM_DTYPE_CALL = {
     "bool": "Boolean",
+    "int4": "Int4",
     "int8": "Int8",
+    "int16": "Int16",
     "int32": "Int32",
     "int64": "Int64",
     "uint8": "UInt8",
@@ -155,10 +157,12 @@ if TYPE_CHECKING:
     class bool(dtype): ...
     class short(dtype): ...
     class int(dtype): ...
+    class uint(dtype): ...
     class long(dtype): ...
     class half(dtype): ...
     class float(dtype): ...
     class double(dtype): ...
+    class int4(dtype): ...
     class int8(dtype): ...
     class int16(dtype): ...
     class int32(dtype): ...
@@ -320,10 +324,12 @@ else:
     bool = dtype("bool")
     short = dtype("int16")
     int = dtype("int32")
+    uint = dtype("uint32")
     long = dtype("int64")
     half = dtype("float16")
     float = dtype("float32")
     double = dtype("float64")
+    int4 = dtype("int4")
     int8 = dtype("int8")
     int16 = dtype("int16")
     int32 = dtype("int32")
@@ -484,10 +490,12 @@ _all_dtypes = {
     "bool",
     "short",
     "int",
+    "uint",
     "long",
     "half",
     "float",
     "double",
+    "int4",
     "int8",
     "int16",
     "int32",

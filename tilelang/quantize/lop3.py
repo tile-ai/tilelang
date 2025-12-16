@@ -1089,8 +1089,8 @@ __device__ void decode_i2u_to_i4s(T1 *_i4u, T2 *B_local_decode, const int N = 16
 
 
 def get_lop3_intrin_group(
-    out_dtype: Literal[T.float16, T.int8, "int4"],
-    source_format: Literal["int", "uint"] = "uint",
+    out_dtype: Literal[T.float16, T.int8, T.int4],
+    source_format: Literal[T.int, T.uint] = T.uint,
     source_bit: int = 4,
     storage_dtype: Literal[T.int32, T.int8] = T.int8,
     with_scaling: bool = False,
@@ -1108,7 +1108,7 @@ def get_lop3_intrin_group(
     in_dtype : Literal[T.int8]
         The data type of the input. It should be "int8".
 
-    out_dtype : Literal[T.float16, T.int8, "int4"]
+    out_dtype : Literal[T.float16, T.int8, T.int4]
         The data type of the output. It can be either "float16" or "int8" or "int4".
 
     storage_nbit : int, optional
@@ -1131,17 +1131,18 @@ def get_lop3_intrin_group(
     Dict[str, str]
         A dictionary mapping the names of the intrinsics to their corresponding implementations.
     """
-    assert out_dtype in [T.float16, T.int8, "int4"], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'int8' or 'int4' ."
+    out_dtype, source_format, storage_dtype = T.dtype(out_dtype), T.dtype(source_format), T.dtype(storage_dtype)
+    assert out_dtype in [T.float16, T.int8, T.int4], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'int8' or 'int4' ."
 
-    dtype_mapping = {"float16": "f16", "int4": "i4", "int8": "i8", "int32": "i32"}
+    dtype_mapping = {T.float16: "f16", T.int4: "i4", T.int8: "i8", T.int32: "i32"}
     target_dtype = dtype_mapping[out_dtype]
 
-    if source_format not in ["int", "uint"]:
+    if source_format not in [T.int, T.uint]:
         raise ValueError(f"Invalid source_format. Expected 'int' or 'uint', but got {source_format}.")
-    if with_zeros and source_format == "int":
+    if with_zeros and source_format == T.int:
         raise ValueError(f"Zeros are not supported for signed integers, but got {source_format}")
 
-    source_symbol = "i" if source_format == "int" else "u"
+    source_symbol = "i" if source_format == T.int else "u"
 
     import_c_map = {
         "i4_to_f16": decode_i4_to_f16,
@@ -1181,7 +1182,7 @@ def get_lop3_intrin_group(
         d4f = "f16"
     elif out_dtype == T.int8:
         d4f = "i8s"
-    elif out_dtype == "int4":
+    elif out_dtype == T.int4:
         d4f = "i4s"
     else:
         raise ValueError(f"Unsupported target dtype: {target_dtype}")
