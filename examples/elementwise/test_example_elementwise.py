@@ -6,7 +6,7 @@ def test_example_elementwise_add():
     example_elementwise_add.main()
 
 
-def test_example_elementwise_add_with_autotune():
+def test_example_elementwise_add_autotune():
     example_elementwise_add.main(use_autotune=True)
 
 
