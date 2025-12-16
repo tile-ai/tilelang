@@ -56,18 +56,11 @@ def get_best_config(M, N):
     return autotuner.run(warmup=3, rep=20)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--m", type=int, default=1024)
-    parser.add_argument("--n", type=int, default=1024)
-    parser.add_argument("--use_autotune", action="store_true", default=False)
-    args, _ = parser.parse_known_args()
-    M, N = args.m, args.n
-
+def main(M=1024, N=1024, use_autotune=False):
     a = torch.randn(M, N, dtype=torch.float32, device="cuda")
     b = torch.randn(M, N, dtype=torch.float32, device="cuda")
 
-    if args.use_autotune:
+    if use_autotune:
         result = get_best_config(M, N)
         kernel = result.kernel
     else:
@@ -81,4 +74,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--m", type=int, default=1024)
+    parser.add_argument("--n", type=int, default=1024)
+    parser.add_argument("--use_autotune", action="store_true", default=False)
+    args, _ = parser.parse_known_args()
+
+    main(args.m, args.n, args.use_autotune)
