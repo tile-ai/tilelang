@@ -341,7 +341,7 @@ def test_gemm_sp_sm90(M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_
         (512, 1024, 768, T.int8, T.int32, T.int32, 64, 64, 64, 0, 32, False, True),
         (512, 1024, 768, T.int8, T.int32, T.int32, 128, 128, 128, 0, 128, False, True),
         (512, 1024, 768, T.int8, T.int32, T.int32, 64, 64, 64, 1, 128, False, True),
-        (512, 1024, 768, T.int8, T.int32, T.int32, 64, 64, 64, 2, 128, False,
+        (512, 1024, 768, T.int8, T.int32, T.int32, 64, 64, 64, 2, 128, False, True),
     ],
 )
 def test_gemm_sp_sm80(M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K, num_stages, num_threads, trans_A, trans_B):
