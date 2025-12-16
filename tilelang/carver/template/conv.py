@@ -39,9 +39,9 @@ class ConvTemplate(BaseTemplate):
     S: int  # The step size by which the kernel slides across the input.
     D: int  # The spacing between kernel elements, controlling receptive field expansion.
     P: int  # The number of pixels added to input borders to control output spatial dimensions.
-    in_dtype: str = T.float16  # Data type of input matrices
-    out_dtype: str = T.float16  # Data type of output matrix
-    accum_dtype: str = T.float16  # Data type for accumulation
+    in_dtype: str = "float16"  # Data type of input matrices
+    out_dtype: str = "float16"  # Data type of output matrix
+    accum_dtype: str = "float16"  # Data type for accumulation
     with_bias: bool = False  # Whether to add a bias term
 
     def get_hardware_aware_configs(self, arch=None, topk=10) -> list[Hint]:

@@ -7,7 +7,6 @@ tilelang.testing.set_random_seed()
 
 
 def _make_shared_reduce(M, N, dtype, reduce_cb):
-
     @T.prim_func
     def main(
         A: T.Tensor((M, N), dtype),

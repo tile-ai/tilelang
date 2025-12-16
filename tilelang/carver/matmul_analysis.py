@@ -593,7 +593,7 @@ def get_tensorized_func_and_tags(
         intrin_info["in_dtype"] = in_dtype
         intrin_info["out_dtype"] = out_dtype
 
-        if 70 <= check_sm_version(target.arch) < 80 and out_dtype == T.int32:
+        if 70 <= check_sm_version(target.arch) < 80 and out_dtype == "int32":
             # INT32 Accum TensorCore only supports SM Version > 32.
             return False
 
@@ -609,7 +609,7 @@ def get_tensorized_func_and_tags(
         # When the func is a dequantize like ops, we should consider the M
         require_block_reduce = False
         # And we only support float16 for now
-        if hasattr(func.attrs, "dequantize_info") and in_dtype in [T.bfloat16, T.float16]:
+        if hasattr(func.attrs, "dequantize_info") and in_dtype in ["bfloat16", "float16"]:
             for arg in func.params:
                 inp_shape = func.buffer_map[arg].shape
                 M = inp_shape[0]
@@ -644,7 +644,7 @@ def get_tensorized_func_and_tags(
 
         # 16 for 16 bits tensor core while 32 for 8bits tensorcore.
         minimal_tensorize_spatial_threshold = 16
-        minimal_tensorize_reduce_threshold = 16 if in_dtype in [T.bfloat16, T.float16] else 32
+        minimal_tensorize_reduce_threshold = 16 if in_dtype in ["bfloat16", "float16"] else 32
         # the batch dimension is not taken into consideration.
         for item_var in block_stmt.iter_vars[1:]:
             extent = item_var.dom.extent
@@ -665,7 +665,7 @@ def get_tensorized_func_and_tags(
     return func, None
 
 
-def get_propagate_map(trans: bool = True, dtype=T.float16, matrix_name="A", index_dtype=T.int32):
+def get_propagate_map(trans: bool = True, dtype="float16", matrix_name="A", index_dtype="int32"):
     from bitblas.tl.mma_layout import (  # pylint: disable=import-outside-toplevel
         ldmatrix_32x8_to_shared_16x16_layout,
         ldmatrix_trans_32x8_to_shared_16x16_layout,
@@ -724,7 +724,7 @@ def get_propagate_map(trans: bool = True, dtype=T.float16, matrix_name="A", inde
 # This function is used to get the index map for the stage3 of the
 # Ladder weight propagation, which can be used to avoid the ldmatrix
 # Instructions.
-def get_ladder_stage3_map(dtype=T.float16, index_dtype=T.int32):
+def get_ladder_stage3_map(dtype="float16", index_dtype="int32"):
     def shared_32x8_to_mma_32x8_layout(i, j):
         thread_id = (i % 8) * 4 + (j // 2)
         local_id = (i // 8) * 2 + (j % 2)

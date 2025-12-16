@@ -32,9 +32,9 @@ class MatmulTemplate(BaseTemplate):
     K: int = None  # Number of columns in matrix A and rows in matrix B
     trans_A: bool = False  # Whether to transpose matrix A
     trans_B: bool = True  # Whether to transpose matrix B
-    in_dtype: str = T.float16  # Data type of input matrices
-    out_dtype: str = T.float16  # Data type of output matrix
-    accum_dtype: str = T.float16  # Data type for accumulation
+    in_dtype: str = "float16"  # Data type of input matrices
+    out_dtype: str = "float16"  # Data type of output matrix
+    accum_dtype: str = "float16"  # Data type for accumulation
     with_bias: bool = False  # Whether to add a bias term
 
     def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:

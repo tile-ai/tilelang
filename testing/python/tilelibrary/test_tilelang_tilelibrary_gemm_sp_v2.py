@@ -31,7 +31,6 @@ def matmul(
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
-
     @T.prim_func
     def main(
         A_sparse: T.Tensor(A_sparse_shape, in_dtype),

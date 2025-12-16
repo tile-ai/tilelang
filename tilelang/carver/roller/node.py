@@ -146,7 +146,7 @@ class Node:
     def set_dtype(self, dtype: tvm.DataType, id=0) -> None:
         assert isinstance(dtype, tvm.DataType), type(dtype)
         if dtype == tvm.DataType("bool"):
-            dtype = tvm.DataType(T.int8)
+            dtype = tvm.DataType("int8")
         if len(self._dtypes) <= id:
             self._dtypes.extend([None for _ in range(id - len(self._dtypes) + 1)])
         elif self._dtypes[id] is not None:
@@ -318,7 +318,7 @@ class PrimFuncNode(Node):
     def set_dtype(self, dtype: tvm.DataType, id=0) -> None:
         assert isinstance(dtype, tvm.DataType), type(dtype)
         if dtype == tvm.DataType("bool"):
-            dtype = tvm.DataType(T.int8)
+            dtype = tvm.DataType("int8")
         if len(self._dtypes) <= id:
             self._dtypes.extend([None for _ in range(id - len(self._dtypes) + 1)])
         elif self._dtypes[id] is not None:

@@ -7,7 +7,6 @@ def alloc_var(
     block_N,
     dtype,
 ):
-
     @T.prim_func
     def main(
         A: T.Tensor((N,), dtype),

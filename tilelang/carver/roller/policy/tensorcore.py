@@ -295,7 +295,7 @@ class TensorCorePolicy(DefaultPolicy):
         intrin_info = node.get_tag("intrin_info")
         if intrin_info:
             codegen_dict.intrin_info = IntrinInfo(**intrin_info)
-            if intrin_info["out_dtype"] in [T.float32]:
+            if intrin_info["out_dtype"] in ["float32"]:
                 codegen_dict.shared_scope = "shared.dyn"
         # smem capacity
         # TODO: This is a dummy mul which avoid reusing some shared memory.

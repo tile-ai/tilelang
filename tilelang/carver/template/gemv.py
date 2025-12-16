@@ -19,9 +19,9 @@ class GEMVTemplate(BaseTemplate):
     N: int = None  # Number of columns in matrix B (output width)
     K: int = None  # Number of rows in matrix B (input width)
     trans_B: bool = True  # Whether to transpose matrix B
-    in_dtype: str = T.float16  # Input data type
-    out_dtype: str = T.float16  # Output data type
-    accum_dtype: str = T.float16  # Accumulation data type
+    in_dtype: str = "float16"  # Input data type
+    out_dtype: str = "float16"  # Output data type
+    accum_dtype: str = "float16"  # Accumulation data type
     with_bias: bool = False  # Whether to add a bias term
 
     def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:

@@ -6,7 +6,6 @@ import tilelang.language as T
 
 
 def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
-
     @T.prim_func
     def cumsum(
         A: T.Tensor((M, N), dtype),

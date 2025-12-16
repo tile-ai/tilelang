@@ -8,7 +8,6 @@ from example_gqa_sink_fwd_bhsd_wgmma_pipelined import flashattn, ref_program, ge
 from typing import Optional
 
 
-
 @triton.jit
 def triton_kernel(
     Q,

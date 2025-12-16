@@ -19,7 +19,7 @@ class ElementwiseTemplate(BaseTemplate):
 
     # OP Related Config
     shape: list[int] = None  # Shape of the tensor
-    dtype: str = T.float16  # Data type of the tensor
+    dtype: str = "float16"  # Data type of the tensor
 
     def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:
         """

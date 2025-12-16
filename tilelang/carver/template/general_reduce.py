@@ -12,7 +12,7 @@ class GeneralReductionTemplate(BaseTemplate):
     # OP Related Config
     structure: str | list[str] = None
     shape: list[int] = None
-    dtype: str = T.float16
+    dtype: str = "float16"
 
     def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:
         roller_hints = get_roller_hints_from_func(self._func, arch=arch, topk=topk, allow_gemv=False)
