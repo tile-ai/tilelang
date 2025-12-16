@@ -346,7 +346,7 @@ def matmul(
 
 
 def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=256):
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     M, K = A.shape
     E, N, QK = qB.shape
     topk = topk_weights.shape[0] // M
@@ -451,8 +451,8 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
                 topk,
                 E,
                 padding_M,
-                "bfloat16",
-                "bfloat16",
+                T.bfloat16,
+                T.bfloat16,
                 T.float32,
                 num_bits=num_bits,
                 scale_size=scale_size,
@@ -467,8 +467,8 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
             topk,
             E,
             padding_M,
-            "bfloat16",
-            "bfloat16",
+            T.bfloat16,
+            T.bfloat16,
             T.float32,
             num_bits=num_bits,
             scale_size=scale_size,

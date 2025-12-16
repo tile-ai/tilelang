@@ -8,7 +8,7 @@ from einops import repeat, rearrange, einsum
 from index import prepare_token_indices
 from utils import get_abs_err, get_err_ratio
 
-BF16 = "bfloat16"
+BF16 = T.bfloat16
 FP32 = T.float32
 INT32 = T.int32
 

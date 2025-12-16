@@ -228,7 +228,7 @@ def matmul(
                 val (tir.PrimExpr): A uint8 value containing packed FP4 elements.
                 pos (tir.PrimExpr): Index (0-based) of which FP4 nibble inside `val` to extract.
                 scale (tir.PrimExpr): Exponent offset applied when converting FP4 exponent to bfloat16.
-                dtype (str): Target dtype string; must be "bfloat16".
+                dtype (str): Target dtype string; must be T.bfloat16.
 
             Returns:
                 tir.PrimExpr: A bfloat16-typed PrimExpr containing the converted value.
@@ -252,7 +252,7 @@ def matmul(
             e_bf16 = T.min(e_bf16 + scale, tir.const((1 << 8) - 1, T.uint16))
             m_f4 = f4 & tir.const(1, T.uint16)
             val_bf16 = tir.reinterpret(
-                "bfloat16",
+                T.bfloat16,
                 ((((s << tir.const(8, T.uint16)) | e_bf16) << tir.const(7, T.uint16)) | (m_f4 << tir.const(6, T.uint16))).astype(T.uint16),
             )
             return val_bf16
@@ -364,7 +364,7 @@ def ref_program_twiddling(A, qB):
     Returns:
         torch.Tensor: Result matrix C with shape (M, N) in bfloat16.
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert_bit_twiddling(qB)
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
@@ -384,7 +384,7 @@ def ref_program_simple(A, qB):
     Returns:
         torch.Tensor: Resulting matrix C in bfloat16 with shape (M, N).
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert(qB)
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
@@ -410,14 +410,14 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
     """
     total_flops = 2 * m * n * k
     if tune:
-        kernel = matmul(m, n, k, "bfloat16", "bfloat16", T.float32, num_bits=4, fast_dequant=fast_dequant)
+        kernel = matmul(m, n, k, T.bfloat16, T.bfloat16, T.float32, num_bits=4, fast_dequant=fast_dequant)
     else:
         kernel = matmul(
             m,
             n,
             k,
-            "bfloat16",
-            "bfloat16",
+            T.bfloat16,
+            T.bfloat16,
             T.float32,
             num_bits=4,
             fast_dequant=fast_dequant,

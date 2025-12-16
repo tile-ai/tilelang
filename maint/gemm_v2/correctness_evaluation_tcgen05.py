@@ -134,7 +134,7 @@ K_VALUES_8Bit = [32, 64, 128]
 FALSE_TRUE_CASES = [
     pytest.param(
         k,
-        "float16",
+        T.float16,
         "float32",
         "float32",
         id=f"K{k}-float16-float-float",
@@ -195,7 +195,7 @@ if __name__ == "__main__":
     #             if m in [32, 64] and (n not in [64, 128, 256]):
     #                 continue
     #             print(f"======================= Test {m} {n} {k} False True =============================")
-    #             run_gemm(m, n, k * 3, False, True, "float16", "float", "float", m, n, k, 2, 128)
+    #             run_gemm(m, n, k * 3, False, True, T.float16, T.float, T.float, m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
 
     # # Test Pass
@@ -205,7 +205,7 @@ if __name__ == "__main__":
     #             if m in [32, 64] and (n not in [64, 128, 256]):
     #                 continue
     #             print(f"======================= Test {m} {n} {k} False True =============================")
-    #             run_gemm(m, n, k * 3, False, True, "float16", "float", "float", m, n, k, 2, 256)
+    #             run_gemm(m, n, k * 3, False, True, T.float16, T.float, T.float, m, n, k, 2, 256)
     #             print(f"Test {m} {n} {k} Pass")
 
     # # Test Pass
@@ -215,4 +215,4 @@ if __name__ == "__main__":
     #             if m in [32, 64] and (n not in [64, 128, 256]):
     #                 continue
     #             print(f"======================= Test {m} {n} {k} False True =============================")
-    #             run_gemm(m, n, k * 3, False, True, "float8_e5m2", "float", "float", m, n, k, 2, 128)
+    #             run_gemm(m, n, k * 3, False, True, "float8_e5m2", T.float, T.float, m, n, k, 2, 128)

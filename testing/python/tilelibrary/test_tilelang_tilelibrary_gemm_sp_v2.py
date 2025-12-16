@@ -156,11 +156,11 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
 @pytest.mark.parametrize(
     "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
     [
-        (512, 1024, 768, False, True, "float16", "float16", "float", 128, 128, 32, 2, 128),
-        (512, 1024, 768, False, False, "float16", "float16", "float", 128, 128, 32, 2, 128),
-        (512, 1024, 768, True, False, "float16", "float16", "float", 128, 128, 32, 2, 128),
-        (512, 1024, 768, True, True, "float16", "float16", "float", 128, 128, 32, 2, 128),
-        (128, 8, 64, False, True, "float16", "float16", "float", 128, 8, 32, 0, 128),
+        (512, 1024, 768, False, True, T.float16, T.float16, T.float, 128, 128, 32, 2, 128),
+        (512, 1024, 768, False, False, T.float16, T.float16, T.float, 128, 128, 32, 2, 128),
+        (512, 1024, 768, True, False, T.float16, T.float16, T.float, 128, 128, 32, 2, 128),
+        (512, 1024, 768, True, True, T.float16, T.float16, T.float, 128, 128, 32, 2, 128),
+        (128, 8, 64, False, True, T.float16, T.float16, T.float, 128, 8, 32, 0, 128),
         (128, 128, 128, False, True, "int8", "int32", "int32", 128, 128, 64, 2, 128),
         (128, 128, 128, False, False, "int8", "int8", "int32", 128, 128, 64, 2, 128),
         (128, 128, 128, True, False, "int8", "int8", "int32", 128, 128, 64, 2, 128),

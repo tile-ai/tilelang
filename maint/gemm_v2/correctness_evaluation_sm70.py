@@ -217,17 +217,17 @@ K_VALUES = [16, 32, 64]
 FALSE_TRUE_CASES = [
     pytest.param(
         k,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         id=f"K{k}-float16-float16-float16",
     )
     for k in K_VALUES
 ] + [
     pytest.param(
         k,
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
         "float32",
         id=f"K{k}-float16-float16-float32",
     )
@@ -248,7 +248,7 @@ def run_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 
 
 def run_gemm_rs_false_false(m, n, k):
-    run_gemm_rs(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    run_gemm_rs(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k, 2, 128)
 
 
 TRANS_CASES = [
@@ -306,9 +306,9 @@ def test_gemm_false_false(m, n, k):
         k * 3,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         m,
         n,
         k,
@@ -329,7 +329,7 @@ def test_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_rs_false_false(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_rs_false_false(m, n, k)
 
 
@@ -341,7 +341,7 @@ if __name__ == "__main__":
     #     for n in [16, 32, 64, 128]:
     #         for k in [16, 32, 64]:
     #             print(f"======================= Test {m} {n} {k} False True =============================")
-    #             run_gemm(m, n, k * 3, False, True, "float16", "float16", "float16", m, n, k, 2, 128)
+    #             run_gemm(m, n, k * 3, False, True, T.float16, T.float16, T.float16, m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
 
     # # Test Pass
@@ -349,5 +349,5 @@ if __name__ == "__main__":
     #     for n in [16, 32, 64, 128]:
     #         for k in [16, 32, 64]:
     #             print(f"======================= Test {m} {n} {k} False False =============================")
-    #             run_gemm(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    #             run_gemm(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")

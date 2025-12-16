@@ -37,7 +37,7 @@ def flashattn_fwd(
     block_N=64,
     num_stages=1,
     threads=128,
-    dtype: str = "float16",
+    dtype: str = T.float16,
 ):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -140,7 +140,7 @@ def flashattn_fwd(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
+def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 32
@@ -179,7 +179,7 @@ def make_dq_layout(dQ):
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
+def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 64
@@ -204,7 +204,7 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     }
 )
-def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale=None, dtype="float16"):  # None for full attention
+def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale=None, dtype=T.float16):  # None for full attention
     if sm_scale is None:
         sm_scale = (1.0 / dim) ** 0.5
     scale = sm_scale * 1.44269504  # log2(e)
@@ -309,7 +309,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale
 
 
 @tilelang.jit(out_idx=-1)
-def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: str = "float16"):
+def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: str = T.float16):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len]
 
@@ -346,7 +346,7 @@ class _attention(torch.autograd.Function):
 
         q, k, v, sinks = [maybe_contiguous(x) for x in (q, k, v, sinks)]
         BATCH, H, N_CTX, D_HEAD = q.shape
-        dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
+        dtype = T.float16 if q.dtype == torch.float16 else T.bfloat16
         kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, groups, window_size, dtype=dtype)
         o, lse = kernel(q, k, v, sinks)
         ctx.save_for_backward(q, k, v, sinks, o, lse)
@@ -359,7 +359,7 @@ class _attention(torch.autograd.Function):
         q, k, v, sinks, o, lse = ctx.saved_tensors
         BATCH, H, N_CTX, D_HEAD = q.shape
         groups = ctx.groups
-        dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
+        dtype = T.float16 if q.dtype == torch.float16 else T.bfloat16
 
         kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
@@ -438,9 +438,9 @@ def main(
     D_HEAD: int = 64,
     groups: int = 2,
     window_size: Optional[int] = None,
-    dtype: str = "float16",
+    dtype: str = T.float16,
 ):
-    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    torch_dtype = {T.float16: torch.float16, T.bfloat16: torch.bfloat16}[dtype]
     if window_size is not None:
         print("Using sliding window attention.")
         assert window_size <= N_CTX
@@ -473,7 +473,7 @@ def main(
     # Checks
     rtol, atol = {
         T.float16: (1e-2, 1e-2),
-        "bfloat16": (2e-2, 2e-2),
+        T.bfloat16: (2e-2, 2e-2),
     }[dtype]
     assert torch.allclose(O, O_ref, rtol=rtol, atol=atol), f"O max err: {(O - O_ref).abs().max()}"
     assert torch.allclose(dV, dV_ref, rtol=rtol, atol=atol), f"dV max err: {(dV - dV_ref).abs().max()}"
@@ -506,6 +506,6 @@ if __name__ == "__main__":
     parser.add_argument("--d_head", type=int, default=128, help="Head dimension")
     parser.add_argument("--groups", type=int, default=8, help="Groups")
     parser.add_argument("--window_size", type=int, default=None, help="window size (default: None, which means full attention)")
-    parser.add_argument("--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
+    parser.add_argument("--dtype", type=str, default=T.float16, help="dtype, can be float16 or bfloat16")
     args = parser.parse_args()
     main(args.batch, args.h, args.n_ctx, args.d_head, args.groups, args.window_size, args.dtype)

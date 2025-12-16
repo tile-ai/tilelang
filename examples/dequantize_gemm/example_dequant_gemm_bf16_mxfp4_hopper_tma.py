@@ -20,7 +20,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
         val (tir.PrimExpr): Packed input value of dtype `uint8` containing one or more 4-bit fields.
         pos (tir.PrimExpr): Index of the nibble within `val` (used to shift/extract the 4-bit field).
         scale (tir.PrimExpr): Per-element exponent adjustment added to the extracted exponent (uint-like).
-        dtype (str): Destination dtype string (must be "bfloat16").
+        dtype (str): Destination dtype string (must be T.bfloat16).
 
     Returns:
         tir.PrimExpr: The resulting value reinterpreted as `bfloat16`.
@@ -43,7 +43,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
     # e_bf16 = T.min(e_bf16 + scale, tir.const((1 << 8) - 1, "uint16"))
     m_f4 = f4 & tir.const(1, T.uint16)
     val_bf16 = tir.reinterpret(
-        "bfloat16",
+        T.bfloat16,
         ((((s << tir.const(8, T.uint16)) | e_bf16) << tir.const(7, T.uint16)) | (m_f4 << tir.const(6, T.uint16))).astype(T.uint16),
     )
     return val_bf16
@@ -402,7 +402,7 @@ def ref_program_twiddling(A, qB, Scale, Bias=None):
     Returns:
         torch.Tensor: Resulting matrix C with shape (M, N) in bfloat16.
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert_bit_twiddling(qB)
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
@@ -427,7 +427,7 @@ def ref_program_twiddling_with_bias(A, qB, Scale, Bias):
     Returns:
         torch.Tensor: Resulting matrix C with shape (M, N) in bfloat16.
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert_bit_twiddling(qB)
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
@@ -453,7 +453,7 @@ def ref_program_simple(A, qB, Scale, Bias=None):
 
     No in-place modification is performed on inputs (a local floating copy of B is scaled).
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert(qB)
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
@@ -483,7 +483,7 @@ def ref_program_simple_with_bias(A, qB, Scale, Bias):
 
     No in-place modification is performed on inputs (a local floating copy of B is scaled).
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert(qB)
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
@@ -514,15 +514,15 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
 
     if tune:
         kernel = matmul(
-            m, n, k, "bfloat16", "bfloat16", T.float32, num_bits=4, scale_size=scale_size, fast_dequant=fast_dequant, with_bias=with_bias
+            m, n, k, T.bfloat16, T.bfloat16, T.float32, num_bits=4, scale_size=scale_size, fast_dequant=fast_dequant, with_bias=with_bias
         )
     else:
         kernel = matmul(
             m,
             n,
             k,
-            "bfloat16",
-            "bfloat16",
+            T.bfloat16,
+            T.bfloat16,
             T.float32,
             num_bits=4,
             scale_size=scale_size,

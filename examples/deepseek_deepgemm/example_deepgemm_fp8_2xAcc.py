@@ -23,7 +23,7 @@ def tl_gemm(
         T.float8_e4m3,
     ], "Currently only float8_e4m3 is supported"
     assert out_dtype in [
-        "bfloat16",
+        T.bfloat16,
         T.float32,
     ], "Currently only float16 and float32 are supported"
 
@@ -176,7 +176,7 @@ def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtyp
 
 
 def main():
-    assert_tl_gemm_correctness(1024, 1024, 8192, 128, T.float8_e4m3, "bfloat16", T.float32)
+    assert_tl_gemm_correctness(1024, 1024, 8192, 128, T.float8_e4m3, T.bfloat16, T.float32)
 
 
 if __name__ == "__main__":

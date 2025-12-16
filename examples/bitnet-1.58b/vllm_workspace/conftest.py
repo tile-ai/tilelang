@@ -129,8 +129,8 @@ def image_assets() -> _ImageAssets:
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float,
+    T.bfloat16: torch.bfloat16,
+    T.float: torch.float,
 }
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)

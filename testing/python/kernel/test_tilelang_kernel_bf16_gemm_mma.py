@@ -40,7 +40,7 @@ def tl_matmul(
 ):
     assert in_dtype in [
         T.float16,
-        "bfloat16",
+        T.bfloat16,
         T.float8_e4m3,
         T.float8_e5m2,
         T.int8,
@@ -221,7 +221,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_assert_tl_matmul_bfloat16():
-    assert_tl_matmul_correctness(256, 256, 256, "bfloat16", T.float32, T.float32)
+    assert_tl_matmul_correctness(256, 256, 256, T.bfloat16, T.float32, T.float32)
 
 
 if __name__ == "__main__":

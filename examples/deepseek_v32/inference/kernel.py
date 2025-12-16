@@ -12,7 +12,7 @@ pass_configs = {
 }
 
 FP8 = T.float8_e4m3
-BF16 = "bfloat16"
+BF16 = T.bfloat16
 FP32 = T.float32
 
 

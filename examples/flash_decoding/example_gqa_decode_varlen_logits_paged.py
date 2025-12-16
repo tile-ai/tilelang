@@ -659,7 +659,7 @@ if __name__ == "__main__":
     parser.add_argument("--k_seqlen", type=int, default=8192, help="Key sequence length")
     parser.add_argument("--head_size", type=int, default=128, choices=[64, 128, 256], help="Head dimension")
     parser.add_argument("--block_size", type=int, default=128, help="Block size for computation")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=[T.float16, "bfloat16"], help="Data type")
+    parser.add_argument("--dtype", type=str, default=T.bfloat16, choices=[T.float16, T.bfloat16], help="Data type")
     parser.add_argument("--test_varlen", action="store_true", help="Test with truly variable sequence lengths")
     parser.add_argument("--test_sink", action="store_true", help="Test with sink attention mechanism")
     parser.add_argument("--benchmark", action="store_true", help="Run speed benchmark")

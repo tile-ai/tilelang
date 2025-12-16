@@ -110,7 +110,7 @@ def run_gemm_sp(
 
 
 def main():
-    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
+    run_gemm_sp(512, 1024, 768, T.float16, T.float16, "float32", 128, 128, 128, 2, 128)
 
 
 if __name__ == "__main__":

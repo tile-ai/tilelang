@@ -399,9 +399,9 @@ FALSE_TRUE_CASES = (
     [
         pytest.param(
             k,
-            "float16",
-            "float16",
-            "float16",
+            T.float16,
+            T.float16,
+            T.float16,
             id=f"K{k}-float16-float16-float16",
         )
         for k in K_VALUES
@@ -452,15 +452,15 @@ def run_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 
 
 def run_gemm_rs_false_false(m, n, k):
-    run_gemm_rs(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k)
+    run_gemm_rs(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k)
 
 
 def run_gemm_rs_true_false(m, n, k):
-    run_gemm_rs(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k)
+    run_gemm_rs(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k)
 
 
 def run_gemm_rs_true_true(m, n, k):
-    run_gemm_rs(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k)
+    run_gemm_rs(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k)
 
 
 def run_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
@@ -468,15 +468,15 @@ def run_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 
 
 def run_gemm_sr_false_false(m, n, k):
-    run_gemm_sr(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k)
+    run_gemm_sr(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k)
 
 
 def run_gemm_sr_true_false(m, n, k):
-    run_gemm_sr(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k)
+    run_gemm_sr(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k)
 
 
 def run_gemm_sr_true_true(m, n, k):
-    run_gemm_sr(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k)
+    run_gemm_sr(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k)
 
 
 def run_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
@@ -484,15 +484,15 @@ def run_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 
 
 def run_gemm_rr_false_false(m, n, k):
-    run_gemm_rr(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k)
+    run_gemm_rr(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k)
 
 
 def run_gemm_rr_true_false(m, n, k):
-    run_gemm_rr(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k)
+    run_gemm_rr(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k)
 
 
 def run_gemm_rr_true_true(m, n, k):
-    run_gemm_rr(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k)
+    run_gemm_rr(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k)
 
 
 TRANS_CASES = [
@@ -548,9 +548,9 @@ def test_gemm_false_false(m, n, k):
         k * 3,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         m,
         n,
         k,
@@ -567,9 +567,9 @@ def test_gemm_true_false(m, n, k):
         k * 3,
         True,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         m,
         n,
         k,
@@ -586,9 +586,9 @@ def test_gemm_true_true(m, n, k):
         k * 3,
         True,
         True,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         m,
         n,
         k,
@@ -607,7 +607,7 @@ def test_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_rs_false_false(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_rs_false_false(m, n, k)
 
 
@@ -615,7 +615,7 @@ def test_gemm_rs_false_false(m, n, k):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_rs_true_false(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_rs_true_false(m, n, k)
 
 
@@ -623,7 +623,7 @@ def test_gemm_rs_true_false(m, n, k):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_rs_true_true(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_rs_true_true(m, n, k)
 
 
@@ -639,7 +639,7 @@ def test_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_sr_false_false(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_sr_false_false(m, n, k)
 
 
@@ -647,7 +647,7 @@ def test_gemm_sr_false_false(m, n, k):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_sr_true_false(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_sr_true_false(m, n, k)
 
 
@@ -655,7 +655,7 @@ def test_gemm_sr_true_false(m, n, k):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_sr_true_true(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_sr_true_true(m, n, k)
 
 
@@ -671,7 +671,7 @@ def test_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_rr_false_false(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_rr_false_false(m, n, k)
 
 
@@ -679,7 +679,7 @@ def test_gemm_rr_false_false(m, n, k):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_rr_true_false(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_rr_true_false(m, n, k)
 
 
@@ -687,7 +687,7 @@ def test_gemm_rr_true_false(m, n, k):
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
 def test_gemm_rr_true_true(m, n, k):
-    _ensure_torch_dtypes("float16")
+    _ensure_torch_dtypes(T.float16)
     run_gemm_rr_true_true(m, n, k)
 
 
@@ -699,7 +699,7 @@ if __name__ == "__main__":
     #     for n in [16, 32, 64, 128]:
     #         for k in [16, 32, 64, 128]:
     #             print(f"======================= Test {m} {n} {k} False True =============================")
-    #             run_gemm(m, n, k * 3, False, True, "float16", "float16", "float16", m, n, k, 2, 128)
+    #             run_gemm(m, n, k * 3, False, True, T.float16, T.float16, T.float16, m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
 
     # # Test Pass
@@ -707,7 +707,7 @@ if __name__ == "__main__":
     #     for n in [16, 32, 64, 128]:
     #         for k in [16, 32, 64, 128]:
     #             print(f"======================= Test {m} {n} {k} False False =============================")
-    #             run_gemm(m, n, k * 3, False, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    #             run_gemm(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
 
     # # Test Pass
@@ -715,7 +715,7 @@ if __name__ == "__main__":
     #     for n in [16, 32, 64, 128]:
     #         for k in [16, 32, 64, 128]:
     #             print(f"======================= Test {m} {n} {k} True False =============================")
-    #             run_gemm(m, n, k * 3, True, False, "float16", "float16", "float16", m, n, k, 2, 128)
+    #             run_gemm(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k, 2, 128)
     #             print(f"Test {m}, {n} {k} Pass")
     #         print(f"Test {n} Pass")
 
@@ -724,7 +724,7 @@ if __name__ == "__main__":
     #     for n in [16, 32, 64, 128]:
     #         for k in [16, 32, 64, 128]:
     #             print(f"======================= Test {m} {n} {k} True True =============================")
-    #             run_gemm(m, n, k * 3, True, True, "float16", "float16", "float16", m, n, k, 2, 128)
+    #             run_gemm(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k, 2, 128)
     #             print(f"Test {m}, {n} {k} Pass")
     #         print(f"Test {n} Pass")
 
@@ -733,15 +733,15 @@ if __name__ == "__main__":
     #     for n in [16, 32, 64, 128]:
     #         for k in [16, 32, 64, 128]:
     #             print(f"======================= Test {m} {n} {k} False True =============================")
-    #             run_gemm_rs(m, n, k * 3, False, True, "float16", "float16", "float16", m, n, k, 2, 128)
+    #             run_gemm_rs(m, n, k * 3, False, True, T.float16, T.float16, T.float16, m, n, k, 2, 128)
     #             print(f"Test {m} {n} {k} Pass")
 
     # for n in [16, 32, 64, 128]:
     #     for k in [16, 32, 64, 128]:
-    #         run_gemm_rs(64, n, k, False, False, "float16", "float16", "float16", 64, n, k, 0, 256)
+    #         run_gemm_rs(64, n, k, False, False, T.float16, T.float16, T.float16, 64, n, k, 0, 256)
     #         print(f"Test {64} {n} {k} Pass")
 
     # for n in [16, 32, 64, 128]:
     #     for k in [16, 32, 64, 128]:
-    #         run_gemm(64, n, k, False, False, "float16", "float16", "float16", 64, n, k, 0, 256)
+    #         run_gemm(64, n, k, False, False, T.float16, T.float16, T.float16, 64, n, k, 0, 256)
     #         print(f"Test {64} {n} {k} Pass")
