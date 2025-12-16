@@ -68,6 +68,21 @@ _TORCH_DTYPE_TO_STR = {
     torch.bfloat16: "bfloat16",
 }
 
+_extended_torch_dtypes = [
+    ("float8_e4m3fn",),
+    ("float8_e4m3fnuz",),
+    ("float8_e5m2",),
+    ("float8_e5m2fnuz",),
+    ("float8_e8m0fnu",),
+    ("float4_e2m1fnx2",),
+]
+for dtype_name_tuple in _extended_torch_dtypes:
+    dtype_name = dtype_name_tuple[0]
+    torch_dtype = getattr(torch, dtype_name, None)
+    if torch_dtype is not None:
+        _TORCH_DTYPE_TO_STR[torch_dtype] = dtype_name
+
+
 _CANONICAL_TO_DISPLAY_STR = {
     "double": "float64",
     "float": "float32",

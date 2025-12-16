@@ -16,7 +16,7 @@ import argparse
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H):
     scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)
     dtype = T.float16
-    q_dtype = T.float8_e4m3
+    q_dtype = T.float8_e4m3fn
     accum_dtype = T.float32
     kv_group_num = heads // kv_head_num
     VALID_BLOCK_H = min(block_H, kv_group_num)

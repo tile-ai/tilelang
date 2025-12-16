@@ -314,7 +314,7 @@ def run_gemm_sp_sm80(
         (512, 1024, 768, T.float16, T.float32, T.float32, 64, 128, 256, 2, 128, False, False),
         (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 0, 128, False, True),
         (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 0, 128, False, False),
-        (512, 1024, 768, T.float8_e4m3, T.float16, T.float16, 64, 64, 64, 2, 128, False, True),
+        (512, 1024, 768, T.float8_e4m3fn, T.float16, T.float16, 64, 64, 64, 2, 128, False, True),
         (512, 1024, 768, T.int8, T.int32, T.int32, 64, 64, 64, 2, 128, False, True),
     ],
 )

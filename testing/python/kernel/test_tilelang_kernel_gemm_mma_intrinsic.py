@@ -41,7 +41,7 @@ def tl_matmul(
     assert in_dtype in [
         T.float16,
         T.bfloat16,
-        T.float8_e4m3,
+        T.float8_e4m3fn,
         T.float8_e5m2,
         T.int8,
     ], "Currently only float16 and int8 are supported"
@@ -54,7 +54,7 @@ def tl_matmul(
     micro_size_x = micro_size_y = micro_size_k = 16
 
     is_float8 = in_dtype in [
-        T.float8_e4m3,
+        T.float8_e4m3fn,
         T.float8_e5m2,
         T.float8_e4m3fn,
         T.float8_e5m2fnuz,
@@ -233,7 +233,7 @@ def test_assert_tl_matmul_bfloat16():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 9)
 def test_assert_tl_matmul_fp8():
-    assert_tl_matmul_correctness(128, 128, 128, T.float8_e4m3, T.float32, T.float32)
+    assert_tl_matmul_correctness(128, 128, 128, T.float8_e4m3fn, T.float32, T.float32)
     assert_tl_matmul_correctness(128, 128, 128, T.float8_e5m2, T.float32, T.float32)
 
 

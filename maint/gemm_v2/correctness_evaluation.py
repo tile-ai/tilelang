@@ -421,7 +421,7 @@ FALSE_TRUE_CASES = (
     + [
         pytest.param(
             k,
-            T.float8_e4m3,
+            T.float8_e4m3fn,
             T.float32,
             T.float32,
             id="K32-float8_e4m3-float32-float32",

@@ -159,7 +159,7 @@ def matmul(
 
     # Use half-precision for input data to reduce memory bandwidth,
     # accumulate in float for better numerical accuracy
-    dtype = T.float8_e4m3fnuz if torch.version.hip is not None else T.float8_e4m3
+    dtype = T.float8_e4m3fnuz if torch.version.hip is not None else T.float8_e4m3fn
     accum_dtype = T.float32
 
     @T.prim_func

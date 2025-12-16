@@ -171,7 +171,7 @@ def test_gemv_simt():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 9)
 def test_gemv_simt_fp8():
-    evaluate_gemv_simt(1, 1024, 1024, T.float8_e4m3, T.float32, T.float32, with_bias=False)
+    evaluate_gemv_simt(1, 1024, 1024, T.float8_e4m3fn, T.float32, T.float32, with_bias=False)
     evaluate_gemv_simt(1, 1024, 1024, T.float8_e5m2, T.float32, T.float32, with_bias=False)
 
 

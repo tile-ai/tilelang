@@ -11,7 +11,7 @@ pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_FAST_MATH: True,
 }
 
-FP8 = T.float8_e4m3
+FP8 = T.float8_e4m3fn
 BF16 = T.bfloat16
 FP32 = T.float32
 

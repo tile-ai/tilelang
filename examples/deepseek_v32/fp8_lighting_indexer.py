@@ -97,7 +97,7 @@ def mqa_attn_return_logits(
 ):
     if block_Q is None:
         block_Q = 128 // heads
-    dtype = T.float8_e4m3
+    dtype = T.float8_e4m3fn
     accum_dtype = T.float32
     index_dtype = T.int32
 

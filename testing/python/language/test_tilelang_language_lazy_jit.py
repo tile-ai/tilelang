@@ -326,8 +326,8 @@ def test_jit2_return():
 def test_jit2_deepseek_deepgemm():
     @tilelang.lazy_jit
     def deep_gemm(
-        A: T.Tensor[[int, int], T.float8_e4m3],
-        B: T.Tensor[[int, int], T.float8_e4m3],
+        A: T.Tensor[[int, int], T.float8_e4m3fn],
+        B: T.Tensor[[int, int], T.float8_e4m3fn],
         scales_a: T.Tensor[[int, int], T.float32],
         scales_b: T.Tensor[[int, int], T.float32],
         out_dtype: T.dtype = T.bfloat16,
