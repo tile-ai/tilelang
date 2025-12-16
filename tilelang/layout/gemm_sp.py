@@ -31,10 +31,20 @@ def make_cutlass_metadata_layout_sm90(buffer: tvm.tir.Buffer, mma_dtype: str, bl
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
         warnings.warn(f"block_k {block_k} is too large, set to 128 for {mma_dtype}.", stacklevel=2)
-    if mma_dtype not in [T.float16, T.bfloat16, T.float32, T.int8, "float8_e4m3", "float8_e5m2"]:
+    if mma_dtype not in [
+        T.float16,
+        T.bfloat16,
+        T.float32,
+        T.int8,
+        T.float8_e4m3,
+        T.float8_e4m3fn,
+        T.float8_e4m3fnuz,
+        T.float8_e5m2,
+        T.float8_e5m2fnuz,
+    ]:
         raise NotImplementedError(f"Unsupported dtype: {mma_dtype}")
 
-    if buffer.dtype not in ["uint8", "int8"]:
+    if buffer.dtype not in [T.uint8, T.int8]:
         raise ValueError(f"metadata should be 8 bit, got {buffer.dtype}")
 
     bits_map = {
@@ -43,7 +53,10 @@ def make_cutlass_metadata_layout_sm90(buffer: tvm.tir.Buffer, mma_dtype: str, bl
         "float32": 32,
         "int8": 8,
         "float8_e4m3": 8,
+        "float8_e4m3fn": 8,
+        "float8_e4m3fnuz": 8,
         "float8_e5m2": 8,
+        "float8_e5m2fnuz": 8,
     }
 
     # ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_config.inl#L108-L117

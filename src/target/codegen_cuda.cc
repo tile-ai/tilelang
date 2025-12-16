@@ -1124,8 +1124,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float32 to float8 (E4M3/E5M2)
-  if (from_ty.is_float() &&
-      (target_ty.is_float8_e4m3() || target_ty.is_float8_e5m2())) {
+  if (from_ty.is_float() && (target_ty.is_float8())) {
+    bool target_type_is_e4m3 = target_ty.is_float8_e4m3() ||
+                               target_ty.is_float8_e4m3fn() ||
+                               target_ty.is_float8_e4m3fnuz();
     // FP32 -> FP8: Use __nv_cvt_float2_to_fp8x2 for vectorized conversion
     // (float2 -> fp8x2)
     if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
@@ -1134,8 +1136,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       stream << "*reinterpret_cast<__nv_fp8x2_storage_t*>(&(" << sret
              << ")) = __nv_cvt_float2_to_fp8x2(*reinterpret_cast<float2*>(&("
              << src << ")), __NV_SATFINITE, "
-             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
+             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
       os << sret;
       return;
     } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
@@ -1144,14 +1145,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[0] = "
              << "__nv_cvt_float2_to_fp8x2(*(float2*)(&(" << src
              << ")), __NV_SATFINITE, "
-             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
+             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
       PrintIndent();
       stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[1] = "
              << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
              << "))+1), __NV_SATFINITE, "
-             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
+             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
       os << sret;
       return;
     } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
@@ -1160,33 +1159,31 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[0] = "
              << "__nv_cvt_float2_to_fp8x2(*(float2*)(&(" << src
              << ")), __NV_SATFINITE, "
-             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
+             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
       PrintIndent();
       stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[1] = "
              << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
              << "))+1), __NV_SATFINITE, "
-             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
+             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
       PrintIndent();
       stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[2] = "
              << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
              << "))+2), __NV_SATFINITE, "
-             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
+             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
       PrintIndent();
       stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[3] = "
              << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
              << "))+3), __NV_SATFINITE, "
-             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
+             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
       os << sret;
       return;
     }
   }
 
-  if ((from_ty.is_float8_e4m3() || from_ty.is_float8_e5m2()) &&
-      target_ty.is_float()) {
+  if (from_ty.is_float8() && target_ty.is_float()) {
+    bool from_type_is_e4m3 = from_ty.is_float8_e4m3() ||
+                             from_ty.is_float8_e4m3fn() ||
+                             from_ty.is_float8_e4m3fnuz();
     // FP8 -> FP32: Use __tl_cvt_fp8x2_to_float2 for vectorized conversion
     // (fp8x2 -> float2)
     if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
@@ -1196,8 +1193,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
              << ")) = "
                 "__tl_cvt_fp8x2_to_float2(*reinterpret_cast<__nv_fp8x2_storage_"
                 "t*>(&("
-             << src << ")), "
-             << (from_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << src << ")), " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
              << ");\n";
       os << sret;
       return;
@@ -1206,14 +1202,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       PrintIndent();
       stream << "*(float2*)(&" << sret << ") = "
              << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[0], "
-             << (from_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << "))[0], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
              << ");\n";
       PrintIndent();
       stream << "*((float2*)(&" << sret << ")+1) = "
              << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[1], "
-             << (from_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << "))[1], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
              << ");\n";
       os << sret;
       return;
@@ -1222,26 +1216,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       PrintIndent();
       stream << "*(float2*)(&" << sret << ") = "
              << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[0], "
-             << (from_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << "))[0], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
              << ");\n";
       PrintIndent();
       stream << "*((float2*)(&" << sret << ")+1) = "
              << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[1], "
-             << (from_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << "))[1], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
              << ");\n";
       PrintIndent();
       stream << "*((float2*)(&" << sret << ")+2) = "
              << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[2], "
-             << (from_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << "))[2], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
              << ");\n";
       PrintIndent();
       stream << "*((float2*)(&" << sret << ")+3) = "
              << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[3], "
-             << (from_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << "))[3], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
              << ");\n";
       os << sret;
       return;
