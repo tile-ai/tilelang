@@ -73,7 +73,8 @@ def main():
     else:
         # Default config
         config = {"block_M": 32, "block_N": 32, "threads": 128}
-        kernel = elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32")
+        program = elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32")
+        kernel = tilelang.compile(program, out_idx=[-1], target="cuda")
 
     out = kernel(a, b)
     torch.testing.assert_close(out, ref_program(a, b), rtol=1e-2, atol=1e-2)
