@@ -5,7 +5,7 @@ from typing import Tuple
 from tilelang.utils.tensor import torch_assert_close
 
 # support bfloat16, float, float16
-dtype = "bfloat16"
+dtype = T.bfloat16
 accum_dtype = "float"
 
 
@@ -165,9 +165,9 @@ def main(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
         batch_sizes = [2048, 6144]
     if dtype == "float":
         x = torch.randn(M, N, device="cuda", dtype=torch.float32)
-    elif dtype == "float16":
+    elif dtype == T.float16:
         x = torch.randn(M, N, device="cuda", dtype=torch.float16)
-    elif dtype == "bfloat16":
+    elif dtype == T.bfloat16:
         x = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")

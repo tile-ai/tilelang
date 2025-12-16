@@ -5,7 +5,7 @@ import argparse
 
 
 @tilelang.jit(out_idx=[-1])
-def matmul_non_persistent(M, N, K, block_M, block_N, block_K, threads, num_stages, dtype="float16", accum_dtype="float"):
+def matmul_non_persistent(M, N, K, block_M, block_N, block_K, threads, num_stages, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((M, K), dtype),
@@ -34,7 +34,7 @@ def matmul_non_persistent(M, N, K, block_M, block_N, block_K, threads, num_stage
 
 @tilelang.jit(out_idx=[-1])
 def matmul_persistent(
-    M, N, K, block_M, block_N, block_K, threads, num_stages, dtype="float16", accum_dtype="float", use_persistent_primitive=True
+    M, N, K, block_M, block_N, block_K, threads, num_stages, dtype=T.float16, accum_dtype=T.float32, use_persistent_primitive=True
 ):
     sm_num = driver.get_num_sms()
     m_blocks = T.ceildiv(M, block_M)

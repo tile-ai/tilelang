@@ -22,7 +22,7 @@ def tl_topk(
     blk_m,
     threads=128,
 ):
-    dtype = "float32"
+    dtype = T.float32
 
     @T.prim_func
     def topk_kernel(

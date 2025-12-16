@@ -14,7 +14,7 @@ def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: list
     """Convert a BufferLoad to a tl.region call with explicit extents."""
     indices = list(load.indices)
     if len(indices) > len(extents):
-        extents = [tir.IntImm("int32", 1) for _ in range(len(indices) - len(extents))] + list(extents)
+        extents = [tir.IntImm(T.int32, 1) for _ in range(len(indices) - len(extents))] + list(extents)
     assert len(indices) == len(extents), f"indices = {indices}, extents = {extents}"
     return region(load, access_type, *extents)
 

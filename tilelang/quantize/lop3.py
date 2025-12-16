@@ -1088,10 +1088,10 @@ __device__ void decode_i2u_to_i4s(T1 *_i4u, T2 *B_local_decode, const int N = 16
 
 
 def get_lop3_intrin_group(
-    out_dtype: Literal["float16", "int8", "int4"],
+    out_dtype: Literal[T.float16, T.int8, "int4"],
     source_format: Literal["int", "uint"] = "uint",
     source_bit: int = 4,
-    storage_dtype: Literal["int32", "int8"] = "int8",
+    storage_dtype: Literal[T.int32, T.int8] = T.int8,
     with_scaling: bool = False,
     with_zeros: bool = False,
     zeros_mode: Literal["original", "rescale", "quantized"] = "original",
@@ -1104,10 +1104,10 @@ def get_lop3_intrin_group(
 
     Parameters
     ----------
-    in_dtype : Literal["int8"]
+    in_dtype : Literal[T.int8]
         The data type of the input. It should be "int8".
 
-    out_dtype : Literal["float16", "int8", "int4"]
+    out_dtype : Literal[T.float16, T.int8, "int4"]
         The data type of the output. It can be either "float16" or "int8" or "int4".
 
     storage_nbit : int, optional
@@ -1130,7 +1130,7 @@ def get_lop3_intrin_group(
     Dict[str, str]
         A dictionary mapping the names of the intrinsics to their corresponding implementations.
     """
-    assert out_dtype in ["float16", "int8", "int4"], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'int8' or 'int4' ."
+    assert out_dtype in [T.float16, T.int8, "int4"], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'int8' or 'int4' ."
 
     dtype_mapping = {"float16": "f16", "int4": "i4", "int8": "i8", "int32": "i32"}
     target_dtype = dtype_mapping[out_dtype]
@@ -1176,9 +1176,9 @@ def get_lop3_intrin_group(
     if is_ladder_stage3:
         key += "_offset"
 
-    if out_dtype == "float16":
+    if out_dtype == T.float16:
         d4f = "f16"
-    elif out_dtype == "int8":
+    elif out_dtype == T.int8:
         d4f = "i8s"
     elif out_dtype == "int4":
         d4f = "i4s"

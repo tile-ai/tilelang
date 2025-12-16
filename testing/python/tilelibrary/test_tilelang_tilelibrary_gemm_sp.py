@@ -43,7 +43,7 @@ def matmul_sp_sm90(
     trans_A,
     trans_B,
 ):
-    E_factor = 4 if in_dtype == "float32" else 8
+    E_factor = 4 if in_dtype == T.float32 else 8
     A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
     B_shape = (K, N) if not trans_B else (N, K)
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
@@ -103,7 +103,7 @@ def matmul_sp_sm80(
     trans_B,
 ):
     is_8_bit = "8" in in_dtype
-    metadata_dtype = "int32" if is_8_bit else "int16"
+    metadata_dtype = T.int32 if is_8_bit else T.int16
     E_factor = SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype]
     A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
     B_shape = (K, N) if not trans_B else (N, K)
@@ -193,7 +193,7 @@ def run_gemm_sp(
             A = A.T
         if trans_B:
             B = B.T
-        if "float8" in in_dtype or "int8" in in_dtype:
+        if "float8" in in_dtype or T.int8 in in_dtype:
             A = A.to(torch.float32)
             B = B.to(torch.float32)
         return torch.matmul(A, B)

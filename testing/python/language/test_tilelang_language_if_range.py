@@ -7,7 +7,7 @@ import tilelang.testing
 @tilelang.jit(
     out_idx=[1],
 )
-def tilelang_if_range(M, N, block_M, block_N, dtype="float16"):
+def tilelang_if_range(M, N, block_M, block_N, dtype=T.float16):
     @T.prim_func
     def main(
         A: T.Tensor((M, N), dtype),
@@ -27,7 +27,7 @@ def tilelang_if_range(M, N, block_M, block_N, dtype="float16"):
     return main
 
 
-def run_tilelang_if_range(M=128, N=128, block_M=32, block_N=32, dtype="float16"):
+def run_tilelang_if_range(M=128, N=128, block_M=32, block_N=32, dtype=T.float16):
     kernel = tilelang_if_range(M, N, block_M, block_N, dtype)
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)

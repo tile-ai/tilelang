@@ -128,10 +128,10 @@ def main(
     seq_kv: int = 256,
     dim: int = 128,
     window_size: Optional[int] = None,
-    dtype: str = "float16",
+    dtype: str = T.float16,
     tune: bool = False,
 ):
-    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    torch_dtype = {T.float16: torch.float16, T.bfloat16: torch.bfloat16}[dtype]
     if window_size is not None:
         print("Using sliding window attention.")
         assert window_size <= seq_q

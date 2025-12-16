@@ -99,7 +99,7 @@ def mqa_attn_return_logits(
         block_Q = 128 // heads
     dtype = "float8_e4m3"
     accum_dtype = "float"
-    index_dtype = "int32"
+    index_dtype = T.int32
 
     seq_len = T.dynamic("seq_len")
     seq_len_kv = T.dynamic("seq_len_kv")
@@ -179,7 +179,7 @@ def clean_logits_(
     seq_len_kv = T.dynamic("seq_len_kv")
 
     dtype = "float"
-    indices_dtype = "int32"
+    indices_dtype = T.int32
 
     @T.prim_func
     def clean_logits_kernel(

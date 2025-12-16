@@ -46,7 +46,7 @@ def tl_matmul(
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -163,7 +163,7 @@ def ref_program(A, B):
 
 
 def main(M=4096, N=4096, K=4096):
-    in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
+    in_dtype, out_dtype, accum_dtype = T.float16, T.float16, T.float32
     kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source

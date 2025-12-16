@@ -181,6 +181,6 @@ def main():
 
 if __name__ == "__main__":
     for dtype in ["float8_e4m3"]:
-        for out_dtype in ["bfloat16", "float32"]:
+        for out_dtype in [T.bfloat16, T.float32]:
             for block_N in [16, 32, 64, 128]:
-                assert_tl_gemm_correctness(1024, 1024, 8192, block_N, dtype, out_dtype, "float32")
+                assert_tl_gemm_correctness(1024, 1024, 8192, block_N, dtype, out_dtype, T.float32)

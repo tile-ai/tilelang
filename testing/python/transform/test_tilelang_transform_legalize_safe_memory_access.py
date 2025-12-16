@@ -5,7 +5,7 @@ import tilelang.testing
 
 
 def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: int = 2):
-    dtype = "float32"
+    dtype = T.float32
 
     @T.prim_func
     def main(
@@ -48,7 +48,7 @@ def issue_1013_buggy_kernel():
     num_threads = 128
 
     @T.prim_func
-    def main(x: T.Tensor((num_tokens,), dtype="int64")):
+    def main(x: T.Tensor((num_tokens,), dtype=T.int64)):
         with T.Kernel(1, threads=num_threads) as _:
             count = T.alloc_var("int")
             thread_idx = T.get_thread_binding()
@@ -60,19 +60,19 @@ def issue_1013_buggy_kernel():
     # and the padding value is not used. However, the current prover cannot handle this case.
     # So for now the expected kernel is a if-else statement to check the boundary.
     @T.prim_func
-    def expected(x: T.Tensor((num_tokens,), dtype="int64")):
+    def expected(x: T.Tensor((num_tokens,), dtype=T.int64)):
         with T.Kernel(1, threads=num_threads) as _:
             count = T.alloc_var("int")
             thread_idx = T.get_thread_binding()
             for i in T.serial(0, T.ceildiv(num_tokens - thread_idx, num_threads)):
                 idx = thread_idx + i * num_threads
-                count += T.Cast("int32", T.if_then_else(idx < num_tokens, x[idx], T.int64(0)) == T.int64(2))
+                count += T.Cast(T.int32, T.if_then_else(idx < num_tokens, x[idx], T.int64(0)) == T.int64(2))
 
     return main, expected
 
 
 def vectorize_access_with_atmoic_add_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: int = 2):
-    dtype = "float32"
+    dtype = T.float32
 
     @T.prim_func
     def main(
@@ -114,7 +114,7 @@ def assert_vectorize_access_with_atmoic_add(M: int = 64, N: int = 64):
 
 
 def oob_store_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: int = 2):
-    dtype = "float32"
+    dtype = T.float32
 
     @T.prim_func
     def main(

@@ -92,7 +92,7 @@ from tvm.script.ir_builder.tir import frame
 
 def buffer(
     shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral],
-    dtype: str = "float32",
+    dtype: str = T.float32,
     data: Var = None,
     strides: List[PrimExpr] = None,
     elem_offset: PrimExpr = None,
@@ -143,7 +143,7 @@ def buffer(
     """
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        strides = [Var(s, "int32") if isinstance(s, str) else s for s in strides]
+        strides = [Var(s, T.int32) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
     return _ffi_api.Buffer(  # type: ignore[attr-defined] # pylint: disable=no-member
@@ -244,7 +244,7 @@ def func_ret(ret_type: Type) -> Type:
 def match_buffer(
     param: Union[Var, BufferLoad, BufferRegion],
     shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral] = None,
-    dtype: str = "float32",
+    dtype: str = T.float32,
     data: Var = None,
     strides: List[PrimExpr] = None,
     elem_offset: PrimExpr = None,
@@ -266,11 +266,11 @@ def match_buffer(
     -------
     Match buffer from function parameter
     .. code-block:: python
-        A = T.match_buffer(a, (128, 128), dtype="float32")
+        A = T.match_buffer(a, (128, 128), dtype=T.float32)
 
     Match buffer from Buffer subregion
     .. code-block:: python
-        A = T.match_buffer(B[0:128, i * 128 : i * 128 + 128], (128, 128), dtype="float32")
+        A = T.match_buffer(B[0:128, i * 128 : i * 128 + 128], (128, 128), dtype=T.float32)
 
     Parameters
     ----------
@@ -320,7 +320,7 @@ def match_buffer(
             raise ValueError("Shape must be specified when binding input param")
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        idx_dtype = shape[0].dtype if isinstance(shape[0], PrimExpr) else "int32"
+        idx_dtype = shape[0].dtype if isinstance(shape[0], PrimExpr) else T.int32
         strides = [Var(s, idx_dtype) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
@@ -440,7 +440,7 @@ def block_attr(attrs: Dict[str, Any]) -> None:
 
 def alloc_buffer(
     shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral],
-    dtype: str = "float32",
+    dtype: str = T.float32,
     data: Var = None,
     strides: List[PrimExpr] = None,
     elem_offset: PrimExpr = None,
@@ -491,7 +491,7 @@ def alloc_buffer(
     """
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        strides = [Var(s, "int32") if isinstance(s, str) else s for s in strides]
+        strides = [Var(s, T.int32) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
     return _ffi_api.AllocBuffer(  # type: ignore[attr-defined] # pylint: disable=no-member
@@ -537,7 +537,7 @@ class axis:  # pylint: disable=invalid-name
     def spatial(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = "int32",
+        dtype: str = T.int32,
     ) -> Var:
         """The spatial block axis defining function.
 
@@ -565,7 +565,7 @@ class axis:  # pylint: disable=invalid-name
     def reduce(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = "int32",
+        dtype: str = T.int32,
     ) -> Var:
         """The reduced block axis defining function.
 
@@ -593,7 +593,7 @@ class axis:  # pylint: disable=invalid-name
     def scan(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = "int32",
+        dtype: str = T.int32,
     ) -> Var:
         """The scanning block axis defining function.
 
@@ -621,7 +621,7 @@ class axis:  # pylint: disable=invalid-name
     def opaque(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = "int32",
+        dtype: str = T.int32,
     ) -> Var:
         """The opaque block axis defining function.
 
@@ -646,7 +646,7 @@ class axis:  # pylint: disable=invalid-name
         )
 
     @staticmethod
-    def remap(kinds: str, bindings: List[PrimExpr], dtype: str = "int32") -> Union[List[Var], Var]:
+    def remap(kinds: str, bindings: List[PrimExpr], dtype: str = T.int32) -> Union[List[Var], Var]:
         """The block axis remapping function.
 
         Parameters
@@ -1133,7 +1133,7 @@ def Else() -> frame.ElseFrame:  # pylint: disable=invalid-name
 
 def decl_buffer(
     shape,
-    dtype="float32",
+    dtype=T.float32,
     data=None,
     strides=None,
     elem_offset=None,
@@ -1184,7 +1184,7 @@ def decl_buffer(
     """
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        strides = [Var(s, "int32") if isinstance(s, str) else s for s in strides]
+        strides = [Var(s, T.int32) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
     return _ffi_api.DeclBuffer(  # type: ignore[attr-defined] # pylint: disable=no-member
@@ -1237,7 +1237,7 @@ def launch_thread(
     return _ffi_api.LaunchThread(thread, extent)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def env_thread(thread_tag: str, dtype: str = "int32") -> IterVar:
+def env_thread(thread_tag: str, dtype: str = T.int32) -> IterVar:
     """Bind a var to thread env
 
     Parameters
@@ -1656,7 +1656,7 @@ def comm_reducer(combiner: Callable, identity: List[PrimExpr]) -> CommReducer:
     args = []
     for name, i in zip(params.keys(), identity + identity):
         if isinstance(i, int):
-            args.append(Var(name, "int32"))
+            args.append(Var(name, T.int32))
         else:
             args.append(Var(name, i.dtype))
     res = combiner(*args)

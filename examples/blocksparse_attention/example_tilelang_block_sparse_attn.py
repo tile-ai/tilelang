@@ -41,7 +41,7 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
     shape = [batch, heads, seq_len, dim]
     block_mask_shape = [batch, heads, downsample_len, downsample_len]
 
-    dtype = "float16"
+    dtype = T.float16
     accum_dtype = "float"
     block_mask_dtype = "bool"
 

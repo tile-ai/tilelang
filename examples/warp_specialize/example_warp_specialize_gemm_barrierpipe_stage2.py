@@ -7,7 +7,7 @@ tilelang.disable_cache()
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 @tilelang.jit(out_idx=[2])
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     num_stages = 2
     mbarrier_list = [128, 128] * num_stages
 

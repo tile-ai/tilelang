@@ -25,7 +25,7 @@ def _check(original, transformed):
 M = 512
 N = 512
 K = 512
-dtype = "float16"
+dtype = T.float16
 block_M = 64
 block_N = 64
 block_K = 32
@@ -40,8 +40,8 @@ def test_warp_specialized():
         with T.block(""):
             T.reads(A[by * 64, 0:481], B[0:481, bx * 64])
             T.writes()
-            A_shared = T.alloc_buffer((3, 1, 8, 256), "float16", scope="shared.dyn")
-            B_shared = T.alloc_buffer((3, 1, 4, 512), "float16", scope="shared.dyn")
+            A_shared = T.alloc_buffer((3, 1, 8, 256), T.float16, scope="shared.dyn")
+            B_shared = T.alloc_buffer((3, 1, 4, 512), T.float16, scope="shared.dyn")
             C_local = T.alloc_buffer((32,), scope="local")
             for k in T.serial(16, annotations={"num_stages": T.int32(3)}):
                 if v == 0:
@@ -73,8 +73,8 @@ def test_warp_specialized():
         bx = T.launch_thread("blockIdx.x", 8)
         by = T.launch_thread("blockIdx.y", 8)
         v = T.launch_thread("threadIdx.x", 256)
-        A_shared = T.decl_buffer((3, 1, 8, 256), "float16", scope="shared.dyn")
-        B_shared = T.decl_buffer((3, 1, 4, 512), "float16", scope="shared.dyn")
+        A_shared = T.decl_buffer((3, 1, 8, 256), T.float16, scope="shared.dyn")
+        B_shared = T.decl_buffer((3, 1, 4, 512), T.float16, scope="shared.dyn")
         C_local = T.decl_buffer((32,), scope="local")
         T.create_list_of_mbarrier(128, 128, 128, 128, 128, 128)
         T.attr([128, 128], "kWarpSpecializationScope", 0)

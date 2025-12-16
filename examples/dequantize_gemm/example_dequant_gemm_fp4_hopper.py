@@ -9,20 +9,20 @@ import argparse
 
 def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):
     assert nbit == 4
-    assert dtype == "float16"
-    assert val.dtype == "uint8"
+    assert dtype == T.float16
+    assert val.dtype == T.uint8
     # e_f4 == 0 -> e_f16 = 0
     # e_f4 != 0 -> e_f16 = e_f4 + ExponentialBias(f16, f4) = e_f4 + (2^4 - 2^1) = e_f4 + 14
     # s1e2m1
-    mask = tir.const((1 << nbit) - 1, "uint16")
-    f4 = (val >> (pos.astype("uint16") * tir.const(nbit, "uint16"))) & mask
-    s = f4 >> tir.const(3, "uint16")
-    e_f4 = (f4 & tir.const(6, "uint16")) >> tir.const(1, "uint16")
-    e_f16 = e_f4 + tir.const(14, "uint16")
-    m_f4 = f4 & tir.const(1, "uint16")
+    mask = tir.const((1 << nbit) - 1, T.uint16)
+    f4 = (val >> (pos.astype(T.uint16) * tir.const(nbit, T.uint16))) & mask
+    s = f4 >> tir.const(3, T.uint16)
+    e_f4 = (f4 & tir.const(6, T.uint16)) >> tir.const(1, T.uint16)
+    e_f16 = e_f4 + tir.const(14, T.uint16)
+    m_f4 = f4 & tir.const(1, T.uint16)
     m_f16 = m_f4
     val_f16 = tir.reinterpret(
-        "float16", ((e_f16 | (s << tir.const(5, "uint16"))) << tir.const(10, "uint16") | m_f16 << tir.const(9, "uint16")).astype("uint16")
+        "float16", ((e_f16 | (s << tir.const(5, T.uint16))) << tir.const(10, T.uint16) | m_f16 << tir.const(9, T.uint16)).astype(T.uint16)
     )
     # return tir.Select(e_f4 == tir.const(0, "uint32"), tir.const(0, "float16"), val_f16)
     return val_f16
@@ -60,7 +60,7 @@ def torch_convert(tensor):
 @tilelang.jit(out_idx=[1])
 def test_convert(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "uint8"
+    storage_dtype = T.uint8
     B_shape = (N, K // num_elems_per_byte)
     B_shared_shape = (block_N, block_K // num_elems_per_byte)
     B_dequantize_shared_shape = (block_N, block_K)
@@ -125,7 +125,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
     @tilelang.jit(out_idx=[2])
     def kernel_func(block_M, block_N, block_K, num_stages, threads, split=1):
         num_elems_per_byte = 8 // num_bits
-        storage_dtype = "uint8"
+        storage_dtype = T.uint8
         A_shape = (M, K)
         B_shape = (N, K // num_elems_per_byte)
         A_shared_shape = (block_M, block_K)

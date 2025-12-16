@@ -89,7 +89,7 @@ def chunk_scan_fwd(
     num_stages=2,
     threads=128,
 ):
-    dtype = "float16"
+    dtype = T.float16
     accum_dtype = "float"
     nchunks = T.ceildiv(seqlen, chunk_size)
     p = 1.44269504

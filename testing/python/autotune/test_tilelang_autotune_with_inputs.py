@@ -39,7 +39,7 @@ def get_configs():
 )
 @tilelang.jit(out_idx=[-1])
 def matmul(M, N, K, block_M=128, block_N=128, block_K=32, num_stages=0, thread_num=128, enable_rasterization=False):
-    dtype = "float16"
+    dtype = T.float16
     accum_dtype = "float"
 
     @T.prim_func

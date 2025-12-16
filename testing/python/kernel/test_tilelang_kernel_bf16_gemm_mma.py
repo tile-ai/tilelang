@@ -59,7 +59,7 @@ def tl_matmul(
         "float8_e4m3fn",
         "float8_e5m2fnuz",
     ]
-    if out_dtype == "int32" or is_float8:
+    if out_dtype == T.int32 or is_float8:
         micro_size_k = 32
 
     # This is a debug config
@@ -67,7 +67,7 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 32
     warp_col_tiles = 32
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage

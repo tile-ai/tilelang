@@ -375,7 +375,7 @@ def check_hopper():
     return compute_capability == (9, 0)
 
 
-def convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages, threads, dtype="float16", accum_dtype="float"):
+def convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages, threads, dtype=T.float16, accum_dtype=T.float32):
     KH, KW = K, K
     OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
@@ -463,7 +463,7 @@ def test_nvrtc_l2_persistent_map():
         M,
         N,
         block_size=256,
-        dtype="float32",
+        dtype=T.float32,
     ):
         @T.prim_func
         def kernel(

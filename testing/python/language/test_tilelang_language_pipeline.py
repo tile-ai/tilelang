@@ -63,8 +63,8 @@ def run_gemm(
     block_K = 32
     trans_A = False
     trans_B = False
-    in_dtype = "float16"
-    out_dtype = "float16"
+    in_dtype = T.float16
+    out_dtype = T.float16
     dtypeAccum = "float32"
     num_threads = 128
     program = matmul(
@@ -101,7 +101,7 @@ def run_gemm(
             A = A.T
         if trans_B:
             B = B.T
-        if in_dtype == "float32":
+        if in_dtype == T.float32:
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
             A = (A.view(torch.int32) - 0x1000).view(torch.float32)
@@ -127,7 +127,7 @@ def test_pipeline_order_stage():
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     },
 )
-def blocksparse_matmul(M, N, K, block_M, block_N, block_K, num_stages, dtype="float16", accum_dtype="float"):
+def blocksparse_matmul(M, N, K, block_M, block_N, block_K, num_stages, dtype=T.float16, accum_dtype=T.float32):
     block_mask_shape = (M // block_M, N // block_N, K // block_K)
 
     import tilelang.language as T

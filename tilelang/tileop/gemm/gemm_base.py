@@ -121,7 +121,7 @@ class GemmBase:
 
     @property
     def mbarptr(self) -> PrimExpr:
-        return getattr(self.gemm_node, "mbarPtr", tvm.tir.const(0, "uint32"))
+        return getattr(self.gemm_node, "mbarPtr", tvm.tir.const(0, T.uint32))
 
     @property
     def mbar(self) -> tir.Buffer:
@@ -131,7 +131,7 @@ class GemmBase:
     def C_coords(self):
         coords = getattr(self.gemm_node, "cCoords", None)
         if coords is None or len(coords) == 0:
-            zero = tvm.tir.const(0, "int32")
+            zero = tvm.tir.const(0, T.int32)
             return [zero, zero]
         return [coords[i] for i in range(len(coords))]
 

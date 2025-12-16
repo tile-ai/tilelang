@@ -83,9 +83,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -515,7 +515,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             self.block_col_warps,
         )
 
-        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
         def forward_thread(i: int, j: int) -> int:
             """

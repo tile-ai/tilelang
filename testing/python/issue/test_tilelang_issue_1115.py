@@ -9,7 +9,7 @@ def test_int64_address():
         S,
         D,
         pos_ty="int64",
-        dtype="float32",
+        dtype=T.float32,
     ):
         @T.prim_func
         def main(

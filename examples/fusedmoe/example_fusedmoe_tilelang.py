@@ -121,7 +121,7 @@ def moe_forward_tilelang_routed(
     # group_count = len(group_sizes_list)
     # M = sum([(group_size + block_token - 1) // block_token for group_size in group_sizes_list])
     M = math.ceil(group_sum / block_token) + group_count
-    accum_dtype = "float32"
+    accum_dtype = T.float32
 
     # Tensors: Note that input shape is reshape to (bs * seq_len * n_experts_per_token, dhidden) for grouped gemm
     input_shape = (group_sum, dhidden)

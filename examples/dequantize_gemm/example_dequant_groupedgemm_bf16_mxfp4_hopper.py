@@ -49,7 +49,7 @@ def matmul(
     in_dtype,
     out_dtype,
     accum_dtype,
-    source_format="uint",
+    source_format=T.uint32,
     num_bits=4,
     scale_size=32,
     fast_dequant=True,
@@ -83,8 +83,8 @@ def matmul(
         topk (int): number of experts selected per token.
         E (int): number of experts.
         padding_M (int): padded number of tokens after grouping and block alignment.
-        in_dtype (str): element type of A (e.g., "bfloat16").
-        out_dtype (str): output tensor element type (e.g., "bfloat16").
+        in_dtype (str): element type of A (e.g., T.bfloat16).
+        out_dtype (str): output tensor element type (e.g., T.bfloat16).
         accum_dtype (str): accumulation type used for the inner GEMM.
         source_format (str, optional): format string passed to intrinsic selector (default "uint").
         num_bits (int, optional): number of bits per quantized element in B (default 4).
@@ -111,7 +111,7 @@ def matmul(
     """
 
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "uint8"
+    storage_dtype = T.uint8
     QK = K // num_elems_per_byte
     Block_QK = block_K // num_elems_per_byte
     A_shared_shape = (block_M, block_K)
@@ -137,7 +137,7 @@ def matmul(
     import_source = import_source
 
     # the dequant part is the same as in dequant_gemm
-    def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype="bfloat16"):
+    def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype=T.bfloat16):
         """
         Return a TileLang macro that performs fast dequantization of twiddled FP4-packed data into BF16.
         The returned macro has signature (B_shared, B_dequantize_shared, Scale, k) and:
@@ -147,12 +147,12 @@ def matmul(
         - Writes the scaled BF16 results into B_dequantize_shared.
 
         Notes:
-        - This factory only supports in_dtype="fp4" and out_dtype="bfloat16".
+        - This factory only supports in_dtype="fp4" and out_dtype=T.bfloat16.
         - The macro depends on several names from the enclosing scope (e.g., import_source, func_name, DataType, num_elems_per_byte, storage_dtype, block_N, block_K, threads, scale_size); those must be defined and consistent with the kernel that will use the macro.
         - The macro issues a T.import_source and T.call_extern to invoke the external intrinsic; ensure the external implementation matching `func_name` is available at compilation/runtime.
         """
         assert in_dtype in ["fp4"]
-        assert out_dtype in ["bfloat16"]
+        assert out_dtype in [T.bfloat16]
 
         # Some variables for dequantization in each thread
         MAX_TRANSACTION_SIZE_BITS = 128
@@ -227,9 +227,9 @@ def matmul(
 
         return fast_dequant_bf16_fp4_twiddling
 
-    def get_simple_dequant_func(in_dtype="fp4", out_dtype="bfloat16"):
+    def get_simple_dequant_func(in_dtype="fp4", out_dtype=T.bfloat16):
         assert in_dtype in ["fp4"]
-        assert out_dtype in ["bfloat16"]
+        assert out_dtype in [T.bfloat16]
 
         @T.macro
         def simple_dequant_bf16_fp4(B_shared, B_dequantize_shared, Scale_shared, k):

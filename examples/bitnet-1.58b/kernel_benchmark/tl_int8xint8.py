@@ -49,7 +49,7 @@ def tl_matmul(
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -57,7 +57,7 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 64
     warp_col_tiles = 64
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -183,7 +183,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     # src_code is the generated cuda source
     assert src_code is not None
     print(src_code)
-    if in_dtype == "int8":
+    if in_dtype == T.int8:
         A = torch.randint(-7, 7, (M, K), device="cuda", dtype=torch.int8)
         B = torch.randint(-7, 7, (N, K), device="cuda", dtype=torch.int8)
     else:

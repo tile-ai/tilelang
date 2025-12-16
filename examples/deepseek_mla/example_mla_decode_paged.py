@@ -17,7 +17,7 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
     if softmax_scale is None:
         softmax_scale = (dv + dpe) ** -0.5
     scale = float(softmax_scale * 1.44269504)  # log2(e)
-    dtype = "float16"
+    dtype = T.float16
     accum_dtype = "float"
     kv_group_num = h_q // h_kv
     VALID_BLOCK_H = min(block_H, kv_group_num)

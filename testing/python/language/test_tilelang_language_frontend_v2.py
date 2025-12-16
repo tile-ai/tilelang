@@ -304,7 +304,7 @@ def test_serial_for_with_step():
 
     assert isinstance(T.serial(1, 10, 1), IRBuilderFrame)
     assert isinstance(T.serial(1, 10, IntImm("int32", 1)), IRBuilderFrame)
-    assert not isinstance(T.serial(1, 10, Var("tmp", "int32")), IRBuilderFrame)
+    assert not isinstance(T.serial(1, 10, Var("tmp", T.int32)), IRBuilderFrame)
     assert not isinstance(T.serial(10, -1, -1), IRBuilderFrame)
 
 
@@ -458,10 +458,10 @@ def test_buffer_slice_step():
 
 
 def test_boolop():
-    a = Var("a", "int32")
-    b = Var("b", "int32")
-    c = Var("c", "int32")
-    d = Var("d", "int32")
+    a = Var("a", T.int32)
+    b = Var("b", T.int32)
+    c = Var("c", T.int32)
+    d = Var("d", T.int32)
 
     @T.macro
     def cond():

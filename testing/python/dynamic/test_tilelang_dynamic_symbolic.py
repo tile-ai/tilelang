@@ -44,7 +44,7 @@ def tl_matmul_macro(
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -52,7 +52,7 @@ def tl_matmul_macro(
     block_col_warps = 1
     warp_row_tiles = 16
     warp_col_tiles = 16
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage

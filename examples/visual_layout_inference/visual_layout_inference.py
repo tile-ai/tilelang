@@ -10,7 +10,7 @@ import tilelang.language as T
         tilelang.PassConfigKey.TL_LAYOUT_VISUALIZATION_FORMATS: "svg",
     },
 )
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def gemm(
         A: T.Tensor((M, K), dtype),

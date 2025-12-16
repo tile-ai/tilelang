@@ -26,7 +26,7 @@ def matmul(
     from tilelang.quantize import _tir_packed_to_unsigned_convert
 
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "int8"
+    storage_dtype = T.int8
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
     storage_type = str("".join(c for c in storage_dtype if not c.isdigit()))
     A_shape = (M, K)
@@ -159,11 +159,11 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     ], "Currently only float16, float32 and int32 are supported"
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "int8"
+    storage_dtype = T.int8
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -182,7 +182,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
 
     block_M = block_row_warps * warp_row_tiles
     block_N = block_col_warps * warp_col_tiles
-    block_K = 32 if in_dtype == "float16" else 64
+    block_K = 32 if in_dtype == T.float16 else 64
     chunk = block_K // reduce_k
 
     is_smooth_a = False
@@ -365,7 +365,7 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     assert src_code is not None
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "int8"
+    storage_dtype = T.int8
 
     A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
     qB = torch.randint(0, 127, (N, K // num_elems_per_byte), device="cuda", dtype=getattr(torch, storage_dtype))

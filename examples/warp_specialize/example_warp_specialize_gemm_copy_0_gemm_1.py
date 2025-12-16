@@ -5,7 +5,7 @@ import tilelang.language as T
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 @tilelang.jit(out_idx=[2])
-def matmul_warp_specialize_copy_0_gemm_1(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul_warp_specialize_copy_0_gemm_1(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((M, K), dtype),

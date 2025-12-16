@@ -5,7 +5,7 @@ import tilelang.language as T
 import torch
 
 
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     num_stages = 0
 
     @T.prim_func
@@ -61,7 +61,7 @@ def test_matmul_codegen():
 
 
 def test_matmul_compile():
-    def matmul_jit_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+    def matmul_jit_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
         # a simple kernel just for jit test
         @T.prim_func
         def matmul(
@@ -103,7 +103,7 @@ def test_matmul_compile():
     with tvm.target.Target("c"):
         complied_fun = tilelang.compile(cpu_func, -1, execution_backend="ctypes")
 
-    in_dtype = "float16"
+    in_dtype = T.float16
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype))
     B = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype))
 

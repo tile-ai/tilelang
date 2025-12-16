@@ -100,7 +100,7 @@ def fast_flashattn(
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
-    dtype = "float16"
+    dtype = T.float16
     accum_dtype = "float"
 
     vec_size = qk_coalesced_width
@@ -121,7 +121,7 @@ def fast_flashattn(
 
             num_q_blocks = T.ceildiv(seq_len, block_M)
 
-            bx = T.alloc_var("int32")
+            bx = T.alloc_var(T.int32)
             bx = b_split
 
             with T.While(bx < num_q_blocks):

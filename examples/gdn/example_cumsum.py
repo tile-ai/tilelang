@@ -32,8 +32,8 @@ def tilelang_chunk_local_cumsum_scalar(
     is_varlen=False,
     head_first=False,
     reverse=False,
-    input_dtype="float16",
-    output_dtype="float32",
+    input_dtype=T.float16,
+    output_dtype=T.float32,
     # kernel config
     block_S=64,
     threads=256,
@@ -154,8 +154,8 @@ def main():
         chunk_size=64,
         reverse=True,
         head_first=False,
-        input_dtype="float32",
-        output_dtype="float32",
+        input_dtype=T.float32,
+        output_dtype=T.float32,
         threads=256,
         use_fragment=False,
     )

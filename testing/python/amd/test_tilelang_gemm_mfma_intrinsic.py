@@ -25,7 +25,7 @@ def tl_matmul(
 ):
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if in_dtype in {"float8_e4m3fnuz", "int8"}:
+    if in_dtype in {"float8_e4m3fnuz", T.int8}:
         micro_size_k = 32
 
     block_row_warps = 2
@@ -159,7 +159,7 @@ def tl_matmul(
     return main
 
 
-def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="float32", a_transposed=False, b_transposed=True, k_pack=1):
+def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.float32, a_transposed=False, b_transposed=True, k_pack=1):
     matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack)
     print(matmul)
     kernel = tilelang.compile(matmul)
@@ -168,7 +168,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
     assert src_code is not None
     A_shape = (K, M) if a_transposed else (M, K)
     B_shape = (N, K) if b_transposed else (K, N)
-    if in_dtype == "int8":
+    if in_dtype == T.int8:
         A = torch.randint(-128, 127, A_shape, device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, B_shape, device="cuda", dtype=torch.int8)
     elif in_dtype == "float8_e4m3fnuz":
@@ -212,11 +212,11 @@ def test_assert_tl_matmul():
     assert_tl_matmul_correctness(128, 128, 128, "float16", "float16")
     assert_tl_matmul_correctness(128, 256, 256, "float16", "float32")
     assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", k_pack=2)
-    assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", accum_dtype="int32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype="int32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype="int32", k_pack=2)
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32", k_pack=2)
+    assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", accum_dtype=T.int32)
+    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype=T.int32)
+    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype=T.int32, k_pack=2)
+    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype=T.int32)
+    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype=T.int32, k_pack=2)
     assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3fnuz", "float16")
     assert_tl_matmul_correctness(128, 256, 256, "float8_e4m3fnuz", "float32")
     assert_tl_matmul_correctness(128, 256, 256, "float8_e4m3fnuz", "float32", k_pack=2)

@@ -5,7 +5,7 @@ from tilelang.utils.tensor import map_torch_type
 
 
 @tilelang.jit(out_idx=[-1])
-def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype=T.float32):
     # for fp8 gemm, do one promote after 4 wgmma inst, i.e. block_K = 128.
     # if block_K < 128, promote after 128/block_K iters.
     # if block_K > 128, promote after every iter.

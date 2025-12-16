@@ -21,13 +21,13 @@ def run_passes(func: tvm.tir.PrimFunc):
 @tilelang.testing.requires_cuda
 def test_sync_if_with_same_index():
     @T.prim_func(check_well_formed=False)
-    def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
+    def func(p0_arg: T.Buffer((1, 2, 1, 1), T.float32), p1: T.Buffer(2, T.float32)) -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
         threadIdx_y = T.env_thread("threadIdx.y")
         blockIdx_x = T.env_thread("blockIdx.x")
-        p0 = T.Buffer([2], dtype="float32", data=p0_arg.data)
-        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
-        temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
+        p0 = T.Buffer([2], dtype=T.float32, data=p0_arg.data)
+        result_local = T.alloc_buffer([1], dtype=T.float32, scope="local")
+        temp_shared = T.alloc_buffer([1], dtype=T.float32, scope="shared")
         T.launch_thread(blockIdx_x, 8)
         T.launch_thread(threadIdx_x, 4)
         result_local[0] = T.float32(0)
@@ -43,12 +43,12 @@ def test_sync_if_with_same_index():
 @tilelang.testing.requires_cuda
 def test_sync_read_thread_id_independent_location():
     @T.prim_func
-    def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
+    def func(p0_arg: T.Buffer((1, 2, 1, 1), T.float32), p1: T.Buffer(2, T.float32)) -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
         blockIdx_x = T.env_thread("blockIdx.x")
-        p0 = T.Buffer([2], dtype="float32", data=p0_arg.data)
-        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
-        temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
+        p0 = T.Buffer([2], dtype=T.float32, data=p0_arg.data)
+        result_local = T.alloc_buffer([1], dtype=T.float32, scope="local")
+        temp_shared = T.alloc_buffer([1], dtype=T.float32, scope="shared")
         T.launch_thread(blockIdx_x, 8)
         T.launch_thread(threadIdx_x, 4)
         result_local[0] = T.float32(0)
@@ -66,11 +66,11 @@ def test_sync_read_thread_id_independent_location():
 @tilelang.testing.requires_cuda
 def test_sync_shared():
     @T.prim_func(private=True)
-    def func(A: T.Buffer((4, 4), "float32"), E: T.Buffer((4, 4), "float32")):
+    def func(A: T.Buffer((4, 4), T.float32), E: T.Buffer((4, 4), T.float32)):
         blockIdx_x = T.launch_thread("blockIdx.x", 1)
-        B = T.allocate([24], "float32", "shared")
-        C = T.allocate([1], "float32", "local")
-        D = T.allocate([16], "float32", "shared")
+        B = T.allocate([24], T.float32, "shared")
+        C = T.allocate([1], T.float32, "local")
+        D = T.allocate([16], T.float32, "shared")
         threadIdx_x = T.launch_thread("threadIdx.x", 16)
         B_1 = T.Buffer((24,), data=B, scope="shared")
         A_1 = T.Buffer((16,), data=A.data)
@@ -83,11 +83,11 @@ def test_sync_shared():
         E_1[threadIdx_x] = D_1[threadIdx_x]
 
     @T.prim_func(private=True)
-    def expected(A: T.Buffer((4, 4), "float32"), E: T.Buffer((4, 4), "float32")):
+    def expected(A: T.Buffer((4, 4), T.float32), E: T.Buffer((4, 4), T.float32)):
         blockIdx_x = T.launch_thread("blockIdx.x", 1)
-        B_1 = T.allocate([24], "float32", "shared")
-        C_1 = T.allocate([1], "float32", "local")
-        D_1 = T.allocate([16], "float32", "shared")
+        B_1 = T.allocate([24], T.float32, "shared")
+        C_1 = T.allocate([1], T.float32, "local")
+        D_1 = T.allocate([16], T.float32, "shared")
         threadIdx_x = T.launch_thread("threadIdx.x", 16)
         B_1_1 = T.Buffer((24,), data=B_1, scope="shared")
         A_1 = T.Buffer((16,), data=A.data)
@@ -107,11 +107,11 @@ def test_sync_shared():
 @tvm.testing.requires_cuda
 def test_sync_let_stmt():
     @T.prim_func(private=True)
-    def func(A: T.Buffer((16 * 512), "float32")):
+    def func(A: T.Buffer((16 * 512), T.float32)):
         blockIdx_x = T.launch_thread("blockIdx.x", 16)
-        A_shared = T.allocate([512], "float32", "shared")
-        in_thread_A_temp = T.allocate([1], "float32", "local")
-        cross_thread_A_temp = T.allocate([1], "float32", "local")
+        A_shared = T.allocate([512], T.float32, "shared")
+        in_thread_A_temp = T.allocate([1], T.float32, "local")
+        cross_thread_A_temp = T.allocate([1], T.float32, "local")
         threadIdx_x = T.launch_thread("threadIdx.x", 128)
         A_shared_1 = T.Buffer((512,), data=A_shared, scope="shared")
         for ax0 in range(512):
@@ -141,11 +141,11 @@ def test_sync_let_stmt():
             )
 
     @T.prim_func(private=True)
-    def expected(A: T.Buffer((8192,), "float32")):
+    def expected(A: T.Buffer((8192,), T.float32)):
         blockIdx_x = T.launch_thread("blockIdx.x", 16)
-        A_shared_1 = T.allocate([512], "float32", "shared")
-        in_thread_A_temp_1 = T.allocate([1], "float32", "local")
-        cross_thread_A_temp_1 = T.allocate([1], "float32", "local")
+        A_shared_1 = T.allocate([512], T.float32, "shared")
+        in_thread_A_temp_1 = T.allocate([1], T.float32, "local")
+        cross_thread_A_temp_1 = T.allocate([1], T.float32, "local")
         threadIdx_x = T.launch_thread("threadIdx.x", 128)
         A_shared_1_1 = T.Buffer((512,), data=A_shared_1, scope="shared")
         for ax0 in range(512):
@@ -184,7 +184,7 @@ def test_sync_let_stmt():
 def test_sync_shared_dyn_stmatrix_loop_hoist():
     @T.prim_func
     def func():
-        buf_dyn_shmem = T.alloc_buffer((98304,), "uint8", scope="shared.dyn")
+        buf_dyn_shmem = T.alloc_buffer((98304,), T.uint8, scope="shared.dyn")
         tx = T.launch_thread("threadIdx.x", 384)
         for i in T.unroll(8):
             off = (

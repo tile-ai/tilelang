@@ -4,7 +4,7 @@ import tilelang as tl
 import torch
 
 
-def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32"):
+def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
     import tilelang.language as T
 
     @T.prim_func
@@ -23,7 +23,7 @@ def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype="float3
     return cumsum
 
 
-def cumsum_fragment_test(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32"):
+def cumsum_fragment_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
     import tilelang.language as T
 
     @T.prim_func
@@ -44,7 +44,7 @@ def cumsum_fragment_test(M, N, block_M, block_N, dim=0, reverse=False, dtype="fl
     return cumsum
 
 
-def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32", scope="smem"):
+def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):
     if scope == "smem":
         program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype)
     elif scope == "fragment":
@@ -74,7 +74,7 @@ def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32", sc
     torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
 
 
-def cumsum_smem_test_1d(N, block_N, reverse=False, dtype="float32"):
+def cumsum_smem_test_1d(N, block_N, reverse=False, dtype=T.float32):
     import tilelang.language as T
 
     @T.prim_func
@@ -92,7 +92,7 @@ def cumsum_smem_test_1d(N, block_N, reverse=False, dtype="float32"):
     return cumsum
 
 
-def cumsum_fragment_test_1d(N, block_N, reverse=False, dtype="float32"):
+def cumsum_fragment_test_1d(N, block_N, reverse=False, dtype=T.float32):
     import tilelang.language as T
 
     @T.prim_func
@@ -112,7 +112,7 @@ def cumsum_fragment_test_1d(N, block_N, reverse=False, dtype="float32"):
     return cumsum
 
 
-def run_cumsum_1d(N, block_N, reverse=False, dtype="float32", scope="smem"):
+def run_cumsum_1d(N, block_N, reverse=False, dtype=T.float32, scope="smem"):
     if scope == "smem":
         program = cumsum_smem_test_1d(N, block_N, reverse, dtype)
     elif scope == "fragment":
@@ -150,8 +150,8 @@ def test_cumsum_smem():
     run_cumsum(1024, 1024, 128, 128, dim=1, reverse=True)
 
     # Test different dtypes
-    run_cumsum(256, 256, 128, 128, dtype="float32")
-    run_cumsum(256, 256, 128, 128, dtype="float32")
+    run_cumsum(256, 256, 128, 128, dtype=T.float32)
+    run_cumsum(256, 256, 128, 128, dtype=T.float32)
 
 
 def test_cumsum_fragment():
@@ -160,8 +160,8 @@ def test_cumsum_fragment():
     run_cumsum(1024, 1024, 128, 128, dim=1, reverse=True, scope="fragment")
 
     # Test different dtypes
-    run_cumsum(256, 256, 128, 128, dtype="float32", scope="fragment")
-    run_cumsum(256, 256, 128, 128, dtype="float32", scope="fragment")
+    run_cumsum(256, 256, 128, 128, dtype=T.float32, scope="fragment")
+    run_cumsum(256, 256, 128, 128, dtype=T.float32, scope="fragment")
 
 
 def test_cumsum_smem_1d():
@@ -174,7 +174,7 @@ def test_cumsum_fragment_1d():
     run_cumsum_1d(1024, 128, reverse=True, scope="fragment")
 
 
-def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype="float32"):
+def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype=T.float32):
     """Test cumsum with buffer region (slice) as input."""
     import tilelang.language as T
 
@@ -198,7 +198,7 @@ def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype="float32"):
     return cumsum_region
 
 
-def run_cumsum_region_1d(N, chunk_size, reverse=False, dtype="float32"):
+def run_cumsum_region_1d(N, chunk_size, reverse=False, dtype=T.float32):
     """Run test for cumsum with region input."""
     program = cumsum_region_test_1d(N, chunk_size, reverse, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
@@ -224,7 +224,7 @@ def run_cumsum_region_1d(N, chunk_size, reverse=False, dtype="float32"):
     torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
 
 
-def cumsum_region_test_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32"):
+def cumsum_region_test_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
     """Test cumsum with buffer region (slice) as input in 2D."""
     import tilelang.language as T
 
@@ -253,7 +253,7 @@ def cumsum_region_test_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype="f
     return cumsum_region
 
 
-def run_cumsum_region_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32"):
+def run_cumsum_region_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
     """Run test for cumsum with 2D region input."""
     program = cumsum_region_test_2d(M, N, block_M, block_N, dim, reverse, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)

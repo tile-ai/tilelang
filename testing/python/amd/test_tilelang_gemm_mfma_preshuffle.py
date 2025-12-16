@@ -25,7 +25,7 @@ def tl_matmul(
 ):
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if in_dtype in {"float8_e4m3fnuz", "int8"}:
+    if in_dtype in {"float8_e4m3fnuz", T.int8}:
         micro_size_k = 32
 
     block_row_warps = 2
@@ -195,7 +195,7 @@ def assert_tl_matmul_correctness(
     K,
     in_dtype,
     out_dtype,
-    accum_dtype="float32",
+    accum_dtype=T.float32,
     a_transposed=False,
     b_transposed=True,
     k_pack=1,
@@ -210,7 +210,7 @@ def assert_tl_matmul_correctness(
     assert src_code is not None
     A_shape = (K, M) if a_transposed else (M, K)
     B_shape = (N, K) if b_transposed else (K, N)
-    if in_dtype == "int8":
+    if in_dtype == T.int8:
         A = torch.randint(-128, 127, A_shape, device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, B_shape, device="cuda", dtype=torch.int8)
     elif in_dtype == "float8_e4m3fnuz":
@@ -259,12 +259,12 @@ def assert_tl_matmul_correctness(
 
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype="int32", b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype="int32", b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", b_transposed=False, accum_dtype="int32", b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype=T.int32, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype=T.int32, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", b_transposed=False, accum_dtype=T.int32, b_preshuffle=True)
 
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype="int32", k_pack=2, b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", b_transposed=False, accum_dtype="int32", k_pack=2, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype=T.int32, k_pack=2, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", b_transposed=False, accum_dtype=T.int32, k_pack=2, b_preshuffle=True)
 
     assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", b_preshuffle=True)
     assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", b_transposed=False, b_preshuffle=True)

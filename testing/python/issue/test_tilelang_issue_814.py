@@ -5,7 +5,7 @@ import torch
 
 
 @tilelang.jit
-def _tmp_var_kernel(N, block_N, dtype="float"):
+def _tmp_var_kernel(N, block_N, dtype=T.float32):
     @T.prim_func
     def kernel(
         A: T.Tensor((N,), dtype),

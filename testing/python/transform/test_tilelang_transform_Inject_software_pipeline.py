@@ -22,7 +22,7 @@ def test_trival_pipeline():
                 with T.block():
                     T.reads(A[tx, i])
                     T.writes(C[tx, i])
-                    B = T.alloc_buffer((16, 1), dtype="float32", scope="shared")
+                    B = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
                     with T.block():
                         T.reads(A[tx, i])
                         T.writes(B[tx, 0])

@@ -46,7 +46,7 @@ def gemv_simt(
     C_shape = (M, N)
 
     dp4a_size = 4
-    use_dp4a = in_dtype == "int8" and accum_dtype == "int32"
+    use_dp4a = in_dtype == T.int8 and accum_dtype == T.int32
 
     @T.prim_func
     def main(

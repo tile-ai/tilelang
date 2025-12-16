@@ -82,7 +82,7 @@ def run_gemm_ss(
     num_stages=3,
     num_threads=128,
 ):
-    metadata_dtype = "int32" if ("8" in in_dtype) else "int16"
+    metadata_dtype = T.int32 if ("8" in in_dtype) else T.int16
     program = matmul(
         M,
         N,
@@ -260,7 +260,7 @@ def run_gemm_rs(
     num_stages=3,
     num_threads=128,
 ):
-    metadata_dtype = "int32" if ("8" in in_dtype) else "int16"
+    metadata_dtype = T.int32 if ("8" in in_dtype) else T.int16
     program = matmul_rs(
         M,
         N,
@@ -417,7 +417,7 @@ def run_gemm_sr(
     num_stages=3,
     num_threads=128,
 ):
-    metadata_dtype = "int32" if ("8" in in_dtype) else "int16"
+    metadata_dtype = T.int32 if ("8" in in_dtype) else T.int16
     program = matmul_sr(
         M,
         N,
@@ -578,7 +578,7 @@ def run_gemm_rr(
     num_stages=3,
     num_threads=128,
 ):
-    metadata_dtype = "int32" if ("8" in in_dtype) else "int16"
+    metadata_dtype = T.int32 if ("8" in in_dtype) else T.int16
     program = matmul_rr(
         M,
         N,

@@ -12,7 +12,7 @@ def calc_diff(x, y):
 
 
 @tilelang.jit(out_idx=[-1])
-def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype=T.float32):
     @T.prim_func
     def gemm_fp8(
         A: T.Tensor((M, K), dtype),

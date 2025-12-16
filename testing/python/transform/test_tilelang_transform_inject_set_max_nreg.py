@@ -22,8 +22,8 @@ def test_inject_set_max_nreg():
             T.annotate_producer_reg_dealloc(24)  # Producer: decrease to 24
             T.annotate_consumer_reg_alloc(240)  # Consumer: increase to 240
 
-            A_shared = T.alloc_buffer((3, 1, 8, 256), "float16", scope="shared.dyn")
-            B_shared = T.alloc_buffer((3, 1, 4, 512), "float16", scope="shared.dyn")
+            A_shared = T.alloc_buffer((3, 1, 8, 256), T.float16, scope="shared.dyn")
+            B_shared = T.alloc_buffer((3, 1, 4, 512), T.float16, scope="shared.dyn")
             C_local = T.alloc_buffer((32,), scope="local")
 
             T.create_list_of_mbarrier(128, 128, 128, 128, 128, 128)

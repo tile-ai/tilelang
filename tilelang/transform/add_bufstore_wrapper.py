@@ -143,7 +143,7 @@ def AddWrapperForSingleBufStore():
                                 )
 
                     # Wrap fragment[0] access with T.Parallel loop
-                    return For(Var("_", "int32"), 0, 1, ForKind.PARALLEL, statement)
+                    return For(Var("_", T.int32), 0, 1, ForKind.PARALLEL, statement)
 
             return statement
 

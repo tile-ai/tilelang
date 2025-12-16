@@ -20,9 +20,9 @@ class FlashAttentionTemplate(BaseTemplate):
 
     is_causal: bool = False
 
-    in_dtype: str = "float16"
-    out_dtype: str = "float16"
-    accum_dtype: str = "float16"
+    in_dtype: str = T.float16
+    out_dtype: str = T.float16
+    accum_dtype: str = T.float16
 
     def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:
         """

@@ -39,7 +39,7 @@ def tl_matmul(
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if accum_dtype == "int32":
+    if accum_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -47,7 +47,7 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 64
     warp_col_tiles = 64
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -223,7 +223,7 @@ def tl_matmul_weight_only_transform(
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     transform_b = 3
@@ -233,7 +233,7 @@ def tl_matmul_weight_only_transform(
     block_col_warps = 2
     warp_row_tiles = 64
     warp_col_tiles = 64
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -376,7 +376,7 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
         M=N,
         N=(K // 2),
         datatype="int8",
-        storage_dtype="int8",
+        storage_dtype=T.int8,
         transform_kind=transform_b,
         transpose_matrix=True,
     )

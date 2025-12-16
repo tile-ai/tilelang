@@ -38,7 +38,7 @@ def run_alloc_var(
 
 
 def test_alloc_var():
-    run_alloc_var(1024, 128, "float16")
+    run_alloc_var(1024, 128, T.float16)
 
 
 def alloc_var_add(

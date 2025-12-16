@@ -36,7 +36,7 @@ class Statement:
                 output_indices.append(results[_iter.var])
             else:
                 # not Bijective mapping case
-                output_indices.append(tir.Var("undefined", dtype="int32") % int(_iter.dom.extent))
+                output_indices.append(tir.Var("undefined", dtype=T.int32) % int(_iter.dom.extent))
         return output_indices
 
 
@@ -344,7 +344,7 @@ def _extract_dependent_region(block_analyzer, block: BlockRV) -> dict[str, list[
         for indice, shape_limit in zip(x.indices, x.buffer.shape):
             expr = walk_indice(indice)
             if expr is None:
-                expr = tir.Var("undefined", dtype="int8") % shape_limit
+                expr = tir.Var("undefined", dtype=T.int8) % shape_limit
             if isinstance(expr, tir.IntImm) and expr.value == 0:
                 """for tensor ir zero dim smplification case.
                 for ax0, ax1, ax2 in T.grid(T.int64(1024), T.int64(1024), T.int64(1024)):

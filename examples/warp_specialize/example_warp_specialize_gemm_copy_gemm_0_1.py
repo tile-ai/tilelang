@@ -10,7 +10,7 @@ import tilelang.language as T
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     },
 )
-def matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     warp_group_num = 2
     threads = 128 * warp_group_num
 

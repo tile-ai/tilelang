@@ -30,7 +30,7 @@ def fill(buffer: tir.Buffer | tir.BufferRegion | tir.BufferLoad, value: tir.Prim
         if region is not None:
             extents = [r.extent for r in region.region]
         else:
-            extents = [tir.IntImm("int32", 1) for _ in buffer.indices]
+            extents = [tir.IntImm(T.int32, 1) for _ in buffer.indices]
     else:
         extents = []
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.fill"), to_buffer_region(buffer, access_type="w", extents=extents), value)

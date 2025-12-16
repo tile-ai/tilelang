@@ -74,7 +74,7 @@ trans_A, trans_B = False, True
 num_stages = 2
 threads = 256
 for tvm_fp8_dtype in ["float8_e4m3", "float8_e5m2"]:
-    for tvm_acc_dtype in ["float16", "float32"]:  # , torch.float16]:
+    for tvm_acc_dtype in [T.float16, T.float32]:  # , torch.float16]:
         torch_fp8_dtype = map_torch_type(tvm_fp8_dtype)
         torch_acc_dtype = map_torch_type(tvm_acc_dtype)
         print(f"running {tvm_fp8_dtype} -> {tvm_acc_dtype}")

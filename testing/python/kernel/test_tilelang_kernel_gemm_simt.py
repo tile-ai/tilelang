@@ -72,7 +72,7 @@ def tl_matmul_simt(
 
     micro_size_k = 128 // DataType(in_dtype).bits
     dp4a_size = 4
-    use_dp4a = in_dtype == "int8" and accum_dtype == "int32"
+    use_dp4a = in_dtype == T.int8 and accum_dtype == T.int32
 
     @T.prim_func
     def main(
@@ -139,7 +139,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     # src_code is the generated cuda source
     assert src_code is not None
 
-    if in_dtype == "int8":
+    if in_dtype == T.int8:
         A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, (N, K), device="cuda", dtype=torch.int8)
     else:

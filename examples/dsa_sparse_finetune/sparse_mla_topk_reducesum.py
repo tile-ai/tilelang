@@ -41,8 +41,8 @@ def tl_sparse_mla_topk_reducesum_impl(
     seq_len_kv = T.symbolic("seq_len_kv")
 
     head_kv = heads // kv_group
-    indices_dtype = "int32"
-    dtype = "bfloat16"
+    indices_dtype = T.int32
+    dtype = T.bfloat16
     accum_dtype = "float"
 
     G = kv_group

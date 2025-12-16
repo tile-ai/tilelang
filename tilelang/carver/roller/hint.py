@@ -249,7 +249,7 @@ class Hint:
         # analysis pass context, for int8 mma, we should merge static shared memory
         merge_static_smem = False
         # int32 and float32 accum may take too much shared memory
-        if self.use_tc and self.intrin_info.out_dtype in ["float32", "int32"]:
+        if self.use_tc and self.intrin_info.out_dtype in [T.float32, T.int32]:
             merge_static_smem = True
         # Always merge dynamic shared memory
         if self.shared_scope == "shared.dyn":

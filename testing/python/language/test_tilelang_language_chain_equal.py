@@ -10,7 +10,7 @@ import torch
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     },
 )
-def chain_equal(N, block_size, dtype="float32"):
+def chain_equal(N, block_size, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((N,), dtype),
@@ -25,7 +25,7 @@ def chain_equal(N, block_size, dtype="float32"):
     return main
 
 
-def run_chain_equal(N=128, block_size=64, dtype="float32"):
+def run_chain_equal(N=128, block_size=64, dtype=T.float32):
     kernel = chain_equal(N, block_size, dtype)
     A = torch.zeros((N,), dtype=torch.float32, device="cuda")
     B = torch.zeros((N,), dtype=torch.float32, device="cuda")

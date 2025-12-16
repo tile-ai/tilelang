@@ -133,10 +133,10 @@ class SparseTensorCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        e_dtype: str = "uint8",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        e_dtype: str = T.uint8,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         e_transposed: bool = False,
@@ -181,7 +181,7 @@ class SparseTensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype="float16"):
+    def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         # NOTE: k_dim here represents the logical shape of the MMA operation.
@@ -250,7 +250,7 @@ class SparseTensorCoreIntrinEmitter:
 
     def get_store_index_map(self, inverse: bool = False) -> IndexMap:
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
-        index_map = IndexMap.from_func(mma_store_index_map, index_dtype="int32")
+        index_map = IndexMap.from_func(mma_store_index_map, index_dtype=T.int32)
         if not inverse:
             return index_map
         inverse_index_map = index_map.inverse([warp_size, local_size_c])
@@ -708,7 +708,7 @@ class SparseTensorCoreIntrinEmitter:
             self.block_col_warps,
         )
 
-        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
         def forward_thread(i: int, j: int) -> int:
             """

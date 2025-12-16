@@ -22,7 +22,7 @@ def tl_fused_chunk_fwd_kernel(
     H,
     DK,
     DV,
-    dtype: str = "float16",
+    dtype: str = T.float16,
     scale: float = None,
 ) -> torch.Tensor:
     if scale is None:

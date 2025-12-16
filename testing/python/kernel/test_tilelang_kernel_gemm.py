@@ -92,7 +92,7 @@ def run_gemm(
             A = A.T
         if trans_B:
             B = B.T
-        if in_dtype == "float32":
+        if in_dtype == T.float32:
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
             A = (A.view(torch.int32) - 0x1000).view(torch.float32)

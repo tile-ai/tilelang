@@ -5,7 +5,7 @@ import tilelang.testing
 import pytest
 
 
-def run_ieee_math_test(mathop_name, mathop_func, rounding_mode="rn", M=128, N=128, block_M=32, block_N=32, dtype="float32"):
+def run_ieee_math_test(mathop_name, mathop_func, rounding_mode="rn", M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
     """
     Test IEEE-compliant math operations with specified rounding modes.
     """

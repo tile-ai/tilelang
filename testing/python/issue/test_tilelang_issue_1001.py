@@ -16,7 +16,7 @@ def _cumsum_view_infer_layout(hidden):
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens, hidden), "float"]):
         with T.Kernel(num_tokens, threads=128) as pid:
-            smem = T.alloc_shared((hidden,), dtype="float")
+            smem = T.alloc_shared((hidden,), dtype=T.float32)
             T.copy(x[pid, :], smem)
             T.cumsum(T.view(smem, (1, hidden)), dim=1)
 

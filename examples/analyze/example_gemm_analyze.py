@@ -15,7 +15,7 @@ def kernel(
     thread_num=None,
     enable_rasteration=None,
 ):
-    dtype = "float16"
+    dtype = T.float16
     accum_dtype = "float"
 
     @T.prim_func

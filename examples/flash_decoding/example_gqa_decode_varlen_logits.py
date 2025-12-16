@@ -209,7 +209,7 @@ def flashattn(
     shape_v = [total_seqlen_k, k_heads, dim]
     shape_o = [batch, heads, dim]
     shape_s = [batch, heads, math.ceil(max_seqlen_kv / block_N)]
-    dtype = "float16"
+    dtype = T.float16
     accum_dtype = "float"
     kv_group_num = heads // k_heads
 
@@ -449,7 +449,7 @@ def test_equal_seqlen_decode_main(args):
     real_max_k_seqlen = args.k_seqlen
     head_size = args.head_size
     block_size = args.block_size
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+    dtype = torch.bfloat16 if args.dtype == T.bfloat16 else torch.float16
 
     # For decode, query is just 1 token per batch
     q = torch.randn(batch_size, q_heads, head_size, device="cuda", dtype=dtype)
@@ -568,7 +568,7 @@ def test_varlen_decode_main(args):
     real_max_k_seqlen = args.k_seqlen
     head_size = args.head_size
     block_size = args.block_size
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+    dtype = torch.bfloat16 if args.dtype == T.bfloat16 else torch.float16
 
     print(f"Testing decode kernel with variable sequence lengths (max_k_seqlen={max_k_seqlen})")
 
@@ -789,7 +789,7 @@ def speed_benchmark_decode_comparison(args):
     max_k_seqlen = args.k_seqlen
     head_size = args.head_size
     block_size = args.block_size
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+    dtype = torch.bfloat16 if args.dtype == T.bfloat16 else torch.float16
 
     print("\n=== Decode Speed Benchmark Comparison ===")
     print("Configuration:")
@@ -898,7 +898,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.test_sink = True
     args.test_varlen = False
-    args.dtype = "float16"
+    args.dtype = T.float16
     args.num_split = 1
 
     if args.benchmark:

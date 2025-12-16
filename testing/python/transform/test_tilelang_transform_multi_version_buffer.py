@@ -24,7 +24,7 @@ def _check(original, transformed):
 M = 512
 N = 512
 K = 512
-dtype = "float16"
+dtype = T.float16
 block_M = 64
 block_N = 64
 block_K = 32
@@ -39,8 +39,8 @@ def test_multi_version_buffer():
         with T.block(""):
             T.reads(A[by * 64, 0:481], B[0:481, bx * 64])
             T.writes()
-            A_shared = T.alloc_buffer((1, 8, 256), "float16", scope="shared.dyn")
-            B_shared = T.alloc_buffer((1, 4, 512), "float16", scope="shared.dyn")
+            A_shared = T.alloc_buffer((1, 8, 256), T.float16, scope="shared.dyn")
+            B_shared = T.alloc_buffer((1, 4, 512), T.float16, scope="shared.dyn")
             C_local = T.alloc_buffer((32,), scope="local")
             for i in T.unroll(16, annotations={"pragma_unroll_explicit": T.bool(False)}):
                 for vec in T.vectorized(2):
@@ -78,8 +78,8 @@ def test_multi_version_buffer():
         with T.block(""):
             T.reads(A[by * 64, 0:481], B[0:481, bx * 64])
             T.writes()
-            A_shared = T.alloc_buffer((3, 1, 8, 256), "float16", scope="shared.dyn")
-            B_shared = T.alloc_buffer((3, 1, 4, 512), "float16", scope="shared.dyn")
+            A_shared = T.alloc_buffer((3, 1, 8, 256), T.float16, scope="shared.dyn")
+            B_shared = T.alloc_buffer((3, 1, 4, 512), T.float16, scope="shared.dyn")
             C_local = T.alloc_buffer((32,), scope="local")
             for i in T.unroll(16, annotations={"pragma_unroll_explicit": T.bool(False)}):
                 for vec in T.vectorized(2):
@@ -116,8 +116,8 @@ def test_multi_version_buffer_with_let():
     @T.prim_func
     def before(scales: T.Tensor((4,), "float32")):
         with T.block("root"):
-            shared = T.alloc_buffer((8,), "float32", scope="shared.dyn")
-            accum = T.alloc_buffer((8,), "float32", scope="local")
+            shared = T.alloc_buffer((8,), T.float32, scope="shared.dyn")
+            accum = T.alloc_buffer((8,), T.float32, scope="local")
             for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
                 value = scales[k]
                 for i in T.serial(8):
@@ -128,8 +128,8 @@ def test_multi_version_buffer_with_let():
     @T.prim_func
     def after(scales: T.Tensor((4,), "float32")):
         with T.block("root"):
-            shared = T.alloc_buffer((2, 8), "float32", scope="shared.dyn")
-            accum = T.alloc_buffer((8,), "float32", scope="local")
+            shared = T.alloc_buffer((2, 8), T.float32, scope="shared.dyn")
+            accum = T.alloc_buffer((8,), T.float32, scope="local")
             for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
                 value = scales[k]
                 for i in T.serial(8):

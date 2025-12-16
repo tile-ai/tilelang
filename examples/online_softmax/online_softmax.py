@@ -9,7 +9,7 @@ from typing import Callable
 def softmax_kernel(
     M,
     N,
-    dtype: str = "float16",
+    dtype: str = T.float16,
 ) -> "Callable":
     BN = min(tl.next_power_of_2(N), 8192)
     NN = tl.cdiv(N, BN)
