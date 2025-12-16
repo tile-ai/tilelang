@@ -52,7 +52,7 @@ class Fragment(Layout):
         # Each dimension is assigned a range from 0..size and a Var like i0, i1, etc.
         forward_vars = []
         for idx, size in enumerate(shape):
-            iv = IterVar(Range(0, size), Var(f"i{idx}", "int32", 0))
+            iv = IterVar(Range(0, size), Var(f"i{idx}", "int32"), 0)
             forward_vars.append(iv)
 
         # Collect the underlying variables (i.e., Var objects) from the IterVars
@@ -68,7 +68,7 @@ class Fragment(Layout):
             # If replication is greater than 1, create a replicate IterVar
             # and pass it to forward_fn
             if replicate > 1:
-                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32", 0))
+                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
                 forward_thread, forward_index = forward_fn(*vars, thread_replicate)
             else:
                 thread_replicate = None
@@ -78,7 +78,7 @@ class Fragment(Layout):
             forward_index = forward_index_fn(*vars) if forward_index_fn else None
             # Then compute forward_thread via forward_thread_fn
             if replicate > 1:
-                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32", 0))
+                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
                 forward_thread = forward_thread_fn(*vars, thread_replicate.var)
             else:
                 thread_replicate = None
