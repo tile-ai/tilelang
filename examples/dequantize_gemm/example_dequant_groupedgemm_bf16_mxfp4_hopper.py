@@ -259,8 +259,8 @@ def matmul(
         Bias: T.Tensor((E, N), out_dtype),
         # Add fusedmoe tensors
         topk_weights: T.Tensor((M * topk), out_dtype),
-        sorted_token_ids: T.Tensor((padding_M), "int32"),
-        expert_ids: T.Tensor((padding_M // block_M), "int32"),
+        sorted_token_ids: T.Tensor((padding_M), T.int32),
+        expert_ids: T.Tensor((padding_M // block_M), T.int32),
         C: T.Tensor((M, topk, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(padding_M, block_M), threads=threads) as (bx, by):
@@ -271,8 +271,8 @@ def matmul(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
             topk_weights_shared = T.alloc_shared((block_M), out_dtype)
-            sorted_token_ids_shared = T.alloc_shared((block_M), "int32")
-            expert_id = T.alloc_local((1), "int32")  # the expert id for the current block
+            sorted_token_ids_shared = T.alloc_shared((block_M), T.int32)
+            expert_id = T.alloc_local((1), T.int32)  # the expert id for the current block
             # To use 1D TMA, the last dim of Scale_shared must have stride=1
             # May use much more shared memory than necessary
             Scale_shared = T.alloc_shared((block_N, K // scale_size), storage_dtype)
@@ -453,7 +453,7 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
                 padding_M,
                 "bfloat16",
                 "bfloat16",
-                "float32",
+                T.float32,
                 num_bits=num_bits,
                 scale_size=scale_size,
                 fast_dequant=fast_dequant,
@@ -469,7 +469,7 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
             padding_M,
             "bfloat16",
             "bfloat16",
-            "float32",
+            T.float32,
             num_bits=num_bits,
             scale_size=scale_size,
             fast_dequant=fast_dequant,

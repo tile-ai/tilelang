@@ -498,7 +498,7 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
 
     if tune:
         kernel = matmul(
-            m, n, k, "bfloat16", "bfloat16", "float32", num_bits=4, scale_size=scale_size, fast_dequant=fast_dequant, with_bias=with_bias
+            m, n, k, "bfloat16", "bfloat16", T.float32, num_bits=4, scale_size=scale_size, fast_dequant=fast_dequant, with_bias=with_bias
         )
     else:
         kernel = matmul(
@@ -507,7 +507,7 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
             k,
             "bfloat16",
             "bfloat16",
-            "float32",
+            T.float32,
             num_bits=4,
             scale_size=scale_size,
             block_M=256,

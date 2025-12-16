@@ -25,7 +25,7 @@ def tl_matmul(
 ):
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if in_dtype in {"float8_e4m3fnuz", T.int8}:
+    if in_dtype in {T.float8_e4m3fnuz, T.int8}:
         micro_size_k = 32
 
     block_row_warps = 2
@@ -213,7 +213,7 @@ def assert_tl_matmul_correctness(
     if in_dtype == T.int8:
         A = torch.randint(-128, 127, A_shape, device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, B_shape, device="cuda", dtype=torch.int8)
-    elif in_dtype == "float8_e4m3fnuz":
+    elif in_dtype == T.float8_e4m3fnuz:
         A = torch.rand(A_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
         B = torch.rand(B_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
     else:
@@ -259,17 +259,17 @@ def assert_tl_matmul_correctness(
 
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype=T.int32, b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype=T.int32, b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", b_transposed=False, accum_dtype=T.int32, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, T.int8, T.int32, accum_dtype=T.int32, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, T.int8, T.int32, accum_dtype=T.int32, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, T.int8, T.int32, b_transposed=False, accum_dtype=T.int32, b_preshuffle=True)
 
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", accum_dtype=T.int32, k_pack=2, b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "int8", "int32", b_transposed=False, accum_dtype=T.int32, k_pack=2, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, T.int8, T.int32, accum_dtype=T.int32, k_pack=2, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, T.int8, T.int32, b_transposed=False, accum_dtype=T.int32, k_pack=2, b_preshuffle=True)
 
-    assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", b_transposed=False, b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", k_pack=2, b_preshuffle=True)
-    assert_tl_matmul_correctness(256, 256, 512, "float8_e4m3fnuz", "float32", k_pack=2, b_transposed=False, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, T.float8_e4m3fnuz, T.float32, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, T.float8_e4m3fnuz, T.float32, b_transposed=False, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, T.float8_e4m3fnuz, T.float32, k_pack=2, b_preshuffle=True)
+    assert_tl_matmul_correctness(256, 256, 512, T.float8_e4m3fnuz, T.float32, k_pack=2, b_transposed=False, b_preshuffle=True)
 
 
 if __name__ == "__main__":

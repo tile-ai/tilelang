@@ -10,7 +10,7 @@ def test_issue_1237_dynamic_copy_extent_builds():
     length = T.symbolic("len", dtype=T.int32)
 
     @T.prim_func
-    def sample_kernel(global_tensor: T.Tensor[(length,), "int32"]):  # noqa: F821
+    def sample_kernel(global_tensor: T.Tensor[(length,), T.int32]):  # noqa: F821
         with T.Kernel(1, threads=32):
             buffer_shared = T.alloc_shared((1024,), dtype=T.int32)
             T.copy(global_tensor[0:length], buffer_shared)

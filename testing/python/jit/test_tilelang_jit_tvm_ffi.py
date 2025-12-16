@@ -162,9 +162,9 @@ def test_gemm_jit_kernel():
         768,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         256,
         32,
@@ -207,7 +207,7 @@ def run_tvm_ffi_kernel_do_bench(
 
 
 def test_tvm_ffi_kernel_do_bench():
-    run_tvm_ffi_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_tvm_ffi_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
 def run_tvm_ffi_kernel_multi_stream(
@@ -249,7 +249,7 @@ def run_tvm_ffi_kernel_multi_stream(
 
 
 def test_tvm_ffi_kernel_multi_stream():
-    run_tvm_ffi_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_tvm_ffi_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
 def run_tvm_ffi_dynamic_shape(
@@ -298,12 +298,12 @@ def run_tvm_ffi_dynamic_shape(
 
 
 def test_tvm_ffi_dynamic_shape():
-    run_tvm_ffi_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_tvm_ffi_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
-    run_tvm_ffi_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_tvm_ffi_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
     run_tvm_ffi_dynamic_shape(
-        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16", "float16", 128, 256, 32, 2
+        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2
     )
 
 

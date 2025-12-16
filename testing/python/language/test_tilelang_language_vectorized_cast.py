@@ -3,11 +3,11 @@ import tilelang.testing
 import tilelang.language as T
 
 str2dtype = {
-    "float32": torch.float32,
-    "float16": torch.float16,
+    T.float32: torch.float32,
+    T.float16: torch.float16,
     "bfloat16": torch.bfloat16,
-    "float8_e4m3": torch.float8_e4m3fn,
-    "float8_e5m2": torch.float8_e5m2,
+    T.float8_e4m3: torch.float8_e4m3fn,
+    T.float8_e5m2: torch.float8_e5m2,
 }
 
 
@@ -87,12 +87,12 @@ def test_vectorized_cast():
     run_vectorized_cast(T.float16, T.float32, "__half22float2", 4)
 
     # fp32 -> fp8_e4m3
-    run_vectorized_cast(T.float32, "float8_e4m3", "__nv_cvt_float2_to_fp8x2", 2)
-    run_vectorized_cast(T.float32, "float8_e4m3", "__nv_cvt_float2_to_fp8x2", 4)
+    run_vectorized_cast(T.float32, T.float8_e4m3, "__nv_cvt_float2_to_fp8x2", 2)
+    run_vectorized_cast(T.float32, T.float8_e4m3, "__nv_cvt_float2_to_fp8x2", 4)
 
     # fp32 -> fp8_e5m2
-    run_vectorized_cast(T.float32, "float8_e5m2", "__nv_cvt_float2_to_fp8x2", 2)
-    run_vectorized_cast(T.float32, "float8_e5m2", "__nv_cvt_float2_to_fp8x2", 4)
+    run_vectorized_cast(T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 2)
+    run_vectorized_cast(T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 4)
 
     # fp32 -> bf16
     run_vectorized_cast(T.float32, T.bfloat16, "__float22bfloat162_rn", 2)
@@ -103,12 +103,12 @@ def test_vectorized_cast():
     run_vectorized_cast(T.bfloat16, T.float32, "__bfloat1622float2", 4)
 
     # fp8_e4m3 -> fp32
-    run_vectorized_cast("float8_e4m3", T.float32, "__tl_cvt_fp8x2_to_float2", 2)
-    run_vectorized_cast("float8_e4m3", T.float32, "__tl_cvt_fp8x2_to_float2", 4)
+    run_vectorized_cast(T.float8_e4m3, T.float32, "__tl_cvt_fp8x2_to_float2", 2)
+    run_vectorized_cast(T.float8_e4m3, T.float32, "__tl_cvt_fp8x2_to_float2", 4)
 
     # fp8_e5m2 -> fp32
-    run_vectorized_cast("float8_e5m2", T.float32, "__tl_cvt_fp8x2_to_float2", 2)
-    run_vectorized_cast("float8_e5m2", T.float32, "__tl_cvt_fp8x2_to_float2", 4)
+    run_vectorized_cast(T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 2)
+    run_vectorized_cast(T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 4)
 
 
 if __name__ == "__main__":

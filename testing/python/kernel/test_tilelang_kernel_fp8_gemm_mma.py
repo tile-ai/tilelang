@@ -39,24 +39,24 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "float8_e4m3",
-        "float8_e5m2",
-        "int8",
+        T.float16,
+        T.float8_e4m3,
+        T.float8_e5m2,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
     is_float8 = in_dtype in [
-        "float8_e4m3",
-        "float8_e5m2",
-        "float8_e4m3fn",
-        "float8_e5m2fnuz",
+        T.float8_e4m3,
+        T.float8_e5m2,
+        T.float8_e4m3fn,
+        T.float8_e5m2fnuz,
     ]
     if out_dtype == T.int32 or is_float8:
         micro_size_k = 32
@@ -221,8 +221,8 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 9)
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3", "float32", "float32")
-    assert_tl_matmul_correctness(128, 128, 128, "float8_e5m2", "float32", "float32")
+    assert_tl_matmul_correctness(128, 128, 128, T.float8_e4m3, T.float32, T.float32)
+    assert_tl_matmul_correctness(128, 128, 128, T.float8_e5m2, T.float32, T.float32)
 
 
 if __name__ == "__main__":

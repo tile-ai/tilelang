@@ -42,10 +42,10 @@ def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
         with T.Kernel(batch, threads=BLOCK_SIZE) as (bx):
             tx = T.get_thread_binding()
 
-            s_threshold_bin_id = T.alloc_shared([1], "int32")
-            s_histogram = T.alloc_shared([RADIX + 1], "int32")
-            s_num_input = T.alloc_shared([2], "int32")
-            s_input_idx = T.alloc_shared([2, SMEM_INPUT_SIZE], "int32")
+            s_threshold_bin_id = T.alloc_shared([1], T.int32)
+            s_histogram = T.alloc_shared([RADIX + 1], T.int32)
+            s_num_input = T.alloc_shared([2], T.int32)
+            s_input_idx = T.alloc_shared([2, SMEM_INPUT_SIZE], T.int32)
 
             l_threshold_bin_id = T.alloc_var(T.int32)
             l_new_topk = T.alloc_var(T.int32)
@@ -128,7 +128,7 @@ def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     if s * BLOCK_SIZE + tx < l_num_input:
                         l_bin_id32 = T.Cast(
-                            "int32", ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
+                            T.int32, ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
                         )
                         T.atomic_add(s_histogram[l_bin_id32], 1)
                 T.sync_threads()
@@ -157,7 +157,7 @@ def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
                     T.sync_threads()
                     if s * BLOCK_SIZE + tx < l_num_input:
                         l_bin_id32 = T.Cast(
-                            "int32", ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
+                            T.int32, ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
                         )
                         if l_bin_id32 > l_threshold_bin_id:
                             pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos

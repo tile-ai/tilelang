@@ -1,3 +1,4 @@
+import tilelang.language as T
 from tilelang import tvm as tvm
 import tilelang.testing
 import pytest
@@ -22,8 +23,6 @@ def matmul(
     B_shape = (N, K) if trans_B else (K, N)
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(
@@ -112,27 +111,27 @@ def run_gemm_ss(
 def test_gemm_ss():
     # More test case can be found in kernel/test_tilelang_kernel_gemm.py
     # GEMM tests for float16
-    run_gemm_ss(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 128, 32, 2)
-    run_gemm_ss(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 128, 32, 2)
-    run_gemm_ss(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 128, 32, 2)
-    run_gemm_ss(512, 1024, 768, True, True, "float16", "float16", "float16", 128, 128, 32, 2)
+    run_gemm_ss(512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 128, 32, 2)
+    run_gemm_ss(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 128, 32, 2)
+    run_gemm_ss(512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 128, 32, 2)
+    run_gemm_ss(512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 128, 32, 2)
     # n8 test
-    run_gemm_ss(128, 8, 32, False, True, "float16", "float16", "float16", 128, 8, 32, 0, 128)
+    run_gemm_ss(128, 8, 32, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 0, 128)
 
     # int8 test
-    run_gemm_ss(128, 128, 128, False, True, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, False, False, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, True, False, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, True, True, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
 
     # float8 tests
-    run_gemm_ss(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2)
 
     # tfloat32 test
-    run_gemm_ss(128, 128, 128, False, False, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, False, True, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_ss(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2)
 
 
 def matmul_rs(
@@ -155,8 +154,6 @@ def matmul_rs(
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
     A_frag_shape = A_shared_shape
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(
@@ -249,28 +246,28 @@ def run_gemm_rs(
 @pytest.mark.skip(reason="Temporarily disabling until GEMM RS issues are resolved")
 def test_gemm_rs():
     # GEMM tests for float16
-    run_gemm_rs(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_rs(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_rs(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_rs(512, 1024, 768, True, True, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_gemm_rs(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_rs(512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_rs(512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_rs(512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
     # n8 tests
-    run_gemm_rs(128, 8, 32, False, True, "float16", "float16", "float16", 128, 8, 32, 0, 128)
+    run_gemm_rs(128, 8, 32, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 0, 128)
 
     # int8 tests
-    run_gemm_rs(128, 128, 128, False, True, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, False, False, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, True, False, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, True, True, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
 
     # float8 tests
-    run_gemm_rs(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2)
 
     # float32 tests
-    run_gemm_rs(128, 128, 128, False, False, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, False, True, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_rs(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2)
 
 
 def matmul_sr(
@@ -293,8 +290,6 @@ def matmul_sr(
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
     B_frag_shape = B_shared_shape
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(
@@ -386,29 +381,29 @@ def run_gemm_sr(
 
 def test_gemm_sr():
     # GEMM tests for float16
-    run_gemm_sr(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_sr(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_sr(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_sr(512, 1024, 768, True, True, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_gemm_sr(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_sr(512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_sr(512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_sr(512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
     # n8 tests
-    run_gemm_sr(128, 8, 32, False, True, "float16", "float16", "float16", 128, 8, 32, 0, 128)
+    run_gemm_sr(128, 8, 32, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 0, 128)
 
     # int8 tests
-    run_gemm_sr(128, 128, 32, False, True, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 32, False, False, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 32, True, False, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 32, True, True, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 32, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 32, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 32, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 32, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
 
     # float8 tests
-    run_gemm_sr(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2)
 
     # float32 tests
     # TODO(lei): fix in future
-    run_gemm_sr(128, 128, 128, False, False, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 128, False, True, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_sr(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2)
 
 
 def matmul_rr(
@@ -528,29 +523,29 @@ def run_gemm_rr(
 
 def test_gemm_rr():
     # GEMM tests for float16
-    run_gemm_rr(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_rr(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_rr(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_rr(512, 1024, 768, True, True, "float16", "float16", "float16", 128, 256, 32, 2)
-    run_gemm_rr(512, 1024, 768, False, True, "bfloat16", "bfloat16", "float", 128, 256, 32, 2)
+    run_gemm_rr(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_rr(512, 1024, 768, False, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_rr(512, 1024, 768, True, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_rr(512, 1024, 768, True, True, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_gemm_rr(512, 1024, 768, False, True, "bfloat16", "bfloat16", T.float, 128, 256, 32, 2)
     # n8 tests
-    run_gemm_rr(128, 8, 128, False, True, "float16", "float16", "float16", 128, 8, 32, 2)
-    run_gemm_rr(128, 8, 128, False, True, "int8", "int8", "int32", 128, 8, 32, 2)
+    run_gemm_rr(128, 8, 128, False, True, T.float16, T.float16, T.float16, 128, 8, 32, 2)
+    run_gemm_rr(128, 8, 128, False, True, T.int8, T.int8, T.int32, 128, 8, 32, 2)
 
     # int8 tests
-    run_gemm_rr(128, 128, 128, False, True, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, False, False, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, True, False, "int8", "int8", "int32", 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, True, True, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2)
 
     # float8 tests
-    run_gemm_rr(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 32, 2)
 
     # float32 tests
-    run_gemm_rr(128, 128, 128, False, False, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, False, True, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 2)
-    run_gemm_rr(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2)
 
 
 if __name__ == "__main__":

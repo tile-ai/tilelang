@@ -2,6 +2,7 @@ import torch
 import tilelang
 from tilelang.utils.sparse import compress_sm90
 from tilelang.layout import make_cutlass_metadata_layout
+from tilelang import language as T
 import tilelang.testing
 
 
@@ -23,8 +24,6 @@ def matmul_sp(
     B_shape = (K, N)
     A_shared_shape = (block_M, block_K // 2)
     B_shared_shape = (block_K, block_N)
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(

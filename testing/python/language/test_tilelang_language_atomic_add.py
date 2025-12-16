@@ -197,7 +197,7 @@ def run_atomic_memory_order(K, M, N, block_M, block_N, dtype=T.float32):
 @tilelang.jit
 def atomic_addx2_program(M, N, block_M, block_N):
     @T.prim_func
-    def atomic_addx2(A: T.Tensor((M, N), "float16"), B: T.Tensor((M, N), "float16")):
+    def atomic_addx2(A: T.Tensor((M, N), T.float16), B: T.Tensor((M, N), T.float16)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=32) as (bx, by):
             for i, j in T.Parallel(block_M, block_N // 2):
                 idx_i = bx * block_M + i
@@ -285,7 +285,7 @@ def run_atomic_different_memory_orders(M, N, block_M, block_N, dtype=T.float32):
 @tilelang.jit
 def atomic_addx4_program(M, N, block_M, block_N):
     @T.prim_func
-    def atomic_addx4(A: T.Tensor((M, N), "float32"), B: T.Tensor((M, N), "float32")):
+    def atomic_addx4(A: T.Tensor((M, N), T.float32), B: T.Tensor((M, N), T.float32)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=32) as (bx, by):
             for i, j in T.Parallel(block_M, block_N // 4):
                 idx_i = bx * block_M + i

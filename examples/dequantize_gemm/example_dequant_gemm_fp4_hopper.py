@@ -22,9 +22,9 @@ def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype:
     m_f4 = f4 & tir.const(1, T.uint16)
     m_f16 = m_f4
     val_f16 = tir.reinterpret(
-        "float16", ((e_f16 | (s << tir.const(5, T.uint16))) << tir.const(10, T.uint16) | m_f16 << tir.const(9, T.uint16)).astype(T.uint16)
+        T.float16, ((e_f16 | (s << tir.const(5, T.uint16))) << tir.const(10, T.uint16) | m_f16 << tir.const(9, T.uint16)).astype(T.uint16)
     )
-    # return tir.Select(e_f4 == tir.const(0, "uint32"), tir.const(0, "float16"), val_f16)
+    # return tir.Select(e_f4 == tir.const(0, "uint32"), tir.const(0, T.float16), val_f16)
     return val_f16
 
 
@@ -98,7 +98,7 @@ def test_fp4_fp16_convert_close():
         K,
         block_N,
         block_K,
-        "float16",
+        T.float16,
     )
 
     B = torch.randint(0, 16, (N, K // 2), dtype=torch.uint8, device="cuda").to(torch.uint8)
@@ -241,7 +241,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
 
 
 def ref_program(A, qB):
-    dtypeC = "float16"
+    dtypeC = T.float16
     B = torch_convert(qB)
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
@@ -252,7 +252,7 @@ def main(m=256, n=256, k=256, tune=False):
     total_flops = 2 * m * n * k
 
     if not tune:
-        kernel = matmul(m, n, k, "float16", "float16", "float32", num_bits=4, tune=tune)(
+        kernel = matmul(m, n, k, T.float16, T.float16, T.float32, num_bits=4, tune=tune)(
             block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1
         )
         profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
@@ -265,7 +265,7 @@ def main(m=256, n=256, k=256, tune=False):
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_result = matmul(m, n, k, "float16", "float16", "float32", num_bits=4, tune=tune)
+        best_result = matmul(m, n, k, T.float16, T.float16, T.float32, num_bits=4, tune=tune)
         best_latency = best_result.latency
         best_config = best_result.config
         print(f"Best latency: {best_latency}")

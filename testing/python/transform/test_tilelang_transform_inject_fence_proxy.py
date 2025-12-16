@@ -34,9 +34,9 @@ def test_lower_fence_proxy():
                 "handle",
                 tir.op.Op.get("tl.tl_gemm"),
                 "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
-                T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
             )
 
     @T.prim_func
@@ -52,9 +52,9 @@ def test_lower_fence_proxy():
                 "handle",
                 tir.op.Op.get("tl.tl_gemm"),
                 "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
-                T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
             )
 
     _check(before, after)
@@ -166,7 +166,7 @@ def test_wgmma_marked_async():
             A_shared[0] = T.float16(0)
             T.warpgroup_arrive()
             T.ptx_wgmma_ss(
-                "float16",
+                T.float16,
                 "m64n64k16",
                 T.bool(True),
                 T.bool(True),

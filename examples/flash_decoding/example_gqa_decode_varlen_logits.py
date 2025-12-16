@@ -221,8 +221,8 @@ def flashattn(
         Q: T.Tensor(shape_q, dtype),
         K: T.Tensor(shape_k, dtype),
         V: T.Tensor(shape_v, dtype),
-        cu_seqlens_k: T.Tensor([batch + 1], "int32"),
-        s_aux: T.Tensor([heads], "float32"),
+        cu_seqlens_k: T.Tensor([batch + 1], T.int32),
+        s_aux: T.Tensor([heads], T.float32),
         Output: T.Tensor([batch, heads, dim], dtype),
         S: T.Tensor(shape_s, dtype),
     ):
@@ -241,7 +241,7 @@ def flashattn(
             logsum = T.alloc_fragment([block_H], accum_dtype)
             S_shared = T.alloc_shared([block_H, math.ceil(max_seqlen_kv / block_N)], dtype)
             # S_fragment = T.alloc_fragment([block_H, math.ceil(max_seqlen_kv / block_N)], accum_dtype)
-            s_aux_shared = T.alloc_shared([block_H], "float32")
+            s_aux_shared = T.alloc_shared([block_H], T.float32)
 
             T.annotate_layout(
                 {
@@ -321,8 +321,8 @@ def flashattn(
         Q: T.Tensor(shape_q, dtype),
         K: T.Tensor(shape_k, dtype),
         V: T.Tensor(shape_v, dtype),
-        cu_seqlens_k: T.Tensor([batch + 1], "int32"),
-        s_aux: T.Tensor([heads], "float32"),
+        cu_seqlens_k: T.Tensor([batch + 1], T.int32),
+        s_aux: T.Tensor([heads], T.float32),
         Output: T.Tensor(shape_o, dtype),
         S: T.Tensor(shape_s, dtype),
     ):
@@ -890,7 +890,7 @@ if __name__ == "__main__":
     parser.add_argument("--k_seqlen", type=int, default=8192, help="Key sequence length")
     parser.add_argument("--head_size", type=int, default=128, choices=[64, 128, 256], help="Head dimension")
     parser.add_argument("--block_size", type=int, default=64, help="Block size for computation")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float16", "bfloat16"], help="Data type")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=[T.float16, "bfloat16"], help="Data type")
     parser.add_argument("--test_varlen", action="store_true", help="Test with truly variable sequence lengths")
     parser.add_argument("--test_sink", action="store_true", help="Test with sink attention mechanism")
     parser.add_argument("--benchmark", action="store_true", help="Run speed benchmark")

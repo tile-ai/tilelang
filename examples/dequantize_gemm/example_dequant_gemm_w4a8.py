@@ -85,7 +85,7 @@ def torch_convert(tensor):
 
 
 def ref_program(A, qB):
-    dtypeC = "int32"
+    dtypeC = T.int32
     B = torch_convert(qB)
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
@@ -166,7 +166,7 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
 def main(m=128, n=256, k=256, tune=False):
     total_flops = 2 * m * n * k
     if not tune:
-        kernel = matmul_int8xint4(m, n, k, "int8", "int32", "int32", num_bits=4, tune=tune)(
+        kernel = matmul_int8xint4(m, n, k, T.int8, T.int32, T.int32, num_bits=4, tune=tune)(
             block_M=32, block_N=32, block_K=128, num_stages=1, threads=128
         )
         profiler = kernel.get_profiler()
@@ -177,7 +177,7 @@ def main(m=128, n=256, k=256, tune=False):
         print(f"Tilelang: {latency} ms")
 
     else:
-        best_result = matmul_int8xint4(m, n, k, "int8", "int32", "int32", num_bits=4, tune=tune)
+        best_result = matmul_int8xint4(m, n, k, T.int8, T.int32, T.int32, num_bits=4, tune=tune)
         best_latency = best_result.latency
         best_config = best_result.config
         print(f"Bset latency: {best_latency}")

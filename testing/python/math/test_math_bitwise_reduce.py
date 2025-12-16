@@ -21,15 +21,15 @@ def bitwise_reduce(
 ):
     @T.prim_func
     def reduce_func(
-        A: T.Tensor((M, N), "int32"),
-        B: T.Tensor((M), "int32"),
-        Output: T.Tensor((M), "int32"),
+        A: T.Tensor((M, N), T.int32),
+        B: T.Tensor((M), T.int32),
+        Output: T.Tensor((M), T.int32),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_N), "int32")
-            A_fragment = T.alloc_fragment((block_M, block_N), "int32")
-            B_shared = T.alloc_shared((block_M,), "int32")
-            B_fragment = T.alloc_fragment((block_M), "int32")
+            A_shared = T.alloc_shared((block_M, block_N), T.int32)
+            A_fragment = T.alloc_fragment((block_M, block_N), T.int32)
+            B_shared = T.alloc_shared((block_M,), T.int32)
+            B_fragment = T.alloc_fragment((block_M), T.int32)
             T.copy(A[by * block_M, bx * block_N], A_shared)
             T.copy(A_shared, A_fragment)
             T.copy(B[by * block_M], B_shared)

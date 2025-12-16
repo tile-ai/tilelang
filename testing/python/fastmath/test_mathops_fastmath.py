@@ -159,8 +159,8 @@ def run_abs_test():
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, N), "float32"),
-        B: T.Tensor((M, N), "float32"),
+        A: T.Tensor((M, N), T.float32),
+        B: T.Tensor((M, N), T.float32),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             for i, j in T.Parallel(block_M, block_N):

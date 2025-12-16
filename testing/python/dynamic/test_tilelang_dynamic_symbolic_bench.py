@@ -437,7 +437,7 @@ def assert_tl_matmul_block_dynamic_mnk(
 
 
 def run_assert_tl_matmul_block_static(M, N, K, block_M, block_N, block_K):
-    assert_tl_matmul_block_static(M, N, K, block_M, block_N, block_K, False, False, "float16", "float16", "float32")
+    assert_tl_matmul_block_static(M, N, K, block_M, block_N, block_K, False, False, T.float16, T.float16, T.float32)
 
 
 def run_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
@@ -450,9 +450,9 @@ def run_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
         block_K,
         False,
         False,
-        "float16",
-        "float16",
-        "float32",
+        T.float16,
+        T.float16,
+        T.float32,
         pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 8},
     )
     assert_tl_matmul_block_dynamic_m(
@@ -464,9 +464,9 @@ def run_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
         block_K,
         False,
         False,
-        "float16",
-        "float16",
-        "float32",
+        T.float16,
+        T.float16,
+        T.float32,
         pass_configs={"tl.disable_dynamic_tail_split": False},
     )
 
@@ -481,9 +481,9 @@ def run_assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K):
         block_K,
         False,
         False,
-        "float16",
-        "float16",
-        "float32",
+        T.float16,
+        T.float16,
+        T.float32,
         pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 8},
     )
     assert_tl_matmul_block_dynamic_mn(
@@ -495,9 +495,9 @@ def run_assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K):
         block_K,
         False,
         False,
-        "float16",
-        "float16",
-        "float32",
+        T.float16,
+        T.float16,
+        T.float32,
         pass_configs={"tl.disable_dynamic_tail_split": False},
     )
 
@@ -512,9 +512,9 @@ def run_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
         block_K,
         False,
         False,
-        "float16",
-        "float16",
-        "float32",
+        T.float16,
+        T.float16,
+        T.float32,
         pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 4},
     )
     assert_tl_matmul_block_dynamic_mnk(
@@ -526,9 +526,9 @@ def run_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
         block_K,
         False,
         False,
-        "float16",
-        "float16",
-        "float32",
+        T.float16,
+        T.float16,
+        T.float32,
         pass_configs={"tl.disable_dynamic_tail_split": False},
     )
 

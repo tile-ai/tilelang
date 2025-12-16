@@ -23,7 +23,7 @@ def fused_index_kernel(B: int, M: int, N: int, BLOCK_MN: int, BLOCK_K: int):
             B,
             threads=128,
         ) as (pid_m, pid_n, pid_b):
-            a_fp32_local = T.alloc_fragment((BLOCK_MN * BLOCK_K // VEC_SIZE, VEC_SIZE), "float32")
+            a_fp32_local = T.alloc_fragment((BLOCK_MN * BLOCK_K // VEC_SIZE, VEC_SIZE), T.float32)
             offs_m = pid_m * BLOCK_MN
             offs_n = pid_n * BLOCK_K
 

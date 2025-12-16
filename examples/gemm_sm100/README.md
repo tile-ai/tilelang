@@ -48,10 +48,10 @@ def main(
         # 1. Allocate memory buffers
         A_shared = T.alloc_shared((block_M, block_K), "bfloat16")  # A matrix shared memory
         B_shared = T.alloc_shared((block_N, block_K), "bfloat16")  # B matrix shared memory
-        C_tmem = T.alloc_tmem([block_M, block_N], "float")         # TCGEN5MMA output to Tensor Memory
+        C_tmem = T.alloc_tmem([block_M, block_N], T.float)         # TCGEN5MMA output to Tensor Memory
         mbar = T.alloc_barrier(1)                                 # mbarrier synchronization primitive
 
-        C_local = T.alloc_fragment((block_M, block_N), "float")   # Register storage
+        C_local = T.alloc_fragment((block_M, block_N), T.float)   # Register storage
         C_shared = T.alloc_shared((block_M, block_N), "bfloat16") # Output shared memory
 
         # 2. Main computation loop

@@ -38,13 +38,13 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
@@ -209,12 +209,12 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
-    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", "float32")
+    assert_tl_matmul_correctness(128, 128, 128, T.float16, T.float16, T.float16)
+    assert_tl_matmul_correctness(128, 256, 256, T.float16, T.float32, T.float32)
 
 
 if __name__ == "__main__":
     # bitblas.testing.main()
-    # assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
-    # assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", "int32")
-    assert_tl_matmul_correctness(16384, 16384, 16384, "int8", "int32", "int32")
+    # assert_tl_matmul_correctness(128, 128, 128, T.float16, T.float16, T.float16)
+    # assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
+    assert_tl_matmul_correctness(16384, 16384, 16384, T.int8, T.int32, T.int32)

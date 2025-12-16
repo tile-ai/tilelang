@@ -1,13 +1,11 @@
-from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
+from tilelang import language as T
 import torch
 import pytest
 
 
 def reshape_test(N, M, dtype):
-    import tilelang.language as T
-
     @T.prim_func
     def main(
         A: T.Tensor((N,), dtype),
@@ -42,13 +40,11 @@ def run_reshape(N, M, dtype):
 
 def test_reshape_smem():
     # Test reshape
-    run_reshape(1024, 32, "float32")
-    run_reshape(2048, 64, "float16")
+    run_reshape(1024, 32, T.float32)
+    run_reshape(2048, 64, T.float16)
 
 
 def reshape_test_smem_1d_2_2d(N, M, dtype):
-    import tilelang.language as T
-
     @T.prim_func
     def main(
         A: T.Tensor((N,), dtype),
@@ -86,13 +82,11 @@ def run_reshape_smem_1d_2_2d(N, M, dtype):
 
 
 def test_reshape_smem_1d_2_2d():
-    run_reshape_smem_1d_2_2d(1024, 32, "float32")
-    run_reshape_smem_1d_2_2d(2048, 64, "float16")
+    run_reshape_smem_1d_2_2d(1024, 32, T.float32)
+    run_reshape_smem_1d_2_2d(2048, 64, T.float16)
 
 
 def reshape_test_smem_2d_2_1d(N, M, dtype):
-    import tilelang.language as T
-
     @T.prim_func
     def main(
         A: T.Tensor((N // M, M), dtype),
@@ -130,13 +124,11 @@ def run_reshape_smem_2d_2_1d(N, M, dtype):
 
 
 def test_reshape_smem_2d_2_1d():
-    run_reshape_smem_2d_2_1d(1024, 32, "float32")
-    run_reshape_smem_2d_2_1d(2048, 64, "float16")
+    run_reshape_smem_2d_2_1d(1024, 32, T.float32)
+    run_reshape_smem_2d_2_1d(2048, 64, T.float16)
 
 
 def reshape_fragment_test(N, M, dtype):
-    import tilelang.language as T
-
     @T.prim_func
     def main(
         A: T.Tensor((N // M, M), dtype),
@@ -175,12 +167,11 @@ def run_reshape_fragment(N, M, dtype):
 
 
 def test_reshape_fragment():
-    run_reshape_fragment(1024, 32, "float32")
-    run_reshape_fragment(2048, 64, "float16")
+    run_reshape_fragment(1024, 32, T.float32)
+    run_reshape_fragment(2048, 64, T.float16)
 
 
 def reshape_layout_transform_shared(N, M, dtype):
-    import tilelang.language as T
     from tilelang.intrinsics.mma_layout import make_mma_swizzle_layout
 
     @T.prim_func
@@ -222,13 +213,11 @@ def run_reshape_layout_transform_shared(N, M, dtype):
 
 
 def test_reshape_layout_transform_shared():
-    run_reshape_layout_transform_shared(1024, 32, "float32")
-    run_reshape_layout_transform_shared(2048, 64, "float16")
+    run_reshape_layout_transform_shared(1024, 32, T.float32)
+    run_reshape_layout_transform_shared(2048, 64, T.float16)
 
 
 def reduce_after_reshape_test(N, M, dtype):
-    import tilelang.language as T
-
     @T.prim_func
     def main(
         A: T.Tensor((N,), dtype),
@@ -267,13 +256,11 @@ def run_reduce_after_reshape(N, M, dtype):
 
 
 def test_reduce_after_reshape():
-    run_reduce_after_reshape(1024, 32, "float32")
-    run_reduce_after_reshape(2048, 64, "float16")
+    run_reduce_after_reshape(1024, 32, T.float32)
+    run_reduce_after_reshape(2048, 64, T.float16)
 
 
 def reshape_shape_mismatch_test(N, M, dtype):
-    import tilelang.language as T
-
     @T.prim_func
     def main(
         A: T.Tensor((N,), dtype),
@@ -288,7 +275,7 @@ def reshape_shape_mismatch_test(N, M, dtype):
 
 def test_reshape_shape_mismatch():
     with pytest.raises(AssertionError):
-        reshape_shape_mismatch_test(1024, 32, "float32")
+        reshape_shape_mismatch_test(1024, 32, T.float32)
 
 
 if __name__ == "__main__":

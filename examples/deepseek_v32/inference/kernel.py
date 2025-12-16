@@ -11,9 +11,9 @@ pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_FAST_MATH: True,
 }
 
-FP8 = "float8_e4m3"
+FP8 = T.float8_e4m3
 BF16 = "bfloat16"
-FP32 = "float32"
+FP32 = T.float32
 
 
 def fast_log2_ceil(x):

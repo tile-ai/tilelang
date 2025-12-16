@@ -76,13 +76,13 @@ def bitnet_158_int8xint2_decode(
     reduce_thread=32,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
     storage_nbit = 8
     num_bits = 2
@@ -259,4 +259,4 @@ def assert_bitnet_158_int8xint2_decode_correctness(M, N, K, in_dtype, out_dtype,
 
 
 if __name__ == "__main__":
-    assert_bitnet_158_int8xint2_decode_correctness(1, 256, 256, "int8", "int32", "int32")
+    assert_bitnet_158_int8xint2_decode_correctness(1, 256, 256, T.int8, T.int32, T.int32)

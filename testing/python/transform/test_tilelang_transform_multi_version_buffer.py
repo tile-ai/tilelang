@@ -50,7 +50,7 @@ def test_multi_version_buffer():
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
                         0,
-                        T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 2),
+                        T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 2),
                         k * 32,
                         by * 64,
                     )
@@ -58,16 +58,16 @@ def test_multi_version_buffer():
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3, 2, 0),
                         0,
-                        T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 2),
+                        T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 2),
                         bx * 64,
                         k * 32,
                     )
                 T.call_extern(
                     "handle",
                     "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
-                    T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
-                    T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
-                    T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                    T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
+                    T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
+                    T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
                 )
 
     @T.prim_func
@@ -89,7 +89,7 @@ def test_multi_version_buffer():
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
                         0,
-                        T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 2),
+                        T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 2),
                         k * 32,
                         by * 64,
                     )
@@ -97,16 +97,16 @@ def test_multi_version_buffer():
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3, 2, 0),
                         0,
-                        T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 2),
+                        T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 2),
                         bx * 64,
                         k * 32,
                     )
                 T.call_extern(
                     "handle",
                     "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
-                    T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 1),
-                    T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 1),
-                    T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                    T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 1),
+                    T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 1),
+                    T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
                 )
 
     _check(before, after)
@@ -114,7 +114,7 @@ def test_multi_version_buffer():
 
 def test_multi_version_buffer_with_let():
     @T.prim_func
-    def before(scales: T.Tensor((4,), "float32")):
+    def before(scales: T.Tensor((4,), T.float32)):
         with T.block("root"):
             shared = T.alloc_buffer((8,), T.float32, scope="shared.dyn")
             accum = T.alloc_buffer((8,), T.float32, scope="local")
@@ -126,7 +126,7 @@ def test_multi_version_buffer_with_let():
                     accum[i] = accum[i] + shared[i]
 
     @T.prim_func
-    def after(scales: T.Tensor((4,), "float32")):
+    def after(scales: T.Tensor((4,), T.float32)):
         with T.block("root"):
             shared = T.alloc_buffer((2, 8), T.float32, scope="shared.dyn")
             accum = T.alloc_buffer((8,), T.float32, scope="local")

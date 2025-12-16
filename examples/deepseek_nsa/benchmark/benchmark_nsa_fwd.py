@@ -876,7 +876,7 @@ if __name__ == "__main__":
     parser.add_argument("--dim", type=int, default=128, help="Head dimension")
     parser.add_argument("--selected_blocks", type=int, default=16, help="Number of selected blocks")
     parser.add_argument("--block_size", type=int, default=32, help="Block size")
-    parser.add_argument("--dtype", type=str, default="float16", help="Data type (float16 or float32)")
+    parser.add_argument("--dtype", type=str, default=T.float16, help="Data type (float16 or float32)")
     parser.add_argument("--scale", type=float, default=0.1, help="Attention scale factor")
     parser.add_argument("--iterations", type=int, default=100, help="Number of iterations")
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations")

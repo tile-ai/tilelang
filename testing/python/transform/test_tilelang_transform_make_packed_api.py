@@ -109,7 +109,7 @@ def test_internal_subroutine_call():
 
         # this test fails if it's made public
         @T.prim_func(private=True)
-        def subroutine(A_data: T.handle("float32")):
+        def subroutine(A_data: T.handle(T.float32)):
             T.func_attr({"target": T.target("llvm")})
             T.evaluate(A_data)
 
@@ -141,7 +141,7 @@ def test_subroutine_call_to_externally_visible_subroutine():
             before.subroutine(A.data)
 
         @T.prim_func
-        def subroutine(A_data: T.handle("float32")):
+        def subroutine(A_data: T.handle(T.float32)):
             T.func_attr({"global_symbol": "subroutine", "target": T.target("llvm", host="llvm")})
             T.evaluate(A_data)
 
@@ -204,7 +204,7 @@ def test_function_call_with_null_data_pointer():
     built = tvm.compile(func, target="llvm")
 
     A = tvm.nd.array(np.zeros([16], dtype=T.int32))
-    B = tvm.nd.empty([16, 16], "int32", tvm.cpu())
+    B = tvm.nd.empty([16, 16], T.int32, tvm.cpu())
 
     with pytest.raises(tvm.TVMError):
         built(A, B)
@@ -222,7 +222,7 @@ def test_function_call_with_wrong_dimensionality():
     built = tvm.compile(func, target="llvm")
 
     A = tvm.nd.array(np.zeros([16], dtype=T.int32))
-    B = tvm.nd.empty([16], "int32", tvm.cpu())
+    B = tvm.nd.empty([16], T.int32, tvm.cpu())
 
     with pytest.raises(tvm.TVMError):
         built(A, B)

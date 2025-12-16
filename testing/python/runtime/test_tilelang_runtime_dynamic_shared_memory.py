@@ -12,7 +12,7 @@ def dynamic_smem_kernel():
     length = T.symbolic("len", dtype=T.int32)  # noqa: F821
 
     @T.prim_func
-    def main(global_tensor: T.Tensor[(length,), "int32"]):  # noqa: F821
+    def main(global_tensor: T.Tensor[(length,), T.int32]):  # noqa: F821
         # Launch a simple kernel that copies from global memory into shared memory
         # using a dynamically-sized allocation. No writes back to global_tensor.
         with T.Kernel(1, threads=32) as _:

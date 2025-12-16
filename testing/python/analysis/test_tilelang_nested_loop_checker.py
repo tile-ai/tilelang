@@ -151,7 +151,7 @@ def run_gemm_nested_pipelines(
     trans_B = False
     in_dtype = T.float16
     out_dtype = T.float16
-    dtypeAccum = "float32"
+    dtypeAccum = T.float32
     num_threads = 128
     program = matmul_nested_pipelines(
         M,
@@ -471,7 +471,7 @@ def run_gemm_mixed_pp(
     block_K = 32
     in_dtype = T.float16
     out_dtype = T.float16
-    dtypeAccum = "float32"
+    dtypeAccum = T.float32
     num_threads = 128
 
     program = matmul_nested_pipa(
@@ -605,7 +605,7 @@ def run_gemm_tiled_op_with_parallel(
     block_K = 32
     in_dtype = T.float16
     out_dtype = T.float16
-    dtypeAccum = "float32"
+    dtypeAccum = T.float32
     num_threads = 128
 
     program = matmul_nested_pipa(

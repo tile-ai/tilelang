@@ -16,7 +16,7 @@ def _check(original, transformed):
 
 def test_trival_pipeline():
     @T.prim_func
-    def before(A: T.Tensor((16, 1), "float32"), C: T.Tensor((16, 1), "float32")):
+    def before(A: T.Tensor((16, 1), T.float32), C: T.Tensor((16, 1), T.float32)):
         for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
             for i in T.serial(0, 1, annotations={"software_pipeline_stage": [0, 1], "software_pipeline_order": [0, 1]}):
                 with T.block():

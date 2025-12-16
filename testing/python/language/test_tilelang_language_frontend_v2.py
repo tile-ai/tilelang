@@ -303,7 +303,7 @@ def test_serial_for_with_step():
     assert torch.all(res == ref), f"Expected {ref}, but got {res}"
 
     assert isinstance(T.serial(1, 10, 1), IRBuilderFrame)
-    assert isinstance(T.serial(1, 10, IntImm("int32", 1)), IRBuilderFrame)
+    assert isinstance(T.serial(1, 10, IntImm(T.int32, 1)), IRBuilderFrame)
     assert not isinstance(T.serial(1, 10, Var("tmp", T.int32)), IRBuilderFrame)
     assert not isinstance(T.serial(10, -1, -1), IRBuilderFrame)
 
@@ -433,7 +433,7 @@ def test_frame_inside_macro():
             idx_out: T.Tensor[(32,), T.int32],
         ):
             with T.Kernel(num_blocks, threads=32) as block_idx:  # noqa: F841
-                fragment = T.alloc_fragment(32, "int32")
+                fragment = T.alloc_fragment(32, T.int32)
                 T.copy(idx_out, fragment)
 
                 for i in T.Parallel(32):

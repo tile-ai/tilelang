@@ -28,13 +28,13 @@ def tl_topk(
     def topk_kernel(
         logits: T.Tensor([M, N], dtype),
         topk_gates: T.Tensor([M, topk], dtype),
-        topk_indices: T.Tensor([M, topk], "int32"),
+        topk_indices: T.Tensor([M, topk], T.int32),
     ):
         with T.Kernel(T.ceildiv(M, blk_m), threads=threads) as bx:
             logits_frag = T.alloc_fragment([blk_m, N], dtype=dtype)
             max_val = T.alloc_fragment([blk_m], dtype=dtype)
-            expand_max_idx = T.alloc_fragment([blk_m, N], "int32")
-            max_idx = T.alloc_fragment([blk_m], "int32")
+            expand_max_idx = T.alloc_fragment([blk_m, N], T.int32)
+            max_idx = T.alloc_fragment([blk_m], T.int32)
 
             T.copy(logits[bx * blk_m, 0], logits_frag)
 

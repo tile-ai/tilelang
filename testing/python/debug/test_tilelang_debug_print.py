@@ -31,11 +31,11 @@ def test_debug_print_buffer():
     debug_print_buffer(dtype=T.float32)
     debug_print_buffer(dtype=T.float64)
     debug_print_buffer(dtype=T.bfloat16)
-    debug_print_buffer(dtype="float8_e4m3")
-    debug_print_buffer(dtype="float8_e4m3fn")
-    debug_print_buffer(dtype="float8_e4m3fnuz")
-    debug_print_buffer(dtype="float8_e5m2")
-    debug_print_buffer(dtype="float8_e5m2fnuz")
+    debug_print_buffer(dtype=T.float8_e4m3)
+    debug_print_buffer(dtype=T.float8_e4m3fn)
+    debug_print_buffer(dtype=T.float8_e4m3fnuz)
+    debug_print_buffer(dtype=T.float8_e5m2)
+    debug_print_buffer(dtype=T.float8_e5m2fnuz)
 
 
 def debug_print_buffer_conditional(M=16, N=16):

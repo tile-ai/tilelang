@@ -217,7 +217,7 @@ def tilelang_kernel_bwd_dkv(
         DO_slc: T.Tensor(do_slc_shape, dtype),
         DK: T.Tensor(dk_shape, dtype),
         DV: T.Tensor(dv_shape, dtype),
-        BlockMask: T.Tensor(block_mask_shape, "int32"),
+        BlockMask: T.Tensor(block_mask_shape, T.int32),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)
@@ -388,7 +388,7 @@ def tilelang_kernel_bwd_dqkv(
         DQ: T.Tensor(dq_shape, dtype),
         DK: T.Tensor(dk_shape, dtype),
         DV: T.Tensor(dv_shape, dtype),
-        BlockMask: T.Tensor(block_mask_shape, "int32"),
+        BlockMask: T.Tensor(block_mask_shape, T.int32),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)

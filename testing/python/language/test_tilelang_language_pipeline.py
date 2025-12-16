@@ -64,7 +64,7 @@ def run_gemm(
     trans_B = False
     in_dtype = T.float16
     out_dtype = T.float16
-    dtypeAccum = "float32"
+    dtypeAccum = T.float32
     num_threads = 128
     program = matmul(
         M,

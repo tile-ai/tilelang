@@ -472,7 +472,7 @@ def main(
 
     # Checks
     rtol, atol = {
-        "float16": (1e-2, 1e-2),
+        T.float16: (1e-2, 1e-2),
         "bfloat16": (2e-2, 2e-2),
     }[dtype]
     assert torch.allclose(O, O_ref, rtol=rtol, atol=atol), f"O max err: {(O - O_ref).abs().max()}"
@@ -506,6 +506,6 @@ if __name__ == "__main__":
     parser.add_argument("--d_head", type=int, default=128, help="Head dimension")
     parser.add_argument("--groups", type=int, default=8, help="Groups")
     parser.add_argument("--window_size", type=int, default=None, help="window size (default: None, which means full attention)")
-    parser.add_argument("--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
+    parser.add_argument("--dtype", type=str, default=T.float16, help="dtype, can be float16 or bfloat16")
     args = parser.parse_args()
     main(args.batch, args.h, args.n_ctx, args.d_head, args.groups, args.window_size, args.dtype)

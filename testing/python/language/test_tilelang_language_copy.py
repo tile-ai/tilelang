@@ -87,11 +87,11 @@ def test_tilelang_copy_with_stride():
 def tilelang_copy_bufferload(num_tokens, dtype=T.float16):
     @T.prim_func
     def main(
-        indices: T.Tensor((num_tokens,), "int32"),
+        indices: T.Tensor((num_tokens,), T.int32),
         x: T.Tensor((num_tokens,), dtype),
     ):
         with T.Kernel(num_tokens, threads=32) as pid:
-            idx = T.alloc_local([1], "int32")
+            idx = T.alloc_local([1], T.int32)
             T.copy(indices[pid], idx[0])
             x[idx[0]] = x[idx[0]] + 1
 
@@ -143,7 +143,7 @@ def test_tilelang_copy_buffer_load_with_parallel():
     run_tilelang_copy_buffer_load_with_parallel(M=1024, N=1024, block_M=128, block_N=128)
 
 
-def run_tilelang_copy_fp8_e8m0(M=1024, N=1024, block_M=128, block_N=128, src_dtype="float8_e8m0fnu", dst_dtype="float8_e8m0fnu"):
+def run_tilelang_copy_fp8_e8m0(M=1024, N=1024, block_M=128, block_N=128, src_dtype=T.float8_e8m0fnu, dst_dtype=T.float8_e8m0fnu):
     program = tilelang_copy(M, N, block_M, block_N, src_dtype=src_dtype, dst_dtype=dst_dtype)
     kernel = tilelang.compile(
         program,
@@ -159,10 +159,10 @@ def run_tilelang_copy_fp8_e8m0(M=1024, N=1024, block_M=128, block_N=128, src_dty
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_tilelang_copy_fp8_e8m0():
-    run_tilelang_copy_fp8_e8m0(src_dtype="float8_e8m0fnu", dst_dtype="float8_e8m0fnu")
+    run_tilelang_copy_fp8_e8m0(src_dtype=T.float8_e8m0fnu, dst_dtype=T.float8_e8m0fnu)
 
 
-def run_tilelang_copy_fp4(M=1024, N=1024, block_M=128, block_N=128, src_dtype="float4_e2m1fn", dst_dtype="float4_e2m1fn"):
+def run_tilelang_copy_fp4(M=1024, N=1024, block_M=128, block_N=128, src_dtype=T.float4_e2m1fn, dst_dtype=T.float4_e2m1fn):
     program = tilelang_copy(M, N, block_M, block_N, src_dtype=src_dtype, dst_dtype=dst_dtype)
     kernel = tilelang.compile(
         program,
@@ -179,9 +179,9 @@ def run_tilelang_copy_fp4(M=1024, N=1024, block_M=128, block_N=128, src_dtype="f
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_tilelang_copy_fp4():
-    run_tilelang_copy_fp4(src_dtype="float4_e2m1fn", dst_dtype="float4_e2m1fn")
-    run_tilelang_copy_fp4(src_dtype="float4_e2m1fn", dst_dtype=T.float16)
-    run_tilelang_copy_fp4(src_dtype="float4_e2m1fn", dst_dtype=T.bfloat16)
+    run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.float4_e2m1fn)
+    run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.float16)
+    run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.bfloat16)
 
 
 if __name__ == "__main__":

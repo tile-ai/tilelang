@@ -11,7 +11,7 @@ auto_target = tvm.target.Target(determine_target("auto"))
 @pytest.mark.parametrize(
     "block_M, block_N, block_K, threads, vec_load_b, dtype",
     [
-        (64, 64, 32, 128, 8, "float16"),
+        (64, 64, 32, 128, 8, T.float16),
     ],
 )
 def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):

@@ -22,9 +22,9 @@ def _test_infinity(dtype: str):
 
 @tilelang.testing.requires_cuda
 def test_infinity():
-    _test_infinity("float16")
+    _test_infinity(T.float16)
     _test_infinity("bfloat16")
-    _test_infinity("float32")
+    _test_infinity(T.float32)
     _test_infinity("float64")
 
 

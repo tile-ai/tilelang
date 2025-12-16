@@ -410,7 +410,7 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
     """
     total_flops = 2 * m * n * k
     if tune:
-        kernel = matmul(m, n, k, "bfloat16", "bfloat16", "float32", num_bits=4, fast_dequant=fast_dequant)
+        kernel = matmul(m, n, k, "bfloat16", "bfloat16", T.float32, num_bits=4, fast_dequant=fast_dequant)
     else:
         kernel = matmul(
             m,
@@ -418,7 +418,7 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
             k,
             "bfloat16",
             "bfloat16",
-            "float32",
+            T.float32,
             num_bits=4,
             fast_dequant=fast_dequant,
             block_M=256,

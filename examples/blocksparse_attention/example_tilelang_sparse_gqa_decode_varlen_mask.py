@@ -38,7 +38,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
             K: T.Tensor(shape_k, dtype),
             V: T.Tensor(shape_v, dtype),
             block_mask: T.Tensor(shape_mask, "bool"),
-            cache_seqlens: T.Tensor([batch], "int32"),
+            cache_seqlens: T.Tensor([batch], T.int32),
             glse: T.Tensor([batch, heads, num_split], accum_dtype),
             Output_partial: T.Tensor(part_shape, accum_dtype),
         ):
@@ -157,7 +157,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
             K: T.Tensor(shape_k, dtype),
             V: T.Tensor(shape_v, dtype),
             block_mask: T.Tensor(shape_mask, "bool"),
-            cache_seqlens: T.Tensor([batch], "int32"),
+            cache_seqlens: T.Tensor([batch], T.int32),
             glse: T.Tensor([batch, heads, num_split], accum_dtype),
             Output_partial: T.Tensor(part_shape, accum_dtype),
             Output: T.Tensor(shape_o, dtype),

@@ -34,7 +34,7 @@ def _empty_with_dead_code_kernel():
     num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
-    def buggy_kernel(x: T.Tensor[(num_tokens,), "float32"]):
+    def buggy_kernel(x: T.Tensor[(num_tokens,), T.float32]):
         with T.Kernel(num_tokens, threads=32) as pid:
             y = x[pid]
 

@@ -149,13 +149,13 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     from bitblas.gpu.intrin.lop3 import decode_i4_to_f16
 
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
@@ -417,13 +417,13 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
 
 @tilelang.testing.requires_package("bitblas")
 def test_run_dequantize_gemm():
-    run_gemm(256, 256, 256, "float16", "float16", "float16", 128, 128, 32, num_threads=128)
-    run_gemm(256, 256, 256, "int8", "int32", "int32", 128, 128, 32, num_threads=128)
+    run_gemm(256, 256, 256, T.float16, T.float16, T.float16, 128, 128, 32, num_threads=128)
+    run_gemm(256, 256, 256, T.int8, T.int32, T.int32, 128, 128, 32, num_threads=128)
 
 
 @tilelang.testing.requires_package("bitblas")
 def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
-    assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correctness(256, 1024, 512, "float16", "float16", "float16", 3)
+    assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correctness(256, 1024, 512, T.float16, T.float16, T.float16, 3)
 
 
 def main():

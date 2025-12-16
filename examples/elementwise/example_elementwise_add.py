@@ -40,7 +40,7 @@ def get_configs(M, N):
 
 def get_best_config(M, N):
     def kernel(block_M=None, block_N=None, threads=None):
-        return elementwise_add(M, N, block_M, block_N, "float32", "float32", threads)
+        return elementwise_add(M, N, block_M, block_N, T.float32, T.float32, threads)
 
     autotuner = (
         AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N))

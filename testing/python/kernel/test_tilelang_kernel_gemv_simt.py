@@ -164,15 +164,15 @@ def evaluate_gemv_simt(
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_gemv_simt():
-    evaluate_gemv_simt(1, 1024, 1024, "float16", "float16", "float16", with_bias=False)
-    evaluate_gemv_simt(1, 1024, 1024, "int8", "int32", "int32", with_bias=False)
+    evaluate_gemv_simt(1, 1024, 1024, T.float16, T.float16, T.float16, with_bias=False)
+    evaluate_gemv_simt(1, 1024, 1024, T.int8, T.int32, T.int32, with_bias=False)
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 9)
 def test_gemv_simt_fp8():
-    evaluate_gemv_simt(1, 1024, 1024, "float8_e4m3", "float32", "float32", with_bias=False)
-    evaluate_gemv_simt(1, 1024, 1024, "float8_e5m2", "float32", "float32", with_bias=False)
+    evaluate_gemv_simt(1, 1024, 1024, T.float8_e4m3, T.float32, T.float32, with_bias=False)
+    evaluate_gemv_simt(1, 1024, 1024, T.float8_e5m2, T.float32, T.float32, with_bias=False)
 
 
 if __name__ == "__main__":

@@ -325,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument("--dim", type=int, default=128, help="dim")
     parser.add_argument("--groups", type=int, default=8, help="groups")
     parser.add_argument("--window_size", type=int, default=None, help="window size (default: None, which means full attention)")
-    parser.add_argument("--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
+    parser.add_argument("--dtype", type=str, default=T.float16, help="dtype, can be float16 or bfloat16")
     parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.groups, args.window_size, args.dtype, args.tune)

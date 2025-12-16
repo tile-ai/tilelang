@@ -308,7 +308,7 @@ if __name__ == "__main__":
     parser.add_argument("--seq_kv", type=int, default=4096, help="sequence length of key/value")
     parser.add_argument("--dim", type=int, default=128, help="dim")
     parser.add_argument("--window_size", type=int, default=None, help="window size (default: None, which means full attention)")
-    parser.add_argument("--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
+    parser.add_argument("--dtype", type=str, default=T.float16, help="dtype, can be float16 or bfloat16")
     parser.add_argument("--tune", action="store_true", help="tune")
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.window_size, args.dtype, args.tune)
