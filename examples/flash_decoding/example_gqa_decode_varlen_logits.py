@@ -210,7 +210,7 @@ def flashattn(
     shape_o = [batch, heads, dim]
     shape_s = [batch, heads, math.ceil(max_seqlen_kv / block_N)]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     kv_group_num = heads // k_heads
 
     valid_block_H = min(block_H, kv_group_num)

@@ -49,7 +49,7 @@ def sparse_mla_fwd(
     token_indices_shape = [seq_len, 2]
     indices_dtype = T.int32
     dtype = T.bfloat16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     G = kv_group
     H = head_kv

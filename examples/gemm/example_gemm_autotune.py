@@ -117,7 +117,7 @@ def get_best_config(M, N, K, with_roller=False):
         enable_rasteration=None,
     ):
         dtype = T.bfloat16
-        accum_dtype = "float"
+        accum_dtype = T.float32
 
         @T.prim_func
         def main(

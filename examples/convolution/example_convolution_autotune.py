@@ -81,7 +81,7 @@ def convolution(
     OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     is_hopper = check_hopper()
 
     @T.prim_func

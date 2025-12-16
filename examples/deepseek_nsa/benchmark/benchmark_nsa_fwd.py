@@ -481,7 +481,7 @@ def tilelang_sparse_attention(
     block_indices_shape = [batch, seq_len, head_kv, selected_blocks]
     block_indices_dtype = T.int32
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     block_S = block_size
     block_T = min(block_T, tilelang.math.next_power_of_2(dim))
 

@@ -34,7 +34,7 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
     v_shape = [total_kv, head_kv, dim_v]
     o_shape = [total_q, heads, dim_v]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_fwd(
@@ -144,7 +144,7 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
 )
 def flashattn_bwd_preprocess(batch, heads, total_q, N_CTX, max_seq_len, dim_v):
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [total_q, heads, dim_v]
     blk = 32
 
@@ -199,7 +199,7 @@ def make_dq_layout(dQ):
 )
 def flashattn_bwd_postprocess(total_q, total_kv, heads, head_kv, dim_qk, dim_v):
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     q_shape = [total_q, heads, dim_qk]
     k_shape = [total_kv, head_kv, dim_qk]
     v_shape = [total_kv, head_kv, dim_v]
@@ -246,7 +246,7 @@ def flashattn_bwd_atomic_add(
     v_shape = [total_kv, head_kv, dim_v]
     do_shape = [total_q, heads, dim_v]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_bwd(
@@ -387,7 +387,7 @@ def flashattn_bwd_split(
     dk_shape = [groups, total_kv, head_kv, dim_qk]  # sum after kernel
     dv_shape = [groups, total_kv, head_kv, dim_v]  # sum after kernel
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_bwd(

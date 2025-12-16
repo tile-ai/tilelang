@@ -88,7 +88,7 @@ def fast_flashattn(
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     vec_size = qk_coalesced_width
     v_vec_size = v_coalesced_width
@@ -237,7 +237,7 @@ def get_bwd_configs():
 @tilelang.jit(out_idx=[2])
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, seq_len, heads, dim]
     blk = 32
 
@@ -281,7 +281,7 @@ def flashattn_bwd(
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_bwd_kernel(
@@ -369,7 +369,7 @@ def flashattn_bwd(
 @tilelang.jit(out_idx=[1])
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, seq_len, heads, dim]
     blk = 64
 

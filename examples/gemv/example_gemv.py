@@ -275,7 +275,7 @@ def get_autotuned_kernel(
     reduce_threads=None,
 ):
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     MAX_TRANSACTION_SIZE_IN_BITS = 128
     TILE_K = MAX_TRANSACTION_SIZE_IN_BITS // DataType(dtype).bits
     BLOCK_K = reduce_threads * TILE_K

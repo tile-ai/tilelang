@@ -54,7 +54,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
     shape_v = [batch, seqlen_kv, groups, dim]
     shape_o = [batch, heads, dim]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     kv_group_num = heads // groups
 
     part_shape = [batch, heads, num_split, dim]

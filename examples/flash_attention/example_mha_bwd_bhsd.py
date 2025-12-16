@@ -16,7 +16,7 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     shape = [batch, heads, seq_len, dim]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_fwd(
@@ -92,7 +92,7 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
 )
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 32
 
@@ -132,7 +132,7 @@ def make_dq_layout(dQ):
 )
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 64
 
@@ -161,7 +161,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     shape = [batch, heads, seq_len, dim]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_bwd(

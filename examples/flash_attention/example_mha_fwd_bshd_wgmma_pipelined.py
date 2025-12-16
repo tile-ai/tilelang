@@ -24,7 +24,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal, block_M=128, block_N=128, n
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.macro
     def MMA0(

@@ -46,7 +46,7 @@ def flashattn(
     shape_o = [batch, heads, dim]
     shape_s = [batch, heads, math.ceil(max_seqlen_kv / block_N)]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     kv_group_num = heads // k_heads
     assert page_block_size >= block_N and page_block_size % block_N == 0, (
         "page_block_size must be larger than block_N and a multiple of block_N"

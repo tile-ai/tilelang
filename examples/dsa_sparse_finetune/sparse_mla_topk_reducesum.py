@@ -43,7 +43,7 @@ def tl_sparse_mla_topk_reducesum_impl(
     head_kv = heads // kv_group
     indices_dtype = T.int32
     dtype = T.bfloat16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     G = kv_group
     H = head_kv

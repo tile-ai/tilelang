@@ -16,7 +16,7 @@ def kernel(
     enable_rasteration=None,
 ):
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def matmul(

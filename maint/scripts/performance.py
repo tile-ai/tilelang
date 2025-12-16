@@ -31,7 +31,7 @@ def run(M, N, K):
         enable_rasteration=None,
     ):
         dtype = "float16"
-        accum_dtype = "float"
+        accum_dtype = T.float32
 
         @T.prim_func
         def main(

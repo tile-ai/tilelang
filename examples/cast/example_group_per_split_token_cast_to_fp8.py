@@ -6,7 +6,7 @@ from tilelang.utils.tensor import torch_assert_close
 
 # support bfloat16, float, float16
 dtype = T.bfloat16
-accum_dtype = "float"
+accum_dtype = T.float32
 
 
 @tilelang.jit(out_idx=[2, 3])

@@ -46,7 +46,7 @@ def flashattn_fwd(
     scale = sm_scale * 1.44269504  # log2(e)
 
     shape = [batch, heads, seq_len, dim]
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_fwd(
@@ -138,7 +138,7 @@ def flashattn_fwd(
     },
 )
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 32
 
@@ -177,7 +177,7 @@ def make_dq_layout(dQ):
     },
 )
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 64
 
@@ -217,7 +217,7 @@ def flashattn_bwd(
     scale = sm_scale * 1.44269504  # log2(e)
 
     shape = [batch, heads, seq_len, dim]
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -316,7 +316,7 @@ def flashattn_bwd(
 
 @tilelang.jit(out_idx=-1)
 def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: str = T.float16):
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len]
 
     @T.prim_func

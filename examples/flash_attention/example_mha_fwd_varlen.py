@@ -81,7 +81,7 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64
     o_shape = [UQ, heads, dim]
 
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def main(

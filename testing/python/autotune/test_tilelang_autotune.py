@@ -188,7 +188,7 @@ def matmul(M, N, K, with_roller):
         # Use half-precision for input data to reduce memory bandwidth,
         # accumulate in float for better numerical accuracy
         dtype = T.float16
-        accum_dtype = "float"
+        accum_dtype = T.float32
 
         @T.prim_func
         def main(

@@ -49,7 +49,7 @@ def flashattn_fwd(
     head_kv = heads // groups
     q_shape = [batch, heads, seq_len, dim]
     kv_shape = [batch, head_kv, seq_len, dim]
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_fwd(
@@ -141,7 +141,7 @@ def flashattn_fwd(
     },
 )
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 32
 
@@ -180,7 +180,7 @@ def make_dq_layout(dQ):
     },
 )
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 64
 
@@ -212,7 +212,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale
     head_kv = heads // groups
     q_shape = [batch, heads, seq_len, dim]
     kv_shape = [batch, head_kv, seq_len, dim]
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     block_M, block_N, num_stages, threads = get_bwd_configs()
 
@@ -310,7 +310,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale
 
 @tilelang.jit(out_idx=-1)
 def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: str = T.float16):
-    accum_dtype = "float"
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len]
 
     @T.prim_func

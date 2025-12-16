@@ -101,7 +101,7 @@ def fast_flashattn(
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     vec_size = qk_coalesced_width
     v_vec_size = v_coalesced_width

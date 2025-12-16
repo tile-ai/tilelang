@@ -15,7 +15,7 @@ from heuristic import num_splits_heuristic
 def flashattn(batch, heads, heads_kv, dim, dim_v):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     dtype = T.float16
-    accum_dtype = "float"
+    accum_dtype = T.float32
     kv_group_num = heads // heads_kv
 
     @tilelang.jit(
