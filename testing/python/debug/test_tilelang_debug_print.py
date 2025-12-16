@@ -18,7 +18,7 @@ def debug_print_buffer(M=16, N=16, dtype=T.float16):
 
 
 def test_debug_print_buffer():
-    debug_print_buffer(dtype="bool")
+    debug_print_buffer(dtype=T.bool)
     debug_print_buffer(dtype=T.int8)
     debug_print_buffer(dtype=T.int16)
     debug_print_buffer(dtype=T.int32)
