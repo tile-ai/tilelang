@@ -349,5 +349,4 @@ def test_gemm_sp_sm80(M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    run_gemm_sp_sm90(512, 1024, 768, T.float8_e4m3fn, T.float32, T.float32, 64, 64, 64, 2, 128, False, True)
+    tilelang.testing.main()
