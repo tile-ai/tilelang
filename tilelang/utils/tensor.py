@@ -44,6 +44,9 @@ def map_torch_type(intype: str) -> torch.dtype:
             "torch.float8_e4m3fnuz is not supported in this version of torchPlease upgrade torch >= 2.2.0"
         )
         return torch.float8_e4m3fnuz
+    elif intype.startswith("float4"):
+        # PyTorch doesn't support float4, use uint8 as storage type
+        return torch.uint8
     else:
         return getattr(torch, intype)
 
@@ -75,11 +78,14 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
         if supply_type == TensorSupplyType.Auto:
             is_unsigned = param.is_unsigned()
             is_float8 = param.is_float8()
+            is_float4 = param.is_float4()
             is_boolean = param.is_boolean()
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
                 return torch.randint(low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
+            elif is_float4:
+                return torch.randint(low=0, high=16, size=shape, device=device, dtype=dtype)
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             elif dtype in {torch.float16, torch.float32, torch.bfloat16}:
@@ -96,11 +102,14 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
         if supply_type == TensorSupplyType.Integer:
             is_unsigned = param.is_unsigned()
             is_float8 = param.is_float8()
+            is_float4 = param.is_float4()
             is_boolean = param.is_boolean()
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
                 return torch.randint(low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
+            elif is_float4:
+                return torch.randint(low=0, high=16, size=shape, device=device, dtype=dtype)
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             else:

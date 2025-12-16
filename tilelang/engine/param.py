@@ -100,6 +100,18 @@ class KernelParam:
             dtype_str = dtype_str[6:]
         return dtype_str.startswith("float8")
 
+    def is_float4(self) -> bool:
+        """
+        Checks if the parameter represents a float4 type.
+
+        Returns:
+            bool: True if parameter is a float4 type, False otherwise
+        """
+        dtype_str = str(self.dtype)
+        if dtype_str.startswith("torch."):
+            dtype_str = dtype_str[6:]
+        return dtype_str.startswith("float4")
+
     def is_boolean(self) -> bool:
         """
         Checks if the parameter represents a boolean type.
