@@ -311,7 +311,7 @@ def test_abs_maps_to_fabs():
 @tilelang.testing.requires_cuda
 def test_fastmath_versions(name, func):
     """Test that __exp, __exp10, __log, __log2, __log10, __tan, __cos, __sin generate fastmath CUDA code"""
-    run_fastmath_mathop_test(name, func, dtype="float32")
+    run_fastmath_mathop_test(name, func, dtype=T.float32)
     print(f"✓ {name} test passed")
 
 

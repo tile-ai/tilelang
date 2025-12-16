@@ -161,12 +161,12 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
         (512, 1024, 768, True, False, T.float16, T.float16, T.float, 128, 128, 32, 2, 128),
         (512, 1024, 768, True, True, T.float16, T.float16, T.float, 128, 128, 32, 2, 128),
         (128, 8, 64, False, True, T.float16, T.float16, T.float, 128, 8, 32, 0, 128),
-        (128, 128, 128, False, True, "int8", "int32", "int32", 128, 128, 64, 2, 128),
-        (128, 128, 128, False, False, "int8", "int8", "int32", 128, 128, 64, 2, 128),
-        (128, 128, 128, True, False, "int8", "int8", "int32", 128, 128, 64, 2, 128),
-        (128, 128, 128, True, True, "int8", "int8", "int32", 128, 128, 64, 2, 128),
-        (128, 128, 128, False, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 64, 2, 128),
-        (128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 64, 2, 128),
+        (128, 128, 128, False, True, T.int8, T.int32, T.int32, 128, 128, 64, 2, 128),
+        (128, 128, 128, False, False, T.int8, T.int8, T.int32, 128, 128, 64, 2, 128),
+        (128, 128, 128, True, False, T.int8, T.int8, T.int32, 128, 128, 64, 2, 128),
+        (128, 128, 128, True, True, T.int8, T.int8, T.int32, 128, 128, 64, 2, 128),
+        (128, 128, 128, False, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 64, 2, 128),
+        (128, 128, 128, True, True, T.float8_e5m2, T.float8_e5m2, T.float32, 128, 128, 64, 2, 128),
     ],
 )
 def test_gemm_ss(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):

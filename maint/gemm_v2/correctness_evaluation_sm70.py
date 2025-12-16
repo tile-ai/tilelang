@@ -81,7 +81,7 @@ def _compile_and_check(
             A = A.T
         if trans_B:
             B = B.T
-        if in_dtype == "float32":
+        if in_dtype == T.float32:
             A = (A.view(torch.int32) - 0x1000).view(torch.float32)
             B = (B.view(torch.int32) - 0x1000).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
@@ -228,7 +228,7 @@ FALSE_TRUE_CASES = [
         k,
         T.float16,
         T.float16,
-        "float32",
+        T.float32,
         id=f"K{k}-float16-float16-float32",
     )
     for k in K_VALUES

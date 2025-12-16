@@ -296,8 +296,8 @@ if __name__ == "__main__":
 
     M, N, K = args.m, args.n, args.k
     in_dtype = args.dtype
-    out_dtype = "float32" if in_dtype == "int8" else T.float16
-    accum_dtype = "float32" if in_dtype == "int8" else T.float16
+    out_dtype = T.float32 if in_dtype == "int8" else T.float16
+    accum_dtype = T.float32 if in_dtype == "int8" else T.float16
     with_roller = args.with_roller
     with_roller = True
     # Compute total floating-point operations

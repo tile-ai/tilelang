@@ -80,7 +80,7 @@ def _compile_and_check(
             A = A.T
         if trans_B:
             B = B.T
-        if in_dtype == "float32":
+        if in_dtype == T.float32:
             A = (A.view(torch.int32) - 0x1000).view(torch.float32)
             B = (B.view(torch.int32) - 0x1000).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
@@ -409,9 +409,9 @@ FALSE_TRUE_CASES = (
     + [
         pytest.param(
             k,
-            "int8",
-            "int32",
-            "int32",
+            T.int8,
+            T.int32,
+            T.int32,
             id="K32-int8-int32-int32",
         )
         for k in K_VALUES_8Bit
@@ -419,9 +419,9 @@ FALSE_TRUE_CASES = (
     + [
         pytest.param(
             k,
-            "float8_e5m2",
-            "float32",
-            "float32",
+            T.float8_e5m2,
+            T.float32,
+            T.float32,
             id="K32-float8_e5m2-float32-float32",
         )
         for k in K_VALUES_8Bit
@@ -429,9 +429,9 @@ FALSE_TRUE_CASES = (
     + [
         pytest.param(
             k,
-            "float8_e4m3",
-            "float32",
-            "float32",
+            T.float8_e4m3,
+            T.float32,
+            T.float32,
             id="K32-float8_e4m3-float32-float32",
         )
         for k in K_VALUES_8Bit

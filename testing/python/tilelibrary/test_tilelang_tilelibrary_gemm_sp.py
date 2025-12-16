@@ -191,7 +191,7 @@ def run_gemm_sp(
             A = A.T
         if trans_B:
             B = B.T
-        if "float8" in in_dtype or T.int8 in in_dtype:
+        if "float8" in in_dtype or "int8" in in_dtype:
             A = A.to(torch.float32)
             B = B.to(torch.float32)
         return torch.matmul(A, B)

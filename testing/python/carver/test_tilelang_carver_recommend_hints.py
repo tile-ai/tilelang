@@ -72,8 +72,8 @@ def run_matmul_recommend_hints(
 
 def test_matmul_recommend_hints():
     run_matmul_recommend_hints(1024, 1024, 1024, T.float16, T.float16, T.float16)
-    run_matmul_recommend_hints(1024, 1024, 1024, "int8", "int32", "int32")
-    run_matmul_recommend_hints(1024, 1024, 1024, T.float16, "float32", T.float16)
+    run_matmul_recommend_hints(1024, 1024, 1024, T.int8, T.int32, T.int32)
+    run_matmul_recommend_hints(1024, 1024, 1024, T.float16, T.float32, T.float16)
 
 
 def run_gemv_recommend_hints(
@@ -97,8 +97,8 @@ def run_gemv_recommend_hints(
 
 def test_gemv_recommend_hints():
     run_gemv_recommend_hints(1024, 1024, T.float16, T.float16, T.float16)
-    run_gemv_recommend_hints(1024, 1024, "int8", "int32", "int32")
-    run_gemv_recommend_hints(1024, 1024, T.float16, "float32", T.float16)
+    run_gemv_recommend_hints(1024, 1024, T.int8, T.int32, T.int32)
+    run_gemv_recommend_hints(1024, 1024, T.float16, T.float32, T.float16)
 
 
 def run_fmha_recommend_hints(
@@ -134,7 +134,7 @@ def run_fmha_recommend_hints(
 
 def test_fmha_recommend_hints():
     run_fmha_recommend_hints(4, 32, 512, 512, 128, T.float16, T.float16, T.float16)
-    run_fmha_recommend_hints(4, 32, 512, 512, 128, "int8", "int32", "int32")
+    run_fmha_recommend_hints(4, 32, 512, 512, 128, T.int8, T.int32, T.int32)
 
 
 if __name__ == "__main__":

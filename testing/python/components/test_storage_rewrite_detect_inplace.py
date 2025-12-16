@@ -10,10 +10,10 @@ def _compile_kernel_without_inplace():
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), T.float]):
         with T.Kernel(num_tokens, threads=32) as pid:
-            read = T.alloc_var("int")
+            read = T.alloc_var(T.int)
             read = x[pid]
 
-            write = T.alloc_var("int")
+            write = T.alloc_var(T.int)
             write = read * 2
             x[pid] = write
 
@@ -31,10 +31,10 @@ def _compile_kernel_with_inplace():
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), T.float]):
         with T.Kernel(num_tokens, threads=32) as pid:
-            read = T.alloc_var("int")
+            read = T.alloc_var(T.int)
             read = x[pid]
 
-            write = T.alloc_var("int")
+            write = T.alloc_var(T.int)
             write = read * 2
             x[pid] = write
 

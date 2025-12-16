@@ -211,15 +211,15 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
 @pytest.mark.parametrize(
     "M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack",
     [
-        (128, 128, 128, T.float16, T.float16, "float32", False, True, 1),
-        (128, 256, 256, T.float16, "float32", "float32", False, True, 1),
-        (128, 256, 256, T.float16, "float32", "float32", False, True, 2),
-        (128, 128, 128, "int8", "int32", "int32", False, True, 1),
-        (128, 256, 256, "int8", "int32", "int32", False, True, 1),
-        (128, 256, 256, "int8", "int32", "int32", False, True, 2),
-        (128, 256, 256, "int8", "int32", "int32", False, False, 1),
-        (128, 256, 256, "int8", "int32", "int32", False, False, 2),
-        (128, 128, 128, "float8_e4m3fnuz", T.float16, "float32", False, True, 1),
+        (128, 128, 128, T.float16, T.float16, T.float32, False, True, 1),
+        (128, 256, 256, T.float16, T.float32, T.float32, False, True, 1),
+        (128, 256, 256, T.float16, T.float32, T.float32, False, True, 2),
+        (128, 128, 128, T.int8, T.int32, T.int32, False, True, 1),
+        (128, 256, 256, T.int8, T.int32, T.int32, False, True, 1),
+        (128, 256, 256, T.int8, T.int32, T.int32, False, True, 2),
+        (128, 256, 256, T.int8, T.int32, T.int32, False, False, 1),
+        (128, 256, 256, T.int8, T.int32, T.int32, False, False, 2),
+        (128, 128, 128, T.float8_e4m3fnuz, T.float16, T.float32, False, True, 1),
     ],
 )
 @tilelang.testing.requires_rocm
