@@ -13,6 +13,7 @@ from .utils import construct_strides
 import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
+
 from tvm.tir.expr import BufferLoad, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
 from collections.abc import Sequence
@@ -393,7 +394,7 @@ class Builder(BaseBuilder):
         # 2. Quick return for trivil types
         if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
             return value
-        if isinstance(value, tir.IntImm) and value.dtype == T.int32:
+        if isinstance(value, tir.IntImm) and value.dtype == "int32":
             return value.value
         if isinstance(value, (Var, Buffer)):
             # Bind TVM Var/Buffer names and also record scope so reusing the same

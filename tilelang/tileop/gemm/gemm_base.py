@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm import tir
+from tilelang import language as T
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang.tileop.base import GemmWarpPolicy
 from tvm.ir.base import Node

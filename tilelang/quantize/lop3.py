@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 from typing import Literal
+from tilelang import language as T
 
 decode_i4_to_f16 = """
 template <typename T1, typename T2, bool isSigned = false>

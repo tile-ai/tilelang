@@ -213,7 +213,7 @@ def to_buffer_region(
         exts = [tir.min(exts[i], extents[i]) for i in range(len(exts))]
         return _make_region_call(tir.BufferLoad(obj.buffer, mins), access_type, *exts)
     if isinstance(obj, tir.Buffer):
-        mins = [tir.IntImm(T.int32, 0) for _ in obj.shape]
+        mins = [tir.IntImm("int32", 0) for _ in obj.shape]
         if extents is None:
             ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
             return tir.BufferRegion(obj, ranges)
@@ -225,12 +225,12 @@ def to_buffer_region(
             if region is not None:
                 return region
             mins = [idx for idx in obj.indices]
-            ones = [tir.IntImm(T.int32, 1) for _ in obj.indices]
+            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
             ranges = [ir.Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
             return tir.BufferRegion(obj.buffer, ranges)
         exts = list(extents)
         if len(obj.indices) > len(exts):
-            exts = [tir.IntImm(T.int32, 1) for _ in range(len(obj.indices) - len(exts))] + exts
+            exts = [tir.IntImm("int32", 1) for _ in range(len(obj.indices) - len(exts))] + exts
         assert len(obj.indices) == len(exts)
         return _make_region_call(obj, access_type, *exts)
     raise ValueError(f"Unsupported argument type for to_buffer_region: {type(obj)}")
@@ -377,7 +377,7 @@ def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
     """
     Compute the number of bits in a Buffer (shape with dtype)."""
     if len(shape) == 0:
-        return tir.IntImm(T.int32, 1)
+        return tir.IntImm("int32", 1)
     result = shape[0]
     for i in range(1, len(shape)):
         result = result * shape[i]
@@ -394,9 +394,9 @@ def prim_expr_equal(lhs, rhs) -> bool:
     if isinstance(lhs, int) and isinstance(rhs, int):
         return lhs == rhs
     if isinstance(lhs, int):
-        lhs = tir.IntImm(T.int32, lhs)
+        lhs = tir.IntImm("int32", lhs)
     if isinstance(rhs, int):
-        rhs = tir.IntImm(T.int32, rhs)
+        rhs = tir.IntImm("int32", rhs)
     if ir.structural_equal(lhs, rhs):
         return True
     return tir.analysis.expr_deep_equal(lhs, rhs)

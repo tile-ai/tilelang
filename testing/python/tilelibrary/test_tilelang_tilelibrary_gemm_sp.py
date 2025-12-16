@@ -1,6 +1,7 @@
 import torch
 import tilelang
 import tilelang.testing
+import tilelang.language as T
 
 from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
 from tilelang.layout import make_cutlass_metadata_layout
@@ -48,8 +49,6 @@ def matmul_sp_sm90(
     B_shape = (K, N) if not trans_B else (N, K)
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
     B_shared_shape = (block_K, block_N) if not trans_B else (block_N, block_K)
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(
@@ -109,8 +108,6 @@ def matmul_sp_sm80(
     B_shape = (K, N) if not trans_B else (N, K)
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
     B_shared_shape = (block_K, block_N) if not trans_B else (block_N, block_K)
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(

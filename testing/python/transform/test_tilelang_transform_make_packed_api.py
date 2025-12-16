@@ -23,7 +23,8 @@ from tilelang import tvm as tvm
 import tvm
 import tilelang.testing
 from tvm import tir
-from tvm.script import tir as T, ir as I
+import tilelang.language as T
+from tvm.script import ir as I
 
 
 def _find_assignment(stmt, var_name):

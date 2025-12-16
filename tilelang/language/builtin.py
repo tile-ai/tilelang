@@ -24,7 +24,7 @@ def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
     if isinstance(value, PrimExpr):
         return value
     if isinstance(value, int):
-        return tir.IntImm(T.int32, value)
+        return tir.IntImm("int32", value)
     raise TypeError(f"Expect warp sizing argument to be int or PrimExpr, but got {type(value)}.")
 
 
@@ -781,7 +781,7 @@ def initialize_tcgen05_descriptor(
             int(leading_byte_offset),
             int(stride_byte_offset),
             int(base_offset),
-            tir.IntImm(T.int32, 1 if leading_is_absolute else 0),
+            tir.IntImm("int32", 1 if leading_is_absolute else 0),
             int(swizzle_mode),
         )
     )

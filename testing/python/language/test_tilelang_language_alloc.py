@@ -1,4 +1,5 @@
 import tilelang.testing
+from tilelang import language as T
 
 
 def alloc_var(
@@ -6,7 +7,6 @@ def alloc_var(
     block_N,
     dtype,
 ):
-    import tilelang.language as T
 
     @T.prim_func
     def main(

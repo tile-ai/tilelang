@@ -2,10 +2,10 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
 import torch
+import tilelang.language as T
 
 
 def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
-    import tilelang.language as T
 
     @T.prim_func
     def cumsum(

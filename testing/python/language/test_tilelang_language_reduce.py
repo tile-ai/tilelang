@@ -1,12 +1,12 @@
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
+import tilelang.language as T
 
 tilelang.testing.set_random_seed()
 
 
 def _make_shared_reduce(M, N, dtype, reduce_cb):
-    import tilelang.language as T
 
     @T.prim_func
     def main(

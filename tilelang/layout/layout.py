@@ -26,7 +26,7 @@ class Layout(Node):
         # Create an IterVar for each dimension in the shape
         for idx, size in enumerate(shape):
             # Define an IterVar over the range [0, size) with an associated variable name
-            iv = IterVar(Range(0, size), Var(f"i{idx}", T.int32), 0)
+            iv = IterVar(Range(0, size), Var(f"i{idx}", "int32", 0))
             forward_vars.append(iv)
 
         # Extract the variable references from the IterVars

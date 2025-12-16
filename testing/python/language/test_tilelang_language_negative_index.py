@@ -1,7 +1,7 @@
 from tilelang import tvm
 import tilelang as tl
 import tilelang.testing
-from tvm.script import tir as T
+import tilelang.language as T
 
 
 @T.prim_func

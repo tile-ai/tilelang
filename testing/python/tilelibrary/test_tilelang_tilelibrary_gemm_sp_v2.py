@@ -6,6 +6,7 @@ from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmi
 
 import tilelang.testing
 import torch
+import tilelang.language as T
 
 
 def matmul(
@@ -30,7 +31,6 @@ def matmul(
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
-    import tilelang.language as T
 
     @T.prim_func
     def main(

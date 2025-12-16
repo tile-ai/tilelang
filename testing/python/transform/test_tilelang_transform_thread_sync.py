@@ -2,7 +2,7 @@
 
 from tilelang import tvm as tvm
 import tilelang.testing
-from tvm.script import tir as T
+import tilelang.language as T
 from tvm import te
 
 

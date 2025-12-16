@@ -8,6 +8,7 @@ from example_mha_sink_fwd_bhsd_wgmma_pipelined import flashattn, ref_program, ge
 from typing import Optional
 
 
+
 @triton.jit
 def triton_kernel(
     Q,
@@ -128,10 +129,10 @@ def main(
     seq_kv: int = 256,
     dim: int = 128,
     window_size: Optional[int] = None,
-    dtype: str = T.float16,
+    dtype: str = "float16",
     tune: bool = False,
 ):
-    torch_dtype = {T.float16: torch.float16, T.bfloat16: torch.bfloat16}[dtype]
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:
         print("Using sliding window attention.")
         assert window_size <= seq_q

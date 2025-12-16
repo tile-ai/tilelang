@@ -1,6 +1,7 @@
 import tilelang.testing
 import tilelang
 import torch
+from tilelang import language as T
 
 
 @tilelang.jit(

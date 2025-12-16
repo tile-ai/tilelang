@@ -1,5 +1,6 @@
-import tilelang.testing
 import torch
+import tilelang.testing
+from tilelang import language as T
 
 B = 1
 S = 1024  # small but for test only.
