@@ -60,8 +60,8 @@ def test_jit2_gemm_annot():
     )
 
     for in_dtype, out_dtype in prod:
-        in_dtype = in_dtype.torch()
-        out_dtype = out_dtype.torch()
+        in_dtype = in_dtype..as_torch()
+        out_dtype = out_dtype..as_torch()
         A = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
         B = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
         C_ref = out_dtype(A @ B)
@@ -97,8 +97,8 @@ def test_jit2_gemm_ptr():
         ]
     )
     for in_dtype, out_dtype in prod:
-        in_dtype = in_dtype.torch()
-        out_dtype = out_dtype.torch()
+        in_dtype = in_dtype..as_torch()
+        out_dtype = out_dtype..as_torch()
         A = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
         B = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
         C_ref = out_dtype(A @ B)

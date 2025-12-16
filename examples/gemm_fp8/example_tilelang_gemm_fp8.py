@@ -36,7 +36,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype=T.float32):
 
 
 def test_gemm_fp8(M, N, K, dtype):
-    torch_dtype = map_torch_type(dtype)
+    torch_dtype = T.dtype(dtype)..as_torch()
 
     kernel = matmul(M, N, K, 128, 128, 64, dtype)
 

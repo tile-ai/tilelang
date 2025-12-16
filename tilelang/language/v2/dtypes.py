@@ -11,7 +11,7 @@ _T = TypeVar("_T")
 if TYPE_CHECKING:
 
     class dtype(Generic[_T]):
-        def torch(self) -> torch.dtype: ...
+        def as_torch(self) -> torch.dtype: ...
 else:
     dtype = tvm.DataType
 
@@ -78,7 +78,7 @@ _CANONICAL_TO_DISPLAY_STR = {
     "ulong": "uint64",
 }
 
-# _STR_TO_TORCH_DTYPE = {v: k for k, v in _TORCH_DTYPE_TO_STR.items()}
+_STR_TO_TORCH_DTYPE = {v: k for k, v in _TORCH_DTYPE_TO_STR.items()}
 
 # _STR_TO_NUMPY_DTYPE = {v: k for k, v in _NUMPY_DTYPE_TO_STR.items()}
 
@@ -139,6 +139,17 @@ def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var
     return call(expr, is_size_var)
 
 
+def __dtype_as_torch__(self: dtype) -> torch.dtype:
+    """Convert TileLang dtype to PyTorch dtype."""
+    dtype_str = str(self)
+    if dtype_str in _STR_TO_TORCH_DTYPE:
+        return _STR_TO_TORCH_DTYPE[dtype_str]
+    raise ValueError(
+        f"Cannot convert dtype '{dtype_str}' to torch.dtype. "
+        f"Supported dtypes: {list(_STR_TO_TORCH_DTYPE.keys())}"
+    )
+
+
 __orig_dtype_new = dtype.__new__
 
 
@@ -154,6 +165,7 @@ def __dtype_new__(cls, value: AnyDType) -> dtype:
 
 dtype.__call__ = __dtype_call__
 dtype.__new__ = __dtype_new__
+dtype.as_torch = __dtype_as_torch__
 
 
 def get_tvm_dtype(value: AnyDType) -> dtype:

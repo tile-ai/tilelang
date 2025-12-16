@@ -45,7 +45,7 @@ def assert_gemm(
 ):
     jit_kernel = matmul(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
 
-    torch_dtype = getattr(torch, dtype)
+    torch_dtype = dtype..as_torch()
     a, b = None, None
     if "int" in dtype:
         a = torch.randint(100, (M, K), dtype=torch_dtype, device="mps")

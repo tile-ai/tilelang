@@ -92,7 +92,7 @@ def run_clamp_value_range(
     import torch
 
     # Convert string dtype to torch.dtype
-    torch_dtype = map_torch_type(dtype)
+    torch_dtype = dtype..as_torch()
 
     def ref_program(A):
         min_val = torch.min(A) * 0.5

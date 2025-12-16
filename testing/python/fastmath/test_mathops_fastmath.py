@@ -134,7 +134,7 @@ def run_two_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, 
     check_non_fastmath_usage(source_fastmath, mathop_name)
 
     # Test numerical correctness
-    torch_dtype = getattr(torch, dtype)
+    torch_dtype = dtype..as_torch()
     a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
     b = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
@@ -222,7 +222,7 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32,
     check_fastmath_usage(source_fastmath, cuda_mathop_name, expect_fastmath=True)
 
     # Test numerical correctness
-    torch_dtype = getattr(torch, dtype)
+    torch_dtype = dtype..as_torch()
     a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
     # Ensure positive values for functions that need them
