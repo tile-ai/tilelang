@@ -1428,8 +1428,6 @@ std::string CodeGenTileLangCUDA::GetVecLoad(DataType t,
 void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
                                         PrimExpr base,
                                         const std::string &value) {
-  LOG(INFO) << "PrintVecStore: " << t;
-  LOG(INFO) << "bits() * lanes(): " << t.bits() * t.lanes();
   const VarNode *buffer_var = buffer->data.get();
   std::string scope;
   if (alloc_storage_scope_.count(buffer_var)) {
@@ -2895,8 +2893,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
 
 void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
                                      std::ostream &os) { // NOLINT(*)
-  LOG(INFO) << "VisitExpr_(const BufferLoadNode *op, std::ostream &os): "
-            << op->dtype;
   ICHECK_EQ(op->indices.size(), 1)
       << "Load from non-flat memory not supported.";
   ICHECK(!op->predicate.defined())
