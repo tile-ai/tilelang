@@ -8,10 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.profiler import do_bench
 from typing import Tuple
-from argparse import ArgumentParser
-from utils import gen_inputs  # noqa: F403
 
 
 # TODO(wt): Add async functionality

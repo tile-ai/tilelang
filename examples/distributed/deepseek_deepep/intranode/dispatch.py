@@ -7,10 +7,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.profiler import do_bench
-from argparse import ArgumentParser
 from typing import Optional, Tuple
-from tilelang.distributed.utils import init_dist
 from utils import Config, ep_ext  # noqa: F403
 
 tilelang.disable_cache()
@@ -181,7 +178,8 @@ def notify_dispatch(
         channel_end_offset,
         channel_head_idx,
         channel_tail_idx,
-        stream=comm_stream.cuda_stream
+        stream=comm_stream.cuda_stream,
+        skip_tensor_validation=True  # reduce runtime overhead
     )
 
     num_recv_tokens, num_recv_tokens_per_expert_list = ep_ext.wait_for_counters_ready(moe_recv_counter, moe_recv_expert_counter)
@@ -229,12 +227,13 @@ def cached_notify_dispatch(
 ):
     kernel = cached_notify_dispatch_kernel(num_ranks, num_channels)
     kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)  # we still comm on barrier_signal
-    kernel(barrier_signal, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, stream=comm_stream.cuda_stream)
+    kernel(barrier_signal, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, stream=comm_stream.cuda_stream,
+        skip_tensor_validation=True) # reduce runtime overhead
 
 
 @tilelang.jit(
     pass_configs={"tl.disable_tma_lower": True,  # enable TMA later
-        "tl.disable_warp_specialized": True}, debug_root_path='/home/yu/debug/dispatch_static')
+        "tl.disable_warp_specialized": True})
 def dispatch_kernel(
     rank, 
     num_ranks,
@@ -794,11 +793,13 @@ def intranode_dispatch(
     if handle is None:
         # kernel = dispatch_kernel(rank, num_ranks, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens, hidden, num_topk, num_experts, config.num_sms, 'bfloat16')
         # kernel.initialize(allocator=allocator)
-        kernel(recv_x, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_prefix_matrix, send_head, x, topk_idx, topk_weights, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers, stream=comm_stream.cuda_stream)
+        kernel(recv_x, recv_src_idx, recv_topk_idx, recv_topk_weights, recv_channel_prefix_matrix, send_head, x, topk_idx, topk_weights, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers, stream=comm_stream.cuda_stream,
+            skip_tensor_validation=True) # reduce runtime overhead
         handle = (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
         return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle
     else:
         kernel = cached_dispatch_kernel(rank, num_ranks, num_tokens, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens, hidden, num_topk, num_experts, config.num_sms, 'bfloat16')
         kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
-        kernel(recv_x, recv_src_idx, recv_channel_prefix_matrix, send_head, x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, stream=comm_stream.cuda_stream)
+        kernel(recv_x, recv_src_idx, recv_channel_prefix_matrix, send_head, x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, channel_x_buffers, channel_src_idx_buffers, stream=comm_stream.cuda_stream,
+            skip_tensor_validation=True) # reduce runtime overhead
         return recv_x

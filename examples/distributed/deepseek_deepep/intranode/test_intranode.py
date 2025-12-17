@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder
 import torch
 import tilelang
 from argparse import ArgumentParser
-from tilelang.distributed.utils import init_dist, perf_fn
+from tilelang.distributed.utils import init_dist
 
 from buffer import EPBuffer
 from utils import gen_inputs, ep_bench
