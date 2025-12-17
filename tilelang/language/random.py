@@ -1,7 +1,5 @@
 from tvm import tir
-from typing import Any
-import tilelang.language as T
-from tilelang.language.utils import index_to_coordinates
+
 
 # https://docs.nvidia.com/cuda/curand/device-api-overview.html#device-api-overview
 def rng_init(seed, seq, off):
@@ -25,6 +23,7 @@ def rng_init(seed, seq, off):
     seq = tir.convert(seq)
     off = tir.convert(off)
     return tir.call_intrin("handle", tir.op.Op.get("tl.rng_init"), seed, seq, off)
+
 
 def rng_rand():
     """Generate a 32-bit unsigned random integer
