@@ -262,7 +262,7 @@ if __name__ == "__main__":
     total_flops = 2 * M * N * K
 
     # matmul(...) returns (best_latency, best_config, ref_latency)
-    best_result = matmul_sp(M, N, K, "float16", args.accum_dtype)
+    best_result = matmul_sp(M, N, K, T.float16, args.accum_dtype)
     best_latency = best_result.latency
     best_config = best_result.config
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")

@@ -55,8 +55,8 @@ def get_configs():
 def chunk_state_fwd(
     batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, block_M=64, block_N=64, block_K=64, num_stages=2, threads=128
 ):
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
     nchunks = T.ceildiv(seqlen, chunk_size)
     p = 1.44269504
 

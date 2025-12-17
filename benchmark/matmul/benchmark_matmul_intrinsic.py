@@ -49,22 +49,22 @@ def tl_matmul(
     enable_rasteration=False,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
-    # chunk = 32 if in_dtype == "float16" else 64
+    # chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     block_M = block_row_warps * warp_row_tiles
@@ -194,9 +194,9 @@ def get_configs(args, kwargs):
             M=M,
             N=N,
             K=K,
-            in_dtype="float16",
-            out_dtype="float16",
-            accum_dtype="float16",
+            in_dtype=T.float16,
+            out_dtype=T.float16,
+            accum_dtype=T.float16,
         ).with_arch(arch)
 
         func = carve_template.equivalent_function()
@@ -251,9 +251,9 @@ def matmul(
     M,
     N,
     K,
-    in_dtype="float16",
-    out_dtype="float16",
-    accum_dtype="float16",
+    in_dtype=T.float16,
+    out_dtype=T.float16,
+    accum_dtype=T.float16,
     with_roller=False,
     block_row_warps=None,
     block_col_warps=None,
@@ -295,9 +295,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    in_dtype = args.dtype
-    out_dtype = "float32" if in_dtype == "int8" else "float16"
-    accum_dtype = "float32" if in_dtype == "int8" else "float16"
+    in_dtype = T.dtype(args.dtype)
+    out_dtype = T.float32 if in_dtype == T.int8 else T.float16
+    accum_dtype = T.float32 if in_dtype == T.int8 else T.float16
     with_roller = args.with_roller
     with_roller = True
     # Compute total floating-point operations

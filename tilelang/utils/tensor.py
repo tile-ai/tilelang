@@ -32,7 +32,11 @@ class TensorSupplyType(Enum):
     Auto = 7
 
 
-def map_torch_type(intype: str) -> torch.dtype:
+def map_torch_type(intype) -> torch.dtype:
+    # Convert to string if needed
+    if not isinstance(intype, str):
+        intype = str(intype)
+
     if intype == "float8_e4m3":
         assert hasattr(torch, "float8_e4m3fn"), "torch.float8_e4m3fn is not supported in this version of torchPlease upgrade torch >= 2.1.0"
         return torch.float8_e4m3fn
@@ -44,6 +48,19 @@ def map_torch_type(intype: str) -> torch.dtype:
             "torch.float8_e4m3fnuz is not supported in this version of torchPlease upgrade torch >= 2.2.0"
         )
         return torch.float8_e4m3fnuz
+    elif intype == "float8_e8m0fnu":
+        assert hasattr(torch, "float8_e8m0fnu"), (
+            "torch.float8_e8m0fnu is not supported in this version of torchPlease upgrade torch >= 2.8.0"
+        )
+        return torch.float8_e8m0fnu
+    elif intype == "float4_e2m1fnx2":
+        assert hasattr(torch, "float4_e2m1fnx2"), (
+            "torch.float4_e2m1fnx2 is not supported in this version of torchPlease upgrade torch >= 2.8.0"
+        )
+        return torch.float4_e2m1fnx2
+    elif "float4" in intype:
+        # PyTorch doesn't support float4, use int8 as storage type
+        return torch.int8
     else:
         return getattr(torch, intype)
 
@@ -53,7 +70,8 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
     from .device import get_current_device
 
     def get_tensor(param: KernelParam) -> torch.Tensor:
-        dtype: torch.dtype = param.dtype
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        dtype: torch.dtype = param.torch_dtype()
         device = get_current_device()
 
         if hasattr(param, "shape") and not param.shape:
@@ -74,11 +92,14 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
         if supply_type == TensorSupplyType.Auto:
             is_unsigned = param.is_unsigned()
             is_float8 = param.is_float8()
+            is_float4 = param.is_float4()
             is_boolean = param.is_boolean()
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
                 return torch.randint(low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
+            elif is_float4:
+                return torch.randint(low=0, high=16, size=shape, device=device, dtype=dtype)
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             elif dtype in {torch.float16, torch.float32, torch.bfloat16}:
@@ -95,11 +116,14 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
         if supply_type == TensorSupplyType.Integer:
             is_unsigned = param.is_unsigned()
             is_float8 = param.is_float8()
+            is_float4 = param.is_float4()
             is_boolean = param.is_boolean()
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
                 return torch.randint(low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
+            elif is_float4:
+                return torch.randint(low=0, high=16, size=shape, device=device, dtype=dtype)
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             else:

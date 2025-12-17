@@ -98,8 +98,8 @@ def matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtyp
 def main(M=16384, N=16384, K=16384):
     block_M, block_N, block_K = 128, 128, 32
     trans_A, trans_B = False, False
-    in_dtype, out_dtype = "float16", "float16"
-    accum_dtype = "float32"
+    in_dtype, out_dtype = T.float16, T.float16
+    accum_dtype = T.float32
     num_stages = 3
     threads = 128
     matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, num_stages, threads)

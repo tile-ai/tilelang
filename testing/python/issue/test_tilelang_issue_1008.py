@@ -33,7 +33,7 @@ def _fill_with_dynamic_region_kernel():
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), "int64"]):  # noqa: F821
         with T.Kernel(num_tokens, threads=128) as _:
-            a, b = T.alloc_var("int"), T.alloc_var("int")
+            a, b = T.alloc_var(T.int), T.alloc_var(T.int)
             T.fill(x[a:b], 0)
 
     return buggy_kernel

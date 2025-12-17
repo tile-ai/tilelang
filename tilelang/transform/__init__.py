@@ -435,6 +435,10 @@ def PlanAndUpdateBufferAllocationLocation():
     return _ffi_api.PlanAndUpdateBufferAllocationLocation()  # type: ignore
 
 
+def HoistNonRestrictParams():
+    return _ffi_api.HoistNonRestrictParams()  # type: ignore
+
+
 def StorageRewrite():
     """StorageRewrite
 

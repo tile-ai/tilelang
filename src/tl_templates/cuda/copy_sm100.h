@@ -5,6 +5,7 @@
 
 namespace tl {
 
+// 256-bit load for longlong4
 __device__ __forceinline__ longlong4 ld_global_256(const longlong4 *ptr) {
   longlong4 ret;
   asm volatile("ld.global.v4.s64 {%0, %1, %2, %3}, [%4];"
@@ -13,12 +14,7 @@ __device__ __forceinline__ longlong4 ld_global_256(const longlong4 *ptr) {
   return ret;
 }
 
-__device__ __forceinline__ void st_global_256(longlong4 *ptr, longlong4 &val) {
-  asm volatile("st.global.v4.s64 [%0], {%1, %2, %3, %4};"
-               :
-               : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
-}
-
+// 256-bit load for ulonglong4
 __device__ __forceinline__ ulonglong4 ld_global_256(const ulonglong4 *ptr) {
   ulonglong4 ret;
   asm volatile("ld.global.v4.u64 {%0, %1, %2, %3}, [%4];"
@@ -27,6 +23,32 @@ __device__ __forceinline__ ulonglong4 ld_global_256(const ulonglong4 *ptr) {
   return ret;
 }
 
+// Generic 256-bit load for FP8 types (returns ulonglong4)
+template <typename T>
+__device__ __forceinline__ ulonglong4 ld_global_256(const T *ptr) {
+  ulonglong4 ret;
+  asm volatile("ld.global.v4.u64 {%0, %1, %2, %3}, [%4];"
+               : "=l"(ret.x), "=l"(ret.y), "=l"(ret.z), "=l"(ret.w)
+               : "l"(ptr));
+  return ret;
+}
+
+// 256-bit store for longlong4
+__device__ __forceinline__ void st_global_256(longlong4 *ptr, longlong4 &val) {
+  asm volatile("st.global.v4.s64 [%0], {%1, %2, %3, %4};"
+               :
+               : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
+}
+
+// 256-bit store for ulonglong4 with non-const reference
+__device__ __forceinline__ void st_global_256(ulonglong4 *ptr,
+                                              ulonglong4 &val) {
+  asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
+               :
+               : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
+}
+
+// 256-bit store for ulonglong4 with const reference
 // must be const &val, otherwise the compiler will generate a temporary variable
 // and compilation will fail if we have st_global_256(ptr, ld_global_256(ptr))
 __device__ __forceinline__ void st_global_256(ulonglong4 *ptr,
@@ -36,35 +58,22 @@ __device__ __forceinline__ void st_global_256(ulonglong4 *ptr,
                : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
 }
 
-__device__ __forceinline__ ulonglong4 ld_global_256(const fp8_e4_32_t *ptr) {
-  ulonglong4 ret;
-  asm volatile("ld.global.v4.u64 {%0, %1, %2, %3}, [%4];"
-               : "=l"(ret.x), "=l"(ret.y), "=l"(ret.z), "=l"(ret.w)
-               : "l"(ptr));
-  return ret;
-}
-
-__device__ __forceinline__ void st_global_256(fp8_e4_32_t *ptr,
-                                              fp8_e4_32_t &val8) {
-  ulonglong4 &val = *((ulonglong4 *)&val8);
+// Generic 256-bit store for FP8 types
+template <typename T>
+__device__ __forceinline__ void st_global_256(T *ptr, const ulonglong4 &val) {
   asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
                :
                : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
 }
-__device__ __forceinline__ ulonglong4 ld_global_256(const fp8_e5_32_t *ptr) {
-  ulonglong4 ret;
-  asm volatile("ld.global.v4.u64 {%0, %1, %2, %3}, [%4];"
-               : "=l"(ret.x), "=l"(ret.y), "=l"(ret.z), "=l"(ret.w)
-               : "l"(ptr));
-  return ret;
-}
 
-__device__ __forceinline__ void st_global_256(fp8_e5_32_t *ptr,
-                                              fp8_e5_32_t &val8) {
-  ulonglong4 &val = *((ulonglong4 *)&val8);
+// Generic 256-bit store for FP8 types with non-const reference
+template <typename T>
+__device__ __forceinline__ void st_global_256(T *ptr, T &val) {
+  ulonglong4 &val_u64 = *((ulonglong4 *)&val);
   asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
                :
-               : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
+               : "l"(ptr), "l"(val_u64.x), "l"(val_u64.y), "l"(val_u64.z),
+                 "l"(val_u64.w));
 }
 
 __device__ __forceinline__ unsigned long long

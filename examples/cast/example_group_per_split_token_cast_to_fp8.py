@@ -5,8 +5,8 @@ from typing import Tuple
 from tilelang.utils.tensor import torch_assert_close
 
 # support bfloat16, float, float16
-dtype = "bfloat16"
-accum_dtype = "float"
+dtype = T.bfloat16
+accum_dtype = T.float32
 
 
 @tilelang.jit(out_idx=[2, 3])
@@ -18,8 +18,8 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
     @T.prim_func
     def group_per_split_token_cast(
         X: T.Tensor((M, N), dtype),
-        batch_sizes: T.Tensor((BG,), "int32"),
-        X_fp8: T.Tensor((BG, M_max, N), "float8_e4m3"),
+        batch_sizes: T.Tensor((BG,), T.int32),
+        X_fp8: T.Tensor((BG, M_max, N), T.float8_e4m3fn),
         X_amax: T.Tensor((BG, M_max, T.ceildiv(N, group_size)), accum_dtype),
     ):
         with T.Kernel(T.ceildiv(M_max, blk_m), T.ceildiv(N, group_size), BG, threads=128) as (bx, by, bz):
@@ -30,8 +30,8 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
             y_amax_local = T.alloc_fragment((blk_m,), accum_dtype)
             y_s_local = T.alloc_fragment((blk_m,), accum_dtype)
             y_q_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
-            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "float8_e4m3")
-            row_offset = T.alloc_fragment((1,), "int32")
+            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
+            row_offset = T.alloc_fragment((1,), T.int32)
 
             T.annotate_layout(
                 {
@@ -163,11 +163,11 @@ def ref_program(x: torch.Tensor, batch_sizes: torch.Tensor) -> Tuple[torch.Tenso
 def main(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
     if batch_sizes is None:
         batch_sizes = [2048, 6144]
-    if dtype == "float":
+    if dtype == T.float:
         x = torch.randn(M, N, device="cuda", dtype=torch.float32)
-    elif dtype == "float16":
+    elif dtype == T.float16:
         x = torch.randn(M, N, device="cuda", dtype=torch.float16)
-    elif dtype == "bfloat16":
+    elif dtype == T.bfloat16:
         x = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")

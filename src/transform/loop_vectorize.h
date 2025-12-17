@@ -46,6 +46,12 @@ For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
 // when var changes
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer);
+
+// Check if expr is invariant within vector boundaries
+bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
+                                     int target_vectorized_size,
+                                     arith::Analyzer *analyzer);
+
 bool IndiceCanVectorize(const PrimExpr &expr, Var var,
                         const PrimExpr &iter_var_size,
                         int target_vectorized_size, arith::Analyzer *analyzer);

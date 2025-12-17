@@ -17,7 +17,7 @@ torch.manual_seed(42)
 
 DEFAULT_CONFIG = {  # take best config from autotune script
     "4090": {
-        "float": {
+        T.float: {
             "block_M": 128,
             "block_N": 64,
             "block_K": 64,
@@ -26,7 +26,7 @@ DEFAULT_CONFIG = {  # take best config from autotune script
             "policy": T.GemmWarpPolicy.Square,
             "enable_rasterization": True,
         },
-        "float16": {
+        T.float16: {
             "block_M": 256,
             "block_N": 128,
             "block_K": 64,
@@ -37,7 +37,7 @@ DEFAULT_CONFIG = {  # take best config from autotune script
         },
     },
     "h20": {
-        "float": {
+        T.float: {
             "block_M": 128,
             "block_N": 64,
             "block_K": 128,
@@ -46,7 +46,7 @@ DEFAULT_CONFIG = {  # take best config from autotune script
             "policy": T.GemmWarpPolicy.Square,
             "enable_rasterization": True,
         },
-        "float16": {
+        T.float16: {
             "block_M": 128,
             "block_N": 64,
             "block_K": 128,
@@ -65,26 +65,26 @@ ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
 def matmul_sp_fp16_custom_compress(
     M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy, enable_rasterization, use_cutlass_layout
 ):
-    e_factor, e_dtype = (16, "int16")
+    e_factor, e_dtype = (16, T.int16)
 
     @T.prim_func
     def gemm_sp_fp16_custom_compress(
-        A_sparse: T.Tensor((M, K // 2), "float16"),
+        A_sparse: T.Tensor((M, K // 2), T.float16),
         E: T.Tensor((M, K // e_factor), e_dtype),
-        B: T.Tensor((K, N), "float16"),
+        B: T.Tensor((K, N), T.float16),
         C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K // 2), "float16")
+            A_shared = T.alloc_shared((block_M, block_K // 2), T.float16)
             E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
-            B_shared = T.alloc_shared((block_K, block_N), "float16")
+            B_shared = T.alloc_shared((block_K, block_N), T.float16)
             C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             if use_cutlass_layout:
                 T.annotate_layout(
                     {
-                        E: make_cutlass_metadata_layout(E, mma_dtype="float16", arch="8.0", block_k=block_K),
-                        E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype="float16", arch="8.0", block_k=block_K),
+                        E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="8.0", block_k=block_K),
+                        E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="8.0", block_k=block_K),
                     }
                 )
             T.clear(C_local)
@@ -253,15 +253,15 @@ def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
             if use_cutlass_layout:
                 T.annotate_layout(
                     {
-                        E: make_cutlass_metadata_layout(E, mma_dtype="float16", arch="8.0", block_k=block_K),
-                        E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype="float16", arch="8.0", block_k=block_K),
+                        E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="8.0", block_k=block_K),
+                        E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="8.0", block_k=block_K),
                     }
                 )
             T.clear(A_sp_shared)
             T.clear(E_shared)
             # TODO: alloc_var seems buggy here
-            non_zero_cnt = T.alloc_local((1,), dtype="uint8")
-            non_zero_elt_log_idx = T.alloc_local((elem,), dtype="uint8")
+            non_zero_cnt = T.alloc_local((1,), dtype=T.uint8)
+            non_zero_elt_log_idx = T.alloc_local((elem,), dtype=T.uint8)
             T.copy(A[bx * block_M, by * block_K], A_shared)
             for tm in T.Parallel(block_M):
                 for g_i in range(0, block_K // group):
@@ -300,7 +300,7 @@ def main():
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
     parser.add_argument("--use_cutlass_layout", action="store_true", help="Use cutlass layout for E tensor")
     parser.add_argument("--use_torch_compressor", action="store_true", help="Use torch sparse for reference")
-    parser.add_argument("--accum_dtype", type=str, default="float", choices=["float", "float16"], help="Accumulation datatype")
+    parser.add_argument("--accum_dtype", type=str, default=T.float, choices=[T.float, T.float16], help="Accumulation datatype")
     parser.add_argument("--cfg", type=str, choices=["4090"], default="4090")
     args = parser.parse_args()
     kernel = matmul_sp_fp16_custom_compress(
@@ -314,7 +314,7 @@ def main():
         assert not args.use_cutlass_layout, "torch sparse must be used with naive layout"
         a_sparse, e = torch_compress(a)
     else:
-        a_sparse, e = compress_kernel(args.m, args.k, 32, 32, "float16", use_cutlass_layout=args.use_cutlass_layout)(a)
+        a_sparse, e = compress_kernel(args.m, args.k, 32, 32, T.float16, use_cutlass_layout=args.use_cutlass_layout)(a)
 
     c = kernel(a_sparse, e, b)
 

@@ -80,16 +80,16 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64
     v_shape = [UKV, heads, dim]
     o_shape = [UQ, heads, dim]
 
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
 
     @T.prim_func
     def main(
         Q_unpad: T.Tensor(q_shape, dtype),
         K_unpad: T.Tensor(k_shape, dtype),
         V_unpad: T.Tensor(v_shape, dtype),
-        cu_seqlens_q: T.Tensor([batch_size + 1], "int32"),
-        cu_seqlens_k: T.Tensor([batch_size + 1], "int32"),
+        cu_seqlens_q: T.Tensor([batch_size + 1], T.int32),
+        cu_seqlens_k: T.Tensor([batch_size + 1], T.int32),
         max_seqlen_q: T.int32,
         Output_unpad: T.Tensor(o_shape, dtype),
     ):

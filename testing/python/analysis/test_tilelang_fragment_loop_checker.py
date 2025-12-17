@@ -5,7 +5,7 @@ import pytest
 
 
 @tilelang.jit
-def simple_invalid_loop(dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128):
+def simple_invalid_loop(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
     A = T.dynamic("A")
 
     @T.prim_func
@@ -26,7 +26,7 @@ def simple_invalid_loop(dtype: str = "bfloat16", accum_dtype: str = "float32", n
 
 
 @tilelang.jit
-def nested_invalid_loop(dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128):
+def nested_invalid_loop(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
     A = T.dynamic("A")
 
     @T.prim_func
@@ -48,7 +48,7 @@ def nested_invalid_loop(dtype: str = "bfloat16", accum_dtype: str = "float32", n
 
 
 @tilelang.jit
-def invalid_loop_with_complex_dataflow(dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128):
+def invalid_loop_with_complex_dataflow(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
     A = T.dynamic("A")
 
     @T.prim_func
@@ -69,7 +69,7 @@ def invalid_loop_with_complex_dataflow(dtype: str = "bfloat16", accum_dtype: str
 
 
 @tilelang.jit
-def valid_loop_not_use_loop_var(dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128):
+def valid_loop_not_use_loop_var(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
     A = T.dynamic("A")
 
     @T.prim_func
@@ -91,7 +91,7 @@ def valid_loop_not_use_loop_var(dtype: str = "bfloat16", accum_dtype: str = "flo
 
 
 @tilelang.jit
-def valid_loop_not_frag(dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128):
+def valid_loop_not_frag(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
     A = T.dynamic("A")
 
     @T.prim_func
@@ -112,7 +112,7 @@ def valid_loop_not_frag(dtype: str = "bfloat16", accum_dtype: str = "float32", n
 
 
 @tilelang.jit
-def valid_loop_serial(dtype: str = "bfloat16", accum_dtype: str = "float32", num_threads: int = 128):
+def valid_loop_serial(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
     A = T.dynamic("A")
 
     @T.prim_func

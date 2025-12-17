@@ -1,16 +1,17 @@
-import tilelang.testing
 import torch
+import tilelang.testing
+from tilelang import language as T
 
 B = 1
 S = 1024  # small but for test only.
 H = 32
 DK = 128
 DV = 128
-input_dtype = "bfloat16"
-output_dtype = "bfloat16"
-accum_dtype = "float32"
-gate_dtype = "float32"
-state_dtype = "float32"
+input_dtype = T.bfloat16
+output_dtype = T.bfloat16
+accum_dtype = T.float32
+gate_dtype = T.float32
+state_dtype = T.float32
 chunk_size = 64
 use_g = True
 use_initial_state = True

@@ -157,7 +157,7 @@ class BufferProxy:
     def __call__(
         self,
         shape,
-        dtype="float32",
+        dtype=T.float32,
         data=None,
         strides=None,
         elem_offset=None,

@@ -35,18 +35,18 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -54,7 +54,7 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 64
     warp_col_tiles = 64
-    # chunk = 32 if in_dtype == "float16" else 64
+    # chunk = 32 if in_dtype == T.float16 else 64
     chunk = 32
     shared_scope = "shared.dyn"
 
@@ -163,7 +163,7 @@ def ref_program(A, B):
 
 
 def main(M=4096, N=4096, K=4096):
-    in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
+    in_dtype, out_dtype, accum_dtype = T.float16, T.float16, T.float32
     kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source

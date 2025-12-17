@@ -9,7 +9,7 @@ def test_inject_set_max_nreg():
     """Test the InjectSetMaxNReg pass"""
 
     @T.prim_func
-    def before(A: T.Tensor((512, 512), "float16"), B: T.Tensor((512, 512), "float16")):
+    def before(A: T.Tensor((512, 512), T.float16), B: T.Tensor((512, 512), T.float16)):
         bx = T.launch_thread("blockIdx.x", 8)
         by = T.launch_thread("blockIdx.y", 8)
         v = T.launch_thread("threadIdx.x", 128)
@@ -22,8 +22,8 @@ def test_inject_set_max_nreg():
             T.annotate_producer_reg_dealloc(24)  # Producer: decrease to 24
             T.annotate_consumer_reg_alloc(240)  # Consumer: increase to 240
 
-            A_shared = T.alloc_buffer((3, 1, 8, 256), "float16", scope="shared.dyn")
-            B_shared = T.alloc_buffer((3, 1, 4, 512), "float16", scope="shared.dyn")
+            A_shared = T.alloc_buffer((3, 1, 8, 256), T.float16, scope="shared.dyn")
+            B_shared = T.alloc_buffer((3, 1, 4, 512), T.float16, scope="shared.dyn")
             C_local = T.alloc_buffer((32,), scope="local")
 
             T.create_list_of_mbarrier(128, 128, 128, 128, 128, 128)
@@ -37,7 +37,7 @@ def test_inject_set_max_nreg():
                         T.tma_load(
                             T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
                             T.get_mbarrier(k % 3),
-                            T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 2),
+                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 2),
                             k * 32,
                             by * 64,
                         )
@@ -49,9 +49,9 @@ def test_inject_set_max_nreg():
                     T.call_extern(
                         "handle",
                         "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
-                        T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 1),
-                        T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 1),
-                        T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                        T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 1),
+                        T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 1),
+                        T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
                     )
                     T.evaluate(tir.Call("handle", "tir.ptx_arrive_barrier", [T.get_mbarrier(k % 3 + 3)]))
 
@@ -86,7 +86,7 @@ def test_inject_set_max_nreg_no_set_max_nreg():
     """Test the InjectSetMaxNReg pass with no_set_max_nreg"""
 
     @T.prim_func
-    def before_no_set_max_nreg(A: T.Tensor((512, 512), "float16")):
+    def before_no_set_max_nreg(A: T.Tensor((512, 512), T.float16)):
         bx = T.launch_thread("blockIdx.x", 8)
         v = T.launch_thread("threadIdx.x", 128)
 

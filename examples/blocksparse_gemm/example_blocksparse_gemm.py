@@ -93,7 +93,7 @@ def supply_program(params: List[KernelParam]):
 )
 @tilelang.jit(out_idx=[-1])
 def blocksparse_matmul(
-    M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_rasteration, dtype="float16", accum_dtype="float"
+    M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_rasteration, dtype=T.float16, accum_dtype=T.float32
 ):
     block_mask_shape = (M // block_M, N // block_N, K // block_K)
 

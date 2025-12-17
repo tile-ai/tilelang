@@ -11,7 +11,7 @@ _T = TypeVar("_T")
 if TYPE_CHECKING:
 
     class dtype(Generic[_T]):
-        def torch(self) -> torch.dtype: ...
+        def as_torch(self) -> torch.dtype: ...
 else:
     dtype = tvm.DataType
 
@@ -68,7 +68,32 @@ _TORCH_DTYPE_TO_STR = {
     torch.bfloat16: "bfloat16",
 }
 
-# _STR_TO_TORCH_DTYPE = {v: k for k, v in _TORCH_DTYPE_TO_STR.items()}
+_extended_torch_dtypes = [
+    ("float8_e4m3fn",),
+    ("float8_e4m3fnuz",),
+    ("float8_e5m2",),
+    ("float8_e5m2fnuz",),
+    ("float8_e8m0fnu",),
+    ("float4_e2m1fnx2",),
+]
+for dtype_name_tuple in _extended_torch_dtypes:
+    dtype_name = dtype_name_tuple[0]
+    torch_dtype = getattr(torch, dtype_name, None)
+    if torch_dtype is not None:
+        _TORCH_DTYPE_TO_STR[torch_dtype] = dtype_name
+
+
+_CANONICAL_TO_DISPLAY_STR = {
+    "double": "float64",
+    "float": "float32",
+    "int": "int32",
+    "long": "int64",
+    "short": "int16",
+    "uint": "uint32",
+    "ulong": "uint64",
+}
+
+_STR_TO_TORCH_DTYPE = {v: k for k, v in _TORCH_DTYPE_TO_STR.items()}
 
 # _STR_TO_NUMPY_DTYPE = {v: k for k, v in _NUMPY_DTYPE_TO_STR.items()}
 
@@ -76,7 +101,9 @@ _DTYPE_TO_STR = {**_PYTHON_DTYPE_TO_STR, **_NUMPY_DTYPE_TO_STR, **_TORCH_DTYPE_T
 
 _STR_TO_TVM_DTYPE_CALL = {
     "bool": "Boolean",
+    "int4": "Int4",
     "int8": "Int8",
+    "int16": "Int16",
     "int32": "Int32",
     "int64": "Int64",
     "uint8": "UInt8",
@@ -127,12 +154,20 @@ def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var
     return call(expr, is_size_var)
 
 
+def __dtype_as_torch__(self: dtype) -> torch.dtype:
+    """Convert TileLang dtype to PyTorch dtype."""
+    dtype_str = str(self)
+    if dtype_str in _STR_TO_TORCH_DTYPE:
+        return _STR_TO_TORCH_DTYPE[dtype_str]
+    raise ValueError(f"Cannot convert dtype '{dtype_str}' to torch.dtype. Supported dtypes: {list(_STR_TO_TORCH_DTYPE.keys())}")
+
+
 __orig_dtype_new = dtype.__new__
 
 
 def __dtype_new__(cls, value: AnyDType) -> dtype:
     if isinstance(value, str):
-        return __orig_dtype_new(cls, value)
+        return __orig_dtype_new(cls, _CANONICAL_TO_DISPLAY_STR.get(value, value))
     elif value in _DTYPE_TO_STR:
         return __orig_dtype_new(cls, _DTYPE_TO_STR[value])
     else:
@@ -142,6 +177,7 @@ def __dtype_new__(cls, value: AnyDType) -> dtype:
 
 dtype.__call__ = __dtype_call__
 dtype.__new__ = __dtype_new__
+dtype.as_torch = __dtype_as_torch__
 
 
 def get_tvm_dtype(value: AnyDType) -> dtype:
@@ -155,10 +191,12 @@ if TYPE_CHECKING:
     class bool(dtype): ...
     class short(dtype): ...
     class int(dtype): ...
+    class uint(dtype): ...
     class long(dtype): ...
     class half(dtype): ...
     class float(dtype): ...
     class double(dtype): ...
+    class int4(dtype): ...
     class int8(dtype): ...
     class int16(dtype): ...
     class int32(dtype): ...
@@ -320,10 +358,12 @@ else:
     bool = dtype("bool")
     short = dtype("int16")
     int = dtype("int32")
+    uint = dtype("uint32")
     long = dtype("int64")
     half = dtype("float16")
     float = dtype("float32")
     double = dtype("float64")
+    int4 = dtype("int4")
     int8 = dtype("int8")
     int16 = dtype("int16")
     int32 = dtype("int32")
@@ -484,10 +524,12 @@ _all_dtypes = {
     "bool",
     "short",
     "int",
+    "uint",
     "long",
     "half",
     "float",
     "double",
+    "int4",
     "int8",
     "int16",
     "int32",

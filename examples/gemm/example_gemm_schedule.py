@@ -3,7 +3,7 @@ import tilelang.language as T
 
 
 @tilelang.jit(out_idx=[-1])
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def gemm_schedule(
         A: T.Tensor((M, K), dtype),

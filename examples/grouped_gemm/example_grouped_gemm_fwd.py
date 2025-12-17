@@ -37,7 +37,7 @@ def torch_gmm(a, b, batch_sizes, batch_offsets_tensor, trans_b=False):
 
 
 @tilelang.jit(out_idx=[2])
-def grouped_gemm(batch_sizes_list, K, N, block_M, block_N, block_K, num_stages=2, threads=128, dtype="float16"):
+def grouped_gemm(batch_sizes_list, K, N, block_M, block_N, block_K, num_stages=2, threads=128, dtype=T.float16):
     """
     args:
         a (torch.Tensor): Input tensor of shape (M, K).
@@ -45,7 +45,7 @@ def grouped_gemm(batch_sizes_list, K, N, block_M, block_N, block_K, num_stages=2
     """
     batch_sum = sum(batch_sizes_list)
     batch_count = len(batch_sizes_list)
-    accum_dtype = "float32"
+    accum_dtype = T.float32
     total_m_blocks = sum((size + block_M - 1) // block_M for size in batch_sizes_list)
 
     @T.prim_func
@@ -53,16 +53,16 @@ def grouped_gemm(batch_sizes_list, K, N, block_M, block_N, block_K, num_stages=2
         A: T.Tensor([batch_sum, K], dtype),  # type: ignore
         B: T.Tensor([batch_count, K, N], dtype),  # type: ignore
         C: T.Tensor([batch_sum, N], dtype),  # type: ignore
-        batch_sizes: T.Tensor([batch_count], "int32"),  # type: ignore
-        batch_offsets: T.Tensor([batch_count], "int32"),  # type: ignore
-        batch_padded_offsets: T.Tensor([batch_count], "int32"),  # type: ignore
+        batch_sizes: T.Tensor([batch_count], T.int32),  # type: ignore
+        batch_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
+        batch_padded_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
     ):
         with T.Kernel(total_m_blocks, T.ceildiv(N, block_N), threads=threads) as (bx, by):
             A_shared = T.alloc_shared([block_M, block_K], dtype)
             B_shared = T.alloc_shared([block_K, block_N], dtype)
             C_local = T.alloc_fragment([block_M, block_N], accum_dtype)
-            cur_batch_idx = T.alloc_local([1], "int32")
-            cur_batch_size = T.alloc_local([1], "int32")
+            cur_batch_idx = T.alloc_local([1], T.int32)
+            cur_batch_size = T.alloc_local([1], T.int32)
 
             m_start_padded = bx * block_M
 

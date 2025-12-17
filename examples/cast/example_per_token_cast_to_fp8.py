@@ -7,14 +7,14 @@ from tilelang.utils.tensor import torch_assert_close
 
 @tilelang.jit(out_idx=[1, 2])
 def per_token_cast_to_fp8(M, N, blk_m):
-    dtype = "float"
+    dtype = T.float
     group_size = 128
     fp8_min = -448.0
     fp8_max = 448.0
 
     @T.prim_func
     def per_token_cast(
-        X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), "float8_e4m3"), X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype)
+        X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), T.float8_e4m3fn), X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype)
     ):
         with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (bx, by):
             row = bx
@@ -23,7 +23,7 @@ def per_token_cast_to_fp8(M, N, blk_m):
             y_amax_local = T.alloc_fragment((blk_m,), dtype)
             y_s_local = T.alloc_fragment((blk_m,), dtype)
             y_q_local = T.alloc_fragment((blk_m, group_size), dtype)
-            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "float8_e4m3")
+            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
 
             T.annotate_layout(
                 {

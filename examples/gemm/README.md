@@ -53,7 +53,7 @@ import tilelang
 from tilelang import Profiler
 import tilelang.language as T
 
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float):
     @T.prim_func
     def main(
         A: T.Tensor((M, K), dtype),
@@ -176,7 +176,7 @@ import tilelang.language as T
 # that helps align data for MMA (Matrix Multiply-Accumulate) operations.
 from tilelang.intrinsics import make_mma_swizzle_layout as make_swizzle_layout
 
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float):
     @T.prim_func
     def main(
         A: T.Tensor((M, K), dtype),
@@ -265,18 +265,18 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config

@@ -104,9 +104,9 @@ def test_gemm_f16f16f16_nn():
         768,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         256,
         32,
@@ -224,9 +224,9 @@ def test_gemm_jit_kernel():
         768,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         256,
         32,
@@ -269,7 +269,7 @@ def run_nvrtc_kernel_do_bench(
 
 
 def test_nvrtc_kernel_do_bench():
-    run_nvrtc_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_nvrtc_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
 def run_nvrtc_kernel_multi_stream(
@@ -311,7 +311,7 @@ def run_nvrtc_kernel_multi_stream(
 
 
 def test_nvrtc_kernel_multi_stream():
-    run_nvrtc_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_nvrtc_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
 def run_nvrtc_dynamic_shape(
@@ -360,11 +360,11 @@ def run_nvrtc_dynamic_shape(
 
 
 def test_nvrtc_dynamic_shape():
-    run_nvrtc_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_nvrtc_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
-    run_nvrtc_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_nvrtc_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
-    run_nvrtc_dynamic_shape(T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_nvrtc_dynamic_shape(T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
 def check_hopper():
@@ -375,7 +375,7 @@ def check_hopper():
     return compute_capability == (9, 0)
 
 
-def convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages, threads, dtype="float16", accum_dtype="float"):
+def convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages, threads, dtype=T.float16, accum_dtype=T.float32):
     KH, KW = K, K
     OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
@@ -463,7 +463,7 @@ def test_nvrtc_l2_persistent_map():
         M,
         N,
         block_size=256,
-        dtype="float32",
+        dtype=T.float32,
     ):
         @T.prim_func
         def kernel(

@@ -31,8 +31,8 @@ def blocksparse_matmul_global(
     num_stages,
     thread_num,
     enable_rasteration,
-    dtype="float16",
-    accum_dtype="float",
+    dtype=T.float16,
+    accum_dtype=T.float32,
 ):
     block_mask_shape = (M // block_M, N // block_N, K // block_K, condition_dim)
 
@@ -75,8 +75,8 @@ def blocksparse_matmul_shared(
     num_stages,
     thread_num,
     enable_rasteration,
-    dtype="float16",
-    accum_dtype="float",
+    dtype=T.float16,
+    accum_dtype=T.float32,
 ):
     block_mask_shape = (M // block_M, N // block_N, K // block_K, condition_dim)
 
@@ -124,8 +124,8 @@ def blocksparse_matmul_local(
     num_stages,
     thread_num,
     enable_rasteration,
-    dtype="float16",
-    accum_dtype="float",
+    dtype=T.float16,
+    accum_dtype=T.float32,
 ):
     block_mask_shape = (M // block_M, N // block_N, K // block_K, condition_dim)
 

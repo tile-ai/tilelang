@@ -26,7 +26,7 @@ def matmul(
     from tilelang.quantize import _tir_packed_to_unsigned_convert
 
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "int8"
+    storage_dtype = T.int8
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
     storage_type = str("".join(c for c in storage_dtype if not c.isdigit()))
     A_shape = (M, K)
@@ -149,21 +149,21 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     from bitblas.gpu.intrin.lop3 import decode_i4_to_f16
 
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "int8"
+    storage_dtype = T.int8
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -182,7 +182,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
 
     block_M = block_row_warps * warp_row_tiles
     block_N = block_col_warps * warp_col_tiles
-    block_K = 32 if in_dtype == "float16" else 64
+    block_K = 32 if in_dtype == T.float16 else 64
     chunk = block_K // reduce_k
 
     is_smooth_a = False
@@ -365,7 +365,7 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     assert src_code is not None
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "int8"
+    storage_dtype = T.int8
 
     A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
     qB = torch.randint(0, 127, (N, K // num_elems_per_byte), device="cuda", dtype=getattr(torch, storage_dtype))
@@ -417,13 +417,13 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
 
 @tilelang.testing.requires_package("bitblas")
 def test_run_dequantize_gemm():
-    run_gemm(256, 256, 256, "float16", "float16", "float16", 128, 128, 32, num_threads=128)
-    run_gemm(256, 256, 256, "int8", "int32", "int32", 128, 128, 32, num_threads=128)
+    run_gemm(256, 256, 256, T.float16, T.float16, T.float16, 128, 128, 32, num_threads=128)
+    run_gemm(256, 256, 256, T.int8, T.int32, T.int32, 128, 128, 32, num_threads=128)
 
 
 @tilelang.testing.requires_package("bitblas")
 def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
-    assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correctness(256, 1024, 512, "float16", "float16", "float16", 3)
+    assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correctness(256, 1024, 512, T.float16, T.float16, T.float16, 3)
 
 
 def main():

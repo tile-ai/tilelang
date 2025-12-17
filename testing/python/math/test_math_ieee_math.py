@@ -5,7 +5,7 @@ import tilelang.testing
 import pytest
 
 
-def run_ieee_math_test(mathop_name, mathop_func, rounding_mode="rn", M=128, N=128, block_M=32, block_N=32, dtype="float32"):
+def run_ieee_math_test(mathop_name, mathop_func, rounding_mode="rn", M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
     """
     Test IEEE-compliant math operations with specified rounding modes.
     """
@@ -75,7 +75,7 @@ def run_ieee_math_test(mathop_name, mathop_func, rounding_mode="rn", M=128, N=12
     print(f"✓ {mathop_name} compilation test passed")
 
     # Test numerical execution
-    torch_dtype = getattr(torch, dtype)
+    torch_dtype = dtype.as_torch()
     a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
     if num_inputs >= 2:
@@ -186,8 +186,8 @@ def test_ieee_frsqrt_rn_only():
 
     @T.prim_func
     def main(
-        A: T.Tensor((128, 128), "float32"),
-        B: T.Tensor((128, 128), "float32"),
+        A: T.Tensor((128, 128), T.float32),
+        B: T.Tensor((128, 128), T.float32),
     ):
         with T.Kernel(T.ceildiv(128, 32), T.ceildiv(128, 32), threads=128) as (bx, by):
             for i, j in T.Parallel(32, 32):

@@ -61,9 +61,9 @@ class MatrixCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -105,9 +105,9 @@ class MatrixCoreIntrinEmitter:
         self.num_elems_per_byte = num_elems_per_byte
         self.thread_var = thread_var
 
-    def _initialize_k_dim(self, a_dtype="float16"):
+    def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
-            if a_dtype in ["float8_e4m3fnuz", "int8"]:
+            if a_dtype in ["float8_e4m3fnuz", T.int8]:
                 self.k_dim = 32
                 return
             a_dtype = DataType(a_dtype)
@@ -132,7 +132,7 @@ class MatrixCoreIntrinEmitter:
     def _initialize_mfma_prefix(self, k_dim=16):
         in_dtype, out_dtype = self.a_dtype, self.accum_dtype
         M_DIM, N_DIM = self.M_DIM, self.N_DIM
-        out_dtype_abbrv = {"float16": "f16", "float32": "f32", "int8": "i8", "int32": "i32"}[out_dtype]
+        out_dtype_abbrv = {T.float16: "f16", T.float32: "f32", T.int8: "i8", T.int32: "i32"}[out_dtype]
 
         in_dtype_abbrv = {
             "bfloat16": "bf16",
@@ -221,7 +221,7 @@ class MatrixCoreIntrinEmitter:
 
     def get_store_index_map(self, inverse: bool = False) -> IndexMap:
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
-        index_map = IndexMap.from_func(mfma_store_index_map, index_dtype="int32")
+        index_map = IndexMap.from_func(mfma_store_index_map, index_dtype=T.int32)
         if not inverse:
             return index_map
         inverse_index_map = index_map.inverse([warp_size, local_size_c])
@@ -521,7 +521,7 @@ class MatrixCoreIntrinEmitter:
             self.block_col_warps,
         )
 
-        inverse_mfma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+        inverse_mfma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
         def forward_thread(i: int, j: int) -> int:
             """
@@ -670,9 +670,9 @@ class MatrixCoreIntrinEmitter:
 class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
     def __init__(
         self,
-        a_dtype: str = "float16",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,

@@ -94,7 +94,7 @@ def _gemm_impl(
     offset_a = A_offset[-1]
     offset_b = B_offset[-1]
 
-    mbar = to_buffer_region(mbar, access_type="rw") if mbar is not None else tir.const(0, "uint32")
+    mbar = to_buffer_region(mbar, access_type="rw") if mbar is not None else tir.const(0, T.uint32)
     C_coords = [r.min for r in C_region.region]
     # Convert BufferRegion to tl.region calls for arguments
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])

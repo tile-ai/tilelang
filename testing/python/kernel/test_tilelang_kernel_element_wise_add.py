@@ -1,5 +1,5 @@
-from tilelang import tvm as tvm
 import tilelang.testing
+from tilelang import language as T
 import torch
 
 
@@ -12,8 +12,6 @@ def elementwise_add(
     out_dtype,
     threads,
 ):
-    import tilelang.language as T
-
     @T.prim_func
     def main(
         A: T.Tensor((M, N), in_dtype),
@@ -67,8 +65,8 @@ def test_elementwise_add_f32():
     run_elementwise_add(
         512,
         1024,
-        "float32",
-        "float32",
+        T.float32,
+        T.float32,
         128,
         256,
     )
@@ -78,8 +76,8 @@ def test_elementwise_add_f16():
     run_elementwise_add(
         512,
         1024,
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
         128,
         256,
     )
@@ -89,8 +87,8 @@ def test_elementwise_add_i32():
     run_elementwise_add(
         512,
         1024,
-        "int32",
-        "int32",
+        T.int32,
+        T.int32,
         128,
         256,
     )
@@ -100,8 +98,8 @@ def test_elementwise_add_f32f16():
     run_elementwise_add(
         512,
         1024,
-        "float32",
-        "float16",
+        T.float32,
+        T.float16,
         128,
         256,
     )

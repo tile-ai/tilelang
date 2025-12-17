@@ -52,7 +52,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             self.ir_module = func_or_mod
 
         # Cache parameter information during initialization
-        self.param_dtypes = [param.dtype for param in params]
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        self.param_dtypes = [param.torch_dtype() for param in params]
         self.param_shapes = []
         for param in params:
             native_shape = []
@@ -118,7 +119,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             adapter.ir_module = func_or_mod
 
         # Cache parameter information during initialization
-        adapter.param_dtypes = [param.dtype for param in params]
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        adapter.param_dtypes = [param.torch_dtype() for param in params]
         adapter.param_shapes = []
         for param in params:
             native_shape = []

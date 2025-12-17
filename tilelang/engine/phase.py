@@ -175,6 +175,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # TODO(lei): return to tir pass when kSymbolicBound simplification
     # is merged into tvm.
     mod = tilelang.transform.Simplify()(mod)
+    # Hoist any root-block annotations to PrimFunc attrs if pass is available
+    mod = tilelang.transform.HoistNonRestrictParams()(mod)
     return mod
 
 

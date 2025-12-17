@@ -33,16 +33,16 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
     k_shape = [total_kv, head_kv, dim_qk]
     v_shape = [total_kv, head_kv, dim_v]
     o_shape = [total_q, heads, dim_v]
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_fwd(
         Q: T.Tensor(q_shape, dtype),  # type: ignore
         K: T.Tensor(k_shape, dtype),  # type: ignore
         V: T.Tensor(v_shape, dtype),  # type: ignore
-        cu_seqlens_q: T.Tensor([batch + 1], "int32"),  # type: ignore
-        cu_seqlens_k: T.Tensor([batch + 1], "int32"),  # type: ignore
+        cu_seqlens_q: T.Tensor([batch + 1], T.int32),  # type: ignore
+        cu_seqlens_k: T.Tensor([batch + 1], T.int32),  # type: ignore
         Output: T.Tensor(o_shape, dtype),  # type: ignore
         lse: T.Tensor([batch, heads, N_CTX], accum_dtype),  # type: ignore
     ):
@@ -143,8 +143,8 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
     },
 )
 def flashattn_bwd_preprocess(batch, heads, total_q, N_CTX, max_seq_len, dim_v):
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
     shape = [total_q, heads, dim_v]
     blk = 32
 
@@ -152,7 +152,7 @@ def flashattn_bwd_preprocess(batch, heads, total_q, N_CTX, max_seq_len, dim_v):
     def flash_bwd_prep(
         O: T.Tensor(shape, dtype),  # type: ignore
         dO: T.Tensor(shape, dtype),  # type: ignore
-        cu_seqlens_q: T.Tensor([batch + 1], "int32"),  # type: ignore
+        cu_seqlens_q: T.Tensor([batch + 1], T.int32),  # type: ignore
         Delta: T.Tensor([batch, heads, N_CTX], accum_dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(max_seq_len, blk), batch) as (bx, by, bz):
@@ -198,8 +198,8 @@ def make_dq_layout(dQ):
     },
 )
 def flashattn_bwd_postprocess(total_q, total_kv, heads, head_kv, dim_qk, dim_v):
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
     q_shape = [total_q, heads, dim_qk]
     k_shape = [total_kv, head_kv, dim_qk]
     v_shape = [total_kv, head_kv, dim_v]
@@ -245,8 +245,8 @@ def flashattn_bwd_atomic_add(
     k_shape = [total_kv, head_kv, dim_qk]
     v_shape = [total_kv, head_kv, dim_v]
     do_shape = [total_q, heads, dim_v]
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_bwd(
@@ -256,8 +256,8 @@ def flashattn_bwd_atomic_add(
         dO: T.Tensor(do_shape, dtype),  # type: ignore
         lse: T.Tensor([batch, heads, N_CTX], accum_dtype),  # type: ignore
         Delta: T.Tensor([batch, heads, N_CTX], accum_dtype),  # type: ignore
-        cu_seqlens_q: T.Tensor([batch + 1], "int32"),  # type: ignore
-        cu_seqlens_k: T.Tensor([batch + 1], "int32"),  # type: ignore
+        cu_seqlens_q: T.Tensor([batch + 1], T.int32),  # type: ignore
+        cu_seqlens_k: T.Tensor([batch + 1], T.int32),  # type: ignore
         dQ: T.Tensor(q_shape, accum_dtype),  # type: ignore
         dK: T.Tensor(k_shape, accum_dtype),  # type: ignore
         dV: T.Tensor(v_shape, accum_dtype),  # type: ignore
@@ -386,8 +386,8 @@ def flashattn_bwd_split(
     do_shape = [total_q, heads, dim_v]
     dk_shape = [groups, total_kv, head_kv, dim_qk]  # sum after kernel
     dv_shape = [groups, total_kv, head_kv, dim_v]  # sum after kernel
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_bwd(
@@ -397,8 +397,8 @@ def flashattn_bwd_split(
         dO: T.Tensor(do_shape, dtype),  # type: ignore
         lse: T.Tensor([batch, heads, N_CTX], accum_dtype),  # type: ignore
         Delta: T.Tensor([batch, heads, N_CTX], accum_dtype),  # type: ignore
-        cu_seqlens_q: T.Tensor([batch + 1], "int32"),  # type: ignore
-        cu_seqlens_k: T.Tensor([batch + 1], "int32"),  # type: ignore
+        cu_seqlens_q: T.Tensor([batch + 1], T.int32),  # type: ignore
+        cu_seqlens_k: T.Tensor([batch + 1], T.int32),  # type: ignore
         dQ: T.Tensor(q_shape, accum_dtype),  # type: ignore
         dK: T.Tensor(dk_shape, dtype),  # type: ignore
         dV: T.Tensor(dv_shape, dtype),  # type: ignore

@@ -9,12 +9,12 @@ from typing import Callable
 def softmax_kernel(
     M,
     N,
-    dtype: str = "float16",
+    dtype: T.dtype = T.float16,
 ) -> "Callable":
     BN = min(tl.next_power_of_2(N), 8192)
     NN = tl.cdiv(N, BN)
 
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     scale = 1.44269504  # log2(e)
 

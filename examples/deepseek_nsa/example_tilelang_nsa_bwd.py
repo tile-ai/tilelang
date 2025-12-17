@@ -49,9 +49,9 @@ def tilelang_kernel_fwd(
     o_slc_shape = [batch, seq_len, heads, dim]
     lse_slc_shape = [batch, seq_len, heads]
     block_indices_shape = [batch, seq_len, head_kv, selected_blocks]
-    block_indices_dtype = "int32"
-    dtype = "float16"
-    accum_dtype = "float"
+    block_indices_dtype = T.int32
+    dtype = T.float16
+    accum_dtype = T.float32
     block_S = block_size
     block_T = min(128, tilelang.math.next_power_of_2(dim))
 
@@ -170,8 +170,8 @@ def tilelang_kernel_bwd_dkv(
     block_size=64,
     groups=1,
     selected_blocks=16,
-    dtype="float16",
-    accum_dtype="float",
+    dtype=T.float16,
+    accum_dtype=T.float32,
 ):
     if scale is None:
         sm_scale = (1.0 / dim) ** 0.5
@@ -217,7 +217,7 @@ def tilelang_kernel_bwd_dkv(
         DO_slc: T.Tensor(do_slc_shape, dtype),
         DK: T.Tensor(dk_shape, dtype),
         DV: T.Tensor(dv_shape, dtype),
-        BlockMask: T.Tensor(block_mask_shape, "int32"),
+        BlockMask: T.Tensor(block_mask_shape, T.int32),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)
@@ -340,8 +340,8 @@ def tilelang_kernel_bwd_dqkv(
     block_size=64,
     groups=1,
     selected_blocks=16,
-    dtype="float16",
-    accum_dtype="float",
+    dtype=T.float16,
+    accum_dtype=T.float32,
 ):
     if scale is None:
         sm_scale = (1.0 / dim) ** 0.5
@@ -388,7 +388,7 @@ def tilelang_kernel_bwd_dqkv(
         DQ: T.Tensor(dq_shape, dtype),
         DK: T.Tensor(dk_shape, dtype),
         DV: T.Tensor(dv_shape, dtype),
-        BlockMask: T.Tensor(block_mask_shape, "int32"),
+        BlockMask: T.Tensor(block_mask_shape, T.int32),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)
@@ -505,8 +505,8 @@ def tilelang_kernel_preprocess(
     heads,
     seq_len,
     dim,
-    dtype="float16",
-    accum_dtype="float",
+    dtype=T.float16,
+    accum_dtype=T.float32,
     blk=32,
 ):
     from tilelang import language as T
@@ -548,7 +548,7 @@ def tilelang_kernel_block_mask(
     seq_len,
     selected_blocks,
     block_size,
-    dtype="int32",
+    dtype=T.int32,
 ):
     from tilelang import language as T
 

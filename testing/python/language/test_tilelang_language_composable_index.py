@@ -6,7 +6,7 @@ import torch
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
-def tilelang_composable_copy(M, N, block_M, block_N, dtype="float16"):
+def tilelang_composable_copy(M, N, block_M, block_N, dtype=T.float16):
     @T.prim_func
     def main(
         A: T.Tensor((M, N), dtype),
@@ -25,7 +25,7 @@ def tilelang_composable_copy(M, N, block_M, block_N, dtype="float16"):
     return main
 
 
-def run_tilelang_composable_copy(M=1024, N=1024, block_M=128, block_N=128, dtype="float16"):
+def run_tilelang_composable_copy(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16):
     program = tilelang_composable_copy(M, N, block_M, block_N, dtype)
     kernel = tilelang.compile(
         program,
@@ -44,7 +44,7 @@ def run_tilelang_composable_copy(M=1024, N=1024, block_M=128, block_N=128, dtype
 def test_tilelang_copy():
     run_tilelang_composable_copy(M=1024, N=1024, block_M=128, block_N=128)
     run_tilelang_composable_copy(M=1024, N=576, block_M=32, block_N=576)
-    run_tilelang_composable_copy(M=1024, N=576, block_M=32, block_N=576, dtype="float")
+    run_tilelang_composable_copy(M=1024, N=576, block_M=32, block_N=576, dtype=T.float32)
 
 
 if __name__ == "__main__":

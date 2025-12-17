@@ -54,7 +54,7 @@ def matmul(
 M, N, K = 4096, 4096, 8192
 block_M, block_N, block_K = 128, 256, 128
 trans_A, trans_B = False, True
-in_dtype, out_dtype, accum_dtype = "bfloat16", "bfloat16", "float"
+in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
 num_stages = 2
 threads = 256
 

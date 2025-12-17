@@ -9,7 +9,7 @@ def test_int64_address():
         S,
         D,
         pos_ty="int64",
-        dtype="float32",
+        dtype=T.float32,
     ):
         @T.prim_func
         def main(
@@ -36,7 +36,7 @@ def test_int64_address():
     pos_int64 = torch.arange(S, device="cuda", dtype=torch.int64)
     pos_int32 = torch.arange(S, device="cuda", dtype=torch.int32)
     kernel_int64 = set_cache_kernel(S, D, "int64")
-    kernel_int32 = set_cache_kernel(S, D, "int32")
+    kernel_int32 = set_cache_kernel(S, D, T.int32)
     kernel_int64(pos_int64, value, cache)
     torch.testing.assert_close(cache, value)
     kernel_int32(pos_int32, value, cache)

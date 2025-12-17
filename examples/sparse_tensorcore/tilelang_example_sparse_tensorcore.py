@@ -2,6 +2,7 @@ import torch
 import tilelang
 from tilelang.utils.sparse import compress_sm90
 from tilelang.layout import make_cutlass_metadata_layout
+from tilelang import language as T
 import tilelang.testing
 
 
@@ -24,8 +25,6 @@ def matmul_sp(
     A_shared_shape = (block_M, block_K // 2)
     B_shared_shape = (block_K, block_N)
 
-    import tilelang.language as T
-
     @T.prim_func
     def main(
         A_sparse: T.Tensor(A_sparse_shape, in_dtype),
@@ -40,8 +39,8 @@ def matmul_sp(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout(
                 {
-                    E: make_cutlass_metadata_layout(E, mma_dtype="float16", arch="9.0", block_k=block_K),
-                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype="float16", arch="9.0", block_k=block_K),
+                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="9.0", block_k=block_K),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="9.0", block_k=block_K),
                 }
             )
             T.clear(C_local)
@@ -111,7 +110,7 @@ def run_gemm_sp(
 
 
 def main():
-    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
+    run_gemm_sp(512, 1024, 768, T.float16, T.float16, T.float32, 128, 128, 128, 2, 128)
 
 
 if __name__ == "__main__":

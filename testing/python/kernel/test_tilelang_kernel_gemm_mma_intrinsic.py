@@ -39,27 +39,27 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "bfloat16",
-        "float8_e4m3",
-        "float8_e5m2",
-        "int8",
+        T.float16,
+        T.bfloat16,
+        T.float8_e4m3fn,
+        T.float8_e5m2,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
     is_float8 = in_dtype in [
-        "float8_e4m3",
-        "float8_e5m2",
-        "float8_e4m3fn",
-        "float8_e5m2fnuz",
+        T.float8_e4m3fn,
+        T.float8_e5m2,
+        T.float8_e4m3fn,
+        T.float8_e5m2fnuz,
     ]
-    if out_dtype == "int32" or is_float8:
+    if out_dtype == T.int32 or is_float8:
         micro_size_k = 32
 
     # This is a debug config
@@ -67,7 +67,7 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 32
     warp_col_tiles = 32
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -219,22 +219,22 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
-    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", "float32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", "int32")
+    assert_tl_matmul_correctness(128, 128, 128, T.float16, T.float16, T.float16)
+    assert_tl_matmul_correctness(128, 256, 256, T.float16, T.float32, T.float32)
+    assert_tl_matmul_correctness(128, 256, 256, T.int8, T.int32, T.int32)
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_assert_tl_matmul_bfloat16():
-    assert_tl_matmul_correctness(256, 256, 256, "bfloat16", "float32", "float32")
+    assert_tl_matmul_correctness(256, 256, 256, T.bfloat16, T.float32, T.float32)
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 9)
 def test_assert_tl_matmul_fp8():
-    assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3", "float32", "float32")
-    assert_tl_matmul_correctness(128, 128, 128, "float8_e5m2", "float32", "float32")
+    assert_tl_matmul_correctness(128, 128, 128, T.float8_e4m3fn, T.float32, T.float32)
+    assert_tl_matmul_correctness(128, 128, 128, T.float8_e5m2, T.float32, T.float32)
 
 
 if __name__ == "__main__":

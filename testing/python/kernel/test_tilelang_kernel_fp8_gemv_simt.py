@@ -46,7 +46,7 @@ def gemv_simt(
     C_shape = (M, N)
 
     dp4a_size = 4
-    use_dp4a = in_dtype == "int8" and accum_dtype == "int32"
+    use_dp4a = in_dtype == T.int8 and accum_dtype == T.int32
 
     @T.prim_func
     def main(
@@ -164,8 +164,8 @@ def evaluate_gemv_simt(
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 9)
 def test_gemv_simt():
-    evaluate_gemv_simt(1, 1024, 1024, "float8_e4m3", "float32", "float32", with_bias=False)
-    evaluate_gemv_simt(1, 1024, 1024, "float8_e5m2", "float32", "float32", with_bias=False)
+    evaluate_gemv_simt(1, 1024, 1024, T.float8_e4m3fn, T.float32, T.float32, with_bias=False)
+    evaluate_gemv_simt(1, 1024, 1024, T.float8_e5m2, T.float32, T.float32, with_bias=False)
 
 
 if __name__ == "__main__":

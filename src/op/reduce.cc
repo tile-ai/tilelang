@@ -528,23 +528,29 @@ Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     std::stringstream ss;
     auto threads = T.thread_bounds->extent;
     Array<PrimExpr> args;
-    int ndim = static_cast<int>(src->shape.size());
 
     // Build access pointers from regions locally
     PrimExpr srcPtr = MakeAccessPtrFromRegion(srcRegion_, 1);
     PrimExpr dstPtr = MakeAccessPtrFromRegion(dstRegion_, 2);
+
+    // Use region extents instead of buffer shape for correct slice handling
+    Array<PrimExpr> src_extents;
+    for (const auto &range : srcRegion_->region) {
+      src_extents.push_back(range->extent);
+    }
+    int ndim = static_cast<int>(src_extents.size());
 
     if (ndim == 1) {
       ICHECK_EQ(dim, 0) << "Cumulative sum over a 1D buffer only supports dim "
                            "= 0.";
       ss << "tl::CumSum1D<" << threads << ", " << (reverse ? "true" : "false")
          << ">::run";
-      args = {StringImm(ss.str()), srcPtr, dstPtr, src->shape[0]};
+      args = {StringImm(ss.str()), srcPtr, dstPtr, src_extents[0]};
     } else if (ndim == 2) {
       ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
          << (reverse ? "true" : "false") << ">::run";
-      args = {StringImm(ss.str()), srcPtr, dstPtr, src->shape[0],
-              src->shape[1]};
+      args = {StringImm(ss.str()), srcPtr, dstPtr, src_extents[0],
+              src_extents[1]};
     } else {
       LOG(FATAL) << "CumSum currently supports only 1D or 2D buffers, got "
                  << ndim << "D.";

@@ -43,6 +43,7 @@ dependencies = [
     "torch>=2.7; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
+    "z3-solver>=4.13.0",
 ]
 
 [project.optional-dependencies]
@@ -53,7 +54,14 @@ fp4 = ["ml-dtypes>=0.5.1"]
 vis = ["matplotlib"]
 
 [build-system]
-requires = ["cython>=3.0.0", "scikit-build-core"]
+requires = [
+    "cython>=3.0.0",
+    "scikit-build-core",
+    "z3-solver>=4.13.0",
+    # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
+    # See tvm's CMakeLists.txt for more information.
+    "patchelf>=0.17.2; platform_system == 'Linux'",
+]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -227,7 +235,7 @@ environment.PYTHONUNBUFFERED = "1"
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
 manylinux-x86_64-image  = "manylinux_2_28"  # AlmaLinux 8
-manylinux-aarch64-image = "manylinux_2_28"  # AlmaLinux 8
+manylinux-aarch64-image = "manylinux_2_34"  # Z3 requires
 # Install CUDA runtime and stub driver library
 # manylinux_2_28 uses gcc 14, which needs CUDA >=12.8
 before-all = """
@@ -256,7 +264,7 @@ yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-de
 yum clean all
 """
 repair-wheel-command = [
-    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
+    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --verbose --strict {wheel}",
 ]
 

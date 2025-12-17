@@ -98,7 +98,7 @@ class GemmTCGEN5(GemmBase):
             raise ValueError("TCGEN5MMA expects 2D coordinates for C buffer access")
 
         accum_dtype = str(self.C.dtype)
-        if accum_dtype not in ["float32", "float16"]:
+        if accum_dtype not in [str(T.float32), str(T.float16)]:
             raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
 
         A_shared = self.ARegion

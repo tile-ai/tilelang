@@ -17,7 +17,7 @@ def dequantize_gemv(
     out_dtype: str,
     accum_dtype: str,
     num_bits: int = 4,
-    storage_dtype: str = "int8",
+    storage_dtype: T.dtype = T.int8,
     source_format: str = "uint",
     n_partition: int = 4,
     reduce_thread: int = 32,
@@ -51,7 +51,7 @@ def dequantize_gemv(
     C_shape = (M, N)
 
     dp4a_size = 4
-    use_dp4a = in_dtype == "int8" and accum_dtype == "int32"
+    use_dp4a = in_dtype == T.int8 and accum_dtype == T.int32
 
     import_source: Optional[str] = None
     func_name: str = ""
@@ -159,11 +159,11 @@ def main() -> None:
     M = 1
     N = 1024
     K = 1024
-    in_dtype = "float16"
-    out_dtype = "float16"
-    accum_dtype = "float16"
+    in_dtype = T.float16
+    out_dtype = T.float16
+    accum_dtype = T.float16
     num_bits = 4
-    storage_dtype = "int8"
+    storage_dtype = T.int8
     source_format = "uint"
     n_partition = 4
     reduce_thread = 32

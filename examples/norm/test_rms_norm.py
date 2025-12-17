@@ -5,7 +5,7 @@ import tilelang.language as T
 
 
 def rms_norm_splitk(M, N, blk_m, blk_k):
-    dtype = "float"
+    dtype = T.float
 
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
@@ -35,7 +35,7 @@ def rms_norm_splitk(M, N, blk_m, blk_k):
 
 
 def rms_norm(M, N, blk_m):
-    dtype = "float"
+    dtype = T.float
 
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):

@@ -26,20 +26,20 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     K = K // 2
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if accum_dtype == "int32":
+    if accum_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -47,7 +47,7 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 64
     warp_col_tiles = 64
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -197,8 +197,8 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 def test_assert_tl_matmul_correctness():
-    assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", "int32")
-    assert_tl_matmul_correctness(128, 128, 64, "int8", "int32", "int32")
+    assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
+    assert_tl_matmul_correctness(128, 128, 64, T.int8, T.int32, T.int32)
 
 
 @simplify_prim_func
@@ -212,18 +212,18 @@ def tl_matmul_weight_only_transform(
 ):
     K = K // 2
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     transform_b = 3
@@ -233,7 +233,7 @@ def tl_matmul_weight_only_transform(
     block_col_warps = 2
     warp_row_tiles = 64
     warp_col_tiles = 64
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -375,8 +375,8 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
     ladder_permutate_config = bitblas.ops.LadderPermutateConfig(
         M=N,
         N=(K // 2),
-        datatype="int8",
-        storage_dtype="int8",
+        datatype=T.int8,
+        storage_dtype=T.int8,
         transform_kind=transform_b,
         transpose_matrix=True,
     )
@@ -400,9 +400,9 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
 @tilelang.testing.requires_package("bitblas")
 @tilelang.testing.requires_llvm
 def test_assert_tl_matmul_weight_only_transform():
-    assert_tl_matmul_weight_only_transform_correctness(128, 128, 128, "int8", "int32", "int32")
+    assert_tl_matmul_weight_only_transform_correctness(128, 128, 128, T.int8, T.int32, T.int32)
 
 
 if __name__ == "__main__":
     # tilelang.testing.main()
-    assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", "int32")
+    assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
