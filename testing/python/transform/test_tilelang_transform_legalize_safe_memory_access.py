@@ -121,7 +121,6 @@ def test_vectorize_access():
     assert_vectorize_access(64, 64)
 
 
-
 def test_vectorize_access_with_atmoic_add():
     assert_vectorize_access_with_atmoic_add(64, 64)
 
