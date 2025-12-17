@@ -267,22 +267,22 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
+  Array<PrimExpr> new_args;
+
+  // Optional bounds predicates for src and dst
   PrimExpr src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
   PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
 
-  Array<PrimExpr> new_args;
-
+  // Load source value and cast to dst dtype if needed
   PrimExpr src_value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
     src_value = Cast(dst->dtype, src_value);
-  if (src_predicate.defined())
-    src_value = if_then_else(src_predicate, src_value, make_zero(dst->dtype));
 
-  PrimExpr dst_value = BufferLoad(dst, dst_indices);
-  if (dst_predicate.defined())
-    dst_value = if_then_else(dst_predicate, dst_value, make_zero(dst->dtype));
+  // Build a pointer to destination element using tvm_access_ptr
+  PrimExpr dst_ptr = Call(DataType::Handle(), builtin::address_of(),
+                          {BufferLoad(dst, dst_indices)});
 
-  new_args.push_back(dst_value);
+  new_args.push_back(dst_ptr);
   new_args.push_back(src_value);
   new_args.push_back(memory_order);
 

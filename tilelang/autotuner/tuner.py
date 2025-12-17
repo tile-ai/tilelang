@@ -37,6 +37,7 @@ from pathlib import Path
 
 from tilelang import env
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
+from tilelang.utils.language import get_prim_func_name
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.utils.target import determine_target
 from tilelang import __version__
@@ -332,11 +333,15 @@ class AutoTuner:
             if env.is_cache_enabled() and not env.is_autotune_cache_disabled():
                 # First check in-memory cache
                 if key in self._memory_cache:
+                    # Include PrimFunc name when hitting autotuner memory cache
+                    cached_result = self._memory_cache[key]
+                    prim = getattr(cached_result, "func", None)
+                    kernel_name = get_prim_func_name(prim, "<unknown>")
                     logger.warning(
-                        "Found kernel in memory cache. For better performance,"
-                        " consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel."
+                        "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.",
+                        kernel_name,
                     )
-                    return self._memory_cache[key]
+                    return cached_result
 
                 # Then check disk cache
                 result = self._load_result_from_disk(key)

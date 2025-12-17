@@ -7,8 +7,6 @@ import argparse
 from einops import rearrange, repeat
 from bert_padding import pad_input, unpad_input
 
-# tilelang.disable_cache()
-
 
 def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
     assert mode in ["full", "random", "third"]

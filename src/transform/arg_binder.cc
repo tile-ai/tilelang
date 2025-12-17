@@ -443,9 +443,21 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
     PrimExpr bit1_ok = (v_type_bits == bits1 && lanes_ok);
     cond = cond || int8_ok || uint8_ok || kdlbool8_ok || kdlbool1_ok || bit1_ok;
   }
+  // Allow float4 to match int8 at runtime (PyTorch uses int8 as storage for
+  // FP4).
+  if (buffer->dtype.is_float4()) {
+    PrimExpr code_int = IntImm(DataType::UInt(8), DataType::kInt);
+    PrimExpr bits8 = IntImm(DataType::UInt(8), 8);
+    // For FP4, we pack 2 elements per byte, but we still use same lanes at
+    // storage level Accept int8 with same lanes as the fp4 type
+    PrimExpr fp4_lanes_ok = (v_type_lanes == expect_lanes);
+    PrimExpr int8_ok =
+        (v_type_code == code_int && v_type_bits == bits8 && fp4_lanes_ok);
+    cond = cond || int8_ok;
+  }
   if (!(buffer->dtype == DataType::Int(1) ||
         buffer->dtype == DataType::Int(4) ||
-        buffer->dtype == DataType::UInt(4))) {
+        buffer->dtype == DataType::UInt(4) || buffer->dtype.is_float4())) {
     // Build FFI packed call to __tvm_error_dtype_mismatch when mismatch occurs.
     // Only issue the call when handle is non-NULL and cond is false.
     ffi::Array<PrimExpr> packed_args;

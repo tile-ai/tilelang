@@ -30,3 +30,4 @@ scipy
 tabulate
 tornado
 wheel
+z3-solver>=4.13.0

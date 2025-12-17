@@ -28,6 +28,10 @@ static constexpr const char *kWarpSpecializationScope =
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
+// A PrimFunc-level attribute carrying a list of handle Vars
+// that must NOT be marked with the restrict qualifier in codegen.
+// Type: Array<tir::Var>
+static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
@@ -55,6 +59,7 @@ static constexpr const char *kLayoutVisualizationEnable =
     "tl.layout_visualization_enable";
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
+static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
 /*!
  * \brief Whether to disable dynamic tail split
  *
