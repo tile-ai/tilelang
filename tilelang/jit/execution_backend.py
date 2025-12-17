@@ -32,8 +32,10 @@ def allowed_backends_for_target(target: Target, *, include_unavailable: bool = T
     """
     kind = _target_kind(target)
 
-    if kind == "cuda":
-        allowed = ["tvm_ffi", "nvrtc", "cython", "ctypes", "cutedsl"]
+    if is_cutedsl_target(target):
+        return ["cutedsl"]
+    elif kind == "cuda":
+        allowed = ["tvm_ffi", "nvrtc", "cython", "ctypes"]
     elif kind == "hip":
         allowed = ["tvm_ffi", "cython", "ctypes"]
     elif kind == "metal":
