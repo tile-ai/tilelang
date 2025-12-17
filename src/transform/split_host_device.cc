@@ -33,6 +33,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../op/builtin.h"
 #include "common/assume.h"
 #include "tir/analysis/var_use_def_analysis.h"
 #include "tvm/node/cast.h"
@@ -56,6 +57,12 @@ public:
   explicit HostDeviceSplitter(IRModule *device_mod,
                               std::function<GlobalVar()> var_supply)
       : device_mod_(device_mod), var_supply_(std::move(var_supply)) {}
+
+  void SetNonRestrictParams(Optional<Array<tir::Var>> params) {
+    for (auto param : params.value()) {
+      non_restrict_params_.push_back(param);
+    }
+  }
 
   tir::Stmt VisitStmt_(const tir::AttrStmtNode *op) final {
     if (op->attr_key == tvm::attr::kTarget) {
@@ -93,6 +100,7 @@ public:
 
 private:
   bool found_device_region_{false};
+  Array<tir::Var> non_restrict_params_;
 
   Stmt wrapBodyWithHostSideAssumes(Stmt body) {
     for (auto it = host_assumes_.rbegin(); it != host_assumes_.rend(); ++it) {
@@ -103,6 +111,7 @@ private:
   }
 
   tir::Stmt SplitDeviceFunc(tir::Stmt body, tvm::Target device_target) {
+
     auto [params, buffers_to_declare] =
         [&]() -> std::tuple<Array<tir::Var>, Array<tir::Buffer>> {
       tir::VarUseDefAnalyzer use_def(/*defined_vars=*/{},
@@ -152,9 +161,11 @@ private:
 
     tir::PrimFunc device_func(params, body, kernel_ret_type);
     device_func =
-        WithAttrs(std::move(device_func), {{tvm::attr::kTarget, device_target},
-                                           {tir::attr::kNoAlias, true},
-                                           {tir::attr::kIsGlobalFunc, true}});
+        WithAttrs(std::move(device_func),
+                  {{tvm::attr::kTarget, device_target},
+                   {tir::attr::kNoAlias, true},
+                   {tir::attr::kIsGlobalFunc, true},
+                   {tl::attr::kNonRestrictParams, non_restrict_params_}});
 
     GlobalVar kernel_symbol_global = var_supply_();
     (*device_mod_)->Add(kernel_symbol_global, device_func);
@@ -188,6 +199,13 @@ private:
 tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule *device_mod,
                               std::function<GlobalVar()> var_supply) {
   HostDeviceSplitter splitter(device_mod, std::move(var_supply));
+  // Propagate non-restrict parameter list from host func to device kernels
+  if (auto opt = func->GetAttr<Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
+    splitter.SetNonRestrictParams(opt.value());
+    // Remove the attribute from host-side PrimFunc; it only matters for device
+    // codegen.
+    func = tvm::WithoutAttr(std::move(func), tl::attr::kNonRestrictParams);
+  }
 
   if (auto body = splitter(func->body); !body.same_as(func->body)) {
     func.CopyOnWrite()->body = body;
@@ -204,7 +222,6 @@ tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule *device_mod,
       }
     }
   }
-
   return func;
 }
 
@@ -235,7 +252,6 @@ tvm::transform::Pass SplitHostDevice() {
         }
       }
     }
-
     mod->Update(updates);
     mod->Update(device_mod);
     return tir::transform::ConvertSSA()(mod);

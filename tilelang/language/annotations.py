@@ -11,6 +11,7 @@ __all__ = [
     "annotate_layout",
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
+    "annotate_restrict_buffers",
 ]
 
 
@@ -51,3 +52,31 @@ def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
         assert buffer.scope() == "global", "persistent L2 can only be applied to global buffers"
         _l2_hit_ratio_map[buffer.data] = FloatImm("float32", float(hit_ratio))
     return block_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
+
+
+def annotate_restrict_buffers(*buffers):
+    """Mark the given buffer parameters as non-restrict.
+
+    This annotation tells codegen to omit the `__restrict__` qualifier for the
+    specified kernel buffer parameters. Use this when two (or more) buffers may
+    alias, for example overlapping slices from the same base tensor.
+
+    Example
+    -------
+    >>> @T.prim_func
+    ... def buggy_kernel(x: T.Tensor((N,), T.float32),
+    ...                  y: T.Tensor((N,), T.float32)):
+    ...     T.annotate_restrict_buffers(x, y)
+    ...     with T.Kernel(N, threads=32) as pid:
+    ...         y[pid] = x[pid] + 1
+    """
+    if not buffers:
+        return None
+    data_vars = []
+    for buf in buffers:
+        try:
+            data_vars.append(buf.data)
+        except Exception as e:
+            raise TypeError(f"annotate_restrict_buffers expects Buffer arguments, got {type(buf)}") from e
+    # Also return as block attribute (root block exists by default) for readability/tools.
+    return block_attr({"tl.non_restrict_params": data_vars})

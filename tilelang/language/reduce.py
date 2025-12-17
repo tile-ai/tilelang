@@ -243,8 +243,8 @@ def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
 
 @macro
 def cumsum_fragment(
-    src: tir.Buffer | tir.BufferRegion | tir.BufferLoad,
-    dst: tir.Buffer | tir.BufferRegion | tir.BufferLoad,
+    src: tir.Buffer,
+    dst: tir.Buffer,
     dim: int,
     reverse: bool,
 ) -> tir.PrimExpr:
