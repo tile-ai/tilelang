@@ -2,13 +2,12 @@
 
 import torch
 import torch.distributed as dist
-from typing import Callable, List, Tuple, Optional, Union
+from typing import Tuple, Optional
 
 import tilelang
-import tilelang.language as T
 from utils import Config
 from tilelang.distributed.utils import create_mapped_tensor
-from intranode import get_dispatch_layout, intranode_dispatch, intranode_combine, dispatch_kernel
+from intranode import get_dispatch_layout, intranode_dispatch, intranode_combine
 
 
 class EPBuffer:
@@ -106,10 +105,6 @@ class EPBuffer:
         
         self._symm_buffers = (barrier_signal, per_rank_buffer, per_expert_buffer, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, 
             channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers)
-
-        # exp: prepare kernels AOT
-        self._dispatch_kernel = dispatch_kernel(self.rank, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_send_tokens, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens, self.hidden, self.num_topk, self.num_experts, self.num_sms, 'bfloat16')
-        self._dispatch_kernel.initialize(allocator=self._allocator, stream=self.comm_stream.cuda_stream)
 
     def _pre_alloc_symm_buffers_internode(self):
         raise NotImplementedError("internode is not supported yet")
@@ -232,7 +227,7 @@ class EPBuffer:
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
             recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle = intranode_dispatch(
-                self.rank, self._allocator, self._symm_buffers, self._moe_recv_counter, self._moe_recv_expert_counter, self._moe_recv_counter_mapped, self._moe_recv_expert_counter_mapped, x, self.dispatch_cfg, handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, self._dispatch_kernel, self.comm_stream)
+                self.rank, self._allocator, self._symm_buffers, self._moe_recv_counter, self._moe_recv_expert_counter, self._moe_recv_counter_mapped, self._moe_recv_expert_counter_mapped, x, self.dispatch_cfg, handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, self.comm_stream)
             return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle
         
     def combine(self, x: torch.Tensor, handle: Tuple, topk_weights: torch.Tensor):
@@ -253,8 +248,7 @@ class EPBuffer:
             recv_x: the reduced token from its dispatched ranks.
             recv_topk_weights: the reduced top-k weights from its dispatch ranks.
         """
-        rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head = handle
         recv_x, recv_topk_weights = intranode_combine(
-            self.rank, self._allocator, self._symm_buffers, x, self.combine_cfg, handle, topk_weights, self.comm_stream,)
+            self.rank, self._allocator, self._symm_buffers, x, self.combine_cfg, handle, topk_weights, self.comm_stream)
         return recv_x, recv_topk_weights
 

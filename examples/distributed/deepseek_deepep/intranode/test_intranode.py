@@ -105,21 +105,21 @@ def test_intranode(
     if not cached_dispatch:
         group.barrier()
         deepep_dispatch_time = ep_bench(lambda: deepep_buffer.dispatch(x, None, ref_num_tokens_per_rank, None, ref_is_token_in_rank, ref_num_tokens_per_expert, topk_idx, topk_weights, expert_alignment),
-            warmup=5, rep=5)
+            warmup=50, rep=50)
         print(f'[rank {rank}] DeepEP dispatch time: {deepep_dispatch_time:.4f}ms')
         group.barrier()
         ts_dispatch_time = ep_bench(lambda: ts_buffer.dispatch(x, None, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment),
-            warmup=5, rep=5)
+            warmup=50, rep=50)
         print(f'[rank {rank}] TileScale dispatch time: {ts_dispatch_time:.4f}ms')
         group.barrier()
     else:
         group.barrier()
         deepep_dispatch_time = ep_bench(lambda: deepep_buffer.dispatch(x, ref_handle, ref_num_tokens_per_rank, None, ref_is_token_in_rank, ref_num_tokens_per_expert, None, None, expert_alignment),
-            warmup=5, rep=5)
+            warmup=50, rep=50)
         print(f'[rank {rank}] DeepEP dispatch time: {deepep_dispatch_time:.4f}ms')
         group.barrier()
         ts_dispatch_time = ep_bench(lambda: ts_buffer.dispatch(x, ref_handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, None, None, expert_alignment),
-            warmup=5, rep=5)
+            warmup=50, rep=50)
         print(f'[rank {rank}] TileScale dispatch time: {ts_dispatch_time:.4f}ms')
         group.barrier()
 
