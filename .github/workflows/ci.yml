@@ -93,7 +93,7 @@ jobs:
             name: self-hosted-amd
             # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
             # Use "Nightly-" prefix to use torch nightly builds.
-            toolkit: ROCm-6.3
+            toolkit: Nightly-ROCm-7.1
           - tags: [macos-latest]
             name: macos-latest
             toolkit: Metal # or Nightly-Metal
