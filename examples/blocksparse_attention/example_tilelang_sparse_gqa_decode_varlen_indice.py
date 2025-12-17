@@ -11,8 +11,8 @@ from heuristic import num_splits_heuristic
 
 def flashattn(batch, heads, heads_kv, dim, dim_v):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
     kv_group_num = heads // heads_kv
 
     @tilelang.jit(
@@ -35,9 +35,9 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
             Q: T.Tensor(shape_q, dtype),
             K: T.Tensor(shape_k, dtype),
             V: T.Tensor(shape_v, dtype),
-            block_indices: T.Tensor(shape_indices, "int32"),
-            cache_seqlens: T.Tensor([batch], "int32"),
-            # actual_num_blocks: T.Tensor([batch], "int32"),
+            block_indices: T.Tensor(shape_indices, T.int32),
+            cache_seqlens: T.Tensor([batch], T.int32),
+            # actual_num_blocks: T.Tensor([batch], T.int32),
             glse: T.Tensor([batch, heads, num_split], accum_dtype),
             Output_partial: T.Tensor(part_shape, accum_dtype),
         ):
@@ -128,7 +128,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                 lse_logsum_local = T.alloc_local([1], accum_dtype)
                 lse_max_local = T.alloc_local([1], accum_dtype)
                 scale_local = T.alloc_local([1], accum_dtype)
-                max_split = T.alloc_local([1], "int32")
+                max_split = T.alloc_local([1], T.int32)
 
                 T.annotate_layout(
                     {
@@ -166,9 +166,9 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
             Q: T.Tensor(shape_q, dtype),
             K: T.Tensor(shape_k, dtype),
             V: T.Tensor(shape_v, dtype),
-            block_indices: T.Tensor(shape_indices, "int32"),
-            cache_seqlens: T.Tensor([batch], "int32"),
-            # actual_num_blocks: T.Tensor([batch], "int32"),
+            block_indices: T.Tensor(shape_indices, T.int32),
+            cache_seqlens: T.Tensor([batch], T.int32),
+            # actual_num_blocks: T.Tensor([batch], T.int32),
             glse: T.Tensor([batch, heads, num_split], accum_dtype),
             Output_partial: T.Tensor(part_shape, accum_dtype),
             Output: T.Tensor(shape_o, dtype),

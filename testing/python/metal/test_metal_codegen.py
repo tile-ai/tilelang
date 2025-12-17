@@ -6,7 +6,7 @@ import torch
 
 
 @tilelang.jit(execution_backend="torch")
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float32", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float32, accum_dtype=T.float32):
     @T.prim_func
     def gemm(
         A: T.Tensor((M, K), dtype),
@@ -39,13 +39,13 @@ def assert_gemm(
     block_M,
     block_N,
     block_K,
-    dtype="float32",
-    accum_dtype="float",
+    dtype=T.float32,
+    accum_dtype=T.float32,
     atol=1e-8,
 ):
     jit_kernel = matmul(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
 
-    torch_dtype = getattr(torch, dtype)
+    torch_dtype = dtype.as_torch()
     a, b = None, None
     if "int" in dtype:
         a = torch.randint(100, (M, K), dtype=torch_dtype, device="mps")
@@ -69,12 +69,12 @@ def test_gemm_float32():
 
 @tilelang.testing.requires_metal
 def test_gemm_float16():
-    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype="float16", atol=1)
+    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype=T.float16, atol=1)
 
 
 @tilelang.testing.requires_metal
 def test_gemm_int32():
-    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype="int32", atol=1)
+    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype=T.int32, atol=1)
 
 
 if __name__ == "__main__":

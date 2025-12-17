@@ -49,7 +49,7 @@ def matmul(
     in_dtype,
     out_dtype,
     accum_dtype,
-    source_format="uint",
+    source_format=T.uint32,
     num_bits=4,
     scale_size=32,
     fast_dequant=True,
@@ -83,8 +83,8 @@ def matmul(
         topk (int): number of experts selected per token.
         E (int): number of experts.
         padding_M (int): padded number of tokens after grouping and block alignment.
-        in_dtype (str): element type of A (e.g., "bfloat16").
-        out_dtype (str): output tensor element type (e.g., "bfloat16").
+        in_dtype (str): element type of A (e.g., T.bfloat16).
+        out_dtype (str): output tensor element type (e.g., T.bfloat16).
         accum_dtype (str): accumulation type used for the inner GEMM.
         source_format (str, optional): format string passed to intrinsic selector (default "uint").
         num_bits (int, optional): number of bits per quantized element in B (default 4).
@@ -111,7 +111,7 @@ def matmul(
     """
 
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "uint8"
+    storage_dtype = T.uint8
     QK = K // num_elems_per_byte
     Block_QK = block_K // num_elems_per_byte
     A_shared_shape = (block_M, block_K)
@@ -137,7 +137,7 @@ def matmul(
     import_source = import_source
 
     # the dequant part is the same as in dequant_gemm
-    def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype="bfloat16"):
+    def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype=T.bfloat16):
         """
         Return a TileLang macro that performs fast dequantization of twiddled FP4-packed data into BF16.
         The returned macro has signature (B_shared, B_dequantize_shared, Scale, k) and:
@@ -147,12 +147,12 @@ def matmul(
         - Writes the scaled BF16 results into B_dequantize_shared.
 
         Notes:
-        - This factory only supports in_dtype="fp4" and out_dtype="bfloat16".
+        - This factory only supports in_dtype="fp4" and out_dtype=T.bfloat16.
         - The macro depends on several names from the enclosing scope (e.g., import_source, func_name, DataType, num_elems_per_byte, storage_dtype, block_N, block_K, threads, scale_size); those must be defined and consistent with the kernel that will use the macro.
         - The macro issues a T.import_source and T.call_extern to invoke the external intrinsic; ensure the external implementation matching `func_name` is available at compilation/runtime.
         """
         assert in_dtype in ["fp4"]
-        assert out_dtype in ["bfloat16"]
+        assert out_dtype in [T.bfloat16]
 
         # Some variables for dequantization in each thread
         MAX_TRANSACTION_SIZE_BITS = 128
@@ -227,9 +227,9 @@ def matmul(
 
         return fast_dequant_bf16_fp4_twiddling
 
-    def get_simple_dequant_func(in_dtype="fp4", out_dtype="bfloat16"):
+    def get_simple_dequant_func(in_dtype="fp4", out_dtype=T.bfloat16):
         assert in_dtype in ["fp4"]
-        assert out_dtype in ["bfloat16"]
+        assert out_dtype in [T.bfloat16]
 
         @T.macro
         def simple_dequant_bf16_fp4(B_shared, B_dequantize_shared, Scale_shared, k):
@@ -259,8 +259,8 @@ def matmul(
         Bias: T.Tensor((E, N), out_dtype),
         # Add fusedmoe tensors
         topk_weights: T.Tensor((M * topk), out_dtype),
-        sorted_token_ids: T.Tensor((padding_M), "int32"),
-        expert_ids: T.Tensor((padding_M // block_M), "int32"),
+        sorted_token_ids: T.Tensor((padding_M), T.int32),
+        expert_ids: T.Tensor((padding_M // block_M), T.int32),
         C: T.Tensor((M, topk, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(padding_M, block_M), threads=threads) as (bx, by):
@@ -271,8 +271,8 @@ def matmul(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
             topk_weights_shared = T.alloc_shared((block_M), out_dtype)
-            sorted_token_ids_shared = T.alloc_shared((block_M), "int32")
-            expert_id = T.alloc_local((1), "int32")  # the expert id for the current block
+            sorted_token_ids_shared = T.alloc_shared((block_M), T.int32)
+            expert_id = T.alloc_local((1), T.int32)  # the expert id for the current block
             # To use 1D TMA, the last dim of Scale_shared must have stride=1
             # May use much more shared memory than necessary
             Scale_shared = T.alloc_shared((block_N, K // scale_size), storage_dtype)
@@ -346,7 +346,7 @@ def matmul(
 
 
 def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=256):
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     M, K = A.shape
     E, N, QK = qB.shape
     topk = topk_weights.shape[0] // M
@@ -451,9 +451,9 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
                 topk,
                 E,
                 padding_M,
-                "bfloat16",
-                "bfloat16",
-                "float32",
+                T.bfloat16,
+                T.bfloat16,
+                T.float32,
                 num_bits=num_bits,
                 scale_size=scale_size,
                 fast_dequant=fast_dequant,
@@ -467,9 +467,9 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
             topk,
             E,
             padding_M,
-            "bfloat16",
-            "bfloat16",
-            "float32",
+            T.bfloat16,
+            T.bfloat16,
+            T.float32,
             num_bits=num_bits,
             scale_size=scale_size,
             fast_dequant=fast_dequant,

@@ -1,6 +1,7 @@
 import tilelang.testing
 import tilelang
 import torch
+from tilelang import language as T
 
 
 @tilelang.jit(
@@ -16,9 +17,9 @@ def matmul_kernel_jit(
     block_K,
     trans_A=False,
     trans_B=True,
-    in_dtype="float16",
-    out_dtype="float32",
-    accum_dtype="float32",
+    in_dtype=T.float16,
+    out_dtype=T.float32,
+    accum_dtype=T.float32,
     num_stages=2,
     threads=128,
 ):

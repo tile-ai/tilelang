@@ -8,7 +8,7 @@ tilelang.testing.set_random_seed()
 
 
 @tilelang.jit(out_idx=[1])
-def parallel_elementwise_static(length=256, dtype="float32"):
+def parallel_elementwise_static(length=256, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -22,7 +22,7 @@ def parallel_elementwise_static(length=256, dtype="float32"):
 
 
 @tilelang.jit(out_idx=[1])
-def parallel_elementwise_dynamic(max_len=512, threads=256, dtype="float32"):
+def parallel_elementwise_dynamic(max_len=512, threads=256, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((max_len,), dtype),

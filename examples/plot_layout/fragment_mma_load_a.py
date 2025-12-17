@@ -5,7 +5,7 @@ from tvm.tir import IndexMap
 from tilelang.intrinsics.utils import get_mma_micro_size
 
 
-def make_mma_load_base_layout(dtype: str = "float16", matrix: Literal["A", "B"] = "A", transposed: bool = False) -> T.Fragment:
+def make_mma_load_base_layout(dtype: T.dtype = T.float16, matrix: Literal["A", "B"] = "A", transposed: bool = False) -> T.Fragment:
     """
     Create a layout function for storing MMA results into a fragment buffer.
     This layout is used in conjunction with `inverse_mma_store_layout` to
@@ -74,7 +74,7 @@ def make_mma_load_base_layout(dtype: str = "float16", matrix: Literal["A", "B"] 
     else:
         raise ValueError(f"Unsupported matrix {matrix}")
 
-    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
     def forward_thread(i: int, j: int) -> int:
         """
@@ -107,7 +107,7 @@ chunk = 2
 from tilelang.tools import plot_layout
 
 # ldmatrix layout 16x16
-base_layout = make_mma_load_base_layout(dtype="float16", matrix="A", transposed=False)
+base_layout = make_mma_load_base_layout(dtype=T.float16, matrix="A", transposed=False)
 print(base_layout)
 plot_layout(base_layout, name="base_layout")
 

@@ -4,10 +4,10 @@ import tilelang.testing
 
 
 def _make_kernel(M, N):
-    dtype = "bfloat16"
+    dtype = T.bfloat16
 
     @T.prim_func
-    def fwd_main(KV: T.Tensor((M, N), dtype), ids: T.Tensor((4,), "int32")):
+    def fwd_main(KV: T.Tensor((M, N), dtype), ids: T.Tensor((4,), T.int32)):
         with T.Kernel(4, threads=1):
             A = T.alloc_shared([N], dtype)
             B = T.alloc_shared([N], dtype)

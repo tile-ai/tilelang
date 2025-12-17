@@ -7,7 +7,7 @@ from tilelang.utils import map_torch_type
 
 
 @tl.jit
-def tensor_null_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float", with_bias=False):
+def tensor_null_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32, with_bias=False):
     @T.prim_func
     def main(
         A: T.Tensor((M, K), dtype),
@@ -38,7 +38,7 @@ def tensor_null_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_
     return main
 
 
-def run_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def run_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     a = torch.randn(M, K, device="cuda", dtype=map_torch_type(dtype))
     b = torch.randn(N, K, device="cuda", dtype=map_torch_type(dtype))
     c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))

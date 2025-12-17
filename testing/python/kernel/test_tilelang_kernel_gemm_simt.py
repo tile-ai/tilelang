@@ -35,13 +35,13 @@ def tl_matmul_simt(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     # This is a debug config
@@ -72,7 +72,7 @@ def tl_matmul_simt(
 
     micro_size_k = 128 // DataType(in_dtype).bits
     dp4a_size = 4
-    use_dp4a = in_dtype == "int8" and accum_dtype == "int32"
+    use_dp4a = in_dtype == T.int8 and accum_dtype == T.int32
 
     @T.prim_func
     def main(
@@ -139,7 +139,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     # src_code is the generated cuda source
     assert src_code is not None
 
-    if in_dtype == "int8":
+    if in_dtype == T.int8:
         A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, (N, K), device="cuda", dtype=torch.int8)
     else:
@@ -161,9 +161,9 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
-    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", "float32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", "int32")
+    assert_tl_matmul_correctness(128, 128, 128, T.float16, T.float16, T.float16)
+    assert_tl_matmul_correctness(128, 256, 256, T.float16, T.float32, T.float32)
+    assert_tl_matmul_correctness(128, 256, 256, T.int8, T.int32, T.int32)
 
 
 if __name__ == "__main__":

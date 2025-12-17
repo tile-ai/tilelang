@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import torch
 from tilelang import tvm as tvm
 from tvm.tir import Buffer, IntImm, Var, PrimExpr
-from tilelang.utils.tensor import map_torch_type
+import tilelang.language as T
 
 
 @dataclass
@@ -138,7 +138,7 @@ class KernelParam:
             >>> param = KernelParam.from_buffer(buffer)
             >>> tensor = torch.empty(shape, dtype=param.torch_dtype())
         """
-        return map_torch_type(str(self.dtype))
+        return T.dtype(self.dtype).as_torch()
 
 
 @dataclass

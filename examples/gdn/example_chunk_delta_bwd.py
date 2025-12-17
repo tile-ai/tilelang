@@ -250,13 +250,13 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             dv_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dv_fragment_2 = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dO_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
-            dO_shared_t = T.alloc_shared((block_DV, block_S), dtype="float32")
-            dO_fragment = T.alloc_fragment((block_S, block_DV), dtype="float32")
-            dO_fragment_t = T.alloc_fragment((block_DV, block_S), dtype="float32")
+            dO_shared_t = T.alloc_shared((block_DV, block_S), dtype=T.float32)
+            dO_fragment = T.alloc_fragment((block_S, block_DV), dtype=T.float32)
+            dO_fragment_t = T.alloc_fragment((block_DV, block_S), dtype=T.float32)
             K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
             Q_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
-            Q_shared_fp32 = T.alloc_shared((block_S, DK), dtype="float32")
+            Q_shared_fp32 = T.alloc_shared((block_S, DK), dtype=T.float32)
             W_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
             G_last_local = T.alloc_local((1), dtype=gate_dtype)
@@ -592,11 +592,11 @@ def main():
         H=8,
         DK=DK,
         DV=128,
-        input_dtype="bfloat16",
-        output_dtype="bfloat16",
-        accum_dtype="float32",
-        gate_dtype="float32",
-        state_dtype="float32",
+        input_dtype=T.bfloat16,
+        output_dtype=T.bfloat16,
+        accum_dtype=T.float32,
+        gate_dtype=T.float32,
+        state_dtype=T.float32,
         chunk_size=64,
         scale=DK**-0.5,
         use_g=True,

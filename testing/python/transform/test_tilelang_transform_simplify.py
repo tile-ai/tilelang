@@ -22,9 +22,9 @@ def modify(
             T.gemm(A, B, D)
         else:
             with T.block():
-                A_shared = T.alloc_shared((64, 64), dtype="float32")
-                C_shared = T.alloc_shared((64, 64), dtype="float32")
-                D_shared = T.alloc_shared((64, 64), dtype="float32")
+                A_shared = T.alloc_shared((64, 64), dtype=T.float32)
+                C_shared = T.alloc_shared((64, 64), dtype=T.float32)
+                D_shared = T.alloc_shared((64, 64), dtype=T.float32)
                 T.copy(A, A_shared)
                 T.copy(C, C_shared)
                 T.gemm(A_shared, C_shared, D_shared)
@@ -40,7 +40,7 @@ def test_modify(with_B=False, with_bias=False):
     assert mod != mod2
 
 
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def main(
         a: T.handle,

@@ -10,7 +10,7 @@ from typing import Literal, Callable
 from tilelang.intrinsics.utils import get_mma_micro_size
 from tilelang.tools import plot_layout
 
-def make_mma_load_base_layout(dtype: str = "float16",
+def make_mma_load_base_layout(dtype: str = T.float16,
                               matrix: Literal["A", "B"] = "A",
                               transposed: bool = False) -> T.Fragment:
     """
@@ -69,7 +69,7 @@ def make_mma_load_base_layout(dtype: str = "float16",
     micro_size_s, _, micro_size_r = get_mma_micro_size(dtype)
 
     transform_func = transform_func
-    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
     def forward_thread(i: int, j: int) -> int:
         """
@@ -94,7 +94,7 @@ def make_mma_load_base_layout(dtype: str = "float16",
 
 
 # Create a 16×16 matrix layout for ldmatrix operations
-base_layout = make_mma_load_base_layout(dtype="float16", matrix="A", transposed=False)
+base_layout = make_mma_load_base_layout(dtype=T.float16, matrix="A", transposed=False)
 
 # Print the layout structure (optional for debugging)
 print(base_layout)

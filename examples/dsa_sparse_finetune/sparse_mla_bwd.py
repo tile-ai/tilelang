@@ -13,11 +13,11 @@ def preprocess(
     D,
     block_ND=32,
     num_stages=5,
-    dtype="bfloat16",
-    accum_dtype="float",
+    dtype=T.bfloat16,
+    accum_dtype=T.float32,
 ):
-    assert dtype == "bfloat16"
-    assert accum_dtype == "float"
+    assert dtype == T.bfloat16
+    assert accum_dtype == T.float32
 
     S = T.symbolic("S")
 
@@ -53,11 +53,11 @@ def postprocess(
     kv_group=1,
     block_N=64,
     threads=128,
-    dtype="bfloat16",
-    accum_dtype="float",
+    dtype=T.bfloat16,
+    accum_dtype=T.float32,
 ):
-    assert dtype == "bfloat16"
-    assert accum_dtype == "float"
+    assert dtype == T.bfloat16
+    assert accum_dtype == T.float32
     S_kv = T.symbolic("S_kv")
 
     dkv_shape = [S_kv, kv_group, D + D_tail]
@@ -94,15 +94,15 @@ def bwd(
     block_size=32,
     num_stages=0,
     threads=128,
-    indices_dtype="int32",
-    dtype="bfloat16",
-    accum_dtype="float",
+    indices_dtype=T.int32,
+    dtype=T.bfloat16,
+    accum_dtype=T.float32,
 ):
     assert is_causal == True, "non-casual is not supported now"
     assert topk % block_size == 0, "otherwise will load some index=0 thus causing wrong kv to be loaded"
-    assert dtype == "bfloat16"
-    assert accum_dtype == "float"
-    assert indices_dtype == "int32"
+    assert dtype == T.bfloat16
+    assert accum_dtype == T.float32
+    assert indices_dtype == T.int32
 
     if sm_scale is None:
         sm_scale = (D + D_tail) ** (-0.5)
@@ -119,9 +119,9 @@ def bwd(
     lse_shape = [S, H]
     offsets_shape = [B_plus_one]
     token_indices_shape = [S, 2]
-    assert indices_dtype == "int32"
-    assert dtype == "bfloat16"
-    assert accum_dtype == "float"
+    assert indices_dtype == T.int32
+    assert dtype == T.bfloat16
+    assert accum_dtype == T.float32
 
     H = H_kv
     padded_H = max(tilelang.math.next_power_of_2(H_kv), 16)

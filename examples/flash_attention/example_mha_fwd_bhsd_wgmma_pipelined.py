@@ -24,8 +24,8 @@ def flashattn(batch, heads, seq_q, seq_kv, dim, is_causal, block_M=128, block_N=
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     q_shape = [batch, heads, seq_q, dim]
     kv_shape = [batch, heads, seq_kv, dim]
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
 
     past_len = seq_kv - seq_q
     assert past_len >= 0, "seq_kv must be greater than or equal to seq_q"

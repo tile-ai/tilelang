@@ -63,9 +63,9 @@ def get_configs(args, kwargs):
             M=M,
             N=N,
             K=K,
-            in_dtype="float16",
-            out_dtype="float16",
-            accum_dtype="float",
+            in_dtype=T.float16,
+            out_dtype=T.float16,
+            accum_dtype=T.float32,
         ).with_arch(arch)
 
         func = carve_template.equivalent_function()
@@ -159,8 +159,8 @@ def matmul(
 
     # Use half-precision for input data to reduce memory bandwidth,
     # accumulate in float for better numerical accuracy
-    dtype = "float8_e4m3fnuz" if torch.version.hip is not None else "float8_e4m3"
-    accum_dtype = "float"
+    dtype = T.float8_e4m3fnuz if torch.version.hip is not None else T.float8_e4m3fn
+    accum_dtype = T.float32
 
     @T.prim_func
     def main(

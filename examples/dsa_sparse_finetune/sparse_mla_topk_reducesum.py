@@ -8,9 +8,9 @@ from einops import repeat, rearrange, einsum
 from index import prepare_token_indices
 from utils import get_abs_err, get_err_ratio
 
-BF16 = "bfloat16"
-FP32 = "float32"
-INT32 = "int32"
+BF16 = T.bfloat16
+FP32 = T.float32
+INT32 = T.int32
 
 pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
@@ -41,9 +41,9 @@ def tl_sparse_mla_topk_reducesum_impl(
     seq_len_kv = T.symbolic("seq_len_kv")
 
     head_kv = heads // kv_group
-    indices_dtype = "int32"
-    dtype = "bfloat16"
-    accum_dtype = "float"
+    indices_dtype = T.int32
+    dtype = T.bfloat16
+    accum_dtype = T.float32
 
     G = kv_group
     H = head_kv

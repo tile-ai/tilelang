@@ -3,7 +3,7 @@ import tilelang.language as T
 
 
 @tilelang.jit
-def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_dtype="float", out_dtype="float32"):
+def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype=T.float16, accum_dtype=T.float32, out_dtype=T.float32):
     splitK = K // split_k
 
     @T.prim_func

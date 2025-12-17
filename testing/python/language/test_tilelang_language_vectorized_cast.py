@@ -4,11 +4,11 @@ import tilelang.testing
 import tilelang.language as T
 
 str2dtype = {
-    "float32": torch.float32,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float8_e4m3": torch.float8_e4m3fn,
-    "float8_e5m2": torch.float8_e5m2,
+    T.float32: torch.float32,
+    T.float16: torch.float16,
+    T.bfloat16: torch.bfloat16,
+    T.float8_e4m3fn: torch.float8_e4m3fn,
+    T.float8_e5m2: torch.float8_e5m2,
 }
 
 
@@ -81,22 +81,22 @@ def run_vectorized_cast(src_dtype_str: str, dst_dtype_str: str, check_str: str, 
 @pytest.mark.parametrize(
     "src_dtype, dst_dtype, check_str, lanes",
     [
-        ("float32", "float16", "__float22half2_rn", 2),
-        ("float32", "float16", "__float22half2_rn", 4),
-        ("float16", "float32", "__half22float2", 2),
-        ("float16", "float32", "__half22float2", 4),
-        ("float32", "float8_e4m3", "__nv_cvt_float2_to_fp8x2", 2),
-        ("float32", "float8_e4m3", "__nv_cvt_float2_to_fp8x2", 4),
-        ("float32", "float8_e5m2", "__nv_cvt_float2_to_fp8x2", 2),
-        ("float32", "float8_e5m2", "__nv_cvt_float2_to_fp8x2", 4),
-        ("float32", "bfloat16", "__float22bfloat162_rn", 2),
-        ("float32", "bfloat16", "__float22bfloat162_rn", 4),
-        ("bfloat16", "float32", "__bfloat1622float2", 2),
-        ("bfloat16", "float32", "__bfloat1622float2", 4),
-        ("float8_e4m3", "float32", "__tl_cvt_fp8x2_to_float2", 2),
-        ("float8_e4m3", "float32", "__tl_cvt_fp8x2_to_float2", 4),
-        ("float8_e5m2", "float32", "__tl_cvt_fp8x2_to_float2", 2),
-        ("float8_e5m2", "float32", "__tl_cvt_fp8x2_to_float2", 4),
+        (T.float32, T.float16, "__float22half2_rn", 2),
+        (T.float32, T.float16, "__float22half2_rn", 4),
+        (T.float16, T.float32, "__half22float2", 2),
+        (T.float16, T.float32, "__half22float2", 4),
+        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 2),
+        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 4),
+        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 2),
+        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 4),
+        (T.float32, T.bfloat16, "__float22bfloat162_rn", 2),
+        (T.float32, T.bfloat16, "__float22bfloat162_rn", 4),
+        (T.bfloat16, T.float32, "__bfloat1622float2", 2),
+        (T.bfloat16, T.float32, "__bfloat1622float2", 4),
+        (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
+        (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
+        (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
+        (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
     ],
 )
 def test_vectorized_cast(src_dtype, dst_dtype, check_str, lanes):

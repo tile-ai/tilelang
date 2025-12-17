@@ -12,7 +12,7 @@ from tilelang.intrinsics.mfma_layout import (
 
 
 def make_mfma_load_base_layout(
-    dtype: str = "float16", matrix: Literal["A", "B"] = "A", k_dim: int = 16, transposed: bool = False
+    dtype: T.dtype = T.float16, matrix: Literal["A", "B"] = "A", k_dim: int = 16, transposed: bool = False
 ) -> T.Fragment:
     """
     Create a layout function for storing MFMA results into a fragment buffer.
@@ -79,7 +79,7 @@ def make_mfma_load_base_layout(
     else:
         raise ValueError(f"Unsupported matrix {matrix}")
 
-    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
     def forward_thread(i: int, j: int) -> int:
         """
@@ -112,7 +112,7 @@ chunk = 2
 from tilelang.tools import plot_layout
 
 # ldmatrix layout 16x16
-base_layout = make_mfma_load_base_layout(dtype="float16", matrix="A", transposed=False)
+base_layout = make_mfma_load_base_layout(dtype=T.float16, matrix="A", transposed=False)
 print(base_layout)
 plot_layout(base_layout, name="base_layout")
 

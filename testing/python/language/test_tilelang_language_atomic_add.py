@@ -3,7 +3,7 @@ import tilelang.language as T
 
 
 @tilelang.jit
-def atomic_add_program(K, M, N, block_M, block_N, dtype="float"):
+def atomic_add_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_add(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), K, threads=32) as (bx, by, bz):
@@ -17,7 +17,7 @@ def atomic_add_program(K, M, N, block_M, block_N, dtype="float"):
     return atomic_add
 
 
-def run_atomic_add(K, M, N, block_M, block_N, dtype="float32"):
+def run_atomic_add(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
     import torch
 
@@ -36,7 +36,7 @@ def run_atomic_add(K, M, N, block_M, block_N, dtype="float32"):
 
 
 @tilelang.jit
-def tile_atomic_add_program(K, M, N, block_M, block_N, dtype="float"):
+def tile_atomic_add_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_add(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), K, threads=32) as (bx, by, bz):
@@ -49,7 +49,7 @@ def tile_atomic_add_program(K, M, N, block_M, block_N, dtype="float"):
     return atomic_add
 
 
-def run_tile_atomic_add(K, M, N, block_M, block_N, dtype="float32"):
+def run_tile_atomic_add(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = tile_atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
     print(kernel.get_kernel_source())
     import torch
@@ -71,7 +71,7 @@ def run_tile_atomic_add(K, M, N, block_M, block_N, dtype="float32"):
 
 
 @tilelang.jit
-def atomic_max_program(K, M, N, block_M, block_N, dtype="float"):
+def atomic_max_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_max(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), K, threads=32) as (bx, by, bz):
@@ -85,7 +85,7 @@ def atomic_max_program(K, M, N, block_M, block_N, dtype="float"):
     return atomic_max
 
 
-def run_atomic_max(K, M, N, block_M, block_N, dtype="float32"):
+def run_atomic_max(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_max_program(K, M, N, block_M, block_N, dtype=dtype)
     import torch
 
@@ -104,7 +104,7 @@ def run_atomic_max(K, M, N, block_M, block_N, dtype="float32"):
 
 
 @tilelang.jit
-def atomic_min_program(K, M, N, block_M, block_N, dtype="float"):
+def atomic_min_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_min(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), K, threads=32) as (bx, by, bz):
@@ -118,7 +118,7 @@ def atomic_min_program(K, M, N, block_M, block_N, dtype="float"):
     return atomic_min
 
 
-def run_atomic_min(K, M, N, block_M, block_N, dtype="float32"):
+def run_atomic_min(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_min_program(K, M, N, block_M, block_N, dtype=dtype)
     import torch
 
@@ -137,7 +137,7 @@ def run_atomic_min(K, M, N, block_M, block_N, dtype="float32"):
 
 
 @tilelang.jit
-def atomic_load_store_program(M, N, block_M, block_N, dtype="float"):
+def atomic_load_store_program(M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_load_store(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=32) as (bx, by):
@@ -151,7 +151,7 @@ def atomic_load_store_program(M, N, block_M, block_N, dtype="float"):
     return atomic_load_store
 
 
-def run_atomic_load_store(M, N, block_M, block_N, dtype="float32"):
+def run_atomic_load_store(M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_load_store_program(M, N, block_M, block_N, dtype=dtype)
     import torch
 
@@ -162,7 +162,7 @@ def run_atomic_load_store(M, N, block_M, block_N, dtype="float32"):
 
 
 @tilelang.jit
-def atomic_memory_order_program(K, M, N, block_M, block_N, dtype="float"):
+def atomic_memory_order_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_with_memory_order(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), K, threads=32) as (bx, by, bz):
@@ -176,7 +176,7 @@ def atomic_memory_order_program(K, M, N, block_M, block_N, dtype="float"):
     return atomic_with_memory_order
 
 
-def run_atomic_memory_order(K, M, N, block_M, block_N, dtype="float32"):
+def run_atomic_memory_order(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_memory_order_program(K, M, N, block_M, block_N, dtype=dtype)
     import torch
 
@@ -197,7 +197,7 @@ def run_atomic_memory_order(K, M, N, block_M, block_N, dtype="float32"):
 @tilelang.jit
 def atomic_addx2_program(M, N, block_M, block_N):
     @T.prim_func
-    def atomic_addx2(A: T.Tensor((M, N), "float16"), B: T.Tensor((M, N), "float16")):
+    def atomic_addx2(A: T.Tensor((M, N), T.float16), B: T.Tensor((M, N), T.float16)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=32) as (bx, by):
             for i, j in T.Parallel(block_M, block_N // 2):
                 idx_i = bx * block_M + i
@@ -248,7 +248,7 @@ def test_atomic_addx2():
 
 
 @tilelang.jit
-def atomic_different_memory_orders_program(M, N, block_M, block_N, dtype="float"):
+def atomic_different_memory_orders_program(M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_different_orders(
         A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype), C: T.Tensor((M, N), dtype), D: T.Tensor((M, N), dtype)
@@ -266,7 +266,7 @@ def atomic_different_memory_orders_program(M, N, block_M, block_N, dtype="float"
     return atomic_different_orders
 
 
-def run_atomic_different_memory_orders(M, N, block_M, block_N, dtype="float32"):
+def run_atomic_different_memory_orders(M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_different_memory_orders_program(M, N, block_M, block_N, dtype=dtype)
     import torch
 
@@ -285,7 +285,7 @@ def run_atomic_different_memory_orders(M, N, block_M, block_N, dtype="float32"):
 @tilelang.jit
 def atomic_addx4_program(M, N, block_M, block_N):
     @T.prim_func
-    def atomic_addx4(A: T.Tensor((M, N), "float32"), B: T.Tensor((M, N), "float32")):
+    def atomic_addx4(A: T.Tensor((M, N), T.float32), B: T.Tensor((M, N), T.float32)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=32) as (bx, by):
             for i, j in T.Parallel(block_M, block_N // 4):
                 idx_i = bx * block_M + i
@@ -315,7 +315,7 @@ def run_atomic_addx4(M, N, block_M, block_N):
 
 
 @tilelang.jit
-def atomic_return_prev_program(M, N, block_M, block_N, dtype="float"):
+def atomic_return_prev_program(M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_with_return_prev(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype), old_vals: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=32) as (bx, by):
@@ -328,7 +328,7 @@ def atomic_return_prev_program(M, N, block_M, block_N, dtype="float"):
     return atomic_with_return_prev
 
 
-def run_atomic_return_prev(M, N, block_M, block_N, dtype="float32"):
+def run_atomic_return_prev(M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_return_prev_program(M, N, block_M, block_N, dtype=dtype)
     import torch
 
@@ -344,9 +344,9 @@ def run_atomic_return_prev(M, N, block_M, block_N, dtype="float32"):
 
 
 def test_atomic_different_memory_orders():
-    run_atomic_different_memory_orders(32, 32, 8, 8, dtype="float")
-    run_atomic_different_memory_orders(32, 32, 8, 8, dtype="float16")
-    run_atomic_different_memory_orders(32, 32, 8, 8, dtype="bfloat16")
+    run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.float32)
+    run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.float16)
+    run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.bfloat16)
 
 
 def test_atomic_addx4():

@@ -20,11 +20,11 @@ def tl_gemm(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float8_e4m3",
+        T.float8_e4m3fn,
     ], "Currently only float8_e4m3 is supported"
     assert out_dtype in [
-        "bfloat16",
-        "float32",
+        T.bfloat16,
+        T.float32,
     ], "Currently only float16 and float32 are supported"
 
     group_size = 128
@@ -44,14 +44,14 @@ def tl_gemm(
         A: T.Tensor(A_shape, in_dtype),
         B: T.Tensor(B_shape, in_dtype),
         C: T.Tensor((M, N), out_dtype),
-        scales_a: T.Tensor(Scales_A_shape, "float32"),
-        scales_b: T.Tensor(Scales_B_shape, "float32"),
+        scales_a: T.Tensor(Scales_A_shape, T.float32),
+        scales_b: T.Tensor(Scales_B_shape, T.float32),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype)
-            Scale_C_shared = T.alloc_shared((block_M), "float32")
+            Scale_C_shared = T.alloc_shared((block_M), T.float32)
             C_local = T.alloc_fragment(C_shared_shape, accum_dtype)
             C_local_accum = T.alloc_fragment(C_shared_shape, accum_dtype)
 
@@ -176,11 +176,11 @@ def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtyp
 
 
 def main():
-    assert_tl_gemm_correctness(1024, 1024, 8192, 128, "float8_e4m3", "bfloat16", "float32")
+    assert_tl_gemm_correctness(1024, 1024, 8192, 128, T.float8_e4m3fn, T.bfloat16, T.float32)
 
 
 if __name__ == "__main__":
-    for dtype in ["float8_e4m3"]:
-        for out_dtype in ["bfloat16", "float32"]:
+    for dtype in [T.float8_e4m3fn]:
+        for out_dtype in [T.bfloat16, T.float32]:
             for block_N in [16, 32, 64, 128]:
-                assert_tl_gemm_correctness(1024, 1024, 8192, block_N, dtype, out_dtype, "float32")
+                assert_tl_gemm_correctness(1024, 1024, 8192, block_N, dtype, out_dtype, T.float32)

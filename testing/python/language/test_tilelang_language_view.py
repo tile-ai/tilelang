@@ -1,3 +1,4 @@
+import tilelang.language as T
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
@@ -5,8 +6,6 @@ import pytest
 
 
 def view_test(N, M, dtype, new_dtype=None):
-    import tilelang.language as T
-
     new_shape = [N // M, M]
     if new_dtype:
         from tvm import DataType
@@ -37,9 +36,7 @@ def run_view(N, M, dtype, new_dtype=None):
 
     def ref_program(A):
         if new_dtype:
-            from tilelang.utils.tensor import map_torch_type
-
-            torch_dtype = map_torch_type(new_dtype)
+            torch_dtype = T.dtype(new_dtype).as_torch()
             return A.view(N // M, M).view(dtype=torch_dtype)
         return A.view(N // M, M)
 
@@ -48,17 +45,15 @@ def run_view(N, M, dtype, new_dtype=None):
 
 def test_reshape_view():
     # Test view with same dtype
-    run_view(1024, 32, "float32")
-    run_view(2048, 64, "float16")
+    run_view(1024, 32, T.float32)
+    run_view(2048, 64, T.float16)
 
     # Test view with dtype conversion
-    run_view(1024, 32, "float32", "float16")
-    run_view(2048, 64, "float16", "float32")
+    run_view(1024, 32, T.float32, T.float16)
+    run_view(2048, 64, T.float16, T.float32)
 
 
 def view_shape_mismatch_test(N, M, dtype, new_dtype=None):
-    import tilelang.language as T
-
     new_shape = [N // M, M + 1]
     if new_dtype:
         from tvm import DataType
@@ -84,7 +79,7 @@ def view_shape_mismatch_test(N, M, dtype, new_dtype=None):
 
 def test_view_shape_mismatch():
     with pytest.raises(AssertionError):
-        view_shape_mismatch_test(1024, 32, "float32")
+        view_shape_mismatch_test(1024, 32, T.float32)
 
 
 if __name__ == "__main__":

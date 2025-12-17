@@ -51,9 +51,9 @@ def get_configs(M, N, K, with_roller=False, topk=20):
             M=M,
             N=N,
             K=K,
-            in_dtype="float16",
-            out_dtype="float16",
-            accum_dtype="float",
+            in_dtype=T.float16,
+            out_dtype=T.float16,
+            accum_dtype=T.float32,
         ).with_arch(arch)
 
         func = carve_template.equivalent_function()
@@ -116,8 +116,8 @@ def get_best_config(M, N, K, with_roller=False):
         thread_num=None,
         enable_rasteration=None,
     ):
-        dtype = "bfloat16"
-        accum_dtype = "float"
+        dtype = T.bfloat16
+        accum_dtype = T.float32
 
         @T.prim_func
         def main(
@@ -178,7 +178,7 @@ def get_heuristic_config() -> dict:
 
 
 @tl.jit(out_idx=[-1])
-def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_rasteration, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_rasteration, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def gemm_autotune(
         A: T.Tensor((M, K), dtype),

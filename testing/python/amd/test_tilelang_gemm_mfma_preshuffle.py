@@ -26,7 +26,7 @@ def tl_matmul(
 ):
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if in_dtype in {"float8_e4m3fnuz", "int8"}:
+    if in_dtype in {T.float8_e4m3fnuz, T.int8}:
         micro_size_k = 32
 
     block_row_warps = 2
@@ -196,7 +196,7 @@ def assert_tl_matmul_correctness(
     K,
     in_dtype,
     out_dtype,
-    accum_dtype="float32",
+    accum_dtype=T.float32,
     a_transposed=False,
     b_transposed=True,
     k_pack=1,
@@ -211,10 +211,10 @@ def assert_tl_matmul_correctness(
     assert src_code is not None
     A_shape = (K, M) if a_transposed else (M, K)
     B_shape = (N, K) if b_transposed else (K, N)
-    if in_dtype == "int8":
+    if in_dtype == T.int8:
         A = torch.randint(-128, 127, A_shape, device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, B_shape, device="cuda", dtype=torch.int8)
-    elif in_dtype == "float8_e4m3fnuz":
+    elif in_dtype == T.float8_e4m3fnuz:
         A = torch.rand(A_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
         B = torch.rand(B_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
     else:
@@ -261,14 +261,14 @@ def assert_tl_matmul_correctness(
 @pytest.mark.parametrize(
     "M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack, b_preshuffle, b_g2l_load",
     [
-        (256, 256, 512, "int8", "int32", "int32", False, True, 1, True, False),
-        (256, 256, 512, "int8", "int32", "int32", False, False, 1, True, False),
-        (256, 256, 512, "int8", "int32", "int32", False, True, 2, True, False),
-        (256, 256, 512, "int8", "int32", "int32", False, False, 2, True, False),
-        (256, 256, 512, "float8_e4m3fnuz", "float32", "float32", False, True, 1, True, False),
-        (256, 256, 512, "float8_e4m3fnuz", "float32", "float32", False, False, 1, True, False),
-        (256, 256, 512, "float8_e4m3fnuz", "float32", "float32", False, True, 2, True, False),
-        (256, 256, 512, "float8_e4m3fnuz", "float32", "float32", False, False, 2, True, False),
+        (256, 256, 512, T.int8, T.int32, T.int32, False, True, 1, True, False),
+        (256, 256, 512, T.int8, T.int32, T.int32, False, False, 1, True, False),
+        (256, 256, 512, T.int8, T.int32, T.int32, False, True, 2, True, False),
+        (256, 256, 512, T.int8, T.int32, T.int32, False, False, 2, True, False),
+        (256, 256, 512, T.float8_e4m3fnuz, T.float32, T.float32, False, True, 1, True, False),
+        (256, 256, 512, T.float8_e4m3fnuz, T.float32, T.float32, False, False, 1, True, False),
+        (256, 256, 512, T.float8_e4m3fnuz, T.float32, T.float32, False, True, 2, True, False),
+        (256, 256, 512, T.float8_e4m3fnuz, T.float32, T.float32, False, False, 2, True, False),
     ],
 )
 @tilelang.testing.requires_rocm

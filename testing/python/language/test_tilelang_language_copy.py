@@ -8,7 +8,7 @@ print(torch.__version__)
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
-def tilelang_copy(M, N, block_M, block_N, src_dtype="float16", dst_dtype="float16"):
+def tilelang_copy(M, N, block_M, block_N, src_dtype=T.float16, dst_dtype=T.float16):
     @T.prim_func
     def main(
         A: T.Tensor((M, N), src_dtype),
@@ -24,7 +24,7 @@ def tilelang_copy(M, N, block_M, block_N, src_dtype="float16", dst_dtype="float1
     return main
 
 
-def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype="float16"):
+def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16):
     program = tilelang_copy(M, N, block_M, block_N, src_dtype=dtype, dst_dtype=dtype)
     kernel = tilelang.compile(
         program,
@@ -42,10 +42,10 @@ def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype="float16")
 def test_tilelang_copy():
     run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128)
     run_tilelang_copy(M=1024, N=576, block_M=32, block_N=576)
-    run_tilelang_copy(M=1024, N=576, block_M=32, block_N=576, dtype="float")
+    run_tilelang_copy(M=1024, N=576, block_M=32, block_N=576, dtype=T.float32)
 
 
-def tilelang_copy_with_stride(M, N, NN, block_M, block_N, dtype="float16"):
+def tilelang_copy_with_stride(M, N, NN, block_M, block_N, dtype=T.float16):
     @T.prim_func
     def main(
         A: T.StridedTensor((M, N), (NN, 1), dtype),
@@ -59,7 +59,7 @@ def tilelang_copy_with_stride(M, N, NN, block_M, block_N, dtype="float16"):
     return main
 
 
-def run_tilelang_copy_with_stride(M=1024, N=1024, NN=2048, block_M=128, block_N=128, dtype="float16"):
+def run_tilelang_copy_with_stride(M=1024, N=1024, NN=2048, block_M=128, block_N=128, dtype=T.float16):
     if isinstance(NN, int):
         assert NN > N, "NN must be greater than N"
     program = tilelang_copy_with_stride(M, N, NN, block_M, block_N, dtype)
@@ -84,21 +84,21 @@ def test_tilelang_copy_with_stride():
     run_tilelang_copy_with_stride(M=1024, N=1024, NN=T.dynamic("NN"), block_M=128, block_N=128)
 
 
-def tilelang_copy_bufferload(num_tokens, dtype="float16"):
+def tilelang_copy_bufferload(num_tokens, dtype=T.float16):
     @T.prim_func
     def main(
-        indices: T.Tensor((num_tokens,), "int32"),
+        indices: T.Tensor((num_tokens,), T.int32),
         x: T.Tensor((num_tokens,), dtype),
     ):
         with T.Kernel(num_tokens, threads=32) as pid:
-            idx = T.alloc_local([1], "int32")
+            idx = T.alloc_local([1], T.int32)
             T.copy(indices[pid], idx[0])
             x[idx[0]] = x[idx[0]] + 1
 
     return main
 
 
-def run_tilelang_copy_bufferload(num_tokens=128, dtype="float16"):
+def run_tilelang_copy_bufferload(num_tokens=128, dtype=T.float16):
     program = tilelang_copy_bufferload(num_tokens, dtype)
     # test compilation only
     tilelang.compile(
@@ -112,7 +112,7 @@ def test_tilelang_copy_bufferload():
     run_tilelang_copy_bufferload(num_tokens=128)
 
 
-def tilelang_copy_buffer_load_with_parallel(M, N, block_M, block_N, dtype="float16"):
+def tilelang_copy_buffer_load_with_parallel(M, N, block_M, block_N, dtype=T.float16):
     @T.prim_func
     def main(
         A: T.Tensor((M, N), dtype),
@@ -126,7 +126,7 @@ def tilelang_copy_buffer_load_with_parallel(M, N, block_M, block_N, dtype="float
     return main
 
 
-def run_tilelang_copy_buffer_load_with_parallel(M=1024, N=1024, block_M=128, block_N=128, dtype="float16"):
+def run_tilelang_copy_buffer_load_with_parallel(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16):
     program = tilelang_copy_buffer_load_with_parallel(M, N, block_M, block_N, dtype)
     kernel = tilelang.compile(
         program,
@@ -143,7 +143,7 @@ def test_tilelang_copy_buffer_load_with_parallel():
     run_tilelang_copy_buffer_load_with_parallel(M=1024, N=1024, block_M=128, block_N=128)
 
 
-def run_tilelang_copy_fp8_e8m0(M=1024, N=1024, block_M=128, block_N=128, src_dtype="float8_e8m0fnu", dst_dtype="float8_e8m0fnu"):
+def run_tilelang_copy_fp8_e8m0(M=1024, N=1024, block_M=128, block_N=128, src_dtype=T.float8_e8m0fnu, dst_dtype=T.float8_e8m0fnu):
     program = tilelang_copy(M, N, block_M, block_N, src_dtype=src_dtype, dst_dtype=dst_dtype)
     kernel = tilelang.compile(
         program,
@@ -159,10 +159,10 @@ def run_tilelang_copy_fp8_e8m0(M=1024, N=1024, block_M=128, block_N=128, src_dty
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_tilelang_copy_fp8_e8m0():
-    run_tilelang_copy_fp8_e8m0(src_dtype="float8_e8m0fnu", dst_dtype="float8_e8m0fnu")
+    run_tilelang_copy_fp8_e8m0(src_dtype=T.float8_e8m0fnu, dst_dtype=T.float8_e8m0fnu)
 
 
-def run_tilelang_copy_fp4(M=1024, N=1024, block_M=128, block_N=128, src_dtype="float4_e2m1fn", dst_dtype="float4_e2m1fn"):
+def run_tilelang_copy_fp4(M=1024, N=1024, block_M=128, block_N=128, src_dtype=T.float4_e2m1fn, dst_dtype=T.float4_e2m1fn):
     program = tilelang_copy(M, N, block_M, block_N, src_dtype=src_dtype, dst_dtype=dst_dtype)
     kernel = tilelang.compile(
         program,
@@ -179,9 +179,9 @@ def run_tilelang_copy_fp4(M=1024, N=1024, block_M=128, block_N=128, src_dtype="f
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_tilelang_copy_fp4():
-    run_tilelang_copy_fp4(src_dtype="float4_e2m1fn", dst_dtype="float4_e2m1fn")
-    run_tilelang_copy_fp4(src_dtype="float4_e2m1fn", dst_dtype="float16")
-    run_tilelang_copy_fp4(src_dtype="float4_e2m1fn", dst_dtype="bfloat16")
+    run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.float4_e2m1fn)
+    run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.float16)
+    run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.bfloat16)
 
 
 if __name__ == "__main__":

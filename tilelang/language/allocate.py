@@ -28,6 +28,7 @@ from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
 from tvm.tir.buffer import Buffer
 from tvm.tir.expr import FloatImm, IntImm
+from .v2 import dtypes as _dtypes
 from .v2.dtypes import dtype as tl_dtype
 from .v2.builder import OutTensor
 from .v2.annot import Tensor, SharedBuffer, LocalBuffer, FragmentBuffer
@@ -158,7 +159,7 @@ def alloc_barrier(arrive_count: int):
     Returns:
         T.Buffer: A TVM buffer object allocated as a barrier
     """
-    return T.alloc_buffer([arrive_count], "uint64", scope="shared.barrier")
+    return T.alloc_buffer([arrive_count], _dtypes.uint64, scope="shared.barrier")
 
 
 def alloc_tmem(shape, dtype):
@@ -231,7 +232,7 @@ DescKind = Literal["wgmma", "tcgen05_smem", "tcgen05_instr"]
 
 def alloc_descriptor(
     kind: DescKind = "wgmma",
-    dtype: str = "uint64",
+    dtype: str = _dtypes.uint64,
 ):
     """Allocate a descriptor buffer for WGMMA and TCGEN5.MMA.
 
@@ -248,28 +249,28 @@ def alloc_descriptor(
     return T.alloc_buffer([1], dtype, scope=scope)
 
 
-def alloc_wgmma_desc(dtype: str = "uint64"):
+def alloc_wgmma_desc(dtype: str = _dtypes.uint64):
     return alloc_descriptor("wgmma", dtype=dtype)
 
 
-def alloc_tcgen05_smem_desc(dtype: str = "uint64"):
+def alloc_tcgen05_smem_desc(dtype: str = _dtypes.uint64):
     return alloc_descriptor("tcgen05_smem", dtype=dtype)
 
 
-def alloc_tcgen05_instruction_desc(dtype: str = "uint32"):
+def alloc_tcgen05_instruction_desc(dtype: str = _dtypes.uint32):
     return alloc_descriptor("tcgen05_instr", dtype=dtype)
 
 
 # Alias: short name consistent with imports
-def alloc_tcgen05_instr_desc(dtype: str = "uint32"):
+def alloc_tcgen05_instr_desc(dtype: str = _dtypes.uint32):
     return alloc_tcgen05_instruction_desc(dtype)
 
 
 @overload
-def empty(shape: tuple[Unpack[_Shapes]], dtype: str = "float32") -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
+def empty(shape: tuple[Unpack[_Shapes]], dtype: str = _dtypes.float32) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
 
 
-def empty(*shape: Unpack[_Shapes], dtype: str = "float32") -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
+def empty(*shape: Unpack[_Shapes], dtype: str = _dtypes.float32) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
     if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
         return OutTensor(shape[0], dtype)
     elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):

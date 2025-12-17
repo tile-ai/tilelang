@@ -73,9 +73,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -245,7 +245,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         )
         # Allocate an instruction descriptor wrapper and initialize it
         a_dtype_abbrv = self.a_dtype_abbrv
-        mask_zero = T.Cast("int32", 0)
+        mask_zero = T.Cast(T.int32, 0)
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
         # TCGEN05 only has one warp group

@@ -3,7 +3,7 @@ import tilelang.language as T
 import torch
 
 
-def make_matmul_prim(M, N, K, block_M=128, block_N=128, block_K=32, dtype="float16", accum_dtype="float"):
+def make_matmul_prim(M, N, K, block_M=128, block_N=128, block_K=32, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((M, K), dtype),

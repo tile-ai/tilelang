@@ -21,12 +21,12 @@ def tl_fused_chunk_bwd_kernel(
     H,
     DK,
     DV,
-    dtype: str = "float16",
+    dtype: T.dtype = T.float16,
     scale: float = None,
 ) -> torch.Tensor:
     if scale is None:
         scale = DK**-0.5
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     chunk_size = 64
     BK = BV = 64  # Set to 128 can be faster, but has some numerical differences with FLA

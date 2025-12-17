@@ -9,14 +9,14 @@ import tilelang.testing
 @tilelang.jit
 def dynamic_smem_kernel():
     # Symbolic length to drive dynamic shared memory allocation
-    length = T.symbolic("len", dtype="int32")  # noqa: F821
+    length = T.symbolic("len", dtype=T.int32)  # noqa: F821
 
     @T.prim_func
-    def main(global_tensor: T.Tensor[(length,), "int32"]):  # noqa: F821
+    def main(global_tensor: T.Tensor[(length,), T.int32]):  # noqa: F821
         # Launch a simple kernel that copies from global memory into shared memory
         # using a dynamically-sized allocation. No writes back to global_tensor.
         with T.Kernel(1, threads=32) as _:
-            buffer_shared = T.alloc_shared((length,), dtype="int32")  # noqa: F821
+            buffer_shared = T.alloc_shared((length,), dtype=T.int32)  # noqa: F821
             T.copy(buffer_shared, global_tensor)
 
     return main

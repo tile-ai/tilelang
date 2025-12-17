@@ -6,29 +6,29 @@ import tilelang.language as T
 
 
 @tilelang.jit(out_idx=[2], pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
-def grouped_gemm_fwd(batch_sum, batch_count, K, N, block_M, block_N, block_K, num_stages=2, threads=128, dtype="float16"):
+def grouped_gemm_fwd(batch_sum, batch_count, K, N, block_M, block_N, block_K, num_stages=2, threads=128, dtype=T.float16):
     """
     args:
         a (torch.Tensor): Input tensor of shape (M, K).
         b (torch.Tensor): Input tensor of shape (G, K, N).
     """
-    accum_dtype = "float32"
+    accum_dtype = T.float32
 
     @T.prim_func
     def kernel(
         A: T.Tensor([batch_sum, K], dtype),  # type: ignore
         B: T.Tensor([batch_count, K, N], dtype),  # type: ignore
         C: T.Tensor([batch_sum, N], dtype),  # type: ignore
-        batch_sizes: T.Tensor([batch_count], "int32"),  # type: ignore
-        batch_offsets: T.Tensor([batch_count], "int32"),  # type: ignore
-        batch_padded_offsets: T.Tensor([batch_count], "int32"),  # type: ignore
+        batch_sizes: T.Tensor([batch_count], T.int32),  # type: ignore
+        batch_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
+        batch_padded_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(batch_sum, block_M) + batch_count, T.ceildiv(N, block_N), threads=threads) as (bx, by):
             A_shared = T.alloc_shared([block_M, block_K], dtype)
             B_shared = T.alloc_shared([block_K, block_N], dtype)
             C_local = T.alloc_fragment([block_M, block_N], accum_dtype)
-            cur_batch_idx = T.alloc_local([1], "int32")
-            cur_batch_size = T.alloc_local([1], "int32")
+            cur_batch_idx = T.alloc_local([1], T.int32)
+            cur_batch_size = T.alloc_local([1], T.int32)
 
             m_start_padded = bx * block_M
 
@@ -158,21 +158,21 @@ def construct_inputs(batch_sizes_list, K, M, trans_b, padding_M, device, dtype):
 
 
 @tilelang.jit(out_idx=[2], pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
-def grouped_gemm_bwd(batch_sum, batch_count, M, N, block_M, block_N, block_K, num_stages=2, threads=128, dtype="float16"):
+def grouped_gemm_bwd(batch_sum, batch_count, M, N, block_M, block_N, block_K, num_stages=2, threads=128, dtype=T.float16):
     """
     args:
         a (torch.Tensor): Input tensor of shape (M, K).
         b (torch.Tensor): Input tensor of shape (G, K, N).
     """
-    accum_dtype = "float32"
+    accum_dtype = T.float32
 
     @T.prim_func
     def kernel(
         A: T.Tensor([batch_sum, M], dtype),  # type: ignore
         B: T.Tensor([batch_sum, N], dtype),  # type: ignore
         C: T.Tensor([batch_count, M, N], dtype),  # type: ignore
-        batch_sizes: T.Tensor([batch_count], "int32"),  # type: ignore
-        batch_offsets: T.Tensor([batch_count], "int32"),  # type: ignore
+        batch_sizes: T.Tensor([batch_count], T.int32),  # type: ignore
+        batch_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), batch_count, threads=threads) as (bx, by, bz):
             A_shared = T.alloc_shared([block_K, block_M], dtype)

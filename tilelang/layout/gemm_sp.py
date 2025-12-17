@@ -31,10 +31,20 @@ def make_cutlass_metadata_layout_sm90(buffer: tvm.tir.Buffer, mma_dtype: str, bl
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
         warnings.warn(f"block_k {block_k} is too large, set to 128 for {mma_dtype}.", stacklevel=2)
-    if mma_dtype not in ["float16", "bfloat16", "float32", "int8", "float8_e4m3", "float8_e5m2"]:
+    if mma_dtype not in [
+        T.float16,
+        T.bfloat16,
+        T.float32,
+        T.int8,
+        T.float8_e4m3,
+        T.float8_e4m3fn,
+        T.float8_e4m3fnuz,
+        T.float8_e5m2,
+        T.float8_e5m2fnuz,
+    ]:
         raise NotImplementedError(f"Unsupported dtype: {mma_dtype}")
 
-    if buffer.dtype not in ["uint8", "int8"]:
+    if buffer.dtype not in [T.uint8, T.int8]:
         raise ValueError(f"metadata should be 8 bit, got {buffer.dtype}")
 
     bits_map = {
@@ -43,7 +53,10 @@ def make_cutlass_metadata_layout_sm90(buffer: tvm.tir.Buffer, mma_dtype: str, bl
         "float32": 32,
         "int8": 8,
         "float8_e4m3": 8,
+        "float8_e4m3fn": 8,
+        "float8_e4m3fnuz": 8,
         "float8_e5m2": 8,
+        "float8_e5m2fnuz": 8,
     }
 
     # ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_config.inl#L108-L117
@@ -112,10 +125,10 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tir.Buffer, mma_dtype: str):
         buffer: metadata buffer shape, for sm80 it should be a 16bit type
     """
 
-    if mma_dtype in ["float16", "bfloat16"] and buffer.dtype not in ["uint16", "int16"]:
+    if mma_dtype in [T.float16, T.bfloat16] and buffer.dtype not in [T.uint16, T.int16]:
         raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
 
-    if mma_dtype in ["float8_e4m3", "float8_e5m2", "int8", "uint8"] and buffer.dtype not in ["uint32", "int32"]:
+    if mma_dtype in ["float8_e4m3", "float8_e5m2", T.int8, T.uint8] and buffer.dtype not in [T.uint32, T.int32]:
         raise ValueError(f"metadata should be 32 bit, got {buffer.dtype}")
 
     m, k = buffer.shape
@@ -134,7 +147,7 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tir.Buffer, mma_dtype: str):
     return T.Layout(buffer.shape, ColumnMajorInterleaved)
 
 
-def make_cutlass_metadata_layout(buffer: tvm.tir.Buffer, mma_dtype: str = "float16", arch: str | None = None, **extra_args):
+def make_cutlass_metadata_layout(buffer: tvm.tir.Buffer, mma_dtype: str = T.float16, arch: str | None = None, **extra_args):
     if arch is None:
         arch = nvcc.get_target_compute_version()
 

@@ -40,9 +40,9 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
     shape = [batch, heads, seq_len, dim]
     block_mask_shape = [batch, heads, downsample_len, downsample_len]
 
-    dtype = "float16"
-    accum_dtype = "float"
-    block_mask_dtype = "bool"
+    dtype = T.float16
+    accum_dtype = T.float32
+    block_mask_dtype = T.bool
 
     def kernel_func(block_M, block_N, num_stages, threads):
         @T.macro

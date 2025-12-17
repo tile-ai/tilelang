@@ -87,8 +87,8 @@ def tl_matmul_streamk(
         C: T.Tensor,
         C_local: T.LocalBuffer,
     ):
-        start_iter = T.alloc_fragment((1,), "int32", "local")
-        end_iter = T.alloc_fragment((1,), "int32", "local")
+        start_iter = T.alloc_fragment((1,), T.int32, "local")
+        end_iter = T.alloc_fragment((1,), T.int32, "local")
 
         start_iter[0] = pid * streamk_full_tiles + T.min(pid, streamk_partial_tiles)
         last_iter = (pid + 1) * streamk_full_tiles + T.min(pid + 1, streamk_partial_tiles)
@@ -179,9 +179,9 @@ def main():
         BLOCK_SIZE_K,
         False,
         True,
-        "float16",
-        "float16",
-        "float32",
+        T.float16,
+        T.float16,
+        T.float32,
         2,
         64,
     )

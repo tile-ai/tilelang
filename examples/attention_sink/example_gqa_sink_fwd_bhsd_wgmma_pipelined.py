@@ -41,7 +41,7 @@ def flashattn(
     block_N=128,
     num_stages=2,
     threads=256,
-    dtype: str = "float16",
+    dtype: T.dtype = T.float16,
 ):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -53,7 +53,7 @@ def flashattn(
     head_kv = heads // groups
     q_shape = [batch, heads, seq_q, dim]
     kv_shape = [batch, head_kv, seq_kv, dim]
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     past_len = seq_kv - seq_q
     assert past_len >= 0, "seq_kv must be greater than or equal to seq_q"
@@ -263,10 +263,11 @@ def main(
     dim: int = 128,
     groups: int = 8,
     window_size: Optional[int] = None,
-    dtype: str = "float16",
+    dtype: T.dtype = T.float16,
     tune: bool = False,
 ):
-    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    dtype = T.dtype(dtype)
+    torch_dtype = dtype.as_torch()
     if window_size is not None:
         print("Using sliding window attention.")
         assert window_size <= seq_q

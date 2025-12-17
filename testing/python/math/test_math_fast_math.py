@@ -49,7 +49,7 @@ def check_non_fastmath_usage(source, mathop_name):
     check_fastmath_usage(source, mathop_name, expect_fastmath=False)
 
 
-def run_single_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype="float32"):
+def run_single_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
     """
     Test single-argument mathops.
     T.exp should generate expf (non-fastmath), T.__exp should generate __expf (fastmath)
@@ -85,7 +85,7 @@ def run_single_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=3
     print(f"✓ {mathop_name} compilation and execution test passed")
 
 
-def run_two_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype="float32"):
+def run_two_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
     """
     Test two-argument mathops to ensure they generate non-fastmath CUDA code.
     """
@@ -133,7 +133,7 @@ def run_two_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, 
     check_non_fastmath_usage(source_fastmath, mathop_name)
 
     # Test numerical correctness
-    torch_dtype = getattr(torch, dtype)
+    torch_dtype = dtype.as_torch()
     a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
     b = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
@@ -159,8 +159,8 @@ def run_abs_test():
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, N), "float32"),
-        B: T.Tensor((M, N), "float32"),
+        A: T.Tensor((M, N), T.float32),
+        B: T.Tensor((M, N), T.float32),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             for i, j in T.Parallel(block_M, block_N):
@@ -188,7 +188,7 @@ def run_abs_test():
     print("✓ abs numerical test passed")
 
 
-def run_fastmath_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype="float32"):
+def run_fastmath_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
     """
     Test fastmath mathops to ensure they generate fastmath CUDA code (with __ prefix).
     """
@@ -221,7 +221,7 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32,
     check_fastmath_usage(source_fastmath, cuda_mathop_name, expect_fastmath=True)
 
     # Test numerical correctness
-    torch_dtype = getattr(torch, dtype)
+    torch_dtype = dtype.as_torch()
     a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
     # Ensure positive values for functions that need them
@@ -273,7 +273,7 @@ def test_mathops_generate_no_fastmath():
     ]
 
     for name, func in single_arg_mathops:
-        run_single_arg_mathop_test(name, func, dtype="float32")
+        run_single_arg_mathop_test(name, func, dtype=T.float32)
         print(f"✓ {name} test passed")
 
 
@@ -287,7 +287,7 @@ def test_two_arg_mathops_fastmath():
     ]
 
     for name, func in two_arg_mathops:
-        run_two_arg_mathop_test(name, func, dtype="float32")
+        run_two_arg_mathop_test(name, func, dtype=T.float32)
 
 
 @tilelang.testing.requires_cuda
@@ -312,7 +312,7 @@ def test_fastmath_versions():
     ]
 
     for name, func in fastmath_mathops:
-        run_fastmath_mathop_test(name, func, dtype="float32")
+        run_fastmath_mathop_test(name, func, dtype=T.float32)
         print(f"✓ {name} test passed")
 
 

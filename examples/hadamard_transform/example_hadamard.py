@@ -17,7 +17,7 @@ def is_pow_of_2(n):
 def hadamard(b, n, dtype):
     assert is_pow_of_2(n), "n must be a power of 2"
     assert 2 <= n <= 32768, "n must be in [2, 32768]"
-    elem_size = {"float32": 4, "float16": 2, "bfloat16": 2}[dtype]
+    elem_size = {T.float32: 4, T.float16: 2, T.bfloat16: 2}[dtype]
 
     logN = int(math.log2(n))
     threads = [0, 1, 1, 1, 2, 4, 8, 16, 32, 32, 128, 256, 256, 256, 256, 256][logN]
@@ -138,7 +138,7 @@ def main():
 
     B, D = args.batch, args.dim
     x = torch.randn((B, D), device="cuda")
-    kernel = hadamard(B, D, "float32")
+    kernel = hadamard(B, D, T.float32)
     y = kernel(x)
     y_ref = ref_program(x)
     torch.testing.assert_close(y, y_ref, atol=1e-2, rtol=1e-2)

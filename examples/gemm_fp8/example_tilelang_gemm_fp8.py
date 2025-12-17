@@ -1,7 +1,6 @@
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.utils.tensor import map_torch_type
 
 
 def calc_diff(x, y):
@@ -12,7 +11,7 @@ def calc_diff(x, y):
 
 
 @tilelang.jit(out_idx=[-1])
-def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype=T.float32):
     @T.prim_func
     def gemm_fp8(
         A: T.Tensor((M, K), dtype),
@@ -36,7 +35,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 
 
 def test_gemm_fp8(M, N, K, dtype):
-    torch_dtype = map_torch_type(dtype)
+    torch_dtype = T.dtype(dtype).as_torch()
 
     kernel = matmul(M, N, K, 128, 128, 64, dtype)
 
@@ -56,8 +55,8 @@ def test_gemm_fp8(M, N, K, dtype):
 
 
 def main():
-    test_gemm_fp8(1024, 1024, 1024, "float8_e4m3")
-    test_gemm_fp8(1024, 1024, 1024, "float8_e5m2")
+    test_gemm_fp8(1024, 1024, 1024, T.float8_e4m3fn)
+    test_gemm_fp8(1024, 1024, 1024, T.float8_e5m2)
 
 
 if __name__ == "__main__":

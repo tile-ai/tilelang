@@ -60,9 +60,9 @@ class TensorCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -108,7 +108,7 @@ class TensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype="float16"):
+    def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         self.k_dim = 256 // a_dtype.bits
@@ -194,9 +194,9 @@ class TensorCoreIntrinEmitter:
 
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
         if DataType(self.accum_dtype).bits == 64:
-            index_map = IndexMap.from_func(mma_store_index_map_fp64, index_dtype="int32")
+            index_map = IndexMap.from_func(mma_store_index_map_fp64, index_dtype=T.int32)
         else:
-            index_map = IndexMap.from_func(mma_store_index_map, index_dtype="int32")
+            index_map = IndexMap.from_func(mma_store_index_map, index_dtype=T.int32)
         if not inverse:
             return index_map
         inverse_index_map = index_map.inverse([warp_size, local_size_c])
@@ -649,7 +649,7 @@ class TensorCoreIntrinEmitter:
             self.block_col_warps,
         )
 
-        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
         def forward_thread(i: int, j: int) -> int:
             """
@@ -806,9 +806,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -839,7 +839,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         )
         self._initialize_transform_kind(transform_kind_a, transform_kind_b)
 
-    def _initialize_k_dim(self, a_dtype="float16"):
+    def _initialize_k_dim(self, a_dtype=T.float16):
         self.k_dim = 256 // DataType(a_dtype).bits
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
@@ -1266,7 +1266,7 @@ class INT4TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitterWith
         a_dtype_abbrv = "int4"
         b_dtype_abbrv = "int4"
         accum_dtype = self.accum_dtype
-        accum_dtype_abbrv = "int32"
+        accum_dtype_abbrv = T.int32
         mma_prefix = "m16n8k32"
 
         @T.macro
