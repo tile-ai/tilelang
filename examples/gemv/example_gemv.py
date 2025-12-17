@@ -17,8 +17,8 @@ def naive_gemv(
     K: int,
     BLOCK_N: int,
     BLOCK_K: int,
-    dtype: str = T.float16,
-    accum_dtype: str = T.float,
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
     @T.prim_func
     def main(
@@ -49,8 +49,8 @@ def naive_splitk_gemv(
     K: int,
     BLOCK_N: int,
     BLOCK_K: int,
-    dtype: str = T.float16,
-    accum_dtype: str = T.float,
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
     @T.prim_func
     def main(
@@ -85,8 +85,8 @@ def splitk_gemv(
     BLOCK_N: int,
     BLOCK_K: int,
     reduce_threads: int,
-    dtype: str = T.float16,
-    accum_dtype: str = T.float,
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
     TILE_K = T.ceildiv(BLOCK_K, reduce_threads)
 
@@ -124,8 +124,8 @@ def splitk_gemv_vectorized(
     K: int,
     BLOCK_N: int,
     reduce_threads: int,
-    dtype: str = T.float16,
-    accum_dtype: str = T.float,
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
     MAX_TRANSACTION_SIZE_IN_BITS = 128
     TILE_K = MAX_TRANSACTION_SIZE_IN_BITS // DataType(dtype).bits
@@ -165,8 +165,8 @@ def splitk_gemv_vectorized_tvm(
     K: int,
     BLOCK_N: int,
     reduce_threads: int,
-    dtype: str = T.float16,
-    accum_dtype: str = T.float,
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
     MAX_TRANSACTION_SIZE_IN_BITS = 128
     TILE_K = MAX_TRANSACTION_SIZE_IN_BITS // DataType(dtype).bits
@@ -233,7 +233,7 @@ def get_block_template_configs():
     },
     out_idx=[2],
 )
-def gemv_alloc_reducer(M, N, block_M=128, block_N=128, num_stages=2, threads=256, dtype: str = T.float16, accum_dtype: str = T.float):
+def gemv_alloc_reducer(M, N, block_M=128, block_N=128, num_stages=2, threads=256, dtype: T.dtype = T.float16, accum_dtype: T.dtype = T.float):
     @T.prim_func
     def main(a: T.Tensor((M, N), dtype), x: T.Tensor(N, dtype), o: T.Tensor(M, dtype)):  # type: ignore
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as i0_m:

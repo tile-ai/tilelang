@@ -37,7 +37,7 @@ def flashattn_fwd(
     block_N=64,
     num_stages=1,
     threads=128,
-    dtype: str = T.float16,
+    dtype: T.dtype = T.float16,
 ):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -140,7 +140,7 @@ def flashattn_fwd(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
+def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 32
@@ -179,7 +179,7 @@ def make_dq_layout(dQ):
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
+def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 64
@@ -309,7 +309,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale
 
 
 @tilelang.jit(out_idx=-1)
-def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: str = T.float16):
+def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len]
 

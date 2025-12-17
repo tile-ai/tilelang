@@ -41,7 +41,7 @@ def flashattn(
     block_N=128,
     num_stages=2,
     threads=256,
-    dtype: str = T.float16,
+    dtype: T.dtype = T.float16,
 ):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -263,7 +263,7 @@ def main(
     dim: int = 128,
     groups: int = 8,
     window_size: Optional[int] = None,
-    dtype: str = T.float16,
+    dtype: T.dtype = T.float16,
     tune: bool = False,
 ):
     dtype = T.dtype(dtype)

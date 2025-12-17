@@ -36,7 +36,7 @@ def flashattn_fwd(
     block_N=64,
     num_stages=1,
     threads=128,
-    dtype: str = T.float16,
+    dtype: T.dtype = T.float16,
 ):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -137,7 +137,7 @@ def flashattn_fwd(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
+def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 32
@@ -176,7 +176,7 @@ def make_dq_layout(dQ):
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = T.float16):
+def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 64
@@ -208,7 +208,7 @@ def flashattn_bwd(
     dim,
     window_size=None,  # None for full attention
     sm_scale=None,
-    dtype: str = T.float16,
+    dtype: T.dtype = T.float16,
 ):
     block_M, block_N, num_stages, threads = get_bwd_configs()
 
@@ -315,7 +315,7 @@ def flashattn_bwd(
 
 
 @tilelang.jit(out_idx=-1)
-def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: str = T.float16):
+def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len]
 
@@ -433,7 +433,7 @@ def ref_program(
     return output.transpose(1, 2).contiguous()
 
 
-def main(BATCH: int = 1, H: int = 1, N_CTX: int = 512, D_HEAD: int = 128, window_size: Optional[int] = None, dtype: str = T.float16):
+def main(BATCH: int = 1, H: int = 1, N_CTX: int = 512, D_HEAD: int = 128, window_size: Optional[int] = None, dtype: T.dtype = T.float16):
     dtype = T.dtype(dtype)
     torch_dtype = dtype.as_torch()
     if window_size is not None:

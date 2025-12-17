@@ -12,7 +12,7 @@ from tilelang.intrinsics.mfma_layout import (
 
 
 def make_mfma_load_base_layout(
-    dtype: str = T.float16, matrix: Literal["A", "B"] = "A", k_dim: int = 16, transposed: bool = False
+    dtype: T.dtype = T.float16, matrix: Literal["A", "B"] = "A", k_dim: int = 16, transposed: bool = False
 ) -> T.Fragment:
     """
     Create a layout function for storing MFMA results into a fragment buffer.

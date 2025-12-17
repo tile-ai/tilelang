@@ -5,7 +5,7 @@ from tilelang.carver.arch import auto_infer_current_arch
 from typing import List
 
 
-def run_general_reduction_recommend_hints(structure: str = "SSR", shape: List[int] = None, dtype: str = T.float16, topk: int = 20):
+def run_general_reduction_recommend_hints(structure: str = "SSR", shape: List[int] = None, dtype: T.dtype = T.float16, topk: int = 20):
     arch = auto_infer_current_arch()
     carve_template = carver.GeneralReductionTemplate(
         structure=structure,
@@ -26,7 +26,7 @@ def test_general_reduction_recommend_hints():
     run_general_reduction_recommend_hints("SRS", [1024, 1024, 1024], T.float16)
 
 
-def run_elementwise_recommend_hints(shape: List[int] = None, dtype: str = T.float16, topk: int = 20):
+def run_elementwise_recommend_hints(shape: List[int] = None, dtype: T.dtype = T.float16, topk: int = 20):
     arch = auto_infer_current_arch()
     carve_template = carver.ElementwiseTemplate(
         shape=shape,
@@ -50,9 +50,9 @@ def run_matmul_recommend_hints(
     M: int = 1024,
     N: int = 1024,
     K: int = 1024,
-    in_dtype: str = T.float16,
-    out_dtype: str = T.float16,
-    accum_dtype: str = T.float16,
+    in_dtype: T.dtype = T.float16,
+    out_dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float16,
 ):
     arch = auto_infer_current_arch()
     carve_template = carver.MatmulTemplate(
@@ -78,7 +78,7 @@ def test_matmul_recommend_hints():
 
 
 def run_gemv_recommend_hints(
-    N: int = 1024, K: int = 1024, in_dtype: str = T.float16, out_dtype: str = T.float16, accum_dtype: str = T.float16
+    N: int = 1024, K: int = 1024, in_dtype: T.dtype = T.float16, out_dtype: T.dtype = T.float16, accum_dtype: T.dtype = T.float16
 ):
     arch = auto_infer_current_arch()
     carve_template = carver.GEMVTemplate(
@@ -108,9 +108,9 @@ def run_fmha_recommend_hints(
     seq_length: int = 512,
     seq_kv_length: int = 512,
     head_dim: int = 128,
-    in_dtype: str = T.float16,
-    accum_dtype: str = T.float16,
-    out_dtype: str = T.float16,
+    in_dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float16,
+    out_dtype: T.dtype = T.float16,
 ):
     arch = auto_infer_current_arch()
     carve_template = carver.FlashAttentionTemplate(

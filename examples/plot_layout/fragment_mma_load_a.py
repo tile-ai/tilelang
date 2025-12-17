@@ -5,7 +5,7 @@ from tvm.tir import IndexMap
 from tilelang.intrinsics.utils import get_mma_micro_size
 
 
-def make_mma_load_base_layout(dtype: str = T.float16, matrix: Literal["A", "B"] = "A", transposed: bool = False) -> T.Fragment:
+def make_mma_load_base_layout(dtype: T.dtype = T.float16, matrix: Literal["A", "B"] = "A", transposed: bool = False) -> T.Fragment:
     """
     Create a layout function for storing MMA results into a fragment buffer.
     This layout is used in conjunction with `inverse_mma_store_layout` to

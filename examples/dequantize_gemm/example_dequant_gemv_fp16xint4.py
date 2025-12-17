@@ -17,7 +17,7 @@ def dequantize_gemv(
     out_dtype: str,
     accum_dtype: str,
     num_bits: int = 4,
-    storage_dtype: str = T.int8,
+    storage_dtype: T.dtype = T.int8,
     source_format: str = "uint",
     n_partition: int = 4,
     reduce_thread: int = 32,
