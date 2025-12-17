@@ -81,6 +81,8 @@ in the main directory. This installation is removable by:
 python3 -m pip uninstall tilelang
 ```
 
+We also recommend installing TileLang in a more manual way for better control over the build process, by compiling the C++ extensions first and set the `PYTHONPATH`. See [Working from Source via `PYTHONPATH`](https://tilelang.com/get_started/Installation.html#working-from-source-via-pythonpath) for detailed instructions.
+
 ## Lint Check
 
 To check the linting, run:

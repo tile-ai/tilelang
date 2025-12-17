@@ -34,13 +34,24 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "common/assume.h"
 #include "tir/analysis/var_use_def_analysis.h"
+#include "tvm/node/cast.h"
+#include "tvm/runtime/logging.h"
+#include "tvm/tir/stmt.h"
 
 namespace tvm {
 namespace tl {
 using namespace ffi;
 namespace tir = tvm::tir;
 
+// This pass traverses the AST, split the target function into host part and
+// device part and copies all assume attribute statements to the device side.
+
+// 1. Traverse AST and collect all assume statements into host_assumes_.
+// 2. Until the first AttrStmtNode with tvm::attr::kTarget.
+// 3. Call SplitDeviceFunc, which will create a new device function and replace
+//    the original body with a call to that function.
 class HostDeviceSplitter : public tir::StmtMutator {
 public:
   explicit HostDeviceSplitter(IRModule *device_mod,
@@ -58,7 +69,26 @@ public:
       found_device_region_ = true;
       auto device_target = op->node.as<tvm::Target>().value().WithoutHost();
       return SplitDeviceFunc(op->body, device_target);
+    } else if (op->attr_key == tir::attr::tilelang_assume) {
+      // NOTE(chaofan): the assumes collected here must be in host-side.
+      //    This is because when the collector reaches the split region,
+      //    it will start to split and return. For safety, we add a check here.
+      ICHECK(!found_device_region_)
+          << "Assumes collection should not be in device region.";
+      // We first push back the outside assume, then visit the child.
+      // So when moving assumes to device side, we need to do the building
+      // process in a reverse order.
+      host_assumes_.push_back(op);
     }
+    return tir::StmtMutator::VisitStmt_(op);
+  }
+
+  tir::Stmt VisitStmt_(const tir::EvaluateNode *op) final {
+    auto stmt = GetRef<tir::Stmt>(op);
+    // There should be no assume in evaluate form after InjectAssumes.
+    ICHECK(!IsAssumeInEvaluateForm(stmt))
+        << "Unexpected assume in evaluate form. Please run InjectAssumes pass "
+           "first.";
     return tir::StmtMutator::VisitStmt_(op);
   }
 
@@ -71,6 +101,14 @@ public:
 private:
   bool found_device_region_{false};
   Array<tir::Var> non_restrict_params_;
+
+  Stmt wrapBodyWithHostSideAssumes(Stmt body) {
+    for (auto it = host_assumes_.rbegin(); it != host_assumes_.rend(); ++it) {
+      body =
+          AttrStmt((*it)->node, tir::attr::tilelang_assume, (*it)->value, body);
+    }
+    return body;
+  }
 
   tir::Stmt SplitDeviceFunc(tir::Stmt body, tvm::Target device_target) {
 
@@ -113,9 +151,14 @@ private:
       kernel_ret_type = VoidType();
     }
 
+    // Declare necessary buffers for the device side.
     for (tir::Buffer buf : buffers_to_declare) {
       body = tir::DeclBuffer(buf, std::move(body));
     }
+
+    // Copy assumes from host-side to device-side.
+    body = wrapBodyWithHostSideAssumes(body);
+
     tir::PrimFunc device_func(params, body, kernel_ret_type);
     device_func =
         WithAttrs(std::move(device_func),
@@ -149,6 +192,8 @@ private:
   IRModule *device_mod_;
   // Generate new GlobalVar for the kernel
   std::function<GlobalVar()> var_supply_;
+  // Collect assumes in host side
+  Array<const tir::AttrStmtNode *> host_assumes_;
 };
 
 tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule *device_mod,

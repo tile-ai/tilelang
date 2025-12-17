@@ -10,6 +10,7 @@ scikit-build-core
 setuptools>=61
 torch
 wheel
+z3-solver>=4.13.0
 
 auditwheel; platform_system == 'Linux'
 patchelf; platform_system == 'Linux'

@@ -69,9 +69,9 @@ pip install -e . -v
 
 (working-from-source-via-pythonpath)=
 
-### Working from Source via `PYTHONPATH`
+### Working from Source via `PYTHONPATH` (Recommended for Developers)
 
-If you prefer to work directly from the source tree via `PYTHONPATH`, make sure the native extension is built first:
+If you prefer to work directly from the source tree via `PYTHONPATH` instead of using pip, make sure the native extension (`libtilelang.so`) is built first:
 
 ```bash
 mkdir -p build
@@ -79,6 +79,14 @@ cd build
 cmake .. -DUSE_CUDA=ON
 make -j
 ```
+
+We also recommend using `ninja` to speed up compilation:
+
+```bash
+cmake .. -DUSE_CUDA=ON -G Ninja
+ninja
+```
+
 Then add the repository root to `PYTHONPATH` before importing `tilelang`, for example:
 
 ```bash
@@ -229,8 +237,17 @@ Developers who needs to recompile frequently could use:
 
 ```bash
 pip install -r requirements-dev.txt
+
+# For first time compilation
 pip install -e . -v --no-build-isolation
 
+# Or manually compile with cmake/ninja. Remember to set PYTHONPATH properly.
+mkdir build
+cd build
+cmake .. -G Ninja
+ninja
+
+# Rebuild when you change the cpp code
 cd build; ninja
 ```
 

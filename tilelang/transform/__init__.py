@@ -92,7 +92,8 @@ def LegalizeNegativeIndex():
 
 
 def InjectAssumes():
-    """Inject Assumes
+    """Inject Assumes for natural shape boundary conditions. And convert Assumes in Evaluate(Call(...)) form
+    (tvm builtin assume call) to AttrNode form.
 
     Returns:
     -------

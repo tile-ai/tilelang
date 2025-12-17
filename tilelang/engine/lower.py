@@ -76,21 +76,37 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
     # Read pass-config keys (string-valued) like in jit.adapter.libgen.compile_lib
     cfg = pass_config or {}
-    if cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH.value, False):
+    if cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH, False):
         deprecated_warning("TL_DISABLE_FAST_MATH", "TL_ENABLE_FAST_MATH", "0.1.7")
-        disable_fast_math = bool(cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH.value, True))
+        disable_fast_math = bool(cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH, True))
         enable_fast_math = not disable_fast_math
     else:
-        enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH.value, False))
+        enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
 
-    ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL.value, None)
-    verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT.value, False))
+    ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+    verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))
 
     options = [
         "-std=c++17",
         "-I" + tl_template_path,
         "-I" + cutlass_path,
     ]
+    # Merge extra device compiler flags from pass config, if provided
+    extra_flags = cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS, None)
+    if extra_flags:
+        import shlex
+
+        if isinstance(extra_flags, str):
+            tokens = shlex.split(extra_flags)
+        else:
+            tokens = []
+            for flag in extra_flags:
+                if isinstance(flag, str):
+                    tokens.extend(shlex.split(flag))
+                else:
+                    tokens.append(str(flag))
+        options += tokens
+
     if enable_fast_math:
         options.append("--use_fast_math")
     if ptxas_usage_level is not None:

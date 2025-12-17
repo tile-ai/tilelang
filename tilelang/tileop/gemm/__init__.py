@@ -6,7 +6,6 @@ from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
-from tilelang.ir import GemmWarpPolicy as GemmWarpPolicy
 from .gemm_mma import GemmMMA
 from .gemm_mma_sm70 import GemmMMASm70
 from .gemm_wgmma import GemmWGMMA

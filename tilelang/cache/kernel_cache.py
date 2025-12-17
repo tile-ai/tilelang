@@ -16,6 +16,7 @@ from tvm.target import Target
 from tvm.tir import PrimFunc
 from tvm.runtime import Executable
 from tilelang.engine.param import KernelParam
+from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang import __version__
@@ -179,13 +180,16 @@ class KernelCache:
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:
+                # Include kernel name for easier debugging when hitting memory cache
+                kernel_name = get_prim_func_name(func, "<unknown>")
                 self.logger.warning(
-                    "Found kernel in memory cache. For better performance, consider using `@tilelang.jit` instead of direct kernel caching."
+                    "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.jit` instead of direct kernel caching.",
+                    kernel_name,
                 )
                 return self._memory_cache[key]
 
             if verbose:
-                self.logger.debug(f"Checking disk cache for kernel {func.attrs['global_symbol']}")
+                self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
 
             # Then check disk cache
             kernel = self._load_kernel_from_disk(
@@ -193,13 +197,13 @@ class KernelCache:
             )
             if kernel is not None:
                 if verbose:
-                    self.logger.debug(f"Found kernel in disk cache for {func.attrs['global_symbol']}")
+                    self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
                 # Populate memory cache with disk result
                 self._memory_cache[key] = kernel
                 return kernel
 
         if verbose:
-            self.logger.debug(f"No cached kernel for {func.attrs['global_symbol']}")
+            self.logger.debug(f"No cached kernel for {get_prim_func_name(func, '<unknown>')}")
         # Compile kernel if cache miss; leave critical section
         kernel = JITKernel(
             func,
