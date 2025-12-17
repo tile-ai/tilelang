@@ -95,7 +95,7 @@ def test_bind():
 
 def test_divmod():
     analyzer = Analyzer()
-    a = T.Var('a', T.int32)
+    a = T.Var("a", T.int32)
 
     assert not analyzer.can_prove(a % 2 % -2 - a % 2 == 0)
     assert analyzer.can_prove(a % -2 % 2 - a % 2 == 0)
