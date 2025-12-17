@@ -9,6 +9,7 @@ from tilelang import env
 
 # Include version information to ensure different versions use separate caches
 from tilelang import __version__
+
 # Define paths
 compress_util = os.path.join(env.TILELANG_TEMPLATE_PATH, "tl_templates/cuda/compress_sm90.cu")
 # Cache directory for compiled extensions
