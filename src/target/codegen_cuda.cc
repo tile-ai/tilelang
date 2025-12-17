@@ -297,6 +297,10 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <cooperative_groups.h>\n";
   }
 
+  if (need_curand_kernel_h_) {
+    decl_stream << "#include <curand_kernel.h>\n";
+  }
+
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
   if (enable_sparse_gemm_) {
     decl_stream << "#include <tl_templates/cuda/gemm_sp.h>\n";
@@ -2740,6 +2744,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::rng_init())) {
+    this->need_curand_kernel_h_ = true;
+    os << "curandStatePhilox4_32_10_t __philox_state; ";
+    os << "curand_init" << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2])
+       << ", &__philox_state)";
+  } else if (op->op.same_as(tl::rng_rand())) {
+    this->need_curand_kernel_h_ = true;
+    os << "curand" << "(&__philox_state)";
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
     os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_max())) {

@@ -110,6 +110,10 @@ from .annotations import (  # noqa: F401
     annotate_l2_hit_ratio,
 )
 
+from .random import (
+    rng_init,  # noqa: F401
+    rng_rand,  # noqa: F401
+)
 
 def import_source(source: str | None = None):
     # source is the source code to be imported
