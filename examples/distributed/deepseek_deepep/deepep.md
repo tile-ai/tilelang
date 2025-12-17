@@ -7,7 +7,24 @@ To install and compare with the original DeepEP implementation, please refer to 
 - [] Internode Normal Mode
 - [] Low-latency Mode
 
-# DeepEP Intra-node
+# Benchmark Results
+
+The table below shows a latency and bandwidth comparison for DeepEP and TileScale on the same NVLink hardware (as reported by the example):
+
+*Measured on: NVL8, H100, 10 channels, 8 ranks, 32 experts, 7168 hidden, 4096 tokens.*
+
+## Normal Mode Dispatch 
+
+| Method      | Dispatch Time (ms) | Bandwidth (GB/s) |
+|-------------|--------------------|------------------|
+| DeepEP      | 1.0045             | 328.97           |
+| TileScale   | 1.0720             | 308.25           |
+
+## Normal Mode Combine
+
+> Coming soon...
+
+# Intra-node Introduction
 
 This example implements DeepEP’s intra‑node (NVLink) dispatch/combine using TileScale kernels.
 
