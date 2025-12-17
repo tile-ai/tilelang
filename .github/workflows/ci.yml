@@ -288,6 +288,26 @@ jobs:
           echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
           uv cache clean
 
+      - name: Enable core dump generation (Linux / GitHub-hosted runners)
+        if: ${{ runner.os == 'Linux' && !startsWith(matrix.runner.name, 'self-hosted') }}
+        run: |
+          sudo sysctl -w kernel.core_pattern="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
+          sudo sysctl -w kernel.core_uses_pid=0
+          sudo sysctl -w fs.suid_dumpable=1
+          sysctl kernel.core_pattern kernel.core_uses_pid fs.suid_dumpable
+
+      - name: Enable core dump generation (macOS / GitHub-hosted runners)
+        if: ${{ runner.os == 'macOS' && !startsWith(matrix.runner.name, 'self-hosted') }}
+        run: |
+          sudo sysctl -w kern.corefile="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
+          sudo sysctl -w kern.coredump=1
+          sudo sysctl -w kern.sugid_coredump=1
+          sysctl kern.corefile kern.coredump kern.sugid_coredump
+
+      - name: Install project (wheel form)
+        run: |
+          uv pip install -v .
+
       - name: Run clang-tidy
         id: clang-tidy
         if: runner.os == 'Linux'
@@ -327,26 +347,6 @@ jobs:
             git diff --color=always || true
             exit "${rc}"
           fi
-
-      - name: Enable core dump generation (Linux / GitHub-hosted runners)
-        if: ${{ runner.os == 'Linux' && !startsWith(matrix.runner.name, 'self-hosted') }}
-        run: |
-          sudo sysctl -w kernel.core_pattern="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
-          sudo sysctl -w kernel.core_uses_pid=0
-          sudo sysctl -w fs.suid_dumpable=1
-          sysctl kernel.core_pattern kernel.core_uses_pid fs.suid_dumpable
-
-      - name: Enable core dump generation (macOS / GitHub-hosted runners)
-        if: ${{ runner.os == 'macOS' && !startsWith(matrix.runner.name, 'self-hosted') }}
-        run: |
-          sudo sysctl -w kern.corefile="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
-          sudo sysctl -w kern.coredump=1
-          sudo sysctl -w kern.sugid_coredump=1
-          sysctl kern.corefile kern.coredump kern.sugid_coredump
-
-      - name: Install project (wheel form)
-        run: |
-          uv pip install -v .
 
       - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         if: contains(matrix.runner.toolkit, 'CUDA')
