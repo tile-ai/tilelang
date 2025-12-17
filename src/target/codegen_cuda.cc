@@ -131,8 +131,7 @@ static std::string GetTileLangFP8Type(DataType type) {
   if (type.is_float8_e4m3fn() || type.is_float8_e4m3fnuz() ||
       type.is_float8_e4m3()) {
     stream << "fp8_e4" << vec << "_t";
-  } else if (type.is_float8_e5m2() || type.is_float8_e5m2fnuz() ||
-             type.is_float8_e5m2()) {
+  } else if (type.is_float8_e5m2() || type.is_float8_e5m2fnuz()) {
     stream << "fp8_e5" << vec << "_t";
   } else if (type.is_float8_e8m0fnu()) {
     stream << "fp8_e8" << vec << "_t";
