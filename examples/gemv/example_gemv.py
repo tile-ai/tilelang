@@ -233,7 +233,9 @@ def get_block_template_configs():
     },
     out_idx=[2],
 )
-def gemv_alloc_reducer(M, N, block_M=128, block_N=128, num_stages=2, threads=256, dtype: T.dtype = T.float16, accum_dtype: T.dtype = T.float):
+def gemv_alloc_reducer(
+    M, N, block_M=128, block_N=128, num_stages=2, threads=256, dtype: T.dtype = T.float16, accum_dtype: T.dtype = T.float
+):
     @T.prim_func
     def main(a: T.Tensor((M, N), dtype), x: T.Tensor(N, dtype), o: T.Tensor(M, dtype)):  # type: ignore
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as i0_m:
