@@ -381,10 +381,6 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // arbitrary carrier to ensure the symbol is bound.
   std::unordered_set<const VarNode *> used_param_buffers =
       detector.used_params_by_data;
-
-  // Track shape variables that are shared across multiple nullable buffers
-  std::unordered_set<const VarNode *> shared_shape_vars;
-
   for (const VarNode *sym : detector.used_shape_vars) {
     auto it = shape_var2params.find(sym);
     if (it == shape_var2params.end())
@@ -398,17 +394,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       }
     }
     if (!has_used_carrier && !carriers.empty()) {
-      // If there's only one carrier, it must be non-NULL to provide the shape.
-      // If there are multiple carriers, the shape can be extracted from any of
-      // them, so don't force any specific one to be non-NULL (nullable buffer
-      // support).
-      if (carriers.size() == 1) {
-        used_param_buffers.insert(carriers.front());
-      } else {
-        // Multiple carriers: mark this shape variable as shared
-        // The deferred binding logic will generate cascading if_then_else
-        shared_shape_vars.insert(sym);
-      }
+      // Choose the first carrier to anchor this symbol.
+      used_param_buffers.insert(carriers.front());
     }
   }
 
@@ -521,9 +508,6 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     binder.Bind(param, expr, name_hint + "." + param->name_hint, true);
   }
 
-  // Tell ArgBinder about shared shape variables before binding buffers
-  binder.SetSharedShapeVars(shared_shape_vars);
-
   for (const auto &[var, buffer] : buffer_def) {
     // Prefer buffer data var name in diagnostics to avoid exposing low-level
     // handle vars
@@ -532,9 +516,6 @@ PrimFunc MakePackedAPI(PrimFunc func) {
                         used_param_buffers.count(var.get()));
     arg_buffer_declarations.push_back(DeclBuffer(buffer, nop));
   }
-
-  // Finalize deferred shape variable bindings (cascading + constraints)
-  binder.FinalizeDeferredBindings();
   // reset global symbol to attach prefix
   func = WithAttrs(
       std::move(func),

@@ -158,36 +158,7 @@ public:
                     const std::string &arg_name, bool with_lets,
                     const PrimExpr &nullable_guard);
 
-  /*!
-   * \brief Set shared shape variables that need special handling
-   * \param shared_vars Set of shape variables shared across multiple nullable
-   * buffers
-   */
-  void
-  SetSharedShapeVars(const std::unordered_set<const VarNode *> &shared_vars);
-
-  /*!
-   * \brief Finalize deferred shape variable bindings
-   *
-   * For shared shape variables, generates:
-   * 1. Cascading if_then_else to extract from first non-NULL buffer
-   * 2. Runtime assertion that at least one buffer is non-NULL
-   */
-  void FinalizeDeferredBindings();
-
 private:
-  // Information about a deferred shape binding
-  struct DeferredShapeBinding {
-    Var temp_var;    // Temporary variable holding shape value from this buffer
-    Var is_null_var; // The is_null variable for this buffer
-  };
-
-  // Map from shape variable to its deferred bindings
-  std::unordered_map<const VarNode *, std::vector<DeferredShapeBinding>>
-      deferred_shape_bindings_;
-
-  // Set of shape variables that are shared across multiple buffers
-  std::unordered_set<const VarNode *> shared_shape_vars_;
   std::vector<Var> getUndefVars(const std::vector<PrimExpr> &arg);
   // Internal bind function
   bool Bind_(const PrimExpr &arg, const PrimExpr &value,
