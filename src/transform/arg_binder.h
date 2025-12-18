@@ -95,17 +95,21 @@ public:
    */
   void BindBuffer(const Buffer &arg, const Buffer &value,
                   const std::string &arg_name, bool fuzzy_match);
+
   /*!
    * \brief Bind symbolic buffer to a DLTensor handle.
    * \param buffer The argument buffer to be binded.
-   * \param device_type The device id to be binded.
+   * \param device_type The device type to be binded.
    * \param device_id The device id to be binded.
-   * \param handle The DLTensor handle.
-   * \param arg_name argument name.
+   * \param buffer_def The buffer definition.
+   * \param func_name The function name.
+   * \param used_param_buffers The used param buffers.
    */
-  void BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
-                    const PrimExpr &device_id, const Var &handle,
-                    const std::string &arg_name, bool is_used);
+  void
+  BindDLTensors(const std::vector<std::pair<Var, Buffer>> &buffer_def,
+                const PrimExpr &device_type, const PrimExpr &device_id,
+                const std::string &func_name,
+                const std::unordered_set<const VarNode *> &used_param_buffers);
 
   /*! \return The defs generated in binding. */
   const std::vector<Var> &defs() const { return defs_; }
