@@ -458,6 +458,17 @@ TVM_DLL const Op &loop_break();
 TVM_DLL const Op &tvm_mfma();
 
 /*!
+ * \brief tvm intrinsic for amd matrix core mmac instructions.
+ *
+ *  void tvm_mfma(StringImm shape, StringImm A_layout, StringImm B_layout,
+ *               StringImm A_dtype, StringImm B_dtype, StringImm C_dtype,
+ *               Var multiplicand_a, Expr a_index,
+ *               Var multiplicand_b, Expr b_index,
+ *               Var accumulator, Expr c_index);
+ */
+TVM_DLL const Op &tvm_mmac();
+
+/*!
  * \brief tvm intrinsic for storing the result of AMD MFMA into a destination
  * pointer.
  *

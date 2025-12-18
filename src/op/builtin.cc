@@ -286,6 +286,9 @@ TIR_DEFINE_TL_BUILTIN(tl_gemm_sp)
 TIR_DEFINE_TL_BUILTIN(tvm_mfma).set_num_inputs(12).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(tvm_mmac).set_num_inputs(12).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(tvm_mfma_store)
     .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
