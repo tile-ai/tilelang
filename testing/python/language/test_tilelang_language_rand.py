@@ -20,6 +20,7 @@ def tilelang_rand_1d(M=1024, seed=42):
             T.rng_init(seed)
             for i in T.Parallel(blk_M):
                 A[bx * blk_M + i] = T.rng_rand()
+                # match a particular RNG sequence of triton
                 T.rng_rand()
                 T.rng_rand()
                 T.rng_rand()
