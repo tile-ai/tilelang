@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""GEMM (General Matrix Multiplication) operators exposed on the TileLang language surface."""
 
 from __future__ import annotations
 from tilelang.tileop.base import GemmWarpPolicy

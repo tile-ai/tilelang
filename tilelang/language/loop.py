@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""Loop related language interfaces in TileLang."""
 
 from __future__ import annotations
 from typing import Any

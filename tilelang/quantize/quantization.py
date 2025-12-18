@@ -16,8 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
+
 # The code below is mostly copied from mlc.ai quantization.py in mlc-llm.
 # pylint: disable=invalid-name,missing-function-docstring,unused-variable
 """TIR computation utilities for quantization."""

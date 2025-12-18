@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""Copy operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
 from typing import Literal
