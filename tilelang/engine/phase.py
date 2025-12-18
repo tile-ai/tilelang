@@ -142,119 +142,43 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     Returns:
         IRModule: The transformed module, ready for target-specific optimization passes.
     """
-
-    verbose = False
-    if verbose:
-        print("### Initial IR")
-        print(mod)
-
     mod = tir.transform.BindTarget(target)(mod)
-
-    if verbose:
-        print("### After BindTarget")
-        print(mod)
 
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
     # Add wrapper for single buf store
-
-    if verbose:
-        print("### After LetInline")
-        print(mod)
-
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
-
-    if verbose:
-        print("### After AddWrapperForSingleBufStore")
-        print(mod)
-
     # Normalize negative indices to canonical non-negative form
     mod = tilelang.transform.LegalizeNegativeIndex()(mod)
-
-    if verbose:
-        print("### After LegalizeNegativeIndex")
-        print(mod)
-
     # Inject assumes to speedup tvm prover
     mod = tilelang.transform.InjectAssumes()(mod)
-
-    if verbose:
-        print("### After InjectAssumes")
-        print(mod)
-
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-
-    if verbose:
-        print("### After Simplify")
-        print(mod)
-
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
-
-    if verbose:
-        print("### After LayoutReducer")
-        print(mod)
-
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
-
-    if verbose:
-        print("### After LayoutInference")
-        print(mod)
-
     # Visualize the layout
     LayoutVisual(mod)
-
-    if verbose:
-        print("### After LayoutVisual")
-        print(mod)
-
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
-
-    if verbose:
-        print("### After LowerTileOp")
-        print(mod)
-
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)
-
-    if verbose:
-        print("### After LowerL2Persistent")
-        print(mod)
-
     # Legalize vectorized loops to ensure they are valid
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
-
-    if verbose:
-        print("### After LegalizeVectorizedLoop")
-        print(mod)
-
     # Add safety checks for memory accesses
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
-
-    if verbose:
-        print("### After LegalizeSafeMemoryAccess")
-        print(mod)
-
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     # use an enhanced pass to simplify the dynamic symbolics
     # TODO(lei): return to tir pass when kSymbolicBound simplification
     # is merged into tvm.
     mod = tilelang.transform.Simplify()(mod)
-
-    if verbose:
-        print("### After Simplify")
-        print(mod)
-
     return mod
 
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
-    verbose = False
     pass_ctx = tilelang.transform.get_pass_context()
     # Lower the barrier.arrive into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)
@@ -262,8 +186,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerSharedTmem()(mod)
     # which may be introduced by the LegalizeSafeMemoryAccess
     if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
-        if verbose:
-            print("Contains TMA & Warp specialization")
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
@@ -280,21 +202,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             mod = tilelang.transform.RewriteWgmmaSync()(mod)
         mod = tilelang.transform.InjectFenceProxy()(mod)
     else:
-        if verbose:
-            print("Doesn't contain TMA & Warp specialization")
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        if verbose:
-            print("### Initial IR")
-            print(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
-        if verbose:
-            print("### After PipelinePlanning")
-            print(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-        if verbose:
-            print("### After InjectSoftwarePipeline")
-            print(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         if allow_fence_proxy(target=target):
             # in hopper device, wgmma is an async proxy
