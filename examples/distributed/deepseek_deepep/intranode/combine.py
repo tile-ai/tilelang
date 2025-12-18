@@ -88,12 +88,15 @@ def cached_notify_combine(
     kernel = cached_notify_combine_kernel(num_ranks, num_sms)
     kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
 
-    kernel(send_head, channel_head_idx, channel_tail_idx, barrier_signal, stream=comm_stream.cuda_stream)
+    kernel(send_head, channel_head_idx, channel_tail_idx, barrier_signal, stream=comm_stream.cuda_stream,
+      skip_tensor_validation=True)  # reduce runtime overhead
 
 
 @tilelang.jit(
     pass_configs={"tl.disable_tma_lower": True,  # use TMA later
-        "tl.disable_warp_specialized": True})
+        "tl.disable_warp_specialized": True}, 
+    # debug_root_path='/home/wt/debug/combine'
+)
 def combine_kernel(
     num_ranks,
     num_max_send_tokens,  # config.num_max_nvl_chunked_send_tokens
@@ -331,7 +334,7 @@ def combine_kernel(
     return combine_main
 
 
-# @tilelang.engine.register_cuda_postproc
+@tilelang.engine.register_cuda_postproc
 def _(code, _):
     if not 'void combine_main_kernel' in code:
         return code
@@ -350,8 +353,8 @@ uint64_t __constant__ meta_data[1024];
 #include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>
 #endif
 
-extern "C" __global__ void combine_main_kernel(int* __restrict__ channel_head_idx, int* __restrict__ channel_prefix_matrix, int* __restrict__ channel_src_idx_buffers, int* __restrict__ channel_tail_idx, float* __restrict__ channel_topk_weights_buffers, bfloat16_t* __restrict__ channel_x_buffers, int* __restrict__ rank_prefix_matrix, float* __restrict__ recv_topk_weights, bfloat16_t* __restrict__ recv_x, int* __restrict__ send_head, int* __restrict__ src_idx, float* __restrict__ topk_weights, bfloat16_t* __restrict__ x, int num_recv_tokens, int num_tokens);
-extern "C" __global__ void __launch_bounds__(768, 1) combine_main_kernel(int* __restrict__ channel_head_idx, int* __restrict__ channel_prefix_matrix, int* __restrict__ channel_src_idx_buffers, int* __restrict__ channel_tail_idx, float* __restrict__ channel_topk_weights_buffers, bfloat16_t* __restrict__ channel_x_buffers, int* __restrict__ rank_prefix_matrix, float* __restrict__ recv_topk_weights, bfloat16_t* __restrict__ recv_x, int* __restrict__ send_head, int* __restrict__ src_idx, float* __restrict__ topk_weights, bfloat16_t* __restrict__ x, int num_recv_tokens, int num_tokens) {
+extern "C" __global__ void combine_main_kernel(int* __restrict__ channel_head_idx, int* __restrict__ channel_prefix_matrix, int* __restrict__ channel_src_idx_buffers, int* __restrict__ channel_tail_idx, float* __restrict__ channel_topk_weights_buffers, bfloat16_t* __restrict__ channel_x_buffers, int* __restrict__ rank_prefix_matrix, float* __restrict__ recv_topk_weights, bfloat16_t* __restrict__ recv_x, int* __restrict__ send_head, int* __restrict__ src_idx, float* __restrict__ topk_weights, bfloat16_t* __restrict__ x, int num_recv_tokens, int num_tokens, int rank);
+extern "C" __global__ void __launch_bounds__(768, 1) combine_main_kernel(int* __restrict__ channel_head_idx, int* __restrict__ channel_prefix_matrix, int* __restrict__ channel_src_idx_buffers, int* __restrict__ channel_tail_idx, float* __restrict__ channel_topk_weights_buffers, bfloat16_t* __restrict__ channel_x_buffers, int* __restrict__ rank_prefix_matrix, float* __restrict__ recv_topk_weights, bfloat16_t* __restrict__ recv_x, int* __restrict__ send_head, int* __restrict__ src_idx, float* __restrict__ topk_weights, bfloat16_t* __restrict__ x, int num_recv_tokens, int num_tokens, int rank) {
   int current_channel_tail_idx = 0;
   int token_idx = 0;
   int dst_slot_idx = 0;
@@ -373,12 +376,12 @@ extern "C" __global__ void __launch_bounds__(768, 1) combine_main_kernel(int* __
   if ((((int)blockIdx.x) % 2) == 0) {
     int condval;
     if ((0 < (((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7))) {
-      condval = rank_prefix_matrix[(((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7) * 8) - 6)];
+      condval = rank_prefix_matrix[((((((((int64_t)((int)threadIdx.x)) >> (int64_t)5) + (((int64_t)((int)blockIdx.x)) >> (int64_t)1)) & (int64_t)7) * (int64_t)8) + ((int64_t)rank)) - (int64_t)8)];
     } else {
       condval = 0;
     }
     int rank_offset = condval;
-    int num_rank_tokens = (rank_prefix_matrix[(((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7) * 8) + 2)] - rank_offset);
+    int num_rank_tokens = (rank_prefix_matrix[(((((((int64_t)((int)threadIdx.x)) >> (int64_t)5) + (((int64_t)((int)blockIdx.x)) >> (int64_t)1)) & (int64_t)7) * (int64_t)8) + ((int64_t)rank))] - rank_offset);
     int channel_offset = channel_prefix_matrix[(((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7) * 10) + (((int)blockIdx.x) >> 1))];
     int condval_1;
     if (((((int)blockIdx.x) >> 1) == 9)) {
@@ -393,14 +396,18 @@ extern "C" __global__ void __launch_bounds__(768, 1) combine_main_kernel(int* __
       if (!((token_idx < ((rank_offset + channel_offset) + num_channel_tokens)))) { break; }
       int num_round_tokens = min(4, (((rank_offset + channel_offset) + num_channel_tokens) - token_idx));
       if (cute::elect_one_sync()) {
-        tl::wait_ge((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_head_idx[(((((int)blockIdx.x) >> 1) * 8) + 2)]))) - tl::get_remote_base_ptr(tl::get_rank()))), ((current_channel_tail_idx + num_round_tokens) - 256));
+        tl::wait_ge((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_head_idx[(((((int64_t)((int)blockIdx.x)) >> (int64_t)1) * (int64_t)8) + ((int64_t)rank))]))) - tl::get_remote_base_ptr(tl::get_rank()))), ((current_channel_tail_idx + num_round_tokens) - 256));
       }
       __syncwarp();
       for (int v = 0; v < ((((num_round_tokens + 2) - (((int)threadIdx.x) >> 8)) / 3) + ((((num_round_tokens + 2) - (((int)threadIdx.x) >> 8)) % 3) >> 31)); ++v) {
         dst_slot_idx = ((((v * 3) + (((int)threadIdx.x) >> 8)) + current_channel_tail_idx) & 255);
         if (0 <= (((v * 3) + (((int)threadIdx.x) >> 8)) + token_idx)) {
           if ((((v * 3) + (((int)threadIdx.x) >> 8)) + token_idx) < num_tokens) {
-            tl::cp_warp<7168, 4, true>((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_x_buffers[((((((int64_t)((int)blockIdx.x)) >> (int64_t)1) * (int64_t)14680064) + (((int64_t)dst_slot_idx) * (int64_t)7168)) + (int64_t)3670016)]))) - tl::get_remote_base_ptr(tl::get_rank()))), (&(x[(((((int64_t)v) * (int64_t)21504) + ((((int64_t)((int)threadIdx.x)) >> (int64_t)8) * (int64_t)7168)) + (((int64_t)token_idx) * (int64_t)7168))])));
+            if (0 <= rank) {
+              if (rank < 8) {
+                tl::cp_warp<7168, 4, true>((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_x_buffers[((((((int64_t)((int)blockIdx.x)) >> (int64_t)1) * (int64_t)14680064) + (((int64_t)rank) * (int64_t)1835008)) + (((int64_t)dst_slot_idx) * (int64_t)7168))]))) - tl::get_remote_base_ptr(tl::get_rank()))), (&(x[(((((int64_t)v) * (int64_t)21504) + ((((int64_t)((int)threadIdx.x)) >> (int64_t)8) * (int64_t)7168)) + (((int64_t)token_idx) * (int64_t)7168))])));
+              }
+            }
           }
         }
         if (cute::elect_one_sync()) {
@@ -409,7 +416,11 @@ extern "C" __global__ void __launch_bounds__(768, 1) combine_main_kernel(int* __
               tl::ld<Semantic::WEAK, Scope::GPU, true, false>((&(src_idx[(((((int64_t)v) * (int64_t)3) + (((int64_t)((int)threadIdx.x)) >> (int64_t)8)) + ((int64_t)token_idx))])), idx);
             }
           }
-          tl::st<Semantic::WEAK, Scope::GPU, false>((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_src_idx_buffers[((((((int64_t)((int)blockIdx.x)) >> (int64_t)1) * (int64_t)2048) + ((int64_t)dst_slot_idx)) + (int64_t)512)]))) - tl::get_remote_base_ptr(tl::get_rank()))), idx);
+          if (0 <= rank) {
+            if (rank < 8) {
+              tl::st<Semantic::WEAK, Scope::GPU, false>((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_src_idx_buffers[((((((int64_t)((int)blockIdx.x)) >> (int64_t)1) * (int64_t)2048) + (((int64_t)rank) * (int64_t)256)) + ((int64_t)dst_slot_idx))]))) - tl::get_remote_base_ptr(tl::get_rank()))), idx);
+            }
+          }
         }
         if ((((int)threadIdx.x) & 31) < 8) {
           if (0 <= (((v * 3) + (((int)threadIdx.x) >> 8)) + token_idx)) {
@@ -417,14 +428,18 @@ extern "C" __global__ void __launch_bounds__(768, 1) combine_main_kernel(int* __
               tl::ld<Semantic::WEAK, Scope::GPU, true, false>((&(topk_weights[((((((int64_t)v) * (int64_t)24) + ((((int64_t)((int)threadIdx.x)) >> (int64_t)8) * (int64_t)8)) + (((int64_t)token_idx) * (int64_t)8)) + (((int64_t)((int)threadIdx.x)) & (int64_t)31))])), idx);
             }
           }
-          tl::st<Semantic::WEAK, Scope::GPU, false>((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_topk_weights_buffers[(((((((int64_t)((int)blockIdx.x)) >> (int64_t)1) * (int64_t)16384) + (((int64_t)dst_slot_idx) * (int64_t)8)) + (((int64_t)((int)threadIdx.x)) & (int64_t)31)) + (int64_t)4096)]))) - tl::get_remote_base_ptr(tl::get_rank()))), idx);
+          if (0 <= rank) {
+            if (rank < 8) {
+              tl::st<Semantic::WEAK, Scope::GPU, false>((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_topk_weights_buffers[(((((((int64_t)((int)blockIdx.x)) >> (int64_t)1) * (int64_t)16384) + (((int64_t)rank) * (int64_t)2048)) + (((int64_t)dst_slot_idx) * (int64_t)8)) + (((int64_t)((int)threadIdx.x)) & (int64_t)31))]))) - tl::get_remote_base_ptr(tl::get_rank()))), idx);
+            }
+          }
         }
       }
       token_idx = (token_idx + num_round_tokens);
       current_channel_tail_idx = (current_channel_tail_idx + num_round_tokens);
       tl::__sync_thread_partial((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7), 96);
       if (((((int)threadIdx.x) >> 8) == 0) && cute::elect_one_sync()) {
-        tl::st<Semantic::RELEASE, Scope::SYS, false>((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_tail_idx[(((((int)blockIdx.x) >> 1) * 8) + 2)]))) - tl::get_remote_base_ptr(tl::get_rank()))), current_channel_tail_idx);
+        tl::st<Semantic::RELEASE, Scope::SYS, false>((tl::get_remote_base_ptr((((((int)threadIdx.x) >> 5) + (((int)blockIdx.x) >> 1)) & 7)) + (tl::get_uintptr_t((&(channel_tail_idx[(((((int64_t)((int)blockIdx.x)) >> (int64_t)1) * (int64_t)8) + ((int64_t)rank))]))) - tl::get_remote_base_ptr(tl::get_rank()))), current_channel_tail_idx);
       }
     }
   } else {
@@ -488,19 +503,13 @@ extern "C" __global__ void __launch_bounds__(768, 1) combine_main_kernel(int* __
           for (int i_3 = 0; i_3 < 2; ++i_3) {
             *(float4*)(values + (i_3 * 4)) = make_float4(0x0p+0f/*0.000000e+00*/, 0x0p+0f/*0.000000e+00*/, 0x0p+0f/*0.000000e+00*/, 0x0p+0f/*0.000000e+00*/);
           }
+          /// change 1 (major)
           for (int j = 0; j < condvar; ++j) {
-              if (0 <= slot_indices[j]) {
-                if (slot_indices[j] < 256) {
-                  if (0 <= topk_ranks[j]) {
-                    if (topk_ranks[j] < 8) {
-                      auto src = (&(channel_x_buffers[(((((((((int)blockIdx.x) >> 1) * 14680064) + (topk_ranks[j] * 1835008)) + (slot_indices[j] * 7168)) + (v_2 * 256)) + ((((int)threadIdx.x) & 31) * 8)) + 0)]));
-                      auto dst = &(recv_value[((((int64_t)j) * (int64_t)8))]);
-                      *reinterpret_cast<int4*>(dst) = *reinterpret_cast<int4*>(src);
-                    }
-                  }
-                }
-              }
+            auto src = (&(channel_x_buffers[(((((((((int)blockIdx.x) >> 1) * 14680064) + (topk_ranks[j] * 1835008)) + (slot_indices[j] * 7168)) + (v_2 * 256)) + ((((int)threadIdx.x) & 31) * 8)))]));
+            auto dst = &(recv_value[((((int64_t)j) * (int64_t)8))]);
+            *reinterpret_cast<int4*>(dst) = __ldg(reinterpret_cast<int4*>(src));
           }
+          ///
           for (int j_1 = 0; j_1 < condvar; ++j_1) {
             for (int k_1 = 0; k_1 < 2; ++k_1) {
               float4 __1;
@@ -516,15 +525,25 @@ extern "C" __global__ void __launch_bounds__(768, 1) combine_main_kernel(int* __
               *(float4*)(values + (k_1 * 4)) = __1;
             }
           }
-          for (int j_2 = 0; j_2 < 2; ++j_2) {
-            if ((((v_1 * 23) + min((((num_recv_tokens + 9) / 10) * (((int)blockIdx.x) >> 1)), num_recv_tokens)) + (((int)threadIdx.x) >> 5)) <= num_recv_tokens) {
-              uint2 __3;
-              float4 v__2 = *(float4*)(values + (j_2 * 4));
-              (reinterpret_cast<__nv_bfloat162*>(&__3))[0] = __float22bfloat162_rn(*(float2*)(&(v__2)));
-              (reinterpret_cast<__nv_bfloat162*>(&__3))[1] = __float22bfloat162_rn(*((float2*)(&(v__2))+1));
-              *(uint2*)(recv_x + (((((((((int64_t)v_1) * (int64_t)164864) + ((((int64_t)((int)threadIdx.x)) >> (int64_t)5) * (int64_t)7168)) + (min((((((int64_t)num_recv_tokens) + (int64_t)9) / (int64_t)10) * (((int64_t)((int)blockIdx.x)) >> (int64_t)1)), ((int64_t)num_recv_tokens)) * (int64_t)7168)) + (((int64_t)v_2) * (int64_t)256)) + ((((int64_t)((int)threadIdx.x)) & (int64_t)31) * (int64_t)8)) + (((int64_t)j_2) * (int64_t)4)) - (int64_t)7168)) = __3;
-            }
+          /// change 2 (minor)
+          // for (int j_2 = 0; j_2 < 2; ++j_2) {
+          //   if ((((v_1 * 23) + min((((num_recv_tokens + 9) / 10) * (((int)blockIdx.x) >> 1)), num_recv_tokens)) + (((int)threadIdx.x) >> 5)) <= num_recv_tokens) {
+          //     uint2 __3;
+          //     float4 v__2 = *(float4*)(values + (j_2 * 4));
+          //     (reinterpret_cast<__nv_bfloat162*>(&__3))[0] = __float22bfloat162_rn(*(float2*)(&(v__2)));
+          //     (reinterpret_cast<__nv_bfloat162*>(&__3))[1] = __float22bfloat162_rn(*((float2*)(&(v__2))+1));
+          //     *(uint2*)(recv_x + (((((((((int64_t)v_1) * (int64_t)164864) + ((((int64_t)((int)threadIdx.x)) >> (int64_t)5) * (int64_t)7168)) + (min((((((int64_t)num_recv_tokens) + (int64_t)9) / (int64_t)10) * (((int64_t)((int)blockIdx.x)) >> (int64_t)1)), ((int64_t)num_recv_tokens)) * (int64_t)7168)) + (((int64_t)v_2) * (int64_t)256)) + ((((int64_t)((int)threadIdx.x)) & (int64_t)31) * (int64_t)8)) + (((int64_t)j_2) * (int64_t)4)) - (int64_t)7168)) = __3;
+          //   }
+          // }
+          if ((((v_1 * 23) + min((((num_recv_tokens + 9) / 10) * (((int)blockIdx.x) >> 1)), num_recv_tokens)) + (((int)threadIdx.x) >> 5)) <= num_recv_tokens) {
+            int4 __3;
+            (reinterpret_cast<__nv_bfloat162*>(&__3))[0] = __float22bfloat162_rn(*(float2*)(values));
+            (reinterpret_cast<__nv_bfloat162*>(&__3))[1] = __float22bfloat162_rn(*((float2*)(values)+1));
+            (reinterpret_cast<__nv_bfloat162*>(&__3))[2] = __float22bfloat162_rn(*((float2*)(values)+2));
+            (reinterpret_cast<__nv_bfloat162*>(&__3))[3] = __float22bfloat162_rn(*((float2*)(values)+3));
+            *(int4*)(recv_x + (((((((((int64_t)v_1) * (int64_t)164864) + ((((int64_t)((int)threadIdx.x)) >> (int64_t)5) * (int64_t)7168)) + (min((((((int64_t)num_recv_tokens) + (int64_t)9) / (int64_t)10) * (((int64_t)((int)blockIdx.x)) >> (int64_t)1)), ((int64_t)num_recv_tokens)) * (int64_t)7168)) + (((int64_t)v_2) * (int64_t)256)) + ((((int64_t)((int)threadIdx.x)) & (int64_t)31) * (int64_t)8)) + (((int64_t)0) * (int64_t)4)) - (int64_t)7168)) = __3;
           }
+          ///
         }
         if ((((int)threadIdx.x) & 31) < 8) {
           weight_sum = 0x0p+0f/*0.000000e+00*/;
@@ -612,8 +631,9 @@ def intranode_combine(
         channel_x_buffers,
         channel_src_idx_buffers,
         channel_topk_weights_buffers,
-        stream=comm_stream.cuda_stream
-    )
+        stream=comm_stream.cuda_stream,
+        skip_tensor_validation=True
+    )  # reduce runtime overhead
     compute_stream = torch.cuda.current_stream()
     compute_stream.wait_stream(comm_stream)
     return recv_x, recv_topk_weights
