@@ -29,6 +29,67 @@ using namespace tir;
 void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
                      const std::string &arg_name, std::vector<Stmt> *asserts,
                      PrimExpr nullable_guard = PrimExpr()) {
+  // Special handling: if cond is comparing two if_then_else expressions
+  // that guard against NULL (with the same fallback), we should only check
+  // equality when both conditions are true.
+  // Pattern: if_then_else(guard_a, val_a, fallback) == if_then_else(guard_b,
+  // val_b, fallback) Should become: guard_a && guard_b => (val_a == val_b)
+  // Which is equivalent to: !guard_a || !guard_b || (val_a == val_b)
+  //
+  // Also handle the case where the if_then_else is wrapped in Cast:
+  // Cast(type, if_then_else(...)) == Cast(type, if_then_else(...))
+  if (const auto *eq = cond.as<tvm::tir::EQNode>()) {
+    // Helper to unwrap Cast nodes
+    auto unwrap_cast = [](PrimExpr expr) -> const tvm::tir::CallNode * {
+      if (const auto *cast_node = expr.as<tvm::tir::CastNode>()) {
+        return cast_node->value.as<tvm::tir::CallNode>();
+      }
+      return expr.as<tvm::tir::CallNode>();
+    };
+
+    const auto *lhs_ite = unwrap_cast(eq->a);
+    const auto *rhs_ite = unwrap_cast(eq->b);
+
+    if (lhs_ite && rhs_ite &&
+        lhs_ite->op.same_as(tvm::tir::builtin::if_then_else()) &&
+        rhs_ite->op.same_as(tvm::tir::builtin::if_then_else()) &&
+        lhs_ite->args.size() == 3 && rhs_ite->args.size() == 3) {
+
+      // Check if both have the same fallback value (accounting for Cast)
+      auto extract_fallback = [](PrimExpr expr) -> PrimExpr {
+        if (const auto *cast_node = expr.as<tvm::tir::CastNode>()) {
+          if (const auto *ite = cast_node->value.as<tvm::tir::CallNode>()) {
+            if (ite->op.same_as(tvm::tir::builtin::if_then_else()) &&
+                ite->args.size() == 3) {
+              return ite->args[2];
+            }
+          }
+        } else if (const auto *ite = expr.as<tvm::tir::CallNode>()) {
+          if (ite->op.same_as(tvm::tir::builtin::if_then_else()) &&
+              ite->args.size() == 3) {
+            return ite->args[2];
+          }
+        }
+        return PrimExpr();
+      };
+
+      PrimExpr lhs_fallback = extract_fallback(eq->a);
+      PrimExpr rhs_fallback = extract_fallback(eq->b);
+
+      if (lhs_fallback.defined() && rhs_fallback.defined() &&
+          StructuralEqual()(lhs_fallback, rhs_fallback)) {
+        // Extract the guards and values
+        PrimExpr guard_a = lhs_ite->args[0];
+        PrimExpr val_a = lhs_ite->args[1];
+        PrimExpr guard_b = rhs_ite->args[0];
+        PrimExpr val_b = rhs_ite->args[1];
+
+        // New condition: !guard_a || !guard_b || (val_a == val_b)
+        cond = Or(Not(guard_a), Or(Not(guard_b), val_a == val_b));
+      }
+    }
+  }
+
   PrimExpr scond = ana->Simplify(cond);
   if (is_zero(scond)) {
     LOG(FATAL) << "Bind have an unmet assertion: " << cond << ", "
@@ -88,6 +149,84 @@ void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
         inner = IfThenElse(Not(nullable_guard), inner);
       }
       asserts->emplace_back(SeqStmt({inner, Evaluate(0)}));
+    }
+  }
+}
+
+void ArgBinder::SetSharedShapeVars(
+    const std::unordered_set<const VarNode *> &shared_vars) {
+  shared_shape_vars_ = shared_vars;
+}
+
+void ArgBinder::FinalizeDeferredBindings() {
+  const Stmt nop = Evaluate(0);
+
+  for (const auto &[shape_var_node, bindings] : deferred_shape_bindings_) {
+    if (bindings.empty())
+      continue;
+
+    Var shape_var = ffi::GetRef<Var>(shape_var_node);
+
+    // Step 1: Build cascading if_then_else expression
+    // Traverse bindings in reverse order to build:
+    // if_then_else(!is_null_0, temp_0, if_then_else(!is_null_1, temp_1, 0))
+    PrimExpr cascading_expr;
+    for (auto rit = bindings.rbegin(); rit != bindings.rend(); ++rit) {
+      const Var &temp_var = rit->temp_var;
+      const Var &is_null_var = rit->is_null_var;
+
+      if (!cascading_expr.defined()) {
+        // Last binding: use temp_var directly as fallback
+        cascading_expr = temp_var;
+      } else {
+        // Build: if_then_else(!is_null, temp_var, cascading_expr)
+        cascading_expr =
+            tvm::if_then_else(Not(is_null_var), temp_var, cascading_expr);
+      }
+    }
+
+    // Bind the actual shape variable with the cascading expression
+    defs_.emplace_back(shape_var);
+    (*def_map_)[shape_var_node] = cascading_expr;
+    init_nest_.emplace_back(LetStmt(shape_var, cascading_expr, nop));
+
+    // Step 2: Add runtime assertion that at least one buffer is non-NULL
+    PrimExpr at_least_one_non_null;
+    for (const auto &binding : bindings) {
+      PrimExpr not_null = Not(binding.is_null_var);
+      at_least_one_non_null = at_least_one_non_null.defined()
+                                  ? Or(at_least_one_non_null, not_null)
+                                  : not_null;
+    }
+
+    if (at_least_one_non_null.defined()) {
+      std::ostringstream msg;
+      msg << "At least one buffer must be non-NULL to provide shape variable '"
+          << shape_var->name_hint << "'";
+      asserts_.emplace_back(AssertStmt(at_least_one_non_null,
+                                       tvm::tir::StringImm(msg.str()), nop));
+    }
+
+    // Step 3: Add deferred equality constraints
+    // All non-NULL buffers must have matching shape values
+    for (size_t i = 0; i + 1 < bindings.size(); ++i) {
+      const auto &binding_i = bindings[i];
+      for (size_t j = i + 1; j < bindings.size(); ++j) {
+        const auto &binding_j = bindings[j];
+
+        // Constraint: is_null_i || is_null_j || (temp_i == temp_j)
+        PrimExpr constraint =
+            Or(binding_i.is_null_var,
+               Or(binding_j.is_null_var, PrimExpr(binding_i.temp_var) ==
+                                             PrimExpr(binding_j.temp_var)));
+
+        std::ostringstream msg;
+        msg << "Shape variable '" << shape_var->name_hint
+            << "' must match across all non-NULL buffers";
+
+        asserts_.emplace_back(
+            AssertStmt(constraint, tvm::tir::StringImm(msg.str()), nop));
+      }
     }
   }
 }
@@ -516,17 +655,38 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
       break;
     }
 
-    // The "real" runtime shape value read from DLTensor
-    PrimExpr shape_val =
-        cast(buffer->shape[k].dtype(),
-             BufferLoad(buf_shape,
-                        {IntImm(DataType::Int(32), static_cast<int>(k))}));
+    // The "real" runtime shape value read from DLTensor, or 0 when NULL
+    // We need to guard the BufferLoad because buf_shape->data might be NULL
+    PrimExpr shape_load =
+        BufferLoad(buf_shape, {IntImm(DataType::Int(32), static_cast<int>(k))});
+    PrimExpr shape_val = cast(buffer->shape[k].dtype(),
+                              tvm::if_then_else(Not(is_null), shape_load,
+                                                make_zero(shape_load.dtype())));
 
-    // When first encountering a Var (e.g., m), this will generate:
-    //   Let(m, bound_shape_val, ...)
-    // Constant dimensions will only generate consistency assertions.
-    BindNullable(buffer->shape[k], shape_val, shape_element_name(k), true,
-                 is_null);
+    // Check if this shape dimension is a shared variable
+    const VarNode *shape_var_node = buffer->shape[k].as<VarNode>();
+    if (shape_var_node && shared_shape_vars_.count(shape_var_node)) {
+      // This is a shared shape variable - defer binding
+      // Create a temporary variable to hold this buffer's shape value
+      std::string temp_name =
+          arg_name + "_shape_dim_" + std::to_string(k) + "_temp";
+      Var temp_var(temp_name, shape_val.dtype());
+      defs_.emplace_back(temp_var);
+      init_nest_.emplace_back(LetStmt(temp_var, shape_val, Evaluate(0)));
+
+      // Record this deferred binding
+      DeferredShapeBinding binding;
+      binding.temp_var = temp_var;
+      binding.is_null_var = is_null_var;
+      deferred_shape_bindings_[shape_var_node].push_back(binding);
+    } else {
+      // Normal shape variable - bind immediately
+      // When first encountering a Var (e.g., m), this will generate:
+      //   Let(m, bound_shape_val, ...)
+      // Constant dimensions will only generate consistency assertions.
+      BindNullable(buffer->shape[k], shape_val, shape_element_name(k), true,
+                   is_null);
+    }
   }
 
   // strides field
