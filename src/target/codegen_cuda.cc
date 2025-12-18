@@ -2746,10 +2746,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << PrintExpr(op->args[1]) << ")";
   } else if (op->op.same_as(tl::rng_init())) {
     this->need_curand_kernel_h_ = true;
-    os << "curandStatePhilox4_32_10_t __philox_state; ";
-    os << "curand_init" << "(" << PrintExpr(op->args[0]) << ", "
-       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2])
-       << ", &__philox_state)";
+    this->curand_philox_state = name_supply_->FreshName("__philox_state");
+    this->PrintIndent();
+    this->stream << "curandStatePhilox4_32_10_t " << this->curand_philox_state
+                 << ";\n";
+    this->PrintIndent();
+    this->stream << "curand_init(" << PrintExpr(op->args[0]) << ", "
+                 << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2])
+                 << ", &" << this->curand_philox_state << ");\n";
+    // Store state_var for later use by rng_rand
   } else if (op->op.same_as(tl::rng_rand())) {
     this->need_curand_kernel_h_ = true;
     os << "curand" << "(&__philox_state)";

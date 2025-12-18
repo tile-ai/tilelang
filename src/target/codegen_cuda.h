@@ -88,6 +88,8 @@ private:
   std::string vid_global_barrier_state_;
   // Global barrier expected node.
   std::string vid_global_barrier_expect_;
+  // Global curand state
+  std::string curand_philox_state;
 
   // whether enable fp16
   bool enable_fp16_{false};
