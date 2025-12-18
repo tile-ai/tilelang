@@ -4,6 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @tilelang.jit
 def tilelang_rand_1d(M=1024, seed=42):
     blk_M = 128
