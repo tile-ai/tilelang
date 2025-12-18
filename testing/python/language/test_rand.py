@@ -17,7 +17,6 @@ def tilelang_rand_1d(M=1024, seed=42):
     @T.prim_func
     def rand_kernel(A: T.Tensor((M,), 'uint32')):
         with T.Kernel(M // blk_M, threads=num_threads) as bx:
-            tx = T.get_thread_binding()
             T.rng_init(seed)
             for i in T.Parallel(blk_M):
                 A[bx * blk_M + i] = T.rng_rand()
