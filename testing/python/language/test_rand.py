@@ -1,27 +1,26 @@
-import pytest
 import tilelang
 import tilelang.language as T  # noqa: N812
 import torch
-import torch.distributed as dist
 import triton
 import triton.language as tl
 
 tilelang.disable_cache()
 
+
 @tilelang.jit
 def tilelang_rand_1d(M=1024, seed=42):
-
     blk_M = 128
     num_threads = 128
 
     @T.prim_func
-    def rand_kernel(A: T.Tensor((M,), 'uint32')):
+    def rand_kernel(A: T.Tensor((M,), "uint32")):
         with T.Kernel(M // blk_M, threads=num_threads) as bx:
             T.rng_init(seed)
             for i in T.Parallel(blk_M):
                 A[bx * blk_M + i] = T.rng_rand()
 
     return rand_kernel
+
 
 @triton.jit
 def triton_rand_1d(X, M, seed):
