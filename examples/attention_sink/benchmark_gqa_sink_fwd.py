@@ -1,6 +1,7 @@
 import torch
 import argparse
 from tilelang.profiler import do_bench
+from tilelang import language as T
 import triton
 import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
@@ -135,7 +136,8 @@ def main(
     dtype: str = "float16",
     tune: bool = False,
 ):
-    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    dtype = T.dtype(dtype)
+    torch_dtype = dtype.as_torch()
     if window_size is not None:
         print("Using sliding window attention.")
         assert window_size <= seq_q

@@ -479,9 +479,9 @@ def tilelang_sparse_attention(
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
     block_indices_shape = [batch, seq_len, head_kv, selected_blocks]
-    block_indices_dtype = "int32"
-    dtype = "float16"
-    accum_dtype = "float"
+    block_indices_dtype = T.int32
+    dtype = T.float16
+    accum_dtype = T.float32
     block_S = block_size
     block_T = min(block_T, tilelang.math.next_power_of_2(dim))
 
@@ -876,7 +876,7 @@ if __name__ == "__main__":
     parser.add_argument("--dim", type=int, default=128, help="Head dimension")
     parser.add_argument("--selected_blocks", type=int, default=16, help="Number of selected blocks")
     parser.add_argument("--block_size", type=int, default=32, help="Block size")
-    parser.add_argument("--dtype", type=str, default="float16", help="Data type (float16 or float32)")
+    parser.add_argument("--dtype", type=str, default=T.float16, help="Data type (float16 or float32)")
     parser.add_argument("--scale", type=float, default=0.1, help="Attention scale factor")
     parser.add_argument("--iterations", type=int, default=100, help="Number of iterations")
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations")
@@ -901,7 +901,7 @@ if __name__ == "__main__":
     if args.suite:
         run_benchmark_suite(impl=args.impl)
     else:
-        dtype = torch.float16 if args.dtype == "float16" else torch.float32
+        dtype = torch.float16 if args.dtype == T.float16 else torch.float32
 
         if args.impl in ["tilelang", "all"]:
             print("Benchmarking TileLang implementation:")

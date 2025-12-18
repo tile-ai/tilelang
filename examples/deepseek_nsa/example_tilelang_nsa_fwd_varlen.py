@@ -38,12 +38,12 @@ def native_sparse_attention_varlen(batch, heads, c_seq_len, dim, is_causal, scal
     block_counts_shape = [c_seq_len, head_kv]
     offsets_shape = [batch + 1]
     token_indices_shape = [c_seq_len, 2]
-    block_indices_dtype = "int32"
-    block_counts_dtype = "int32"
-    offsets_dtype = "int32"
-    token_indices_dtype = "int32"
-    dtype = "float16"
-    accum_dtype = "float"
+    block_indices_dtype = T.int32
+    block_counts_dtype = T.int32
+    offsets_dtype = T.int32
+    token_indices_dtype = T.int32
+    dtype = T.float16
+    accum_dtype = T.float32
     block_S = block_size
     block_T = min(128, tilelang.math.next_power_of_2(dim))
 

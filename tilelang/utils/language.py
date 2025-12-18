@@ -478,3 +478,27 @@ def is_full_region(buffer_region: BufferRegion) -> bool:
         if not expr_equal(r.extent, dim):
             return False
     return True
+
+
+def get_prim_func_name(func: PrimFunc | None, default: str | None = None) -> str | None:
+    """
+    Extract a human‑readable function name from a TVM PrimFunc.
+
+    Prefer the `global_symbol` attribute set on the PrimFunc. If it is missing
+    (e.g., private PrimFunc without a global symbol), return the provided
+    `default` value.
+
+    Args:
+        func: TVM PrimFunc instance or None.
+        default: Fallback name to return when no name can be determined.
+
+    Returns:
+        The function name as a string, or `default` when unavailable.
+    """
+    if func is None:
+        return default
+    try:
+        name = func.attrs["global_symbol"]
+        return str(name) if name is not None else default
+    except Exception:
+        return default

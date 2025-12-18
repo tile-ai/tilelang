@@ -45,8 +45,8 @@ def flashattn(
     shape_v = [total_seqlen_k, k_heads, dim]
     shape_o = [batch, heads, dim]
     shape_s = [batch, heads, math.ceil(max_seqlen_kv / block_N)]
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
     kv_group_num = heads // k_heads
     assert page_block_size >= block_N and page_block_size % block_N == 0, (
         "page_block_size must be larger than block_N and a multiple of block_N"
@@ -60,9 +60,9 @@ def flashattn(
         Q: T.Tensor(shape_q, dtype),
         K: T.Tensor(shape_k, dtype),
         V: T.Tensor(shape_v, dtype),
-        cu_seqlens_k: T.Tensor([batch + 1], "int32"),
-        s_aux: T.Tensor([heads], "float32"),
-        BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / block_N)], "int32"),
+        cu_seqlens_k: T.Tensor([batch + 1], T.int32),
+        s_aux: T.Tensor([heads], T.float32),
+        BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / block_N)], T.int32),
         Output: T.Tensor([batch, heads, dim], dtype),
         S: T.Tensor(shape_s, dtype),
     ):
@@ -80,7 +80,7 @@ def flashattn(
             scores_sum = T.alloc_fragment([block_H], accum_dtype)
             logsum = T.alloc_fragment([block_H], accum_dtype)
             S_shared = T.alloc_shared([block_H, math.ceil(max_seqlen_kv / block_N)], dtype)
-            s_aux_shared = T.alloc_shared([block_H], "float32")
+            s_aux_shared = T.alloc_shared([block_H], T.float32)
 
             bid = bx
             hid = by
@@ -146,9 +146,9 @@ def flashattn(
         Q: T.Tensor(shape_q, dtype),
         K: T.Tensor(shape_k, dtype),
         V: T.Tensor(shape_v, dtype),
-        cu_seqlens_k: T.Tensor([batch + 1], "int32"),
-        s_aux: T.Tensor([heads], "float32"),
-        BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / page_block_size)], "int32"),
+        cu_seqlens_k: T.Tensor([batch + 1], T.int32),
+        s_aux: T.Tensor([heads], T.float32),
+        BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / page_block_size)], T.int32),
         Output: T.Tensor(shape_o, dtype),
         S: T.Tensor(shape_s, dtype),
     ):
@@ -211,7 +211,7 @@ def test_equal_seqlen_decode_main(args):
     head_size = args.head_size
     block_size = args.block_size
     page_block_size = args.page_block_size
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+    dtype = torch.bfloat16 if args.dtype == T.bfloat16 else torch.float16
 
     # For decode, query is just 1 token per batch
     q = torch.randn(batch_size, q_heads, head_size, device="cuda", dtype=dtype)
@@ -341,7 +341,7 @@ def test_varlen_decode_main(args):
     head_size = args.head_size
     block_size = args.block_size
     page_block_size = args.page_block_size
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+    dtype = torch.bfloat16 if args.dtype == T.bfloat16 else torch.float16
 
     print(f"Testing decode kernel with variable sequence lengths (max_k_seqlen={max_k_seqlen})")
 
@@ -549,7 +549,7 @@ def speed_benchmark_decode_comparison(args):
     head_size = args.head_size
     block_size = args.block_size
     page_block_size = args.page_block_size
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+    dtype = torch.bfloat16 if args.dtype == T.bfloat16 else torch.float16
 
     print("\n=== Decode Speed Benchmark Comparison ===")
     print("Configuration:")
@@ -659,7 +659,7 @@ if __name__ == "__main__":
     parser.add_argument("--k_seqlen", type=int, default=8192, help="Key sequence length")
     parser.add_argument("--head_size", type=int, default=128, choices=[64, 128, 256], help="Head dimension")
     parser.add_argument("--block_size", type=int, default=128, help="Block size for computation")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float16", "bfloat16"], help="Data type")
+    parser.add_argument("--dtype", type=str, default=T.bfloat16, choices=[T.float16, T.bfloat16], help="Data type")
     parser.add_argument("--test_varlen", action="store_true", help="Test with truly variable sequence lengths")
     parser.add_argument("--test_sink", action="store_true", help="Test with sink attention mechanism")
     parser.add_argument("--benchmark", action="store_true", help="Run speed benchmark")
@@ -668,7 +668,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.test_sink = True
     args.test_varlen = True
-    args.dtype = "float16"
+    args.dtype = T.float16
     args.num_split = 1
 
     if args.benchmark:

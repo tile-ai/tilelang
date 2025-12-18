@@ -37,6 +37,20 @@ class PassConfigKey(str, Enum):
     TL_ENABLE_PTXAS_VERBOSE_OUTPUT = "tl.enable_ptxas_verbose_output"
     """Enable ptxas verbose output. Default: False"""
 
+    TL_DEVICE_COMPILE_FLAGS = "tl.device_compile_flags"
+    """Additional device compiler flags passed to nvcc/NVRTC.
+
+    Accepts either a string (parsed with shell-like splitting) or a list of
+    strings. Typical usage is to provide extra include paths, defines or
+    ptxas options, e.g.:
+
+    - "-I/opt/include -DMY_SWITCH=1 --ptxas-options=--verbose"
+    - ["-I/opt/include", "-DMY_SWITCH=1", "--ptxas-options=--verbose"]
+
+    These flags are appended to the compiler options used in the tvm_ffi
+    CUDA compile callback. Default: None
+    """
+
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
     """Bitwidth for configuration indices. Default: 32"""
 
@@ -86,10 +100,10 @@ class PassConfigKey(str, Enum):
     such as `dst[i] = f(src[i])`, avoiding implicit aliasing:
 
     ```
-    read = T.allocate([1], "int32", "local.var")
-    write = T.allocate([1], "int32", "local.var")
-    read_buf = T.Buffer((1,), "int32", data=read, scope="local.var")
-    write_buf = T.Buffer((1,), "int32", data=write, scope="local.var")
+    read = T.allocate([1], T.int32, "local.var")
+    write = T.allocate([1], T.int32, "local.var")
+    read_buf = T.Buffer((1,), T.int32, data=read, scope="local.var")
+    write_buf = T.Buffer((1,), T.int32, data=write, scope="local.var")
     write_buf[0] = read_buf[0] * 2
     f(write_buf[0])
     ```
@@ -99,8 +113,8 @@ class PassConfigKey(str, Enum):
     like:
 
     ```
-    read = T.allocate([1], "int32", "local.var")
-    read_buf = T.Buffer((1,), "int32", data=read, scope="local.var")
+    read = T.allocate([1], T.int32, "local.var")
+    read_buf = T.Buffer((1,), T.int32, data=read, scope="local.var")
     read_buf[0] = read_buf[0] * 2
     f(read_buf[0])
     ```

@@ -25,8 +25,8 @@ def test_lower_fence_proxy():
     @T.prim_func
     def before():
         with T.Kernel(8):
-            A_shared = T.decl_buffer((1, 8, 256), "float16", scope="shared.dyn")
-            B_shared = T.decl_buffer((1, 4, 512), "float16", scope="shared.dyn")
+            A_shared = T.decl_buffer((1, 8, 256), T.float16, scope="shared.dyn")
+            B_shared = T.decl_buffer((1, 4, 512), T.float16, scope="shared.dyn")
             C_local = T.decl_buffer((32,), scope="local")
             for i in T.unroll(16):
                 C_local[i * 2 : i * 2 + 2] = T.Broadcast(T.float32(0), 2)
@@ -34,16 +34,16 @@ def test_lower_fence_proxy():
                 "handle",
                 tir.op.Op.get("tl.tl_gemm"),
                 "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
-                T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
             )
 
     @T.prim_func
     def after():
         with T.Kernel(8):
-            A_shared = T.decl_buffer((1, 8, 256), "float16", scope="shared.dyn")
-            B_shared = T.decl_buffer((1, 4, 512), "float16", scope="shared.dyn")
+            A_shared = T.decl_buffer((1, 8, 256), T.float16, scope="shared.dyn")
+            B_shared = T.decl_buffer((1, 4, 512), T.float16, scope="shared.dyn")
             C_local = T.decl_buffer((32,), scope="local")
             for i in T.unroll(16):
                 C_local[i * 2 : i * 2 + 2] = T.Broadcast(T.float32(0), 2)
@@ -52,9 +52,9 @@ def test_lower_fence_proxy():
                 "handle",
                 tir.op.Op.get("tl.tl_gemm"),
                 "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
-                T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
-                T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
             )
 
     _check(before, after)
@@ -64,8 +64,8 @@ def test_async_to_generic_no_double_fence():
     @T.prim_func
     def before():
         with T.Kernel(8):
-            A_shared = T.decl_buffer((1024,), "uint8", scope="shared.dyn")
-            B_shared = T.decl_buffer((1024,), "uint8", scope="shared.dyn")
+            A_shared = T.decl_buffer((1024,), T.uint8, scope="shared.dyn")
+            B_shared = T.decl_buffer((1024,), T.uint8, scope="shared.dyn")
             T.ptx_cp_async("uint8", A_shared.data, 0, B_shared.data, 0, 16)
             T.fence_proxy_async()
             T.call_extern("handle", "generic_op")
@@ -129,7 +129,7 @@ def test_tma_store_sync_injection():
     @T.prim_func
     def before():
         with T.Kernel(8):
-            A_global = T.decl_buffer((128,), "float16", scope="global")
+            A_global = T.decl_buffer((128,), T.float16, scope="global")
             T.evaluate(T.call_intrin("handle", tir.op.Op.get("tl.tma_store"), A_global.data))
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
@@ -159,14 +159,14 @@ def test_wgmma_marked_async():
     @T.prim_func
     def before():
         with T.Kernel(1):
-            A_shared = T.decl_buffer((1,), "float16", scope="shared")
-            desc_a = T.decl_buffer((1,), "uint64", scope="local.descriptor.wgmma")
-            desc_b = T.decl_buffer((1,), "uint64", scope="local.descriptor.wgmma")
-            C_local = T.decl_buffer((32,), "float16", scope="local")
+            A_shared = T.decl_buffer((1,), T.float16, scope="shared")
+            desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            C_local = T.decl_buffer((32,), T.float16, scope="local")
             A_shared[0] = T.float16(0)
             T.warpgroup_arrive()
             T.ptx_wgmma_ss(
-                "float16",
+                T.float16,
                 "m64n64k16",
                 T.bool(True),
                 T.bool(True),

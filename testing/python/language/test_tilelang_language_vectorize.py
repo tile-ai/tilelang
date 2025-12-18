@@ -7,8 +7,8 @@ import tilelang.language as T
 def vectorize_test(N, M, stride_A, stride_B):
     @T.prim_func
     def main(
-        A: T.StridedTensor[(N, M), (1, stride_A), "float32"],  # noqa: F821
-        B: T.StridedTensor[(N, M), (1, stride_B), "float32"],  # noqa: F821
+        A: T.StridedTensor[(N, M), (1, stride_A), T.float32],  # noqa: F821
+        B: T.StridedTensor[(N, M), (1, stride_B), T.float32],  # noqa: F821
     ):
         with T.Kernel(M // 128, threads=128) as (bx):
             tx = T.get_thread_binding(0)
@@ -60,9 +60,9 @@ def test_vectorize():
 def vectorize_test_invariant_index(N, M, K):
     @T.prim_func
     def main(
-        A: T.Tensor[(N, M), "float32"],  # noqa: F821
-        B: T.Tensor[(N, M), "float32"],  # noqa: F821
-        C: T.Tensor[(N, M // K), "float32"],  # noqa: F821
+        A: T.Tensor[(N, M), T.float32],  # noqa: F821
+        B: T.Tensor[(N, M), T.float32],  # noqa: F821
+        C: T.Tensor[(N, M // K), T.float32],  # noqa: F821
     ):
         with T.Kernel(N // 128, threads=128) as (bx):
             tx = T.get_thread_binding(0)

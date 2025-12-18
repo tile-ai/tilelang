@@ -1163,7 +1163,7 @@ def ptx_tcgen05_mma_ss(
      desc_val, scale_out, mask0, mask1, mask2, mask3[, enable_ws]).
     Aliases: you can also pass `ws` or `warp_specialized` (booleans) instead of `enable_ws`.
     Alternatively, use `variant="ws"` (or "default").
-    - kind_dtype: instruction kind selector (e.g., "float16" for kind::f16,
+    - kind_dtype: instruction kind selector (e.g., T.float16 for kind::f16,
       "tf32" for kind::tf32, "int8" for kind::i8, "float8_e4m3" for kind::f8f6f4).
     """
     # Aliases precedence: if either `ws` or `warp_specialized` is provided, they override enable_ws
@@ -1224,7 +1224,7 @@ def ptx_tcgen05_mma_ts(
     Expects 13 positional arguments:
     (kind_dtype, A_ptr, A_offset, desc_b, B_offset, C_ptr, C_offset,
      desc_val, scale_out, mask0, mask1, mask2, mask3).
-    - kind_dtype: instruction kind selector (e.g., "float16" for kind::f16,
+    - kind_dtype: instruction kind selector (e.g., T.float16 for kind::f16,
       "tf32" for kind::tf32, "int8" for kind::i8, "float8_e4m3" for kind::f8f6f4).
     """
     return call_intrin(

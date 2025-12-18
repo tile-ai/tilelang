@@ -35,9 +35,9 @@ def native_sparse_attention(
     q_shape = [batch, 1, heads, dim]  # Changed seq_len to 1
     kv_shape = [batch, seq_len, head_kv, dim]
     block_indices_shape = [batch, 1, head_kv, selected_blocks]  # Changed seq_len to 1
-    block_indices_dtype = "int32"
-    dtype = "float16"
-    accum_dtype = "float"
+    block_indices_dtype = T.int32
+    dtype = T.float16
+    accum_dtype = T.float32
     block_S = block_size
     block_T = min(128, tilelang.math.next_power_of_2(dim))
 

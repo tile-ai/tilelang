@@ -50,7 +50,7 @@ def matmul(
     in_dtype,
     out_dtype,
     accum_dtype,
-    source_format="uint",
+    source_format=T.uint32,
     num_bits=4,
     fast_dequant=True,
     block_M=256,
@@ -90,7 +90,7 @@ def matmul(
         A TileLang/TIR prim_func (the compiled `main`) implementing the described dequantize-then-GEMM kernel.
     """
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "uint8"
+    storage_dtype = T.uint8
 
     QK = K // num_elems_per_byte
     Block_QK = block_K // num_elems_per_byte
@@ -121,7 +121,7 @@ def matmul(
     assert func_name is not None, "mxfp_intrin_info is not found"
     import_source = import_source
 
-    def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype="bfloat16"):
+    def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype=T.bfloat16):
         """
         Create a TileLang macro that performs fast, twiddling-based dequantization from packed FP4 to BF16 using an external runtime plugin.
 
@@ -131,13 +131,13 @@ def matmul(
         - Writes the dequantized BF16 values back to a shared dequantized buffer for use by the kernel.
 
         Notes and preconditions:
-        - Asserts that `in_dtype == "fp4"` and `out_dtype == "bfloat16"`.
+        - Asserts that `in_dtype == "fp4"` and `out_dtype == T.bfloat16`.
         - The generated macro depends on several surrounding-scope symbols (e.g., `import_source`, `func_name`, `block_K`, `Block_QK`, `threads`, `num_elems_per_byte`, `storage_dtype`, and `out_dtype`) and expects them to be defined consistently in the enclosing kernel.
         - The macro is optimized for block-wise, per-thread transactions sized to the target storage width (uses a MAX_TRANSACTION_SIZE_BITS constant) and uses local/register buffers sized accordingly.
         - The macro uses `T.import_source` to bring the external plugin into the module and `T.call_extern` to perform the high-throughput dequantization; callers must ensure the external function matches the expected calling convention and memory layout.
         """
         assert in_dtype in ["fp4"]
-        assert out_dtype in ["bfloat16"]
+        assert out_dtype in [T.bfloat16]
 
         # Some variables for dequantization in each thread
         MAX_TRANSACTION_SIZE_BITS = 128
@@ -193,7 +193,7 @@ def matmul(
 
         return fast_dequant_bf16_fp4_twiddling
 
-    def get_simple_dequant_func(in_dtype="fp4", out_dtype="bfloat16"):
+    def get_simple_dequant_func(in_dtype="fp4", out_dtype=T.bfloat16):
         """
         Create a simple TIR dequantization macro that converts packed 4-bit FP (FP4) stored in uint8 into bfloat16.
 
@@ -204,7 +204,7 @@ def matmul(
         - Writes the dequantized bfloat16 block into B_dequantize_shared.
 
         Constraints:
-        - Supports only in_dtype="fp4" and out_dtype="bfloat16".
+        - Supports only in_dtype="fp4" and out_dtype=T.bfloat16.
         - The helper assumes nbit == 4 and produces bfloat16 values.
         - The macro uses a fixed test-scale of 0 (no per-element scaling) as written.
 
@@ -212,7 +212,7 @@ def matmul(
             A TIR macro function performing the described in-place block dequantization from packed uint8 FP4 to bfloat16.
         """
         assert in_dtype in ["fp4"]
-        assert out_dtype in ["bfloat16"]
+        assert out_dtype in [T.bfloat16]
 
         def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr, dtype: str):
             """
@@ -228,32 +228,32 @@ def matmul(
                 val (tir.PrimExpr): A uint8 value containing packed FP4 elements.
                 pos (tir.PrimExpr): Index (0-based) of which FP4 nibble inside `val` to extract.
                 scale (tir.PrimExpr): Exponent offset applied when converting FP4 exponent to bfloat16.
-                dtype (str): Target dtype string; must be "bfloat16".
+                dtype (str): Target dtype string; must be T.bfloat16.
 
             Returns:
                 tir.PrimExpr: A bfloat16-typed PrimExpr containing the converted value.
 
             Notes:
-                - The function asserts `nbit == 4`, `dtype == "bfloat16"`, and that `val.dtype` is "uint8".
+                - The function asserts `nbit == 4`, `dtype == T.bfloat16`, and that `val.dtype` is T.uint8.
                 - The conversion uses a fixed mapping from FP4 exponent/mantissa layout into bfloat16
                 bit fields and clamps the computed exponent to fit into 8 bits.
             """
             assert nbit == 4
-            assert dtype == "bfloat16"
-            assert val.dtype == "uint8"
-            mask = tir.const((1 << nbit) - 1, "uint16")
-            f4 = (val >> (pos.astype("uint16") * tir.const(nbit, "uint16"))) & mask
-            s = f4 >> tir.const(3, "uint16")
-            e_f4 = (f4 & tir.const(6, "uint16")) >> tir.const(1, "uint16")
+            assert dtype == T.bfloat16
+            assert val.dtype == T.uint8
+            mask = tir.const((1 << nbit) - 1, T.uint16)
+            f4 = (val >> (pos.astype(T.uint16) * tir.const(nbit, T.uint16))) & mask
+            s = f4 >> tir.const(3, T.uint16)
+            e_f4 = (f4 & tir.const(6, T.uint16)) >> tir.const(1, T.uint16)
             # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
-            e_bf16 = e_f4 + tir.const(126, "uint16")
+            e_bf16 = e_f4 + tir.const(126, T.uint16)
             # Scale is the exponential part, within the representation of uint8
             # To handle the overflow, we use the max function to limit the exponential part to 8 bits
-            e_bf16 = T.min(e_bf16 + scale, tir.const((1 << 8) - 1, "uint16"))
-            m_f4 = f4 & tir.const(1, "uint16")
+            e_bf16 = T.min(e_bf16 + scale, tir.const((1 << 8) - 1, T.uint16))
+            m_f4 = f4 & tir.const(1, T.uint16)
             val_bf16 = tir.reinterpret(
-                "bfloat16",
-                ((((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16")) | (m_f4 << tir.const(6, "uint16"))).astype("uint16"),
+                T.bfloat16,
+                ((((s << tir.const(8, T.uint16)) | e_bf16) << tir.const(7, T.uint16)) | (m_f4 << tir.const(6, T.uint16))).astype(T.uint16),
             )
             return val_bf16
 
@@ -364,7 +364,7 @@ def ref_program_twiddling(A, qB):
     Returns:
         torch.Tensor: Result matrix C with shape (M, N) in bfloat16.
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert_bit_twiddling(qB)
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
@@ -384,7 +384,7 @@ def ref_program_simple(A, qB):
     Returns:
         torch.Tensor: Resulting matrix C in bfloat16 with shape (M, N).
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert(qB)
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
@@ -410,15 +410,15 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
     """
     total_flops = 2 * m * n * k
     if tune:
-        kernel = matmul(m, n, k, "bfloat16", "bfloat16", "float32", num_bits=4, fast_dequant=fast_dequant)
+        kernel = matmul(m, n, k, T.bfloat16, T.bfloat16, T.float32, num_bits=4, fast_dequant=fast_dequant)
     else:
         kernel = matmul(
             m,
             n,
             k,
-            "bfloat16",
-            "bfloat16",
-            "float32",
+            T.bfloat16,
+            T.bfloat16,
+            T.float32,
             num_bits=4,
             fast_dequant=fast_dequant,
             block_M=256,

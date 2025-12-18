@@ -4,7 +4,7 @@ import tilelang.language as T
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((M, K), dtype),
@@ -39,7 +39,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
     return main
 
 
-def run_matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def run_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     program = matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
     kernel = tilelang.compile(program, out_idx=[2], target="cuda", pass_configs={"tl.disable_tma_lower": True})
     import torch

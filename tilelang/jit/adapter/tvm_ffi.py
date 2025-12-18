@@ -135,7 +135,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         current_device_functor = self.get_current_device_functor()
 
         # Convert TVM types to native Python types during initialization
-        param_dtypes = [param.dtype for param in self.params]
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        param_dtypes = [param.torch_dtype() for param in self.params]
         # Convert TVM shape arrays to native Python lists
         param_shapes = []
 

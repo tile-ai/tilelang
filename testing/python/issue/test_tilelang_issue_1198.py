@@ -9,7 +9,7 @@ def test_issue_1198():
             [
                 32,
             ],
-            "int32",
+            T.int32,
         ),
     ):
         pass

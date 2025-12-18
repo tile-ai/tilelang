@@ -52,7 +52,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             self.ir_module = func_or_mod
 
         # Cache parameter information during initialization
-        self.param_dtypes = [param.dtype for param in params]
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        self.param_dtypes = [param.torch_dtype() for param in params]
         self.param_shapes = []
         for param in params:
             native_shape = []
@@ -75,7 +76,9 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_pass_configs(pass_configs)
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
-        self.host_func, self.function_names = self.wrapper.wrap(device_kernel_source)
+        wrapper_result = self.wrapper.wrap(device_kernel_source)
+        self.host_func = wrapper_result["host_func"]
+        self.function_names = wrapper_result["function_names"]
 
         self.lib_generator = NVRTCLibraryGenerator(self.target, self.verbose)
         self.lib_generator.update_lib_code(self.device_kernel_source)
@@ -118,7 +121,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             adapter.ir_module = func_or_mod
 
         # Cache parameter information during initialization
-        adapter.param_dtypes = [param.dtype for param in params]
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        adapter.param_dtypes = [param.torch_dtype() for param in params]
         adapter.param_shapes = []
         for param in params:
             native_shape = []

@@ -6,7 +6,7 @@ import torch
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
-def tilelang_copy(M, N, block_M, block_N, dtype="float16", pad_value=0):
+def tilelang_copy(M, N, block_M, block_N, dtype=T.float16, pad_value=0):
     @T.prim_func
     def main(
         A: T.Tensor((M, N), dtype),
@@ -26,7 +26,7 @@ def tilelang_copy(M, N, block_M, block_N, dtype="float16", pad_value=0):
     return main
 
 
-def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype="float16", pad_value=0):
+def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16, pad_value=0):
     program = tilelang_copy(M, N, block_M, block_N, dtype, pad_value=pad_value)
     kernel = tilelang.compile(
         program, out_idx=[1], target="cuda", pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True}

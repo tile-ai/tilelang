@@ -13,12 +13,12 @@ def chunk_retention_fwd_kernel(
     H,
     DK,
     DV,
-    dtype: str = "float16",
+    dtype: T.dtype = T.float16,
     scale: float = None,
 ) -> torch.Tensor:
     if scale is None:
         scale = DK**-0.5
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     chunk_size = 64
     BK = BV = 64  # Set to 128 can be faster, but has some numerical differences with FLA
@@ -37,7 +37,7 @@ def chunk_retention_fwd_kernel(
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
             i_h = i_bh % H
-            log_decay = T.alloc_var("float32")
+            log_decay = T.alloc_var(T.float32)
             log_decay = T.log2(1 - T.exp2(-5.0 - 1.0 * i_h))  # Head-specific log decay
 
             q = T.alloc_shared([chunk_size, BK], dtype)

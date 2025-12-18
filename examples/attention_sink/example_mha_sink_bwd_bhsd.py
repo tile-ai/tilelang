@@ -36,7 +36,7 @@ def flashattn_fwd(
     block_N=64,
     num_stages=1,
     threads=128,
-    dtype: str = "float16",
+    dtype: T.dtype = T.float16,
 ):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -46,7 +46,7 @@ def flashattn_fwd(
     scale = sm_scale * 1.44269504  # log2(e)
 
     shape = [batch, heads, seq_len, dim]
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     @T.prim_func
     def flash_fwd(
@@ -137,8 +137,8 @@ def flashattn_fwd(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
-    accum_dtype = "float"
+def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: T.dtype = T.float16):
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 32
 
@@ -176,8 +176,8 @@ def make_dq_layout(dQ):
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
-    accum_dtype = "float"
+def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: T.dtype = T.float16):
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len, dim]
     blk = 64
 
@@ -208,7 +208,7 @@ def flashattn_bwd(
     dim,
     window_size=None,  # None for full attention
     sm_scale=None,
-    dtype: str = "float16",
+    dtype: T.dtype = T.float16,
 ):
     block_M, block_N, num_stages, threads = get_bwd_configs()
 
@@ -217,7 +217,7 @@ def flashattn_bwd(
     scale = sm_scale * 1.44269504  # log2(e)
 
     shape = [batch, heads, seq_len, dim]
-    accum_dtype = "float"
+    accum_dtype = T.float32
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -315,8 +315,8 @@ def flashattn_bwd(
 
 
 @tilelang.jit(out_idx=-1)
-def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: str = "float16"):
-    accum_dtype = "float"
+def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: T.dtype = T.float16):
+    accum_dtype = T.float32
     shape = [batch, heads, seq_len]
 
     @T.prim_func
@@ -346,7 +346,7 @@ class _attention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, sinks, window_size):
         BATCH, H, N_CTX, D_HEAD = q.shape
-        dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
+        dtype = T.float16 if q.dtype == torch.float16 else T.bfloat16
         kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, window_size, dtype=dtype)
         o, lse = kernel(q, k, v, sinks)
         ctx.save_for_backward(q, k, v, sinks, o, lse)
@@ -364,7 +364,7 @@ class _attention(torch.autograd.Function):
             return x
 
         do, q, k, v, sinks, o = [maybe_contiguous(x) for x in (do, q, k, v, sinks, o)]
-        dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
+        dtype = T.float16 if q.dtype == torch.float16 else T.bfloat16
         kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         delta = kernel_prep(o, do)
@@ -433,8 +433,9 @@ def ref_program(
     return output.transpose(1, 2).contiguous()
 
 
-def main(BATCH: int = 1, H: int = 1, N_CTX: int = 512, D_HEAD: int = 128, window_size: Optional[int] = None, dtype: str = "float16"):
-    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+def main(BATCH: int = 1, H: int = 1, N_CTX: int = 512, D_HEAD: int = 128, window_size: Optional[int] = None, dtype: T.dtype = T.float16):
+    dtype = T.dtype(dtype)
+    torch_dtype = dtype.as_torch()
     if window_size is not None:
         print("Using sliding window attention.")
         assert window_size <= N_CTX
@@ -466,8 +467,8 @@ def main(BATCH: int = 1, H: int = 1, N_CTX: int = 512, D_HEAD: int = 128, window
 
     # Checks
     rtol, atol = {
-        "float16": (1e-2, 1e-2),
-        "bfloat16": (2e-2, 2e-2),
+        T.float16: (1e-2, 1e-2),
+        T.bfloat16: (2e-2, 2e-2),
     }[dtype]
     assert torch.allclose(O, O_ref, rtol=rtol, atol=atol), f"O max err: {(O - O_ref).abs().max()}"
     assert torch.allclose(dV, dV_ref, rtol=rtol, atol=atol), f"dV max err: {(dV - dV_ref).abs().max()}"

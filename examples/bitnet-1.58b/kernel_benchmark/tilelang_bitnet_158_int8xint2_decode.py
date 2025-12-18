@@ -76,13 +76,13 @@ def bitnet_158_int8xint2_decode(
     reduce_thread=32,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
     storage_nbit = 8
     num_bits = 2
@@ -94,7 +94,7 @@ def bitnet_158_int8xint2_decode(
     MAX_TRANSACTION_SIZE_IN_BITS = 128
     micro_size_k = MAX_TRANSACTION_SIZE_IN_BITS // DataType(in_dtype).bits
     micro_size_k_compressed = micro_size_k // num_elems_per_byte
-    storage_dtype = "int8"
+    storage_dtype = T.int8
     block_K = reduce_thread * micro_size_k
 
     use_dp4a = True
@@ -194,12 +194,12 @@ def general_compress(lowprecision_weight, source_bits=4, storage_dtype=np.int8):
 
 
 # interleave weight numpy implementation
-def interleave_weight(qweight, nbits=4, target_dtype="float16"):
-    assert target_dtype in ["float16", "int8"]
+def interleave_weight(qweight, nbits=4, target_dtype=T.float16):
+    assert target_dtype in [T.float16, T.int8]
     # reinterpret the data type of qweight to int32
     qweight = qweight.view(np.int32)
     new_qweight = np.zeros_like(qweight)
-    bits_stride = 8 if target_dtype == "int8" else 16
+    bits_stride = 8 if target_dtype == T.int8 else 16
     mask = (1 << nbits) - 1  # for 4bit the val is 0x0000000f
     num_groups = 32 // bits_stride
     elems_per_group = bits_stride // nbits
@@ -209,7 +209,7 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
             shift = (offset % num_groups) * bits_stride + (offset // num_groups) * nbits
             new_qweight |= ((qweight >> (nbits * offset)) & mask) << shift
 
-    if nbits == 1 and target_dtype == "int8":
+    if nbits == 1 and target_dtype == T.int8:
         # special handling for 1b interleave
         n16_weight = new_qweight & np.int32(0xF0F00F0F)
         n16_weight |= ((new_qweight & np.int32(0x000000F0)) >> 4) << 16
@@ -217,12 +217,12 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
         n16_weight |= ((new_qweight & np.int32(0x000F0000)) >> 16) << 4
         n16_weight |= ((new_qweight & np.int32(0x0F000000)) >> 24) << 12
         return n16_weight.view(np.int8)
-    elif nbits == 2 and target_dtype == "float16":
+    elif nbits == 2 and target_dtype == T.float16:
         n8_weight = new_qweight & np.int32(0xFF0000FF)
         n8_weight |= ((new_qweight & np.int32(0x0000FF00)) >> 8) << 16
         n8_weight |= ((new_qweight & np.int32(0x00FF0000)) >> 16) << 8
         return n8_weight.view(np.int8)
-    elif nbits == 1 and target_dtype == "float16":
+    elif nbits == 1 and target_dtype == T.float16:
         n8_weight = new_qweight & 0xF000000F
         n8_weight |= ((new_qweight & 0x000000F0) >> 4) << 8
         n8_weight |= ((new_qweight & 0x00000F00) >> 8) << 16
@@ -259,4 +259,4 @@ def assert_bitnet_158_int8xint2_decode_correctness(M, N, K, in_dtype, out_dtype,
 
 
 if __name__ == "__main__":
-    assert_bitnet_158_int8xint2_decode_correctness(1, 256, 256, "int8", "int32", "int32")
+    assert_bitnet_158_int8xint2_decode_correctness(1, 256, 256, T.int8, T.int32, T.int32)

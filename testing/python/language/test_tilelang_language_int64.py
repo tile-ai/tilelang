@@ -3,7 +3,7 @@ import tilelang.language as T
 
 
 @tilelang.jit
-def fill_symbolic(value: float, dtype="bfloat16"):
+def fill_symbolic(value: float, dtype=T.bfloat16):
     n = T.symbolic("n", "int64")
     block_n = 512
 
@@ -33,7 +33,7 @@ def test_fill_symbolic():
 
 
 @tilelang.jit
-def fill_static(n: int, value: float, dtype="bfloat16"):
+def fill_static(n: int, value: float, dtype=T.bfloat16):
     block_n = 512
 
     @T.prim_func

@@ -36,8 +36,8 @@ def get_configs():
 )
 def flashmla_decode(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, threads=128):
     scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
     kv_group_num = heads // kv_head_num
     VALID_BLOCK_H = min(block_H, kv_group_num)
     assert kv_head_num == 1, "kv_head_num must be 1"

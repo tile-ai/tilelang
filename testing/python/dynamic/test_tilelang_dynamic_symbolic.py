@@ -33,18 +33,18 @@ def tl_matmul_macro(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -52,7 +52,7 @@ def tl_matmul_macro(
     block_col_warps = 1
     warp_row_tiles = 16
     warp_col_tiles = 16
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -453,36 +453,36 @@ def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
 
 
 def test_assert_tl_matmul_macro():
-    assert_tl_matmul_macro_correctness(128, 128, 128, "float16", "float16", "float16")
-    assert_tl_matmul_macro_correctness(66, 128, 128, "float16", "float16", "float16")
-    assert_tl_matmul_macro_correctness(32, 128, 128, "float16", "float16", "float16")
+    assert_tl_matmul_macro_correctness(128, 128, 128, T.float16, T.float16, T.float16)
+    assert_tl_matmul_macro_correctness(66, 128, 128, T.float16, T.float16, T.float16)
+    assert_tl_matmul_macro_correctness(32, 128, 128, T.float16, T.float16, T.float16)
 
 
 def test_assert_tl_matmul_block():
-    assert_tl_matmul_block_correctness(128, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
-    assert_tl_matmul_block_correctness(67, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
-    assert_tl_matmul_block_correctness(36, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
+    assert_tl_matmul_block_correctness(128, 128, 128, False, False, T.float16, T.float16, T.float16, 64, 64, 32)
+    assert_tl_matmul_block_correctness(67, 128, 128, False, False, T.float16, T.float16, T.float16, 64, 64, 32)
+    assert_tl_matmul_block_correctness(36, 128, 128, False, False, T.float16, T.float16, T.float16, 64, 64, 32)
 
 
 def test_assert_tl_matmul_block_all_dynamic():
-    assert_tl_matmul_block_all_dynamic_correctness(128, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
-    assert_tl_matmul_block_all_dynamic_correctness(67, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
-    assert_tl_matmul_block_all_dynamic_correctness(36, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32)
+    assert_tl_matmul_block_all_dynamic_correctness(128, 128, 128, False, False, T.float16, T.float16, T.float16, 64, 64, 32)
+    assert_tl_matmul_block_all_dynamic_correctness(67, 128, 128, False, False, T.float16, T.float16, T.float16, 64, 64, 32)
+    assert_tl_matmul_block_all_dynamic_correctness(36, 128, 128, False, False, T.float16, T.float16, T.float16, 64, 64, 32)
 
 
 def test_assert_tl_matmul_block_all_dynamic_with_pass_config():
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        128, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=8
+        128, 128, 128, False, False, T.float16, T.float16, T.float16, 64, 64, 32, dynamic_alignment=8
     )
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        64, 128, 128, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=8
+        64, 128, 128, False, False, T.float16, T.float16, T.float16, 64, 64, 32, dynamic_alignment=8
     )
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        64, 128, 60, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=4
+        64, 128, 60, False, False, T.float16, T.float16, T.float16, 64, 64, 32, dynamic_alignment=4
     )
     # Tail split is enabled with dynamic alignment 0
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        64, 128, 64, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=0
+        64, 128, 64, False, False, T.float16, T.float16, T.float16, 64, 64, 32, dynamic_alignment=0
     )
 
 

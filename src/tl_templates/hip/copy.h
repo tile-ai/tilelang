@@ -73,33 +73,35 @@ CK_TILE_DEVICE void async_buffer_load_dword_v(void *smem, int32x4_t rsrc,
 }
 
 template <int N>
-TL_DEVICE void cp_async_gs(void *lds_base_ptr, void *global_base_ptr) {
+TL_DEVICE void cp_async_gs(void *lds_base_ptr, void const *global_base_ptr) {
   if constexpr (N == 16) {
-    *(uint4 *)lds_base_ptr = *(uint4 *)global_base_ptr;
+    *(uint4 *)lds_base_ptr = *(const uint4 *)global_base_ptr;
   } else if constexpr (N == 8) {
-    *(uint2 *)lds_base_ptr = *(uint2 *)global_base_ptr;
+    *(uint2 *)lds_base_ptr = *(const uint2 *)global_base_ptr;
   } else if constexpr (N == 4) {
     async_buffer_load_dword_v(
         lds_base_ptr,
-        make_wave_buffer_resource(((int32_t *)global_base_ptr) - threadIdx.x),
+        make_wave_buffer_resource(((const int32_t *)global_base_ptr) -
+                                  threadIdx.x),
         threadIdx.x * N /*assume 4 bytes*/);
   }
 }
 
 template <int N>
 TL_DEVICE void cp_async_gs_conditional(void *lds_base_ptr,
-                                       void *global_base_ptr, bool cond) {
+                                       void const *global_base_ptr, bool cond) {
   if constexpr (N == 16) {
     *(uint4 *)lds_base_ptr =
-        cond ? *(uint4 *)global_base_ptr : make_uint4(0, 0, 0, 0);
+        cond ? *(const uint4 *)global_base_ptr : make_uint4(0, 0, 0, 0);
   } else if constexpr (N == 8) {
     *(uint2 *)lds_base_ptr =
-        cond ? *(uint2 *)global_base_ptr : make_uint2(0, 0);
+        cond ? *(const uint2 *)global_base_ptr : make_uint2(0, 0);
   } else {
     if (cond) {
       async_buffer_load_dword_v(
           lds_base_ptr,
-          make_wave_buffer_resource(((int32_t *)global_base_ptr) - threadIdx.x),
+          make_wave_buffer_resource(((const int32_t *)global_base_ptr) -
+                                    threadIdx.x),
           threadIdx.x * N /*assume 4 bytes*/);
     } else {
       *(uint4 *)lds_base_ptr = make_uint4(0, 0, 0, 0);

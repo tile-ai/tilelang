@@ -137,7 +137,7 @@ import tilelang.language as T
 # target currently can be "cuda" or "hip" or "cpu".
 # if not specified, it will be inferred from the input tensors during compile time
 @tilelang.jit
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float):
 
     @T.prim_func
     def matmul_relu_kernel(

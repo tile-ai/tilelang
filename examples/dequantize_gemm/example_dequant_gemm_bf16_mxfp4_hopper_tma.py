@@ -20,31 +20,31 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
         val (tir.PrimExpr): Packed input value of dtype `uint8` containing one or more 4-bit fields.
         pos (tir.PrimExpr): Index of the nibble within `val` (used to shift/extract the 4-bit field).
         scale (tir.PrimExpr): Per-element exponent adjustment added to the extracted exponent (uint-like).
-        dtype (str): Destination dtype string (must be "bfloat16").
+        dtype (str): Destination dtype string (must be T.bfloat16).
 
     Returns:
         tir.PrimExpr: The resulting value reinterpreted as `bfloat16`.
 
     Notes:
-    - Preconditions are enforced via assertions: nbit == 4, dtype == "bfloat16", and val.dtype == "uint8".
+    - Preconditions are enforced via assertions: nbit == 4, dtype == T.bfloat16, and val.dtype == T.uint8.
     - The function clamps the adjusted exponent to the 8-bit range before assembling the bfloat16 bit pattern.
     """
     assert nbit == 4
-    assert dtype == "bfloat16"
-    assert val.dtype == "uint8"
-    mask = tir.const((1 << nbit) - 1, "uint16")
-    f4 = (val >> (pos.astype("uint16") * tir.const(nbit, "uint16"))) & mask
-    s = f4 >> tir.const(3, "uint16")
-    e_f4 = (f4 & tir.const(6, "uint16")) >> tir.const(1, "uint16")
+    assert dtype == T.bfloat16
+    assert val.dtype == T.uint8
+    mask = tir.const((1 << nbit) - 1, T.uint16)
+    f4 = (val >> (pos.astype(T.uint16) * tir.const(nbit, T.uint16))) & mask
+    s = f4 >> tir.const(3, T.uint16)
+    e_f4 = (f4 & tir.const(6, T.uint16)) >> tir.const(1, T.uint16)
     # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
-    e_bf16 = e_f4 + tir.const(126, "uint16")
+    e_bf16 = e_f4 + tir.const(126, T.uint16)
     # Scale is the exponential part, within the representation of uint8
     # To handle the overflow, we may use the min function to limit the exponential part to 8 bits
     # e_bf16 = T.min(e_bf16 + scale, tir.const((1 << 8) - 1, "uint16"))
-    m_f4 = f4 & tir.const(1, "uint16")
+    m_f4 = f4 & tir.const(1, T.uint16)
     val_bf16 = tir.reinterpret(
-        "bfloat16",
-        ((((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16")) | (m_f4 << tir.const(6, "uint16"))).astype("uint16"),
+        T.bfloat16,
+        ((((s << tir.const(8, T.uint16)) | e_bf16) << tir.const(7, T.uint16)) | (m_f4 << tir.const(6, T.uint16))).astype(T.uint16),
     )
     return val_bf16
 
@@ -90,7 +90,7 @@ def matmul(
     in_dtype,
     out_dtype,
     accum_dtype,
-    source_format="uint",
+    source_format=T.uint32,
     num_bits=4,
     scale_size=32,
     fast_dequant=True,
@@ -116,7 +116,7 @@ def matmul(
     Parameters:
     M, N, K (int): matrix dimensions (A is MxK, result is MxN). K must be divisible by (block_K * split).
     in_dtype (str): element type of A (e.g., "fp4" in this file).
-    out_dtype (str): output tensor element type (e.g., "bfloat16").
+    out_dtype (str): output tensor element type (e.g., T.bfloat16).
     accum_dtype (str): accumulation type used for the inner GEMM.
     source_format (str, optional): format string passed to intrinsic selector (default "uint").
     num_bits (int, optional): number of bits per quantized element in B (default 4).
@@ -141,7 +141,7 @@ def matmul(
     - An assertion enforces that K % (block_K * split) == 0.
     """
     num_elems_per_byte = 8 // num_bits
-    storage_dtype = "uint8"
+    storage_dtype = T.uint8
     QK = K // num_elems_per_byte
     Block_QK = block_K // num_elems_per_byte
     A_shape = (M, K)
@@ -170,7 +170,7 @@ def matmul(
     assert func_name is not None, "mxfp_intrin_info is not found"
     import_source = import_source
 
-    def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype="bfloat16"):
+    def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype=T.bfloat16):
         """
         Return a TileLang macro that performs fast dequantization of twiddled FP4-packed data into BF16.
 
@@ -181,12 +181,12 @@ def matmul(
         - Writes the scaled BF16 results into B_dequantize_shared.
 
         Notes:
-        - This factory only supports in_dtype="fp4" and out_dtype="bfloat16".
+        - This factory only supports in_dtype="fp4" and out_dtype=T.bfloat16.
         - The macro depends on several names from the enclosing scope (e.g., import_source, func_name, DataType, num_elems_per_byte, storage_dtype, block_N, block_K, threads, scale_size); those must be defined and consistent with the kernel that will use the macro.
         - The macro issues a T.import_source and T.call_extern to invoke the external intrinsic; ensure the external implementation matching `func_name` is available at compilation/runtime.
         """
         assert in_dtype in ["fp4"]
-        assert out_dtype in ["bfloat16"]
+        assert out_dtype in [T.bfloat16]
 
         # Some variables for dequantization in each thread
         MAX_TRANSACTION_SIZE_BITS = 128
@@ -262,19 +262,19 @@ def matmul(
 
         return fast_dequant_bf16_fp4_twiddling
 
-    def get_simple_dequant_func(in_dtype="fp4", out_dtype="bfloat16"):
+    def get_simple_dequant_func(in_dtype="fp4", out_dtype=T.bfloat16):
         """
         Create a simple (scalar) dequantization macro that converts 4-bit packed inputs to bfloat16.
 
         Returns a T.macro that, given shared-storage buffers B_shared, B_dequantize_shared, a Scale tensor, and block index k, unpacks 4-bit values from B_shared, converts each nibble to a bfloat16 value using _tir_u8_to_f4_to_bf16, applies the per-element exponential Scale, and writes the dequantized BF16 block into B_dequantize_shared.
 
         Notes:
-        - Only supports in_dtype="fp4" and out_dtype="bfloat16".
+        - Only supports in_dtype="fp4" and out_dtype=T.bfloat16.
         - The macro expects B_shared and B_dequantize_shared to have the shapes established in the enclosing scope (B_shared_shape, B_dequantize_shared_shape) and performs block-local copying into allocated fragments before elementwise conversion.
         - Scale holds the exponent-like scaling values indexed per output element as used by the conversion helper.
         """
         assert in_dtype in ["fp4"]
-        assert out_dtype in ["bfloat16"]
+        assert out_dtype in [T.bfloat16]
 
         @T.macro
         def simple_dequant_bf16_fp4(B_shared, B_dequantize_shared, Scale_shared, k):
@@ -402,7 +402,7 @@ def ref_program_twiddling(A, qB, Scale, Bias=None):
     Returns:
         torch.Tensor: Resulting matrix C with shape (M, N) in bfloat16.
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert_bit_twiddling(qB)
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
@@ -427,7 +427,7 @@ def ref_program_twiddling_with_bias(A, qB, Scale, Bias):
     Returns:
         torch.Tensor: Resulting matrix C with shape (M, N) in bfloat16.
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert_bit_twiddling(qB)
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
@@ -453,7 +453,7 @@ def ref_program_simple(A, qB, Scale, Bias=None):
 
     No in-place modification is performed on inputs (a local floating copy of B is scaled).
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert(qB)
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
@@ -483,7 +483,7 @@ def ref_program_simple_with_bias(A, qB, Scale, Bias):
 
     No in-place modification is performed on inputs (a local floating copy of B is scaled).
     """
-    dtypeC = "bfloat16"
+    dtypeC = T.bfloat16
     B = torch_convert(qB)
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
@@ -514,16 +514,16 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
 
     if tune:
         kernel = matmul(
-            m, n, k, "bfloat16", "bfloat16", "float32", num_bits=4, scale_size=scale_size, fast_dequant=fast_dequant, with_bias=with_bias
+            m, n, k, T.bfloat16, T.bfloat16, T.float32, num_bits=4, scale_size=scale_size, fast_dequant=fast_dequant, with_bias=with_bias
         )
     else:
         kernel = matmul(
             m,
             n,
             k,
-            "bfloat16",
-            "bfloat16",
-            "float32",
+            T.bfloat16,
+            T.bfloat16,
+            T.float32,
             num_bits=4,
             scale_size=scale_size,
             block_M=256,

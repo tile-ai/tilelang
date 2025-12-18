@@ -70,8 +70,8 @@ def flashattn(batch, heads, seq_len, dim, is_causal, groups=1, block_M=64, block
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
 
     @T.macro
     def MMA0(

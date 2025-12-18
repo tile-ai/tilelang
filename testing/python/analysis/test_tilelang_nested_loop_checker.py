@@ -29,7 +29,7 @@ Rule:
 
 
 @tilelang.jit(out_idx=[1])
-def nested_continuous_parallels(length=256, block=16, dtype="float32"):
+def nested_continuous_parallels(length=256, block=16, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -44,7 +44,7 @@ def nested_continuous_parallels(length=256, block=16, dtype="float32"):
 
 
 @tilelang.jit(out_idx=[1])
-def nested_triple_continuous_parallels(length=256, block1=8, block2=2, dtype="float32"):
+def nested_triple_continuous_parallels(length=256, block1=8, block2=2, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -60,7 +60,7 @@ def nested_triple_continuous_parallels(length=256, block1=8, block2=2, dtype="fl
 
 
 @tilelang.jit(out_idx=[1])
-def nested_noncontinuous_parallels(length=256, block=16, dtype="float32"):
+def nested_noncontinuous_parallels(length=256, block=16, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -149,9 +149,9 @@ def run_gemm_nested_pipelines(
     block_K = 32
     trans_A = False
     trans_B = False
-    in_dtype = "float16"
-    out_dtype = "float16"
-    dtypeAccum = "float32"
+    in_dtype = T.float16
+    out_dtype = T.float16
+    dtypeAccum = T.float32
     num_threads = 128
     program = matmul_nested_pipelines(
         M,
@@ -188,7 +188,7 @@ def run_gemm_nested_pipelines(
             A = A.T
         if trans_B:
             B = B.T
-        if in_dtype == "float32":
+        if in_dtype == T.float32:
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
             A = (A.view(torch.int32) - 0x1000).view(torch.float32)
@@ -215,7 +215,7 @@ is OK.
 
 
 @tilelang.jit(out_idx=[1])
-def nested_continuous_serials(length=256, block=16, dtype="float32"):
+def nested_continuous_serials(length=256, block=16, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -230,7 +230,7 @@ def nested_continuous_serials(length=256, block=16, dtype="float32"):
 
 
 @tilelang.jit(out_idx=[1])
-def nested_noncontinuous_serials(length=256, block=16, dtype="float32"):
+def nested_noncontinuous_serials(length=256, block=16, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -272,7 +272,7 @@ Rule:
 
 
 @tilelang.jit(out_idx=[1])
-def nested_continuous_sp(length=256, block=16, dtype="float32"):
+def nested_continuous_sp(length=256, block=16, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -287,7 +287,7 @@ def nested_continuous_sp(length=256, block=16, dtype="float32"):
 
 
 @tilelang.jit(out_idx=[1])
-def nested_continuous_ps(length=256, block=16, dtype="float32"):
+def nested_continuous_ps(length=256, block=16, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -302,7 +302,7 @@ def nested_continuous_ps(length=256, block=16, dtype="float32"):
 
 
 @tilelang.jit(out_idx=[1])
-def nested_continuous_psp(length=256, block1=8, block2=2, dtype="float32"):
+def nested_continuous_psp(length=256, block1=8, block2=2, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -318,7 +318,7 @@ def nested_continuous_psp(length=256, block1=8, block2=2, dtype="float32"):
 
 
 @tilelang.jit(out_idx=[1])
-def nested_continuous_sps(length=256, block1=8, block2=2, dtype="float32"):
+def nested_continuous_sps(length=256, block1=8, block2=2, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -469,9 +469,9 @@ def run_gemm_mixed_pp(
     block_M = 128
     block_N = 128
     block_K = 32
-    in_dtype = "float16"
-    out_dtype = "float16"
-    dtypeAccum = "float32"
+    in_dtype = T.float16
+    out_dtype = T.float16
+    dtypeAccum = T.float32
     num_threads = 128
 
     program = matmul_nested_pipa(
@@ -502,7 +502,7 @@ def run_gemm_mixed_pp(
     def ref_program(A, B):
         import torch
 
-        if in_dtype == "float32":
+        if in_dtype == T.float32:
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
             A = (A.view(torch.int32) - 0x1000).view(torch.float32)
@@ -603,9 +603,9 @@ def run_gemm_tiled_op_with_parallel(
     block_M = 128
     block_N = 128
     block_K = 32
-    in_dtype = "float16"
-    out_dtype = "float16"
-    dtypeAccum = "float32"
+    in_dtype = T.float16
+    out_dtype = T.float16
+    dtypeAccum = T.float32
     num_threads = 128
 
     program = matmul_nested_pipa(
@@ -636,7 +636,7 @@ def run_gemm_tiled_op_with_parallel(
     def ref_program(A, B):
         import torch
 
-        if in_dtype == "float32":
+        if in_dtype == T.float32:
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
             A = (A.view(torch.int32) - 0x1000).view(torch.float32)
@@ -673,7 +673,7 @@ def run_gemm_tiled_op_with_parallel(
 
 
 @tilelang.jit(out_idx=[1])
-def tir_op_with_parallel(length=256, block=16, dtype="float32"):
+def tir_op_with_parallel(length=256, block=16, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),
@@ -688,7 +688,7 @@ def tir_op_with_parallel(length=256, block=16, dtype="float32"):
 
 
 @tilelang.jit(out_idx=[1])
-def customize_op_with_parallel(length=256, block=16, dtype="float32"):
+def customize_op_with_parallel(length=256, block=16, dtype=T.float32):
     @T.prim_func
     def main(
         A: T.Tensor((length,), dtype),

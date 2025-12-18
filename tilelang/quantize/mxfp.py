@@ -1,4 +1,5 @@
 from typing import Literal
+from tilelang import language as T
 
 # Implementation asm for fp4 to bf16, using twiddling
 # Reference: https://github.com/triton-lang/triton/blob/main/python/triton_kernels/triton_kernels/tensor_details/layout_details/hopper_value.py#L11-L18
@@ -49,10 +50,10 @@ __device__ void decode_fp4_to_bf16_twiddling(T1 *B_local, T2 *B_local_decode, co
 
 
 def get_mxfp_intrin_group(
-    out_dtype: Literal["float16", "bfloat16"] = "bfloat16",
-    source_format: Literal["int", "uint"] = "uint",
+    out_dtype: Literal[T.float16, T.bfloat16] = T.bfloat16,
+    source_format: Literal[T.int, T.uint] = T.uint,
     source_bit: int = 4,
-    storage_dtype: Literal["int32", "int8", "uint8"] = "uint8",
+    storage_dtype: Literal[T.int32, T.int8, T.uint8] = T.uint8,
     use_twiddling: bool = False,
 ) -> dict[str, str]:
     """
@@ -65,10 +66,10 @@ def get_mxfp_intrin_group(
     `_twiddling`).
 
     Parameters:
-        out_dtype: Target floating-point type for decoded values; either "float16" or "bfloat16".
+        out_dtype: Target floating-point type for decoded values; either T.float16 or T.bfloat16.
         source_format: Integer source representation; "int" or "uint".
         source_bit: Bit width of the packed source format (e.g., 4).
-        storage_dtype: Underlying storage integer dtype (one of "int32", "int8", "uint8").
+        storage_dtype: Underlying storage integer dtype (one of T.int32, T.int8, T.uint8).
         use_twiddling: When True, select the twiddling variant of the decoding intrinsic.
 
     Returns:
@@ -80,11 +81,12 @@ def get_mxfp_intrin_group(
         AssertionError: if out_dtype, source_format, or storage_dtype are not supported.
         KeyError: if the constructed key does not match any available C source implementation.
     """
-    assert out_dtype in ["float16", "bfloat16"], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'bfloat16'."
-    assert source_format in ["int", "uint"], f"Invalid source_format: {source_format}. Expected 'int' or 'uint'."
-    assert storage_dtype in ["int32", "int8", "uint8"], f"Invalid storage_dtype: {storage_dtype}. Expected 'int32' or 'int8' or 'uint8'."
+    out_dtype, source_format, storage_dtype = T.dtype(out_dtype), T.dtype(source_format), T.dtype(storage_dtype)
+    assert out_dtype in [T.float16, T.bfloat16], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'bfloat16'."
+    assert source_format in [T.int, T.uint], f"Invalid source_format: {source_format}. Expected 'int' or 'uint'."
+    assert storage_dtype in [T.int32, T.int8, T.uint8], f"Invalid storage_dtype: {storage_dtype}. Expected 'int32' or 'int8' or 'uint8'."
 
-    dtype_map = {"float16": "f16", "bfloat16": "bf16"}
+    dtype_map = {T.float16: "f16", T.bfloat16: "bf16"}
     key = f"fp{source_bit}_to_{dtype_map[out_dtype]}"
     if use_twiddling:
         key += "_twiddling"

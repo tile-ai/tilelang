@@ -16,7 +16,7 @@ arch = nvcc.get_target_compute_version()
 
 DEFAULT_CONFIG = {  # take best config from autotune script
     "4090": {
-        "float": {
+        T.float: {
             "block_M": 128,
             "block_N": 64,
             "block_K": 64,
@@ -25,7 +25,7 @@ DEFAULT_CONFIG = {  # take best config from autotune script
             "policy": T.GemmWarpPolicy.Square,
             "enable_rasterization": True,
         },
-        "float16": {
+        T.float16: {
             "block_M": 256,
             "block_N": 128,
             "block_K": 64,
@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {  # take best config from autotune script
         },
     },
     "h20": {
-        "float": {
+        T.float: {
             "block_M": 128,
             "block_N": 64,
             "block_K": 128,
@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {  # take best config from autotune script
             "policy": T.GemmWarpPolicy.Square,
             "enable_rasterization": True,
         },
-        "float16": {
+        T.float16: {
             "block_M": 128,
             "block_N": 64,
             "block_K": 128,
@@ -66,15 +66,15 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
 
     @T.prim_func
     def gemm_sp_fp16(
-        A_sparse: T.Tensor((M, K // 2), "float16"),
+        A_sparse: T.Tensor((M, K // 2), T.float16),
         E: T.Tensor((M, K // e_factor), e_dtype),
-        B: T.Tensor((K, N), "float16"),
+        B: T.Tensor((K, N), T.float16),
         C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K // 2), "float16")
+            A_shared = T.alloc_shared((block_M, block_K // 2), T.float16)
             E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
-            B_shared = T.alloc_shared((block_K, block_N), "float16")
+            B_shared = T.alloc_shared((block_K, block_N), T.float16)
             C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
@@ -83,8 +83,8 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
             T.use_swizzle(panel_size=10, enable=enable_rasterization)
             T.annotate_layout(
                 {
-                    E: make_cutlass_metadata_layout(E, mma_dtype="float16", block_k=block_K, arch=arch),
-                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype="float16", block_k=block_K, arch=arch),
+                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, block_k=block_K, arch=arch),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, block_k=block_K, arch=arch),
                 }
             )
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -104,7 +104,7 @@ def main():
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument("--accum_dtype", type=str, default="float", choices=["float", "float16"], help="Accumulation datatype")
+    parser.add_argument("--accum_dtype", type=str, default=T.float, choices=[T.float, T.float16], help="Accumulation datatype")
     parser.add_argument("--cfg", type=str, choices=["4090", "h20"], default="4090")
     args = parser.parse_args()
     kernel = matmul_sp_fp16(args.m, args.n, args.k, args.accum_dtype, **DEFAULT_CONFIG[args.cfg][args.accum_dtype])

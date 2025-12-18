@@ -186,8 +186,8 @@ def make_tilelang_unary_kernel(M: int, N: int, op_id: int, use_fastmath: bool = 
 
     @T.prim_func
     def tilelang_unary_kernel(
-        A: T.Tensor((M, N), "float32"),
-        B: T.Tensor((M, N), "float32"),
+        A: T.Tensor((M, N), T.float32),
+        B: T.Tensor((M, N), T.float32),
     ):
         with T.Kernel(T.ceildiv(N, TILELANG_BLOCK_N), T.ceildiv(M, TILELANG_BLOCK_M), threads=TILELANG_THREADS) as (bx, by):
             for i, j in T.Parallel(TILELANG_BLOCK_M, TILELANG_BLOCK_N):
@@ -224,9 +224,9 @@ def make_tilelang_binary_kernel(M: int, N: int):
 
     @T.prim_func
     def tilelang_binary_kernel(
-        A: T.Tensor((M, N), "float32"),
-        B: T.Tensor((M, N), "float32"),
-        C: T.Tensor((M, N), "float32"),
+        A: T.Tensor((M, N), T.float32),
+        B: T.Tensor((M, N), T.float32),
+        C: T.Tensor((M, N), T.float32),
     ):
         with T.Kernel(T.ceildiv(N, TILELANG_BLOCK_N), T.ceildiv(M, TILELANG_BLOCK_M), threads=TILELANG_THREADS) as (bx, by):
             for i, j in T.Parallel(TILELANG_BLOCK_M, TILELANG_BLOCK_N):

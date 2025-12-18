@@ -31,9 +31,9 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
 
     vertical_size_round, slash_size_round = tilelang.next_power_of_2(vertical_size), tilelang.next_power_of_2(slash_size)
 
-    dtype = "float16"
-    accum_dtype = "float"
-    int_dtype = "int32"
+    dtype = T.float16
+    accum_dtype = T.float32
+    int_dtype = T.int32
 
     def kernel_func(block_M, block_N, num_stages, threads):
         @T.macro

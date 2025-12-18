@@ -13,7 +13,7 @@ from tvm import ir, tir
 
 def copy(
     src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
-    dst: tir.Buffer | tir.BufferLoad,
+    dst: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
     coalesced_width: int | None = None,
     disable_tma: bool = False,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
@@ -22,7 +22,7 @@ def copy(
 
     Args:
         src (Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion]): Source memory region
-        dst (Union[tir.Buffer, tir.BufferLoad]): Destination memory region
+        dst (Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion]): Destination memory region
         coalesced_width (Optional[int], optional): Width for coalesced memory access. Defaults to None.
 
     Raises:

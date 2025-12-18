@@ -53,8 +53,8 @@ def get_configs():
 )
 @tilelang.jit(out_idx=[-1])
 def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pack, gemm_type):
-    dtype = "float8_e4m3fnuz"
-    accum_dtype = "float"
+    dtype = T.float8_e4m3fnuz
+    accum_dtype = T.float32
 
     @T.prim_func
     def gemm_fp8_rs(

@@ -33,7 +33,7 @@ def moe_forward_tilelang_shared(
     shared_W_up_shape = (dexpert, dhidden)
     shared_W_down_shape = (dhidden, dexpert)
 
-    accum_type = "float32"
+    accum_type = T.float32
 
     @T.prim_func
     def kernel_shared(
@@ -121,7 +121,7 @@ def moe_forward_tilelang_routed(
     # group_count = len(group_sizes_list)
     # M = sum([(group_size + block_token - 1) // block_token for group_size in group_sizes_list])
     M = math.ceil(group_sum / block_token) + group_count
-    accum_dtype = "float32"
+    accum_dtype = T.float32
 
     # Tensors: Note that input shape is reshape to (bs * seq_len * n_experts_per_token, dhidden) for grouped gemm
     input_shape = (group_sum, dhidden)
@@ -139,10 +139,10 @@ def moe_forward_tilelang_routed(
         routed_expert_up: T.Tensor(routed_expert_up_shape, dtype),  # type: ignore
         routed_expert_down: T.Tensor(routed_expert_down_shape, dtype),  # type: ignore
         routed_expert_weights: T.Tensor(routed_expert_weights_shape, dtype),  # type: ignore
-        group_sizes: T.Tensor(group_sizes_shape, "int32"),  # type: ignore
-        group_offsets: T.Tensor(group_sizes_shape, "int32"),  # type: ignore
-        group_padded_offsets: T.Tensor(group_sizes_shape, "int32"),  # type: ignore
-        group_idx_for_bx: T.Tensor((M,), "int32"),  # type: ignore
+        group_sizes: T.Tensor(group_sizes_shape, T.int32),  # type: ignore
+        group_offsets: T.Tensor(group_sizes_shape, T.int32),  # type: ignore
+        group_padded_offsets: T.Tensor(group_sizes_shape, T.int32),  # type: ignore
+        group_idx_for_bx: T.Tensor((M,), T.int32),  # type: ignore
         up_logits: T.Tensor(intermediate_shape, dtype),  # type: ignore
         output: T.Tensor(input_shape, dtype),  # type: ignore
     ):
@@ -155,8 +155,8 @@ def moe_forward_tilelang_routed(
             gate_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
             up_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
 
-            cur_group_idx = T.alloc_local([1], "int32")
-            cur_group_size = T.alloc_local([1], "int32")
+            cur_group_idx = T.alloc_local([1], T.int32)
+            cur_group_size = T.alloc_local([1], T.int32)
 
             T.use_swizzle(10, enable=True)
 
@@ -208,8 +208,8 @@ def moe_forward_tilelang_routed(
             routed_expert_down_shared = T.alloc_shared((block_dhidden, block_dexpert), dtype=dtype)
             output_local = T.alloc_fragment((block_token, block_dhidden), dtype=accum_dtype)
 
-            cur_group_idx = T.alloc_local([1], "int32")
-            cur_group_size = T.alloc_local([1], "int32")
+            cur_group_idx = T.alloc_local([1], T.int32)
+            cur_group_size = T.alloc_local([1], T.int32)
 
             T.use_swizzle(10, enable=True)
 
@@ -464,7 +464,7 @@ def custom_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
     """
     input_tensor, weights, config = data
 
-    dtype_str = "float16"
+    dtype_str = T.float16
 
     shared_kernel = moe_forward_tilelang_shared(
         config["d_hidden"],

@@ -1,13 +1,14 @@
+import pytest
 import torch
 import tilelang.testing
 import tilelang.language as T
 
 str2dtype = {
-    "float32": torch.float32,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float8_e4m3": torch.float8_e4m3fn,
-    "float8_e5m2": torch.float8_e5m2,
+    T.float32: torch.float32,
+    T.float16: torch.float16,
+    T.bfloat16: torch.bfloat16,
+    T.float8_e4m3fn: torch.float8_e4m3fn,
+    T.float8_e5m2: torch.float8_e5m2,
 }
 
 
@@ -60,9 +61,10 @@ def run_vectorized_cast(src_dtype_str: str, dst_dtype_str: str, check_str: str, 
     kernel = vectorized_cast_kernel(M, src_dtype_str, dst_dtype_str)
     kernel_parallel = parallel_vectorized_cast_kernel(M, src_dtype_str, dst_dtype_str)
 
-    A = torch.randn(M, dtype=str2dtype[src_dtype_str]).cuda()
-    B = torch.zeros(M, dtype=str2dtype[dst_dtype_str]).cuda()
-    C = torch.zeros(M, dtype=str2dtype[dst_dtype_str]).cuda()
+    A_float = torch.randn(M, dtype=torch.float32, device="cuda")
+    A = A_float.to(str2dtype[src_dtype_str])
+    B = torch.zeros(M, dtype=str2dtype[dst_dtype_str], device="cuda")
+    C = torch.zeros(M, dtype=str2dtype[dst_dtype_str], device="cuda")
 
     kernel(A, B)
     kernel_parallel(A, C)
@@ -76,30 +78,29 @@ def run_vectorized_cast(src_dtype_str: str, dst_dtype_str: str, check_str: str, 
     assert check_str in code and check_str in code_parallel, f"Cast {src_dtype_str} to {dst_dtype_str} with {lanes=} is not vectorized!"
 
 
-def test_vectorized_cast():
-    # fp32 -> fp16
-    run_vectorized_cast("float32", "float16", "__float22half2_rn", 2)
-    run_vectorized_cast("float32", "float16", "__float22half2_rn", 4)
-
-    # fp16 -> fp32
-    run_vectorized_cast("float16", "float32", "__half22float2", 2)
-    run_vectorized_cast("float16", "float32", "__half22float2", 4)
-
-    # fp32 -> fp8_e4m3
-    run_vectorized_cast("float32", "float8_e4m3", "__nv_cvt_float2_to_fp8x2", 2)
-    run_vectorized_cast("float32", "float8_e4m3", "__nv_cvt_float2_to_fp8x2", 4)
-
-    # fp32 -> fp8_e5m2
-    run_vectorized_cast("float32", "float8_e5m2", "__nv_cvt_float2_to_fp8x2", 2)
-    run_vectorized_cast("float32", "float8_e5m2", "__nv_cvt_float2_to_fp8x2", 4)
-
-    # fp32 -> bf16
-    run_vectorized_cast("float32", "bfloat16", "__float22bfloat162_rn", 2)
-    run_vectorized_cast("float32", "bfloat16", "__float22bfloat162_rn", 4)
-
-    # bf16 -> fp32
-    run_vectorized_cast("bfloat16", "float32", "__bfloat1622float2", 2)
-    run_vectorized_cast("bfloat16", "float32", "__bfloat1622float2", 4)
+@pytest.mark.parametrize(
+    "src_dtype, dst_dtype, check_str, lanes",
+    [
+        (T.float32, T.float16, "__float22half2_rn", 2),
+        (T.float32, T.float16, "__float22half2_rn", 4),
+        (T.float16, T.float32, "__half22float2", 2),
+        (T.float16, T.float32, "__half22float2", 4),
+        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 2),
+        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 4),
+        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 2),
+        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 4),
+        (T.float32, T.bfloat16, "__float22bfloat162_rn", 2),
+        (T.float32, T.bfloat16, "__float22bfloat162_rn", 4),
+        (T.bfloat16, T.float32, "__bfloat1622float2", 2),
+        (T.bfloat16, T.float32, "__bfloat1622float2", 4),
+        (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
+        (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
+        (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
+        (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
+    ],
+)
+def test_vectorized_cast(src_dtype, dst_dtype, check_str, lanes):
+    run_vectorized_cast(src_dtype, dst_dtype, check_str, lanes)
 
 
 if __name__ == "__main__":

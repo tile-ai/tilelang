@@ -19,15 +19,15 @@ def test_buffer_load_negative_index_legalized():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
+    def before(A: T.Tensor((1024,), T.float32)):
         value = A[-1]
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
+    def after(A: T.Tensor((1024,), T.float32)):
         value = A[1023]  # A[-1] becomes A[1023]
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     _check(before, after)
@@ -39,15 +39,15 @@ def test_buffer_load_mixed_negative_positive_indices():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024, 512), "float32")):
+    def before(A: T.Tensor((1024, 512), T.float32)):
         value = A[-1, 10]
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     @T.prim_func
-    def after(A: T.Tensor((1024, 512), "float32")):
+    def after(A: T.Tensor((1024, 512), T.float32)):
         value = A[1023, 10]  # A[-1, 10] becomes A[1023, 10]
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     _check(before, after)
@@ -59,15 +59,15 @@ def test_buffer_load_multiple_negative_indices():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024, 512, 256), "float32")):
+    def before(A: T.Tensor((1024, 512, 256), T.float32)):
         value = A[-1, -2, -3]
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     @T.prim_func
-    def after(A: T.Tensor((1024, 512, 256), "float32")):
+    def after(A: T.Tensor((1024, 512, 256), T.float32)):
         value = A[1023, 510, 253]  # -1+1024=1023, -2+512=510, -3+256=253
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     _check(before, after)
@@ -79,15 +79,15 @@ def test_buffer_load_negative_index_in_expression():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
-        B = T.alloc_buffer((1024,), "float32")
+    def before(A: T.Tensor((1024,), T.float32)):
+        B = T.alloc_buffer((1024,), T.float32)
         for i in T.serial(1, 1024):
             value = A[-i]
             B[-i] = value
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
-        B = T.alloc_buffer((1024,), "float32")
+    def after(A: T.Tensor((1024,), T.float32)):
+        B = T.alloc_buffer((1024,), T.float32)
         for i in T.serial(1, 1024):
             value = A[1024 - i]
             B[1024 - i] = value
@@ -101,16 +101,16 @@ def test_buffer_load_non_negative_index_unchanged():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
+    def before(A: T.Tensor((1024,), T.float32)):
         value = A[0]
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
+    def after(A: T.Tensor((1024,), T.float32)):
         # No changes expected for non-negative indices
         value = A[0]
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     _check(before, after)
@@ -123,18 +123,18 @@ def test_buffer_load_unknown_sign_index_warning():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
-        i = T.Var("i", "int32")
+    def before(A: T.Tensor((1024,), T.float32)):
+        i = T.Var("i", T.int32)
         value = A[i]
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
-        i = T.Var("i", "int32")
+    def after(A: T.Tensor((1024,), T.float32)):
+        i = T.Var("i", T.int32)
         # Unknown sign indices should remain unchanged
         value = A[i]
-        B = T.alloc_buffer((1,), "float32")
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     _check(before, after)
@@ -146,18 +146,18 @@ def test_buffer_load_vector_index_negative_broadcast():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
+    def before(A: T.Tensor((1024,), T.float32)):
         vec = T.Broadcast(-1, 4)
         value = A[vec]
-        B = T.alloc_buffer((4,), "float32")
+        B = T.alloc_buffer((4,), T.float32)
         B[T.Ramp(0, 1, 4)] = value
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
+    def after(A: T.Tensor((1024,), T.float32)):
         # vec is unused and can be delimed by Simplify.
         vec = T.Broadcast(-1, 4)  # noqa: F841
         value = A[T.Broadcast(1023, 4)]
-        B = T.alloc_buffer((4,), "float32")
+        B = T.alloc_buffer((4,), T.float32)
         B[T.Ramp(0, 1, 4)] = value
 
     _check(before, after)
@@ -169,18 +169,18 @@ def test_buffer_load_vector_index_negative_ramp():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
+    def before(A: T.Tensor((1024,), T.float32)):
         vec = T.Ramp(-4, 1, 4)  # indices: [-4, -3, -2, -1]
         value = A[vec]
-        B = T.alloc_buffer((4,), "float32")
+        B = T.alloc_buffer((4,), T.float32)
         B[T.Ramp(0, 1, 4)] = value
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
+    def after(A: T.Tensor((1024,), T.float32)):
         # vec is unused and can be delimed by Simplify.
         vec = T.Ramp(-4, 1, 4)  # noqa: F841
         value = A[T.Ramp(1020, 1, 4)]
-        B = T.alloc_buffer((4,), "float32")
+        B = T.alloc_buffer((4,), T.float32)
         B[T.Ramp(0, 1, 4)] = value
 
     _check(before, after)
@@ -192,17 +192,17 @@ def test_buffer_load_nested_buffer_loads():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024, 512), "float32")):
+    def before(A: T.Tensor((1024, 512), T.float32)):
         inner_val = A[-1, 10]
-        outer_val = A[inner_val.astype("int32"), -2]
-        B = T.alloc_buffer((1,), "float32")
+        outer_val = A[inner_val.astype(T.int32), -2]
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = outer_val
 
     @T.prim_func
-    def after(A: T.Tensor((1024, 512), "float32")):
+    def after(A: T.Tensor((1024, 512), T.float32)):
         inner_val = A[1023, 10]
-        outer_val = A[inner_val.astype("int32"), 510]
-        B = T.alloc_buffer((1,), "float32")
+        outer_val = A[inner_val.astype(T.int32), 510]
+        B = T.alloc_buffer((1,), T.float32)
         B[0] = outer_val
 
     _check(before, after)
@@ -214,11 +214,11 @@ def test_buffer_store_negative_index():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
+    def before(A: T.Tensor((1024,), T.float32)):
         A[-1] = 42.0
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
+    def after(A: T.Tensor((1024,), T.float32)):
         A[1023] = 42.0
 
     _check(before, after)
@@ -230,11 +230,11 @@ def test_buffer_store_mixed_negative_positive_indices():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024, 512), "float32")):
+    def before(A: T.Tensor((1024, 512), T.float32)):
         A[-1, 10] = 42.0
 
     @T.prim_func
-    def after(A: T.Tensor((1024, 512), "float32")):
+    def after(A: T.Tensor((1024, 512), T.float32)):
         A[1023, 10] = 42.0
 
     _check(before, after)
@@ -246,11 +246,11 @@ def test_buffer_store_multiple_negative_indices():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024, 512, 256), "float32")):
+    def before(A: T.Tensor((1024, 512, 256), T.float32)):
         A[-1, -2, -3] = 42.0
 
     @T.prim_func
-    def after(A: T.Tensor((1024, 512, 256), "float32")):
+    def after(A: T.Tensor((1024, 512, 256), T.float32)):
         A[1023, 510, 253] = 42.0  # -1+1024=1023, -2+512=510, -3+256=253
 
     _check(before, after)
@@ -262,12 +262,12 @@ def test_buffer_store_negative_index_in_expression():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
+    def before(A: T.Tensor((1024,), T.float32)):
         for i in T.serial(1, 1024):
             A[-i] = i * 2.0
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
+    def after(A: T.Tensor((1024,), T.float32)):
         for i in T.serial(1, 1024):
             A[1024 - i] = i * 2.0
 
@@ -280,13 +280,13 @@ def test_buffer_store_vector_index_negative_broadcast():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
+    def before(A: T.Tensor((1024,), T.float32)):
         vec = T.Broadcast(-1, 4)
         values = T.Broadcast(42.0, 4)
         A[vec] = values
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
+    def after(A: T.Tensor((1024,), T.float32)):
         # vec is unused and can be delimed by Simplify.
         vec = T.Broadcast(-1, 4)  # noqa: F841
         values = T.Broadcast(42.0, 4)
@@ -301,13 +301,13 @@ def test_buffer_store_vector_index_negative_ramp():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32")):
+    def before(A: T.Tensor((1024,), T.float32)):
         vec = T.Ramp(-4, 1, 4)  # indices: [-4, -3, -2, -1]
         values = T.Ramp(0.0, 1.0, 4)  # values: [0.0, 1.0, 2.0, 3.0]
         A[vec] = values
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32")):
+    def after(A: T.Tensor((1024,), T.float32)):
         # vec is unused and can be delimed by Simplify.
         vec = T.Ramp(-4, 1, 4)  # noqa: F841
         values = T.Ramp(0.0, 1.0, 4)
@@ -322,14 +322,14 @@ def test_buffer_store_nested_in_condition():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), "float32"), flag: T.int32):
+    def before(A: T.Tensor((1024,), T.float32), flag: T.int32):
         if flag > 0:
             A[-1] = 42.0
         else:
             A[-2] = 24.0
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), "float32"), flag: T.int32):
+    def after(A: T.Tensor((1024,), T.float32), flag: T.int32):
         if flag > 0:
             A[1023] = 42.0
         else:

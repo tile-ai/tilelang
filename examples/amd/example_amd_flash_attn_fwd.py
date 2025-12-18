@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import tilelang
 import tilelang.language as T
-from tilelang.primitives.gemm.base import GemmWarpPolicy
+from tilelang.tileop.base import GemmWarpPolicy
 import itertools
 import argparse
 from functools import partial
@@ -100,8 +100,8 @@ def fast_flashattn(
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
 
     vec_size = qk_coalesced_width
     v_vec_size = v_coalesced_width
