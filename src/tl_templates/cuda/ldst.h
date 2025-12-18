@@ -78,6 +78,10 @@ struct LdImpl {
           asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT ".b64 [%0], %1;" \
                        :: "l"(ptr), "l"(value) : "memory"); \
         } \
+      } else if constexpr (sizeof(T) == 16) { \
+        static_assert(std::is_same_v<T, int4>, "tl::st: T must be int4"); \
+        asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT ".v4.s32 {%0, %1, %2, %3}, [%4];" \
+                      :: "l"(ptr), "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w) : "memory"); \
       } \
     } \
   };
@@ -114,6 +118,11 @@ struct LdImpl {
           asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".b64 %0, [%1];" \
                        : "=l"(value) : "l"(ptr) : "memory"); \
         } \
+      } else if constexpr (sizeof(T) == 16) { \
+        static_assert(std::is_same_v<T, int4>, "tl::ld: T must be int4"); \
+        asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".v4.s32 {%0, %1, %2, %3}, [%4];" \
+                      : "=r"(value.x), "=r"(value.y), "=r"(value.z), "=r"(value.w) \
+                      : "l"(ptr) : "memory"); \
       } \
     } \
   };
