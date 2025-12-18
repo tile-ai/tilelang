@@ -30,7 +30,7 @@ def rng_init(seed, seq=None, off=0):
     else:
         seq = tir.convert(seq)
     off = tir.convert(off)
-    return tir.call_intrin("handle", tir.op.Op.get("tl.rng_init"), seed, seq, off)
+    return tir.call_intrin("void", tir.op.Op.get("tl.rng_init"), seed, seq, off)
 
 
 def rng_rand():
