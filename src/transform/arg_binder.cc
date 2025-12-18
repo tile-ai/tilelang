@@ -884,12 +884,10 @@ void ArgBinder::BindDLTensors(
 
       // Check if the data pointer is NULL.  This check is skipped for
       // size-0 arrays and also skipped when handle itself is NULL.
-      auto alloc_size = [&]() -> PrimExpr {
-        PrimExpr product = IntImm(buffer->DefaultIndexType(), 1);
-        for (const auto &dim : buffer->shape)
-          product *= dim;
-        return product;
-      }();
+      PrimExpr alloc_size = IntImm(buffer->DefaultIndexType(), 1);
+      for (const auto &dim : buffer->shape) {
+        alloc_size = alloc_size * dim;
+      }
       // Improve message: kernel/buffer naming for data pointer null check
       std::string kernel_nm2 = arg_name;
       std::string buf_nm2 = arg_name;
