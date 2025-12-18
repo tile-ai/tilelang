@@ -1,22 +1,23 @@
 import torch
 import tilelang
-import tilelang.tetsing
+import tilelang.testing
 from tilelang import language as T
+
 
 def test_nullable_shared_shape():
     """Test that buffers sharing a shape variable can be nullable."""
 
     @tilelang.jit
     def get_kernel():
-        m = T.dynamic('m')
+        m = T.dynamic("m")
 
         @T.prim_func
         def test_kernel(
-            a: T.Tensor[(m,), "int32"],
-            b: T.Tensor[(m,), "int32"],
-            c: T.Tensor[(m,), "int32"],
+            a: T.Tensor[(m,), T.int32],
+            b: T.Tensor[(m,), T.int32],
+            c: T.Tensor[(m,), T.int32],
         ):
-            with T.Kernel(1, threads=64) as (bx):
+            with T.Kernel(1, threads=64):
                 tx = T.get_thread_binding()
                 if tx == 0:
                     T.print(m)
@@ -63,7 +64,7 @@ def test_nullable_shared_shape():
             print(f"✗ FAIL: Wrong error message: {e}")
             return False
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("All tests passed!")
     return True
 
