@@ -45,7 +45,7 @@ def test_rand_1d(M, seed):
     kernel(tilelang_result)
 
     triton_result = torch.empty(M, dtype=torch.uint32, device="cuda")
-    grid = (M // 128,)
+    grid = (triton.cdiv(M, 128),)
     triton_rand_1d[grid](triton_result, tl.constexpr(M), tl.constexpr(128 // 4), seed)
 
     torch.testing.assert_close(tilelang_result, triton_result)
