@@ -138,7 +138,42 @@ private:
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
     } else if (node->op == builtin::call_extern()) {
-      // do not vectorize extern calls
+      // Check if this is a tl::ld or tl::st call which can be vectorized
+      if (node->args.size() >= 3) {
+        auto func_name_node = node->args[0].as<StringImmNode>();
+        if (func_name_node) {
+          std::string func_name = func_name_node->value;
+          // Check for tl::ld<...> or tl::st<...> patterns
+          if (func_name.rfind("tl::ld<", 0) == 0 || func_name.rfind("tl::st<", 0) == 0) {
+            bool can_vectorize = true;
+            
+            // Check source address (args[1]) for vectorizable pattern
+            auto addr_call = node->args[1].as<CallNode>();
+            if (addr_call && addr_call->op.same_as(builtin::address_of())) {
+              auto buffer_load = addr_call->args[0].as<BufferLoadNode>();
+              if (buffer_load) {
+                has_nonlocal_memory_access_ = true;
+                UpdateVectorSize(buffer_load->indices, buffer_load->buffer);
+              } else {
+                can_vectorize = false;
+              }
+            } else {
+              can_vectorize = false;
+            }
+            
+            // Check destination value (args[2]) for vectorizable pattern
+            auto value_load = node->args[2].as<BufferLoadNode>();
+            if (value_load) {
+              UpdateVectorSize(value_load->indices, value_load->buffer);
+            }
+            
+            if (can_vectorize) {
+              return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
+            }
+          }
+        }
+      }
+      // do not vectorize other extern calls
       vector_size_ = 1;
     }
     return arith::IRVisitorWithAnalyzer::VisitExpr_(node);

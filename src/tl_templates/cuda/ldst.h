@@ -79,7 +79,6 @@ struct LdImpl {
                        :: "l"(ptr), "l"(value) : "memory"); \
         } \
       } else if constexpr (sizeof(T) == 16) { \
-        static_assert(std::is_same_v<T, int4>, "tl::st: T must be int4"); \
         asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT ".v4.s32 {%0, %1, %2, %3}, [%4];" \
                       :: "l"(ptr), "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w) : "memory"); \
       } \
@@ -119,7 +118,6 @@ struct LdImpl {
                        : "=l"(value) : "l"(ptr) : "memory"); \
         } \
       } else if constexpr (sizeof(T) == 16) { \
-        static_assert(std::is_same_v<T, int4>, "tl::ld: T must be int4"); \
         asm volatile("ld" SEM_LIT SCOPE_LIT NC_LIT NA_LIT ".v4.s32 {%0, %1, %2, %3}, [%4];" \
                       : "=r"(value.x), "=r"(value.y), "=r"(value.z), "=r"(value.w) \
                       : "l"(ptr) : "memory"); \
@@ -196,8 +194,8 @@ namespace tl {
 // Public interface
 template <Semantic semantic, Scope scope, bool na, typename P, typename T>
 TL_DEVICE void st(P ptr, T value) {
-  static_assert(sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
-                "tl::st: T must be 2, 4, or 8 bytes");
+  static_assert(sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8 || sizeof(T) == 16,
+                "tl::st: T must be 2, 4, 8, or 16 bytes");
   static_assert(std::is_pointer_v<P> || std::is_same_v<P, uint64_t>,
                 "tl::st: P must be a pointer or uint64_t");
   static_assert(semantic == Semantic::WEAK 
@@ -212,8 +210,8 @@ TL_DEVICE void st(P ptr, T value) {
 
 template <Semantic semantic, Scope scope, bool nc, bool na, typename P, typename T>
 TL_DEVICE void ld(const P ptr, T &value) {
-  static_assert(sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
-                "tl::ld: T must be 2, 4, or 8 bytes");
+  static_assert(sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8 || sizeof(T) == 16,
+                "tl::ld: T must be 2, 4, 8, or 16 bytes");
   static_assert(std::is_pointer_v<P> || std::is_same_v<P, uint64_t>,
                 "tl::ld: P must be a pointer or uint64_t");
   static_assert(semantic == Semantic::WEAK 

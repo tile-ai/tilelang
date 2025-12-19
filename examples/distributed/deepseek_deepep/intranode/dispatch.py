@@ -123,7 +123,6 @@ def notify_dispatch(
     rank: int, 
     num_ranks: int,
     num_experts: int,
-    num_tokens: int,
     num_channels: int,
     expert_alignment: int,
     # dispatch layout
@@ -512,7 +511,6 @@ def cached_dispatch_kernel(
     
     num_threads_per_rank = threads // num_ranks  # 96 (3 warps for each rank)
     num_channels = num_sms // 2  # 10 (2 SMs for each channel)
-    num_local_experts = num_experts // num_ranks
 
     num_warps = threads // 32  # 24
     num_warps_per_rank = num_warps // num_ranks  # 3
@@ -546,7 +544,6 @@ def cached_dispatch_kernel(
     ):
         with T.Kernel(num_sms, threads=threads) as bx:
             tx = T.get_thread_binding()
-            lane_id = tx % 32
             responsible_rank = tx // num_threads_per_rank
             responsible_channel = bx // 2
 
@@ -746,7 +743,6 @@ def intranode_dispatch(
     num_tokens, hidden = x.shape
     num_experts = num_tokens_per_expert.shape[0] if handle is None else 0
     num_ranks = num_tokens_per_rank.shape[0]
-    num_local_experts = num_experts // num_ranks
     num_topk = topk_idx.shape[1] if handle is None else 0
 
     barrier_signal, per_rank_buffer, per_expert_buffer, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, \
@@ -757,7 +753,6 @@ def intranode_dispatch(
             rank,
             num_ranks,
             num_experts,
-            num_tokens,
             config.num_channels,
             expert_alignment,
             num_tokens_per_rank,

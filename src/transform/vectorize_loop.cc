@@ -456,6 +456,17 @@ public:
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::if_then_else())) {
       return MutateIfThenElseExpr_(op);
+    } else if (op->op.same_as(builtin::call_extern())) {
+      // Check if this is a tl::ld or tl::st call which can be vectorized
+      if (op->args.size() >= 3) {
+        auto func_name_node = op->args[0].as<StringImmNode>();
+        if (func_name_node) {
+          std::string func_name = func_name_node->value;
+          if (func_name.rfind("tl::ld<", 0) == 0 || func_name.rfind("tl::st<", 0) == 0) {
+            return MutateTlLdStExpr_(op, func_name.rfind("tl::ld<", 0) == 0);
+          }
+        }
+      }
     } else if (op->op.same_as(builtin::texture2d_load())) {
       int lane = 0;
       Array<PrimExpr> fcd = MutateArray({op->args.back()}, &lane);
@@ -685,6 +696,136 @@ public:
     }
 
     return StmtMutator::VisitStmt_(op);
+  }
+
+  // Vectorize tl::ld or tl::st call
+  PrimExpr MutateTlLdStExpr_(const CallNode *op, bool is_load) {
+    // Structure: call_extern("tl::ld<...>", address_of(BufferLoad), value, ...)
+    ICHECK(op->args.size() >= 3) << "tl::ld/st expects at least 3 arguments";
+
+    PrimExpr func_name = op->args[0];
+    PrimExpr addr_arg = op->args[1];
+    PrimExpr value_arg = op->args[2];
+
+    // Helper to visit indices and extract Ramp info
+    // Returns: (visited_indices, base_indices, ramp_lanes)
+    auto visit_and_extract_ramp = [this](const Array<PrimExpr>& indices)
+        -> std::tuple<Array<PrimExpr>, Array<PrimExpr>, int> {
+      Array<PrimExpr> visited_indices;
+      Array<PrimExpr> base_indices;
+      int ramp_lanes = 1;
+      for (const auto& idx : indices) {
+        PrimExpr visited = this->VisitExpr(idx);
+        visited_indices.push_back(visited);
+        auto ramp = visited.as<RampNode>();
+        if (ramp && is_one(ramp->stride)) {
+          auto lanes_imm = ramp->lanes.as<IntImmNode>();
+          if (lanes_imm) {
+            ramp_lanes = lanes_imm->value;
+          }
+          base_indices.push_back(ramp->base);
+        } else {
+          base_indices.push_back(visited);
+        }
+      }
+      return {visited_indices, base_indices, ramp_lanes};
+    };
+
+    // Process source address - directly handle address_of(BufferLoad)
+    int src_ramp_lanes = 1;
+    PrimExpr new_addr = addr_arg;
+    auto addr_call = addr_arg.as<CallNode>();
+    if (addr_call && addr_call->op.same_as(builtin::address_of())) {
+      auto buffer_load = addr_call->args[0].as<BufferLoadNode>();
+      if (buffer_load) {
+        auto [visited_indices, base_indices, lanes] = visit_and_extract_ramp(buffer_load->indices);
+        src_ramp_lanes = lanes;
+        // Create new address with base indices only (for vectorized load)
+        BufferLoad new_buffer_load(buffer_load->buffer, base_indices);
+        new_addr = Call(DataType::Handle(), builtin::address_of(), {new_buffer_load});
+      }
+    }
+
+    // Process destination value - directly handle BufferLoad
+    int dst_ramp_lanes = 1;
+    PrimExpr new_value = value_arg;
+    auto value_load = value_arg.as<BufferLoadNode>();
+    if (value_load) {
+      auto [visited_indices, base_indices, lanes] = visit_and_extract_ramp(value_load->indices);
+      dst_ramp_lanes = lanes;
+      // Create new value with base indices only
+      new_value = BufferLoad(value_load->buffer, base_indices);
+    }
+
+    // Determine vectorization lanes
+    int vector_lanes = std::max(src_ramp_lanes, dst_ramp_lanes);
+    if (vector_lanes > 1) {
+      // Determine the vector type based on total bytes
+      // 8 x 16-bit = 128 bits = int4, 4 x 32-bit = 128 bits = int4
+      // 4 x 16-bit = 64 bits = int2, 2 x 32-bit = 64 bits = int2
+      DataType vec_dtype;
+      int elem_bits = 16;  // Default assumption for bf16/f16
+
+      // Try to get element dtype from source buffer
+      auto addr_call_check = new_addr.as<CallNode>();
+      if (addr_call_check && addr_call_check->op.same_as(builtin::address_of())) {
+        auto buffer_load = addr_call_check->args[0].as<BufferLoadNode>();
+        if (buffer_load) {
+          elem_bits = buffer_load->buffer->dtype.bits();
+        }
+      }
+
+      int total_bits = vector_lanes * elem_bits;
+      if (total_bits == 128) {
+        vec_dtype = DataType::Int(32, 4);  // int4 equivalent (128 bits)
+      } else if (total_bits == 64) {
+        vec_dtype = DataType::Int(32, 2);  // int2 equivalent (64 bits)
+      } else if (total_bits == 32) {
+        vec_dtype = DataType::Int(32);
+      } else {
+        // Can't vectorize to a standard type, fall back to scalarize
+        need_scalarize_ = true;
+        return GetRef<PrimExpr>(op);
+      }
+
+      // Reinterpret the value to vector type (e.g., int4 for 8xbf16)
+      PrimExpr vec_value = Call(vec_dtype, builtin::reinterpret(), {new_value});
+      PrimExpr vec_value_slice = vec_value.as<CallNode>()->args[0];
+
+      // Build new args with base addresses and reinterpreted value
+      Array<PrimExpr> new_args;
+      new_args.push_back(func_name);
+      new_args.push_back(new_addr);
+      new_args.push_back(vec_value_slice);
+      // Copy remaining args (sem, scope, etc.)
+      for (size_t i = 3; i < op->args.size(); ++i) {
+        new_args.push_back(this->VisitExpr(op->args[i]));
+      }
+
+      // Return the vectorized call
+      return Call(op->dtype, op->op, new_args);
+    }
+
+    // If we couldn't vectorize but args became vectors, need to scalarize
+    if (new_addr.dtype().is_scalable_or_fixed_length_vector() ||
+        new_value.dtype().is_scalable_or_fixed_length_vector()) {
+      need_scalarize_ = true;
+      return GetRef<PrimExpr>(op);
+    }
+
+    // No vectorization needed, return with updated args if changed
+    if (new_addr.same_as(addr_arg) && new_value.same_as(value_arg)) {
+      return GetRef<PrimExpr>(op);
+    }
+
+    Array<PrimExpr> new_args;
+    new_args.push_back(func_name);
+    new_args.push_back(new_addr);
+    new_args.push_back(new_value);
+    for (size_t i = 3; i < op->args.size(); ++i) {
+      new_args.push_back(this->VisitExpr(op->args[i]));
+    }
+    return Call(op->dtype, op->op, new_args);
   }
 
   // scalarize the statement
