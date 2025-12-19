@@ -102,11 +102,18 @@ logger = logging.getLogger(__name__)
 @contextlib.contextmanager
 def _lazy_load_lib():
     old_flags = sys.getdlopenflags()
+    old_init = ctypes.CDLL.__init__
+
+    def lazy_init(self, name, mode=ctypes.DEFAULT_MODE, *args, **kwargs):
+        return old_init(self, name, mode | os.RTLD_LAZY, *args, **kwargs)
+
     sys.setdlopenflags(old_flags | os.RTLD_LAZY)
+    ctypes.CDLL.__init__ = lazy_init
     try:
         yield
     finally:
         sys.setdlopenflags(old_flags)
+        ctypes.CDLL.__init__ = old_init
 
 
 with _lazy_load_lib():
