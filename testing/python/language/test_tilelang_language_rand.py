@@ -20,7 +20,9 @@ def tilelang_rand_1d(M=1024, seed=42):
             T.rng_init(seed, 0, bx * blk_M + tx * num_per_thread)
             for i, j in T.Parallel(threads, num_per_thread):
                 offsets = (bx * threads + i) * num_per_thread
-                A[offsets + j] = T.rng_rand()
+                idx = offsets + j
+                if idx < M:
+                    A[idx] = T.rng_rand()
 
     return rand_kernel
 
