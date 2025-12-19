@@ -75,10 +75,7 @@ def get_warp(src: PrimExpr,
                            "warp", enable_aggresive_vectorize)
 
 
-def put_block(src: PrimExpr,
-              dst: PrimExpr,
-              size: PrimExpr,
-              dst_pe: PrimExpr | IntImm | None = -1):
+def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | IntImm | None = -1):
     """Put to a remote buffer.
 
     Args:
@@ -97,10 +94,7 @@ def put_block(src: PrimExpr,
     )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
-def get_block(src: PrimExpr,
-              dst: PrimExpr,
-              size: PrimExpr,
-              src_pe: PrimExpr | IntImm | None = -1):
+def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | IntImm | None = -1):
     """Get from a remote buffer.
 
     Args:
@@ -119,7 +113,6 @@ def get_block(src: PrimExpr,
     )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
-
 class BinaryRelation(Enum):
     EQ = 0
     NE = 1
@@ -127,8 +120,8 @@ class BinaryRelation(Enum):
     LE = 3
     GT = 4
     LT = 5
-    
-    
+
+
 def wait_eq(barrier: PrimExpr, expected: PrimExpr):
     """Wait until *barrier == expected* for GPU-level synchronization.
     # todo: have different semantic compared to 3 fns below currently
@@ -141,24 +134,29 @@ def wait_eq(barrier: PrimExpr, expected: PrimExpr):
 
 def wait_ne(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
     """Wait until *ptr != expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.NE.value, address_of(ptr), expected, peer)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.NE.value,
+                           address_of(ptr), expected, peer)
 
 
 def wait_ge(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
     """Wait until *ptr >= expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GE.value, address_of(ptr), expected, peer)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GE.value,
+                           address_of(ptr), expected, peer)
 
 
 def wait_le(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
     """Wait until *ptr <= expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LE.value, address_of(ptr), expected, peer)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LE.value,
+                           address_of(ptr), expected, peer)
 
 
 def wait_gt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
     """Wait until *ptr > expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GT.value, address_of(ptr), expected, peer)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GT.value,
+                           address_of(ptr), expected, peer)
 
 
 def wait_lt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
     """Wait until *ptr < expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LT.value, address_of(ptr), expected, peer)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LT.value,
+                           address_of(ptr), expected, peer)

@@ -156,7 +156,7 @@ TL_DEVICE void sync_grid(uint32_t *barrier) {
 template <bool need_fence = true>
 TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 // Macro to compute the barrier pointer for a given target rank
-#define BARRIER_PTR(tgt_rank) \
+#define BARRIER_PTR(tgt_rank)                                                  \
   (reinterpret_cast<int32_t *>(get_remote_base_ptr(tgt_rank) + offset))
 #define FINISHED_SUM_TAG (1024)
 
@@ -164,7 +164,7 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
     memory_fence_sys();
     __syncthreads();
   }
-  
+
   int tid = threadIdx.x;
   if (tid < num_ranks) {
     atomicAdd_system(BARRIER_PTR(rank) + tid, FINISHED_SUM_TAG);
@@ -184,57 +184,62 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 #undef FINISHED_SUM_TAG
 }
 
-template <typename T> 
-TL_DEVICE void wait_eq(void *ptr, T val) {
+template <typename T> TL_DEVICE void wait_eq(void *ptr, T val) {
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_acquire(flag_ptr) != val);
+  while (ld_acquire(flag_ptr) != val)
+    ;
 }
 
-template <typename P, typename T> 
-TL_DEVICE void wait_ne(P ptr, T val) {
-  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>, "P must be a pointer or uint64_t");
+template <typename P, typename T> TL_DEVICE void wait_ne(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) == val);
+  while (ld_volatile_global(flag_ptr) == val)
+    ;
 }
 
-template <typename P, typename T>
-TL_DEVICE void wait_ge(P ptr, T val) {
-  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>, "P must be a pointer or uint64_t");
+template <typename P, typename T> TL_DEVICE void wait_ge(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) < val);
+  while (ld_volatile_global(flag_ptr) < val)
+    ;
 }
 
-template <typename P, typename T>
-TL_DEVICE void wait_le(P ptr, T val) {
-  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>, "P must be a pointer or uint64_t");
+template <typename P, typename T> TL_DEVICE void wait_le(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) > val);
+  while (ld_volatile_global(flag_ptr) > val)
+    ;
 }
 
-template <typename P, typename T>
-TL_DEVICE void wait_gt(P ptr, T val) {
-  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>, "P must be a pointer or uint64_t");
+template <typename P, typename T> TL_DEVICE void wait_gt(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) <= val);
+  while (ld_volatile_global(flag_ptr) <= val)
+    ;
 }
 
-template <typename P, typename T>
-TL_DEVICE void wait_lt(P ptr, T val) {
-  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>, "P must be a pointer or uint64_t");
+template <typename P, typename T> TL_DEVICE void wait_lt(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_volatile_global(flag_ptr) >= val);
+  while (ld_volatile_global(flag_ptr) >= val)
+    ;
 }
 
 } // namespace tl

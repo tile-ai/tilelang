@@ -18,8 +18,8 @@
 #include <stdexcept>
 #include <vector>
 
-#include "ts_ext_ops.h"
 #include "exception.h"
+#include "ts_ext_ops.h"
 
 namespace py = pybind11;
 

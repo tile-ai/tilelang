@@ -45,7 +45,6 @@ TVM_DLL const Op &wait_barrier_gpu();
 
 TVM_DLL const Op &wait_eq();
 
-
 /*!
  * \brief TileOperatorNode for wait operation.
  *
@@ -53,20 +52,21 @@ TVM_DLL const Op &wait_eq();
  * which waits until a condition on a memory address is met.
  */
 class WaitOpNode : public TileOperatorNode {
- public:
-  PrimExpr addr;             ///< The address to watch.
-  PrimExpr expected;         ///< The expected value to compare against.
-  PrimExpr peer;             ///< The peer to compare against.
-  int relation;               ///< The relation to compare against.
+public:
+  PrimExpr addr;     ///< The address to watch.
+  PrimExpr expected; ///< The expected value to compare against.
+  PrimExpr peer;     ///< The peer to compare against.
+  int relation;      ///< The relation to compare against.
 
   bool is_distributed() const;
 
-  static constexpr const char* _type_key = "tl.WaitOp";
+  static constexpr const char *_type_key = "tl.WaitOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(WaitOpNode, TileOperatorNode);
 
-  Stmt Lower(const LowerArgs& T, arith::Analyzer* analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs& T, InferLevel level) const override;
-  static const Op& Get();
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
+  static const Op &Get();
   TileOperator Clone() const override;
 
   static void RegisterReflection() {
@@ -78,7 +78,7 @@ class WaitOpNode : public TileOperatorNode {
         .def_ro("relation", &WaitOpNode::relation);
   }
 
-  bool SEqualReduce(const WaitOpNode* other, SEqualReducer equal) const {
+  bool SEqualReduce(const WaitOpNode *other, SEqualReducer equal) const {
     return equal(addr, other->addr) && equal(expected, other->expected) &&
            equal(peer, other->peer) && equal(relation, other->relation);
   }
@@ -98,10 +98,10 @@ class WaitOpNode : public TileOperatorNode {
  * \brief Wrapper for the WaitOp operator.
  */
 class WaitOp : public TileOperator {
- public:
+public:
   TVM_DEFINE_OBJECT_REF_METHODS(WaitOp, TileOperator, WaitOpNode);
   TVM_DLL WaitOp(Array<PrimExpr> args, BufferMap vmap);
-  static const Op& Get();
+  static const Op &Get();
 };
 
 /*!
@@ -131,7 +131,7 @@ public:
   PrimExpr offset;               ///< Byte offset within the barrier buffer
   Buffer local_bar;              ///< Local barrier buffer reference
   Array<PrimExpr> local_indices; ///< Indices used to access the barrier buffer
-  bool need_fence;              ///< Whether need sys-level fence
+  bool need_fence;               ///< Whether need sys-level fence
 
   static constexpr const char *_type_key = "tl.BarrierBlocksOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(BarrierBlocksOpNode, TileOperatorNode);

@@ -13,7 +13,7 @@ from intranode import get_dispatch_layout, intranode_dispatch, intranode_combine
 class EPBuffer:
     """
     TileScale communication buffers for DeepEP
-    
+
     Attributes:
         num_sms: the number of SMs used in high-throughput kernels
         group: the communication process group
@@ -25,9 +25,14 @@ class EPBuffer:
     num_sms: int = 20
     symm_heap_size: int = 2**30  # size of the symm heap for allocators
 
-    def __init__(self, group: dist.ProcessGroup, num_nvl_bytes: int, 
-        num_topk: int, num_experts: int, hidden: int,
-        dispatch_cfg: Optional[Config] = None, combine_cfg: Optional[Config] = None):
+    def __init__(self,
+                 group: dist.ProcessGroup,
+                 num_nvl_bytes: int,
+                 num_topk: int,
+                 num_experts: int,
+                 hidden: int,
+                 dispatch_cfg: Optional[Config] = None,
+                 combine_cfg: Optional[Config] = None):
         """
         Initialize the communication buffer.
 
@@ -43,7 +48,7 @@ class EPBuffer:
         self.group = group
         self.rank = group.rank()
         self.num_ranks = group.size()
-        
+
         self.num_nvl_bytes = num_nvl_bytes
         assert self.num_ranks <= 8, "currently only support intranode"  # todo: rm this
         self.num_topk = num_topk
@@ -51,13 +56,13 @@ class EPBuffer:
         assert num_experts % self.num_ranks == 0, "num_experts must be divisible by num_ranks"
         self.num_local_experts = num_experts // self.num_ranks
         self.hidden = hidden
-        
+
         self.dispatch_cfg = dispatch_cfg if dispatch_cfg is not None else self.default_dispatch_config
         self.combine_cfg = combine_cfg if combine_cfg is not None else self.default_combine_config
-        
+
         self.comm_stream = torch.cuda.Stream()
 
-        self._allocator= tilelang.get_allocator(
+        self._allocator = tilelang.get_allocator(
             size=EPBuffer.symm_heap_size,
             device="cuda",
             is_distributed=True,
@@ -72,7 +77,7 @@ class EPBuffer:
         self.group.barrier()
 
     def _pre_alloc_symm_buffers(self):
-        """Pre-allocate the symmetric buffers via the alloctor for later communication."""
+        """Pre-allocate the symmetric buffers via the allocator for later communication."""
         if self.num_ranks <= 8:
             self._pre_alloc_symm_buffers_intranode()  # todo: rm this
         else:
@@ -80,46 +85,86 @@ class EPBuffer:
 
     def _pre_alloc_symm_buffers_intranode(self):
         # barrier signal is always zeroed after each usage, so we can pre-init here
-        barrier_signal = tilelang.tensor((self.num_ranks), dtype=torch.int32, device='cuda', allocator=self._allocator).zero_()
+        barrier_signal = tilelang.tensor((self.num_ranks),
+                                         dtype=torch.int32,
+                                         device='cuda',
+                                         allocator=self._allocator).zero_()
 
-        per_rank_buffer = tilelang.tensor((self.num_ranks, self.num_ranks), dtype=torch.int32, device='cuda', allocator=self._allocator)
-        per_expert_buffer = tilelang.tensor((self.num_ranks, self.num_local_experts), dtype=torch.int32, device='cuda', allocator=self._allocator)
+        per_rank_buffer = tilelang.tensor((self.num_ranks, self.num_ranks),
+                                          dtype=torch.int32,
+                                          device='cuda',
+                                          allocator=self._allocator)
+        per_expert_buffer = tilelang.tensor((self.num_ranks, self.num_local_experts),
+                                            dtype=torch.int32,
+                                            device='cuda',
+                                            allocator=self._allocator)
 
-        channel_start_offset = tilelang.tensor(
-            [self.num_channels, self.num_ranks], dtype=torch.int32, device='cuda', allocator=self._allocator)
-        channel_end_offset = tilelang.tensor(
-            [self.num_channels, self.num_ranks], dtype=torch.int32, device='cuda', allocator=self._allocator)
-        channel_head_idx = tilelang.tensor(
-            [self.num_channels, self.num_ranks], dtype=torch.int32, device='cuda', allocator=self._allocator)   
-        channel_tail_idx = tilelang.tensor(
-            [self.num_channels, self.num_ranks], dtype=torch.int32, device='cuda', allocator=self._allocator)
+        channel_start_offset = tilelang.tensor([self.num_channels, self.num_ranks],
+                                               dtype=torch.int32,
+                                               device='cuda',
+                                               allocator=self._allocator)
+        channel_end_offset = tilelang.tensor([self.num_channels, self.num_ranks],
+                                             dtype=torch.int32,
+                                             device='cuda',
+                                             allocator=self._allocator)
+        channel_head_idx = tilelang.tensor([self.num_channels, self.num_ranks],
+                                           dtype=torch.int32,
+                                           device='cuda',
+                                           allocator=self._allocator)
+        channel_tail_idx = tilelang.tensor([self.num_channels, self.num_ranks],
+                                           dtype=torch.int32,
+                                           device='cuda',
+                                           allocator=self._allocator)
         # NOTE: for each #ranks, dispatch and combine cfg have the same num_max_nvl_chunked_recv_tokens, so we can use the same buffer here
-        channel_x_buffers = tilelang.tensor(
-            [self.num_channels, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens, self.hidden], dtype=torch.bfloat16, device='cuda', allocator=self._allocator)
+        channel_x_buffers = tilelang.tensor([
+            self.num_channels, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens,
+            self.hidden
+        ],
+                                            dtype=torch.bfloat16,
+                                            device='cuda',
+                                            allocator=self._allocator)
         channel_src_idx_buffers = tilelang.tensor(
-            [self.num_channels, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens], dtype=torch.int32, device='cuda', allocator=self._allocator)
-        channel_topk_idx_buffers = tilelang.tensor(
-            [self.num_channels, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens, self.num_topk], dtype=torch.int64, device='cuda', allocator=self._allocator)
-        channel_topk_weights_buffers = tilelang.tensor(
-            [self.num_channels, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens, self.num_topk], dtype=torch.float32, device='cuda', allocator=self._allocator)
-        
-        self._symm_buffers = (barrier_signal, per_rank_buffer, per_expert_buffer, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, 
-            channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers)
+            [self.num_channels, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens],
+            dtype=torch.int32,
+            device='cuda',
+            allocator=self._allocator)
+        channel_topk_idx_buffers = tilelang.tensor([
+            self.num_channels, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens,
+            self.num_topk
+        ],
+                                                   dtype=torch.int64,
+                                                   device='cuda',
+                                                   allocator=self._allocator)
+        channel_topk_weights_buffers = tilelang.tensor([
+            self.num_channels, self.num_ranks, self.dispatch_cfg.num_max_nvl_chunked_recv_tokens,
+            self.num_topk
+        ],
+                                                       dtype=torch.float32,
+                                                       device='cuda',
+                                                       allocator=self._allocator)
+
+        self._symm_buffers = (barrier_signal, per_rank_buffer, per_expert_buffer,
+                              channel_start_offset, channel_end_offset, channel_head_idx,
+                              channel_tail_idx, channel_x_buffers, channel_src_idx_buffers,
+                              channel_topk_idx_buffers, channel_topk_weights_buffers)
 
     def _pre_alloc_symm_buffers_internode(self):
         raise NotImplementedError("internode is not supported yet")
 
     def _prepare_counters(self):
-        self._moe_recv_counter, self._moe_recv_counter_mapped = create_mapped_tensor([1], torch.int32)
-        self._moe_recv_expert_counter, self._moe_recv_expert_counter_mapped = create_mapped_tensor([self.num_local_experts], torch.int32)
-        
+        self._moe_recv_counter, self._moe_recv_counter_mapped = create_mapped_tensor([1],
+                                                                                     torch.int32)
+        self._moe_recv_expert_counter, self._moe_recv_expert_counter_mapped = create_mapped_tensor(
+            [self.num_local_experts], torch.int32)
+
         if self.num_ranks > 8:  # internode
-            self._moe_recv_rdma_counter, self._moe_recv_rdma_counter_mapped = create_mapped_tensor([1], torch.int32)
+            self._moe_recv_rdma_counter, self._moe_recv_rdma_counter_mapped = create_mapped_tensor(
+                [1], torch.int32)
 
     @staticmethod
     def set_num_sms(num_sms: int):
         """Set the number of SMs used in high-throughput kernels
-        
+
         Args:
             num_sms: the number of SMs used in high-throughput kernels
         """
@@ -129,7 +174,7 @@ class EPBuffer:
     @property
     def num_channels(self):
         """Get the number of communication channels
-        
+
         Returns:
             the number of communication channels
         """
@@ -157,20 +202,19 @@ class EPBuffer:
             num_tokens_per_expert: `[num_experts]` with `torch.int`, the number of tokens to be sent to each expert.
             is_token_in_rank: `[num_tokens, num_ranks]` with `torch.bool`, whether a token be sent to a rank.
         """
-        num_tokens_per_rank, num_tokens_per_expert, is_token_in_rank = get_dispatch_layout(topk_idx, self.num_experts, self.num_ranks)
+        num_tokens_per_rank, num_tokens_per_expert, is_token_in_rank = get_dispatch_layout(
+            topk_idx, self.num_experts, self.num_ranks)
         return num_tokens_per_rank, num_tokens_per_expert, is_token_in_rank
 
-    def dispatch(
-        self, 
-        x: torch.Tensor,
-        handle: Optional[Tuple] = None,
-        num_tokens_per_rank: Optional[torch.Tensor] = None,
-        is_token_in_rank: Optional[torch.Tensor] = None,
-        num_tokens_per_expert: Optional[torch.Tensor] = None,
-        topk_idx: Optional[torch.Tensor] = None,
-        topk_weights: Optional[torch.Tensor] = None,
-        expert_alignment: int = 1
-    ):
+    def dispatch(self,
+                 x: torch.Tensor,
+                 handle: Optional[Tuple] = None,
+                 num_tokens_per_rank: Optional[torch.Tensor] = None,
+                 is_token_in_rank: Optional[torch.Tensor] = None,
+                 num_tokens_per_expert: Optional[torch.Tensor] = None,
+                 topk_idx: Optional[torch.Tensor] = None,
+                 topk_weights: Optional[torch.Tensor] = None,
+                 expert_alignment: int = 1):
         """
         Dispatch tokens to different ranks, both intranode and internode settings are supported.
         Intranode kernels require all the ranks should be visible via NVLink.
@@ -227,9 +271,13 @@ class EPBuffer:
         else:
             assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None
             recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle = intranode_dispatch(
-                self.rank, self._allocator, self._symm_buffers, self._moe_recv_counter, self._moe_recv_expert_counter, self._moe_recv_counter_mapped, self._moe_recv_expert_counter_mapped, x, self.dispatch_cfg, handle, num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx, topk_weights, expert_alignment, self.comm_stream)
+                self.rank, self._allocator, self._symm_buffers, self._moe_recv_counter,
+                self._moe_recv_expert_counter, self._moe_recv_counter_mapped,
+                self._moe_recv_expert_counter_mapped, x, self.dispatch_cfg, handle,
+                num_tokens_per_rank, is_token_in_rank, num_tokens_per_expert, topk_idx,
+                topk_weights, expert_alignment, self.comm_stream)
             return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle
-        
+
     def combine(self, x: torch.Tensor, handle: Tuple, topk_weights: torch.Tensor):
         # todo: support bias
         """
@@ -248,7 +296,7 @@ class EPBuffer:
             recv_x: the reduced token from its dispatched ranks.
             recv_topk_weights: the reduced top-k weights from its dispatch ranks.
         """
-        recv_x, recv_topk_weights = intranode_combine(
-            self.rank, self._allocator, self._symm_buffers, x, self.combine_cfg, handle, topk_weights, self.comm_stream)
+        recv_x, recv_topk_weights = intranode_combine(self.rank, self._allocator,
+                                                      self._symm_buffers, x, self.combine_cfg,
+                                                      handle, topk_weights, self.comm_stream)
         return recv_x, recv_topk_weights
-

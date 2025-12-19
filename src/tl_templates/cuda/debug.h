@@ -260,8 +260,8 @@ __device__ void debug_print_buffer_value<int16_t>(const char *msg,
 
 // Specialization for msg-only debug print
 __device__ void debug_print_msg(const char *msg) {
-  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d)\n",
-         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d)\n", msg,
+         blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z);
 }
 

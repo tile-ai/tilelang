@@ -7,6 +7,7 @@ import tilelang.language as T
 
 @tilelang.jit
 def get_kernel():
+
     @T.prim_func
     def main(output: T.Tensor((6), 'int32')):
         with T.Kernel(1, threads=32):
@@ -32,6 +33,7 @@ def get_kernel():
             if tx == 0:
                 output[4] = result_any
                 output[5] = result_all
+
     return main
 
 

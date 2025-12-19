@@ -144,9 +144,10 @@ private:
         if (func_name_node) {
           std::string func_name = func_name_node->value;
           // Check for tl::ld<...> or tl::st<...> patterns
-          if (func_name.rfind("tl::ld<", 0) == 0 || func_name.rfind("tl::st<", 0) == 0) {
+          if (func_name.rfind("tl::ld<", 0) == 0 ||
+              func_name.rfind("tl::st<", 0) == 0) {
             bool can_vectorize = true;
-            
+
             // Check source address (args[1]) for vectorizable pattern
             auto addr_call = node->args[1].as<CallNode>();
             if (addr_call && addr_call->op.same_as(builtin::address_of())) {
@@ -160,13 +161,13 @@ private:
             } else {
               can_vectorize = false;
             }
-            
+
             // Check destination value (args[2]) for vectorizable pattern
             auto value_load = node->args[2].as<BufferLoadNode>();
             if (value_load) {
               UpdateVectorSize(value_load->indices, value_load->buffer);
             }
-            
+
             if (can_vectorize) {
               return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
             }

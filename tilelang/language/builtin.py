@@ -619,7 +619,8 @@ def barrier_blocks(barrier: PrimExpr):
     Args:
         barrier: The barrier to synchronize at, should be [num_ranks] of int32
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(barrier), 1)  # whether need fence
+    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(barrier),
+                           1)  # whether need fence
 
 
 def sync_blocks(barrier: PrimExpr):
@@ -628,7 +629,8 @@ def sync_blocks(barrier: PrimExpr):
     Args:
         barrier: The barrier to synchronize at, should be [num_ranks] of int32
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(barrier), 0)  # whether need fence
+    return tir.call_intrin("handle", tir.op.Op.get("tl.barrier_blocks"), address_of(barrier),
+                           0)  # whether need fence
 
 
 def fence_cta():
@@ -735,17 +737,18 @@ def atom_add(barrier: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = 
     return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(barrier), value, sem,
                            scope)
 
+
 def ld(
-    src: PrimExpr, 
-    value: PrimExpr, 
-    scope: Literal["cta", "gpu", "sys"] = "gpu", 
+    src: PrimExpr,
+    value: PrimExpr,
+    scope: Literal["cta", "gpu", "sys"] = "gpu",
     sem: Literal["weak", "volatile", "acquire", "release", "relaxed"] = "weak",
     na: bool = False,
     nc: bool = False,
-    src_pe: tir.PrimExpr | tir.IntImm | None = -1, 
+    src_pe: tir.PrimExpr | tir.IntImm | None = -1,
 ):
     """Load a value from a given address with specified scope, semantic, and optional destination PE.
-    
+
     Args:
         src: The source address to load from.
         value: The value to load.
@@ -753,27 +756,31 @@ def ld(
         sem: The memory semantic.
         na: Whether to use no-allocate L1 policy.
         nc: Whether to use non-coherent cache.
-        src_pe: The source processing element (PE) identifier. 
+        src_pe: The source processing element (PE) identifier.
                 Use -1 (default) for local PE, or a non-negative integer to target a remote PE.
 
     Returns:
         tir.Call: A handle to the load operation.
     """
     assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
-    assert sem in ["weak", "volatile", "acquire", "relaxed"], "Semantic must be one of 'weak', 'volatile', 'acquire', 'release', or 'relaxed'."
+    assert sem in [
+        "weak", "volatile", "acquire", "relaxed"
+    ], "Semantic must be one of 'weak', 'volatile', 'acquire', 'release', or 'relaxed'."
     scope = {"cta": 0, "gpu": 1, "sys": 2}[scope]
     sem = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
     na = 1 if na else 0
     nc = 1 if nc else 0
-    return tir.call_intrin("handle", tir.op.Op.get("tl.ld"), address_of(src), value, sem, scope, na, nc, src_pe)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ld"), address_of(src), value, sem, scope, na,
+                           nc, src_pe)
+
 
 def st(
-    dst: PrimExpr, 
-    value: PrimExpr, 
-    scope: Literal["cta", "gpu", "sys"] = "gpu", 
+    dst: PrimExpr,
+    value: PrimExpr,
+    scope: Literal["cta", "gpu", "sys"] = "gpu",
     sem: Literal["weak", "volatile", "release", "relaxed"] = "weak",
     na: bool = False,
-    dst_pe: tir.PrimExpr | tir.IntImm | None = -1, 
+    dst_pe: tir.PrimExpr | tir.IntImm | None = -1,
 ):
     """Store a value to a given address with specified scope, semantic, and optional destination PE.
 
@@ -783,20 +790,22 @@ def st(
         scope: The memory scope.
         sem: The memory semantic.
         na: Whether to use no-allocate L1 policy.
-        dst_pe: The destination processing element (PE) identifier. 
+        dst_pe: The destination processing element (PE) identifier.
                 Use -1 (default) for local PE, or a non-negative integer to target a remote PE.
 
     Returns:
         tir.Call: A handle to the store operation.
     """
     assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
-    assert sem in ["weak", "volatile", "release", "relaxed"], "Semantic must be one of 'weak', 'volatile', 'release', or 'relaxed'."
-    
+    assert sem in ["weak", "volatile", "release", "relaxed"
+                  ], "Semantic must be one of 'weak', 'volatile', 'release', or 'relaxed'."
+
     # convert to int
     scope = {"cta": 0, "gpu": 1, "sys": 2}[scope]
     sem = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
     na = 1 if na else 0
-    return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(dst), value, sem, scope, na, dst_pe)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.st"), address_of(dst), value, sem, scope, na,
+                           dst_pe)
 
 
 def elect_one_sync():
@@ -814,9 +823,9 @@ def loop_continue():
     return tir.call_intrin("handle", tir.op.Op.get("tl.loop_continue"))
 
 
-def warp_any(value, mask = -1):
+def warp_any(value, mask=-1):
     """Check if any lane in the warp has a true value.
-    
+
     Args:
         value (int): The value to vote.
         mask (uint32): The mask to use, default is 0xFFFFFFFF, which means all lanes.
@@ -827,9 +836,9 @@ def warp_any(value, mask = -1):
     return tir.call_intrin("int32", tir.op.Op.get("tl.warp_any"), value, mask)
 
 
-def warp_all(value, mask = -1):
+def warp_all(value, mask=-1):
     """Check if all lane in the warp have a true value.
-    
+
     Args:
         value (int): The value to vote.
         mask (uint32): The mask to use, default is 0xFFFFFFFF(-1), which means all lanes.

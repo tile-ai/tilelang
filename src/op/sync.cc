@@ -17,8 +17,7 @@ namespace tl {
 
 using namespace tir;
 
-PrimExpr
-BarrierBlocksOpNode::get_offset(const BufferLoadNode *load) const {
+PrimExpr BarrierBlocksOpNode::get_offset(const BufferLoadNode *load) const {
   PrimExpr offset = 0;
   PrimExpr stride = 1;
   auto buffer_shape = load->buffer->shape;
@@ -63,10 +62,8 @@ TIR_DEFINE_TL_BUILTIN(sync_barrier_gpu)
 TIR_DEFINE_TL_BUILTIN(sync_grid).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
-BarrierBlocksOp::BarrierBlocksOp(Array<PrimExpr> args,
-                                 BufferMap vmap) {
-  ObjectPtr<BarrierBlocksOpNode> node =
-      make_object<BarrierBlocksOpNode>();
+BarrierBlocksOp::BarrierBlocksOp(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<BarrierBlocksOpNode> node = make_object<BarrierBlocksOpNode>();
   node->local_bar_addr = args[0];
   node->need_fence = bool(args[1].as<IntImmNode>()->value);
   const auto *call = node->local_bar_addr.as<CallNode>();
@@ -149,7 +146,8 @@ WaitOp::WaitOp(Array<PrimExpr> args, BufferMap vmap) {
 }
 
 bool WaitOpNode::is_distributed() const {
-  return !(peer->IsInstance<IntImmNode>() && peer.as<IntImmNode>()->value == -1);
+  return !(peer->IsInstance<IntImmNode>() &&
+           peer.as<IntImmNode>()->value == -1);
 }
 
 Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
@@ -159,17 +157,16 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   std::stringstream ss;
 
   // Map relation as int to literal_strings
-  const char* relation_str[] = {"eq", "ne", "ge", "le", "gt", "lt"};
+  const char *relation_str[] = {"eq", "ne", "ge", "le", "gt", "lt"};
   ss << "tl::wait_" << relation_str[relation];
-  
+
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
     PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
     PrimExpr local_base_ptr =
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base =
-        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {addr}),
-            local_base_ptr);
+    PrimExpr offset_to_base = Sub(
+        Call(DataType::Handle(), tl::get_uintptr_t(), {addr}), local_base_ptr);
     new_args.push_back(
         Call(DataType::Handle(), tl::get_remote_base_ptr(), {peer}) +
         offset_to_base);
@@ -177,12 +174,13 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(addr);
   }
   new_args.push_back(expected);
-  
+
   auto wait = Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(wait);
 }
 
-LayoutMap WaitOpNode::InferLayout(const LayoutInferArgs &T, InferLevel level) const {
+LayoutMap WaitOpNode::InferLayout(const LayoutInferArgs &T,
+                                  InferLevel level) const {
   (void)T;
   (void)level;
   return {};

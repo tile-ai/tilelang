@@ -24,7 +24,7 @@ def kernel_(M, num_rank, block_M, threads):
             rank[0] = T.get_rank()
             num_rank[0] = T.get_num_ranks()
             tx = T.get_thread_binding()
-            T.st(dst[bx * block_M + tx], src[bx * block_M + tx], dst_pe=1-rank[0])
+            T.st(dst[bx * block_M + tx], src[bx * block_M + tx], dst_pe=1 - rank[0])
 
     return main
 

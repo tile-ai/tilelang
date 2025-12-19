@@ -571,7 +571,8 @@ TVM_DLL const Op &warp_reduce_bitand();
 TVM_DLL const Op &warp_reduce_bitor();
 
 /*!
- * \brief tilelang intrinsic for electing exactly one lane within a logical thread group.
+ * \brief tilelang intrinsic for electing exactly one lane within a logical
+ * thread group.
  */
 TVM_DLL const Op &elect_one_sync();
 
@@ -586,12 +587,14 @@ TVM_DLL const Op &sync_warp();
 TVM_DLL const Op &loop_continue();
 
 /*!
- * \brief tilelang intrinsic for checking if any lane in the warp has a true value.
+ * \brief tilelang intrinsic for checking if any lane in the warp has a true
+ * value.
  */
 TVM_DLL const Op &warp_any();
 
 /*!
- * \brief tilelang intrinsic for checking if all lanes in the warp have a true value.
+ * \brief tilelang intrinsic for checking if all lanes in the warp have a true
+ * value.
  */
 TVM_DLL const Op &warp_all();
 

@@ -381,7 +381,7 @@ public:
   // tl::ld or tl::st expr vectorization
   // Transform: for k in vectorized(N): tl::ld(&buf[base+k], val[k])
   // Into: tl::ld(&buf[base], reinterpret<int4>(val[base])) with vectorized load
-  // 
+  //
   // This function handles the vectorization of tl::ld and tl::st calls.
   // The key insight is that for 8 consecutive bf16 loads (128 bits total),
   // we can use a single int4 load which is more efficient by reinterpreting
@@ -390,21 +390,21 @@ public:
     // Structure: call_extern("tl::ld<...>", address_of(BufferLoad), value, ...)
     // or: call_extern("tl::st<...>", address_of(BufferLoad), value, ...)
     ICHECK(op->args.size() >= 3) << "tl::ld/st expects at least 3 arguments";
-    
+
     PrimExpr func_name = op->args[0];
     PrimExpr addr_arg = op->args[1];
     PrimExpr value_arg = op->args[2];
-    
+
     // Visit the address argument to vectorize indices
     PrimExpr new_addr = this->VisitExpr(addr_arg);
     PrimExpr new_value = this->VisitExpr(value_arg);
-    
+
     // Helper to extract base from Ramp and get lanes
-    auto extract_ramp_info = [](const Array<PrimExpr>& indices) 
-        -> std::pair<Array<PrimExpr>, int> {
+    auto extract_ramp_info =
+        [](const Array<PrimExpr> &indices) -> std::pair<Array<PrimExpr>, int> {
       Array<PrimExpr> base_indices;
       int ramp_lanes = 1;
-      for (const auto& idx : indices) {
+      for (const auto &idx : indices) {
         auto ramp = idx.as<RampNode>();
         if (ramp && is_one(ramp->stride)) {
           auto lanes_imm = ramp->lanes.as<IntImmNode>();
@@ -418,7 +418,7 @@ public:
       }
       return {base_indices, ramp_lanes};
     };
-    
+
     // Check source address for Ramp pattern
     int src_ramp_lanes = 1;
     auto addr_call = new_addr.as<CallNode>();
@@ -430,11 +430,12 @@ public:
           src_ramp_lanes = lanes;
           // Create new address with base indices only
           BufferLoad new_buffer_load(buffer_load->buffer, base_indices);
-          new_addr = Call(DataType::Handle(), builtin::address_of(), {new_buffer_load});
+          new_addr = Call(DataType::Handle(), builtin::address_of(),
+                          {new_buffer_load});
         }
       }
     }
-    
+
     // Check destination value for Ramp pattern (for local buffer stores)
     int dst_ramp_lanes = 1;
     auto value_load = new_value.as<BufferLoadNode>();
@@ -446,7 +447,7 @@ public:
         new_value = BufferLoad(value_load->buffer, base_indices);
       }
     }
-    
+
     // Determine vectorization lanes
     int vector_lanes = std::max(src_ramp_lanes, dst_ramp_lanes);
     if (vector_lanes > 1) {
@@ -454,22 +455,23 @@ public:
       // 8 x 16-bit = 128 bits = int4, 4 x 32-bit = 128 bits = int4
       // 4 x 16-bit = 64 bits = int2, 2 x 32-bit = 64 bits = int2
       DataType vec_dtype;
-      int elem_bits = 16;  // Default assumption for bf16/f16
-      
+      int elem_bits = 16; // Default assumption for bf16/f16
+
       // Try to get element dtype from source buffer
       auto addr_call_check = new_addr.as<CallNode>();
-      if (addr_call_check && addr_call_check->op.same_as(builtin::address_of())) {
+      if (addr_call_check &&
+          addr_call_check->op.same_as(builtin::address_of())) {
         auto buffer_load = addr_call_check->args[0].as<BufferLoadNode>();
         if (buffer_load) {
           elem_bits = buffer_load->buffer->dtype.bits();
         }
       }
-      
+
       int total_bits = vector_lanes * elem_bits;
       if (total_bits == 128) {
-        vec_dtype = DataType::Int(32, 4);  // int4 equivalent (128 bits)
+        vec_dtype = DataType::Int(32, 4); // int4 equivalent (128 bits)
       } else if (total_bits == 64) {
-        vec_dtype = DataType::Int(32, 2);  // int2 equivalent (64 bits)
+        vec_dtype = DataType::Int(32, 2); // int2 equivalent (64 bits)
       } else if (total_bits == 32) {
         vec_dtype = DataType::Int(32);
       } else {
@@ -477,11 +479,11 @@ public:
         need_scalarize_ = true;
         return GetRef<PrimExpr>(op);
       }
-      
+
       // Reinterpret the value to vector type (e.g., int4 for 8xbf16)
       // This generates: reinterpret_cast<int4&>(dst[base])
       PrimExpr vec_value = Call(vec_dtype, builtin::reinterpret(), {new_value});
-      
+
       // Build new args with base addresses and reinterpreted value
       Array<PrimExpr> new_args;
       new_args.push_back(func_name);
@@ -491,23 +493,23 @@ public:
       for (size_t i = 3; i < op->args.size(); ++i) {
         new_args.push_back(this->VisitExpr(op->args[i]));
       }
-      
+
       // Return the vectorized call with same function but vectorized value type
       return Call(op->dtype, op->op, new_args);
     }
-    
+
     // If we couldn't vectorize but args became vectors, need to scalarize
     if (new_addr.dtype().is_scalable_or_fixed_length_vector() ||
         new_value.dtype().is_scalable_or_fixed_length_vector()) {
       need_scalarize_ = true;
       return GetRef<PrimExpr>(op);
     }
-    
+
     // No vectorization needed, return with updated args if changed
     if (new_addr.same_as(addr_arg) && new_value.same_as(value_arg)) {
       return GetRef<PrimExpr>(op);
     }
-    
+
     Array<PrimExpr> new_args;
     new_args.push_back(func_name);
     new_args.push_back(new_addr);
@@ -573,7 +575,8 @@ public:
         if (func_name_node) {
           std::string func_name = func_name_node->value;
           // Check for tl::ld<...> or tl::st<...> patterns
-          if (func_name.rfind("tl::ld<", 0) == 0 || func_name.rfind("tl::st<", 0) == 0) {
+          if (func_name.rfind("tl::ld<", 0) == 0 ||
+              func_name.rfind("tl::st<", 0) == 0) {
             return MutateTlLdStExpr_(op, func_name.rfind("tl::ld<", 0) == 0);
           }
         }

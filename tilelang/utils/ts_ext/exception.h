@@ -34,4 +34,3 @@ public:
     }                                                                          \
   } while (0)
 #endif
-

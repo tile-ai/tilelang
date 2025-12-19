@@ -165,11 +165,13 @@ TL_DEVICE void st_na_global(const dtype_t *ptr, const dtype_t &value) {
           &value));
 }
 
-template <> TL_DEVICE void st_na_global(const int16_t *ptr, const int16_t &value) {
+template <>
+TL_DEVICE void st_na_global(const int16_t *ptr, const int16_t &value) {
   asm volatile(ST_NA_FUNC ".s16 [%0], %1;" ::"l"(ptr), "h"(value));
 }
 
-template <> TL_DEVICE void st_na_global(const uint16_t *ptr, const uint16_t &value) {
+template <>
+TL_DEVICE void st_na_global(const uint16_t *ptr, const uint16_t &value) {
   asm volatile(ST_NA_FUNC ".u16 [%0], %1;" ::"l"(ptr), "h"(value));
 }
 
@@ -196,7 +198,7 @@ template <> TL_DEVICE void st_na_global(const int4 *ptr, const int4 &value) {
 
 template <int N, int UNROLL_FACTOR, typename dtype_t>
 TL_DEVICE void cp_warp_impl(dtype_t const *const dst_addr,
-                       dtype_t const *const src_addr) {
+                            dtype_t const *const src_addr) {
   int lane_id;
   asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
   constexpr int kLoopStride = 32 * (UNROLL_FACTOR);
@@ -217,13 +219,15 @@ TL_DEVICE void cp_warp_impl(dtype_t const *const dst_addr,
 }
 
 /**
- * @param enable_aggresive_vectorize If set to true, the copy will be performed with aggressive vectorization
- * (e.g., using int4 for aligned and sized transfers), which requires that both source and destination addresses
- * are 16-byte aligned and N*sizeof(dtype_t) is a multiple of 16 for optimal memory access and throughput.
- * If false, performs a standard element-wise copy.
+ * @param enable_aggresive_vectorize If set to true, the copy will be performed
+ * with aggressive vectorization (e.g., using int4 for aligned and sized
+ * transfers), which requires that both source and destination addresses are
+ * 16-byte aligned and N*sizeof(dtype_t) is a multiple of 16 for optimal memory
+ * access and throughput. If false, performs a standard element-wise copy.
  */
- // todo: support more auto-vectorize later
-template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize=false, typename dtype_t>
+// todo: support more auto-vectorize later
+template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize = false,
+          typename dtype_t>
 TL_DEVICE void cp_warp(dtype_t const *const dst_addr,
                        dtype_t const *const src_addr) {
   if constexpr (enable_aggresive_vectorize) {
@@ -236,8 +240,10 @@ TL_DEVICE void cp_warp(dtype_t const *const dst_addr,
   }
 }
 
-template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize=false, typename dtype_t>
-TL_DEVICE void cp_warp(uint64_t dst_addr_uint64,dtype_t const *const src_addr) {
+template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize = false,
+          typename dtype_t>
+TL_DEVICE void cp_warp(uint64_t dst_addr_uint64,
+                       dtype_t const *const src_addr) {
   dtype_t *dst_addr = reinterpret_cast<dtype_t *>(dst_addr_uint64);
   if constexpr (enable_aggresive_vectorize) {
     int4 *__restrict__ dst_addr_int4 = (int4 *)dst_addr;
@@ -249,7 +255,8 @@ TL_DEVICE void cp_warp(uint64_t dst_addr_uint64,dtype_t const *const src_addr) {
   }
 }
 
-template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize=false, typename dtype_t>
+template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize = false,
+          typename dtype_t>
 TL_DEVICE void cp_warp(dtype_t *const dst_addr, uint64_t src_addr_uint64) {
   const dtype_t *src_addr = reinterpret_cast<const dtype_t *>(src_addr_uint64);
   if constexpr (enable_aggresive_vectorize) {

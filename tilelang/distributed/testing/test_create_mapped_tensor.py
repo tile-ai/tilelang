@@ -1,12 +1,11 @@
 import torch
 from tilelang.distributed.utils import create_mapped_tensor
 
-
 if __name__ == "__main__":
     shape = (1024, 1024)
     dtype = torch.float32
     host_tensor, device_tensor = create_mapped_tensor(shape, dtype)
-    
+
     # test meta-data
     assert device_tensor.device.type == "cuda"
     assert device_tensor.shape == shape, f"{device_tensor.shape=}"

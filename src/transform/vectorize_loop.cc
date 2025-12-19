@@ -462,7 +462,8 @@ public:
         auto func_name_node = op->args[0].as<StringImmNode>();
         if (func_name_node) {
           std::string func_name = func_name_node->value;
-          if (func_name.rfind("tl::ld<", 0) == 0 || func_name.rfind("tl::st<", 0) == 0) {
+          if (func_name.rfind("tl::ld<", 0) == 0 ||
+              func_name.rfind("tl::st<", 0) == 0) {
             return MutateTlLdStExpr_(op, func_name.rfind("tl::ld<", 0) == 0);
           }
         }
@@ -709,12 +710,12 @@ public:
 
     // Helper to visit indices and extract Ramp info
     // Returns: (visited_indices, base_indices, ramp_lanes)
-    auto visit_and_extract_ramp = [this](const Array<PrimExpr>& indices)
+    auto visit_and_extract_ramp = [this](const Array<PrimExpr> &indices)
         -> std::tuple<Array<PrimExpr>, Array<PrimExpr>, int> {
       Array<PrimExpr> visited_indices;
       Array<PrimExpr> base_indices;
       int ramp_lanes = 1;
-      for (const auto& idx : indices) {
+      for (const auto &idx : indices) {
         PrimExpr visited = this->VisitExpr(idx);
         visited_indices.push_back(visited);
         auto ramp = visited.as<RampNode>();
@@ -738,11 +739,13 @@ public:
     if (addr_call && addr_call->op.same_as(builtin::address_of())) {
       auto buffer_load = addr_call->args[0].as<BufferLoadNode>();
       if (buffer_load) {
-        auto [visited_indices, base_indices, lanes] = visit_and_extract_ramp(buffer_load->indices);
+        auto [visited_indices, base_indices, lanes] =
+            visit_and_extract_ramp(buffer_load->indices);
         src_ramp_lanes = lanes;
         // Create new address with base indices only (for vectorized load)
         BufferLoad new_buffer_load(buffer_load->buffer, base_indices);
-        new_addr = Call(DataType::Handle(), builtin::address_of(), {new_buffer_load});
+        new_addr =
+            Call(DataType::Handle(), builtin::address_of(), {new_buffer_load});
       }
     }
 
@@ -751,7 +754,8 @@ public:
     PrimExpr new_value = value_arg;
     auto value_load = value_arg.as<BufferLoadNode>();
     if (value_load) {
-      auto [visited_indices, base_indices, lanes] = visit_and_extract_ramp(value_load->indices);
+      auto [visited_indices, base_indices, lanes] =
+          visit_and_extract_ramp(value_load->indices);
       dst_ramp_lanes = lanes;
       // Create new value with base indices only
       new_value = BufferLoad(value_load->buffer, base_indices);
@@ -764,11 +768,12 @@ public:
       // 8 x 16-bit = 128 bits = int4, 4 x 32-bit = 128 bits = int4
       // 4 x 16-bit = 64 bits = int2, 2 x 32-bit = 64 bits = int2
       DataType vec_dtype;
-      int elem_bits = 16;  // Default assumption for bf16/f16
+      int elem_bits = 16; // Default assumption for bf16/f16
 
       // Try to get element dtype from source buffer
       auto addr_call_check = new_addr.as<CallNode>();
-      if (addr_call_check && addr_call_check->op.same_as(builtin::address_of())) {
+      if (addr_call_check &&
+          addr_call_check->op.same_as(builtin::address_of())) {
         auto buffer_load = addr_call_check->args[0].as<BufferLoadNode>();
         if (buffer_load) {
           elem_bits = buffer_load->buffer->dtype.bits();
@@ -777,9 +782,9 @@ public:
 
       int total_bits = vector_lanes * elem_bits;
       if (total_bits == 128) {
-        vec_dtype = DataType::Int(32, 4);  // int4 equivalent (128 bits)
+        vec_dtype = DataType::Int(32, 4); // int4 equivalent (128 bits)
       } else if (total_bits == 64) {
-        vec_dtype = DataType::Int(32, 2);  // int2 equivalent (64 bits)
+        vec_dtype = DataType::Int(32, 2); // int2 equivalent (64 bits)
       } else if (total_bits == 32) {
         vec_dtype = DataType::Int(32);
       } else {

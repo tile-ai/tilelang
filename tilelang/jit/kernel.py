@@ -411,7 +411,8 @@ class JITKernel:
     ):
         assert allocator.initialized(), "Allocator is not initialized"
         result = self.adapter.lib.init_table(
-            ctypes.c_void_p(allocator.table.data_ptr()), allocator.table_size, ctypes.c_void_p(stream) if stream is not None else ctypes.c_void_p(0))
+            ctypes.c_void_p(allocator.table.data_ptr()), allocator.table_size,
+            ctypes.c_void_p(stream) if stream is not None else ctypes.c_void_p(0))
         if result != 0:
             error_msg = self.adapter.lib.get_last_error().decode('utf-8')
             raise RuntimeError(f"Initialization failed: {error_msg}")

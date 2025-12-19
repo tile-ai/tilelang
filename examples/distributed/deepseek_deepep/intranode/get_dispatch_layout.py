@@ -2,7 +2,9 @@
 # This op is non-distributed
 ### python get_dispatch_layout.py
 
-import os, sys
+import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add parent folder to path
 
 import torch
@@ -96,8 +98,7 @@ def get_dispatch_layout_kernel(
                         expert_idx = T.alloc_var("int32")
                         expert_idx = topk_idx[i, j]
                         if expert_begin_idx <= expert_idx and expert_idx < expert_end_idx:
-                            tokens_per_expert_per_thread[tx,
-                                                         expert_idx - expert_begin_idx] += 1
+                            tokens_per_expert_per_thread[tx, expert_idx - expert_begin_idx] += 1
 
                 if expert_begin_idx + tx < expert_end_idx:
                     sum = T.alloc_var("int32")

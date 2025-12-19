@@ -280,7 +280,7 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   }
 };
 
-// TileScale extra 
+// TileScale extra
 
 template <typename T, typename ReduceOp>
 TL_DEVICE T warp_reduce(T value, ReduceOp op) {
@@ -293,28 +293,23 @@ TL_DEVICE T warp_reduce(T value, ReduceOp op) {
   return value;
 }
 
-template <typename T>
-TL_DEVICE T warp_reduce_sum(T value) {
+template <typename T> TL_DEVICE T warp_reduce_sum(T value) {
   return warp_reduce<T>(value, SumOp());
 }
 
-template <typename T>
-TL_DEVICE T warp_reduce_max(T value) {
+template <typename T> TL_DEVICE T warp_reduce_max(T value) {
   return warp_reduce<T>(value, MaxOp());
 }
 
-template <typename T>
-TL_DEVICE T warp_reduce_min(T value) {
+template <typename T> TL_DEVICE T warp_reduce_min(T value) {
   return warp_reduce<T>(value, MinOp());
 }
 
-template <typename T>
-TL_DEVICE T warp_reduce_bitand(T value) {
+template <typename T> TL_DEVICE T warp_reduce_bitand(T value) {
   return warp_reduce<T>(value, BitAndOp());
 }
 
-template <typename T>
-TL_DEVICE T warp_reduce_bitor(T value) {
+template <typename T> TL_DEVICE T warp_reduce_bitor(T value) {
   return warp_reduce<T>(value, BitOrOp());
 }
 

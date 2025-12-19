@@ -16,20 +16,19 @@ num_sms: int = 20
 
 @dataclass
 class Config:
-    num_sms : int  # the SMs used in high-throughput kernels
-    num_max_nvl_chunked_send_tokens : int
-    num_max_nvl_chunked_recv_tokens : int
-    num_max_rdma_chunked_send_tokens : int
-    num_max_rdma_chunked_recv_tokens : int
+    num_sms: int  # the SMs used in high-throughput kernels
+    num_max_nvl_chunked_send_tokens: int
+    num_max_nvl_chunked_recv_tokens: int
+    num_max_rdma_chunked_send_tokens: int
+    num_max_rdma_chunked_recv_tokens: int
 
     num_channels: int = field(init=False)
-
 
     def __post_init__(self):
         assert self.num_sms % 2 == 0, "num_sms must be even"
         self.num_channels = self.num_sms // 2
         # 1 sm for send, 1 sm for recv in each channel
-    
+
     @staticmethod
     def get_dispatch_config(num_ranks: int) -> 'Config':
         """
@@ -59,8 +58,7 @@ class Config:
         }
         assert num_ranks in config_map, f'Unsupported number of EP ranks: {num_ranks}'
         return config_map[num_ranks]
-    
-    
+
     @staticmethod
     def get_combine_config(num_ranks: int) -> 'Config':
         """
@@ -93,7 +91,9 @@ class Config:
 
 
 # Only necessary in inter-node cases
-def set_rdma_env_args(num_qps_per_rank: int = 24, allow_nvlink_for_low_latency_mode: bool = True, allow_mnnvl: bool = False):
+def set_rdma_env_args(num_qps_per_rank: int = 24,
+                      allow_nvlink_for_low_latency_mode: bool = True,
+                      allow_mnnvl: bool = False):
     os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
     os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
     os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
@@ -134,14 +134,14 @@ def gen_inputs(num_tokens: int, hidden: int, num_topk: int, num_experts: int, nu
         num_topk: the number of top-k experts to select for each token.
         num_experts: the number of experts.
         num_ranks: the number of total ranks.
-        
+
     Returns:
         x: `[num_tokens, hidden]` with `torch.bfloat16`, the input to MoE layer.
         topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
             `-1` means no selections.
-        topk_weights: `[num_tokens, num_topk]` with `torch.float32`, the weights corresponding to 
+        topk_weights: `[num_tokens, num_topk]` with `torch.float32`, the weights corresponding to
             each selected expert for each token.
-        rank_idx: `[num_tokens, num_topk]` with `torch.int32`, the rank indices corresponding to 
+        rank_idx: `[num_tokens, num_topk]` with `torch.int32`, the rank indices corresponding to
             each selected expert, `-1` means no selections.
     """
     assert num_topk <= num_experts, "num_topk must be less than or equal to num_experts"
@@ -160,7 +160,7 @@ def gen_inputs(num_tokens: int, hidden: int, num_topk: int, num_experts: int, nu
 
 def inplace_unique(x: torch.Tensor, num_slots: int):
     """
-    Keep at most `num_slots` different values in each row of `x`, 
+    Keep at most `num_slots` different values in each row of `x`,
     and fill `x` with -1 in other positions.
     """
     assert x.dim() == 2 and num_slots <= x.size(-1)
@@ -176,7 +176,7 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
     valid_len = min(num_slots, x.size(1))
     x[:, :valid_len] = sorted_bin_idx[:, :valid_len]
 
-    
+
 def ep_bench(fn, warmup: int = 50, rep: int = 50, post_fn=None):
     """DeepEP style benchmark function.
     Args:
@@ -238,11 +238,11 @@ std::tuple<int, std::vector<int>> wait_for_counters_ready(
 
     // After ready, get counter values to return
     int counter_value = counter_ptr[0];
-    
+
     std::vector<int> expert_counter_values = std::vector<int>(
-        expert_ptr, 
+        expert_ptr,
         expert_ptr + num_local_experts);
-    
+
     return std::make_tuple(counter_value, expert_counter_values);
 }
 """
@@ -252,6 +252,4 @@ ep_ext = load_inline(
     cpp_sources=_src,
     functions=["wait_for_counters_ready"],
     extra_cflags=["-O3", "-march=native"],
-    verbose=False
-)
-
+    verbose=False)
