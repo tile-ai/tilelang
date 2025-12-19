@@ -6,8 +6,6 @@ import sys
 import warnings
 from pathlib import Path
 
-from tqdm.auto import tqdm
-
 
 def _compute_version() -> str:
     """Return the package version without being polluted by unrelated installs.
@@ -50,20 +48,7 @@ __version__ = _compute_version()
 del _compute_version
 
 
-class TqdmLoggingHandler(logging.Handler):
-    """Custom logging handler that directs log output to tqdm progress bar to avoid interference."""
-
-    def __init__(self, level=logging.NOTSET):
-        """Initialize the handler with an optional log level."""
-        super().__init__(level)
-
-    def emit(self, record):
-        """Emit a log record. Messages are written to tqdm to ensure output in progress bars isn't corrupted."""
-        try:
-            msg = self.format(record)
-            tqdm.write(msg)
-        except Exception:
-            self.handleError(record)
+logger = logging.getLogger(__name__)
 
 
 def set_log_level(level):
@@ -75,13 +60,28 @@ def set_log_level(level):
     """
     if isinstance(level, str):
         level = getattr(logging, level.upper(), logging.INFO)
-    logger = logging.getLogger(__name__)
     logger.setLevel(level)
 
 
 def _init_logger():
     """Initialize the logger specific for this module with custom settings and a Tqdm-based handler."""
-    logger = logging.getLogger(__name__)
+    from tqdm.auto import tqdm
+
+    class TqdmLoggingHandler(logging.Handler):
+        """Custom logging handler that directs log output to tqdm progress bar to avoid interference."""
+
+        def __init__(self, level=logging.NOTSET):
+            """Initialize the handler with an optional log level."""
+            super().__init__(level)
+
+        def emit(self, record):
+            """Emit a log record. Messages are written to tqdm to ensure output in progress bars isn't corrupted."""
+            try:
+                msg = self.format(record)
+                tqdm.write(msg)
+            except Exception:
+                self.handleError(record)
+
     handler = TqdmLoggingHandler()
     formatter = logging.Formatter(
         fmt="%(asctime)s  [TileLang:%(name)s:%(levelname)s]: %(message)s",
@@ -96,11 +96,11 @@ def _init_logger():
 _init_logger()
 del _init_logger
 
-logger = logging.getLogger(__name__)
-
 
 @contextlib.contextmanager
 def _lazy_load_lib():
+    import torch  # noqa: F401 # preload torch to avoid dlopen errors
+
     old_flags = sys.getdlopenflags()
     old_init = ctypes.CDLL.__init__
 
