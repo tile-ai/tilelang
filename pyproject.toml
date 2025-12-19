@@ -130,7 +130,7 @@ tilelang = "tilelang"
 "tilelang/3rdparty/composable_kernel/include" = "3rdparty/composable_kernel/include"
 "tilelang/3rdparty/composable_kernel/library" = "3rdparty/composable_kernel/library"
 
- 
+
 
 [tool.codespell]
 ignore-words = "docs/spelling_wordlist.txt"
@@ -264,6 +264,11 @@ yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-de
 yum clean all
 """
 repair-wheel-command = [
+    # Exclude libcuda.so.1 to allow importing on a CPU-only machine.
+    "unzip {wheel} -d {dest_dir}/tmp_dir",
+    "find {dest_dir}/tmp_dir -name '*.so*' -exec patchelf --remove-needed libcuda.so.1 '{}' '+'",
+    "pushd {dest_dir}/tmp_dir && zip -r {wheel} . && popd && rm -rf {dest_dir}/tmp_dir",
+    # Do not bundle libtvm_ffi.so and libz3.so because they are shipped by the dependency packages.
     "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --verbose --strict {wheel}",
 ]
