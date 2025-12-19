@@ -6,34 +6,37 @@ import triton.language as tl
 import pytest
 import tilelang.testing
 
-tilelang.disable_cache()
-
 
 @tilelang.jit
 def tilelang_rand_1d(M=1024, seed=42):
-    blk_M = M
-    num_threads = 1
+    num_per_thread = 128
+    threads = 1
+    blk_M = num_per_thread * threads
 
     @T.prim_func
     def rand_kernel(A: T.Tensor((M,), "uint32")):
-        with T.Kernel(M // blk_M, threads=num_threads) as bx:
-            T.rng_init(seed)
-            for i in T.Parallel(blk_M):
-                A[bx * blk_M + i] = T.rng_rand()
-                # match a particular RNG sequence of triton
-                T.rng_rand()
-                T.rng_rand()
-                T.rng_rand()
+        with T.Kernel(T.ceildiv(M, threads * num_per_thread), threads=threads) as bx:
+            tx = T.get_thread_binding()
+            T.rng_init(seed, 0, bx * blk_M + tx * num_per_thread)
+            for i, j in T.Parallel(threads, num_per_thread):
+                offsets = (bx * threads + i) * num_per_thread
+                A[offsets + j] = T.rng_rand()
 
     return rand_kernel
 
 
 @triton.jit
-def triton_rand_1d(X, M, blk_M, seed):
+def triton_rand_1d(X, M, elements_per_thread, seed):
     pid = tl.program_id(0)
-    offset = pid * blk_M + tl.arange(0, blk_M)
-    rand = tl.randint(seed, offset)
-    tl.store(X + offset, rand, mask=offset < M)
+    offset = pid * elements_per_thread + tl.arange(0, elements_per_thread)
+
+    r0, r1, r2, r3 = tl.randint4x(seed, offset)
+
+    base_idx = offset * 4
+    tl.store(X + base_idx, r0, mask=base_idx < M)
+    tl.store(X + base_idx + 1, r1, mask=(base_idx + 1) < M)
+    tl.store(X + base_idx + 2, r2, mask=(base_idx + 2) < M)
+    tl.store(X + base_idx + 3, r3, mask=(base_idx + 3) < M)
 
 
 @tilelang.testing.requires_cuda
@@ -45,7 +48,7 @@ def test_rand_1d(M, seed):
 
     triton_result = torch.empty(M, dtype=torch.uint32, device="cuda")
     grid = (M // 128,)
-    triton_rand_1d[grid](triton_result, tl.constexpr(M), tl.constexpr(128), seed)
+    triton_rand_1d[grid](triton_result, tl.constexpr(M), tl.constexpr(128 // 4), seed)
 
     torch.testing.assert_close(tilelang_result, triton_result)
 
