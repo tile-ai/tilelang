@@ -33,9 +33,9 @@ public:
   Array<PrimExpr>
       dst_indices;   ///< Destination indices used for address computation
   std::string scope; ///< Scope: {warp, block}
-  bool enable_aggresive_vectorize; ///< Whether to enable aggressive
-                                   ///< vectorization, only effctive for
-                                   ///< warp-scope
+  bool enable_aggressive_vectorize; ///< Whether to enable aggressive
+                                    ///< vectorization, only effctive for
+                                    ///< warp-scope
 
   bool is_distributed() const;
 
@@ -125,9 +125,9 @@ public:
   Array<PrimExpr>
       dst_indices;   ///< Destination indices used for address computation
   std::string scope; ///< Scope: {warp, block}
-  bool enable_aggresive_vectorize; ///< Whether to enable aggressive
-                                   ///< vectorization, only effctive for
-                                   ///< warp-scope
+  bool enable_aggressive_vectorize; ///< Whether to enable aggressive
+                                    ///< vectorization, only effctive for
+                                    ///< warp-scope
 
   bool is_distributed() const;
 

@@ -795,13 +795,15 @@ public:
 
       // Reinterpret the value to vector type (e.g., int4 for 8xbf16)
       PrimExpr vec_value = Call(vec_dtype, builtin::reinterpret(), {new_value});
-      PrimExpr vec_value_slice = vec_value.as<CallNode>()->args[0];
+
+      // A trick to get the lvalue of the vectorized value
+      PrimExpr vec_value_lvalue = vec_value.as<CallNode>()->args[0];
 
       // Build new args with base addresses and reinterpreted value
       Array<PrimExpr> new_args;
       new_args.push_back(func_name);
       new_args.push_back(new_addr);
-      new_args.push_back(vec_value_slice);
+      new_args.push_back(vec_value_lvalue);
       // Copy remaining args (sem, scope, etc.)
       for (size_t i = 3; i < op->args.size(); ++i) {
         new_args.push_back(this->VisitExpr(op->args[i]));

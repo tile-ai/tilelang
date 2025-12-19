@@ -219,18 +219,18 @@ TL_DEVICE void cp_warp_impl(dtype_t const *const dst_addr,
 }
 
 /**
- * @param enable_aggresive_vectorize If set to true, the copy will be performed
+ * @param enable_aggressive_vectorize If set to true, the copy will be performed
  * with aggressive vectorization (e.g., using int4 for aligned and sized
  * transfers), which requires that both source and destination addresses are
  * 16-byte aligned and N*sizeof(dtype_t) is a multiple of 16 for optimal memory
  * access and throughput. If false, performs a standard element-wise copy.
  */
 // todo: support more auto-vectorize later
-template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize = false,
+template <int N, int UNROLL_FACTOR, bool enable_aggressive_vectorize = false,
           typename dtype_t>
 TL_DEVICE void cp_warp(dtype_t const *const dst_addr,
                        dtype_t const *const src_addr) {
-  if constexpr (enable_aggresive_vectorize) {
+  if constexpr (enable_aggressive_vectorize) {
     int4 *__restrict__ dst_addr_int4 = (int4 *)dst_addr;
     const int4 *__restrict__ src_addr_int4 = (const int4 *)src_addr;
     constexpr int N_int4 = sizeof(dtype_t) * N / 16;
@@ -240,12 +240,12 @@ TL_DEVICE void cp_warp(dtype_t const *const dst_addr,
   }
 }
 
-template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize = false,
+template <int N, int UNROLL_FACTOR, bool enable_aggressive_vectorize = false,
           typename dtype_t>
 TL_DEVICE void cp_warp(uint64_t dst_addr_uint64,
                        dtype_t const *const src_addr) {
   dtype_t *dst_addr = reinterpret_cast<dtype_t *>(dst_addr_uint64);
-  if constexpr (enable_aggresive_vectorize) {
+  if constexpr (enable_aggressive_vectorize) {
     int4 *__restrict__ dst_addr_int4 = (int4 *)dst_addr;
     const int4 *__restrict__ src_addr_int4 = (const int4 *)src_addr;
     constexpr int N_int4 = sizeof(dtype_t) * N / 16;
@@ -255,11 +255,11 @@ TL_DEVICE void cp_warp(uint64_t dst_addr_uint64,
   }
 }
 
-template <int N, int UNROLL_FACTOR, bool enable_aggresive_vectorize = false,
+template <int N, int UNROLL_FACTOR, bool enable_aggressive_vectorize = false,
           typename dtype_t>
 TL_DEVICE void cp_warp(dtype_t *const dst_addr, uint64_t src_addr_uint64) {
   const dtype_t *src_addr = reinterpret_cast<const dtype_t *>(src_addr_uint64);
-  if constexpr (enable_aggresive_vectorize) {
+  if constexpr (enable_aggressive_vectorize) {
     int4 *__restrict__ dst_addr_int4 = (int4 *)dst_addr;
     const int4 *__restrict__ src_addr_int4 = (const int4 *)src_addr;
     constexpr int N_int4 = sizeof(dtype_t) * N / 16;

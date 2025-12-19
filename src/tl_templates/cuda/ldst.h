@@ -83,7 +83,7 @@ template <Semantic semantic, Scope scope, bool nc, bool na> struct LdImpl {
         }                                                                      \
       } else if constexpr (sizeof(T) == 16) {                                  \
         asm volatile("st" SEM_LIT SCOPE_LIT NA_LIT                             \
-                     ".v4.s32 {%0, %1, %2, %3}, [%4];" ::"l"(ptr),             \
+                     ".v4.s32 [%0], {%1, %2, %3, %4};" ::"l"(ptr),             \
                      "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w)    \
                      : "memory");                                              \
       }                                                                        \

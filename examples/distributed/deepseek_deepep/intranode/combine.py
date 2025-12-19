@@ -197,7 +197,7 @@ def combine_kernel(
                             hidden,
                             dst_pe=send_rank_id,
                             unroll_factor=4,
-                            enable_aggresive_vectorize=True)
+                            enable_aggressive_vectorize=True)
 
                         # 2. send src idx
                         idx = T.alloc_var('int32')

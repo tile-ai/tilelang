@@ -67,11 +67,11 @@ def _test_st_options(scope, sem, na):
 
 
 @tilelang.testing.requires_cuda
-def test_st_options():    
+def test_st_options():
     # st.relaxed.sys.global.s32
     _test_st_options("sys", "relaxed", False)
 
-    # # st.release.sys.global.s32
+    # st.release.sys.global.s32
     _test_st_options("sys", "release", False)
 
     # st.release.cta.s32
@@ -83,7 +83,6 @@ def test_st_options():
     # st.release.gpu.global.L1::no_allocate.b*
     _test_st_options("gpu", "release", True)
 
-    # test_st_options("gpu", "weak", False)
     _test_st_options("gpu", "weak", False)
     _test_st_options("gpu", "weak", True)
 

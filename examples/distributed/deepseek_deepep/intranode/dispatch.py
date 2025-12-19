@@ -389,7 +389,7 @@ def dispatch_kernel(
                                 hidden,
                                 dst_pe=responsible_rank,
                                 unroll_factor=4,
-                                enable_aggresive_vectorize=True)
+                                enable_aggressive_vectorize=True)
 
                             # 2. copy src idx
                             if T.elect_one_sync():
@@ -513,7 +513,7 @@ def dispatch_kernel(
                             hidden,
                             -1,
                             5,
-                            enable_aggresive_vectorize=True)
+                            enable_aggressive_vectorize=True)
 
                     # 2. recv src_idx
                     for chunk_idx in T.serial(cached_channel_head_idx + recv_thread_id_in_rank,
@@ -572,8 +572,6 @@ def cached_dispatch_kernel(
     num_max_send_tokens,  # config.num_max_nvl_chunked_send_tokens
     num_recv_buffer_tokens,  # config.num_max_nvl_chunked_recv_tokens
     hidden,
-    num_topk,
-    num_experts,
     num_sms,
     dtype: str = 'bfloat16',
 ):
@@ -697,7 +695,7 @@ def cached_dispatch_kernel(
                                 hidden,
                                 dst_pe=responsible_rank,
                                 unroll_factor=4,
-                                enable_aggresive_vectorize=True)
+                                enable_aggressive_vectorize=True)
 
                             # 2. copy src idx
                             if T.elect_one_sync():
@@ -793,7 +791,7 @@ def cached_dispatch_kernel(
                             hidden,
                             -1,
                             5,
-                            enable_aggresive_vectorize=True)
+                            enable_aggressive_vectorize=True)
 
                     # 2. recv src_idx
                     for chunk_idx in T.serial(cached_channel_head_idx + recv_thread_id_in_rank,
@@ -948,8 +946,8 @@ def intranode_dispatch(
     else:
         kernel = cached_dispatch_kernel(num_ranks, num_tokens,
                                         config.num_max_nvl_chunked_send_tokens,
-                                        config.num_max_nvl_chunked_recv_tokens, hidden, num_topk,
-                                        num_experts, config.num_sms, 'bfloat16')
+                                        config.num_max_nvl_chunked_recv_tokens, hidden,
+                                        config.num_sms, 'bfloat16')
         kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
         kernel(
             rank,

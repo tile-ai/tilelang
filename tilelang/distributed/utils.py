@@ -401,5 +401,5 @@ def has_fullmesh_nvlink():
         return _has_fullmesh_nvlink
 
 
-def create_mapped_tensor(shape: list[int], dtype: torch.dtype) -> torch.Tensor:
+def create_mapped_tensor(shape: list[int], dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
     return create_host_device_tensor(shape, dtype)
