@@ -184,4 +184,8 @@ def gemm_v2(
 
 
 # Default to v2; allow forcing v1 via environment variable
-gemm = gemm_v1 if _env.use_gemm_v1() else gemm_v2
+# gemm = gemm_v1 if _env.use_gemm_v1() else gemm_v2
+
+
+def gemm(*args, **kwargs):
+    return gemm_v1(*args, **kwargs) if _env.use_gemm_v1() else gemm_v2(*args, **args)
