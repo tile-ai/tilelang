@@ -1177,13 +1177,10 @@ private:
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
       if (const auto *cast = obj.as<CastNode>()) {
         // Check if this is a non-reducer store with Cast operation
-        DataType src_type = cast->value.dtype();
-        DataType dst_type = cast->dtype;
-        bool src_ok =
-            src_type.is_float() || src_type.is_bfloat() || src_type.is_float8();
-        bool dst_ok =
-            dst_type.is_float() || dst_type.is_bfloat() || dst_type.is_float8();
-        if (src_ok && dst_ok && TargetIsCuda(Target::Current())) {
+        DataType from_ty = cast->value.dtype();
+        DataType target_ty = cast->dtype;
+        if (IsCudaVectorizableCast(from_ty, target_ty) &&
+            TargetIsCuda(Target::Current())) {
           has_cast_operations = true;
         }
       }
