@@ -8,6 +8,7 @@ from tvm_ffi.container import Map
 from tvm.ir.base import Span
 from tvm.ir.expr import Range
 from tvm.tir.stmt import BufferRegion
+from tvm.tir.stmt_functor import substitute
 from .ast import BaseBuilder, IRGenerator, eval_op, mutate
 from .utils import construct_strides
 import tvm
@@ -16,9 +17,8 @@ from tvm.script.ir_builder import tir, IRBuilder
 
 from tvm.tir.expr import BufferLoad, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
+from collections.abc import Hashable
 from collections.abc import Sequence
-from .annot import FuncAnnot, ArgVarTable, Annot
-import pprint
 
 # Python 3.9 compatibility for ParamSpec and Self
 try:
@@ -168,15 +168,14 @@ def is_var(v: Any) -> bool:
 
 
 class Builder(BaseBuilder):
-    def __init__(self, func_annot: FuncAnnot = None):
+    def __init__(self):
         self.frames: list[AnyFrame] = []
         self.ir_builder = IRBuilder()
         self.name_inside_frame: dict[str, AnyFrame] = {}
         self.macro_arg_annot = {}
-        self.func_annot = func_annot
         self.out_idx = []
         self.out_tensor_cnt = 0
-        self.arg_vt = ArgVarTable()
+        self.constexpr_var = set()
 
     @classmethod
     def current(cls) -> Self:
@@ -191,6 +190,7 @@ class Builder(BaseBuilder):
             yield
         if len(self.out_idx) != self.out_tensor_cnt:
             raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
+        del thread_local_storage.builder
 
     @contextmanager
     def macro(self, name=None, annotations=None):
@@ -373,6 +373,19 @@ class Builder(BaseBuilder):
         self.check_continue_break()
         locals = self.get_parent_locals()
         orig_value = locals.get(name, None)
+
+        if isinstance(annot, Buffer) and annot.scope() == "global":
+            from tilelang.language import match_buffer
+
+            return IRBuilder.name(
+                name,
+                match_buffer(
+                    orig_value,
+                    annot.shape,
+                    annot.dtype,
+                    strides=annot.strides,
+                ),
+            )
         # if orig_value is a local.var, we use buffer_store to modify it immutably
         #   however, if rvalue is not a PrimExpr, such as buffer,
         #   we should not use buffer_store, and bind it instead
@@ -617,14 +630,14 @@ class Builder(BaseBuilder):
             return value
 
     def prim_func_arg(self, name, value):
-        return self.func_annot.create_argument(name, value, self.arg_vt)
-        # if isinstance(value, (Buffer, Var)):
-        #     return tir.arg(name, value)
-        # elif value is self.empty:
-        #     raise ValueError(f'Argument `{name}` is not annotated')
-        # else:
-        #     raise TypeError(
-        #         f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
+        if isinstance(value, (Buffer, Var)):
+            return tir.arg(name, value)
+        elif value is self.empty:
+            raise ValueError(f"Argument `{name}` is not annotated")
+        elif isinstance(value, Hashable):
+            return value
+        else:
+            raise TypeError(f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
 
     def arg(self, name, value):
         if self.find_frame_idx(MacroFrame) is not None:
@@ -639,35 +652,14 @@ class Builder(BaseBuilder):
             return serial
         raise ValueError(f"Unknown override: {name}")
 
+    def constexpr(self, name: str) -> Var:
+        var = tir.Var(name, "int32")
+        self.constexpr_var.add(var)
+        return var
+
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
-
-
-@dataclass
-class PrimFuncCreater(Generic[_P, _T]):
-    func_annot: FuncAnnot
-    ir_gen: IRGenerator[_P, _T]
-    orig_func: Callable[_P, _T]
-
-    @property
-    def annot(self) -> dict[str, Annot]:
-        return self.func_annot.annots
-
-    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> PrimFunc[_P, _T]:
-        builder = Builder(self.func_annot)
-        with builder.prim_func(self.orig_func.__name__):
-            self.ir_gen.gen(builder)(*args, **kwargs)
-        res: PrimFunc = builder.get()
-        res.ir_gen = self.ir_gen
-        res.orig_func = self.orig_func
-        res.func_annot = self.func_annot
-        res.out_idx_override = builder.out_idx or None
-        return res
-
-    def __repr__(self):
-        fmt = pprint.pformat({"annot": self.func_annot.annots, "ir_gen": self.ir_gen, "orig_func": self.orig_func}, indent=2)
-        return f"{self.__class__.__name__}(\n{fmt}\n)"
 
 
 if TYPE_CHECKING:
@@ -681,7 +673,6 @@ if TYPE_CHECKING:
         span: Span | None
         ir_gen: IRGenerator[_P, _T] | None
         orig_func: Callable[_P, _T] | None
-        func_annot: FuncAnnot | None
         out_idx_override: list[int] | None
 
 else:
@@ -752,6 +743,7 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
 
 
 from typing import _eval_type
+import re
 
 
 def get_type_hints(func):
@@ -813,72 +805,135 @@ def get_type_hints(func):
     return hints
 
 
-def prim_func(func: Callable[_P, _T] = None, *, generator: bool = False) -> PrimFunc[_P, _T] | PrimFuncCreater[_P, _T]:
-    """
-    Decorator to create a primitive function (PrimFunc) for TileLang IR generation.
-    This decorator transforms a Python function into a TileLang primitive function by analyzing
-    its type annotations and generating intermediate representation (IR) code. It supports both
-    immediate construction (when all parameters are statically annotated) and generator mode
-    (for dynamic construction).
-    Parameters
-    ----------
-    func : Callable[_P, _T], optional
-        The function to be decorated. Can be None when using decorator with arguments.
-    generator : bool, default=False
-        If True, returns a generator function that creates PrimFunc instances on demand.
-        If False, attempts to create a PrimFunc immediately using type annotations.
-    Returns
-    -------
-    PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]
-        - If `generator=False` and all parameters are statically annotated: returns a PrimFunc instance
-        - If `generator=True`: returns a callable that generates PrimFunc instances when invoked
-        - If used without parentheses: returns the decorator implementation function
-    Examples
-    --------
-    Static annotation mode (immediate construction):
-    >>> @prim_func
-    ... def add_kernel(A: T.Buffer((128,), T.float32),
-    ...                B: T.Buffer((128,), T.float32)):
-    ...     for i in T.grid(128):
-    ...         B[i] = A[i] + 1.0
-    Generator mode (dynamic construction):
-    >>> @prim_func(generator=True)
-    ... def dynamic_kernel(A=T.Tensor((128,), T.float32)):
-    ...     # function body
-    ...     pass
-    >>> kernel_instance = dynamic_kernel()
-    With custom parameters:
-    >>> @prim_func(generator=True)
-    ... def parameterized_kernel(size: int = 128):
-    ...     # function body using size parameter
-    ...     pass
-    >>> kernel = parameterized_kernel(size=256)
-    See Also
-    --------
-    Builder : The IR builder class used for constructing primitive functions
-    mutate : Function used to generate IR from the decorated function
-    """
+def const(name: str) -> tuple[Var, ...]:
+    builder = Builder.current()
+    if "," in name:
+        names = re.split(r"\s*,\s*", name)
+        return [builder.constexpr(n) for n in names]
+    if " " in name:
+        names = re.split(r"\s+", name)
+        return [builder.constexpr(n) for n in names]
+    else:
+        return builder.constexpr(name)
 
+
+@dataclass
+class TirTemplate(Generic[_P, _T]):
+    prim_func: PrimFunc[_P, _T]
+    matcher: dict[Var, tuple[tvm.tir.Var, str, int]]
+
+    @classmethod
+    def create(cls, prim_func: PrimFunc[_P, _T], constexpr: set[Var]) -> TirTemplate[_P, _T]:
+        matcher = {}
+        for k, v in prim_func.buffer_map.items():
+            for i, s in enumerate(v.shape):
+                if s in constexpr and s not in matcher:
+                    matcher[s] = (k.name, "shape", i)
+            for i, s in enumerate(v.strides):
+                if s in constexpr and s not in matcher:
+                    matcher[s] = (k.name, "stride", i)
+        return cls(prim_func=prim_func, matcher=matcher)
+
+    def _parse_phase2_key(self, **kwargs):
+        result = []
+        for k, ty, i in self.matcher.values():
+            if ty == "shape":
+                result.append(kwargs[k].shape[i])
+            if ty == "stride":
+                result.append(kwargs[k].strides()[i])
+        return tuple(result)
+
+    def get_tir(self, **kwargs):
+        values = self._parse_phase2_key(**kwargs)
+        subs = {name: value for name, value in zip(self.matcher, values)}
+        return substitute_primfunc(self.prim_func, subs)
+
+
+@dataclass
+class LazyJITFunc(Generic[_P, _T]):
+    orig_func: Callable[_P, _T]
+    arg_names: list[str]
+    tensor_args: dict[str, Buffer | Var]
+    ir_gen: IRGenerator[_P, _T]
+
+    def __post_init__(self):
+        # we don't want it to show up in the constructor
+        self.p1_cache: dict[Any, TirTemplate[_P, _T]] = {}
+
+    def _parse_phase1_key(self, *args, **kwargs):
+        kwargs.update({k: v for k, v in zip(self.arg_names, args)})
+        tensor_args = {}
+        for k in self.tensor_args:
+            if k in kwargs:
+                tensor_args[k] = kwargs.pop(k)
+        p1_key = tuple(sorted(kwargs.items()))
+        return p1_key, tensor_args, kwargs
+
+    def parse_args(self, *args, **kwargs):
+        p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
+        tir_temp = self.p1_cache.get(p1_key, None)
+        if tir_temp is None:
+            builder = Builder()
+            with builder.prim_func(self.orig_func.__name__):
+                self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
+            pf = builder.get()
+            tir_temp = TirTemplate.create(pf, builder.constexpr_var)
+            self.p1_cache[p1_key] = tir_temp
+        p2_key = tir_temp._parse_phase2_key(**tensor_args)
+        return (p1_key, p2_key), tensor_args
+
+    def get_tir(self, *args, **kwargs):
+        (p1_key, _), tensor_args = self.parse_args(*args, **kwargs)
+        return self.p1_cache[p1_key].get_tir(**tensor_args)
+
+    def __call__(self, *args, **kwargs):
+        return self.get_tir(*args, **kwargs)
+
+
+def substitute_primfunc(prim_func, vmap):
+    analyzer = tvm.arith.Analyzer()
+
+    def sub(v):
+        return analyzer.simplify(substitute(v, vmap))
+
+    def substitute_buffer(buf):
+        return tvm.tir.decl_buffer(
+            data=sub(buf.data),
+            shape=[sub(dim) for dim in buf.shape],
+            dtype=buf.dtype,
+            strides=[sub(stride) for stride in buf.strides] if buf.strides else None,
+        )
+
+    return PrimFunc(
+        params=[sub(v) for v in prim_func.params],
+        body=substitute(prim_func.body, vmap),
+        buffer_map={k: substitute_buffer(v) for k, v in prim_func.buffer_map.items()},
+        attrs=prim_func.attrs,
+    )
+
+
+def prim_func(func: Callable[_P, _T] = None, *, lazy_jit=False) -> PrimFunc[_P, _T] | LazyJITFunc[_P, _T]:
     def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
         sig = inspect.signature(func)
         annot = get_type_hints(func)
-
-        func_annot = FuncAnnot.from_sig_annots(sig, annot)
+        for k in annot:
+            if not isinstance(annot[k], type) and callable(annot[k]):
+                annot[k] = annot[k]()
         ir_gen = mutate(func)
-
-        prim_func_generator = PrimFuncCreater(func_annot, ir_gen, orig_func=func)
-
-        if func_annot.is_all_static():
-            args = func_annot.get_all_static_args()
-            return prim_func_generator(**args)
+        if lazy_jit:
+            arg_names = list(sig.parameters.keys())
+            tensor_args = {k: v for k, v in annot.items() if isinstance(v, (Buffer, Var))}
+            return LazyJITFunc(func, arg_names, tensor_args, ir_gen)
         else:
-            if generator is False:
-                unknown_args = func_annot.get_compile_time_unknown_args()
-                raise ValueError(
-                    f"Cannot create PrimFunc for `{func.__name__}`, some arguments are not compile-time known, \n"
-                    f"Annotations:\n{func_annot.annots}"
-                    f"Unknown Args: {unknown_args}"
-                )
-            return prim_func_generator
+            try:
+                builder = Builder()
+                with builder.prim_func(func.__name__):
+                    ir_gen.gen(builder)(**annot)
+                prim_func = builder.get()
+                prim_func.orig_func = func
+                return prim_func
+            except Exception as e:
+                logger.fatal(f"Failed to build prim_func from {func.__name__}\nargs={annot}\nsource={ir_gen.source}")
+                raise e
 
     return impl(func) if func is not None else impl
