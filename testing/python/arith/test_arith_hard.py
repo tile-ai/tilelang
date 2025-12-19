@@ -93,5 +93,13 @@ def test_bind():
         raise e
 
 
+def test_divmod():
+    analyzer = Analyzer()
+    a = T.Var("a", T.int32)
+
+    assert not analyzer.can_prove(a % 2 % -2 - a % 2 == 0)
+    assert analyzer.can_prove(a % -2 % 2 - a % 2 == 0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

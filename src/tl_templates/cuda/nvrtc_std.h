@@ -173,4 +173,4 @@ template <class T, unsigned I = 0>
 inline constexpr size_t extent_v = extent<T, I>::value;
 } // namespace std
 
-#endif
+#endif // __CUDACC_RTC__

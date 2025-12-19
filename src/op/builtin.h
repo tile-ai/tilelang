@@ -147,6 +147,10 @@ TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
 
+// random op
+TVM_DLL const Op &rng_init();
+TVM_DLL const Op &rng_rand();
+
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
  *

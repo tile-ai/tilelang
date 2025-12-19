@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""Loop related language interfaces in TileLang."""
 
 from __future__ import annotations
 from typing import Any
@@ -175,5 +175,12 @@ def unroll(
         return UnrollForWithStep(start, stop, step, annotations=annotations)
 
 
-Serial = serial
-Unroll = unroll
+# "Serial" and "Unroll" are aliases of "T.serial" and "T.unroll". We use uppercase to emphasize that they are tile-level loops.
+
+
+def Serial(*args, **kwargs):
+    return serial(*args, **kwargs)
+
+
+def Unroll(*args, **kwargs):
+    return unroll(*args, **kwargs)

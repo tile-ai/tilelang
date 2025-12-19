@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""Some customized operations frequently used in tensor programming, exposed on the TileLang language surface."""
 
 from __future__ import annotations
 import tilelang.language as T

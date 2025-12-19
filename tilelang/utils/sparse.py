@@ -7,10 +7,13 @@ from tilelang.utils.tensor import is_float8_dtype, fp8_remove_negative_zeros_
 from torch.utils.cpp_extension import load, _import_module_from_library
 from tilelang import env
 
+# Include version information to ensure different versions use separate caches
+from tilelang import __version__
+
 # Define paths
 compress_util = os.path.join(env.TILELANG_TEMPLATE_PATH, "tl_templates/cuda/compress_sm90.cu")
 # Cache directory for compiled extensions
-_CACHE_DIR = os.path.join(env.TILELANG_CACHE_DIR, "sparse_compressor")
+_CACHE_DIR = os.path.join(env.TILELANG_CACHE_DIR, "sparse_compressor", __version__)
 os.makedirs(_CACHE_DIR, exist_ok=True)
 
 

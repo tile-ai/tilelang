@@ -88,6 +88,8 @@ private:
   std::string vid_global_barrier_state_;
   // Global barrier expected node.
   std::string vid_global_barrier_expect_;
+  // Global curand state
+  std::string curand_philox_state;
 
   // whether enable fp16
   bool enable_fp16_{false};
@@ -123,6 +125,8 @@ private:
   bool need_cast_smem_ptr_to_int_{false};
   // whether need cooperative_groups.h
   bool need_cooperative_groups_{false};
+  // whether need curand_kernel.h
+  bool need_curand_kernel_h_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");

@@ -76,7 +76,9 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_pass_configs(pass_configs)
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
-        self.host_func, self.function_names = self.wrapper.wrap(device_kernel_source)
+        wrapper_result = self.wrapper.wrap(device_kernel_source)
+        self.host_func = wrapper_result["host_func"]
+        self.function_names = wrapper_result["function_names"]
 
         self.lib_generator = NVRTCLibraryGenerator(self.target, self.verbose)
         self.lib_generator.update_lib_code(self.device_kernel_source)

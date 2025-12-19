@@ -1190,6 +1190,7 @@ private:
     });
 
     if ((has_non_local || has_cast_operations) && !has_reducer) {
+      DLOG(INFO) << "Try to vectorize loop";
       for_node = VectorizeLoop(for_node, saved_analyzer.get());
     }
 

@@ -393,10 +393,15 @@ PrimFunc MakePackedAPI(PrimFunc func) {
         break;
       }
     }
-    if (!has_used_carrier && !carriers.empty()) {
-      // Choose the first carrier to anchor this symbol.
-      used_param_buffers.insert(carriers.front());
-    }
+    // NOTE: With the new nullable shape binding logic in
+    // ArgBinder::BindDLTensors, we no longer need to force one carrier to be
+    // non-NULL. The binder will:
+    // 1. Assert that at least one carrier is non-NULL at runtime
+    // 2. Use cascaded if_then_else to read from the first non-NULL carrier
+    // So we can allow all carriers to be nullable.
+    // if (!has_used_carrier && !carriers.empty()) {
+    //   used_param_buffers.insert(carriers.front());
+    // }
   }
 
   for (int i = 0; i < static_cast<int>(func_ptr->params.size()); ++i) {
@@ -508,14 +513,14 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     binder.Bind(param, expr, name_hint + "." + param->name_hint, true);
   }
 
+  binder.BindDLTensors(buffer_def, device_type, device_id, name_hint,
+                       used_param_buffers);
   for (const auto &[var, buffer] : buffer_def) {
     // Prefer buffer data var name in diagnostics to avoid exposing low-level
     // handle vars
-    std::string display = name_hint + "." + buffer->data->name_hint;
-    binder.BindDLTensor(buffer, device_type, device_id, var, display,
-                        used_param_buffers.count(var.get()));
     arg_buffer_declarations.push_back(DeclBuffer(buffer, nop));
   }
+
   // reset global symbol to attach prefix
   func = WithAttrs(
       std::move(func),
