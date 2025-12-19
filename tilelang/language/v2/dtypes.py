@@ -173,21 +173,21 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
             )
             return torch.float8_e4m3fn
     elif dtype_str == "float8_e5m2":
-        assert hasattr(torch, "float8_e5m2"), "torch.float8_e5m2 is not supported in this version of torchPlease upgrade torch >= 2.1.0"
+        assert hasattr(torch, "float8_e5m2"), "torch.float8_e5m2 is not supported in this version of torch. Please upgrade torch >= 2.1.0"
         return torch.float8_e5m2
     elif dtype_str == "e4m3fnuz_float8":
         assert hasattr(torch, "float8_e4m3fnuz"), (
-            "torch.float8_e4m3fnuz is not supported in this version of torchPlease upgrade torch >= 2.2.0"
+            "torch.float8_e4m3fnuz is not supported in this version of torch. Please upgrade torch >= 2.2.0"
         )
         return torch.float8_e4m3fnuz
     elif dtype_str == "float8_e8m0fnu":
         assert hasattr(torch, "float8_e8m0fnu"), (
-            "torch.float8_e8m0fnu is not supported in this version of torchPlease upgrade torch >= 2.8.0"
+            "torch.float8_e8m0fnu is not supported in this version of torch. Please upgrade torch >= 2.8.0"
         )
         return torch.float8_e8m0fnu
     elif dtype_str == "float4_e2m1fnx2":
         assert hasattr(torch, "float4_e2m1fnx2"), (
-            "torch.float4_e2m1fnx2 is not supported in this version of torchPlease upgrade torch >= 2.8.0"
+            "torch.float4_e2m1fnx2 is not supported in this version of torch. Please upgrade torch >= 2.8.0"
         )
         return torch.float4_e2m1fnx2
     elif dtype_str in _STR_TO_TORCH_DTYPE:
