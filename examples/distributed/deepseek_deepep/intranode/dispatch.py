@@ -10,7 +10,7 @@ import torch
 import tilelang
 import tilelang.language as T
 from typing import Optional, Tuple
-from utils import Config, ep_ext  # noqa: F403
+from deepep_utils import Config, ep_ext  # noqa: F403
 
 # tilelang.disable_cache()
 os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log

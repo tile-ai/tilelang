@@ -24,7 +24,7 @@ The table below shows a latency and bandwidth comparison for DeepEP and TileScal
 # Intra-node Introduction
 
 This example implements DeepEP’s intra‑node (NVLink) dispatch/combine using TileScale kernels.
-
+z
 The intra‑node path lives under `intranode/` and provides a minimal public API that mirrors DeepEP’s behavior for NVLink‑connected ranks.
 
 
@@ -144,7 +144,7 @@ which can be reused for cached re‑dispatch and is required by the combine stag
 Quick start (intra‑node test):
 
 ```
-TILELANG_USE_DISTRIBUTED=1 python intranode/test_intranode.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 TILELANG_USE_DISTRIBUTED=1 python intranode/example_intranode.py \
   --num_ranks 8 --num_tokens 4096 --hidden 7168 --num_topk 8 --num_experts 32 [--cached]
 ```
 

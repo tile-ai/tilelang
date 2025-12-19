@@ -5,7 +5,7 @@ import torch.distributed as dist
 from typing import Tuple, Optional
 
 import tilelang
-from utils import Config
+from deepep_utils import Config
 from tilelang.distributed.utils import create_mapped_tensor
 from intranode import get_dispatch_layout, intranode_dispatch, intranode_combine
 
