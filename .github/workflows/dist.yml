@@ -165,6 +165,30 @@ jobs:
           output-dir: wheelhouse
           config-file: "{package}/pyproject.toml"
 
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          activate-environment: true
+
+      - name: Test built wheels
+        run: |
+          OLD_VIRTUAL_ENV="${VIRTUAL_ENV}"
+          for WHEEL in wheelhouse/*.whl; do
+            export VIRTUAL_ENV="${OLD_VIRTUAL_ENV}"
+            echo "Testing wheel: ${WHEEL}"
+            uv venv --python=3.12 test-venv
+            source test-venv/bin/activate
+            uv pip install -v "${WHEEL}"
+            (
+              cd /
+              echo "import tilelang; print(tilelang.__version__)" | uv run --no-project --script -
+            )
+            deactivate
+            rm -rf test-venv
+          done
+
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
