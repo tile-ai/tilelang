@@ -1,4 +1,3 @@
-import tilelang
 import tilelang.testing
 
 import example_intranode

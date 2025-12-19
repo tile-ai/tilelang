@@ -7,7 +7,9 @@ from typing import Tuple, Optional
 import tilelang
 from deepep_utils import Config
 from tilelang.distributed.utils import create_mapped_tensor
-from intranode import get_dispatch_layout, intranode_dispatch, intranode_combine
+from intranode.get_dispatch_layout import get_dispatch_layout
+from intranode.dispatch import intranode_dispatch
+from intranode.combine import intranode_combine
 
 
 class EPBuffer:
