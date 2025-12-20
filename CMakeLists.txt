@@ -319,12 +319,11 @@ if(APPLE)
   set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     # some z3 is placed in lib/ and some in bin/, we add both in rpath
-    list(APPEND TILELANG_INSTALL_RPATH "@loader_path/../../z3/lib" "@loader_path/../../z3/bin")
+    string(APPEND TILELANG_INSTALL_RPATH ";@loader_path/../../z3/lib;@loader_path/../../z3/bin")
   endif()
 elseif(UNIX)
   set(TILELANG_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
-    # cmake uses ; by default, we explicitly use : for linux
     string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../z3/lib")
   endif()
   find_program(PATCHELF_EXECUTABLE patchelf)
@@ -339,7 +338,7 @@ foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
 endforeach()
 
 # exclude libcuda.so to allow importing on a CPU-only machine
-if(PATCHELF_EXECUTABLE)
+if(USE_CUDA AND PATCHELF_EXECUTABLE)
   # run patchelf on built libraries to avoid race conditions during linking: use `install(CODE ...)`
   foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
     install(CODE "
