@@ -182,6 +182,34 @@ TileOperator ParallelOpNode::Clone() const {
   return ParallelOp(op);
 }
 
+void ParallelOpNode::ExpandLetBindings(
+    const Map<Var, PrimExpr> &let_var_to_expr) {
+  if (let_var_to_expr.empty())
+    return;
+
+  // Helper function to recursively find BufferLoads through let bindings
+  std::function<void(const PrimExpr &)> expand = [&](const PrimExpr &expr) {
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (auto bl = node.as<BufferLoadNode>()) {
+        if (bl->buffer.scope() == "local.fragment" &&
+            !indice_map_.count(bl->buffer)) {
+          indice_map_.Set(bl->buffer, bl->indices);
+        }
+      } else if (auto var_node = node.as<VarNode>()) {
+        auto var = tvm::ffi::GetRef<Var>(var_node);
+        if (let_var_to_expr.count(var)) {
+          expand(let_var_to_expr[var]);
+        }
+      }
+    });
+  };
+
+  // Scan all let bindings
+  for (const auto &[var, expr] : let_var_to_expr) {
+    expand(expr);
+  }
+}
+
 Stmt ParallelOpNode::Lower(const LowerArgs &T,
                            arith::Analyzer *analyzer) const {
   return root_;
@@ -214,6 +242,11 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
   if (loop_layout_.defined())
     return {};
+
+  // Expand let bindings to find fragment buffer accesses
+  if (!T.let_var_to_expr.empty()) {
+    const_cast<ParallelOpNode *>(this)->ExpandLetBindings(T.let_var_to_expr);
+  }
 
   if (level == InferLevel::kStrict) {
     LayoutMap results;

@@ -110,10 +110,14 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    auto updates =
-        next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
-                                          cur_analyzer, buffer_oob},
-                          level);
+    auto updates = next->InferLayout(LayoutInferArgs{target_,
+                                                     thread_bounds,
+                                                     layout_map,
+                                                     cur_analyzer,
+                                                     buffer_oob,
+                                                     {},
+                                                     let_var_to_expr_},
+                                     level);
 
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
@@ -317,9 +321,16 @@ public:
     // step 2: infer common layout with BFS
     FinishInferQueue(InferLevel::kCommon, layout_map, strict_layout_map, q,
                      in_queue);
-
+    LOG(INFO) << "After FinishInferQueue: " << layout_map.size();
+    for (const auto &[buffer, layout] : layout_map) {
+      LOG(INFO) << "buffer: " << buffer << " -> " << layout->DebugOutput();
+    }
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
+    LOG(INFO) << "After InferInFreeMode: " << layout_map.size();
+    for (const auto &[buffer, layout] : layout_map) {
+      LOG(INFO) << "buffer: " << buffer << " -> " << layout->DebugOutput();
+    }
 
     // step 4: finalize alias layouts by Var
     // For each storage var, if any buffer in the group has a layout,
@@ -479,6 +490,10 @@ private:
         } else if (auto buffer = getBufferFromRegion(arg)) {
           addToUseList(buffer.value());
         }
+        // Check if the argument uses any LetStmt variables that reference
+        // fragment buffers. If so, add those buffers to the use list.
+        // This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0], ...)
+        CollectFragmentBuffersFromExpr(arg);
       }
       // Compute thread_var_ and thread_bounds_
       thread_var_vec_.push_back(thread_var_);
@@ -754,6 +769,30 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
+  void VisitStmt_(const LetStmtNode *op) final {
+    // Record Let variable to its bound expression.
+    // This enables tracking fragment buffer accesses through let bindings.
+    let_var_to_expr_.Set(op->var, op->value);
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  // Helper: recursively collect fragment buffers from an expression,
+  // following let bindings chain.
+  void CollectFragmentBuffersFromExpr(const PrimExpr &expr) {
+    PostOrderVisit(expr, [this](const ObjectRef &node) {
+      if (auto bl = node.as<BufferLoadNode>()) {
+        if (bl->buffer.defined() && bl->buffer.scope() == "local.fragment") {
+          addToUseList(bl->buffer);
+        }
+      } else if (auto var_node = node.as<VarNode>()) {
+        auto var = tvm::ffi::GetRef<Var>(var_node);
+        if (let_var_to_expr_.count(var)) {
+          CollectFragmentBuffersFromExpr(let_var_to_expr_[var]);
+        }
+      }
+    });
+  }
+
   void VisitExpr_(const BufferLoadNode *op) final {
     // Collect buffer from BufferLoad
     if (op->buffer.defined() && op->buffer->data.defined()) {
@@ -815,6 +854,8 @@ private:
   }
 
   Map<Var, Array<Buffer>> buffer_data_to_buffers_;
+  // Map from LetStmt variable to its bound expression
+  Map<Var, PrimExpr> let_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>

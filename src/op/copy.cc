@@ -555,14 +555,34 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
         copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
     Buffer global_tensor = is_load ? src : dst;
     Buffer shared_tensor = is_load ? dst : src;
+
+    Map<Buffer, Layout> result_map;
+
+    // Collect fragment buffers from indices and mark them as fully replicated
+    // For Bulk Load/Store, fragment buffers used as indices should be
+    // replicated across all threads
+    PrimExpr thread_extent = T.thread_bounds->extent;
+    for (const auto &range : src_range) {
+      CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
+                             thread_extent, T.thread_bounds, result_map);
+      CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
+                             thread_extent, T.thread_bounds, result_map);
+    }
+    for (const auto &range : dst_range) {
+      CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
+                             thread_extent, T.thread_bounds, result_map);
+      CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
+                             thread_extent, T.thread_bounds, result_map);
+    }
+
     // check shared layout is non-swizzle
     // skip layout inference if shared layout is already annotated
     if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
       // create a new layout map for tma linear layout
       Layout linear_layout = ComputeLinearLayout(shared_tensor);
-      return Map<Buffer, Layout>({{shared_tensor, linear_layout}});
+      result_map.Set(shared_tensor, linear_layout);
     }
-    return {};
+    return result_map;
   }
   // for LDSM/STSM, the layout was deduced from register layout
   // so we can directly apply the layout of normal copy
@@ -571,7 +591,8 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     arith::Analyzer analyzer;
     par_op_ = ParallelOp((MakeSIMTLoop(&analyzer)));
   }
-  return par_op_->InferLayout(T, level);
+  auto layout_map = par_op_->InferLayout(T, level);
+  return layout_map;
 }
 /**
  * @brief Determine whether this CopyNode can be lowered to a Bulk Load (TMA)
@@ -940,8 +961,13 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
     for (auto level : levels) {
-      par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                           false, T.buffer_remap},
+      par_op->InferLayout({T.target,
+                           T.thread_bounds,
+                           T.layout_map,
+                           analyzer,
+                           false,
+                           T.buffer_remap,
+                           {}},
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
@@ -2032,6 +2058,31 @@ Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
   args.push_back(oob_fill);
 
   return args;
+}
+
+void CopyNode::CollectFragmentLayouts(const PrimExpr &expr,
+                                      const Map<Var, PrimExpr> &let_var_to_expr,
+                                      const LayoutMap &existing_layouts,
+                                      PrimExpr thread_extent,
+                                      Range thread_bounds,
+                                      Map<Buffer, Layout> &result_map) const {
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (auto bl = node.as<BufferLoadNode>()) {
+      if (bl->buffer.scope() == "local.fragment" &&
+          !existing_layouts.count(bl->buffer) &&
+          !result_map.count(bl->buffer)) {
+        auto f = Fragment::FullyReplicated(bl->buffer->shape, thread_extent);
+        result_map.Set(bl->buffer, f->BindThreadRange(thread_bounds));
+      }
+    } else if (auto var_node = node.as<VarNode>()) {
+      auto var = tvm::ffi::GetRef<Var>(var_node);
+      if (let_var_to_expr.count(var)) {
+        CollectFragmentLayouts(let_var_to_expr[var], let_var_to_expr,
+                               existing_layouts, thread_extent, thread_bounds,
+                               result_map);
+      }
+    }
+  });
 }
 
 // Register the Copy operation with TVM's TIR system

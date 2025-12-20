@@ -158,8 +158,13 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (dst.scope() == "local.fragment") {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                         false, T.buffer_remap},
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
@@ -176,8 +181,13 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   } else if (dst.scope() == "shared.dyn" || dst.scope() == "shared" ||
              dst.scope() == "global") {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                         false, T.buffer_remap},
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
