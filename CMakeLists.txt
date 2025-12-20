@@ -348,8 +348,10 @@ if(PATCHELF_EXECUTABLE)
         WORKING_DIRECTORY \"${CMAKE_INSTALL_PREFIX}\"
         RESULT_VARIABLE patchelf_result
       )
-      if(NOT patchelf_result EQUAL 0)
-        message(WARNING \"patchelf failed for ${target}\")
+      if(patchelf_result EQUAL 0)
+        message(STATUS \"`patchelf` successfully removed dependency `libcuda.so` from $<TARGET_FILE:${target}>\")
+      else()
+        message(WARNING \"`patchelf` failed to remove dependency `libcuda.so` from $<TARGET_FILE:${target}>\")
       endif()
     ")
   endforeach()
