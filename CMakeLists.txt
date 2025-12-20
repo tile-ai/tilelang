@@ -333,17 +333,28 @@ elseif(UNIX)
   endif()
 endif()
 
+# let libtilelang to search tvm/tvm_runtime in same dir
 foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
-  # let libtilelang to search tvm/tvm_runtime in same dir
   set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
-  if (PATCHELF_EXECUTABLE)
-    # exclude libcuda.so to allow importing on a CPU-only machine
+endforeach()
+
+# exclude libcuda.so to allow importing on a CPU-only machine
+if(PATCHELF_EXECUTABLE)
+  # For targets created in this directory, use POST_BUILD command
+  foreach(target IN ITEMS tilelang tilelang_module)
     add_custom_command(TARGET ${target} POST_BUILD
       COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:${target}>
       COMMENT "Patching ${target} to remove libcuda.so dependency"
     )
-  endif()
-endforeach()
+  endforeach()
+  # For tvm/tvm_runtime created in subdirectory, create a custom target
+  add_custom_target(patch_tvm_libs ALL
+    COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:tvm>
+    COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:tvm_runtime>
+    COMMENT "Patching tvm and tvm_runtime to remove libcuda.so dependency"
+    DEPENDS tvm tvm_runtime
+  )
+endif()
 
 install(
   TARGETS ${TILELANG_OUTPUT_TARGETS}
