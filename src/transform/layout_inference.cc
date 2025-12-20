@@ -321,16 +321,9 @@ public:
     // step 2: infer common layout with BFS
     FinishInferQueue(InferLevel::kCommon, layout_map, strict_layout_map, q,
                      in_queue);
-    LOG(INFO) << "After FinishInferQueue: " << layout_map.size();
-    for (const auto &[buffer, layout] : layout_map) {
-      LOG(INFO) << "buffer: " << buffer << " -> " << layout->DebugOutput();
-    }
+
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
-    LOG(INFO) << "After InferInFreeMode: " << layout_map.size();
-    for (const auto &[buffer, layout] : layout_map) {
-      LOG(INFO) << "buffer: " << buffer << " -> " << layout->DebugOutput();
-    }
 
     // step 4: finalize alias layouts by Var
     // For each storage var, if any buffer in the group has a layout,
