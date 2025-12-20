@@ -7,3 +7,6 @@
 [submodule "3rdparty/composable_kernel"]
 	path = 3rdparty/composable_kernel
 	url = https://github.com/ROCm/composable_kernel
+[submodule "3rdparty/DeepEP"]
+	path = 3rdparty/DeepEP
+	url = https://github.com/deepseek-ai/DeepEP

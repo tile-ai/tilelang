@@ -41,6 +41,7 @@ jobs:
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
           pip install flash_attn==2.5.8 --no-user --no-build-isolation
+          bash tilelang/distributed/install_deepep.sh  # Install DeepEP for testing purpose
           touch "$MARKER"
         fi
 
