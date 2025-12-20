@@ -7,7 +7,7 @@ env:
 
 jobs:
   format-check:
-    runs-on: [self-hosted, nvidia]
+    runs-on: [self-hosted, nvidia, hopper]
 
     permissions:
       contents: write
@@ -41,7 +41,6 @@ jobs:
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
           pip install flash_attn==2.5.8 --no-user --no-build-isolation
-          bash tilelang/distributed/install_deepep.sh  # Install DeepEP for testing purpose
           touch "$MARKER"
         fi
 
@@ -85,26 +84,22 @@ jobs:
         set -e
         REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
-
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          # flash attention usually requires no isolation build
-          pip install flash_attn==2.5.8 --no-user --no-build-isolation
-          touch "$MARKER"
-        fi
+        # NOTE(wt): We disable the venv reuse for now to allow installing DeepEP
+        # echo "venv stale or missing – recreating"
+        rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
+        python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        python -m pip install --upgrade pip --no-user
+        [[ -f requirements-test.txt ]] && \
+          PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+        # flash attention usually requires no isolation build
+        pip install flash_attn==2.5.8 --no-user --no-build-isolation
 
     - name: Install project (wheel form)
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         pip install . --no-user -v
+        bash tilelang/distributed/install_deepep.sh  # Install DeepEP for testing purpose
 
     - name: Run examples
       run: |

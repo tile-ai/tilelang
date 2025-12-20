@@ -24,5 +24,9 @@ python setup.py install
 cd -
 
 # Validate
-python -c "import deep_ep; print(deep_ep.__version__)"
+python -c "import deep_ep"
+if [ $? -ne 0 ]; then
+    echo "Failed to import deep_ep"
+    exit 1
+fi
 echo "DeepEP is installed successfully. ✅"
