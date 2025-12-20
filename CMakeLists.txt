@@ -316,13 +316,13 @@ set(TILELANG_OUTPUT_TARGETS
 unset(PATCHELF_EXECUTABLE)
 
 if(APPLE)
-  set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../torch/lib;@loader_path/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     # some z3 is placed in lib/ and some in bin/, we add both in rpath
     string(APPEND TILELANG_INSTALL_RPATH ";@loader_path/../../z3/lib;@loader_path/../../z3/bin")
   endif()
 elseif(UNIX)
-  set(TILELANG_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  set(TILELANG_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../torch/lib:\$ORIGIN/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../z3/lib")
   endif()
@@ -343,14 +343,14 @@ if(USE_CUDA AND PATCHELF_EXECUTABLE)
   foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
     install(CODE "
       execute_process(
-        COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so \"$<TARGET_FILE:${target}>\"
+        COMMAND ${PATCHELF_EXECUTABLE} --add-needed libcaffe2_nvrtc.so --remove-needed libcuda.so.1 --remove-needed libcuda.so \"$<TARGET_FILE:${target}>\"
         WORKING_DIRECTORY \"${CMAKE_INSTALL_PREFIX}\"
         RESULT_VARIABLE patchelf_result
       )
       if(patchelf_result EQUAL 0)
-        message(STATUS \"`patchelf` successfully removed dependency `libcuda.so` from $<TARGET_FILE:${target}>\")
+        message(STATUS \"`patchelf` successfully replaced dependency `libcuda.so` with `libcaffe2_nvrtc.so` from $<TARGET_FILE:${target}>\")
       else()
-        message(WARNING \"`patchelf` failed to remove dependency `libcuda.so` from $<TARGET_FILE:${target}>\")
+        message(WARNING \"`patchelf` failed to replace dependency `libcuda.so` with `libcaffe2_nvrtc.so` from $<TARGET_FILE:${target}>\")
       endif()
     ")
   endforeach()

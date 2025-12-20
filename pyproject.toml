@@ -263,7 +263,7 @@ dnf clean all
 """
 repair-wheel-command = [
     # Do not bundle libtvm_ffi.so and libz3.so because they are shipped by the dependency packages.
-    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
+    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcaffe2_nvrtc.so --exclude libcuda.so.1 --exclude libcuda.so --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --verbose --strict {wheel}",
 ]
 
