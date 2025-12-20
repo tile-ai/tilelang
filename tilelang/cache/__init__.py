@@ -44,7 +44,8 @@ def cached(
     """
     Caches and reuses compiled kernels (using KernelCache class).
     """
-    return _dispatch_pool[execution_backend].cached(
+    backend_key: str = execution_backend if execution_backend is not None else "auto"
+    return _dispatch_pool[backend_key].cached(
         func,
         out_idx,
         *args,

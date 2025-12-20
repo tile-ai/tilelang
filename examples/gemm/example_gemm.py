@@ -2,7 +2,7 @@ import tilelang
 import tilelang.language as T
 
 
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit(out_idx=[-1], execution_backend="ctypes")
 def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def gemm(
