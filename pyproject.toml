@@ -258,7 +258,7 @@ esac
 
 cudaver="$(echo "${CUDA_VERSION:-$DEFAULT_CUDA_VERSION}" | cut -d '.' -f-2)"
 v="${cudaver//./-}"
-dnf install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}" nvidia-driver-cuda-libs
+dnf install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}"
 dnf clean all
 """
 repair-wheel-command = [
