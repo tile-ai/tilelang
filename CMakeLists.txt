@@ -333,31 +333,27 @@ elseif(UNIX)
   endif()
 endif()
 
+# let libtilelang to search tvm/tvm_runtime in same dir
 foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
-  # let libtilelang to search tvm/tvm_runtime in same dir
   set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
-  # exclude libcuda.so to allow importing on a CPU-only machine
-  if(PATCHELF_EXECUTABLE)
-    get_target_property(tgt_src_dir ${target} SOURCE_DIR)
-    if (tgt_src_dir)
-      message(STATUS "Target `${target}` defined in '${tgt_src_dir}' will remove its `libcuda.so` dependency")
-      if ("${tgt_src_dir}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
-        # For targets created in this directory, use POST_BUILD command
-        add_custom_command(TARGET ${target} POST_BUILD
-          COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:${target}>
-          COMMENT "Patching `${target}` to remove `libcuda.so` dependency"
-        )
-      else()
-        # For tvm/tvm_runtime created in subdirectory, create a custom target
-        add_custom_target("patch_${target}" ALL
-          COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:${target}>
-          COMMENT "Patching `${target}` to remove `libcuda.so` dependency"
-          DEPENDS ${target}
-        )
-      endif()
-    endif()
-  endif()
 endforeach()
+
+# exclude libcuda.so to allow importing on a CPU-only machine
+if(PATCHELF_EXECUTABLE)
+  # run patchelf on built libraries to avoid race conditions during linking: use `install(CODE ...)`
+  foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+    install(CODE "
+      execute_process(
+        COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so \"$<TARGET_FILE:${target}>\"
+        WORKING_DIRECTORY \"${CMAKE_INSTALL_PREFIX}\"
+        RESULT_VARIABLE patchelf_result
+      )
+      if(NOT patchelf_result EQUAL 0)
+        message(WARNING \"patchelf failed for ${target}\")
+      endif()
+    ")
+  endforeach()
+endif()
 
 install(
   TARGETS ${TILELANG_OUTPUT_TARGETS}
