@@ -2,15 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
 from tilelang import env
-from .kernel_cache import KernelCache
+from .auto_kernel_cache import AutoKernelCache
+from .ctypes_kernel_cache import CTypesKernelCache
+from .cutedsl_kernel_cache import CuTeDSLKernelCache
+from .cython_kernel_cache import CythonKernelCache
+from .nvrtc_kernel_cache import NVRTCKernelCache
+from .torch_kernel_cache import TorchKernelCache
+from .tvm_ffi_kernel_cache import TVMFFIKernelCache
 
-# Create singleton instance of KernelCache
-_kernel_cache_instance = KernelCache()
+if TYPE_CHECKING:
+    from .kernel_cache import KernelCache
+
+# Create a pool of singleton instance of KernelCaches
+_dispatch_pool: dict[str, KernelCache] = {
+    "auto": AutoKernelCache(),
+    "tvm_ffi": TVMFFIKernelCache(),
+    "ctypes": CTypesKernelCache(),
+    "cython": CythonKernelCache(),
+    "nvrtc": NVRTCKernelCache(),
+    "cutedsl": CuTeDSLKernelCache(),
+    "torch": TorchKernelCache(),
+}
 
 
 def cached(
@@ -27,7 +44,7 @@ def cached(
     """
     Caches and reuses compiled kernels (using KernelCache class).
     """
-    return _kernel_cache_instance.cached(
+    return _dispatch_pool[execution_backend].cached(
         func,
         out_idx,
         *args,
