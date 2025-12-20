@@ -329,32 +329,35 @@ elseif(UNIX)
   endif()
   find_program(PATCHELF_EXECUTABLE patchelf)
   if (NOT PATCHELF_EXECUTABLE)
-    message(STATUS "patchelf not found.")
+    message(STATUS "`patchelf` not found.")
   endif()
 endif()
 
-# let libtilelang to search tvm/tvm_runtime in same dir
 foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+  # let libtilelang to search tvm/tvm_runtime in same dir
   set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
+  # exclude libcuda.so to allow importing on a CPU-only machine
+  if(PATCHELF_EXECUTABLE)
+    get_target_property(tgt_src_dir ${target} SOURCE_DIR)
+    if (tgt_src_dir)
+      message(STATUS "Target `${target}` defined in '${tgt_src_dir}' will remove its `libcuda.so` dependency")
+      if ("${tgt_src_dir}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
+        # For targets created in this directory, use POST_BUILD command
+        add_custom_command(TARGET ${target} POST_BUILD
+          COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:${target}>
+          COMMENT "Patching `${target}` to remove `libcuda.so` dependency"
+        )
+      else()
+        # For tvm/tvm_runtime created in subdirectory, create a custom target
+        add_custom_target("patch_${target}" ALL
+          COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:${target}>
+          COMMENT "Patching `${target}` to remove `libcuda.so` dependency"
+          DEPENDS ${target}
+        )
+      endif()
+    endif()
+  endif()
 endforeach()
-
-# exclude libcuda.so to allow importing on a CPU-only machine
-if(PATCHELF_EXECUTABLE)
-  # For targets created in this directory, use POST_BUILD command
-  foreach(target IN ITEMS tilelang tilelang_module)
-    add_custom_command(TARGET ${target} POST_BUILD
-      COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:${target}>
-      COMMENT "Patching ${target} to remove libcuda.so dependency"
-    )
-  endforeach()
-  # For tvm/tvm_runtime created in subdirectory, create a custom target
-  add_custom_target(patch_tvm_libs ALL
-    COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:tvm>
-    COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:tvm_runtime>
-    COMMENT "Patching tvm and tvm_runtime to remove libcuda.so dependency"
-    DEPENDS tvm tvm_runtime
-  )
-endif()
 
 install(
   TARGETS ${TILELANG_OUTPUT_TARGETS}
