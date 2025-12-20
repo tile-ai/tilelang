@@ -43,7 +43,5 @@ class CuTeDSLKernelCache(KernelCache):
         return super()._get_required_files(cache_path) + [os.path.join(cache_path, self.launcher_lib_path)]
 
     @override
-    def _load_kernel_from_cache(
-        self, device_kernel_path: str, host_kernel_path: str, verbose: bool = False
-    ) -> tuple[str | None, str | None]:
+    def _load_kernel_source(self, device_kernel_path: str, host_kernel_path: str, verbose: bool = False) -> tuple[str | None, str | None]:
         return "", ""
