@@ -306,6 +306,15 @@ if(USE_Z3 AND USE_PYPI_Z3)
   set_property(TARGET tvm APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/bin)
 endif()
 
+set(TILELANG_OUTPUT_TARGETS
+  tilelang
+  tilelang_module
+  tvm
+  tvm_runtime
+)
+
+unset(PATCHELF_EXECUTABLE)
+
 if(APPLE)
   set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
@@ -318,15 +327,25 @@ elseif(UNIX)
     # cmake uses ; by default, we explicitly use : for linux
     string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../z3/lib")
   endif()
+  find_program(PATCHELF_EXECUTABLE patchelf)
+  if (NOT PATCHELF_EXECUTABLE)
+    message(STATUS "patchelf not found.")
+  endif()
 endif()
 
-# let libtilelang to search tvm/tvm_runtime in same dir
-set_target_properties(tilelang        PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
-set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
-set_target_properties(tvm             PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
-set_target_properties(tvm_runtime     PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
+foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+  # let libtilelang to search tvm/tvm_runtime in same dir
+  set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
+  if (PATCHELF_EXECUTABLE)
+    # exclude libcuda.so to allow importing on a CPU-only machine
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so $<TARGET_FILE:${target}>
+      COMMENT "Patching ${target} to remove libcuda.so dependency"
+    )
+  endif()
+endforeach()
 
 install(
-  TARGETS tvm tvm_runtime tilelang_module tilelang
+  TARGETS ${TILELANG_OUTPUT_TARGETS}
   LIBRARY DESTINATION tilelang/lib
 )
