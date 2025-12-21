@@ -34,7 +34,7 @@ def cached(
     *args,
     target: str | Target | None = None,
     target_host: str | Target | None = None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] | None = None,
+    execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch"] = "tvm_ffi",
     verbose: bool | None = None,
     pass_configs: dict | None = None,
     compile_flags: list[str] | str | None = None,
@@ -42,11 +42,8 @@ def cached(
     """
     Caches and reuses compiled kernels (using KernelCache class).
     """
-    backend_key = execution_backend
-    if backend_key == "auto" or backend_key is None:
-        backend_key = "tvm_ffi"
-    if backend_key in _dispatch_pool:
-        return _dispatch_pool[backend_key].cached(
+    if execution_backend in _dispatch_pool:
+        return _dispatch_pool[execution_backend].cached(
             func,
             out_idx,
             *args,
@@ -58,7 +55,7 @@ def cached(
             compile_flags=compile_flags,
         )
     else:
-        raise ValueError(f'Cannot find support for execution backend "{backend_key}"')
+        raise ValueError(f'Cannot find support for execution backend "{execution_backend}"')
 
 
 def clear_cache():
