@@ -32,6 +32,74 @@ After installing tilelang, you can verify the installation by running:
 python -c "import tilelang; print(tilelang.__version__)"
 ```
 
+## Install with Nightly Version
+
+For users who want access to the latest features and improvements before official releases, we provide nightly builds of tilelang.
+
+```bash
+pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
+# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
+```
+
+> **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
+
+## Install Using Docker
+
+For users who prefer a containerized environment with all dependencies pre-configured, tilelang provides Docker images for different CUDA versions. This method is particularly useful for ensuring consistent environments across different systems.
+
+**Prerequisites:**
+- Docker installed on your system
+- NVIDIA Docker runtime or GPU is not necessary for building tilelang, you can build on a host without GPU and use that built image on other machine.
+
+1. **Clone the Repository**:
+
+```bash
+git clone --recursive https://github.com/tile-ai/tilelang
+cd tilelang
+```
+
+2. **Build Docker Image**:
+
+Navigate to the docker directory and build the image for your desired CUDA version:
+
+```bash
+cd docker
+docker build -f Dockerfile.cu120 -t tilelang-cu120 .
+```
+
+Available Dockerfiles:
+- `Dockerfile.cu120` - For CUDA 12.0
+- Other CUDA versions may be available in the docker directory
+
+3. **Run Docker Container**:
+
+Start the container with GPU access and volume mounting:
+
+```bash
+docker run -itd \
+  --shm-size 32g \
+  --gpus all \
+  -v /home/tilelang:/home/tilelang \
+  --name tilelang_b200 \
+  tilelang-cu120 \
+  /bin/zsh
+```
+
+**Command Parameters Explanation:**
+- `--shm-size 32g`: Increases shared memory size for better performance
+- `--gpus all`: Enables access to all available GPUs
+- `-v /home/tilelang:/home/tilelang`: Mounts host directory to container (adjust path as needed)
+- `--name tilelang_b200`: Assigns a name to the container for easy management
+- `/bin/zsh`: Uses zsh as the default shell
+
+4. **Access the Container and Verify Installation**:
+
+```bash
+docker exec -it tilelang_b200 /bin/zsh
+# Inside the container:
+python -c "import tilelang; print(tilelang.__version__)"
+```
+
 ## Building from Source
 
 **Prerequisites for building from source:**
@@ -111,79 +179,8 @@ TVM_ROOT=<your-tvm-repo> pip install . -v
 
 > **Note**: This will still rebuild the TVM-related libraries (stored in `TL_LIBS`). And this method often leads to some path issues. Check `env.py` to see some environment variables which are not set properly.
 
-(install-using-docker)=
-
-## Install Using Docker
-
-For users who prefer a containerized environment with all dependencies pre-configured, tilelang provides Docker images for different CUDA versions. This method is particularly useful for ensuring consistent environments across different systems.
-
-**Prerequisites:**
-- Docker installed on your system
-- NVIDIA Docker runtime or GPU is not necessary for building tilelang, you can build on a host without GPU and use that built image on other machine.
-
-1. **Clone the Repository**:
-
-```bash
-git clone --recursive https://github.com/tile-ai/tilelang
-cd tilelang
-```
-
-2. **Build Docker Image**:
-
-Navigate to the docker directory and build the image for your desired CUDA version:
-
-```bash
-cd docker
-docker build -f Dockerfile.cu120 -t tilelang-cu120 .
-```
-
-Available Dockerfiles:
-- `Dockerfile.cu120` - For CUDA 12.0
-- Other CUDA versions may be available in the docker directory
-
-3. **Run Docker Container**:
-
-Start the container with GPU access and volume mounting:
-
-```bash
-docker run -itd \
-  --shm-size 32g \
-  --gpus all \
-  -v /home/tilelang:/home/tilelang \
-  --name tilelang_b200 \
-  tilelang-cu120 \
-  /bin/zsh
-```
-
-**Command Parameters Explanation:**
-- `--shm-size 32g`: Increases shared memory size for better performance
-- `--gpus all`: Enables access to all available GPUs
-- `-v /home/tilelang:/home/tilelang`: Mounts host directory to container (adjust path as needed)
-- `--name tilelang_b200`: Assigns a name to the container for easy management
-- `/bin/zsh`: Uses zsh as the default shell
-
-4. **Access the Container and Verify Installation**:
-
-```bash
-docker exec -it tilelang_b200 /bin/zsh
-# Inside the container:
-python -c "import tilelang; print(tilelang.__version__)"
-```
-
-## Install with Nightly Version
-
-For users who want access to the latest features and improvements before official releases, we provide nightly builds of tilelang.
-
-```bash
-pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
-# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
-```
-
-> **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
-
-## Install Configs
-
 ### Build-time environment variables
+
 `USE_CUDA`: If to enable CUDA support, default: `ON` on Linux, set to `OFF` to build a CPU version. By default, we'll use `/usr/local/cuda` for building tilelang. Set `CUDAToolkit_ROOT` to use different cuda toolkit.
 
 `USE_ROCM`: If to enable ROCm support, default: `OFF`. If your ROCm SDK does not located in `/opt/rocm`, set `USE_ROCM=<rocm_sdk>` to enable build ROCm against custom sdk path.
@@ -204,27 +201,6 @@ Successfully built tilelang-0.1.6.post1+cu116.git0d4a74be-cp38-abi3-linux_x86_64
 where `<sdk>={cuda,rocm,metal}`. Specifically, when `<sdk>=cuda` and `CUDA_VERSION` is provided via env,
 `<sdk>=cu<cuda_major><cuda_minor>`, similar with this part in pytorch.
 Set `NO_TOOLCHAIN_VERSION=ON` to disable this.
-
-### Run-time environment variables
-
-Please refer to the `env.py` file for a full list of supported run-time environment variables.
-
-## Other Tips
-
-### IDE Configs
-
-Building tilelang locally will automatically generate a `compile_commands.json` file in `build` dir.
-VSCode with clangd and [clangd extension](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd) should be able to index that without extra configuration.
-
-### Compile Cache
-
-The default path of the compile cache is `~/.tilelang/cache`. `ccache` will be automatically used if found.
-
-### Repairing Wheels
-
-If you plan to use your wheel in other environment,
-it's recommended to use auditwheel (on Linux) or delocate (on Darwin)
-to repair them.
 
 (faster-rebuild-for-developers)=
 
@@ -258,3 +234,24 @@ you'll see logs like below:
 $ python -c 'import tilelang'
 2025-10-14 11:11:29  [TileLang:tilelang.env:WARNING]: Loading tilelang libs from dev root: /Users/yyc/repo/tilelang/build
 ```
+
+## Other Tips
+
+### IDE Configs
+
+Building tilelang locally will automatically generate a `compile_commands.json` file in `build` dir.
+VSCode with clangd and [clangd extension](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd) should be able to index that without extra configuration.
+
+### Compile Cache
+
+The default path of the compile cache is `~/.tilelang/cache`. `ccache`/`sccache` will be automatically used if found.
+
+### Repairing Wheels
+
+If you plan to use your wheel in other environment,
+it's recommended to use auditwheel (on Linux) or delocate (on Darwin)
+to repair them.
+
+### Run-time environment variables
+
+Please refer to the `env.py` file for a full list of supported run-time environment variables.

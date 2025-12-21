@@ -83,46 +83,18 @@ TileLang achieves exceptional performance across a variety of computational patt
   </div>
 
 ## Installation
-### Method 1: Install with Pip
 
-The quickest way to get started is to install the latest release from PyPI:
+### Quick Installation
+
+The easiest way to install TileLang is via pip:
 
 ```bash
 pip install tilelang
 ```
 
-Alternatively, you can install directly from the GitHub repository:
+### Advanced Installation
 
-```bash
-pip install git+https://github.com/tile-ai/tilelang
-```
-
-Or install locally:
-
-```bash
-# install required system dependencies
-sudo apt-get update
-sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
-
-pip install -e . -v # remove -e option if you don't want to install in editable mode, -v for verbose output
-```
-
-### Method 2: Build from Source
-We currently provide three ways to install **tile-lang** from source:
- - [Install from Source (using your own TVM installation)](./docs/get_started/Installation.md#method-1-install-from-source-using-your-own-tvm-installation)
- - [Install from Source (using the bundled TVM submodule)](./docs/get_started/Installation.md#method-2-install-from-source-using-the-bundled-tvm-submodule)
- - [Install Using the Provided Script](./docs/get_started/Installation.md#method-3-install-using-the-provided-script)
-
-### Method 3: Install with Nightly Version
-
-For users who want access to the latest features and improvements before official releases, we provide nightly builds of **tile-lang**.
-
-```bash
-pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
-# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
-```
-
-> **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
+For more installation options, including **Nightly Builds**, **Building from Source**, and **Docker**, please refer to the [Installation Guide](./docs/get_started/Installation.md).
 
 ## Quick Start
 
