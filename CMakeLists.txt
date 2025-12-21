@@ -300,12 +300,6 @@ install(TARGETS tilelang_cython_wrapper
         RUNTIME DESTINATION tilelang/lib
         ARCHIVE DESTINATION tilelang/lib)
 
-# add python z3 lib path to rpath for running tests and dev in current folder
-if(USE_Z3 AND USE_PYPI_Z3)
-  set_property(TARGET tvm APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/lib)
-  set_property(TARGET tvm APPEND PROPERTY BUILD_RPATH ${Python3_SITELIB}/z3/bin)
-endif()
-
 if(APPLE)
   set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
@@ -325,6 +319,17 @@ set_target_properties(tilelang        PROPERTIES INSTALL_RPATH "${TILELANG_INSTA
 set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
 set_target_properties(tvm             PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
 set_target_properties(tvm_runtime     PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
+
+# Copy libz3.so to build folder to workaround isolated build env issue
+get_target_property(Z3_LIBRARY_PATH z3::libz3 IMPORTED_LOCATION)
+install(FILES "${Z3_LIBRARY_PATH}" DESTINATION "${CMAKE_BINARY_DIR}/tvm")
+if(USE_Z3 AND USE_PYPI_Z3)
+  if(APPLE)
+    set_target_properties(tvm PROPERTIES BUILD_RPATH "@loader_path")
+  else()
+    set_target_properties(tvm PROPERTIES BUILD_RPATH "\$ORIGIN")
+  endif()
+endif()
 
 install(
   TARGETS tvm tvm_runtime tilelang_module tilelang
