@@ -321,9 +321,9 @@ set_target_properties(tvm             PROPERTIES INSTALL_RPATH "${TILELANG_INSTA
 set_target_properties(tvm_runtime     PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
 
 # Copy libz3.so to build folder to workaround isolated build env issue
-get_target_property(Z3_LIBRARY_PATH z3::libz3 IMPORTED_LOCATION)
-install(FILES "${Z3_LIBRARY_PATH}" DESTINATION "${CMAKE_BINARY_DIR}/tvm")
 if(USE_Z3 AND USE_PYPI_Z3)
+  get_target_property(Z3_LIBRARY_PATH z3::libz3 IMPORTED_LOCATION)
+  install(FILES "${Z3_LIBRARY_PATH}" DESTINATION "${CMAKE_BINARY_DIR}/tvm")
   if(APPLE)
     set_target_properties(tvm PROPERTIES BUILD_RPATH "@loader_path")
   else()
