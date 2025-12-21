@@ -138,6 +138,22 @@ TMA_IM2COL_DESC_INIT_FUNC = """
 \t}}
 """
 
+KERNEL_LAUNCH_FUNC_CODE = """
+\t{{
+\t\tcudaLaunchConfig_t config;
+\t\tcudaLaunchAttribute attribute[1];
+\t\tattribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+\t\tattribute[0].val.programmaticStreamSerializationAllowed = 1;
+\t\tconfig.attrs = attribute;
+\t\tconfig.numAttrs = 1;
+\t\tconfig.stream = stream;
+\t\tconfig.gridDim = {0};
+\t\tconfig.blockDim = {1};
+\t\tconfig.dynamicSmemBytes = {2};
+\t\tcudaLaunchKernelEx(&config, {4}, {3});
+\t}}
+"""
+
 
 class BaseWrapper(ABC):
     @abstractmethod
@@ -194,6 +210,7 @@ class TLCUDASourceWrapper:
         self.grid_info: list[int] | dict = [1, 1, 1]
         self.tma_descriptor_args: dict | None = None
         self.l2_persistent_map: dict[str, dict] | None = {}
+        self.pdl_sync_map: dict[str, int] | None = {}
         self.parse_source_information()
         self.srcpath: str | None = None
         self.libpath: str | None = None
@@ -293,6 +310,25 @@ class TLCUDASourceWrapper:
                 kernel_launch_code += "\tTILELANG_CHECK(cudaLaunchCooperativeKernel((void*){}, {}, {}, {}, {}, stream));\n".format(
                     function_name, grid_str, block_str, function_name + "_args", smem_str
                 )
+            elif function_name in self.pdl_sync_map:
+                args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
+                assert len(function_params) == len(args_list), (
+                    f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
+                )
+
+                call_args = ", ".join(args_list)
+
+                kernel_code = KERNEL_LAUNCH_FUNC_CODE.format(
+                    grid_str,
+                    block_str,
+                    smem_str,
+                    call_args,
+                    function_name,
+                )
+
+                kernel_launch_code += kernel_code
+                kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'
+
             else:
                 args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
                 assert len(function_params) == len(args_list), (
@@ -409,6 +445,10 @@ class TLCUDASourceWrapper:
                         block_info["xyz".index(tag[-1])] = extent
                     elif "blockIdx" in tag:
                         grid_info["xyz".index(tag[-1])] = extent
+
+            if "has_cuda_pdl_sync" in attrs:
+                self.pdl_sync_map[function_name] = 0
+
             # Map the extracted configurations to each function
             block_info_map[function_name] = block_info
             grid_info_map[function_name] = grid_info
@@ -423,7 +463,8 @@ class TLCUDASourceWrapper:
         self.use_cooperative_groups = use_cooperative_groups_map
 
         function_names_index = {}
-        for _, func in self.host_mod.functions.items():
+        for g_var, func in self.host_mod.functions.items():
+            function_name = g_var.name_hint
             if "tma_descriptor_args" in func.attrs:
                 self.tma_descriptor_args = func.attrs["tma_descriptor_args"]
             if "l2_persistent_map" in func.attrs:
