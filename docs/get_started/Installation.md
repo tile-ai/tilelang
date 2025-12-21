@@ -255,3 +255,18 @@ to repair them.
 ### Run-time environment variables
 
 Please refer to the `env.py` file for a full list of supported run-time environment variables.
+
+## Troubleshooting
+
+### Z3 Dependency Issue during Installation
+
+If you encounter Z3-related errors when running `pip install .` (often happening in `uv` environments), it might be due to `pip`'s build isolation. `libtvm` might depend on a `libz3` present in the temporary build environment but missing or incompatible in your actual runtime environment.
+
+To resolve this, use the `--no-build-isolation` flag:
+
+```bash
+pip install -r requirements-dev.txt
+pip install . -v --no-build-isolation
+```
+
+This ensures `libtvm` builds against the dependencies in your current environment.
