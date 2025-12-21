@@ -7,20 +7,18 @@ from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
 from tilelang import env
-from .auto_kernel_cache import AutoKernelCache
-from .ctypes_kernel_cache import CTypesKernelCache
-from .cutedsl_kernel_cache import CuTeDSLKernelCache
-from .cython_kernel_cache import CythonKernelCache
-from .nvrtc_kernel_cache import NVRTCKernelCache
-from .torch_kernel_cache import TorchKernelCache
-from .tvm_ffi_kernel_cache import TVMFFIKernelCache
+from tilelang.jit.adapter.ctypes.kernel_cache import CTypesKernelCache
+from tilelang.jit.adapter.cutedsl.kernel_cache import CuTeDSLKernelCache
+from tilelang.jit.adapter.cython.kernel_cache import CythonKernelCache
+from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
+from tilelang.jit.adapter.torch.kernel_cache import TorchKernelCache
+from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 
 if TYPE_CHECKING:
     from .kernel_cache import KernelCache
 
 # Create a pool of singleton instance of KernelCaches
 _dispatch_pool: dict[str, KernelCache] = {
-    "auto": AutoKernelCache(),
     "tvm_ffi": TVMFFIKernelCache(),
     "ctypes": CTypesKernelCache(),
     "cython": CythonKernelCache(),
@@ -44,18 +42,23 @@ def cached(
     """
     Caches and reuses compiled kernels (using KernelCache class).
     """
-    backend_key: str = execution_backend if execution_backend is not None else "auto"
-    return _dispatch_pool[backend_key].cached(
-        func,
-        out_idx,
-        *args,
-        target=target,
-        target_host=target_host,
-        execution_backend=execution_backend,
-        verbose=verbose,
-        pass_configs=pass_configs,
-        compile_flags=compile_flags,
-    )
+    backend_key = execution_backend
+    if backend_key == "auto" or backend_key is None:
+        backend_key = "tvm_ffi"
+    if backend_key in _dispatch_pool:
+        return _dispatch_pool[backend_key].cached(
+            func,
+            out_idx,
+            *args,
+            target=target,
+            target_host=target_host,
+            execution_backend=execution_backend,
+            verbose=verbose,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+        )
+    else:
+        raise ValueError(f'Cannot find support for execution backend "{backend_key}"')
 
 
 def clear_cache():
