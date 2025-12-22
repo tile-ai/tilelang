@@ -59,7 +59,7 @@ private:
     if (!call)
       return;
     if (call->op.same_as(builtin::call_extern())) {
-      if (call->args.size() >= 1) {
+      if (!call->args.empty()) {
         if (const auto *str_node =
                 call->args[0].as<tvm::tir::StringImmNode>()) {
           std::string func_name = str_node->value;
@@ -80,10 +80,10 @@ private:
   MarkCudaSyncCalls() = default;
 };
 
-class ElininateCudaSyncCalls : public StmtExprMutator {
+class EliminateCudaSyncCalls : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
-    ElininateCudaSyncCalls mutator;
+    EliminateCudaSyncCalls mutator;
     PrimFunc new_f = f;
     new_f.CopyOnWrite()->body = mutator.VisitStmt(f->body);
 
@@ -113,7 +113,7 @@ private:
       return false;
 
     if (call->op.same_as(builtin::call_extern())) {
-      if (call->args.size() >= 1) {
+      if (!call->args.empty()) {
         if (const auto *str_node =
                 call->args[0].as<tvm::tir::StringImmNode>()) {
           std::string func_name = str_node->value;
@@ -130,7 +130,7 @@ private:
   }
 
 private:
-  ElininateCudaSyncCalls() = default;
+  EliminateCudaSyncCalls() = default;
 };
 
 using namespace tir::transform;
@@ -138,7 +138,7 @@ using namespace tir::transform;
 tvm::transform::Pass MarkCudaSyncCallsPass(bool have_pdl) {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return have_pdl ? MarkCudaSyncCalls::Substitute(f)
-                    : ElininateCudaSyncCalls::Substitute(f);
+                    : EliminateCudaSyncCalls::Substitute(f);
   };
 
   return CreatePrimFuncPass(pass_func, 0, "tl.MarkCudaSyncCalls", {});
