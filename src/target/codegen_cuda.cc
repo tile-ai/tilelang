@@ -1016,8 +1016,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   if (from_ty.is_bfloat16() && target_ty.is_float()) {
     // Use __bfloat1622float2 for vectorized conversion (bfloat162 -> float2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
-      PrintVectorizedCast("__bfloat1622float2", "__nv_bfloat162",
-                                 "float2", "", true, false);
+      PrintVectorizedCast("__bfloat1622float2", "__nv_bfloat162", "float2", "",
+                          true, false);
       return;
     }
   }
@@ -1026,8 +1026,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   if (from_ty.is_float() && target_ty.is_bfloat16()) {
     // Use __float22bfloat162_rn for vectorized conversion (float2 -> bfloat162)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
-      PrintVectorizedCast("__float22bfloat162_rn", "float2",
-                                 "__nv_bfloat162", "", false, true);
+      PrintVectorizedCast("__float22bfloat162_rn", "float2", "__nv_bfloat162",
+                          "", false, true);
       return;
     }
   }
@@ -1042,8 +1042,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       std::string extra_args = ", __NV_SATFINITE, " + type_suffix;
       PrintVectorizedCast("__nv_cvt_float2_to_fp8x2", "float2",
-                                 "__nv_fp8x2_storage_t", extra_args, false,
-                                 true);
+                          "__nv_fp8x2_storage_t", extra_args, false, true);
       return;
     }
   }
@@ -1056,9 +1055,48 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
 
     // Use __tl_cvt_fp8x2_to_float2 for vectorized conversion (fp8x2 -> float2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
-      PrintVectorizedCast("__tl_cvt_fp8x2_to_float2",
-                                 "__nv_fp8x2_storage_t", "float2",
-                                 ", " + type_suffix, true, false);
+      PrintVectorizedCast("__tl_cvt_fp8x2_to_float2", "__nv_fp8x2_storage_t",
+                          "float2", ", " + type_suffix, true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float16 to float4 (E2M1)
+  if (from_ty.is_float16() && target_ty.is_float4_e2m1fn()) {
+    // Use __tl_cvt_half2_to_fp4x2 for vectorized conversion (half2 -> fp4x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_half2_to_fp4x2", "half2", "uint8_t", "",
+                          false, true);
+      return;
+    }
+  }
+
+  // Handle conversion from float32 to float4 (E2M1)
+  if (from_ty.is_float() && target_ty.is_float4_e2m1fn()) {
+    // Use __tl_cvt_float2_to_fp4x2 for vectorized conversion (float2 -> fp4x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_float2_to_fp4x2", "float2", "uint8_t", "",
+                          false, true);
+      return;
+    }
+  }
+
+  // Handle conversion from float4 (E2M1) to float16
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_float16()) {
+    // Use __tl_cvt_fp4x2_to_half2 for vectorized conversion (fp4x2 -> half2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp4x2_to_half2", "uint8_t", "half2", "",
+                          true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float4 (E2M1) to float32
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_float()) {
+    // Use __tl_cvt_fp4x2_to_float2 for vectorized conversion (fp4x2 -> float2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp4x2_to_float2", "uint8_t", "float2", "",
+                          true, false);
       return;
     }
   }

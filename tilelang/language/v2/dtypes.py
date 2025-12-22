@@ -5,6 +5,7 @@ from typing import Generic, TypeVar, Union, TYPE_CHECKING
 from tvm import tir
 import tvm.script.ir_builder.tir._ffi_api as tb_ffi
 import numpy as np
+from tilelang import logger
 
 _T = TypeVar("_T")
 
@@ -175,7 +176,7 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "float8_e5m2":
         assert hasattr(torch, "float8_e5m2"), "torch.float8_e5m2 is not supported in this version of torch. Please upgrade torch >= 2.1.0"
         return torch.float8_e5m2
-    elif dtype_str == "e4m3fnuz_float8":
+    elif dtype_str == "float8_e4m3fnuz":
         assert hasattr(torch, "float8_e4m3fnuz"), (
             "torch.float8_e4m3fnuz is not supported in this version of torch. Please upgrade torch >= 2.2.0"
         )
@@ -189,7 +190,10 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
         assert hasattr(torch, "float4_e2m1fnx2"), (
             "torch.float4_e2m1fnx2 is not supported in this version of torch. Please upgrade torch >= 2.8.0"
         )
-        return torch.float4_e2m1fnx2
+        return torch.float4_e2m1fn_x2
+    elif dtype_str == "float4_e2m1fn":
+        logger.info("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
+        return torch.float4_e2m1fn_x2
     elif dtype_str in _STR_TO_TORCH_DTYPE:
         return _STR_TO_TORCH_DTYPE[dtype_str]
 
