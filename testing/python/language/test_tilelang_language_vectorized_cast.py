@@ -90,17 +90,39 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
         (T.float32, T.bfloat16, "__float22bfloat162_rn", 4),
         (T.bfloat16, T.float32, "__bfloat1622float2", 2),
         (T.bfloat16, T.float32, "__bfloat1622float2", 4),
+    ],
+)
+def test_vectorized_cast(src_dtype, dst_dtype, check_str, lanes):
+    run_vectorized_cast(src_dtype, dst_dtype, check_str, lanes)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+@pytest.mark.parametrize(
+    "src_dtype, dst_dtype, check_str, lanes",
+    [
         (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
         (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
         (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
         (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
+    ],
+)
+def test_vectorized_cast_fp8(src_dtype, dst_dtype, check_str, lanes):
+    run_vectorized_cast(src_dtype, dst_dtype, check_str, lanes)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+@pytest.mark.parametrize(
+    "src_dtype, dst_dtype, check_str, lanes",
+    [
         (T.float4_e2m1fn, T.float16, "__tl_cvt_fp4x2_to_half2", 2),
         (T.float16, T.float4_e2m1fn, "__tl_cvt_half2_to_fp4x2", 2),
         (T.float4_e2m1fn, T.float32, "__tl_cvt_fp4x2_to_float2", 2),
         (T.float32, T.float4_e2m1fn, "__tl_cvt_float2_to_fp4x2", 2),
     ],
 )
-def test_vectorized_cast(src_dtype, dst_dtype, check_str, lanes):
+def test_vectorized_cast_fp4(src_dtype, dst_dtype, check_str, lanes):
     run_vectorized_cast(src_dtype, dst_dtype, check_str, lanes)
 
 
