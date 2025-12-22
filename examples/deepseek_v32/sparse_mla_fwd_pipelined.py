@@ -263,44 +263,44 @@ def sparse_mla_fwd(
                     # Buffer 0
                     T.barrier_wait(bar_k_0_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        indices_local[0] = Indices[b_i, s_i, g_i, (i_i * 2) * BI + r * 16 + (tx - 256) // 8]
-                        is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local[0] <= max_kv_i
+                        indices_local = Indices[b_i, s_i, g_i, (i_i * 2) * BI + r * 16 + (tx - 256) // 8]
+                        is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local <= max_kv_i
                         if is_kv_valid[r * 16 + (tx - 256) // 8]:
                             with T.attr("default", "async_scope", 1):
                                 for u in T.serial(4):
                                     for v in T.vectorized(8):
                                         KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local[0], g_i, 64 * u + (tx - 256) % 8 * 8 + v
+                                            b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8 + v
                                         ]
                                         KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local[0], g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
+                                            b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
                                         ]
                             with T.attr("default", "async_scope", 1):
                                 for v in T.vectorized(8):
                                     K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[
-                                        b_i, indices_local[0], g_i, D + (tx - 256) % 8 * 8 + v
+                                        b_i, indices_local, g_i, D + (tx - 256) % 8 * 8 + v
                                     ]
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
                     # Buffer 1
                     T.barrier_wait(bar_k_1_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        indices_local[0] = Indices[b_i, s_i, g_i, (i_i * 2 + 1) * BI + r * 16 + (tx - 256) // 8]
-                        is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local[0] <= max_kv_i
+                        indices_local = Indices[b_i, s_i, g_i, (i_i * 2 + 1) * BI + r * 16 + (tx - 256) // 8]
+                        is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local <= max_kv_i
                         if is_kv_valid[r * 16 + (tx - 256) // 8]:
                             with T.attr("default", "async_scope", 1):
                                 for u in T.serial(4):
                                     for v in T.vectorized(8):
                                         KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local[0], g_i, 64 * u + (tx - 256) % 8 * 8 + v
+                                            b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8 + v
                                         ]
                                         KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local[0], g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
+                                            b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
                                         ]
                             with T.attr("default", "async_scope", 1):
                                 for v in T.vectorized(8):
                                     K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[
-                                        b_i, indices_local[0], g_i, D + (tx - 256) % 8 * 8 + v
+                                        b_i, indices_local, g_i, D + (tx - 256) % 8 * 8 + v
                                     ]
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
