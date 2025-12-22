@@ -16,6 +16,7 @@ def debug_print_buffer(M=16, N=16, dtype=T.float16):
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 
+
 def test_debug_print_buffer():
     debug_print_buffer(dtype=T.int8)
     debug_print_buffer(dtype=T.int16)
@@ -30,6 +31,7 @@ def test_debug_print_buffer():
     debug_print_buffer(dtype=T.float64)
     debug_print_buffer(dtype=T.bfloat16)
 
+
 @tilelang.testing.requires_cuda
 def test_debug_print_buffer_cuda_fp8():
     debug_print_buffer(dtype=T.float8_e4m3fn)
@@ -40,6 +42,7 @@ def test_debug_print_buffer_cuda_fp8():
 def test_debug_print_buffer_rocm_fp8():
     debug_print_buffer(dtype=T.float8_e4m3fnuz)
     debug_print_buffer(dtype=T.float8_e5m2fnuz)
+
 
 def debug_print_buffer_conditional(M=16, N=16):
     dtype = T.float16
