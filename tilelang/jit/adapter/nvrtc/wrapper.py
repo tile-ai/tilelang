@@ -479,17 +479,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         return init_l2_persistent_map
 
     def generate_pdl_sync_code(self, function_name: str) -> str:
-        """Generate Python code to configure L2 cache persistence for a kernel.
-
-        L2 persistence pins frequently-accessed data in L2 cache to reduce
-        memory bandwidth. Requires explicit setup via CUDA stream attributes.
-
-        Args:
-            function_name: Kernel name to check for L2 persistence config
-
-        Returns:
-            Python code that sets stream access policy window, or empty
-            string if no L2 persistence configured for this kernel.
+        """
+        Generate Python code to insert PDL synchronization for a given kernel.
         """
         if function_name not in self.pdl_sync_map:
             return ""

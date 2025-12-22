@@ -149,8 +149,7 @@ class LibraryGenerator:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
         if ret.returncode != 0:
-            command_str = " ".join(command)
-            raise RuntimeError(f"Compilation Failed! {command_str}\n {self.lib_code}")
+            raise RuntimeError(f"Compilation Failed! {command}\n {self.lib_code}")
 
         self.srcpath = src.name
         self.libpath = libpath
