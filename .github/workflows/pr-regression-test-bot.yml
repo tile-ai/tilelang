@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: write
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -92,10 +93,13 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const md = `${{ steps.read_md.outputs.content }}`;
-            const runUrl =
-              `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
-            const body =
+            const fs = require('fs');
+            // Read the file directly instead of passing via env/outputs to avoid escaping issues
+            const md = fs.readFileSync('regression_result.md', 'utf8');
+            
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            
+            const body = 
               'Performance Benchmark Report\n' +
               '============================\n\n' +
               `Triggered by: @${context.payload.comment.user.login}\n` +
@@ -113,3 +117,4 @@ jobs:
               issue_number: context.issue.number,
               body
             });
+
