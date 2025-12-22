@@ -1,5 +1,4 @@
 import torch
-import tilelang.testing
 from tilelang import language as T
 
 B = 1
