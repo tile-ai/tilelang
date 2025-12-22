@@ -972,7 +972,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
 
   int lanes = from_ty.lanes();
 
-  auto generate_vector_conversion =
+  auto PrintVectorizedCast =
       [&](const std::string &cast_func, const std::string &src_type,
           const std::string &dst_type, const std::string &extra_args = "",
           bool src_needs_reinterpret = false,
@@ -998,7 +998,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   if (from_ty.is_float16() && target_ty.is_float()) {
     // Use __half22float2 for vectorized conversion (half2 -> float2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
-      generate_vector_conversion("__half22float2", "half2", "float2");
+      PrintVectorizedCast("__half22float2", "half2", "float2");
       return;
     }
   }
@@ -1007,7 +1007,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   if (from_ty.is_float() && target_ty.is_float16()) {
     // Use __float22half2_rn for vectorized conversion (float2 -> half2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
-      generate_vector_conversion("__float22half2_rn", "float2", "half2");
+      PrintVectorizedCast("__float22half2_rn", "float2", "half2");
       return;
     }
   }
@@ -1016,7 +1016,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   if (from_ty.is_bfloat16() && target_ty.is_float()) {
     // Use __bfloat1622float2 for vectorized conversion (bfloat162 -> float2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
-      generate_vector_conversion("__bfloat1622float2", "__nv_bfloat162",
+      PrintVectorizedCast("__bfloat1622float2", "__nv_bfloat162",
                                  "float2", "", true, false);
       return;
     }
@@ -1026,7 +1026,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   if (from_ty.is_float() && target_ty.is_bfloat16()) {
     // Use __float22bfloat162_rn for vectorized conversion (float2 -> bfloat162)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
-      generate_vector_conversion("__float22bfloat162_rn", "float2",
+      PrintVectorizedCast("__float22bfloat162_rn", "float2",
                                  "__nv_bfloat162", "", false, true);
       return;
     }
@@ -1041,7 +1041,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     // Use __nv_cvt_float2_to_fp8x2 for vectorized conversion (float2 -> fp8x2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       std::string extra_args = ", __NV_SATFINITE, " + type_suffix;
-      generate_vector_conversion("__nv_cvt_float2_to_fp8x2", "float2",
+      PrintVectorizedCast("__nv_cvt_float2_to_fp8x2", "float2",
                                  "__nv_fp8x2_storage_t", extra_args, false,
                                  true);
       return;
@@ -1056,7 +1056,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
 
     // Use __tl_cvt_fp8x2_to_float2 for vectorized conversion (fp8x2 -> float2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
-      generate_vector_conversion("__tl_cvt_fp8x2_to_float2",
+      PrintVectorizedCast("__tl_cvt_fp8x2_to_float2",
                                  "__nv_fp8x2_storage_t", "float2",
                                  ", " + type_suffix, true, false);
       return;
