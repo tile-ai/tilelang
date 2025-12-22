@@ -390,20 +390,27 @@ class Builder(BaseBuilder):
             return value
 
         locals = self.get_parent_locals()
-        orig_value = locals.get(name, None)
 
-        if isinstance(annot, Buffer) and annot.scope() == "global":
-            from tilelang.language import match_buffer
+        # Handle type annotation
+        if value is self.empty:
+            orig_value = locals.get(name, value)
+            if isinstance(annot, Buffer) and annot.scope() == "global":
+                from tilelang.language import match_buffer
 
-            return IRBuilder.name(
-                name,
-                match_buffer(
-                    orig_value,
-                    annot.shape,
-                    annot.dtype,
-                    strides=annot.strides,
-                ),
-            )
+                return IRBuilder.name(
+                    name,
+                    match_buffer(
+                        orig_value,
+                        annot.shape,
+                        annot.dtype,
+                        strides=annot.strides,
+                    ),
+                )
+            else:
+                return orig_value
+
+        orig_value = locals.get(name, self.empty)
+
         # if orig_value is a local.var, we use buffer_store to modify it immutably
         #   however, if rvalue is not a PrimExpr, such as buffer,
         #   we should not use buffer_store, and bind it instead
@@ -447,7 +454,7 @@ class Builder(BaseBuilder):
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
             if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                 logger.warning(
-                    f"Variable `{name}` is declared twice, are you looking for a T.alloc_var?",
+                    f"Immutable value `{name}` is re-bound. If you want to modify its value, please use T.alloc_var to make it a variable!",
                     stack_info=True,
                     stacklevel=2,
                 )
@@ -526,7 +533,15 @@ class Builder(BaseBuilder):
             tir.buffer_store(target, eval_op(op, target[0], aug_value), 0)
             return target
         elif isinstance(target, Buffer):
-            raise RuntimeError("Augmented assignment is not supported for Buffer")
+            raise RuntimeError(
+                f"Attempting to update buffer `{target}` using augmented assignment.\n"
+                "Please use slice assignment, e.g. `buf[0] += value` instead."
+            )
+        elif isinstance(target, Var):
+            raise RuntimeError(
+                f"Attempting to update immutable variable `{target}` using augmented assignment.\n"
+                "Please use T.alloc_var to create a mutable variable."
+            )
         else:
             return super().aug_assign(op, target, aug_value)
 
@@ -573,7 +588,7 @@ class Builder(BaseBuilder):
             frame = self.find_frame_idx(TIR_CONTROL_FRAME, start=last_macro)
             if frame is not None:
                 raise NotImplementedError(
-                    "Return from control flow is not supported yet. \n"
+                    "In tilelang macro, return from control flow is not supported yet. \n"
                     "You should allocate a var before the control flow, assign value inside the blocks, \n"
                     "and return the var after the control flow. i.e.\n"
                     "```\n"
@@ -620,7 +635,7 @@ class Builder(BaseBuilder):
             frame = self.name_inside_frame[name]
             if frame not in self.frames:
                 raise RuntimeError(
-                    f"Use immutable variable `{name}` outside its defining region, did you forget **alloc_var**?\n"
+                    f"Immutable variable `{name}` is used outside its defining region!\n"
                     f"variable `{name}` is defined in frame: {frame}, current frames: {self.frames}."
                 )
         return self.unwrap_value(value)
@@ -945,11 +960,15 @@ def substitute_primfunc(prim_func, vmap):
 def prim_func(func: Callable[_P, _T] = None, *, lazy_jit=False) -> PrimFunc[_P, _T] | LazyJITFunc[_P, _T]:
     def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
         sig = inspect.signature(func)
+        ir_gen = mutate(func)
+        for param in sig.parameters.values():
+            if param.kind == param.POSITIONAL_ONLY:
+                raise TypeError(f"PrimFunc does not support positional-only parameters: `{param.name}`")
         annot = get_type_hints(func)
+        annot.update(ir_gen.extra_type_hints)
         for k in annot:
             if not isinstance(annot[k], type) and callable(annot[k]):
                 annot[k] = annot[k]()
-        ir_gen = mutate(func)
         if lazy_jit:
             arg_names = list(sig.parameters.keys())
             tensor_args = {k: v for k, v in annot.items() if isinstance(v, (Buffer, Var))}
