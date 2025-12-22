@@ -187,7 +187,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 lse_local_split = glse[bz, hid, k]
                 scale_local = T.exp2(lse_local_split - lse_logsum_local)
                 for i in T.Parallel(dim):
-                    o_accum_local[i] += po_local[i] * scale_local[0]
+                    o_accum_local[i] += po_local[i] * scale_local
             for i in T.Parallel(dim):
                 Output[bz, hid, i] = o_accum_local[i]
 
