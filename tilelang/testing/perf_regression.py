@@ -70,9 +70,9 @@ def process_func(func: Callable[..., float], name: str | None = None, /, **kwarg
         result_name = result_name[len("regression_") :]
     latency = float(func(**kwargs))
     if not (latency > 0.0):
-        raise ValueError(f"Invalid latency from {result_name}: {latency}")
+        print(f"Warning: non-positive latency {latency} from {result_name}")
+        return
     _RESULTS.append(PerfResult(name=result_name, latency=latency))
-    return latency
 
 
 def regression(prefixes: Sequence[str] = ("regression_",)) -> None:

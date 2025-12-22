@@ -194,14 +194,10 @@ def main(
 
 
 def run_regression_perf(batch: int = 8, heads: int = 32, seq_len: int = 4096, dim: int = 128, is_causal: bool = False):
-    flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
-    total_flops = 2 * flops_per_matmul
-    if is_causal:
-        total_flops *= 0.5
 
     kernel = flashattn(batch, heads, seq_len, dim, is_causal, block_M=128, block_N=128, num_stages=1, threads=128)
     profiler = kernel.get_profiler()
-    return profiler.do_bench(warmup=500, backend="cupti")
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":
