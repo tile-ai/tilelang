@@ -107,5 +107,30 @@ def main(argv=None):
     print("All checks passed.✅")
 
 
+def run_regression_perf(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n", type=int, default=128, help="n")
+    parser.add_argument("--c", type=int, default=128, help="c")
+    parser.add_argument("--h", type=int, default=64, help="h")
+    parser.add_argument("--w", type=int, default=64, help="w")
+    parser.add_argument("--f", type=int, default=128, help="f")
+    parser.add_argument("--k", type=int, default=3, help="k")
+    parser.add_argument("--s", type=int, default=1, help="s")
+    parser.add_argument("--d", type=int, default=1, help="d")
+    parser.add_argument("--p", type=int, default=1, help="p")
+
+    args = parser.parse_args(argv)
+    N, C, H, W, F, K, S, D, P = args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p
+
+    block_m = 64
+    block_n = 128
+    block_k = 32
+    num_stages = 3
+    threads = 256
+    kernel = convolution(N, C, H, W, F, K, S, D, P, block_m, block_n, block_k, num_stages, threads)
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
+    return profiler.do_bench(backend="cupti")
+
+
 if __name__ == "__main__":
     main()

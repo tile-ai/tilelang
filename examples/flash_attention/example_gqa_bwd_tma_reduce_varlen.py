@@ -700,6 +700,58 @@ def main(
     )
 
 
+def run_regression_perf():
+    BATCH = 1
+    H = 32
+    N_CTX = 256
+    D_HEAD_QK = 192
+    D_HEAD_V = 128
+    groups = 16
+    causal = False
+    device = "cuda"
+    torch.manual_seed(42)
+    total_q = BATCH * N_CTX
+    total_kv = BATCH * N_CTX
+    head_kv = H // groups
+    Q = torch.randn(total_q, H, D_HEAD_QK, device=device, dtype=torch.half)
+    K = torch.randn(total_kv, head_kv, D_HEAD_QK, device=device, dtype=torch.half)
+    V = torch.randn(total_kv, head_kv, D_HEAD_V, device=device, dtype=torch.half)
+    O = torch.randn(total_q, H, D_HEAD_V, device=device, dtype=torch.half)
+    dO = torch.randn(total_q, H, D_HEAD_V, device=device, dtype=torch.half)
+    cu_seqlens_q = torch.arange(0, (BATCH + 1) * N_CTX, N_CTX, device=device, dtype=torch.int32)
+    cu_seqlens_k = cu_seqlens_q
+    max_seqlen_q = N_CTX
+    lse = torch.zeros(BATCH, H, N_CTX, device=device, dtype=torch.float32)
+    with torch.no_grad():
+        mod_prep = flashattn_bwd_preprocess(BATCH, H, total_q, N_CTX, max_seqlen_q, D_HEAD_V)
+        kernel = flashattn_bwd_split(
+            BATCH,
+            total_q,
+            total_kv,
+            N_CTX,
+            H,
+            max_seqlen_q,
+            D_HEAD_QK,
+            D_HEAD_V,
+            causal,
+            block_M=128,
+            block_N=32,
+            threads=256,
+            num_stages=2,
+            groups=groups,
+        )
+    dQ = torch.zeros_like(Q, dtype=torch.float32)
+    dK = torch.zeros(groups, total_kv, head_kv, D_HEAD_QK, device=device, dtype=torch.float16)
+    dV = torch.zeros(groups, total_kv, head_kv, D_HEAD_V, device=device, dtype=torch.float16)
+    Delta = mod_prep(O, dO, cu_seqlens_q)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(Q, K, V, dO, lse, Delta, cu_seqlens_q, cu_seqlens_k, dQ, dK, dV)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     arch = nvcc.get_target_compute_version()
     print(f"Detected GPU compute capability: {arch}")

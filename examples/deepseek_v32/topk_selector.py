@@ -240,5 +240,35 @@ def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
     print(f"Average torch.topk time: {elapsed_time_ms / n_iters:.3f} ms")
 
 
+def run_regression_perf(batch=64, seq_len=32 * 1024, topk=2048):
+    batch = 64
+    seq_len = 32 * 1024
+    topk = 2048
+    torch.manual_seed(1)
+    input = torch.randn(batch, seq_len, dtype=torch.float32).cuda()
+    starts = torch.zeros(batch, dtype=torch.int32).cuda()
+    ends = torch.ones(batch, dtype=torch.int32).cuda() * seq_len
+
+    indexes = tl_topk(input, starts, ends, topk)
+
+    indexes_ref = torch.topk(input, topk, dim=-1)[1]
+
+    for i in range(batch):
+        ref_np = indexes_ref[i].cpu().to(torch.int32).numpy()
+        trt_np = indexes[i].cpu().to(torch.int32).numpy()
+
+        set_ref = set(ref_np)
+        set_trt = set(trt_np)
+        intersection = set_ref & set_trt
+        print("selected/all:", len(intersection), "/", len(set_ref), "=", len(intersection) / len(set_ref))
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        tl_topk(input, starts, ends, topk)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     test_topk_selector()

@@ -1,0 +1,121 @@
+name: Performance Regression Bot
+
+on:
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true # always cancel in-progress
+
+env:
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  PYTHONPATH: "" # explicit cleanup
+  PIP_USER: "" # explicit cleanup
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+  XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
+  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
+
+jobs:
+  pr-regression:
+    name: Performance regression test between PR and main
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      github.event.issue.pull_request &&
+      (contains(github.event.comment.body, '@regression-perf'))
+    runs-on: [self-hosted, nvidia]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/merge
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          update-environment: true
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+
+      - name: Install PR version (new)
+        run: |
+          python -m venv new
+          source new/bin/activate
+          pip install --no-user -r requirements-test.txt
+          pip install --no-user .
+
+      - name: Install main version (old)
+        run: |
+          echo "Check files to be deleted!"
+          git clean -dxf -e new/ -e .cache/
+          echo "Delete files completed!"
+          git checkout main
+          python -m venv old
+          source old/bin/activate
+          pip install --no-user -r requirements-test.txt
+          pip install --no-user .
+
+      - name: Run performance regression test
+        run: |
+          source new/bin/activate
+          OLD_PYTHON=./old/bin/python NEW_PYTHON=./new/bin/python \
+            PERF_REGRESSION_MD=regression_result.md PERF_REGRESSION_PNG=regression_result.png \
+            python ./maint/scripts/test_perf_regression.py
+
+      - name: Read markdown table
+        id: read_md
+        run: |
+          echo "content<<EOF" >> $GITHUB_OUTPUT
+          cat regression_result.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload result image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-regression-${{ github.run_id }}
+          path: regression_result.png
+
+      - name: Post test results as PR comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            // Read the file directly instead of passing via env/outputs to avoid escaping issues
+            const md = fs.readFileSync('regression_result.md', 'utf8');
+            
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            
+            const body = 
+              'Performance Benchmark Report\n' +
+              '============================\n\n' +
+              `Triggered by: @${context.payload.comment.user.login}\n` +
+              `Workflow run: ${runUrl}\n\n` +
+              'Results\n' +
+              '-------\n\n' +
+              md + '\n\n' +
+              'Artifacts\n' +
+              '---------\n\n' +
+              '- regression_result.png (speedup plot) is attached as a workflow artifact. Download it from the workflow run page above.\n';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+

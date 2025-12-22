@@ -277,6 +277,49 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128):
     print("All checks passed.✅")
 
 
+def run_regression_perf(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128):
+    flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
+    total_flops = 2 * flops_per_matmul
+    tilelang.testing.set_random_seed(0)
+    causal = False
+    if causal:
+        total_flops *= 0.5
+    dtype = torch.float16
+    device = torch.device("cuda")
+    window_size = (-1, -1)
+    q = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
+    k = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
+    v = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
+    query_padding_mask = generate_random_padding_mask(seq_len, batch, device, mode="random")
+    key_padding_mask = generate_random_padding_mask(seq_len, batch, device, mode="random")
+    (
+        q_unpad,
+        k_unpad,
+        v_unpad,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        q,
+        k,
+        v,
+        output_pad_fn,
+        dq_pad_fn,
+        dk_pad_fn,
+    ) = generate_qkv(q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
+    UQ = q_unpad.shape[0]
+    UK = k_unpad.shape[0]
+    UKV = k_unpad.shape[0]
+    kernel = flashattn(batch, UQ, UKV, heads, dim, causal)
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=int, default=8, help="batch size")

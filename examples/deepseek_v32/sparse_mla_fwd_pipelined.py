@@ -427,6 +427,41 @@ def test_sparse_mla_fwd_pipelined(
     print(f"fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
+def run_regression_perf(B=1, S=4096, SKV=8192, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16, q_start_s_index=1024):
+    KV_stride = 1
+
+    torch.random.manual_seed(0)
+    q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True) / 10
+    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True) / 10
+    q.clamp_(-10, 10)
+    kv.clamp_(-10, 10)
+
+    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
+    for b in range(B):
+        for t in range(S):
+            for h in range(HKV):
+                i_i = torch.randperm(min(max(1, ((t + q_start_s_index) // KV_stride)), SKV))[:topk]
+                indices[b, t, h, : len(i_i)] = i_i
+
+    batch, seq_len, heads, dim_plus_tail_dim = q.shape
+    _, seq_len_kv, kv_group, _ = kv.shape
+    dim = 512
+    tail_dim = dim_plus_tail_dim - dim
+    CP0 = q_start_s_index == 0
+    kernel = sparse_mla_fwd(batch, seq_len, seq_len_kv, heads, dim, tail_dim, topk, KV_stride, kv_group, None, True, CP0)
+
+    def run_kernel_only():
+        kernel(q, kv, indices, torch.tensor([q_start_s_index], dtype=torch.int32, device="cuda"))
+
+    from tilelang.profiler import do_bench
+
+    return do_bench(
+        run_kernel_only,
+        rep=100,
+        warmup=10,
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--test_correctness", action="store_true")

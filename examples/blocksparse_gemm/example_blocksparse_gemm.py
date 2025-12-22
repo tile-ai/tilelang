@@ -6,6 +6,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.utils.tensor import get_tensor_supply, TensorSupplyType
 import torch
 from typing import List
+from tilelang.profiler import do_bench
 
 DEFAULT_BLOCK_M = 128
 DEFAULT_BLOCK_N = 128
@@ -173,6 +174,33 @@ def main():
     except AssertionError as e:
         print("❌ Verification FAILED: Results differ significantly.")
         print(e)
+
+
+def run_regression_perf():
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    a = torch.randn(M, K).cuda().half()
+    b = torch.randn(K, N).cuda().half()
+
+    kernel = blocksparse_matmul(
+        M,
+        N,
+        K,
+        block_M=DEFAULT_BLOCK_M,
+        block_N=DEFAULT_BLOCK_N,
+        block_K=DEFAULT_BLOCK_K,
+        num_stages=DEFAULT_NUM_STAGES,
+        thread_num=DEFAULT_THREAD_NUM,
+        enable_rasteration=DEFAULT_ENABLE_RASTERIZATION,
+    )
+    block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
+    mask_shape = (M // block_M, N // block_N, K // block_K)
+    block_mask = torch.rand(mask_shape).cuda() > sparsity
+
+    def run_kernel_only():
+        kernel(a, b, block_mask)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
 
 
 if __name__ == "__main__":

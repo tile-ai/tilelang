@@ -619,5 +619,78 @@ def main(argv=None):
     print(f"speedup: {triton_time / tilelang_time:.2f}x")
 
 
+def run_regression_perf(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--heads", type=int, default=1)
+    parser.add_argument("--seq_len", type=int, default=16384)
+    parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument("--vertical_size", type=int, default=1000)
+    parser.add_argument("--slash_size", type=int, default=200)
+    args = parser.parse_args(argv)
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = args.batch, args.heads, args.seq_len, args.head_dim
+    vertical_size, slash_size = args.vertical_size, args.slash_size
+    torch.manual_seed(0)
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    q_len = SEQ_LEN
+    vertical_size, slash_size = min(q_len, vertical_size), min(q_len, slash_size)
+    last_q = 64
+    qk = torch.einsum("bhmk, bhnk -> bhmn", q[:, :, -last_q:, :], k)
+    arange = torch.arange(last_q, device="cuda")
+    qk[:, :, :, -last_q:] = torch.where(arange[None, None, :, None] >= arange[None, None, None, :], qk[:, :, :, -last_q:], -torch.inf)
+    qk = torch.nn.functional.softmax(qk, dim=-1, dtype=torch.float32)
+    vertical = qk.sum(-2, keepdim=True)
+    vertical[..., :30] = torch.inf
+    vertical_topk = torch.topk(vertical, vertical_size, -1).indices
+    slash = sum_all_diagonal_matrix(qk)[..., : -last_q + 1]
+    slash[..., -30:] = torch.inf
+    slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
+    block_size_M = 64
+    block_size_N = 64
+    query, key, value = q, k, v
+    v_idx, s_idx = vertical_topk, slash
+    batch_size, num_heads, context_size, head_dim = query.shape
+    v_idx = v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=False)[0]
+    s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
+    from torch.utils.cpp_extension import load
+    import os
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sources = [os.path.join(current_dir, "ops", "kernels.cpp"), os.path.join(current_dir, "ops", "vertical_slash_index.cu")]
+    ops = load(name="convert", sources=sources, verbose=False)
+    convert_vertical_slash_indexes = ops.convert_vertical_slash_indexes
+    batch_size, num_heads, context_size, head_dim = query.shape
+    pad = (block_size_M - context_size) & (block_size_M - 1)
+    if pad == block_size_M:
+        pad = 0
+    query = torch.nn.functional.pad(query, [0, 0, 0, pad, 0, 0, 0, 0])
+    key = torch.nn.functional.pad(key, [0, 0, 0, pad, 0, 0, 0, 0])
+    value = torch.nn.functional.pad(value, [0, 0, 0, pad, 0, 0, 0, 0])
+    if head_dim not in [16, 32, 64, 128, 256, 512]:
+        target_dim = 2 ** math.ceil(math.log2(head_dim)) - head_dim
+        query = torch.nn.functional.pad(query, [0, target_dim, 0, 0, 0, 0, 0, 0])
+        key = torch.nn.functional.pad(key, [0, target_dim, 0, 0, 0, 0, 0, 0])
+        value = torch.nn.functional.pad(value, [0, target_dim, 0, 0, 0, 0, 0, 0])
+    v_idx = v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=False)[0]
+    s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
+    seqlens = torch.tensor([context_size] * query.shape[0], dtype=torch.int32, device=query.device)
+    block_count, block_offset, column_count, column_index = convert_vertical_slash_indexes(
+        seqlens,
+        v_idx,
+        s_idx,
+        context_size,
+        block_size_M,
+        block_size_N,
+    )
+    tl_kernel = _tl_vs_sparse_flashattn(batch_size, num_heads, context_size, head_dim, vertical_topk.shape[-1], slash.shape[-1])
+
+    def run_kernel_only():
+        tl_kernel(query, key, value, block_count, block_offset, column_count, column_index)
+
+    return do_bench(run_kernel_only, backend="cupti")
+
+
 if __name__ == "__main__":
     main()

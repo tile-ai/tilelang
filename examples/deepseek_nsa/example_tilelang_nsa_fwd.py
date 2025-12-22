@@ -171,5 +171,43 @@ def main():
     torch.testing.assert_close(ref, out, atol=1e-2, rtol=1e-2)
 
 
+def run_regression_perf():
+    B, SEQ_LEN, H, HQ, D, S, block_size, dtype, scale = 2, 64, 1, 16, 32, 1, 32, torch.float16, 0.1
+    kernel = native_sparse_attention(
+        batch=B,
+        heads=HQ,
+        seq_len=SEQ_LEN,
+        dim=D,
+        is_causal=True,
+        block_size=block_size,
+        groups=HQ // H,
+        selected_blocks=S,
+        scale=scale,
+    )
+    torch.random.manual_seed(0)
+    Q = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device="cuda").requires_grad_(True)
+    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    g_slc = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    g_swa = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    DO = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device="cuda")
+    block_indices = torch.full((B, SEQ_LEN, H, S), SEQ_LEN, dtype=torch.long, device="cuda")
+    block_counts = torch.zeros((B, SEQ_LEN, H), dtype=torch.long, device="cuda")
+    for b in range(B):
+        for t in range(SEQ_LEN):
+            for h in range(H):
+                i_i = torch.randperm(max(1, (t // block_size)))[:S]
+                block_indices[b, t, h, : len(i_i)] = i_i
+                block_counts[b, t, h] = (block_indices[b, t, h] != SEQ_LEN).sum().item()
+    block_indices = block_indices.sort(-1)[0]
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(Q, K, V, block_indices.to(torch.int32))
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     main()
