@@ -31,7 +31,7 @@ jobs:
     if: |
       github.repository_owner == 'tile-ai' &&
       github.event.issue.pull_request &&
-      (contains(github.event.comment.body, '/performance-report') || contains(github.event.comment.body, '/perf'))
+      (contains(github.event.comment.body, '@regression-perf'))
     runs-on: [self-hosted, nvidia]
     steps:
       - name: Checkout repository
