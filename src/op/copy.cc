@@ -776,7 +776,7 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
 bool CopyNode::CheckLDSMCopy(Target target) const {
   return TargetHasLdmatrix(target) &&
          (src.scope() == "shared.dyn" || src.scope() == "shared") &&
-         dst.scope() == "local.fragment";
+         IsFragmentBuffer(dst);
 }
 
 /**
@@ -791,7 +791,7 @@ bool CopyNode::CheckLDSMCopy(Target target) const {
  * otherwise.
  */
 bool CopyNode::CheckSTSMCopy(Target target) const {
-  return TargetHasStmatrix(target) && src.scope() == "local.fragment" &&
+  return TargetHasStmatrix(target) && IsFragmentBuffer(src) &&
          (dst.scope() == "shared.dyn" || dst.scope() == "shared");
 }
 
@@ -807,7 +807,7 @@ bool CopyNode::CheckSTSMCopy(Target target) const {
  */
 bool CopyNode::CheckTMemLoad(Target target) const {
   return TargetHasTmem(target) && src.scope() == "shared.tmem" &&
-         dst.scope() == "local.fragment";
+         IsFragmentBuffer(dst);
 }
 
 /**
@@ -821,7 +821,7 @@ bool CopyNode::CheckTMemLoad(Target target) const {
  * otherwise.
  */
 bool CopyNode::CheckTMemStore(Target target) const {
-  return TargetHasTmem(target) && src.scope() == "local.fragment" &&
+  return TargetHasTmem(target) && IsFragmentBuffer(src) &&
          dst.scope() == "shared.tmem";
 }
 
@@ -950,8 +950,8 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
   For vectorized_thread_loop;
   auto par_op = ParallelOp(transformed_loop);
 
-  if (is_cpu_target || dst.scope() == "local" || src.scope() == "local") {
-    if (src.scope() == "local" && dst.scope() != "local") {
+  if (is_cpu_target || IsLocalBuffer(src) || IsLocalBuffer(dst)) {
+    if (IsLocalBuffer(src) && !IsLocalBuffer(dst)) {
       LOG(WARNING) << "Copy from local buffer `" << src->name << "` to "
                    << dst.scope() << " buffer `" << dst->name
                    << "` may cause conflicted write.";
@@ -1231,9 +1231,9 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   bool dst_needs_unpack =
       16 == dst->dtype.bits(); // if needs .unpack::16b when is_st
 
-  if (src.scope() == "shared.tmem" && dst.scope() == "local.fragment") {
+  if (src.scope() == "shared.tmem" && IsFragmentBuffer(dst)) {
     is_ld = true;
-  } else if (src.scope() == "local.fragment" && dst.scope() == "shared.tmem") {
+  } else if (IsFragmentBuffer(src) && dst.scope() == "shared.tmem") {
     is_st = true;
   } else if (src.scope() == "shared.dyn" && dst.scope() == "shared.tmem") {
     is_cp = true;
@@ -2068,8 +2068,7 @@ void CopyNode::CollectFragmentLayouts(const PrimExpr &expr,
                                       Map<Buffer, Layout> &result_map) const {
   PostOrderVisit(expr, [&](const ObjectRef &node) {
     if (auto bl = node.as<BufferLoadNode>()) {
-      if (bl->buffer.scope() == "local.fragment" &&
-          !existing_layouts.count(bl->buffer) &&
+      if (IsFragmentBuffer(bl->buffer) && !existing_layouts.count(bl->buffer) &&
           !result_map.count(bl->buffer)) {
         auto f = Fragment::FullyReplicated(bl->buffer->shape, thread_extent);
         result_map.Set(bl->buffer, f->BindThreadRange(thread_bounds));

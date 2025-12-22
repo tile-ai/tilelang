@@ -130,23 +130,23 @@ def mqa_attn_return_logits(
 
             seq_len_i = bx * block_Q
 
-            cu_k_s_min = T.alloc_local([1], index_dtype)
-            cu_k_e_max = T.alloc_local([1], index_dtype)
+            cu_k_s_min = T.alloc_var(index_dtype)
+            cu_k_e_max = T.alloc_var(index_dtype)
 
-            cu_k_s_min[0] = 2147483647
-            cu_k_e_max[0] = -2147483648
+            cu_k_s_min = 2147483647
+            cu_k_e_max = -2147483648
 
             for bq_i in T.serial(block_Q):
-                cu_k_s_min[0] = T.min(cu_k_s_min[0], T.min(CuSeqLenKS[seq_len_i + bq_i], seq_len_kv))
+                cu_k_s_min = T.min(cu_k_s_min, T.min(CuSeqLenKS[seq_len_i + bq_i], seq_len_kv))
             for bq_i in T.serial(block_Q):
-                cu_k_e_max[0] = T.max(cu_k_e_max[0], T.min(CuSeqLenKE[seq_len_i + bq_i], seq_len_kv))
+                cu_k_e_max = T.max(cu_k_e_max, T.min(CuSeqLenKE[seq_len_i + bq_i], seq_len_kv))
 
             T.copy(IndexQ[seq_len_i * heads, 0], index_q_shared)
             T.copy(Weights[seq_len_i, 0], weights)
 
-            for nbn_i in T.Pipelined(T.ceildiv(cu_k_e_max[0] - cu_k_s_min[0], block_N), num_stages=num_stages):
-                T.copy(IndexK[cu_k_s_min[0] + nbn_i * block_N, 0], index_k_shared)
-                T.copy(IndexKScale[cu_k_s_min[0] + nbn_i * block_N], index_k_scale_fragment)
+            for nbn_i in T.Pipelined(T.ceildiv(cu_k_e_max - cu_k_s_min, block_N), num_stages=num_stages):
+                T.copy(IndexK[cu_k_s_min + nbn_i * block_N, 0], index_k_shared)
+                T.copy(IndexKScale[cu_k_s_min + nbn_i * block_N], index_k_scale_fragment)
 
                 T.gemm(
                     index_k_shared,
@@ -165,7 +165,7 @@ def mqa_attn_return_logits(
                 T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
 
                 for bq_i, bn_i in T.Parallel(block_Q, block_N):
-                    Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = logits[bn_i, bq_i]
+                    Logits[seq_len_i + bq_i, cu_k_s_min + nbn_i * block_N + bn_i] = logits[bn_i, bq_i]
 
     return mqa_attn_return_logits_kernel
 
@@ -189,15 +189,13 @@ def clean_logits_(
     ):
         with T.Kernel(seq_len, threads=threads) as bx:
             tx = T.thread_binding(0, threads, thread="threadIdx.x")
-            cu_k_s = T.alloc_local([1], indices_dtype)
-            cu_k_e = T.alloc_local([1], indices_dtype)
-            cu_k_s[0] = CuSeqLenKS[bx]
-            cu_k_e[0] = CuSeqLenKE[bx]
+            cu_k_s = CuSeqLenKS[bx]
+            cu_k_e = CuSeqLenKE[bx]
 
             for n_i in T.Pipelined(T.ceildiv(seq_len_kv, block_K)):
                 for k_i in T.serial(block_K // threads):
                     idx = n_i * block_K + k_i * threads + tx
-                    if idx < cu_k_s[0] or idx >= cu_k_e[0]:
+                    if idx < cu_k_s or idx >= cu_k_e:
                         Logits[bx, idx] = -T.infinity(dtype)
 
     return clean_logits_kernel

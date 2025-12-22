@@ -130,9 +130,9 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                 scores_scale = T.alloc_fragment([block_M], accum_dtype)
                 scores_sum = T.alloc_fragment([block_M], accum_dtype)
                 logsum = T.alloc_fragment([block_M], accum_dtype)
-                block_count = T.alloc_local([1], int_dtype)
+                block_count = T.alloc_var(dtype=int_dtype)
                 block_offset = T.alloc_shared([slash_size_round], int_dtype, scope="shared")
-                column_count = T.alloc_local([1], int_dtype)
+                column_count = T.alloc_var(dtype=int_dtype)
                 column_index = T.alloc_shared([vertical_size_round], int_dtype, scope="shared")
 
                 T.create_list_of_mbarrier([128] * 9)
@@ -143,8 +143,8 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                     }
                 )
 
-                block_count[0] = BlockCount[bz, by, bx]
-                column_count[0] = ColumnCount[bz, by, bx]
+                block_count = BlockCount[bz, by, bx]
+                column_count = ColumnCount[bz, by, bx]
 
                 for vi in T.Parallel(slash_size_round):
                     if vi < slash_size:
@@ -160,7 +160,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                     T.annotate_producer_reg_dealloc()
                     T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
                     T.mbarrier_arrive(mbarrier=8)
-                    for bi in T.serial(block_count[0]):
+                    for bi in T.serial(block_count):
                         k = block_offset[bi]
                         T.mbarrier_wait_parity(mbarrier=bi % 2 + 4, parity=(((bi & 3) >> 1) ^ 1))
                         T.copy(K[bz, by, k : k + block_N, :], K_shared[bi % 2, :, :])
@@ -174,7 +174,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                     T.fill(logsum, 0)
                     T.fill(scores_max, -T.infinity(accum_dtype))
                     T.mbarrier_wait_parity(mbarrier=8, parity=0)
-                    for bi in T.serial(block_count[0]):
+                    for bi in T.serial(block_count):
                         k = block_offset[bi]
                         for i, j in T.Parallel(block_M, block_N):
                             acc_s[i, j] = T.if_then_else(bx * block_M + i >= k + j, 0, -T.infinity(acc_s.dtype))
@@ -207,12 +207,12 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                         for i in T.Parallel(block_M):
                             logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
 
-                    if column_count[0] != 0:
-                        Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count[0], 0, bz, by)
-                        for bi in T.serial(T.ceildiv(column_count[0], block_N) - 1):
+                    if column_count != 0:
+                        Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, 0, bz, by)
+                        for bi in T.serial(T.ceildiv(column_count, block_N) - 1):
                             k = bi * block_N
                             if bi % 2 == 0:
-                                Prefetch(K, V, K_shared_2, V_shared_2, column_index, column_count[0], k + block_N, bz, by)
+                                Prefetch(K, V, K_shared_2, V_shared_2, column_index, column_count, k + block_N, bz, by)
 
                                 Compute(
                                     acc_s,
@@ -221,7 +221,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                     scores_max,
                                     scores_max_prev,
                                     k,
-                                    column_count[0],
+                                    column_count,
                                     Q_shared,
                                     K_shared_1,
                                     V_shared_1,
@@ -231,7 +231,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                     1,
                                 )
                             else:
-                                Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count[0], k + block_N, bz, by)
+                                Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, k + block_N, bz, by)
 
                                 Compute(
                                     acc_s,
@@ -240,7 +240,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                     scores_max,
                                     scores_max_prev,
                                     k,
-                                    column_count[0],
+                                    column_count,
                                     Q_shared,
                                     K_shared_2,
                                     V_shared_2,
@@ -249,15 +249,15 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                     logsum,
                                     1,
                                 )
-                        if T.ceildiv(column_count[0], block_N) % 2 == 0:
+                        if T.ceildiv(column_count, block_N) % 2 == 0:
                             Compute(
                                 acc_s,
                                 acc_s_cast,
                                 acc_o,
                                 scores_max,
                                 scores_max_prev,
-                                T.ceildiv(column_count[0], block_N) * block_N - block_N,
-                                column_count[0],
+                                T.ceildiv(column_count, block_N) * block_N - block_N,
+                                column_count,
                                 Q_shared,
                                 K_shared_2,
                                 V_shared_2,
@@ -273,8 +273,8 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                 acc_o,
                                 scores_max,
                                 scores_max_prev,
-                                T.ceildiv(column_count[0], block_N) * block_N - block_N,
-                                column_count[0],
+                                T.ceildiv(column_count, block_N) * block_N - block_N,
+                                column_count,
                                 Q_shared,
                                 K_shared_1,
                                 V_shared_1,

@@ -325,7 +325,7 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
                                      InferLevel level) const {
   if (T.layout_map.count(src) && T.layout_map.count(dst)) {
-    if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
+    if (IsFragmentBuffer(src) && IsFragmentBuffer(dst)) {
       const FragmentNode *src_layout = T.layout_map[src].as<FragmentNode>();
       const FragmentNode *dst_layout = T.layout_map[dst].as<FragmentNode>();
       if (src_layout && dst_layout) {
@@ -431,14 +431,14 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       StmtExprVisitor::VisitStmt_(op);
     }
     void VisitStmt_(const BufferStoreNode *op) final {
-      if (op->buffer.scope() == "local.fragment") {
+      if (IsFragmentBuffer(op->buffer)) {
         indice_map.Set(op->buffer, op->indices);
         writes.insert(op->buffer);
       }
       StmtExprVisitor::VisitStmt_(op);
     }
     void VisitExpr_(const BufferLoadNode *op) final {
-      if (op->buffer.scope() == "local.fragment") {
+      if (IsFragmentBuffer(op->buffer)) {
         indice_map.Set(op->buffer, op->indices);
       }
       StmtExprVisitor::VisitExpr_(op);
@@ -473,7 +473,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     int best_rank = -1;
     for (auto kv : C.indice_map) {
       const Buffer &buf = kv.first;
-      if (buf.scope() != "local.fragment")
+      if (!IsFragmentBuffer(buf))
         continue;
       if (!args.layout_map.count(buf))
         continue;

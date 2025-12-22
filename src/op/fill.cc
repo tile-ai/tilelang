@@ -156,7 +156,7 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * @return Stmt The lowered TIR statement implementing the fill.
  */
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (dst.scope() == "local.fragment") {
+  if (IsFragmentBuffer(dst)) {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target,
                          T.thread_bounds,
@@ -174,12 +174,11 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                         vectorized_thread_loop);
     }
     return vectorized_thread_loop;
-  } else if (dst.scope() == "local") {
+  } else if (IsLocalBuffer(dst)) {
     auto init_loop = MakeSIMTLoop(analyzer);
     auto vectorized_thread_loop = VectorizeLoop(init_loop, analyzer);
     return vectorized_thread_loop;
-  } else if (dst.scope() == "shared.dyn" || dst.scope() == "shared" ||
-             dst.scope() == "global") {
+  } else if (IsSharedBuffer(dst) || IsGlobalBuffer(dst)) {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target,
                          T.thread_bounds,

@@ -124,40 +124,34 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
             with T.Kernel(heads, batch, threads=128) as (by, bz):
                 po_local = T.alloc_fragment([dim_v], accum_dtype)
                 o_accum_local = T.alloc_fragment([dim_v], accum_dtype)
-                lse_local_split = T.alloc_local([1], accum_dtype)
-                lse_logsum_local = T.alloc_local([1], accum_dtype)
-                lse_max_local = T.alloc_local([1], accum_dtype)
-                scale_local = T.alloc_local([1], accum_dtype)
-                max_split = T.alloc_local([1], T.int32)
-
-                T.annotate_layout(
-                    {
-                        lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-                    }
-                )
+                lse_local_split = T.alloc_var(accum_dtype)
+                lse_logsum_local = T.alloc_var(accum_dtype)
+                lse_max_local = T.alloc_var(accum_dtype)
+                scale_local = T.alloc_var(accum_dtype)
+                max_split = T.alloc_var(T.int32)
 
                 T.clear(lse_logsum_local)
                 T.clear(o_accum_local)
-                lse_max_local[0] = -T.infinity(accum_dtype)
+                lse_max_local = -T.infinity(accum_dtype)
                 for k in T.serial(num_split):
-                    lse_local_split[0] = glse[bz, by, k]
-                    if lse_local_split[0] != 0:
-                        max_split[0] = k
-                        lse_max_local[0] = T.max(lse_max_local[0], glse[bz, by, k])
+                    lse_local_split = glse[bz, by, k]
+                    if lse_local_split != 0:
+                        max_split = k
+                        lse_max_local = T.max(lse_max_local, glse[bz, by, k])
 
                 for k in T.Pipelined(num_split, num_stages=1):
-                    if k <= max_split[0]:
-                        lse_local_split[0] = glse[bz, by, k]
-                        lse_logsum_local[0] += T.exp2(lse_local_split[0] - lse_max_local[0])
-                lse_logsum_local[0] = T.log2(lse_logsum_local[0]) + lse_max_local[0]
+                    if k <= max_split:
+                        lse_local_split = glse[bz, by, k]
+                        lse_logsum_local += T.exp2(lse_local_split - lse_max_local)
+                lse_logsum_local = T.log2(lse_logsum_local) + lse_max_local
                 for k in T.serial(num_split):
-                    if k <= max_split[0]:
+                    if k <= max_split:
                         for i in T.Parallel(dim_v):
                             po_local[i] = Output_partial[bz, by, k, i]
-                        lse_local_split[0] = glse[bz, by, k]
-                        scale_local[0] = T.exp2(lse_local_split[0] - lse_logsum_local[0])
+                        lse_local_split = glse[bz, by, k]
+                        scale_local = T.exp2(lse_local_split - lse_logsum_local)
                         for i in T.Parallel(dim_v):
-                            o_accum_local[i] += po_local[i] * scale_local[0]
+                            o_accum_local[i] += po_local[i] * scale_local
                 for i in T.Parallel(dim_v):
                     Output[bz, by, i] = o_accum_local[i]
 

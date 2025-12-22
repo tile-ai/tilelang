@@ -321,12 +321,11 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: T.dtype = T.flo
         dsinks: T.Tensor(shape, dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block), batch, threads=256) as (bx, by, bz):
-            sink = T.alloc_local([1], dtype)
             lse_fragment = T.alloc_fragment([block], accum_dtype)
             delta_fragment = T.alloc_fragment([block], accum_dtype)
             dsink_fragment = T.alloc_fragment([block], dtype)
 
-            sink[0] = Sinks[bx]
+            sink = Sinks[bx]
             T.copy(lse[bz, bx, by * block : (by + 1) * block], lse_fragment)
             T.copy(Delta[bz, bx, by * block : (by + 1) * block], delta_fragment)
             for i in T.Parallel(block):

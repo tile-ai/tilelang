@@ -112,7 +112,7 @@ def sparse_mla_fwd(
             alpha_local = T.alloc_fragment([H_per_block], accum_dtype)
             m_i = T.alloc_fragment([H_per_block], accum_dtype)
             m_i_prev = T.alloc_fragment([H_per_block], accum_dtype)
-            indices_local = T.alloc_local([1], indices_dtype)
+            indices_local = T.alloc_var(indices_dtype)
 
             # TODO: Multi buffer
             bar_q = T.alloc_barrier(arrive_count=384)

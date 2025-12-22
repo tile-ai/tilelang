@@ -380,7 +380,7 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
   if (level >= InferLevel::kStrict)
     return {};
 
-  if (src.scope() == "local.fragment" && dst.scope() == "local.fragment" &&
+  if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
       T.layout_map.count(src)) {
     auto src_layout = T.layout_map[src].as<Fragment>().value();
 
@@ -518,8 +518,7 @@ CumSumOp::CumSumOp(Array<PrimExpr> args) {
 }
 
 Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (this->src.scope() == "local.fragment" &&
-      this->dst.scope() == "local.fragment") {
+  if (IsFragmentBuffer(this->src) && IsFragmentBuffer(this->dst)) {
     LOG(FATAL) << "CumSum for fragment not implemented, please raise an issue "
                   "if you need this feature.";
   } else if (this->src.scope() == "shared.dyn" ||

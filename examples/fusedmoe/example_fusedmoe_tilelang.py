@@ -155,18 +155,15 @@ def moe_forward_tilelang_routed(
             gate_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
             up_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
 
-            cur_group_idx = T.alloc_local([1], T.int32)
-            cur_group_size = T.alloc_local([1], T.int32)
-
             T.use_swizzle(10, enable=True)
 
             m_start_padded = bx * block_token
 
-            cur_group_idx[0] = group_idx_for_bx[bx]
+            cur_group_idx = group_idx_for_bx[bx]
 
-            cur_group_size[0] = group_sizes[cur_group_idx[0]]
-            m_start = m_start_padded - group_padded_offsets[cur_group_idx[0]] + group_offsets[cur_group_idx[0]]
-            actual_rows = T.max(0, T.min(block_token, cur_group_size[0] - (m_start_padded - group_padded_offsets[cur_group_idx[0]])))
+            cur_group_size = group_sizes[cur_group_idx]
+            m_start = m_start_padded - group_padded_offsets[cur_group_idx] + group_offsets[cur_group_idx]
+            actual_rows = T.max(0, T.min(block_token, cur_group_size - (m_start_padded - group_padded_offsets[cur_group_idx])))
 
             T.clear(gate_logits_local)
             T.clear(up_logits_local)
@@ -179,7 +176,7 @@ def moe_forward_tilelang_routed(
                 )
                 T.copy(
                     routed_expert_gate[
-                        cur_group_idx[0], by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden
+                        cur_group_idx, by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden
                     ],
                     routed_expert_gate_shared,
                     coalesced_width=coalesced_width,
@@ -187,7 +184,7 @@ def moe_forward_tilelang_routed(
                 T.gemm(input_shared, routed_expert_gate_shared, gate_logits_local, k_pack=k_pack, transpose_B=True)
                 T.copy(
                     routed_expert_up[
-                        cur_group_idx[0], by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden
+                        cur_group_idx, by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden
                     ],
                     routed_expert_up_shared,
                     coalesced_width=coalesced_width,
@@ -208,18 +205,15 @@ def moe_forward_tilelang_routed(
             routed_expert_down_shared = T.alloc_shared((block_dhidden, block_dexpert), dtype=dtype)
             output_local = T.alloc_fragment((block_token, block_dhidden), dtype=accum_dtype)
 
-            cur_group_idx = T.alloc_local([1], T.int32)
-            cur_group_size = T.alloc_local([1], T.int32)
-
             T.use_swizzle(10, enable=True)
 
             m_start_padded = bx * block_token
 
-            cur_group_idx[0] = group_idx_for_bx[bx]
+            cur_group_idx = group_idx_for_bx[bx]
 
-            cur_group_size[0] = group_sizes[cur_group_idx[0]]
-            m_start = m_start_padded - group_padded_offsets[cur_group_idx[0]] + group_offsets[cur_group_idx[0]]
-            actual_rows = T.max(0, T.min(block_token, cur_group_size[0] - (m_start_padded - group_padded_offsets[cur_group_idx[0]])))
+            cur_group_size = group_sizes[cur_group_idx]
+            m_start = m_start_padded - group_padded_offsets[cur_group_idx] + group_offsets[cur_group_idx]
+            actual_rows = T.max(0, T.min(block_token, cur_group_size - (m_start_padded - group_padded_offsets[cur_group_idx])))
 
             T.clear(output_local)
 
@@ -231,7 +225,7 @@ def moe_forward_tilelang_routed(
                 )
                 T.copy(
                     routed_expert_down[
-                        cur_group_idx[0], by * block_dhidden : (by + 1) * block_dhidden, k * block_dexpert : (k + 1) * block_dexpert
+                        cur_group_idx, by * block_dhidden : (by + 1) * block_dhidden, k * block_dexpert : (k + 1) * block_dexpert
                     ],
                     routed_expert_down_shared,
                     coalesced_width=coalesced_width,

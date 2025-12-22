@@ -108,15 +108,14 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                 scores_scale = T.alloc_fragment([block_M], accum_dtype)
                 scores_sum = T.alloc_fragment([block_M], accum_dtype)
                 logsum = T.alloc_fragment([block_M], accum_dtype)
-                block_mask = T.alloc_local([downsample_len], block_mask_dtype)
+                block_mask = T.alloc_fragment([downsample_len], block_mask_dtype)
 
                 T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
                 T.fill(acc_o, 0)
                 T.fill(logsum, 0)
                 T.fill(scores_max, -T.infinity(accum_dtype))
 
-                for vj in T.serial(downsample_len):
-                    block_mask[vj] = BlockSparseMask[bz, by, bx, vj]
+                T.copy(BlockSparseMask[bz, by, bx, :], block_mask)
 
                 loop_range = T.ceildiv(seq_kv, block_N)
 
