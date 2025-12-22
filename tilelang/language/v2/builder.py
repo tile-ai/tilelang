@@ -11,11 +11,12 @@ from tvm.tir.stmt import BufferRegion
 from tvm.tir.stmt_functor import substitute
 from .ast import BaseBuilder, IRGenerator, eval_op, mutate
 from .utils import construct_strides
+from tilelang.utils import side_effect
 import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 
-from tvm.tir.expr import BufferLoad, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
+from tvm.tir.expr import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
 from collections.abc import Hashable
 from collections.abc import Sequence
@@ -371,6 +372,23 @@ class Builder(BaseBuilder):
 
     def bind(self, name, value, annot=BaseBuilder.empty):
         self.check_continue_break()
+
+        # in prim func, before T.match_buffer
+        # user may write some shape size expression like
+        #   ```py
+        #   M = T.const('M')
+        #   M_2 = M * 2
+        #   A = T.match_buffer(A, (M, M_2))
+        #   ```
+        # If not deal properly, M_2 will be treated as a LetStmt, and causes error in match_buffer
+        # here we do a quick check in prim_func_frame, if the value is pure expr, we directly return it
+        if (
+            isinstance(value, PrimExpr)
+            and isinstance(self.frames[-1], tir.frame.PrimFuncFrame)
+            and side_effect(value) <= CallEffectKind.Pure.value
+        ):
+            return value
+
         locals = self.get_parent_locals()
         orig_value = locals.get(name, None)
 
@@ -652,8 +670,8 @@ class Builder(BaseBuilder):
             return serial
         raise ValueError(f"Unknown override: {name}")
 
-    def constexpr(self, name: str) -> Var:
-        var = tir.Var(name, "int32")
+    def constexpr(self, name: str, dtype: str = "int32") -> Var:
+        var = tir.Var(name, dtype)
         self.constexpr_var.add(var)
         return var
 
@@ -805,16 +823,16 @@ def get_type_hints(func):
     return hints
 
 
-def const(name: str) -> tuple[Var, ...]:
+def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
     builder = Builder.current()
     if "," in name:
         names = re.split(r"\s*,\s*", name)
-        return [builder.constexpr(n) for n in names]
+        return tuple(builder.constexpr(n, dtype) for n in names)
     if " " in name:
         names = re.split(r"\s+", name)
-        return [builder.constexpr(n) for n in names]
+        return tuple(builder.constexpr(n, dtype) for n in names)
     else:
-        return builder.constexpr(name)
+        return builder.constexpr(name, dtype)
 
 
 @dataclass
@@ -832,6 +850,18 @@ class TirTemplate(Generic[_P, _T]):
             for i, s in enumerate(v.strides):
                 if s in constexpr and s not in matcher:
                     matcher[s] = (k.name, "stride", i)
+        for s in constexpr:
+            if s not in matcher:
+                shapes = {k: v.shape for k, v in prim_func.buffer_map.items()}
+                strides = {k: v.strides for k, v in prim_func.buffer_map.items()}
+                raise RuntimeError(
+                    f"Constexpr variable `{s}` is not used in any buffer shape or stride.\n"
+                    "At least one **DIRECT** usage is required. Please check:\n"
+                    "(1) the variable is not used\n"
+                    f"(2) all uses are indirect, e.g. {s} * 2, {s} * 3. (you can replace them with separate constexpr variables)\n"
+                    f"Buffer shapes: {shapes}\n"
+                    f"Buffer strides: {strides}"
+                )
         return cls(prim_func=prim_func, matcher=matcher)
 
     def _parse_phase2_key(self, **kwargs):
