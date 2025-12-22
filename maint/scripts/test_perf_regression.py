@@ -55,23 +55,79 @@ def draw(df):
     if len(df) == 0:
         return
 
-    plt.figure(figsize=(max(len(df) * 2.2, 6), 20))
-    sns.set_theme(style="whitegrid", font_scale=0.9)
+    num_items = len(df)
+    calculated_width = max(8, num_items * 0.6) 
+    calculated_height = 10 # A reasonable fixed height 
+
+    plt.figure(figsize=(calculated_width, calculated_height))
+    
+    font_scale = 1.1 if num_items > 20 else 0.9
+    sns.set_theme(style="whitegrid", font_scale=font_scale)
+
+    df["Type"] = df["Speedup"].apply(lambda x: "Speedup" if x >= 1.0 else "Slowdown")
+    palette = {"Speedup": "#4CAF50", "Slowdown": "#F44336"} # Green for good, Red for bad
+
+    ax = sns.barplot(
+        data=df, 
+        x="File", 
+        y="Speedup", 
+        hue="Type", 
+        palette=palette,
+        dodge=False # Don't split bars based on hue
+    )
+    # Remove the hue legend as it's self-explanatory
+    if ax.get_legend():
+        ax.get_legend().remove()
+    # ---------------------------
+
     top3_idx = df.nlargest(min(3, len(df)), "Speedup").index
     bot3_idx = df.nsmallest(min(3, len(df)), "Speedup").index
     label_idx = set(top3_idx.tolist() + bot3_idx.tolist())
 
-    for i, val in enumerate(df["Speedup"]):
+    # Add the text labels over the bars
+    # We need to iterate through the patches (the actual bars drawn)
+    for i, patch in enumerate(ax.patches):
         if i in label_idx:
-            plt.text(i, val + 0.02, f"{val:.2f}x", ha="center", va="bottom", color="red", fontsize=8, fontweight="bold")
+            # Get X and Y coordinates from the bar itself
+            x_coords = patch.get_x() + patch.get_width() / 2
+            y_coords = patch.get_height()
+            
+            val = df.iloc[i]["Speedup"]
+            
+            plt.text(
+                x_coords, 
+                y_coords + 0.02, 
+                f"{val:.2f}x", 
+                ha="center", 
+                va="bottom", 
+                color="black", # Black is usually easier to read than red on white
+                fontsize=10, 
+                fontweight="bold"
+            )
 
-    plt.xticks(range(len(df)), df["File"], rotation=70, ha="right", fontsize=12)
-    plt.ylabel("Current Speedup vs Original", fontsize=14)
-    plt.title("Current Speedup vs Original", fontsize=14, fontweight="bold")
-    plt.ylim(0, max(df["Speedup"]) * 1.2)
+    plt.xticks(rotation=70, ha="right", fontsize=11)
+    plt.ylabel("Speedup Ratio (Higher is better)", fontsize=13)
+    plt.xlabel("Benchmark File", fontsize=13)
+    plt.title("Current Speedup vs Original", fontsize=15, fontweight="bold")
+    
+    plt.axhline(y=1.0, color='gray', linestyle='--', linewidth=1)
+
+    max_val = df["Speedup"].max()
+    plt.ylim(0, max(max_val * 1.15, 1.1)) # Ensure at least a little headroom above 1.0
+
     sns.despine()
+    
     plt.tight_layout()
-    plt.savefig(OUT_PNG, dpi=300)
+    
+    print(f"Saving plot to {OUT_PNG} with dimensions ({calculated_width:.1f}x{calculated_height:.1f} inches)")
+    plt.savefig(OUT_PNG, dpi=300, bbox_inches='tight')
+    
+    # Optional: Also save as SVG for perfect clarity
+    # svg_path = OUT_PNG.replace(".png", ".svg")
+    # plt.savefig(svg_path, bbox_inches='tight')
+    # print(f"Also saved SVG version to {svg_path}")
+
+    plt.close()
 
 
 env = {"TL_PERF_REGRESSION_FORMAT": "json"}
