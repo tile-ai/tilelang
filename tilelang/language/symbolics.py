@@ -8,7 +8,7 @@ from tilelang.utils import deprecated
 __all__ = ["dynamic", "symbolic"]
 
 
-def dynamic(name: str, dtype: str = "int32"):
+def dynamic(name: str, dtype: str = "int32") -> tuple[tir.Var,...] | tir.Var:
     """
     Create a TIR dynamic symbolic variable.
 

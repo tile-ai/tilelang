@@ -221,7 +221,7 @@ class Builder(BaseBuilder):
         self.frames[pos] = ExitedMacroFrame()
         self.name_inside_frame, self.macro_arg_annot = save
 
-    def get(self):
+    def get(self) -> PrimFunc:
         return self.ir_builder.get()
 
     def find_frame_idx(self, frame: type | tuple[type, ...], start=0) -> int | None:
@@ -885,7 +885,11 @@ class TirTemplate(Generic[_P, _T]):
             if ty == "shape":
                 result.append(kwargs[k].shape[i])
             if ty == "stride":
-                result.append(kwargs[k].strides()[i])
+                v = kwargs[k]
+                if isinstance(v, Buffer):
+                    result.append(v.strides[i])
+                else:
+                    result.append(kwargs[k].strides()[i])
         return tuple(result)
 
     def get_tir(self, **kwargs):
@@ -893,7 +897,8 @@ class TirTemplate(Generic[_P, _T]):
         subs = {name: value for name, value in zip(self.matcher, values)}
         result = substitute_primfunc(self.prim_func, subs)
         result.orig_func = self.prim_func.orig_func
-        result.out_idx_override = self.prim_func.out_idx_override
+        if hasattr(self.prim_func, "out_idx_override"):
+            result.out_idx_override = self.prim_func.out_idx_override
         return result
 
 
@@ -902,6 +907,7 @@ class LazyJITFunc(Generic[_P, _T]):
     orig_func: Callable[_P, _T]
     arg_names: list[str]
     tensor_args: dict[str, Buffer | Var]
+    tensor_args_defaults: dict[str, Any]
     ir_gen: IRGenerator[_P, _T]
 
     def __post_init__(self):
@@ -914,6 +920,8 @@ class LazyJITFunc(Generic[_P, _T]):
         for k in self.tensor_args:
             if k in kwargs:
                 tensor_args[k] = kwargs.pop(k)
+            elif k in self.tensor_args_defaults:
+                tensor_args[k] = self.tensor_args_defaults[k]
         p1_key = tuple(sorted(kwargs.items()))
         return p1_key, tensor_args, kwargs
 
@@ -926,7 +934,8 @@ class LazyJITFunc(Generic[_P, _T]):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
             pf.orig_func = self.orig_func
-            pf.out_idx_override = builder.out_idx
+            if builder.out_idx:
+                pf.out_idx_override = builder.out_idx
             tir_temp = TirTemplate.create(pf, builder.constexpr_var)
             self.p1_cache[p1_key] = tir_temp
         p2_key = tir_temp._parse_phase2_key(**tensor_args)
@@ -966,18 +975,23 @@ def prim_func(func: Callable[_P, _T] = None, *, lazy_jit=False) -> PrimFunc[_P, 
     def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
         sig = inspect.signature(func)
         ir_gen = mutate(func)
+        func_annot = get_type_hints(func)
+        annot = {}
         for param in sig.parameters.values():
             if param.kind == param.POSITIONAL_ONLY:
                 raise TypeError(f"PrimFunc does not support positional-only parameters: `{param.name}`")
-        annot = get_type_hints(func)
-        annot.update(ir_gen.extra_type_hints)
+            if param.name in ir_gen.extra_type_hints:
+                annot[param.name] = ir_gen.extra_type_hints[param.name]
+            elif param.name in func_annot:
+                annot[param.name] = func_annot[param.name]
         for k in annot:
             if not isinstance(annot[k], type) and callable(annot[k]):
                 annot[k] = annot[k]()
         if lazy_jit:
             arg_names = list(sig.parameters.keys())
             tensor_args = {k: v for k, v in annot.items() if isinstance(v, (Buffer, Var))}
-            return LazyJITFunc(func, arg_names, tensor_args, ir_gen)
+            tensor_args_defaults = {k: sig.parameters[k].default for k in tensor_args if sig.parameters[k].default is not sig.parameters[k].empty}
+            return LazyJITFunc(func, arg_names, tensor_args, tensor_args_defaults, ir_gen)
         else:
             try:
                 builder = Builder()
@@ -985,7 +999,8 @@ def prim_func(func: Callable[_P, _T] = None, *, lazy_jit=False) -> PrimFunc[_P, 
                     ir_gen.gen(builder)(**annot)
                 prim_func = builder.get()
                 prim_func.orig_func = func
-                prim_func.out_idx_override = builder.out_idx
+                if builder.out_idx:
+                    prim_func.out_idx_override = builder.out_idx
                 return prim_func
             except Exception as e:
                 logger.fatal(f"Failed to build prim_func from {func.__name__}\nargs={annot}\nsource={ir_gen.source}")
