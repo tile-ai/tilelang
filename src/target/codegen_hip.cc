@@ -978,7 +978,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     // arg 11: C accumulator index
 
     ICHECK(op->args.size() == 12U)
-        << "Invalid number of arguments for tvm_mfma";
+        << "Invalid number of arguments for tvm_mmac";
     std::string prefix = Downcast<StringImm>(op->args[0])->value;
     std::string A_layout = Downcast<StringImm>(op->args[1])->value;
     std::string B_layout = Downcast<StringImm>(op->args[2])->value;
