@@ -509,6 +509,7 @@ class DSLMutator(ast.NodeTransformer):
             if inner.attr in ["Tensor", "StridedTensor", "ptr"]:
                 eval_res = self._try_eval(inner)
                 from tilelang.language.proxy import TensorProxy, StridedTensorProxy, ptr
+
                 if isinstance(eval_res, (TensorProxy, StridedTensorProxy)) or eval_res is ptr:
                     self.extra_type_hints[name] = ptr
                     return

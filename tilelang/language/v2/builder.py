@@ -990,7 +990,9 @@ def prim_func(func: Callable[_P, _T] = None, *, lazy_jit=False) -> PrimFunc[_P, 
         if lazy_jit:
             arg_names = list(sig.parameters.keys())
             tensor_args = {k: v for k, v in annot.items() if isinstance(v, (Buffer, Var))}
-            tensor_args_defaults = {k: sig.parameters[k].default for k in tensor_args if sig.parameters[k].default is not sig.parameters[k].empty}
+            tensor_args_defaults = {
+                k: sig.parameters[k].default for k in tensor_args if sig.parameters[k].default is not sig.parameters[k].empty
+            }
             return LazyJITFunc(func, arg_names, tensor_args, tensor_args_defaults, ir_gen)
         else:
             try:
