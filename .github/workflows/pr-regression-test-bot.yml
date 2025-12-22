@@ -60,7 +60,7 @@ jobs:
       - name: Install main version (old)
         run: |
           echo "Check files to be deleted!"
-          git clean -dxf -e new/
+          git clean -dxf -e new/ -e .cache/
           echo "Delete files completed!"
           git checkout main
           python -m venv old
@@ -82,10 +82,10 @@ jobs:
           cat regression_result.md >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Upload benchmark image as artifact
+      - name: Upload result image as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: perfbench-${{ github.run_id }}
+          name: perf-regression-${{ github.run_id }}
           path: regression_result.png
 
       - name: Post test results as PR comment
