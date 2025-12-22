@@ -11,8 +11,9 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true # always cancel in-progress
+  # Use the issue/PR number to differentiate between different PRs
+  group: "${{ github.workflow }}-${{ github.event.issue.number }}"
+  cancel-in-progress: true
 
 env:
   PYTHONDEVMODE: "1"
