@@ -891,7 +891,10 @@ class TirTemplate(Generic[_P, _T]):
     def get_tir(self, **kwargs):
         values = self._parse_phase2_key(**kwargs)
         subs = {name: value for name, value in zip(self.matcher, values)}
-        return substitute_primfunc(self.prim_func, subs)
+        result = substitute_primfunc(self.prim_func, subs)
+        result.orig_func = self.prim_func.orig_func
+        result.out_idx_override = self.prim_func.out_idx_override
+        return result
 
 
 @dataclass
@@ -922,6 +925,8 @@ class LazyJITFunc(Generic[_P, _T]):
             with builder.prim_func(self.orig_func.__name__):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
+            pf.orig_func = self.orig_func
+            pf.out_idx_override = builder.out_idx
             tir_temp = TirTemplate.create(pf, builder.constexpr_var)
             self.p1_cache[p1_key] = tir_temp
         p2_key = tir_temp._parse_phase2_key(**tensor_args)
@@ -980,6 +985,7 @@ def prim_func(func: Callable[_P, _T] = None, *, lazy_jit=False) -> PrimFunc[_P, 
                     ir_gen.gen(builder)(**annot)
                 prim_func = builder.get()
                 prim_func.orig_func = func
+                prim_func.out_idx_override = builder.out_idx
                 return prim_func
             except Exception as e:
                 logger.fatal(f"Failed to build prim_func from {func.__name__}\nargs={annot}\nsource={ir_gen.source}")
