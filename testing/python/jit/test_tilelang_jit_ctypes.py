@@ -5,7 +5,7 @@ import tilelang
 import torch
 
 
-def test_nvrtc_pdl():
+def test_ctypes_pdl():
     """Test pdl."""
 
     N = 64
