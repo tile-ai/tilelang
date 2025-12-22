@@ -34,7 +34,7 @@ def cached(
     *args,
     target: str | Target | None = None,
     target_host: str | Target | None = None,
-    execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch"] = "tvm_ffi",
+    execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
     verbose: bool | None = None,
     pass_configs: dict | None = None,
     compile_flags: list[str] | str | None = None,
