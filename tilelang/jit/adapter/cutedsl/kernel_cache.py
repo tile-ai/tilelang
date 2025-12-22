@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+from typing import Literal
 from typing_extensions import override
 
+from tvm.target import Target
 from tilelang.cache.kernel_cache import KernelCache
+from tilelang.engine.param import KernelParam
 from tilelang.jit import JITKernel
 
 
@@ -12,9 +15,6 @@ class CuTeDSLKernelCache(KernelCache):
     host_kernel_path = "kernel.py"
     launcher_lib_path = "launcher_lib.so"
     launcher_cpp_path = "launcher.cpp"
-
-    def __new__(cls, *args, **kwargs):
-        return super().__new__(cls, *args, **kwargs)
 
     @override
     def _save_kernel_source_code_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
@@ -45,3 +45,39 @@ class CuTeDSLKernelCache(KernelCache):
     @override
     def _load_kernel_source(self, device_kernel_path: str, host_kernel_path: str, verbose: bool = False) -> tuple[str | None, str | None]:
         return "", ""
+
+    @override
+    def _set_adapter_cache_path(self, kernel: JITKernel, cache_path: str):
+        if hasattr(kernel, "adapter"):
+            kernel.adapter._cache_path = cache_path
+
+    @override
+    def _build_kernel(
+        self,
+        host_kernel_source: str,
+        device_kernel_source: str,
+        kernel_lib_path: str,
+        kernel_params: list[KernelParam] | None,
+        target: str | Target,
+        target_host: str | Target | None,
+        out_idx: list[int] | None,
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"],
+        pass_configs: dict | None,
+        compile_flags: list[str] | str | None,
+    ) -> JITKernel | None:
+        if kernel_params:
+            return JITKernel.from_database(
+                func=None,
+                host_kernel_source=host_kernel_source,
+                device_kernel_source=device_kernel_source,
+                kernel_lib_path=kernel_lib_path,
+                params=kernel_params,
+                target=target,
+                target_host=target_host,
+                out_idx=out_idx,
+                execution_backend=execution_backend,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
+        else:
+            return None

@@ -17,8 +17,8 @@ from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 if TYPE_CHECKING:
     from .kernel_cache import KernelCache
 
-# Create a pool of singleton instance of KernelCaches
-_dispatch_pool: dict[str, KernelCache] = {
+# Create a map of singleton instance of KernelCaches
+_dispatch_map: dict[str, KernelCache] = {
     "tvm_ffi": TVMFFIKernelCache(),
     "ctypes": CTypesKernelCache(),
     "cython": CythonKernelCache(),
@@ -42,8 +42,8 @@ def cached(
     """
     Caches and reuses compiled kernels (using KernelCache class).
     """
-    if execution_backend in _dispatch_pool:
-        return _dispatch_pool[execution_backend].cached(
+    if execution_backend in _dispatch_map:
+        return _dispatch_map[execution_backend].cached(
             func,
             out_idx,
             *args,

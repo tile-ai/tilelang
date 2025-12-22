@@ -7,9 +7,6 @@ from tilelang.jit import JITKernel
 class TVMFFIKernelCache(KernelCache):
     kernel_lib_path = "executable.so"
 
-    def __new__(cls, *args, **kwargs):
-        return super().__new__(cls, *args, **kwargs)
-
     def _save_wrapper_kernel_code_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
         host_kernel_path = os.path.join(cache_path, self.host_kernel_path)
         if verbose:

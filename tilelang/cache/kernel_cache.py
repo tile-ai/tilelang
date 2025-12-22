@@ -38,10 +38,8 @@ class KernelCache:
     execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi"
     device_kernel_path = "device_kernel.cu"
     host_kernel_path = "host_kernel.cu"
-    executable_path = "executable.so"
     kernel_lib_path = "kernel_lib.so"
     kernel_cubin_path = "kernel.cubin"
-    kernel_py_path = "kernel.py"
     params_path = "params.pkl"
 
     def __new__(cls):
@@ -242,8 +240,7 @@ class KernelCache:
                 cache_path = self._get_cache_path(key)
                 self._save_kernel_to_disk(key, kernel, func, verbose)
                 # Set cache path on adapter so it can save cubin after first execution
-                if hasattr(kernel, "adapter") and execution_backend == "cutedsl":
-                    kernel.adapter._cache_path = cache_path
+                self._set_adapter_cache_path(kernel, cache_path)
 
         # Store in memory cache after compilation
         self._memory_cache[key] = kernel
@@ -392,23 +389,18 @@ class KernelCache:
         except Exception:
             self.logger.exception("Error loading kernel parameters from disk")
 
-        if ((host_kernel_source and device_kernel_source) or self.execution_backend == "cutedsl") and kernel_params:
-            return JITKernel.from_database(
-                func=func,
-                host_kernel_source=host_kernel_source,
-                device_kernel_source=device_kernel_source,
-                kernel_lib_path=kernel_lib_path,
-                params=kernel_params,
-                target=target,
-                target_host=target_host,
-                out_idx=out_idx,
-                execution_backend=execution_backend,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-            )
-        else:
-            # TODO(lei): report what the reason is.
-            return None
+        return self._build_kernel(
+            host_kernel_source=host_kernel_source,
+            device_kernel_source=device_kernel_source,
+            kernel_lib_path=kernel_lib_path,
+            kernel_params=kernel_params,
+            target=target,
+            target_host=target_host,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+        )
 
     def _clear_disk_cache(self):
         """
@@ -470,3 +462,37 @@ class KernelCache:
             host_kernel_source = None
             self.logger.exception("Error loading host kernel source code from disk")
         return device_kernel_source, host_kernel_source
+
+    def _set_adapter_cache_path(self, kernel: JITKernel, cache_path: str):
+        return
+
+    def _build_kernel(
+        self,
+        host_kernel_source: str,
+        device_kernel_source: str,
+        kernel_lib_path: str,
+        kernel_params: list[KernelParam] | None,
+        target: str | Target,
+        target_host: str | Target | None,
+        out_idx: list[int] | None,
+        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"],
+        pass_configs: dict | None,
+        compile_flags: list[str] | str | None,
+    ) -> JITKernel | None:
+        if host_kernel_source and device_kernel_source and kernel_params:
+            return JITKernel.from_database(
+                func=None,
+                host_kernel_source=host_kernel_source,
+                device_kernel_source=device_kernel_source,
+                kernel_lib_path=kernel_lib_path,
+                params=kernel_params,
+                target=target,
+                target_host=target_host,
+                out_idx=out_idx,
+                execution_backend=execution_backend,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
+        else:
+            # TODO(lei): report what the reason is.
+            return None
