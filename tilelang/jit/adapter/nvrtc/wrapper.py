@@ -176,8 +176,6 @@ PDL_SYNC_PY = """
         CUlaunchAttributeID,
     )
 
-    config = CUlaunchConfig()
-
     num_attrs = 1
     attrs = [CUlaunchAttribute()]
     attrs[0].id = CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
