@@ -4,7 +4,7 @@
 
 namespace tl {
 
-template <int panel_width, int offset> TL_DEVICE dim3 rasterization2DRow() {
+template <int panel_width, int offset = 0> TL_DEVICE dim3 rasterization2DRow() {
   const unsigned int block_idx = blockIdx.x + blockIdx.y * gridDim.x;
   const unsigned int grid_size = gridDim.x * gridDim.y;
   const unsigned int panel_size = panel_width * gridDim.x;
@@ -23,7 +23,8 @@ template <int panel_width, int offset> TL_DEVICE dim3 rasterization2DRow() {
   return {col_idx, row_idx, blockIdx.z};
 }
 
-template <int panel_width, int offset> TL_DEVICE dim3 rasterization2DColumn() {
+template <int panel_width, int offset = 0>
+TL_DEVICE dim3 rasterization2DColumn() {
   const unsigned int block_idx = blockIdx.x + blockIdx.y * gridDim.x;
   const unsigned int grid_size = gridDim.x * gridDim.y;
   const unsigned int panel_size = panel_width * gridDim.y;

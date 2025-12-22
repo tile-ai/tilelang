@@ -164,10 +164,10 @@ def tilelang_visit_for(self, node: doc.For) -> None:  # pylint: disable=unused-a
                 "Expect the for loop to be one of the following: "
                 "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding",
             )
-        with self.var_table.with_frame():
-            with iter_val as iters:
-                self.eval_assign(target=node.target, source=iters, bind_value=tvm_tir_parser.bind_for_value)
-                self.visit_body(node.body)
+        with self.var_table.with_frame(), iter_val as iters:
+            self.eval_assign(
+                target=node.target, source=iters, bind_value=tvm_tir_parser.bind_for_value)
+            self.visit_body(node.body)
         return
 
     # Stepped inclusive serial: require positive integer step
@@ -192,16 +192,15 @@ def tilelang_visit_for(self, node: doc.For) -> None:  # pylint: disable=unused-a
     # Use tvm.tir.floordiv via builder ops from tilelang.tir.ir if available
     # Avoid importing op wrappers; compute using arithmetic to keep it simple.
     # We construct: T.ceildiv((end - start), step)
-    extent = T.ceildiv(end - start, step_val) # type: ignore[operator]
+    extent = T.ceildiv(end - start, step_val)  # type: ignore[operator]
 
     for_frame = T.serial(0, extent, annotations=annotations)
-    with self.var_table.with_frame():
-        with for_frame as t:
-            # Bind loop target as Let var: i = start + t * step
-            stepped_index = start + t * step_val  # type: ignore[operator]
-            self.eval_assign(
-                target=node.target,
-                source=stepped_index,
-                bind_value=tvm_tir_parser.bind_assign_value,
-            )
-            self.visit_body(node.body)
+    with self.var_table.with_frame(), for_frame as t:
+        # Bind loop target as Let var: i = start + t * step
+        stepped_index = start + t * step_val  # type: ignore[operator]
+        self.eval_assign(
+            target=node.target,
+            source=stepped_index,
+            bind_value=tvm_tir_parser.bind_assign_value,
+        )
+        self.visit_body(node.body)
