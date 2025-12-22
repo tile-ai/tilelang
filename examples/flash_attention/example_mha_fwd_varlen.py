@@ -271,9 +271,9 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128, t
     )
     torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
 
-    from flash_attn_interface import flash_attn_varlen_func
+    import flash_attn
 
-    fa_out_unpad = flash_attn_varlen_func(
+    fla_out_unpad = flash_attn.flash_attn_varlen_func(
         q_unpad,
         k_unpad,
         v_unpad,
@@ -281,10 +281,11 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128, t
         cu_seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
+        0.0,
         causal=causal,
     )
-    fa_out = output_pad_fn(fa_out_unpad)
-    torch.testing.assert_close(out, fa_out, rtol=1e-2, atol=1e-2)
+    fla_out = output_pad_fn(fla_out_unpad)
+    torch.testing.assert_close(out, fla_out, rtol=1e-2, atol=1e-2)
 
     print("All checks passed.✅")
 
@@ -293,10 +294,12 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128, t
     print(f"Tilelang time: {t} ms")
     print(f"Tilelang: {total_flops / t * 1e-9} TFlops")
     t = do_bench(
-        lambda: flash_attn_varlen_func(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, causal=causal)
+        lambda: flash_attn.flash_attn_varlen_func(
+            q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, 0.0, causal=causal
+        )
     )
-    print(f"FlashAttention time: {t} ms")
-    print(f"FlashAttention: {total_flops / t * 1e-9} TFlops")
+    print(f"FA2 time: {t} ms")
+    print(f"FA2: {total_flops / t * 1e-9} TFlops")
 
 
 if __name__ == "__main__":
