@@ -335,7 +335,7 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: T.dtype = T.flo
             T.copy(lse[bz, bx, by * block : (by + 1) * block], lse_fragment)
             T.copy(Delta[bz, bx, by * block : (by + 1) * block], delta_fragment)
             for i in T.Parallel(block):
-                dsink_fragment[i] = -T.exp2(Sinks[bx] * 1.44269504 - lse_fragment[i]) * delta_fragment[i]
+                dsink_fragment[i] = -T.exp2(sink * 1.44269504 - lse_fragment[i]) * delta_fragment[i]
             T.copy(dsink_fragment, dsinks[bz, bx, by * block : (by + 1) * block])
 
     return flash_bwd_dsink

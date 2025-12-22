@@ -201,6 +201,7 @@ def tilelang_chunk_o_bwd_dqkwg(
             dg_fragment_final = T.alloc_fragment((block_S,), dtype=gate_dtype)
             dg_last_local_0 = T.alloc_var(dtype=gate_dtype)
             dg_last_local_1 = T.alloc_var(dtype=gate_dtype)
+            G_last_local = T.alloc_var(dtype=gate_dtype)
 
             dg_last_fragment = T.alloc_fragment((block_DV * block_DK), dtype=gate_dtype)
             dg_last_fragment_scalar = T.alloc_fragment((1,), dtype=gate_dtype)
@@ -249,7 +250,7 @@ def tilelang_chunk_o_bwd_dqkwg(
                     for i_kv in T.Parallel(block_DK * block_DV):
                         dg_last_fragment[i_kv] = h_shared[i_kv // block_DV, i_kv % block_DV] * dh_shared[i_kv // block_DV, i_kv % block_DV]
                     T.reduce_sum(dg_last_fragment, dg_last_fragment_scalar, dim=-1, clear=False)
-                    dg_last_local[0] += dg_last_fragment_scalar[0]
+                    dg_last_local_0 = dg_last_local_0 + dg_last_fragment_scalar[0]
 
                 T.gemm(dO_shared, V_shared, ds_fragment, transpose_B=True)
                 T.gemm(dO_shared, h_shared, dq_fragment, transpose_B=True)
