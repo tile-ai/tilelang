@@ -49,28 +49,12 @@ jobs:
             pyproject.toml
             requirements*.txt
 
-      - name: Clean pip environment
-        run: |
-          echo "PIP_CONFIG_FILE=/dev/null" >> $GITHUB_ENV
-          echo "PIP_NO_USER=1" >> $GITHUB_ENV
-          echo "PYTHONUSERBASE=" >> $GITHUB_ENV
-          echo "PIP_DISABLE_PIP_VERSION_CHECK=1" >> $GITHUB_ENV
-          echo "PIP_CACHE_DIR=$(mktemp -d)" >> $GITHUB_ENV
-
       - name: Install PR version (new)
         run: |
           python -m venv new
           source new/bin/activate
           pip install --no-user -r requirements-test.txt
           pip install --no-user .
-
-      - name: Clean pip environment
-        run: |
-          echo "PIP_CONFIG_FILE=/dev/null" >> $GITHUB_ENV
-          echo "PIP_NO_USER=1" >> $GITHUB_ENV
-          echo "PYTHONUSERBASE=" >> $GITHUB_ENV
-          echo "PIP_DISABLE_PIP_VERSION_CHECK=1" >> $GITHUB_ENV
-          echo "PIP_CACHE_DIR=$(mktemp -d)" >> $GITHUB_ENV
 
       - name: Install main version (old)
         run: |
