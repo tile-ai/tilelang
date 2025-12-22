@@ -178,9 +178,19 @@ def unroll(
 # "Serial" and "Unroll" are aliases of "T.serial" and "T.unroll". We use uppercase to emphasize that they are tile-level loops.
 
 
-def Serial(*args, **kwargs):
-    return serial(*args, **kwargs)
+def Serial(
+    start: tir.PrimExpr, stop: tir.PrimExpr | None = None, step: tir.PrimExpr | None = None, *, annotations: dict[str, Any] | None = None
+):
+    return serial(start, stop, step, annotations=annotations)
 
 
-def Unroll(*args, **kwargs):
-    return unroll(*args, **kwargs)
+def Unroll(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    step: tir.PrimExpr | None = None,
+    *,
+    explicit: bool = False,
+    unroll_factor: int | None = None,
+    annotations: dict[str, Any] | None = None,
+):
+    return unroll(start, stop, step, explicit=explicit, unroll_factor=unroll_factor, annotations=annotations)

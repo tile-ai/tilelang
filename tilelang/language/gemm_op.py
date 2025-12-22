@@ -187,5 +187,42 @@ def gemm_v2(
 # gemm = gemm_v1 if _env.use_gemm_v1() else gemm_v2
 
 
-def gemm(*args, **kwargs):
-    return gemm_v1(*args, **kwargs) if _env.use_gemm_v1() else gemm_v2(*args, **args)
+def gemm(
+    A: tir.Buffer | tir.Var,
+    B: tir.Buffer | tir.Var,
+    C: tir.Buffer | tir.Var,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+    k_pack: int = 1,
+    wg_wait: int = 0,
+    mbar: tir.Buffer | None = None,
+):
+    return (
+        gemm_v1(
+            A=A,
+            B=B,
+            C=C,
+            transpose_A=transpose_A,
+            transpose_B=transpose_B,
+            policy=policy,
+            clear_accum=clear_accum,
+            k_pack=k_pack,
+            wg_wait=wg_wait,
+            mbar=mbar,
+        )
+        if _env.use_gemm_v1()
+        else gemm_v2(
+            A=A,
+            B=B,
+            C=C,
+            transpose_A=transpose_A,
+            transpose_B=transpose_B,
+            policy=policy,
+            clear_accum=clear_accum,
+            k_pack=k_pack,
+            wg_wait=wg_wait,
+            mbar=mbar,
+        )
+    )
