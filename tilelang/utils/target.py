@@ -15,6 +15,7 @@ SUPPORTED_TARGETS: dict[str, str] = {
     "llvm": "LLVM CPU target (accepts standard TVM LLVM options).",
     "webgpu": "WebGPU target for browser/WebGPU runtimes.",
     "c": "C source backend.",
+    "cutedsl": "CuTe DSL GPU target.",
 }
 
 
@@ -56,11 +57,10 @@ def check_metal_availability() -> bool:
     if not mac_release:
         return False
     # todo: check torch version?
-    return arch == 'arm64'
+    return arch == "arm64"
 
 
-def determine_target(target: str | Target | Literal["auto"] = "auto",
-                     return_object: bool = False) -> str | Target:
+def determine_target(target: str | Target | Literal["auto"] = "auto", return_object: bool = False) -> str | Target:
     """
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 
@@ -96,6 +96,14 @@ def determine_target(target: str | Target | Literal["auto"] = "auto",
             return_var = "metal"
         else:
             raise ValueError("No CUDA or HIP or MPS available on this system.")
+    elif isinstance(target, str) and target.startswith("cutedsl"):
+        cuda_target_str = target.replace("cutedsl", "cuda", 1)
+        temp_target = Target(cuda_target_str)
+
+        target_dict = dict(temp_target.export())
+        target_dict["keys"] = list(target_dict["keys"]) + ["cutedsl"]
+
+        return_var = Target(target_dict)
     else:
         # Validate the target if it's not "auto"
         if isinstance(target, Target):
@@ -116,6 +124,8 @@ def determine_target(target: str | Target | Literal["auto"] = "auto",
         else:
             raise AssertionError(f"Target {target} is not supported")
 
+    if isinstance(return_var, Target):
+        return return_var
     if return_object:
         if isinstance(return_var, Target):
             return return_var

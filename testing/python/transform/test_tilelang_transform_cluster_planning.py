@@ -21,14 +21,12 @@ def _check(original, transformed):
 
 
 def test_cluster_planning():
-
     @T.prim_func
-    def before(A: T.Tensor((1024, 32), "float16"), B: T.Tensor((32, 1024), "float16"), C: T.Tensor(
-        (1024, 1024), "float16")):
+    def before(A: T.Tensor((1024, 32), T.float16), B: T.Tensor((32, 1024), T.float16), C: T.Tensor((1024, 1024), T.float16)):
         with T.Kernel(8, 8, threads=128) as (bx, by):
-            A_shared = T.alloc_shared((128, 32), "float16")
-            B_shared = T.alloc_shared((32, 128), "float16")
-            C_local = T.alloc_fragment((128, 128), "float32")
+            A_shared = T.alloc_shared((128, 32), T.float16)
+            B_shared = T.alloc_shared((32, 128), T.float16)
+            C_local = T.alloc_fragment((128, 128), T.float32)
 
             T.clear(C_local)
 
@@ -41,13 +39,12 @@ def test_cluster_planning():
             T.copy(C_local, C[by * 128, bx * 128])
 
     @T.prim_func
-    def after(A: T.Tensor((1024, 32), "float16"), B: T.Tensor((32, 1024), "float16"), C: T.Tensor(
-        (1024, 1024), "float16")):
+    def after(A: T.Tensor((1024, 32), T.float16), B: T.Tensor((32, 1024), T.float16), C: T.Tensor((1024, 1024), T.float16)):
         T.func_attr({"clusterIdx.y": T.int32(2)})
         with T.Kernel(8, 8, threads=128) as (bx, by):
-            A_shared = T.alloc_shared((128, 32), "float16")
-            B_shared = T.alloc_shared((32, 128), "float16")
-            C_local = T.alloc_fragment((128, 128), "float32")
+            A_shared = T.alloc_shared((128, 32), T.float16)
+            B_shared = T.alloc_shared((32, 128), T.float16)
+            C_local = T.alloc_fragment((128, 128), T.float32)
 
             T.clear(C_local)
 

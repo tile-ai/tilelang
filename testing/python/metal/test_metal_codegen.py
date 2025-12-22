@@ -5,18 +5,17 @@ import tilelang.language as T
 import torch
 
 
-@tilelang.jit(execution_backend='torch')
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float32", accum_dtype="float"):
-
+@tilelang.jit(execution_backend="torch")
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float32, accum_dtype=T.float32):
     @T.prim_func
     def gemm(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), dtype, scope='shared')
-            B_shared = T.alloc_shared((block_K, block_N), dtype, scope='shared')
+            A_shared = T.alloc_shared((block_M, block_K), dtype, scope="shared")
+            B_shared = T.alloc_shared((block_K, block_N), dtype, scope="shared")
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             T.clear(C_local)
@@ -40,21 +39,21 @@ def assert_gemm(
     block_M,
     block_N,
     block_K,
-    dtype="float32",
-    accum_dtype="float",
+    dtype=T.float32,
+    accum_dtype=T.float32,
     atol=1e-8,
 ):
     jit_kernel = matmul(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
 
-    torch_dtype = getattr(torch, dtype)
+    torch_dtype = dtype.as_torch()
     a, b = None, None
-    if 'int' in dtype:
-        a = torch.randint(100, (M, K), dtype=torch_dtype, device='mps')
-        b = torch.randint(100, (K, N), dtype=torch_dtype, device='mps')
+    if "int" in dtype:
+        a = torch.randint(100, (M, K), dtype=torch_dtype, device="mps")
+        b = torch.randint(100, (K, N), dtype=torch_dtype, device="mps")
     else:
-        a = torch.randn(M, K, dtype=torch_dtype, device='mps')
-        b = torch.randn(K, N, dtype=torch_dtype, device='mps')
-    c = torch.zeros(M, N, dtype=torch_dtype, device='mps')
+        a = torch.randn(M, K, dtype=torch_dtype, device="mps")
+        b = torch.randn(K, N, dtype=torch_dtype, device="mps")
+    c = torch.zeros(M, N, dtype=torch_dtype, device="mps")
 
     jit_kernel(a, b, c)
 
@@ -70,12 +69,12 @@ def test_gemm_float32():
 
 @tilelang.testing.requires_metal
 def test_gemm_float16():
-    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype='float16', atol=1)
+    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype=T.float16, atol=1)
 
 
 @tilelang.testing.requires_metal
 def test_gemm_int32():
-    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype='int32', atol=1)
+    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype=T.int32, atol=1)
 
 
 if __name__ == "__main__":

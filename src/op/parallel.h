@@ -24,15 +24,6 @@ namespace tl {
 
 using namespace tir;
 
-class LayoutConflictException : public std::exception {
-public:
-  const char *what() const noexcept override { return msg_.c_str(); }
-  LayoutConflictException(const std::string &msg) : msg_(msg) {}
-
-private:
-  std::string msg_;
-};
-
 bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> small_frag_indices,
                            Array<PrimExpr> large_frag_indices,
@@ -114,6 +105,10 @@ private:
   void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
   }
+  // Expand let bindings to find fragment buffer accesses and add them to
+  // indice_map_. This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0],
+  // ...)
+  void ExpandLetBindings(const Map<Var, PrimExpr> &let_var_to_expr);
 
   // Allow ParallelLoopNestVisitor to access private members.
   friend class ParallelLoopNestVisitor;

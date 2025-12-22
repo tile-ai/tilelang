@@ -182,6 +182,34 @@ TileOperator ParallelOpNode::Clone() const {
   return ParallelOp(op);
 }
 
+void ParallelOpNode::ExpandLetBindings(
+    const Map<Var, PrimExpr> &let_var_to_expr) {
+  if (let_var_to_expr.empty())
+    return;
+
+  // Helper function to recursively find BufferLoads through let bindings
+  std::function<void(const PrimExpr &)> expand = [&](const PrimExpr &expr) {
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (auto bl = node.as<BufferLoadNode>()) {
+        if (bl->buffer.scope() == "local.fragment" &&
+            !indice_map_.count(bl->buffer)) {
+          indice_map_.Set(bl->buffer, bl->indices);
+        }
+      } else if (auto var_node = node.as<VarNode>()) {
+        auto var = tvm::ffi::GetRef<Var>(var_node);
+        if (let_var_to_expr.count(var)) {
+          expand(let_var_to_expr[var]);
+        }
+      }
+    });
+  };
+
+  // Scan all let bindings
+  for (const auto &[var, expr] : let_var_to_expr) {
+    expand(expr);
+  }
+}
+
 Stmt ParallelOpNode::Lower(const LowerArgs &T,
                            arith::Analyzer *analyzer) const {
   return root_;
@@ -214,6 +242,12 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
   if (loop_layout_.defined())
     return {};
+
+  // Expand let bindings to find fragment buffer accesses
+  if (!T.let_var_to_expr.empty()) {
+    const_cast<ParallelOpNode *>(this)->ExpandLetBindings(T.let_var_to_expr);
+  }
+
   if (level == InferLevel::kStrict) {
     LayoutMap results;
     // Deduce buffers that should be complicated replicated.
@@ -252,17 +286,18 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           forward_vars.push_back(
               IterVar(Range(0, s), Var(), IterVarType::kDataPar));
         }
-        Array<PrimExpr> forward_index;
-        for (const auto &iv : forward_vars) {
-          forward_index.push_back(iv->var);
-        }
         Var rep;
         auto rep_iter =
             IterVar({0, T.thread_bounds->extent}, rep, IterVarType::kDataPar);
 
+        // Use default fragment indexing (single output dim) to
+        // stay consistent with other ops (e.g., ReduceOp), and
+        // bind the thread range for comparability.
         const PrimExpr &forward_thread = rep;
-        results.Set(buffer, Fragment(forward_vars, forward_index,
-                                     forward_thread, rep_iter));
+        auto frag = Fragment(forward_vars, /*forward_index=*/{}, forward_thread,
+                             rep_iter)
+                        ->BindThreadRange(T.thread_bounds);
+        results.Set(buffer, frag);
       }
     }
     return results;
@@ -452,8 +487,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       // As the pass will do post processing to the layout
       auto maybe_remapped_root_ =
           IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
-      int vector_size = GetVectorizeSize(maybe_remapped_root_);
-
+      int vector_size = GetVectorizeSize(maybe_remapped_root_, T.analyzer);
       DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
       PrimExpr loop_total_size = 1;
@@ -561,6 +595,16 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     }();
   } else {
     return {};
+  }
+  // check loop_layout_ is injective
+  auto injective_res = loop_layout_->DetectInjective();
+  if (!injective_res->errors.empty()) {
+    std::ostringstream oss;
+    oss << "Loop layout is not injective: " << loop_layout_->DebugOutput()
+        << '\n'
+        << "  errors: " << injective_res->errors << '\n'
+        << "  loop AST: " << root_;
+    throw LoopLayoutInjectiveException(oss.str());
   }
 
   PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();

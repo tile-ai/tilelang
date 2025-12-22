@@ -20,11 +20,11 @@ def tl_gemm(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float8_e4m3",
+        T.float8_e4m3fn,
     ], "Currently only float8_e4m3 is supported"
     assert out_dtype in [
-        "bfloat16",
-        "float32",
+        T.bfloat16,
+        T.float32,
     ], "Currently only float16 and float32 are supported"
 
     group_size = 128
@@ -41,18 +41,17 @@ def tl_gemm(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
-            scales_a: T.Tensor(Scales_A_shape, "float32"),
-            scales_b: T.Tensor(Scales_B_shape, "float32"),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
+        scales_a: T.Tensor(Scales_A_shape, T.float32),
+        scales_b: T.Tensor(Scales_B_shape, T.float32),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype)
-            Scale_C_shared = T.alloc_shared((block_M), "float32")
+            Scale_C_shared = T.alloc_shared((block_M), T.float32)
             C_local = T.alloc_fragment(C_shared_shape, accum_dtype)
             C_local_accum = T.alloc_fragment(C_shared_shape, accum_dtype)
 
@@ -93,21 +92,18 @@ def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     m, n = x.shape
     x_view = x.view(m, -1, 128)
     x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
-    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(
-        m, n), (x_amax / 448.0).view(m, -1)
+    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), (x_amax / 448.0).view(m, -1)
 
 
 def per_block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
-    x_padded = torch.zeros(
-        ceildiv(m, 128) * 128, ceildiv(n, 128) * 128, dtype=x.dtype, device=x.device)
+    x_padded = torch.zeros(ceildiv(m, 128) * 128, ceildiv(n, 128) * 128, dtype=x.dtype, device=x.device)
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
     x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
-    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(
-        x_view.size(0), x_view.size(2))
+    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
 
 
 def ref_deepgemm_fp8(A_fp8, B_fp8, A_scale, B_scale, out_dtype):
@@ -127,13 +123,14 @@ def ref_deepgemm_fp8(A_fp8, B_fp8, A_scale, B_scale, out_dtype):
             c_acc.zero_()
             for k in range(ceildiv(K, 128)):
                 c = torch._scaled_mm(
-                    A_fp8[i * 128:(i + 1) * 128, k * 128:(k + 1) * 128],
-                    B_fp8[j * 128:(j + 1) * 128, k * 128:(k + 1) * 128].T,
+                    A_fp8[i * 128 : (i + 1) * 128, k * 128 : (k + 1) * 128],
+                    B_fp8[j * 128 : (j + 1) * 128, k * 128 : (k + 1) * 128].T,
                     scale_a=A_scales[i, k].view(128, 1).contiguous(),
                     scale_b=B_scales[j, k].view(1, 128).contiguous(),
-                    out_dtype=torch.bfloat16)
+                    out_dtype=torch.bfloat16,
+                )
                 c_acc += c.to(torch.float32)
-            C[i * 128:(i + 1) * 128, j * 128:(j + 1) * 128] = c_acc.to(out_dtype)
+            C[i * 128 : (i + 1) * 128, j * 128 : (j + 1) * 128] = c_acc.to(out_dtype)
     return C
 
 
@@ -179,11 +176,11 @@ def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtyp
 
 
 def main():
-    assert_tl_gemm_correctness(1024, 1024, 8192, 128, "float8_e4m3", "bfloat16", "float32")
+    assert_tl_gemm_correctness(1024, 1024, 8192, 128, T.float8_e4m3fn, T.bfloat16, T.float32)
 
 
 if __name__ == "__main__":
-    for dtype in ["float8_e4m3"]:
-        for out_dtype in ["bfloat16", "float32"]:
+    for dtype in [T.float8_e4m3fn]:
+        for out_dtype in [T.bfloat16, T.float32]:
             for block_N in [16, 32, 64, 128]:
-                assert_tl_gemm_correctness(1024, 1024, 8192, block_N, dtype, out_dtype, "float32")
+                assert_tl_gemm_correctness(1024, 1024, 8192, block_N, dtype, out_dtype, T.float32)

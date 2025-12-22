@@ -5,14 +5,7 @@ import tilelang.testing
 import pytest
 
 
-def run_ieee_math_test(mathop_name,
-                       mathop_func,
-                       rounding_mode="rn",
-                       M=128,
-                       N=128,
-                       block_M=32,
-                       block_N=32,
-                       dtype="float32"):
+def run_ieee_math_test(mathop_name, mathop_func, rounding_mode="rn", M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
     """
     Test IEEE-compliant math operations with specified rounding modes.
     """
@@ -22,18 +15,19 @@ def run_ieee_math_test(mathop_name,
 
         @T.prim_func
         def main_func(
-                A: T.Tensor((M, N), dtype),
-                B: T.Tensor((M, N), dtype),
-                C: T.Tensor((M, N), dtype),
-                D: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, N), dtype),
+            B: T.Tensor((M, N), dtype),
+            C: T.Tensor((M, N), dtype),
+            D: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 for i, j in T.Parallel(block_M, block_N):
-                    D[by * block_M + i,
-                      bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j],
-                                                      B[by * block_M + i, bx * block_N + j],
-                                                      C[by * block_M + i,
-                                                        bx * block_N + j], rounding_mode)
+                    D[by * block_M + i, bx * block_N + j] = mathop_func(
+                        A[by * block_M + i, bx * block_N + j],
+                        B[by * block_M + i, bx * block_N + j],
+                        C[by * block_M + i, bx * block_N + j],
+                        rounding_mode,
+                    )
 
         out_idx = [3]
         num_inputs = 3
@@ -41,16 +35,15 @@ def run_ieee_math_test(mathop_name,
 
         @T.prim_func
         def main_func(
-                A: T.Tensor((M, N), dtype),
-                B: T.Tensor((M, N), dtype),
-                C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, N), dtype),
+            B: T.Tensor((M, N), dtype),
+            C: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 for i, j in T.Parallel(block_M, block_N):
-                    C[by * block_M + i,
-                      bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j],
-                                                      B[by * block_M + i,
-                                                        bx * block_N + j], rounding_mode)
+                    C[by * block_M + i, bx * block_N + j] = mathop_func(
+                        A[by * block_M + i, bx * block_N + j], B[by * block_M + i, bx * block_N + j], rounding_mode
+                    )
 
         out_idx = [2]
         num_inputs = 2
@@ -58,14 +51,12 @@ def run_ieee_math_test(mathop_name,
 
         @T.prim_func
         def main_func(
-                A: T.Tensor((M, N), dtype),
-                B: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, N), dtype),
+            B: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 for i, j in T.Parallel(block_M, block_N):
-                    B[by * block_M + i,
-                      bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j],
-                                                      rounding_mode)
+                    B[by * block_M + i, bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j], rounding_mode)
 
         out_idx = [1]
         num_inputs = 1
@@ -77,13 +68,14 @@ def run_ieee_math_test(mathop_name,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        })
+        },
+    )
 
     print(f"\n=== Testing {mathop_name} with rounding mode {rounding_mode} ===")
     print(f"✓ {mathop_name} compilation test passed")
 
     # Test numerical execution
-    torch_dtype = getattr(torch, dtype)
+    torch_dtype = dtype.as_torch()
     a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
     if num_inputs >= 2:
@@ -194,8 +186,8 @@ def test_ieee_frsqrt_rn_only():
 
     @T.prim_func
     def main(
-            A: T.Tensor((128, 128), "float32"),
-            B: T.Tensor((128, 128), "float32"),
+        A: T.Tensor((128, 128), T.float32),
+        B: T.Tensor((128, 128), T.float32),
     ):
         with T.Kernel(T.ceildiv(128, 32), T.ceildiv(128, 32), threads=128) as (bx, by):
             for i, j in T.Parallel(32, 32):
@@ -207,7 +199,8 @@ def test_ieee_frsqrt_rn_only():
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        })
+        },
+    )
 
     print("\n=== Testing ieee_frsqrt (rn only) ===")
     print("✓ ieee_frsqrt compilation test passed")

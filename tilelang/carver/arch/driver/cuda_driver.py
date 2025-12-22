@@ -2,123 +2,54 @@ from __future__ import annotations
 import ctypes
 import sys
 
-
-class cudaDeviceProp(ctypes.Structure):
-    _fields_ = [
-        ("name", ctypes.c_char * 256),
-        ("uuid", ctypes.c_byte * 16),  # cudaUUID_t
-        ("luid", ctypes.c_char * 8),
-        ("luidDeviceNodeMask", ctypes.c_uint),
-        ("totalGlobalMem", ctypes.c_size_t),
-        ("sharedMemPerBlock", ctypes.c_size_t),
-        ("regsPerBlock", ctypes.c_int),
-        ("warpSize", ctypes.c_int),
-        ("memPitch", ctypes.c_size_t),
-        ("maxThreadsPerBlock", ctypes.c_int),
-        ("maxThreadsDim", ctypes.c_int * 3),
-        ("maxGridSize", ctypes.c_int * 3),
-        ("clockRate", ctypes.c_int),
-        ("totalConstMem", ctypes.c_size_t),
-        ("major", ctypes.c_int),
-        ("minor", ctypes.c_int),
-        ("textureAlignment", ctypes.c_size_t),
-        ("texturePitchAlignment", ctypes.c_size_t),
-        ("deviceOverlap", ctypes.c_int),
-        ("multiProcessorCount", ctypes.c_int),
-        ("kernelExecTimeoutEnabled", ctypes.c_int),
-        ("integrated", ctypes.c_int),
-        ("canMapHostMemory", ctypes.c_int),
-        ("computeMode", ctypes.c_int),
-        ("maxTexture1D", ctypes.c_int),
-        ("maxTexture1DMipmap", ctypes.c_int),
-        ("maxTexture1DLinear", ctypes.c_int),
-        ("maxTexture2D", ctypes.c_int * 2),
-        ("maxTexture2DMipmap", ctypes.c_int * 2),
-        ("maxTexture2DLinear", ctypes.c_int * 3),
-        ("maxTexture2DGather", ctypes.c_int * 2),
-        ("maxTexture3D", ctypes.c_int * 3),
-        ("maxTexture3DAlt", ctypes.c_int * 3),
-        ("maxTextureCubemap", ctypes.c_int),
-        ("maxTexture1DLayered", ctypes.c_int * 2),
-        ("maxTexture2DLayered", ctypes.c_int * 3),
-        ("maxTextureCubemapLayered", ctypes.c_int * 2),
-        ("maxSurface1D", ctypes.c_int),
-        ("maxSurface2D", ctypes.c_int * 2),
-        ("maxSurface3D", ctypes.c_int * 3),
-        ("maxSurface1DLayered", ctypes.c_int * 2),
-        ("maxSurface2DLayered", ctypes.c_int * 3),
-        ("maxSurfaceCubemap", ctypes.c_int),
-        ("maxSurfaceCubemapLayered", ctypes.c_int * 2),
-        ("surfaceAlignment", ctypes.c_size_t),
-        ("concurrentKernels", ctypes.c_int),
-        ("ECCEnabled", ctypes.c_int),
-        ("pciBusID", ctypes.c_int),
-        ("pciDeviceID", ctypes.c_int),
-        ("pciDomainID", ctypes.c_int),
-        ("tccDriver", ctypes.c_int),
-        ("asyncEngineCount", ctypes.c_int),
-        ("unifiedAddressing", ctypes.c_int),
-        ("memoryClockRate", ctypes.c_int),
-        ("memoryBusWidth", ctypes.c_int),
-        ("l2CacheSize", ctypes.c_int),
-        ("persistingL2CacheMaxSize", ctypes.c_int),
-        ("maxThreadsPerMultiProcessor", ctypes.c_int),
-        ("streamPrioritiesSupported", ctypes.c_int),
-        ("globalL1CacheSupported", ctypes.c_int),
-        ("localL1CacheSupported", ctypes.c_int),
-        ("sharedMemPerMultiprocessor", ctypes.c_size_t),
-        ("regsPerMultiprocessor", ctypes.c_int),
-        ("managedMemory", ctypes.c_int),
-        ("isMultiGpuBoard", ctypes.c_int),
-        ("multiGpuBoardGroupID", ctypes.c_int),
-        ("reserved2", ctypes.c_int * 2),
-        ("reserved1", ctypes.c_int * 1),
-        ("reserved", ctypes.c_int * 60)
-    ]
+try:
+    import torch.cuda._CudaDeviceProperties as _CudaDeviceProperties
+except ImportError:
+    _CudaDeviceProperties = type("DummyCudaDeviceProperties", (), {})
 
 
-def get_cuda_device_properties(device_id: int = 0) -> cudaDeviceProp | None:
+class cudaDeviceAttrNames:
+    r"""
+    refer to https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html#group__CUDART__TYPES_1g49e2f8c2c0bd6fe264f2fc970912e5cd
+    """
 
-    if sys.platform == "win32":
-        libcudart = ctypes.windll.LoadLibrary("cudart64_110.dll")
-    else:
-        libcudart = ctypes.cdll.LoadLibrary("libcudart.so")
+    cudaDevAttrMaxThreadsPerBlock: int = 1
+    cudaDevAttrMaxRegistersPerBlock: int = 12
+    cudaDevAttrMaxSharedMemoryPerMultiprocessor: int = 81
+    cudaDevAttrMaxPersistingL2CacheSize: int = 108
 
-    prop = cudaDeviceProp()
-    cudaGetDeviceProperties = libcudart.cudaGetDeviceProperties
-    cudaGetDeviceProperties.argtypes = [ctypes.POINTER(cudaDeviceProp), ctypes.c_int]
-    cudaGetDeviceProperties.restype = ctypes.c_int
-    ret = cudaGetDeviceProperties(ctypes.byref(prop), device_id)
-    if ret == 0:
-        return prop
-    else:
-        raise RuntimeError(f"cudaGetDeviceProperties failed with error {ret}")
+
+def get_cuda_device_properties(device_id: int = 0) -> _CudaDeviceProperties | None:
+    try:
+        import torch.cuda
+
+        if not torch.cuda.is_available():
+            return None
+        return torch.cuda.get_device_properties(torch.device(device_id))
+    except ImportError:
+        return None
 
 
 def get_device_name(device_id: int = 0) -> str | None:
     prop = get_cuda_device_properties(device_id)
     if prop:
-        return prop.name.decode()
-    else:
-        raise RuntimeError("Failed to get device properties.")
+        return prop.name
 
 
 def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> int | None:
     assert format in ["bytes", "kb", "mb"], "Invalid format. Must be one of: bytes, kb, mb"
     prop = get_cuda_device_properties(device_id)
-    if prop:
-        # Convert size_t to int to avoid overflow issues
-        shared_mem = int(prop.sharedMemPerBlock)
-        if format == "bytes":
-            return shared_mem
-        elif format == "kb":
-            return shared_mem // 1024
-        elif format == "mb":
-            return shared_mem // (1024 * 1024)
-        else:
-            raise RuntimeError("Invalid format. Must be one of: bytes, kb, mb")
-    else:
+    if prop is None:
         raise RuntimeError("Failed to get device properties.")
+    shared_mem = int(prop.shared_memory_per_block)
+    if format == "bytes":
+        return shared_mem
+    elif format == "kb":
+        return shared_mem // 1024
+    elif format == "mb":
+        return shared_mem // (1024 * 1024)
+    else:
+        raise RuntimeError("Invalid format. Must be one of: bytes, kb, mb")
 
 
 def get_device_attribute(attr: int, device_id: int = 0) -> int:
@@ -130,7 +61,11 @@ def get_device_attribute(attr: int, device_id: int = 0) -> int:
 
         value = ctypes.c_int()
         cudaDeviceGetAttribute = libcudart.cudaDeviceGetAttribute
-        cudaDeviceGetAttribute.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int]
+        cudaDeviceGetAttribute.argtypes = [
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
         cudaDeviceGetAttribute.restype = ctypes.c_int
 
         ret = cudaDeviceGetAttribute(ctypes.byref(value), attr, device_id)
@@ -148,28 +83,20 @@ def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes")
     Get the maximum dynamic shared memory size in bytes, kilobytes, or megabytes.
     """
     assert format in ["bytes", "kb", "mb"], "Invalid format. Must be one of: bytes, kb, mb"
-    prop = get_cuda_device_properties(device_id)
-    if prop:
-        # Convert size_t to int to avoid overflow issues
-        shared_mem = int(prop.sharedMemPerMultiprocessor)
-        if format == "bytes":
-            return shared_mem
-        elif format == "kb":
-            return shared_mem // 1024
-        elif format == "mb":
-            return shared_mem // (1024 * 1024)
-        else:
-            raise RuntimeError("Invalid format. Must be one of: bytes, kb, mb")
+    shared_mem = get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxSharedMemoryPerMultiprocessor, device_id)
+    if format == "bytes":
+        return shared_mem
+    elif format == "kb":
+        return shared_mem // 1024
+    elif format == "mb":
+        return shared_mem // (1024 * 1024)
     else:
-        raise RuntimeError("Failed to get device properties.")
+        raise RuntimeError("Invalid format. Must be one of: bytes, kb, mb")
 
 
 def get_persisting_l2_cache_max_size(device_id: int = 0) -> int:
-    prop = get_cuda_device_properties(device_id)
-    if prop:
-        return prop.persistingL2CacheMaxSize
-    else:
-        raise RuntimeError("Failed to get device properties for persisting L2 cache max size.")
+    prop = get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxPersistingL2CacheSize, device_id)
+    return prop
 
 
 def get_num_sms(device_id: int = 0) -> int:
@@ -186,15 +113,17 @@ def get_num_sms(device_id: int = 0) -> int:
         RuntimeError: If unable to get the device properties.
     """
     prop = get_cuda_device_properties(device_id)
-    if prop:
-        return prop.multiProcessorCount
-    else:
+    if prop is None:
         raise RuntimeError("Failed to get device properties.")
+    return prop.multi_processor_count
 
 
 def get_registers_per_block(device_id: int = 0) -> int:
-    prop = get_cuda_device_properties(device_id)
-    if prop:
-        return prop.regsPerBlock
-    else:
-        raise RuntimeError("Failed to get device properties.")
+    """
+    Get the maximum number of 32-bit registers available per block.
+    """
+    prop = get_device_attribute(
+        cudaDeviceAttrNames.cudaDevAttrMaxRegistersPerBlock,
+        device_id,
+    )
+    return prop

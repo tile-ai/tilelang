@@ -1,5 +1,4 @@
 """The language interface for tl programs."""
-from __future__ import annotations
 
 from tvm.script.ir_builder.tir.frame import TIRFrame
 from tvm.ffi import register_object

@@ -2,4 +2,4 @@
 set -euxo pipefail
 
 # Build for local architecture
-CIBW_BUILD='cp38-*' cibuildwheel .
+CIBW_BUILD='cp39-*' cibuildwheel . 2>&1 | tee cibuildwheel.log

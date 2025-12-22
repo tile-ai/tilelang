@@ -122,8 +122,14 @@ public:
         return truncdiv(op->a, op->b);
       }
 
+      // NOTE: Disabled due to integer overflow risk in `a + b * c`.
+      // The transformation `floordiv(a,b) -> truncdiv(a + b*c, b) - c`
+      // may overflow when `a` is near type limit and `c` is large,
+      // producing incorrect results.
+
       // If the numerator's lower bound is known, express the floordiv
       // in terms of truncdiv using only positive operands.
+      /*
       arith::ConstIntBound const_int_bound = analyzer_->const_int_bound(op->a);
       if (const_int_bound->min_value < 0 &&
           const_int_bound->min_value >
@@ -165,6 +171,7 @@ public:
             analyzer_->Simplify(op->a + op->b * ceildiv);
         return truncdiv(offset_numerator, op->b) - ceildiv;
       }
+      */
 
       DLOG(INFO) << "LowerFloorDiv: Cannot decide the sign of divident";
       PrimExpr rdiv = truncdiv(op->a, op->b);
@@ -223,8 +230,14 @@ public:
         return truncmod(op->a, op->b);
       }
 
+      // NOTE: Disabled due to integer overflow risk in `a + b * c`.
+      // The transformation `floordiv(a,b) -> truncdiv(a + b*c, b) - c`
+      // may overflow when `a` is near type limit and `c` is large,
+      // producing incorrect results.
+
       // If the numerator's lower bound is known, express the floormod
       // in terms of truncmod using only positive operands.
+      /*
       arith::ConstIntBound const_int_bound = analyzer_->const_int_bound(op->a);
       if (const_int_bound->min_value < 0 &&
           const_int_bound->min_value >
@@ -265,6 +278,7 @@ public:
             analyzer_->Simplify(op->a + op->b * ceildiv);
         return truncmod(offset_numerator, op->b);
       }
+      */
 
       DLOG(INFO) << "LowerFloorMod: Cannot decide the sign of divident";
       // NOTE:condition on b >= 0.

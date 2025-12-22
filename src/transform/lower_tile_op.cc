@@ -606,8 +606,7 @@ private:
     if (call && call->op.as<GlobalVarNode>())
       return Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
-    auto tile_op =
-        ParseOperator(tvm::ffi::GetRef<Stmt>(op), buffer_data_to_buffer_);
+    auto tile_op = ParseOperator(tvm::ffi::GetRef<Stmt>(op));
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
@@ -639,10 +638,16 @@ private:
       thread_bounds = Range::FromMinExtent(0, 1);
     }
 
-    auto lowered =
-        tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_->var,
-                                 callback, layout_map_, buffer_remap_},
-                       analyzer_);
+    // Convert let_bindings_ to Map<Var, PrimExpr> for LowerArgs
+    Map<Var, PrimExpr> let_var_to_expr;
+    for (const auto &[var, expr] : let_bindings_) {
+      let_var_to_expr.Set(var, expr);
+    }
+
+    auto lowered = tile_op->Lower(
+        LowerArgs{target_, thread_bounds, thread_var_->var, callback,
+                  layout_map_, buffer_remap_, let_var_to_expr},
+        analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 

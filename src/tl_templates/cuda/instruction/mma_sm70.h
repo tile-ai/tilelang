@@ -2,8 +2,10 @@
 
 #include "../common.h"
 
+#ifndef __CUDACC_RTC__
 #include <type_traits>
 #include <utility>
+#endif
 
 namespace tl {
 

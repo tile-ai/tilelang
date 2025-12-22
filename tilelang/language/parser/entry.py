@@ -18,6 +18,7 @@
 # which is part of the TVM project (https://tvm.apache.org/).
 # ruff: noqa
 """The entry point of TVM parser for tir."""
+
 import inspect
 from typing import Callable, Optional, Union
 
@@ -29,9 +30,7 @@ from tvm.script.parser._core import parse, scan_macro, utils
 from tvm.script.parser.core.parser import Parser, ScriptMacro
 
 
-def prim_func(func: Optional[Callable] = None,
-              private: bool = False,
-              check_well_formed=True) -> Union[PrimFunc, Callable]:
+def prim_func(func: Optional[Callable] = None, private: bool = False, check_well_formed=True) -> Union[PrimFunc, Callable]:
     """The parsing method for tir prim func, by using `@prim_func` as decorator.
 
     Parameters
@@ -149,8 +148,7 @@ def macro(*args, hygienic: bool = True) -> Callable:
     if len(args) == 1 and inspect.isfunction(args[0]):
         return _decorator(args[0])
 
-    raise ValueError(
-        "Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])")
+    raise ValueError("Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])")
 
 
 class BufferProxy:
@@ -159,7 +157,7 @@ class BufferProxy:
     def __call__(
         self,
         shape,
-        dtype="float32",
+        dtype=T.float32,
         data=None,
         strides=None,
         elem_offset=None,

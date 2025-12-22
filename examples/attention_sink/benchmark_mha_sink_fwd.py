@@ -1,6 +1,7 @@
 import torch
 import argparse
 from tilelang.profiler import do_bench
+from tilelang import language as T
 import triton
 import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
@@ -50,8 +51,7 @@ def triton_kernel(
     q = Q.load([off_z, off_h, start_m * BLOCK_M, 0]).reshape([BLOCK_M, HEAD_DIM])
 
     if BANDWIDTH:
-        lo, hi = tl.maximum(0, start_q + start_m * BLOCK_M -
-                            BANDWIDTH), start_q + (start_m + 1) * BLOCK_M
+        lo, hi = tl.maximum(0, start_q + start_m * BLOCK_M - BANDWIDTH), start_q + (start_m + 1) * BLOCK_M
     else:
         lo, hi = 0, start_q + (start_m + 1) * BLOCK_M
 
@@ -117,26 +117,29 @@ def triton_program(Q, K, V, Sinks, window_size: Optional[int] = None) -> torch.T
         BANDWIDTH=window_size,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        start_q=seq_kv - seq_q)
+        start_q=seq_kv - seq_q,
+    )
     return o
 
 
-def main(batch: int = 1,
-         heads: int = 32,
-         seq_q: int = 256,
-         seq_kv: int = 256,
-         dim: int = 128,
-         window_size: Optional[int] = None,
-         dtype: str = "float16",
-         tune: bool = False):
-    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+def main(
+    batch: int = 1,
+    heads: int = 32,
+    seq_q: int = 256,
+    seq_kv: int = 256,
+    dim: int = 128,
+    window_size: Optional[int] = None,
+    dtype: str = "float16",
+    tune: bool = False,
+):
+    dtype = T.dtype(dtype)
+    torch_dtype = dtype.as_torch()
     if window_size is not None:
-        print('Using sliding window attention.')
+        print("Using sliding window attention.")
         assert window_size <= seq_q
-        flops_per_matmul = 2.0 * batch * heads * min(
-            window_size, seq_kv // 2) * seq_q * dim  # just a rough estimation
+        flops_per_matmul = 2.0 * batch * heads * min(window_size, seq_kv // 2) * seq_q * dim  # just a rough estimation
     else:
-        print('Using full attention.')
+        print("Using full attention.")
         flops_per_matmul = 2.0 * batch * heads * seq_q * seq_kv * dim * 0.5
     total_flops = 2 * flops_per_matmul
 
@@ -163,15 +166,14 @@ def main(batch: int = 1,
             block_N=block_N,
             num_stages=num_stages,
             threads=threads,
-            dtype=dtype)
+            dtype=dtype,
+        )
 
         Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, dtype=torch_dtype)
 
         torch.testing.assert_close(
-            kernel(Q, K, V, sinks),
-            ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype),
-            rtol=1e-2,
-            atol=1e-2)
+            kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype), rtol=1e-2, atol=1e-2
+        )
         print("All checks passed.✅")
 
         latency = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
@@ -184,19 +186,13 @@ def main(batch: int = 1,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--seq_q', type=int, default=4096, help='sequence length of query')
-    parser.add_argument('--seq_kv', type=int, default=4096, help='sequence length of key/value')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument(
-        '--window_size',
-        type=int,
-        default=None,
-        help='window size (default: None, which means full attention)')
-    parser.add_argument(
-        '--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16")
-    parser.add_argument('--tune', action='store_true', help='tune')
+    parser.add_argument("--batch", type=int, default=8, help="batch size")
+    parser.add_argument("--heads", type=int, default=32, help="heads")
+    parser.add_argument("--seq_q", type=int, default=4096, help="sequence length of query")
+    parser.add_argument("--seq_kv", type=int, default=4096, help="sequence length of key/value")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--window_size", type=int, default=None, help="window size (default: None, which means full attention)")
+    parser.add_argument("--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
+    parser.add_argument("--tune", action="store_true", help="tune")
     args = parser.parse_args()
-    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.window_size, args.dtype,
-         args.tune)
+    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.window_size, args.dtype, args.tune)

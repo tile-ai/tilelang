@@ -19,14 +19,12 @@ def _check(original, transformed):
 
 
 def test_simple_pipeline():
-
     @T.prim_func
-    def before(A: T.Tensor((1024, 32), "float32"), B: T.Tensor((32, 1024), "float32"), C: T.Tensor(
-        (1024, 1024), "float32")):
+    def before(A: T.Tensor((1024, 32), T.float32), B: T.Tensor((32, 1024), T.float32), C: T.Tensor((1024, 1024), T.float32)):
         with T.Kernel(8, 8, threads=128) as (bx, by):
-            A_shared = T.alloc_shared((128, 32), "float32")
-            B_shared = T.alloc_shared((32, 128), "float32")
-            C_local = T.alloc_fragment((128, 128), "float32")
+            A_shared = T.alloc_shared((128, 32), T.float32)
+            B_shared = T.alloc_shared((32, 128), T.float32)
+            C_local = T.alloc_fragment((128, 128), T.float32)
 
             T.clear(C_local)
 
@@ -39,24 +37,22 @@ def test_simple_pipeline():
             T.copy(C_local, C[by * 128, bx * 128])
 
     @T.prim_func
-    def after(A: T.Tensor((1024, 32), "float32"), B: T.Tensor((32, 1024), "float32"), C: T.Tensor(
-        (1024, 1024), "float32")):
+    def after(A: T.Tensor((1024, 32), T.float32), B: T.Tensor((32, 1024), T.float32), C: T.Tensor((1024, 1024), T.float32)):
         with T.Kernel(8, 8, threads=128) as (bx, by):
-            A_shared = T.alloc_shared((128, 32), "float32")
-            B_shared = T.alloc_shared((32, 128), "float32")
-            C_local = T.alloc_fragment((128, 128), "float32")
+            A_shared = T.alloc_shared((128, 32), T.float32)
+            B_shared = T.alloc_shared((32, 128), T.float32)
+            C_local = T.alloc_fragment((128, 128), T.float32)
 
             T.clear(C_local)
 
             for ko in T.serial(
-                    32,
-                    annotations={
-                        "software_pipeline_async_stages": [T.int32(0)],
-                        "software_pipeline_order": [T.int32(0), T.int32(1),
-                                                    T.int32(2)],
-                        "software_pipeline_stage": [T.int32(3), T.int32(3),
-                                                    T.int32(3)]
-                    }):
+                32,
+                annotations={
+                    "software_pipeline_async_stages": [T.int32(0)],
+                    "software_pipeline_order": [T.int32(0), T.int32(1), T.int32(2)],
+                    "software_pipeline_stage": [T.int32(3), T.int32(3), T.int32(3)],
+                },
+            ):
                 T.copy(A[by * 128, ko * 32], A_shared)
                 T.copy(B[ko * 32, bx * 128], B_shared)
                 T.gemm(A_shared, B_shared, C_local)

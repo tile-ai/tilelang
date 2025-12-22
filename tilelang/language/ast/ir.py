@@ -92,7 +92,7 @@ from tvm.script.ir_builder.tir import frame
 
 def buffer(
     shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral],
-    dtype: str = "float32",
+    dtype: str = T.float32,
     data: Var = None,
     strides: List[PrimExpr] = None,
     elem_offset: PrimExpr = None,
@@ -143,7 +143,7 @@ def buffer(
     """
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        strides = [Var(s, "int32") if isinstance(s, str) else s for s in strides]
+        strides = [Var(s, T.int32) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
     return _ffi_api.Buffer(  # type: ignore[attr-defined] # pylint: disable=no-member
@@ -244,7 +244,7 @@ def func_ret(ret_type: Type) -> Type:
 def match_buffer(
     param: Union[Var, BufferLoad, BufferRegion],
     shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral] = None,
-    dtype: str = "float32",
+    dtype: str = T.float32,
     data: Var = None,
     strides: List[PrimExpr] = None,
     elem_offset: PrimExpr = None,
@@ -266,11 +266,11 @@ def match_buffer(
     -------
     Match buffer from function parameter
     .. code-block:: python
-        A = T.match_buffer(a, (128, 128), dtype="float32")
+        A = T.match_buffer(a, (128, 128), dtype=T.float32)
 
     Match buffer from Buffer subregion
     .. code-block:: python
-        A = T.match_buffer(B[0:128, i * 128 : i * 128 + 128], (128, 128), dtype="float32")
+        A = T.match_buffer(B[0:128, i * 128 : i * 128 + 128], (128, 128), dtype=T.float32)
 
     Parameters
     ----------
@@ -320,7 +320,7 @@ def match_buffer(
             raise ValueError("Shape must be specified when binding input param")
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        idx_dtype = shape[0].dtype if isinstance(shape[0], PrimExpr) else "int32"
+        idx_dtype = shape[0].dtype if isinstance(shape[0], PrimExpr) else T.int32
         strides = [Var(s, idx_dtype) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
@@ -440,7 +440,7 @@ def block_attr(attrs: Dict[str, Any]) -> None:
 
 def alloc_buffer(
     shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral],
-    dtype: str = "float32",
+    dtype: str = T.float32,
     data: Var = None,
     strides: List[PrimExpr] = None,
     elem_offset: PrimExpr = None,
@@ -491,7 +491,7 @@ def alloc_buffer(
     """
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        strides = [Var(s, "int32") if isinstance(s, str) else s for s in strides]
+        strides = [Var(s, T.int32) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
     return _ffi_api.AllocBuffer(  # type: ignore[attr-defined] # pylint: disable=no-member
@@ -537,7 +537,7 @@ class axis:  # pylint: disable=invalid-name
     def spatial(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = "int32",
+        dtype: str = T.int32,
     ) -> Var:
         """The spatial block axis defining function.
 
@@ -558,13 +558,14 @@ class axis:  # pylint: disable=invalid-name
             The iteration variable.
         """
         return _ffi_api.AxisSpatial(  # type: ignore[attr-defined] # pylint: disable=no-member
-            _as_range(dom), binding, dtype)
+            _as_range(dom), binding, dtype
+        )
 
     @staticmethod
     def reduce(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = "int32",
+        dtype: str = T.int32,
     ) -> Var:
         """The reduced block axis defining function.
 
@@ -585,13 +586,14 @@ class axis:  # pylint: disable=invalid-name
             The iteration variable.
         """
         return _ffi_api.AxisReduce(  # type: ignore[attr-defined] # pylint: disable=no-member
-            _as_range(dom), binding, dtype)
+            _as_range(dom), binding, dtype
+        )
 
     @staticmethod
     def scan(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = "int32",
+        dtype: str = T.int32,
     ) -> Var:
         """The scanning block axis defining function.
 
@@ -612,13 +614,14 @@ class axis:  # pylint: disable=invalid-name
             The iteration variable.
         """
         return _ffi_api.AxisScan(  # type: ignore[attr-defined] # pylint: disable=no-member
-            _as_range(dom), binding, dtype)
+            _as_range(dom), binding, dtype
+        )
 
     @staticmethod
     def opaque(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = "int32",
+        dtype: str = T.int32,
     ) -> Var:
         """The opaque block axis defining function.
 
@@ -639,10 +642,11 @@ class axis:  # pylint: disable=invalid-name
             The iteration variable.
         """
         return _ffi_api.AxisOpaque(  # type: ignore[attr-defined] # pylint: disable=no-member
-            _as_range(dom), binding, dtype)
+            _as_range(dom), binding, dtype
+        )
 
     @staticmethod
-    def remap(kinds: str, bindings: List[PrimExpr], dtype: str = "int32") -> Union[List[Var], Var]:
+    def remap(kinds: str, bindings: List[PrimExpr], dtype: str = T.int32) -> Union[List[Var], Var]:
         """The block axis remapping function.
 
         Parameters
@@ -662,17 +666,15 @@ class axis:  # pylint: disable=invalid-name
             The iteration variables.
         """
         iter_vars = _ffi_api.AxisRemap(  # type: ignore[attr-defined] # pylint: disable=no-member
-            kinds, bindings, dtype)
+            kinds, bindings, dtype
+        )
         return iter_vars[0] if len(iter_vars) == 1 else iter_vars
 
     S = spatial  # pylint: disable=invalid-name
     R = reduce  # pylint: disable=invalid-name
 
 
-def serial(start: PrimExpr,
-           stop: PrimExpr = None,
-           *,
-           annotations: Dict[str, Any] = None) -> frame.ForFrame:
+def serial(start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The serial For statement.
 
     Parameters
@@ -700,10 +702,7 @@ def serial(start: PrimExpr,
     return _ffi_api.Serial(start, stop, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def parallel(start: PrimExpr,
-             stop: PrimExpr = None,
-             *,
-             annotations: Dict[str, Any] = None) -> frame.ForFrame:
+def parallel(start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The parallel For statement.
 
     Parameters
@@ -731,10 +730,7 @@ def parallel(start: PrimExpr,
     return _ffi_api.Parallel(start, stop, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def vectorized(start: PrimExpr,
-               stop: PrimExpr = None,
-               *,
-               annotations: Dict[str, Any] = None) -> frame.ForFrame:
+def vectorized(start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The vectorized For statement.
 
     Parameters
@@ -762,10 +758,7 @@ def vectorized(start: PrimExpr,
     return _ffi_api.Vectorized(start, stop, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def unroll(start: PrimExpr,
-           stop: PrimExpr = None,
-           *,
-           annotations: Dict[str, Any] = None) -> frame.ForFrame:
+def unroll(start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The unrolled For statement.
 
     Parameters
@@ -837,7 +830,8 @@ def thread_binding(
         else:
             start = 0
     return _ffi_api.ThreadBinding(  # type: ignore[attr-defined] # pylint: disable=no-member
-        start, stop, thread, annotations)
+        start, stop, thread, annotations
+    )
 
 
 def grid(*extents: PrimExpr) -> frame.ForFrame:
@@ -878,10 +872,10 @@ def Assert(condition: PrimExpr, message: str) -> frame.AssertFrame:  # pylint: d
 
 
 def LetStmt(  # pylint: disable=invalid-name
-        value: PrimExpr,
-        type_annotation: Optional[Type] = None,  # pylint: disable=redefined-outer-name
-        *,
-        var: Optional[Var] = None,  # pylint: disable=redefined-outer-name
+    value: PrimExpr,
+    type_annotation: Optional[Type] = None,  # pylint: disable=redefined-outer-name
+    *,
+    var: Optional[Var] = None,  # pylint: disable=redefined-outer-name
 ) -> frame.LetFrame:
     """Create a LetStmt binding
 
@@ -909,8 +903,8 @@ def LetStmt(  # pylint: disable=invalid-name
 
 
 def Let(  # pylint: disable=invalid-name
-        expr: PrimExpr,
-        where: Dict[Var, PrimExpr],  # pylint: disable=redefined-outer-name
+    expr: PrimExpr,
+    where: Dict[Var, PrimExpr],  # pylint: disable=redefined-outer-name
 ) -> PrimExpr:
     """Create a Let expression binding"""
     assert len(where) == 1, "T.Let only allows `where` to have exactly one element"
@@ -980,7 +974,8 @@ def realize(
         The result RealizeFrame.
     """
     return _ffi_api.Realize(  # type: ignore[attr-defined] # pylint: disable=no-member
-        buffer_slice, storage_scope, condition)
+        buffer_slice, storage_scope, condition
+    )
 
 
 def allocate(
@@ -1012,7 +1007,8 @@ def allocate(
     if isinstance(condition, bool):
         condition = IntImm("bool", condition)
     return _ffi_api.Allocate(  # type: ignore[attr-defined] # pylint: disable=no-member
-        extents, dtype, scope, condition, annotations)
+        extents, dtype, scope, condition, annotations
+    )
 
 
 def allocate_const(
@@ -1048,7 +1044,8 @@ def allocate_const(
         np_data = np_data.reshape(extents)
 
     return _ffi_api.AllocateConst(  # type: ignore[attr-defined] # pylint: disable=no-member
-        ndarray.array(np_data), dtype, extents, annotations)
+        ndarray.array(np_data), dtype, extents, annotations
+    )
 
 
 def attr(node: Any, attr_key: str, value: Union[PrimExpr, str]) -> frame.AttrFrame:
@@ -1136,7 +1133,7 @@ def Else() -> frame.ElseFrame:  # pylint: disable=invalid-name
 
 def decl_buffer(
     shape,
-    dtype="float32",
+    dtype=T.float32,
     data=None,
     strides=None,
     elem_offset=None,
@@ -1187,7 +1184,7 @@ def decl_buffer(
     """
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        strides = [Var(s, "int32") if isinstance(s, str) else s for s in strides]
+        strides = [Var(s, T.int32) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
     return _ffi_api.DeclBuffer(  # type: ignore[attr-defined] # pylint: disable=no-member
@@ -1240,7 +1237,7 @@ def launch_thread(
     return _ffi_api.LaunchThread(thread, extent)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def env_thread(thread_tag: str, dtype: str = "int32") -> IterVar:
+def env_thread(thread_tag: str, dtype: str = T.int32) -> IterVar:
     """Bind a var to thread env
 
     Parameters
@@ -1297,7 +1294,8 @@ def buffer_store(
     if isinstance(value, bool) and buffer.dtype == "bool":
         value = IntImm("bool", value)
     return _ffi_api.BufferStore(  # type: ignore[attr-defined] # pylint: disable=no-member
-        buffer, value, expr_indices)
+        buffer, value, expr_indices
+    )
 
 
 def prefetch(
@@ -1464,10 +1462,7 @@ def boolean(expr: Optional[PrimExpr] = None, is_size_var: bool = False) -> PrimE
     return _ffi_api.Boolean(expr, is_size_var)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-def handle(dtype: Optional[str] = None,
-           storage_scope: str = "global",
-           *,
-           is_size_var: bool = False) -> Var:
+def handle(dtype: Optional[str] = None, storage_scope: str = "global", *, is_size_var: bool = False) -> Var:
     """Create a TIR var that represents a pointer.
 
     Parameters
@@ -1661,13 +1656,13 @@ def comm_reducer(combiner: Callable, identity: List[PrimExpr]) -> CommReducer:
     args = []
     for name, i in zip(params.keys(), identity + identity):
         if isinstance(i, int):
-            args.append(Var(name, "int32"))
+            args.append(Var(name, T.int32))
         else:
             args.append(Var(name, i.dtype))
     res = combiner(*args)
     if not isinstance(res, tuple):
         res = (res,)
-    return CommReducer(args[:num_args // 2], args[num_args // 2:], res, identity)
+    return CommReducer(args[: num_args // 2], args[num_args // 2 :], res, identity)
 
 
 def index_map(
@@ -1700,16 +1695,15 @@ def target(
         The target.
     """
     if not isinstance(target_config, (str, dict)):
-        raise ValueError(
-            f"T.target expected a config dict or string, but got {type(target_config)}")
+        raise ValueError(f"T.target expected a config dict or string, but got {type(target_config)}")
     if host is not None and not isinstance(host, (str, dict, Target)):
-        raise ValueError("T.target expected the host to be "
-                         "a config dict, string, or T.target, "
-                         f"but got {type(host)}")
+        raise ValueError(f"T.target expected the host to be a config dict, string, or T.target, but got {type(host)}")
     if isinstance(target_config, dict) and "host" in target_config and host is not None:
-        raise ValueError("T.target expects to either receive the host "
-                         "as part of the target's config dictionary, "
-                         "or as a separate argument, but not both.")
+        raise ValueError(
+            "T.target expects to either receive the host "
+            "as part of the target's config dictionary, "
+            "or as a separate argument, but not both."
+        )
     return Target(target_config, host)
 
 
@@ -1742,7 +1736,6 @@ class meta_var:  # pylint: disable=invalid-name
         self.value = value
 
     def __iter__(self):
-
         def f():
             for i in self.value:
                 yield meta_var(i)
@@ -1754,7 +1747,6 @@ class meta_var:  # pylint: disable=invalid-name
 
 
 def _op_wrapper(func):
-
     @functools.wraps(func)
     def wrapped(*args, **kwargs):
         if "dtype" in kwargs:
@@ -1874,7 +1866,6 @@ vscale = _op_wrapper(_tir_op.vscale)
 
 
 def _dtype_forward(func):
-
     @functools.wraps(func)
     def wrapped(*args, **kwargs):
         if "dtype" in kwargs:

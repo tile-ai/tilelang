@@ -1,6 +1,6 @@
 """The profiler and convert to torch utils"""
-from __future__ import annotations
 
+from __future__ import annotations
 from typing import Callable, Any, Literal
 from functools import partial
 import torch
@@ -11,7 +11,7 @@ from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
     torch_assert_close,
-    adapt_torch2tvm,
+    is_float8_dtype,
 )
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
@@ -46,8 +46,7 @@ class Profiler:
             result_idx = []
         elif isinstance(result_idx, int):
             if result_idx > len(params) or result_idx < -len(params):
-                raise ValueError(
-                    f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
+                raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
             if result_idx < 0:
                 result_idx = len(params) + result_idx
             result_idx = [result_idx]
@@ -114,8 +113,7 @@ class Profiler:
         ref_tensors = ins + ref_outs
         lib_tensors = ins + lib_outs
 
-        assert len(lib_tensors) == len(
-            ref_tensors), "len(lib_tensors) not equals to len(ref_tensors) !"
+        assert len(lib_tensors) == len(ref_tensors), "len(lib_tensors) not equals to len(ref_tensors) !"
         # torch.set_printoptions(edgeitems=torch.inf)
         for lhs, rhs in zip(lib_tensors, ref_tensors):
             # close_mask = torch.isclose(lhs, rhs, rtol=rtol, atol=atol)
@@ -127,17 +125,9 @@ class Profiler:
             if lhs is not None and rhs is not None:
                 # in case of numsplit template, the ref output may be None
                 # which means the value is invalid, so we skip the comparison
-                def is_float8(tensor: torch.Tensor) -> bool:
-                    return tensor.dtype in {
-                        torch.float8_e5m2,
-                        torch.float8_e5m2fnuz,
-                        torch.float8_e4m3fn,
-                        torch.float8_e4m3fnuz,
-                    }
-
                 torch_assert_close(
-                    lhs if not is_float8(lhs) else lhs.to(torch.float32),
-                    rhs if not is_float8(rhs) else rhs.to(torch.float32),
+                    lhs if not is_float8_dtype(lhs.dtype) else lhs.to(torch.float32),
+                    rhs if not is_float8_dtype(rhs.dtype) else rhs.to(torch.float32),
                     rtol=rtol,
                     atol=atol,
                     max_mismatched_ratio=max_mismatched_ratio,
@@ -261,10 +251,9 @@ class Profiler:
             )
         elif profiler == "tvm":
             assert func is not None, "func should not be None"
-            assert isinstance(
-                func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
+            assert isinstance(func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
 
-            ins = (self._get_inputs(with_output=True) if input_tensors is None else input_tensors)
+            ins = self._get_inputs(with_output=True) if input_tensors is None else input_tensors
             target = "cuda"
 
             with suppress(Exception):
@@ -273,11 +262,9 @@ class Profiler:
             assert target in ["cuda", "hip"], f"Unknown target: {target}"
 
             device = tvm.cuda(0) if target == "cuda" else tvm.rocm(0)
-            time_evaluator = self.mod.time_evaluator(
-                self.mod.entry_name, device, number=rep, repeat=n_repeat)
-            tvm_inputs = [adapt_torch2tvm(inp) for inp in ins]
+            time_evaluator = self.mod.time_evaluator(self.mod.entry_name, device, number=rep, repeat=n_repeat)
             # Transform Latency to ms
-            return time_evaluator(*tvm_inputs).mean * 1e3
+            return time_evaluator(*ins).mean * 1e3
         else:
             raise ValueError(f"Unknown profiler: {profiler}")
 

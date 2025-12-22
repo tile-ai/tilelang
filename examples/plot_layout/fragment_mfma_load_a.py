@@ -11,10 +11,9 @@ from tilelang.intrinsics.mfma_layout import (
 )
 
 
-def make_mfma_load_base_layout(dtype: str = "float16",
-                               matrix: Literal["A", "B"] = "A",
-                               k_dim: int = 16,
-                               transposed: bool = False) -> T.Fragment:
+def make_mfma_load_base_layout(
+    dtype: T.dtype = T.float16, matrix: Literal["A", "B"] = "A", k_dim: int = 16, transposed: bool = False
+) -> T.Fragment:
     """
     Create a layout function for storing MFMA results into a fragment buffer.
     This layout is used in conjunction with `inverse_mfma_store_layout` to
@@ -72,17 +71,15 @@ def make_mfma_load_base_layout(dtype: str = "float16",
     # so the b matrix expected a transposed basic layout
     transform_func: Callable = None
     if matrix == "A":
-        transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
-            j, i)
+        transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(j, i)
         micro_size_s, micro_size_r = micro_size_x, micro_size_k
     elif matrix == "B":
-        transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(
-            j, i)
+        transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(j, i)
         micro_size_s, micro_size_r = micro_size_k, micro_size_y
     else:
         raise ValueError(f"Unsupported matrix {matrix}")
 
-    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
     def forward_thread(i: int, j: int) -> int:
         """
@@ -115,19 +112,16 @@ chunk = 2
 from tilelang.tools import plot_layout
 
 # ldmatrix layout 16x16
-base_layout = make_mfma_load_base_layout(dtype="float16", matrix="A", transposed=False)
+base_layout = make_mfma_load_base_layout(dtype=T.float16, matrix="A", transposed=False)
 print(base_layout)
 plot_layout(base_layout, name="base_layout")
 
 # warp layout 32x32
-warp_layout = base_layout.repeat([warp_rows, warp_cols],
-                                 repeat_on_thread=False,
-                                 lower_dim_first=False)
+warp_layout = base_layout.repeat([warp_rows, warp_cols], repeat_on_thread=False, lower_dim_first=False)
 print(warp_layout)
 plot_layout(warp_layout, name="warp_layout")
 
 # block layout 64x32
-block_layout = warp_layout.repeat([block_rows, 1], repeat_on_thread=True,
-                                  lower_dim_first=True).replicate(block_cols)
+block_layout = warp_layout.repeat([block_rows, 1], repeat_on_thread=True, lower_dim_first=True).replicate(block_cols)
 print(block_layout)
 plot_layout(block_layout, name="block_layout")

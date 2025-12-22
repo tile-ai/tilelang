@@ -5,9 +5,7 @@ from tvm.tir import IndexMap
 from tilelang.intrinsics.utils import get_mma_micro_size
 
 
-def make_mma_load_base_layout(dtype: str = "float16",
-                              matrix: Literal["A", "B"] = "A",
-                              transposed: bool = False) -> T.Fragment:
+def make_mma_load_base_layout(dtype: T.dtype = T.float16, matrix: Literal["A", "B"] = "A", transposed: bool = False) -> T.Fragment:
     """
     Create a layout function for storing MMA results into a fragment buffer.
     This layout is used in conjunction with `inverse_mma_store_layout` to
@@ -36,6 +34,7 @@ def make_mma_load_base_layout(dtype: str = "float16",
         shared_16x16_to_mma_32x8_layout_sr_b,
         shared_16x32_to_mma_32x16_layout_sr_b,
     )
+
     assert matrix in ["A", "B"], "matrix should be either A or B"
     dtype_bits = DataType(dtype).bits
     # s represents spatial axis
@@ -67,17 +66,15 @@ def make_mma_load_base_layout(dtype: str = "float16",
     # so the b matrix expected a transposed basic layout
     transform_func: Callable = None
     if matrix == "A":
-        transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
-            j, i)
+        transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(j, i)
         micro_size_s, micro_size_r = micro_size_x, micro_size_k
     elif matrix == "B":
-        transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(
-            j, i)
+        transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(j, i)
         micro_size_s, micro_size_r = micro_size_k, micro_size_y
     else:
         raise ValueError(f"Unsupported matrix {matrix}")
 
-    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+    inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
     def forward_thread(i: int, j: int) -> int:
         """
@@ -110,7 +107,7 @@ chunk = 2
 from tilelang.tools import plot_layout
 
 # ldmatrix layout 16x16
-base_layout = make_mma_load_base_layout(dtype="float16", matrix="A", transposed=False)
+base_layout = make_mma_load_base_layout(dtype=T.float16, matrix="A", transposed=False)
 print(base_layout)
 plot_layout(base_layout, name="base_layout")
 

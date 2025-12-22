@@ -97,7 +97,7 @@ public:
   // only will be enabled under cdna mfma instructions
   int kPack_ = 1;
   int wgWait_ = 0;
-  PrimExpr mbarPtr_;
+  BufferRegion mbarRegion_;
   std::optional<tir::Buffer> mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   mutable GemmWarpPolicy policy_;
@@ -144,7 +144,7 @@ private:
 class Gemm : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Gemm, TileOperator, GemmNode);
-  TVM_DLL Gemm(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL Gemm(Array<PrimExpr> args);
   static const Op &Get();
 };
 

@@ -11,11 +11,7 @@ def run_passes(func: tvm.tir.PrimFunc):
 
     cuda_target = tvm.target.Target("cuda", host="llvm")
 
-    mod = tvm.tir.transform.Apply(lambda f: f.with_attr({
-        "global_symbol": "test",
-        "target": cuda_target
-    }))(
-        mod)
+    mod = tvm.tir.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
 
     mod = tvm.tir.transform.AnnotateDeviceRegions()(mod)
     mod = tvm.tir.transform.SplitHostDevice()(mod)
@@ -24,7 +20,6 @@ def run_passes(func: tvm.tir.PrimFunc):
 
 @tilelang.testing.requires_cuda
 def test_sync_if_with_same_index():
-
     @T.prim_func(check_well_formed=False)
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
@@ -47,7 +42,6 @@ def test_sync_if_with_same_index():
 
 @tilelang.testing.requires_cuda
 def test_sync_read_thread_id_independent_location():
-
     @T.prim_func
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
@@ -71,7 +65,6 @@ def test_sync_read_thread_id_independent_location():
 
 @tilelang.testing.requires_cuda
 def test_sync_shared():
-
     @T.prim_func(private=True)
     def func(A: T.Buffer((4, 4), "float32"), E: T.Buffer((4, 4), "float32")):
         blockIdx_x = T.launch_thread("blockIdx.x", 1)
@@ -113,7 +106,6 @@ def test_sync_shared():
 
 @tvm.testing.requires_cuda
 def test_sync_let_stmt():
-
     @T.prim_func(private=True)
     def func(A: T.Buffer((16 * 512), "float32")):
         blockIdx_x = T.launch_thread("blockIdx.x", 16)
@@ -136,9 +128,9 @@ def test_sync_let_stmt():
             in_thread_A_temp_1[0] = A_temp
         cross_thread_A_temp_1 = T.Buffer((1,), data=cross_thread_A_temp, scope="local")
         with T.attr(
-                T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]),
-                "reduce_scope",
-                T.reinterpret("handle", T.uint64(0)),
+            T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]),
+            "reduce_scope",
+            T.reinterpret("handle", T.uint64(0)),
         ):
             T.tvm_thread_allreduce(
                 T.uint32(1),
@@ -190,16 +182,19 @@ def test_sync_let_stmt():
 
 @tilelang.testing.requires_cuda
 def test_sync_shared_dyn_stmatrix_loop_hoist():
-
     @T.prim_func
     def func():
         buf_dyn_shmem = T.alloc_buffer((98304,), "uint8", scope="shared.dyn")
         tx = T.launch_thread("threadIdx.x", 384)
         for i in T.unroll(8):
             off = (
-                i // 4 * 8192 + tx // 32 * 1024 + tx % 16 * 64 +
-                (tx % 8 // 4 + i % 4 // 2) % 2 * 32 + (tx % 4 // 2 + i % 2) % 2 * 16 +
-                (tx % 32 // 16 + tx % 2) % 2 * 8)
+                i // 4 * 8192
+                + tx // 32 * 1024
+                + tx % 16 * 64
+                + (tx % 8 // 4 + i % 4 // 2) % 2 * 32
+                + (tx % 4 // 2 + i % 2) % 2 * 16
+                + (tx % 32 // 16 + tx % 2) % 2 * 8
+            )
             T.evaluate(
                 T.call_intrin(
                     "handle",
@@ -214,7 +209,8 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
                         2,
                     ),
                     T.int32(2),
-                ))
+                )
+            )
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)

@@ -6,7 +6,8 @@ from tvm import tl as TL
 import tvm.tl.language as T
 from bitblas.tl.utils import get_swizzle_layout
 from bitblas.tl.mma_macro_generator import (
-    TensorCoreIntrinEmitter,)
+    TensorCoreIntrinEmitter,
+)
 from bitblas.base import simplify_prim_func
 
 torch.manual_seed(0)
@@ -37,18 +38,18 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -56,7 +57,7 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 64
     warp_col_tiles = 64
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -101,12 +102,11 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+        A: T.Buffer(A_shape, in_dtype),
+        B: T.Buffer(B_shape, in_dtype),
+        C: T.Buffer((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
@@ -116,10 +116,12 @@ def tl_matmul(
 
             thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
 
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)
@@ -127,7 +129,6 @@ def tl_matmul(
             T.clear(C_local)
 
             for ko in T.Pipelined((K // block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -137,7 +138,6 @@ def tl_matmul(
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -183,7 +183,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     # src_code is the generated cuda source
     assert src_code is not None
     print(src_code)
-    if in_dtype == "int8":
+    if in_dtype == T.int8:
         A = torch.randint(-7, 7, (M, K), device="cuda", dtype=torch.int8)
         B = torch.randint(-7, 7, (N, K), device="cuda", dtype=torch.int8)
     else:
@@ -209,12 +209,12 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
-    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", "float32")
+    assert_tl_matmul_correctness(128, 128, 128, T.float16, T.float16, T.float16)
+    assert_tl_matmul_correctness(128, 256, 256, T.float16, T.float32, T.float32)
 
 
 if __name__ == "__main__":
     # bitblas.testing.main()
-    # assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
-    # assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", "int32")
-    assert_tl_matmul_correctness(16384, 16384, 16384, "int8", "int32", "int32")
+    # assert_tl_matmul_correctness(128, 128, 128, T.float16, T.float16, T.float16)
+    # assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
+    assert_tl_matmul_correctness(16384, 16384, 16384, T.int8, T.int32, T.int32)

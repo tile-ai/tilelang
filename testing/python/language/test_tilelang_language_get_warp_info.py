@@ -23,9 +23,8 @@ def _resolve_warps_per_group(warps_per_group: Optional[int]) -> int:
 
 @tilelang.jit(out_idx=[-1])
 def _get_laneid_kernel(num_threads: int = 128, warp_size: Optional[int] = None):
-
     @T.prim_func
-    def laneid_kernel(A: T.Tensor((num_threads,), "int32")):
+    def laneid_kernel(A: T.Tensor((num_threads,), T.int32)):
         with T.Kernel(1, threads=num_threads) as _:
             tx = T.get_thread_binding()
             A[tx] = T.get_lane_idx(warp_size)
@@ -35,9 +34,8 @@ def _get_laneid_kernel(num_threads: int = 128, warp_size: Optional[int] = None):
 
 @tilelang.jit(out_idx=[-1])
 def _get_warp_idx_sync_kernel(num_threads: int = 128, warp_size: Optional[int] = None):
-
     @T.prim_func
-    def warp_idx_sync_kernel(A: T.Tensor((num_threads,), "int32")):
+    def warp_idx_sync_kernel(A: T.Tensor((num_threads,), T.int32)):
         with T.Kernel(1, threads=num_threads) as _:
             tx = T.get_thread_binding()
             A[tx] = T.get_warp_idx_sync(warp_size)
@@ -47,9 +45,8 @@ def _get_warp_idx_sync_kernel(num_threads: int = 128, warp_size: Optional[int] =
 
 @tilelang.jit(out_idx=[-1])
 def _get_warp_idx_kernel(num_threads: int = 128, warp_size: Optional[int] = None):
-
     @T.prim_func
-    def warp_idx_kernel(A: T.Tensor((num_threads,), "int32")):
+    def warp_idx_kernel(A: T.Tensor((num_threads,), T.int32)):
         with T.Kernel(1, threads=num_threads) as _:
             tx = T.get_thread_binding()
             A[tx] = T.get_warp_idx(warp_size)
@@ -63,9 +60,8 @@ def _get_warp_group_idx_kernel(
     warp_size: Optional[int] = None,
     warps_per_group: Optional[int] = None,
 ):
-
     @T.prim_func
-    def warp_group_idx_kernel(A: T.Tensor((num_threads,), "int32")):
+    def warp_group_idx_kernel(A: T.Tensor((num_threads,), T.int32)):
         with T.Kernel(1, threads=num_threads) as _:
             tx = T.get_thread_binding()
             A[tx] = T.get_warp_group_idx(warp_size, warps_per_group)
@@ -75,9 +71,8 @@ def _get_warp_group_idx_kernel(
 
 @tilelang.jit(out_idx=[-1])
 def _shuffle_elect_kernel(num_threads: int = 128, thread_extent: int = 64):
-
     @T.prim_func
-    def shuffle_elect_kernel(A: T.Tensor((num_threads,), "int32")):
+    def shuffle_elect_kernel(A: T.Tensor((num_threads,), T.int32)):
         with T.Kernel(1, threads=num_threads) as _:
             tx = T.get_thread_binding()
             elected = T.shuffle_elect(thread_extent)

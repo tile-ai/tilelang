@@ -27,7 +27,14 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "apache-tvm-ffi==0.1.0",
+    "apache-tvm-ffi~=0.1.0",
+    # Extra constraint to tvm-ffi for abi issue,
+    # should be removed after our tvm's update.
+    # See discussion in tilelang#1373 and apache/tvm-ffi#307
+    "apache-tvm-ffi>=0.1.3",
+    # torch-c-dlpack-ext provides prebuilt torch extensions.
+    # Without it, TVM FFI may require JIT compilation on first import.
+    "torch-c-dlpack-ext",
     "cloudpickle",
     "ml-dtypes",
     "numpy>=1.23.5",
@@ -36,15 +43,25 @@ dependencies = [
     "torch>=2.7; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
+    "z3-solver>=4.13.0",
 ]
 
 [project.optional-dependencies]
 # mldtypes should be greater than 0.5.1
 # if you want to enable fp4
 fp4 = ["ml-dtypes>=0.5.1"]
+# if you want to enable layout inference visualization
+vis = ["matplotlib"]
 
 [build-system]
-requires = ["cython>=3.0.0", "scikit-build-core"]
+requires = [
+    "cython>=3.0.0",
+    "scikit-build-core",
+    "z3-solver>=4.13.0",
+    # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
+    # See tvm's CMakeLists.txt for more information.
+    "patchelf>=0.17.2; platform_system == 'Linux'",
+]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -104,6 +121,7 @@ tilelang = "tilelang"
 # TVM
 "tilelang/3rdparty/tvm/src" = "3rdparty/tvm/src"
 "tilelang/3rdparty/tvm/python" = "3rdparty/tvm/python"
+"tilelang/3rdparty/tvm/include" = "3rdparty/tvm/include"
 "tilelang/3rdparty/tvm/version.py" = "3rdparty/tvm/version.py"
 # CUTLASS
 "tilelang/3rdparty/cutlass/include" = "3rdparty/cutlass/include"
@@ -112,10 +130,7 @@ tilelang = "tilelang"
 "tilelang/3rdparty/composable_kernel/include" = "3rdparty/composable_kernel/include"
 "tilelang/3rdparty/composable_kernel/library" = "3rdparty/composable_kernel/library"
 
-[tool.yapf]
-based_on_style = "yapf"
-column_limit = 100
-indent_width = 4
+ 
 
 [tool.codespell]
 ignore-words = "docs/spelling_wordlist.txt"
@@ -128,13 +143,21 @@ skip = [
 
 [tool.ruff]
 target-version = "py39"
-line-length = 100
+line-length = 140
 output-format = "full"
 
 exclude = [
     "3rdparty",
     "examples/deepseek_v32/inference",
 ]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = false
+docstring-code-line-length = "dynamic"
 
 [tool.ruff.lint.per-file-ignores]
 # Do not upgrade type hint in testing and examples.
@@ -211,12 +234,10 @@ environment.PYTHONDEVMODE = "1"
 environment.PYTHONUNBUFFERED = "1"
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
-# Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
-# TODO: upgrade to manylinux_2_28 at some time
-manylinux-x86_64-image = "manylinux2014"   # CentOS 7
-manylinux-aarch64-image = "manylinux_2_28" # AlmaLinux 8
+manylinux-x86_64-image  = "manylinux_2_28"  # AlmaLinux 8
+manylinux-aarch64-image = "manylinux_2_34"  # Z3 requires
 # Install CUDA runtime and stub driver library
-# manylinux_2_28 uses gcc 14, which needs CUDA 12.8
+# manylinux_2_28 uses gcc 14, which needs CUDA >=12.8
 before-all = """
 set -eux
 
@@ -225,8 +246,8 @@ uname -a
 
 case "$(uname -m)" in
     "x86_64")
-        DEFAULT_CUDA_VERSION="12.1"
-        yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+        DEFAULT_CUDA_VERSION="12.8"
+        dnf config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
         ;;
     "aarch64")
         DEFAULT_CUDA_VERSION="12.8"
@@ -240,9 +261,10 @@ esac
 cudaver="$(echo "${CUDA_VERSION:-$DEFAULT_CUDA_VERSION}" | cut -d '.' -f-2)"
 v="${cudaver//./-}"
 yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}" nvidia-driver-cuda-libs
+yum clean all
 """
 repair-wheel-command = [
-    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
+    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --verbose --strict {wheel}",
 ]
 
@@ -254,7 +276,8 @@ repair-wheel-command = [
 
 [[tool.cibuildwheel.overrides]]
 select = "*linux*x86_64*"
-# CentOS 7 is too old to run import test. Do wheel installation test only.
-test-command = [
-    "echo 'Wheel is installed successfully'",
+# x86_64 runners in GitHub Actions have limited storage,
+# pre-install torch without caching to reduce disk usage during install tilelang.
+before-test = [
+    "pip install torch --no-cache-dir",
 ]

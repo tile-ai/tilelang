@@ -45,7 +45,7 @@ private:
 class Fill : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fill, TileOperator, FillNode);
-  TVM_DLL Fill(Array<PrimExpr> args, BufferMap vmap);
+  TVM_DLL Fill(Array<PrimExpr> args);
   static const Op &Get();
 };
 

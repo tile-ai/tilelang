@@ -1,3 +1,4 @@
+import pytest
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -27,8 +28,7 @@ def matmul(
     vec_size = 4 * k_pack
 
     @T.prim_func
-    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
-        (M, N), out_dtype)):
+    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor((M, N), out_dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
@@ -96,33 +96,49 @@ def run_gemm(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize(
+    "trans_A, trans_B, k_pack",
+    [
+        (False, False, 1),
+        (False, True, 1),
+        (True, True, 1),
+        (True, False, 1),
+        (False, True, 2),
+    ],
+)
 @tilelang.testing.requires_rocm
-def test_gemm_f16f32f32_nt():
-    run_gemm(1024, 1024, 1024, False, False, "float16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "float16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, True, "float16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, False, "float16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "float16", "float32", "float32", 128, 128, 32, k_pack=2)
+def test_gemm_f16f32f32_nt(trans_A, trans_B, k_pack):
+    run_gemm(1024, 1024, 1024, trans_A, trans_B, T.float16, T.float32, T.float32, 128, 128, 32, k_pack=k_pack)
 
 
+@pytest.mark.parametrize(
+    "trans_A, trans_B, k_pack",
+    [
+        (False, False, 1),
+        (False, True, 1),
+        (True, True, 1),
+        (True, False, 1),
+        (False, True, 2),
+    ],
+)
 @tilelang.testing.requires_rocm
-def test_gemm_bf16f32f32_nt():
-    run_gemm(1024, 1024, 1024, False, False, "bfloat16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "bfloat16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, True, "bfloat16", "float32", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, False, "bfloat16", "float32", "float32", 128, 128, 32)
-    run_gemm(
-        1024, 1024, 1024, False, True, "bfloat16", "float32", "float32", 128, 128, 32, k_pack=2)
+def test_gemm_bf16f32f32_nt(trans_A, trans_B, k_pack):
+    run_gemm(1024, 1024, 1024, trans_A, trans_B, T.bfloat16, T.float32, T.float32, 128, 128, 32, k_pack=k_pack)
 
 
+@pytest.mark.parametrize(
+    "trans_A, trans_B, k_pack",
+    [
+        (False, False, 1),
+        (False, True, 1),
+        (True, True, 1),
+        (True, False, 1),
+        (False, True, 2),
+    ],
+)
 @tilelang.testing.requires_rocm
-def test_gemm_bf16bf16f32():
-    run_gemm(1024, 1024, 1024, False, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, False, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-    run_gemm(1024, 1024, 1024, True, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-    run_gemm(
-        1024, 1024, 1024, False, True, "bfloat16", "bfloat16", "float32", 128, 128, 32, k_pack=2)
+def test_gemm_bf16bf16f32(trans_A, trans_B, k_pack):
+    run_gemm(1024, 1024, 1024, trans_A, trans_B, T.bfloat16, T.bfloat16, T.float32, 128, 128, 32, k_pack=k_pack)
 
 
 def matmul_rs(
@@ -149,9 +165,9 @@ def matmul_rs(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -225,24 +241,24 @@ def run_gemm_rs(
 
 # @tilelang.testing.requires_rocm
 # def test_gemm_rs_f16f32f32_nt():
-#     run_gemm_rs(1024, 1024, 1024, False, False, "float16", "float32", "float32", 128, 128, 32)
-#     run_gemm_rs(1024, 1024, 1024, False, True, "float16", "float32", "float32", 128, 128, 32)
-#     run_gemm_rs(1024, 1024, 1024, True, True, "float16", "float32", "float32", 128, 128, 32)
-#     run_gemm_rs(1024, 1024, 1024, True, False, "float16", "float32", "float32", 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, False, False, T.float16, T.float32, T.float32, 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, False, True, T.float16, T.float32, T.float32, 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, True, True, T.float16, T.float32, T.float32, 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, True, False, T.float16, T.float32, T.float32, 128, 128, 32)
 
 # @tilelang.testing.requires_rocm
 # def test_gemm_rs_bf16f32f32_nt():
-#     run_gemm_rs(1024, 1024, 1024, False, False, "bfloat16", "float32", "float32", 128, 128, 32)
-#     run_gemm_rs(1024, 1024, 1024, False, True, "bfloat16", "float32", "float32", 128, 128, 32)
-#     run_gemm_rs(1024, 1024, 1024, True, True, "bfloat16", "float32", "float32", 128, 128, 32)
-#     run_gemm_rs(1024, 1024, 1024, True, False, "bfloat16", "float32", "float32", 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, False, False, T.bfloat16, T.float32, T.float32, 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, False, True, T.bfloat16, T.float32, T.float32, 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, True, True, T.bfloat16, T.float32, T.float32, 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, True, False, T.bfloat16, T.float32, T.float32, 128, 128, 32)
 
 # @tilelang.testing.requires_rocm
 # def test_gemm_rs_bf16bf16f32_nt():
-#     run_gemm_rs(1024, 1024, 1024, False, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-#     run_gemm_rs(1024, 1024, 1024, False, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-#     run_gemm_rs(1024, 1024, 1024, True, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
-#     run_gemm_rs(1024, 1024, 1024, True, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, False, False, T.bfloat16, T.bfloat16, T.float32, 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, False, True, T.bfloat16, T.bfloat16, T.float32, 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, True, True, T.bfloat16, T.bfloat16, T.float32, 128, 128, 32)
+#     run_gemm_rs(1024, 1024, 1024, True, False, T.bfloat16, T.bfloat16, T.float32, 128, 128, 32)
 
 if __name__ == "__main__":
     tilelang.testing.main()

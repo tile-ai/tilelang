@@ -1,9 +1,11 @@
+"""Common math intrinsics exposed on the TileLang language surface."""
+
 from tvm import tir
 
 
 def _validate_rounding_mode(rounding_mode):
     """Validate that the rounding mode is one of the supported IEEE modes"""
-    valid_modes = {'rn', 'rz', 'ru', 'rd'}
+    valid_modes = {"rn", "rz", "ru", "rd"}
     if isinstance(rounding_mode, str) and rounding_mode in valid_modes:
         return
     raise ValueError(f"Invalid rounding mode '{rounding_mode}'. Must be one of: {valid_modes}")

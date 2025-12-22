@@ -48,6 +48,7 @@ def get_configs(M, N, K, with_roller=False):
         from tilelang.carver.template import MatmulTemplate
         from tilelang.carver.arch import CUDA
         from tilelang.carver.roller.rasterization import NoRasterization
+
         arch = CUDA("cuda")
         topk = 20
 
@@ -56,9 +57,9 @@ def get_configs(M, N, K, with_roller=False):
             M=M,
             N=N,
             K=K,
-            in_dtype="float16",
-            out_dtype="float16",
-            accum_dtype="float16",
+            in_dtype=T.float16,
+            out_dtype=T.float16,
+            accum_dtype=T.float16,
         ).with_arch(arch)
 
         func = carve_template.equivalent_function()
@@ -84,7 +85,6 @@ def get_configs(M, N, K, with_roller=False):
         for config in configs:
             print(config)
     else:
-
         block_M = [64]
         block_N = [64]
         block_K = [32]
@@ -100,7 +100,8 @@ def get_configs(M, N, K, with_roller=False):
                 num_stages,
                 thread_num,
                 enable_rasterization,
-            ))
+            )
+        )
 
         configs = [
             {
@@ -110,7 +111,8 @@ def get_configs(M, N, K, with_roller=False):
                 "num_stages": c[3],
                 "thread_num": c[4],
                 "enable_rasteration": c[5],  # keep param name for backward-compat
-            } for c in _configs
+            }
+            for c in _configs
         ]
     return configs
 
@@ -185,14 +187,14 @@ def matmul(M, N, K, with_roller):
         """
         # Use half-precision for input data to reduce memory bandwidth,
         # accumulate in float for better numerical accuracy
-        dtype = "float16"
-        accum_dtype = "float"
+        dtype = T.float16
+        accum_dtype = T.float32
 
         @T.prim_func
         def main(
-                A: T.Tensor((M, K), dtype),
-                B: T.Tensor((N, K), dtype),
-                C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((N, K), dtype),
+            C: T.Tensor((M, N), dtype),
         ):
             """
             The compiled TVM function for block-level matrix multiplication.
@@ -206,9 +208,7 @@ def matmul(M, N, K, with_roller):
             """
             # Bind x-dimension to block index in N,
             #     y-dimension to block index in M.
-            with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-
+            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
                 # Allocate shared memory for A sub-block of shape (block_M, block_K)
                 A_shared = T.alloc_shared((block_M, block_K), dtype)
                 # Allocate shared memory for B sub-block of shape (block_N, block_K)
@@ -247,12 +247,16 @@ def matmul(M, N, K, with_roller):
 
         return main
 
-    autotuner = AutoTuner.from_kernel(
-        kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
+    autotuner = (
+        AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller))
+        .set_compile_args(
             out_idx=[-1],
             target="auto",
-        ).set_profile_args(
-            ref_prog=ref_program,)
+        )
+        .set_profile_args(
+            ref_prog=ref_program,
+        )
+    )
     return autotuner.run(warmup=3, rep=20)
 
 

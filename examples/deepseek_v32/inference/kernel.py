@@ -11,21 +11,21 @@ pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_FAST_MATH: True,
 }
 
-FP8 = "float8_e4m3"
-BF16 = "bfloat16"
-FP32 = "float32"
+FP8 = T.float8_e4m3fn
+BF16 = T.bfloat16
+FP32 = T.float32
 
 
 def fast_log2_ceil(x):
-    bits_x = T.reinterpret("uint32", x)
+    bits_x = T.reinterpret(T.uint32, x)
     exp_x = (bits_x >> 23) & 0xFF
     man_bits = bits_x & ((1 << 23) - 1)
-    return T.Cast("int32", exp_x - 127 + T.if_then_else(man_bits != 0, 1, 0))
+    return T.Cast(T.int32, exp_x - 127 + T.if_then_else(man_bits != 0, 1, 0))
 
 
 def fast_pow2(x):
     bits_x = (x + 127) << 23
-    return T.reinterpret("float32", bits_x)
+    return T.reinterpret(T.float32, bits_x)
 
 
 def fast_round_scale(amax, fp8_max_inv):
@@ -107,8 +107,8 @@ def act_quant(x: torch.Tensor,
 
 
 @tilelang.jit(pass_configs=pass_configs)
-def fp8_gemm_kernel(N, K, out_dtype=BF16, accum_dtype="float32"):
-    assert out_dtype in [BF16, "float32"]
+def fp8_gemm_kernel(N, K, out_dtype=BF16, accum_dtype=T.float32):
+    assert out_dtype in [BF16, T.float32]
 
     M = T.dynamic("M")
     group_size = 128

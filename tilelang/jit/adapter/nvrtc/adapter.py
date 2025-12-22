@@ -9,11 +9,12 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
-from tilelang.jit.adapter.libgen import PyLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, check_nvrtc_available
+
+from .libgen import NVRTCLibraryGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -26,23 +27,24 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
     pymodule = None
     kernels = {}
 
-    def __init__(self,
-                 params: list[KernelParam],
-                 result_idx: list[int],
-                 target: str | Target,
-                 func_or_mod: tir.PrimFunc | tvm.IRModule,
-                 host_mod: tvm.IRModule | None = None,
-                 device_mod: tvm.IRModule | None = None,
-                 kernel_global_source: str | None = None,
-                 verbose: bool = False,
-                 pass_configs: dict[str, Any] | None = None,
-                 compile_flags: list[str] | None = None):
-
+    def __init__(
+        self,
+        params: list[KernelParam],
+        result_idx: list[int],
+        target: str | Target,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_mod: tvm.IRModule | None = None,
+        device_mod: tvm.IRModule | None = None,
+        device_kernel_source: str | None = None,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None,
+    ):
         check_nvrtc_available()
 
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
-        self.kernel_global_source = kernel_global_source
+        self.device_kernel_source = device_kernel_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -50,7 +52,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             self.ir_module = func_or_mod
 
         # Cache parameter information during initialization
-        self.param_dtypes = [param.dtype for param in params]
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        self.param_dtypes = [param.torch_dtype() for param in params]
         self.param_shapes = []
         for param in params:
             native_shape = []
@@ -73,10 +76,12 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_pass_configs(pass_configs)
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
-        self.host_func, self.function_names = self.wrapper.wrap(kernel_global_source)
+        wrapper_result = self.wrapper.wrap(device_kernel_source)
+        self.host_func = wrapper_result["host_func"]
+        self.function_names = wrapper_result["function_names"]
 
-        self.lib_generator = PyLibraryGenerator(self.target, self.verbose)
-        self.lib_generator.update_lib_code(self.kernel_global_source)
+        self.lib_generator = NVRTCLibraryGenerator(self.target, self.verbose)
+        self.lib_generator.update_lib_code(self.device_kernel_source)
         self.lib_generator.update_host_func(self.host_func)
         self.lib_generator.assign_compile_flags(compile_flags)
         self.lib_generator.compile_lib()
@@ -91,20 +96,24 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self._post_init()
 
     @classmethod
-    def from_database(cls,
-                      params: list[KernelParam],
-                      result_idx: list[int],
-                      target: str,
-                      func_or_mod: tir.PrimFunc | tvm.IRModule,
-                      kernel_global_source: str,
-                      kernel_lib_path: str,
-                      verbose: bool = False,
-                      pass_configs: dict[str, Any] | None = None,
-                      compile_flags: list[str] | None = None):
+    def from_database(
+        cls,
+        params: list[KernelParam],
+        result_idx: list[int],
+        target: str,
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        host_kernel_source: str,
+        device_kernel_source: str,
+        kernel_lib_path: str,
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | None = None,
+    ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter.kernel_global_source = kernel_global_source
+        adapter.host_kernel_source = host_kernel_source
+        adapter.device_kernel_source = device_kernel_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -112,7 +121,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             adapter.ir_module = func_or_mod
 
         # Cache parameter information during initialization
-        adapter.param_dtypes = [param.dtype for param in params]
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        adapter.param_dtypes = [param.torch_dtype() for param in params]
         adapter.param_shapes = []
         for param in params:
             native_shape = []
@@ -130,7 +140,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
-        adapter.lib_generator = PyLibraryGenerator(adapter.target, adapter.verbose)
+        adapter.lib_generator = NVRTCLibraryGenerator(adapter.target, adapter.verbose)
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         adapter.pymodule = adapter.lib_generator.pymodule
@@ -166,7 +176,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                     dynamic_symbolic_map[shape] = (i, j)
         return dynamic_symbolic_map
 
-    def get_kernel_source(self) -> str | None:
+    def get_kernel_source(self, kernel_only: bool = True) -> str | None:
         """Get the CUDA kernel source code.
 
         Returns
@@ -174,11 +184,13 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         Optional[str]
             The kernel source code, or None if not available
         """
-        return self.kernel_global_source
+        if kernel_only:
+            return self.device_kernel_source
+        else:
+            return self.host_func
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
-        """Low-level function to call the compiled CUDA kernel.
-        """
+        """Low-level function to call the compiled CUDA kernel."""
         return self.pymodule.call(self.kernels, *args, stream=stream)
 
     def _wrap_forward_from_prebuild_lib(self, *ins: list[torch.Tensor], stream: int | None = None):

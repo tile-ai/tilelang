@@ -23,6 +23,7 @@ def _compute_version() -> str:
         if version_file.is_file():
             try:
                 from version_provider import dynamic_metadata  # type: ignore
+
                 return dynamic_metadata("version")
             except Exception:
                 # Fall back to the raw VERSION file if provider isn't available.
@@ -33,6 +34,7 @@ def _compute_version() -> str:
 
     try:
         from importlib.metadata import version as _dist_version  # py3.8+
+
         return _dist_version("tilelang")
     except Exception as exc:
         warnings.warn(
@@ -120,7 +122,7 @@ def _load_tile_lang_lib():
 if env.SKIP_LOADING_TILELANG_SO == "0":
     _LIB, _LIB_PATH = _load_tile_lang_lib()
 
-from .jit import jit, JITKernel, compile  # noqa: F401
+from .jit import jit, lazy_jit, JITKernel, compile, par_compile  # noqa: F401
 from .profiler import Profiler  # noqa: F401
 from .cache import clear_cache  # noqa: F401
 
@@ -133,10 +135,13 @@ from .layout import (
     Fragment,  # noqa: F401
 )
 from . import (
+    analysis,  # noqa: F401
     transform,  # noqa: F401
     language,  # noqa: F401
     engine,  # noqa: F401
+    tools,  # noqa: F401
 )
+from .language.v2 import dtypes  # noqa: F401
 from .autotuner import autotune  # noqa: F401
 from .transform import PassConfigKey  # noqa: F401
 

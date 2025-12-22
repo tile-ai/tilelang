@@ -28,6 +28,10 @@ static constexpr const char *kWarpSpecializationScope =
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
+// A PrimFunc-level attribute carrying a list of handle Vars
+// that must NOT be marked with the restrict qualifier in codegen.
+// Type: Array<tir::Var>
+static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
@@ -51,14 +55,11 @@ static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
-/*!
- * \brief Whether to disable dynamic tail split
- *
- * kDisableDynamicTailSplit = "tl.disable_dynamic_tail_split"
- *
- */
-static constexpr const char *kDisableDynamicTailSplit =
-    "tl.disable_dynamic_tail_split";
+static constexpr const char *kLayoutVisualizationEnable =
+    "tl.layout_visualization_enable";
+static constexpr const char *kLayoutVisualizationFormats =
+    "tl.layout_visualization_formats";
+static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
 
 /*!
  * \brief Whether to disable thread storage synchronization
@@ -81,18 +82,6 @@ static constexpr const char *kDisableThreadStorageSync =
  *
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
-
-/*!
- * \brief The size of the vectorized dimension in buffer, designed by user
- *
- * For example, if the vectorized dimension is 128 bits and the dtype of buffer
- * A[m, k] is float16, the size of the vectorized dimension (i.e. k) in buffer A
- * should be divisible by 8 (8 = 128 / 16).
- *
- * kDynamicAlignment = "tl.dynamic_alignment"
- *
- */
-static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
 
 /*!
  * \brief Get the type of the CUDA tensor map
@@ -137,6 +126,10 @@ TVM_DLL const Op &ieee_fsqrt();
 TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
+
+// random op
+TVM_DLL const Op &rng_init();
+TVM_DLL const Op &rng_rand();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
@@ -581,6 +574,49 @@ TVM_DLL const Op &device_assert();
  *  This op is used to represent an assert on device with additional message.
  */
 TVM_DLL const Op &device_assert_with_msg();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction sum.
+ */
+TVM_DLL const Op &warp_reduce_sum();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction max.
+ */
+TVM_DLL const Op &warp_reduce_max();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction min.
+ */
+TVM_DLL const Op &warp_reduce_min();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction bitand.
+ */
+TVM_DLL const Op &warp_reduce_bitand();
+
+/*!
+ * \brief tilelang intrinsic for warp reduction bitor.
+ */
+TVM_DLL const Op &warp_reduce_bitor();
+
+/*!
+ * \brief tilelang intrinsic for CUDA read-only cache load (__ldg).
+ *
+ *  This op allows users to explicitly request a non-coherent cached load
+ *  from global memory on CUDA by emitting `__ldg(&ptr[idx])` for 32-bit
+ *  element types on supported architectures. It provides a direct way to
+ *  leverage the read-only data cache for performance-sensitive loads when
+ *  the compiler cannot infer `const __restrict__` automatically.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.__ldg(x[i])
+ *
+ *  The op takes one argument preferred as a BufferLoad identifying the
+ *  source element; alternatively, backends may support passing a Buffer and
+ *  index expression.
+ */
+TVM_DLL const Op &__ldg();
 
 } // namespace tl
 } // namespace tvm

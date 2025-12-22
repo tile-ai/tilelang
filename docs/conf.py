@@ -1,5 +1,5 @@
 # General information about the project.
-project = "Tile Language <br>"
+project = "TileLang <br>"
 author = "Tile Lang Contributors"
 copyright = f"2025-2025, {author}"
 
@@ -20,33 +20,27 @@ extensions = [
     "autoapi.extension",
 ]
 
-autoapi_type = 'python'
-autoapi_dirs = ['../tilelang']
+autoapi_type = "python"
+autoapi_dirs = ["../tilelang"]
 
 autoapi_options = [
-    'members',
-    'undoc-members',
-    'show-inheritance',
-    'show-module-summary',
-    'special-members',
+    "members",
+    "undoc-members",
+    "show-inheritance",
+    "show-module-summary",
+    "special-members",
 ]
 autoapi_keep_files = False  # Useful for debugging the generated rst files
 
 autoapi_generate_api_docs = True
 
-autodoc_typehints = 'description'
+autodoc_typehints = "description"
 
 autoapi_ignore = ["*language/ast*", "*version*", "*libinfo*", "*parser*"]
 
-source_suffix = {
-    '.rst': 'restructuredtext',
-    '.md': 'markdown',
-}
+source_suffix = {".rst": "restructuredtext", ".md": "markdown"}
 
-myst_enable_extensions = [
-    "colon_fence",
-    "deflist",
-]
+myst_enable_extensions = ["colon_fence", "deflist"]
 
 redirects = {"get_started/try_out": "../index.html#getting-started"}
 
@@ -62,13 +56,11 @@ todo_include_todos = False
 html_theme = "furo"
 templates_path = []
 html_static_path = ["_static"]
-footer_copyright = "© 2025-2025 Tile Language"
+html_css_files = ["custom.css"]
+footer_copyright = "© 2025-2026 TileLang"
 footer_note = " "
 
-html_theme_options = {
-    "light_logo": "img/logo-row.svg",
-    "dark_logo": "img/logo-row.svg",
-}
+html_theme_options = {"light_logo": "img/logo-v2.png", "dark_logo": "img/logo-v2.png"}
 
 header_links = [
     ("Home", "https://github.com/tile-ai/tilelang"),

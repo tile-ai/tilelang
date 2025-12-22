@@ -5,11 +5,13 @@ import tilelang.testing
 
 
 def vectorize_access_legalize(M: int = 64, N: int = 64):
-    dtype = "float32"
+    dtype = T.float32
     vec_len = 8
 
     @T.prim_func
-    def main(A: T.Tensor((M, N, vec_len), dtype="float32"),):
+    def main(
+        A: T.Tensor((M, N, vec_len), dtype=T.float32),
+    ):
         with T.Kernel(1, 1, threads=M) as (bx, by):
             A_shared = T.alloc_shared((M, N, vec_len), dtype=dtype)
             tid = T.get_thread_binding()
@@ -18,7 +20,9 @@ def vectorize_access_legalize(M: int = 64, N: int = 64):
                     A_shared[tid, j, v] = A[tid, j, v]
 
     @T.prim_func
-    def expected(A: T.Tensor((M, N, vec_len), dtype="float32"),):
+    def expected(
+        A: T.Tensor((M, N, vec_len), dtype=T.float32),
+    ):
         with T.Kernel(1, 1, threads=M) as (bx, by):
             A_shared = T.alloc_shared((M, N, vec_len), dtype=dtype)
             tid = T.get_thread_binding()

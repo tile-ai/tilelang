@@ -10,6 +10,7 @@ import sys  # noqa: F401
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
 try:
     import fla
+
     print(fla.__file__)
     from fla.ops.utils.cumsum import chunk_local_cumsum_scalar
 except ImportError:
@@ -20,11 +21,8 @@ import torch
 
 
 @tilelang.jit(
-    out_idx=[-1],
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
-    })
+    out_idx=[-1], pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
+)
 def tilelang_chunk_local_cumsum_scalar(
     # task config
     B,
@@ -34,43 +32,43 @@ def tilelang_chunk_local_cumsum_scalar(
     is_varlen=False,
     head_first=False,
     reverse=False,
-    input_dtype="float16",
-    output_dtype="float32",
+    input_dtype=T.float16,
+    output_dtype=T.float32,
     # kernel config
     block_S=64,
     threads=256,
     use_fragment=False,
 ):
     G_shape = (B, H, S) if head_first else (B, S, H)
-    assert chunk_size == 2**(chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
+    assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
     assert chunk_size == block_S, "chunk_size must be equal to block_S"
 
     @T.prim_func
     def kernel(
-            G: T.Tensor(G_shape, dtype=input_dtype),
-            G_new: T.Tensor(G_shape, dtype=output_dtype),
+        G: T.Tensor(G_shape, dtype=input_dtype),
+        G_new: T.Tensor(G_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
             G_shared = T.alloc_shared((1, block_S), dtype=output_dtype, scope="shared")
             if head_first:
-                T.copy(G[bb, bh, bs * block_S:(bs + 1) * block_S], G_shared)
+                T.copy(G[bb, bh, bs * block_S : (bs + 1) * block_S], G_shared)
             else:
-                T.copy(G[bb, bs * block_S:(bs + 1) * block_S, bh], G_shared)
+                T.copy(G[bb, bs * block_S : (bs + 1) * block_S, bh], G_shared)
             if use_fragment:
                 G_fragment = T.alloc_fragment((1, block_S), dtype=output_dtype, scope="shared")
                 T.copy(G_shared, G_fragment)
                 T.cumsum(G_fragment, dim=1, reverse=reverse)
                 if head_first:
-                    T.copy(G_fragment, G_new[bb, bh, bs * block_S:(bs + 1) * block_S])
+                    T.copy(G_fragment, G_new[bb, bh, bs * block_S : (bs + 1) * block_S])
                 else:
-                    T.copy(G_fragment, G_new[bb, bs * block_S:(bs + 1) * block_S, bh])
+                    T.copy(G_fragment, G_new[bb, bs * block_S : (bs + 1) * block_S, bh])
             else:
                 T.cumsum(G_shared, dim=1, reverse=reverse)
                 if head_first:
-                    T.copy(G_shared, G_new[bb, bh, bs * block_S:(bs + 1) * block_S])
+                    T.copy(G_shared, G_new[bb, bh, bs * block_S : (bs + 1) * block_S])
                 else:
-                    T.copy(G_shared, G_new[bb, bs * block_S:(bs + 1) * block_S, bh])
+                    T.copy(G_shared, G_new[bb, bs * block_S : (bs + 1) * block_S, bh])
 
     return kernel
 
@@ -113,11 +111,8 @@ def run_test(
 
     # reference cumsum
     G_new_ref = chunk_local_cumsum_scalar(
-        g=G,
-        chunk_size=chunk_size,
-        reverse=reverse,
-        head_first=head_first,
-        output_dtype=getattr(torch, output_dtype))
+        g=G, chunk_size=chunk_size, reverse=reverse, head_first=head_first, output_dtype=getattr(torch, output_dtype)
+    )
 
     # tilelang cumsum
     block_S = chunk_size
@@ -159,10 +154,11 @@ def main():
         chunk_size=64,
         reverse=True,
         head_first=False,
-        input_dtype="float32",
-        output_dtype="float32",
+        input_dtype=T.float32,
+        output_dtype=T.float32,
         threads=256,
-        use_fragment=False)
+        use_fragment=False,
+    )
 
 
 if __name__ == "__main__":

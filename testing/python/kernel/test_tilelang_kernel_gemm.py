@@ -1,5 +1,6 @@
 from tilelang import tvm as tvm
 import tilelang.testing
+import tilelang.language as T
 
 
 def matmul(
@@ -22,13 +23,11 @@ def matmul(
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
-    import tilelang.language as T
-
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -92,11 +91,11 @@ def run_gemm(
             A = A.T
         if trans_B:
             B = B.T
-        if in_dtype == "float32":
+        if in_dtype == T.float32:
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
-            A = ((A.view(torch.int32) - 0x1000)).view(torch.float32)
-            B = ((B.view(torch.int32) - 0x1000)).view(torch.float32)
+            A = (A.view(torch.int32) - 0x1000).view(torch.float32)
+            B = (B.view(torch.int32) - 0x1000).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -111,9 +110,9 @@ def test_gemm_f16f16f16_nn():
         768,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         128,
         32,
@@ -128,9 +127,9 @@ def test_gemm_f16f16f32_nn():
         768,
         False,
         False,
-        "float16",
-        "float16",
-        "float32",
+        T.float16,
+        T.float16,
+        T.float32,
         128,
         128,
         32,
@@ -144,9 +143,9 @@ def test_gemm_bf16bf16f32_nn():
         768,
         False,
         False,
-        "bfloat16",
-        "bfloat16",
-        "float32",
+        T.bfloat16,
+        T.bfloat16,
+        T.float32,
         128,
         128,
         32,
@@ -160,9 +159,9 @@ def test_gemm_f32f32f32_nn():
         768,
         False,
         False,
-        "float32",
-        "float32",
-        "float32",
+        T.float32,
+        T.float32,
+        T.float32,
         64,
         128,
         32,
@@ -176,9 +175,9 @@ def test_gemm_f16f16f16_tn():
         768,
         True,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         128,
         32,
@@ -193,9 +192,9 @@ def test_gemm_f16f16f16_nt():
         768,
         False,
         True,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         128,
         32,
@@ -204,15 +203,15 @@ def test_gemm_f16f16f16_nt():
 
 
 def test_gemm_i8i8i32_nt():
-    run_gemm(512, 1024, 768, False, True, "int8", "int8", "int32", 128, 128, 64)
+    run_gemm(512, 1024, 768, False, True, T.int8, T.int8, T.int32, 128, 128, 64)
 
 
 def test_gemm_i8i8i32_tn():
-    run_gemm(512, 1024, 768, True, False, "int8", "int8", "int32", 128, 128, 64)
+    run_gemm(512, 1024, 768, True, False, T.int8, T.int8, T.int32, 128, 128, 64)
 
 
 def test_gemm_f64f64f64_nt():
-    run_gemm(512, 512, 512, False, True, "float64", "float64", "float64", 64, 32, 16)
+    run_gemm(512, 512, 512, False, True, T.float64, T.float64, T.float64, 64, 32, 16)
 
 
 def test_gemm_f32f32f32_nt():
@@ -222,9 +221,9 @@ def test_gemm_f32f32f32_nt():
         768,
         False,
         True,
-        "float32",
-        "float32",
-        "float32",
+        T.float32,
+        T.float32,
+        T.float32,
         64,
         128,
         32,
@@ -238,9 +237,9 @@ def test_gemm_f32f32f32_tn():
         768,
         True,
         False,
-        "float32",
-        "float32",
-        "float32",
+        T.float32,
+        T.float32,
+        T.float32,
         64,
         128,
         32,
@@ -254,9 +253,9 @@ def test_pad_aligned_f16f16f16_nn():
         768 - 24,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         256,
         32,
@@ -271,9 +270,9 @@ def test_pad_f16f16f16_nn():
         768 - 5,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         256,
         32,
@@ -288,9 +287,9 @@ def test_pad_f16f16f32_nn():
         768 + 15,
         False,
         False,
-        "float16",
-        "float16",
-        "float32",
+        T.float16,
+        T.float16,
+        T.float32,
         128,
         64,
         32,
@@ -321,9 +320,9 @@ def matmul_sr(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -407,9 +406,9 @@ def test_gemm_f16f16f16_sr():
         768,
         False,
         True,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         128,
         32,
@@ -441,9 +440,9 @@ def matmul_rs(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared")
@@ -526,9 +525,9 @@ def test_gemm_f16f16f16_rs():
         768,
         True,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         128,
         32,

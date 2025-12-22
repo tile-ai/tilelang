@@ -1,17 +1,16 @@
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
+import tilelang.language as T
 
 tilelang.testing.set_random_seed()
 
 
 def _make_shared_reduce(M, N, dtype, reduce_cb):
-    import tilelang.language as T
-
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1) as _:
             A_shared = T.alloc_shared((M, N), dtype)
@@ -30,13 +29,13 @@ def _run_program(program, ref_program, atol=1e-2, rtol=1e-2):
     profiler.assert_allclose(ref_program, atol=atol, rtol=rtol)
 
 
-def reduce_max_test(M, N, dtype="float16"):
+def reduce_max_test(M, N, dtype=T.float16):
     import tilelang.language as T
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1) as _:
             A_local = T.alloc_fragment((M, N), dtype)
@@ -49,13 +48,13 @@ def reduce_max_test(M, N, dtype="float16"):
     return main
 
 
-def reduce_sum_test(M, N, dtype="float32"):
+def reduce_sum_test(M, N, dtype=T.float32):
     import tilelang.language as T
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1) as _:
             A_local = T.alloc_fragment((M, N), dtype)
@@ -68,27 +67,27 @@ def reduce_sum_test(M, N, dtype="float32"):
     return main
 
 
-def reduce_sum_ss(M, N, dtype="float32"):
+def reduce_sum_ss(M, N, dtype=T.float32):
     return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_sum(src, dst, dim=1))
 
 
-def reduce_max_ss(M, N, dtype="float32"):
+def reduce_max_ss(M, N, dtype=T.float32):
     return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_max(src, dst, dim=1))
 
 
-def reduce_min_ss(M, N, dtype="float32"):
+def reduce_min_ss(M, N, dtype=T.float32):
     return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_min(src, dst, dim=1))
 
 
-def reduce_abssum_ss(M, N, dtype="float32"):
+def reduce_abssum_ss(M, N, dtype=T.float32):
     return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_abssum(src, dst, dim=1))
 
 
-def reduce_absmax_ss(M, N, dtype="float32"):
+def reduce_absmax_ss(M, N, dtype=T.float32):
     return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_absmax(src, dst, dim=1))
 
 
-def run_reduce_sum(M, N, dtype="float32", mode="rr"):
+def run_reduce_sum(M, N, dtype=T.float32, mode="rr"):
     if mode == "rr":
         program = reduce_sum_test(M, N, dtype)
     elif mode == "ss":
@@ -98,12 +97,12 @@ def run_reduce_sum(M, N, dtype="float32", mode="rr"):
     _run_program(program, lambda A: A.sum(dim=1))
 
 
-def run_shared_reduce(program_builder, ref_program, M, N, dtype="float32"):
+def run_shared_reduce(program_builder, ref_program, M, N, dtype=T.float32):
     program = program_builder(M, N, dtype)
     _run_program(program, ref_program)
 
 
-def run_reduce_max(M, N, dtype="float16"):
+def run_reduce_max(M, N, dtype=T.float16):
     program = reduce_max_test(M, N, dtype)
     _run_program(program, lambda A: A.max(dim=1).values, atol=1e-2, rtol=1e-2)
 
@@ -119,34 +118,34 @@ def test_reduce_sum_shared():
 
 
 def test_reduce_max():
-    run_reduce_max(256, 256, "float16")
-    run_reduce_max(512, 128, "float16")
-    run_reduce_max(256, 256, "float32")
+    run_reduce_max(256, 256, T.float16)
+    run_reduce_max(512, 128, T.float16)
+    run_reduce_max(256, 256, T.float32)
 
 
 def test_reduce_max_shared():
-    run_shared_reduce(reduce_max_ss, lambda A: A.max(dim=1).values, 64, 64, "float32")
+    run_shared_reduce(reduce_max_ss, lambda A: A.max(dim=1).values, 64, 64, T.float32)
 
 
 def test_reduce_min_shared():
-    run_shared_reduce(reduce_min_ss, lambda A: A.min(dim=1).values, 64, 64, "float32")
+    run_shared_reduce(reduce_min_ss, lambda A: A.min(dim=1).values, 64, 64, T.float32)
 
 
 def test_reduce_abssum_shared():
-    run_shared_reduce(reduce_abssum_ss, lambda A: A.abs().sum(dim=1), 64, 64, "float32")
+    run_shared_reduce(reduce_abssum_ss, lambda A: A.abs().sum(dim=1), 64, 64, T.float32)
 
 
 def test_reduce_absmax_shared():
-    run_shared_reduce(reduce_absmax_ss, lambda A: A.abs().max(dim=1).values, 64, 64, "float32")
+    run_shared_reduce(reduce_absmax_ss, lambda A: A.abs().max(dim=1).values, 64, 64, T.float32)
 
 
-def reduce_sum_test_clear(M, N, dtype="float32"):
+def reduce_sum_test_clear(M, N, dtype=T.float32):
     import tilelang.language as T
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1, threads=32) as _:
             A_local = T.alloc_fragment((M, N), dtype)
@@ -160,7 +159,7 @@ def reduce_sum_test_clear(M, N, dtype="float32"):
     return main
 
 
-def run_reduce_sum_clear(M, N, dtype="float32"):
+def run_reduce_sum_clear(M, N, dtype=T.float32):
     program = reduce_sum_test_clear(M, N, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
 
@@ -176,18 +175,18 @@ def run_reduce_sum_clear(M, N, dtype="float32"):
 
 
 def test_reduce_sum_clear():
-    run_reduce_sum_clear(256, 256, "float32")
-    run_reduce_sum_clear(512, 128, "float32")
-    run_reduce_sum_clear(128, 512, "float32")
+    run_reduce_sum_clear(256, 256, T.float32)
+    run_reduce_sum_clear(512, 128, T.float32)
+    run_reduce_sum_clear(128, 512, T.float32)
 
 
-def reduce_max_test_clear(M, N, dtype="float16"):
+def reduce_max_test_clear(M, N, dtype=T.float16):
     import tilelang.language as T
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1, threads=32) as _:
             A_local = T.alloc_fragment((M, N), dtype)
@@ -201,7 +200,7 @@ def reduce_max_test_clear(M, N, dtype="float16"):
     return main
 
 
-def run_reduce_max_clear(M, N, dtype="float16"):
+def run_reduce_max_clear(M, N, dtype=T.float16):
     program = reduce_max_test_clear(M, N, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
 
@@ -217,7 +216,7 @@ def run_reduce_max_clear(M, N, dtype="float16"):
 
 
 def test_reduce_max_clear():
-    run_reduce_max_clear(256, 256, "float16")
+    run_reduce_max_clear(256, 256, T.float16)
 
 
 if __name__ == "__main__":

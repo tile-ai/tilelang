@@ -5,7 +5,7 @@
  */
 
 #include "./atomic_add.h"
-#include "./region.h"
+#include "utils.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -26,32 +26,27 @@ using namespace tir;
  * @brief Construct an AtomicAdd operator from call arguments and a buffer map.
  *
  * Builds the internal AtomicAddNode, extracts the source and destination
- * regions and their backing Buffers from the first two call-style expressions
- * in `args` (via RegionOp), and stores them along with their ranges. If a third
- * argument is provided, it is interpreted as an integer immediate and stored as
- * the node's coalesced width.
+ * regions and their backing Buffers from the first two region-style expressions
+ * in `args` (BufferLoad/BufferRegion), and stores them along with their
+ * ranges. If a third argument is provided, it is interpreted as an integer
+ * immediate and stored as the node's coalesced width.
  *
  * @param args Call-style PrimExprs where:
  *             - args[0] is the source region call,
  *             - args[1] is the destination region call,
  *             - args[2] (optional) is an IntImm specifying coalesced width.
- * @param vmap Mapping from buffers used by RegionOp to concrete Buffer objects.
- *
  * Notes:
- * - The constructor checks that args[0] and args[1] are CallNodes.
+ * - The constructor checks that args[0] and args[1] are region-compatible.
  * - The constructed node is stored in this->data_.
  */
-AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
+AtomicAdd::AtomicAdd(Array<PrimExpr> args) {
   ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
   for (int i = 0; i < 2; i++) {
-    auto expr = args[i];
-    auto call = expr.as<CallNode>();
-    ICHECK(call);
-    auto region = RegionOp(call->args, vmap);
-    rgs[i] = region->GetRanges();
-    bf[i] = region->GetBuffer();
+    auto region = NormalizeToBufferRegion(args[i]);
+    rgs[i] = region->region;
+    bf[i] = region->buffer;
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
@@ -272,22 +267,22 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
+  Array<PrimExpr> new_args;
+
+  // Optional bounds predicates for src and dst
   PrimExpr src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
   PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
 
-  Array<PrimExpr> new_args;
-
+  // Load source value and cast to dst dtype if needed
   PrimExpr src_value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
     src_value = Cast(dst->dtype, src_value);
-  if (src_predicate.defined())
-    src_value = if_then_else(src_predicate, src_value, make_zero(dst->dtype));
 
-  PrimExpr dst_value = BufferLoad(dst, dst_indices);
-  if (dst_predicate.defined())
-    dst_value = if_then_else(dst_predicate, dst_value, make_zero(dst->dtype));
+  // Build a pointer to destination element using tvm_access_ptr
+  PrimExpr dst_ptr = Call(DataType::Handle(), builtin::address_of(),
+                          {BufferLoad(dst, dst_indices)});
 
-  new_args.push_back(dst_value);
+  new_args.push_back(dst_ptr);
   new_args.push_back(src_value);
   new_args.push_back(memory_order);
 
@@ -544,7 +539,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return vectorized_thread_loop;
 }
 
-TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
+TIR_REGISTER_TL_TILE_OP(AtomicAdd, atomicadd)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

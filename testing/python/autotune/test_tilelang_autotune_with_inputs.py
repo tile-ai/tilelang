@@ -30,38 +30,23 @@ def ref_program(A, B):
 
 
 def get_configs():
-    iter_params = dict(
-        block_M=[64],
-        block_N=[64],
-        block_K=[32],
-        num_stages=[0, 1],
-        thread_num=[128],
-        enable_rasterization=[False])
-    return [{
-        k: v for k, v in zip(iter_params, values)
-    } for values in itertools.product(*iter_params.values())]
+    iter_params = dict(block_M=[64], block_N=[64], block_K=[32], num_stages=[0, 1], thread_num=[128], enable_rasterization=[False])
+    return [{k: v for k, v in zip(iter_params, values)} for values in itertools.product(*iter_params.values())]
 
 
-@tilelang.autotune(configs=get_configs(),)
+@tilelang.autotune(
+    configs=get_configs(),
+)
 @tilelang.jit(out_idx=[-1])
-def matmul(M,
-           N,
-           K,
-           block_M=128,
-           block_N=128,
-           block_K=32,
-           num_stages=0,
-           thread_num=128,
-           enable_rasterization=False):
-
-    dtype = "float16"
-    accum_dtype = "float"
+def matmul(M, N, K, block_M=128, block_N=128, block_K=32, num_stages=0, thread_num=128, enable_rasterization=False):
+    dtype = T.float16
+    accum_dtype = T.float32
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         """
         The compiled TVM function for block-level matrix multiplication.
@@ -76,7 +61,6 @@ def matmul(M,
         # Bind x-dimension to block index in N,
         #     y-dimension to block index in M.
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-
             # Allocate shared memory for A sub-block of shape (block_M, block_K)
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             # Allocate shared memory for B sub-block of shape (block_N, block_K)

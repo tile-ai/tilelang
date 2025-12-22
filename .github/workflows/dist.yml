@@ -1,5 +1,6 @@
 name: Dist
 on:
+  workflow_dispatch:
   schedule:
     # gemini said this is 6:00 china time
     - cron: "0 22 * * *"
@@ -52,7 +53,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
           submodules: recursive
@@ -91,7 +92,7 @@ jobs:
       - name: Upload SDist
         # Not PR to save artifact storage, as SDist is only needed for releases.
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -105,14 +106,12 @@ jobs:
     strategy:
       matrix:
         target:
-          - { runner: ubuntu-latest, toolkit: "CUDA-12.1" }
+          - { runner: ubuntu-latest, toolkit: "CUDA-12.8" }
           - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
           # Wheels are built with Python 3.8 Limited API, they should work with all Python >= 3.8.
           # Only build wheels against Python 3.8 Limited API to save CI resources.
-          # FIXME: Here we use Python 3.9 because our dependency `apache-tvm-ffi` claims to support
-          #        Python 3.8 but it depends on a version of `ml-dtypes` that requires Python >= 3.9.
           - "3.9"
       fail-fast: false
     timeout-minutes: 120
@@ -122,7 +121,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
           submodules: recursive
@@ -160,7 +159,7 @@ jobs:
           fi
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v3.2
+        uses: pypa/cibuildwheel@v3.3
         with:
           package-dir: .
           output-dir: wheelhouse
@@ -169,7 +168,7 @@ jobs:
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
           path: wheelhouse/*.whl
@@ -184,7 +183,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download built SDist
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           # unpacks default artifact into dist/
           # if `name: artifact` is omitted, the action will create extra parent dir
@@ -192,7 +191,7 @@ jobs:
           path: dist
 
       - name: Download built wheels
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           pattern: wheels-*
           path: dist
@@ -202,7 +201,7 @@ jobs:
         run: ls -lh dist/*
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: artifacts
           path: dist/*

@@ -27,9 +27,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -42,15 +42,7 @@ def matmul(
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 T.copy(B[bx * block_N, k * block_K], B_shared)
-                T.gemm(
-                    A_shared,
-                    B_shared,
-                    C_tmem,
-                    trans_A,
-                    trans_B,
-                    mbar=mbar,
-                    wg_wait=-1,
-                    clear_accum=k == 0)
+                T.gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, mbar=mbar, wg_wait=-1, clear_accum=k == 0)
                 T.mbarrier_wait_parity(mbar, k % 2)
 
             T.copy(C_tmem, C_local)
@@ -74,7 +66,8 @@ def _compile_and_check(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
 
     print(kernel.get_kernel_source())
 
@@ -87,7 +80,7 @@ def _compile_and_check(
             A = A.T
         if trans_B:
             B = B.T
-        if in_dtype == "float32":
+        if in_dtype == T.float32:
             A = (A.view(torch.int32) - 0x1000).view(torch.float32)
             B = (B.view(torch.int32) - 0x1000).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
@@ -138,23 +131,25 @@ M_VALUES = [32, 64, 128, 256]
 N_VALUES = [64, 128, 256, 512]
 K_VALUES = [16, 32, 64, 128]
 K_VALUES_8Bit = [32, 64, 128]
-FALSE_TRUE_CASES = ([
+FALSE_TRUE_CASES = [
     pytest.param(
         k,
-        "float16",
-        "float32",
-        "float32",
+        T.float16,
+        T.float32,
+        T.float32,
         id=f"K{k}-float16-float-float",
-    ) for k in K_VALUES
+    )
+    for k in K_VALUES
 ] + [
     pytest.param(
         k,
-        "float8_e5m2",
-        "float32",
-        "float32",
+        T.float8_e5m2,
+        T.float32,
+        T.float32,
         id="K32-float8_e5m2-float32-float32",
-    ) for k in K_VALUES_8Bit
-])
+    )
+    for k in K_VALUES_8Bit
+]
 
 TRANS_CASES = [
     pytest.param(False, True, id="nt"),
@@ -191,7 +186,7 @@ def test_gemm_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
+    tilelang.testing.main()
 
     # # Test Pass
     # for m in [32, 64, 128, 256]:
@@ -200,7 +195,17 @@ if __name__ == "__main__":
     #             if m in [32, 64] and (n not in [64, 128, 256]):
     #                 continue
     #             print(f"======================= Test {m} {n} {k} False True =============================")
-    #             run_gemm(m, n, k * 3, False, True, "float16", "float", "float", m, n, k, 2, 128)
+    #             run_gemm(m, n, k * 3, False, True, T.float16, T.float, T.float, m, n, k, 2, 128)
+    #             print(f"Test {m} {n} {k} Pass")
+
+    # # Test Pass
+    # for m in [32, 64, 128, 256]:
+    #     for n in [32, 64, 128]:
+    #         for k in [16, 32, 64, 128]:
+    #             if m in [32, 64] and (n not in [64, 128, 256]):
+    #                 continue
+    #             print(f"======================= Test {m} {n} {k} False True =============================")
+    #             run_gemm(m, n, k * 3, False, True, T.float16, T.float, T.float, m, n, k, 2, 256)
     #             print(f"Test {m} {n} {k} Pass")
 
     # # Test Pass
@@ -210,17 +215,4 @@ if __name__ == "__main__":
     #             if m in [32, 64] and (n not in [64, 128, 256]):
     #                 continue
     #             print(f"======================= Test {m} {n} {k} False True =============================")
-    #             run_gemm(m, n, k * 3, False, True, "float8_e5m2", "float", "float", m, n, k, 2, 128)
-    #             print(f"Test {m} {n} {k} Pass")
-
-    tilelang.disable_cache()
-    run_gemm(32, 512, 16, False, True, "float16", "float32", "float32", 32, 512, 16, 0, 128)
-    run_gemm(32, 512, 32, False, True, "float16", "float32", "float32", 32, 512, 32, 0, 128)
-    run_gemm(32, 512, 64, False, True, "float16", "float32", "float32", 32, 512, 64, 0, 128)
-    run_gemm(64, 512, 16, False, True, "float16", "float32", "float32", 64, 512, 16, 0, 128)
-    run_gemm(64, 512, 16, False, True, "float16", "float32", "float32", 32, 512, 16, 0, 128)
-    run_gemm(128, 512, 16, False, True, "float16", "float32", "float32", 128, 512, 16, 0, 128)
-
-    # run_gemm(64, 512, 32, False, True, "float16", "float32", "float32", 64, 512, 32, 0, 128)
-    # run_gemm(64, 512, 64, False, True, "float16", "float32", "float32", 64, 512, 64, 0, 128)
-    # run_gemm(128, 512, 16, False, True, "float16", "float32", "float32", 128, 512, 16, 0, 128)
+    #             run_gemm(m, n, k * 3, False, True, T.float8_e5m2, T.float, T.float, m, n, k, 2, 128)

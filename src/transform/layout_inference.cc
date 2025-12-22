@@ -12,12 +12,15 @@
 #include <tvm/tir/utils.h>
 
 #include <algorithm>
+#include <deque>
+#include <memory>
 #include <queue>
 
 #include "../layout/utils.h"
 #include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
+#include "../target/utils.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -71,7 +74,7 @@ public:
 
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
                     LayoutMap &layout_map, const LayoutMap &strict_layout_map,
-                    std::queue<int> &q, std::vector<bool> &in_queue) {
+                    std::deque<int> &q, std::vector<bool> &in_queue) {
     auto num_infer = infer_list_.size();
 
     // Range check for cur_infer_id
@@ -85,6 +88,7 @@ public:
     auto &next = infer_list_[cur_infer_id];
     auto iter_var = thread_var_vec_[cur_infer_id];
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
+    arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
     auto buffer_oob = buffer_oob_vec_[cur_infer_id];
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
@@ -106,13 +110,17 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    auto updates =
-        next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
-                                          &analyzer_, buffer_oob},
-                          level);
+    auto updates = next->InferLayout(LayoutInferArgs{target_,
+                                                     thread_bounds,
+                                                     layout_map,
+                                                     cur_analyzer,
+                                                     buffer_oob,
+                                                     {},
+                                                     let_var_to_expr_},
+                                     level);
+
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
-
       // Basic validity checks
       ICHECK(buffer.defined()) << "InferLayout returned an undefined buffer.";
       ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
@@ -138,8 +146,11 @@ public:
             }
           }
           Layout target_layout =
-              shapes_equal ? src_layout
-                           : src_layout->Reshape(sib->shape, &analyzer_);
+              shapes_equal
+                  ? src_layout
+                  : src_layout->Reshape(sib->shape, &analyzer_,
+                                        Integer(src_buffer->dtype.bytes()),
+                                        Integer(sib->dtype.bytes()));
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
@@ -150,10 +161,7 @@ public:
             layout_map.Set(sib, target_layout);
             if (update_queue && use_list_.count(sib)) {
               for (int idx : use_list_[sib]) {
-                if (!in_queue[idx] && idx != cur_infer_id) {
-                  in_queue[idx] = true;
-                  q.push(idx);
-                }
+                EnqueueWithPriority(idx, q, in_queue, cur_infer_id, layout_map);
               }
             }
           }
@@ -231,22 +239,20 @@ public:
               << "Index in use_list_ for buffer " << buffer
               << " out of range: " << idx << " >= " << num_infer << ".";
 
-          if (!in_queue[idx] && idx != cur_infer_id) {
-            in_queue[idx] = true;
-            q.push(idx);
-          }
+          EnqueueWithPriority(idx, q, in_queue, cur_infer_id, layout_map);
         }
       }
     }
   };
 
   void FinishInferQueue(InferLevel level, LayoutMap &layout_map,
-                        const LayoutMap &strict_layout_map, std::queue<int> &q,
+                        const LayoutMap &strict_layout_map, std::deque<int> &q,
                         std::vector<bool> &in_queue) {
     auto num_infer = infer_list_.size();
+
     while (!q.empty()) {
       int cur_infer_id = q.front();
-      q.pop();
+      q.pop_front();
       // Range check again, just to be safe
       ICHECK_GE(cur_infer_id, 0);
       ICHECK_LT(cur_infer_id, num_infer);
@@ -266,6 +272,9 @@ public:
     ICHECK_EQ(thread_bounds_vec_.size(), infer_list_.size())
         << "Size mismatch: thread_bounds_vec_ and infer_list_ must match in "
            "length.";
+    ICHECK_EQ(analyzer_vec_.size(), infer_list_.size())
+        << "Size mismatch: analyzer_vec_ and infer_list_ must match in "
+           "length.";
     ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
@@ -284,7 +293,7 @@ public:
     int num_infer = infer_list_.size();
 
     // Prepare BFS queue for iterative inference
-    std::queue<int> q;
+    std::deque<int> q;
     std::vector<bool> in_queue(num_infer, true);
     for (int i = 0; i < num_infer; i++) {
       // Check that each infer_list_ entry is valid
@@ -296,7 +305,7 @@ public:
       if (!thread_var_vec_[i].defined() && skip_thread_partition_) {
         thread_var_vec_[i] = thread_var_;
       }
-      q.push(i);
+      q.push_back(i);
     }
 
     // step 1: infer strict layout
@@ -347,10 +356,12 @@ public:
             }
           }
 
-          Layout reshaped =
-              shapes_equal
-                  ? rep_layout.value()
-                  : rep_layout.value()->Reshape(buf->shape, &analyzer_);
+          Layout reshaped = shapes_equal
+                                ? rep_layout.value()
+                                : rep_layout.value()->Reshape(
+                                      buf->shape, &analyzer_,
+                                      Integer(rep.value()->dtype.bytes()),
+                                      Integer(buf->dtype.bytes()));
           layout_map.Set(buf, reshaped);
         }
       }
@@ -426,18 +437,56 @@ private:
     return buffer_map;
   }
 
+  // Return true if all buffers that this op (idx) touches already have
+  // inferred layouts in layout_map. Used to prioritize enqueue order.
+  bool ShouldPrioritize(int idx, const LayoutMap &layout_map) const {
+    auto it = op_touched_buffers_.find(idx);
+    if (it == op_touched_buffers_.end() || it->second.empty())
+      return false;
+    for (const auto &buf : it->second) {
+      if (!layout_map.count(buf))
+        return false;
+    }
+    return true;
+  }
+
+  // Enqueue idx to q with priority if all its buffers already
+  // have layouts. Also guards against duplicates and self-enqueue.
+  void EnqueueWithPriority(int idx, std::deque<int> &q,
+                           std::vector<bool> &in_queue, int cur_infer_id,
+                           const LayoutMap &layout_map) const {
+    if (idx == cur_infer_id)
+      return;
+    if (idx < 0 || idx >= static_cast<int>(in_queue.size()))
+      return;
+    if (in_queue[idx])
+      return;
+    in_queue[idx] = true;
+    if (ShouldPrioritize(idx, layout_map)) {
+      q.push_front(idx);
+    } else {
+      q.push_back(idx);
+    }
+  }
+
   void VisitExpr_(const CallNode *op) final {
     IRVisitorWithAnalyzer::VisitExpr_(op);
     // Do not analysis the call node to the global function.
     if (op->op.as<GlobalVarNode>())
       return;
 
-    auto p = ParseOperator(tvm::ffi::GetRef<Call>(op), GetBufferMap());
+    auto p = ParseOperator(tvm::ffi::GetRef<Call>(op));
     if (p.defined()) {
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
           addToUseList(buffer.value());
+        } else if (auto buffer = getBufferFromRegion(arg)) {
+          addToUseList(buffer.value());
         }
+        // Check if the argument uses any LetStmt variables that reference
+        // fragment buffers. If so, add those buffers to the use list.
+        // This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0], ...)
+        CollectFragmentBuffersFromExpr(arg);
       }
       // Compute thread_var_ and thread_bounds_
       thread_var_vec_.push_back(thread_var_);
@@ -452,6 +501,7 @@ private:
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
+      analyzer_vec_.push_back(analyzer_.Clone());
 
       // Compute buffer oob for each buffer in the op
       if (const auto *copy = p.as<CopyNode>()) {
@@ -489,6 +539,9 @@ private:
   }
 
   Optional<Buffer> getBufferFromAccessPtr(const PrimExpr &expr) {
+    if (auto bl = expr.as<BufferLoadNode>()) {
+      return bl->buffer;
+    }
     auto call = expr.as<CallNode>();
     if (!call) {
       return std::nullopt;
@@ -508,18 +561,45 @@ private:
         }
       }
       return std::nullopt;
-    } else if (call->op.same_as(RegionOp::Get())) {
-      return call->args[0].as<BufferLoadNode>()->buffer;
+    }
+    return std::nullopt;
+  }
+
+  Optional<Buffer> getBufferFromRegion(const PrimExpr &expr) {
+    if (auto call = expr.as<CallNode>()) {
+      if (call->op.same_as(RegionOp::Get())) {
+        if (auto bl = call->args[0].as<BufferLoadNode>()) {
+          return bl->buffer;
+        }
+        return std::nullopt;
+      }
     }
     return std::nullopt;
   }
 
   void addToUseList(const Buffer &buffer) {
+    // buffer scope must be local.fragment
+    if (buffer.scope() != "local.fragment") {
+      return;
+    }
     int infer_idx = infer_list_.size();
     if (use_list_.find(buffer) == use_list_.end()) {
       use_list_[buffer] = {};
     }
     use_list_[buffer].push_back(infer_idx);
+
+    // Track which buffers this op (infer_idx) touches for prioritization.
+    // Avoid duplicates.
+    auto &vec = op_touched_buffers_[infer_idx];
+    bool exists = false;
+    for (const auto &b : vec) {
+      if (b.same_as(buffer)) {
+        exists = true;
+        break;
+      }
+    }
+    if (!exists)
+      vec.push_back(buffer);
   }
 
   void VisitStmt_(const ForNode *op) final {
@@ -528,6 +608,71 @@ private:
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
         addToUseList(buffer);
       }
+
+      PostOrderVisit(op->body, [this](const ObjectRef &node) {
+        if (auto *buffer_load = node.as<BufferLoadNode>()) {
+          if (buffer_load->buffer.defined() &&
+              buffer_load->buffer->data.defined()) {
+            if (buffer_data_to_buffers_.count(buffer_load->buffer->data)) {
+              // Check if this buffer is already in the list
+              auto buffers = buffer_data_to_buffers_[buffer_load->buffer->data];
+              bool found = false;
+              for (const auto &buf : buffers) {
+                if (buf.same_as(buffer_load->buffer)) {
+                  found = true;
+                  break;
+                }
+              }
+              if (!found) {
+                buffers.push_back(buffer_load->buffer);
+                buffer_data_to_buffers_.Set(buffer_load->buffer->data, buffers);
+                DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
+                           << buffer_load->buffer
+                           << " buffer.get() = " << buffer_load->buffer.get()
+                           << " data = " << buffer_load->buffer->data.get();
+              }
+            } else {
+              buffer_data_to_buffers_.Set(buffer_load->buffer->data,
+                                          {buffer_load->buffer});
+              DLOG(INFO) << "[LayoutInference] BufferStore: new buffer "
+                         << buffer_load->buffer
+                         << " buffer.get() = " << buffer_load->buffer.get()
+                         << " data = " << buffer_load->buffer->data.get();
+            }
+          }
+        } else if (auto *buffer_store = node.as<BufferStoreNode>()) {
+          if (buffer_store->buffer.defined() &&
+              buffer_store->buffer->data.defined()) {
+            if (buffer_data_to_buffers_.count(buffer_store->buffer->data)) {
+              auto buffers =
+                  buffer_data_to_buffers_[buffer_store->buffer->data];
+              bool found = false;
+              for (const auto &buf : buffers) {
+                if (buf.same_as(buffer_store->buffer)) {
+                  found = true;
+                  break;
+                }
+              }
+              if (!found) {
+                buffers.push_back(buffer_store->buffer);
+                buffer_data_to_buffers_.Set(buffer_store->buffer->data,
+                                            buffers);
+                DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
+                           << buffer_store->buffer
+                           << " buffer.get() = " << buffer_store->buffer.get()
+                           << " data = " << buffer_store->buffer->data.get();
+              }
+            } else {
+              buffer_data_to_buffers_.Set(buffer_store->buffer->data,
+                                          {buffer_store->buffer});
+              DLOG(INFO) << "[LayoutInference] BufferStore: new buffer "
+                         << buffer_store->buffer
+                         << " buffer.get() = " << buffer_store->buffer.get()
+                         << " data = " << buffer_store->buffer->data.get();
+            }
+          }
+        }
+      });
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
       thread_var_vec_.push_back(thread_var_);
@@ -542,6 +687,7 @@ private:
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
+      analyzer_vec_.push_back(analyzer_.Clone());
       buffer_oob_vec_.push_back(false);
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
@@ -593,7 +739,11 @@ private:
           if (shapes_equal) {
             annotated_layout_map_.Set(buffer, layout);
           } else {
-            auto reshaped_layout = layout->Reshape(buffer->shape, &analyzer_);
+            // Use the first buffer sharing this var as the base for dtype ratio
+            int base_bytes = buffers[0]->dtype.bytes();
+            auto reshaped_layout =
+                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bytes),
+                                Integer(buffer->dtype.bytes()));
             annotated_layout_map_.Set(buffer, reshaped_layout);
           }
         }
@@ -610,6 +760,30 @@ private:
       }
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const LetStmtNode *op) final {
+    // Record Let variable to its bound expression.
+    // This enables tracking fragment buffer accesses through let bindings.
+    let_var_to_expr_.Set(op->var, op->value);
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  // Helper: recursively collect fragment buffers from an expression,
+  // following let bindings chain.
+  void CollectFragmentBuffersFromExpr(const PrimExpr &expr) {
+    PostOrderVisit(expr, [this](const ObjectRef &node) {
+      if (auto bl = node.as<BufferLoadNode>()) {
+        if (bl->buffer.defined() && bl->buffer.scope() == "local.fragment") {
+          addToUseList(bl->buffer);
+        }
+      } else if (auto var_node = node.as<VarNode>()) {
+        auto var = tvm::ffi::GetRef<Var>(var_node);
+        if (let_var_to_expr_.count(var)) {
+          CollectFragmentBuffersFromExpr(let_var_to_expr_[var]);
+        }
+      }
+    });
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -673,16 +847,21 @@ private:
   }
 
   Map<Var, Array<Buffer>> buffer_data_to_buffers_;
+  // Map from LetStmt variable to its bound expression
+  Map<Var, PrimExpr> let_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
       use_list_;
+  // Per-op list of buffers it touches (fragment scope), used for prioritization
+  std::unordered_map<int, std::vector<Buffer>> op_touched_buffers_;
   // This is a workaround for cpu backend,
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
   std::vector<IterVar> thread_var_vec_;
   std::vector<Range> thread_bounds_vec_;
+  std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
   std::vector<bool> buffer_oob_vec_;
   Target target_;
   LayoutMap annotated_layout_map_;
@@ -742,6 +921,7 @@ private:
         }
       }
     }
+
     std::unordered_map<int, std::vector<int>> components;
     for (int i = 0; i < infer_list_.size(); i++) {
       int root = uf.Find(i);
@@ -758,7 +938,7 @@ private:
 
     // For each component, try each op as root, and determine the least
     // replicated one
-    std::queue<int> q;
+    std::deque<int> q;
     std::vector<bool> in_queue(infer_list_.size(), false);
 
     for (auto &&[root, members] : components) {
@@ -772,7 +952,7 @@ private:
       // Try each member as the root of inference for this component
       for (int attempt_infer_root : members) {
         DLOG(INFO) << "----------------------- try root " << attempt_infer_root
-                   << '\n';
+                   << " members " << members.size() << '\n';
         // Backup the current infer_list_ state
         auto back_infer_list = BackupInferList();
         // Copy the current layout_map for temporary use
@@ -803,6 +983,10 @@ private:
           do_update = false;
           DLOG(INFO) << "attempt failed due to NormalizeIterException "
                      << e.what() << '\n';
+        } catch (const LoopLayoutInjectiveException &e) {
+          do_update = false;
+          DLOG(INFO) << "attempt failed due to LoopLayoutInjectiveException "
+                     << e.what() << '\n';
         }
 
         if (do_update) {
@@ -813,7 +997,13 @@ private:
               int64_t frag_reg_num = 1;
               for (auto i : frag.value()->OutputShape()) {
                 auto pci = as_const_int(i);
-                ICHECK(pci != nullptr);
+                ICHECK(pci != nullptr)
+                    << "Can not use non-constant range to "
+                       "iterate over a fragment/local "
+                       "buffer. Non-constant shape expr is: "
+                    << i
+                    << ". This is possibly because you use symbolic shape when "
+                       "accessing a fragment/local buffer.";
                 frag_reg_num *= *pci;
               }
               reg_num += frag_reg_num;
@@ -934,106 +1124,115 @@ private:
       reducer_info = op->annotations.Get(attr::kReducerInfo)
                          ->as<Map<Var, ReducerInfo>>()
                          .value();
-
-    For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    if (result_.for_map.count(tvm::ffi::GetRef<For>(op))) {
-      auto root = tvm::ffi::GetRef<For>(op);
-      // This check is a workaround to support T.Parallel for local buffers.
-      // For example:
-      //   for i in T.Parallel(1024):
-      //     A_local[i] = A_global[i]
-      // Here, A_local is a register-local buffer held independently by each
-      // thread, so explicit thread binding is not required.
-      bool store_into_local = false;
-      PostOrderVisit(root, [&](const ObjectRef &obj) {
-        if (const auto *store = obj.as<BufferStoreNode>()) {
-          if (store->buffer.scope() == "local") {
-            store_into_local = true;
-          }
-          // if the case is like:
-          // for i in T.Parallel(1024):
-          //     A_local[i] = B_global[i]
-          //     A_frag[i] = A_global[i]
-          // exception will be raise in Parallel::LayoutInference
-        }
-      });
-      // This check if for the loop that only manuplates "local" buffers,
-      // for i in T.Parallel(1024):
-      //     A_local[i] = B_local[i]
-      // Though this might be illegal
-      // We use PostOrderVisit to detect whether the loop only manuplates
-      // "local" buffers, which indicates register usage and justifies skipping
-      // thread binding.
-      bool local_register_only = true;
-      PostOrderVisit(root, [&](const ObjectRef &obj) {
-        if (const auto *store = obj.as<BufferStoreNode>()) {
-          if (store->buffer.scope() != "local") {
-            local_register_only = false;
-          }
-        } else if (const auto *load = obj.as<BufferLoadNode>()) {
-          if (load->buffer.scope() != "local") {
-            local_register_only = false;
-          }
-        }
-      });
-
-      auto loop_layout = result_.for_map[root];
-      // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
-      // NOTE(lei): a bit ugly, we should rethink about this part in future.
-      bool parallel_loop =
-          !skip_thread_partition_ && !local_register_only && !store_into_local;
-
-      if (parallel_loop) {
-        for_node =
-            PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);
-      }
-      // If none thread bindings are provided, partition the loop
-      bool has_non_local = false;
-      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-        if (const auto *load = obj.as<BufferLoadNode>()) {
-          String scope = load->buffer.scope();
-          if (scope != "local" && scope != "local.fragment") {
-            has_non_local = true;
-          }
-        } else if (const auto *store = obj.as<BufferStoreNode>()) {
-          String scope = store->buffer.scope();
-          if (scope != "local" && scope != "local.fragment") {
-            has_non_local = true;
-          }
-        }
-      });
-      // Workaround: if reducer is presented, don't vectorize loop
-      // Best solution should be isolate reduction axis out of vectorization
-      bool has_reducer = false;
-      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-        if (!has_reducer)
-          if (const auto *store = obj.as<BufferStoreNode>()) {
-            has_reducer = reducer_info.count(store->buffer->data) != 0;
-          }
-      });
-
-      // If a cast operation exists, vectorization may still be required
-      bool has_cast_operations = false;
-      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-        if (const auto *store = obj.as<BufferStoreNode>()) {
-          // Check if this is a non-reducer store with Cast operation
-          if (store->value.as<CastNode>()) {
-            has_cast_operations = true;
-          }
-        }
-      });
-
-      if ((has_non_local || has_cast_operations) && !has_reducer) {
-        for_node = VectorizeLoop(for_node);
-      }
-
-      if (result_.predicate_map.count(root) && parallel_loop) {
-        return IfThenElse(result_.predicate_map[root], for_node);
-      } else {
-        return for_node;
-      }
+    if (!result_.for_map.count(tvm::ffi::GetRef<For>(op))) {
+      return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
-    return for_node;
+    // the analyzer will be modified in PartitionLoop and VectorizeLoop
+    // we need to save its state to prevent conflicted bindings
+    auto saved_analyzer = analyzer_->Clone();
+    For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
+    auto root = tvm::ffi::GetRef<For>(op);
+    // This check is a workaround to support T.Parallel for local buffers.
+    // For example:
+    //   for i in T.Parallel(1024):
+    //     A_local[i] = A_global[i]
+    // Here, A_local is a register-local buffer held independently by each
+    // thread, so explicit thread binding is not required.
+    bool store_into_local = false;
+    PostOrderVisit(root, [&](const ObjectRef &obj) {
+      if (const auto *store = obj.as<BufferStoreNode>()) {
+        if (store->buffer.scope() == "local") {
+          store_into_local = true;
+        }
+        // if the case is like:
+        // for i in T.Parallel(1024):
+        //     A_local[i] = B_global[i]
+        //     A_frag[i] = A_global[i]
+        // exception will be raise in Parallel::LayoutInference
+      }
+    });
+    // This check if for the loop that only manuplates "local" buffers,
+    // for i in T.Parallel(1024):
+    //     A_local[i] = B_local[i]
+    // Though this might be illegal
+    // We use PostOrderVisit to detect whether the loop only manuplates
+    // "local" buffers, which indicates register usage and justifies skipping
+    // thread binding.
+    bool local_register_only = true;
+    PostOrderVisit(root, [&](const ObjectRef &obj) {
+      if (const auto *store = obj.as<BufferStoreNode>()) {
+        if (store->buffer.scope() != "local") {
+          local_register_only = false;
+        }
+      } else if (const auto *load = obj.as<BufferLoadNode>()) {
+        if (load->buffer.scope() != "local") {
+          local_register_only = false;
+        }
+      }
+    });
+
+    auto loop_layout = result_.for_map[root];
+    // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
+    // NOTE(lei): a bit ugly, we should rethink about this part in future.
+    bool parallel_loop =
+        !skip_thread_partition_ && !local_register_only && !store_into_local;
+
+    if (parallel_loop) {
+      for_node =
+          PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);
+    }
+    // If none thread bindings are provided, partition the loop
+    bool has_non_local = false;
+    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+      if (const auto *load = obj.as<BufferLoadNode>()) {
+        String scope = load->buffer.scope();
+        if (scope != "local" && scope != "local.fragment") {
+          has_non_local = true;
+        }
+      } else if (const auto *store = obj.as<BufferStoreNode>()) {
+        String scope = store->buffer.scope();
+        if (scope != "local" && scope != "local.fragment") {
+          has_non_local = true;
+        }
+      }
+    });
+    // Workaround: if reducer is presented, don't vectorize loop
+    // Best solution should be isolate reduction axis out of vectorization
+    bool has_reducer = false;
+    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+      if (!has_reducer)
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          has_reducer = reducer_info.count(store->buffer->data) != 0;
+        }
+    });
+
+    // If a cast operation exists, vectorization may still be required
+    bool has_cast_operations = false;
+    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+      if (const auto *cast = obj.as<CastNode>()) {
+        // Check if this is a non-reducer store with Cast operation
+        DataType src_type = cast->value.dtype();
+        DataType dst_type = cast->dtype;
+        bool src_ok =
+            src_type.is_float() || src_type.is_bfloat() || src_type.is_float8();
+        bool dst_ok =
+            dst_type.is_float() || dst_type.is_bfloat() || dst_type.is_float8();
+        if (src_ok && dst_ok && TargetIsCuda(Target::Current())) {
+          has_cast_operations = true;
+        }
+      }
+    });
+
+    if ((has_non_local || has_cast_operations) && !has_reducer) {
+      DLOG(INFO) << "Try to vectorize loop";
+      for_node = VectorizeLoop(for_node, saved_analyzer.get());
+    }
+
+    if (result_.predicate_map.count(root) && parallel_loop) {
+      return IfThenElse(result_.predicate_map[root], for_node);
+    } else {
+      return for_node;
+    }
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
