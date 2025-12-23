@@ -320,6 +320,38 @@ def main(
     print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
 
+def run_regression_perf():
+    BATCH = 1
+    H = 32
+    N_CTX = 256
+    D_HEAD = 64
+    causal = False
+    device = "cuda"
+    torch.manual_seed(0)
+    block_M = 128
+    block_N = 128 if D_HEAD <= 64 else 32
+    Q = torch.randn(BATCH, N_CTX, H, D_HEAD, device=device, dtype=torch.half)
+    K = torch.randn_like(Q)
+    V = torch.randn_like(Q)
+    O = torch.randn_like(Q)
+    dO = torch.randn_like(Q)
+    lse = torch.zeros(BATCH, H, N_CTX, device=device, dtype=torch.float32)
+    with torch.no_grad():
+        mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
+        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N)
+    dQ = torch.zeros(BATCH, N_CTX, H, D_HEAD, device=device, dtype=torch.float32)
+    dK = torch.zeros_like(Q, dtype=torch.float16)
+    dV = torch.zeros_like(Q, dtype=torch.float16)
+    Delta = mod_prep(O, dO)
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(Q, K, V, dO, lse, Delta, dQ, dK, dV)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=int, default=8, help="Batch size")

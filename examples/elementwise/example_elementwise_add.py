@@ -53,6 +53,21 @@ def main(M=1024, N=1024, use_autotune=False):
     torch.testing.assert_close(out, ref_program(a, b), rtol=1e-2, atol=1e-2)
 
 
+def run_regression_perf():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--m", type=int, default=1024)
+    parser.add_argument("--n", type=int, default=1024)
+    args, _ = parser.parse_known_args()
+    M, N = args.m, args.n
+    a = torch.randn(M, N, dtype=torch.float32, device="cuda")
+    b = torch.randn(M, N, dtype=torch.float32, device="cuda")
+    config = {"block_M": 32, "block_N": 32, "threads": 128}
+    kernel = elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32")
+    from tilelang.profiler import do_bench
+
+    return do_bench(lambda: kernel(a, b), warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--m", type=int, default=1024)

@@ -318,5 +318,13 @@ def main(BATCH=1, H=32, Q_CTX=128, KV_CTX=8192, D_HEAD=128, causal=False):
     print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
 
 
+def run_regression_perf(BATCH=1, H=32, Q_CTX=128, KV_CTX=8192, D_HEAD=128, causal=False):
+    BLOCK_M = 128
+    BLOCK_N = 64
+    kernel = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    return profiler.do_bench(n_warmup=10, n_repeat=10, backend="cupti")
+
+
 if __name__ == "__main__":
     main()

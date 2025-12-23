@@ -259,8 +259,6 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             Q_shared_fp32 = T.alloc_shared((block_S, DK), dtype=T.float32)
             W_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
-            G_last_local = T.alloc_local((1), dtype=gate_dtype)
-            G_last_local_exp = T.alloc_local((1), dtype=gate_dtype)
             G_shared = T.alloc_shared((block_S), dtype=gate_dtype, scope="shared")
             G_fragment = T.alloc_fragment((block_S), dtype=gate_dtype)
             G_fragment_post = T.alloc_fragment((block_S), dtype=gate_dtype)
@@ -305,17 +303,14 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
                 if use_g:
                     T.copy(G[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh], G_shared, disable_tma=True)
                     T.copy(G_shared, G_fragment)
-                    G_last_local[0] = G_shared[block_S - 1]
-                    G_last_local_exp[0] = T.exp(G_last_local[0])
+                    G_last_local = G_shared[block_S - 1]
+                    G_last_local_exp = T.exp(G_last_local)
                     for i_s2 in T.Parallel(block_S):
-                        G_fragment_post[i_s2] = T.exp(G_last_local[0] - G_fragment[i_s2])
+                        G_fragment_post[i_s2] = T.exp(G_last_local - G_fragment[i_s2])
                     for i_s2, i_v in T.Parallel(block_S, block_DV):
-                        # with T.If(G_last_local[0] - G_shared[i_s2] <= 0):
-                        with T.If(G_last_local[0] - G_fragment[i_s2] <= 0):
-                            with T.Then():
-                                dv_fragment[i_s2, i_v] = dv_fragment[i_s2, i_v] * G_fragment_post[i_s2]
-                            with T.Else():
-                                dv_fragment[i_s2, i_v] = 0
+                        dv_fragment[i_s2, i_v] = (
+                            dv_fragment[i_s2, i_v] * G_fragment_post[i_s2] if G_last_local - G_fragment[i_s2] <= 0 else 0
+                        )
 
                 T.copy(dv[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], dv_shared)
                 T.copy(dv_shared, dv_fragment_2)
@@ -333,12 +328,11 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
                 T.clear(Q_fragment)
                 if use_g:
                     for i_k, i_v in T.Parallel(DK, block_DV):
-                        b_dh_fragment[i_k, i_v] *= G_last_local_exp[0]
+                        b_dh_fragment[i_k, i_v] *= G_last_local_exp
                     T.copy(Q_shared, Q_fragment)
                     for i_s2 in T.Parallel(block_S):
                         G_fragment_exp[i_s2] = T.exp(G_shared[i_s2])
                     for i_s2, i_k in T.Parallel(block_S, DK):
-                        # Q_fragment[i_s2, i_k] = Q_fragment[i_s2, i_k] * T.exp(G_shared[i_s2]) * scale
                         Q_fragment[i_s2, i_k] = Q_fragment[i_s2, i_k] * G_fragment_exp[i_s2] * scale
                 else:
                     T.copy(Q_shared, Q_fragment)

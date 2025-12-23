@@ -108,15 +108,14 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                 scores_scale = T.alloc_fragment([block_M], accum_dtype)
                 scores_sum = T.alloc_fragment([block_M], accum_dtype)
                 logsum = T.alloc_fragment([block_M], accum_dtype)
-                block_mask = T.alloc_local([downsample_len], block_mask_dtype)
+                block_mask = T.alloc_fragment([downsample_len], block_mask_dtype)
 
                 T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
                 T.fill(acc_o, 0)
                 T.fill(logsum, 0)
                 T.fill(scores_max, -T.infinity(accum_dtype))
 
-                for vj in T.serial(downsample_len):
-                    block_mask[vj] = BlockSparseMask[bz, by, bx, vj]
+                T.copy(BlockSparseMask[bz, by, bx, :], block_mask)
 
                 loop_range = T.ceildiv(seq_kv, block_N)
 
@@ -248,6 +247,57 @@ def test_topk_sparse_attention_qlen_lt_klen():
 def main():
     test_topk_sparse_attention()
     test_topk_sparse_attention_qlen_lt_klen()
+
+
+def run_regression_perf():
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = 4, 2, 256, 64
+    TOPK = 2
+    BLOCK = 64
+    torch.manual_seed(0)
+
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+
+    downsample_factor = BLOCK
+    downsample_len = math.ceil(SEQ_LEN / downsample_factor)
+    x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len], device="cuda", dtype=torch.float16)
+    x_ds[:, :, :, 0] = 100
+    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
+
+    kernel = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(q, k, v, block_mask.to(torch.int8))
+
+    latency_1 = do_bench(run_kernel_only, backend="cupti")
+
+    BATCH, N_HEADS = 1, 1
+    Q_LEN, K_LEN, D_HEAD = 128, 256, 64
+    TOPK = 1
+    BLOCK = 64
+    torch.manual_seed(0)
+
+    q = torch.randn(BATCH, N_HEADS, Q_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+
+    downsample_factor = BLOCK
+    downsample_len = math.ceil(K_LEN / downsample_factor)
+    x_ds = torch.randn(BATCH, N_HEADS, downsample_len, downsample_len, device="cuda", dtype=torch.float16)
+    x_ds[:, :, :, 0] = 100
+    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
+
+    kernel = blocksparse_flashattn(BATCH, N_HEADS, Q_LEN, K_LEN, D_HEAD, downsample_len, is_causal=True)
+    print(kernel.get_kernel_source())
+
+    def run_kernel_only2():
+        kernel(q, k, v, block_mask.to(torch.int8))
+
+    latency_2 = do_bench(run_kernel_only2, backend="cupti")
+
+    return (latency_1 + latency_2) / 2
 
 
 if __name__ == "__main__":

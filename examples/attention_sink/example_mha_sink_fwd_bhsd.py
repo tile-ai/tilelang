@@ -301,6 +301,28 @@ def main(
         print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
 
+def run_regression_perf(
+    batch: int = 1,
+    heads: int = 1,
+    seq_q: int = 256,
+    seq_kv: int = 256,
+    dim: int = 128,
+    window_size: Optional[int] = None,
+    dtype: str = "float16",
+):
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    block_M = 128
+    block_N = 128
+    num_stages = 2
+    threads = 256
+    kernel = flashattn(
+        batch, heads, seq_q, seq_kv, dim, window_size, block_M=block_M, block_N=block_N, num_stages=num_stages, threads=threads, dtype=dtype
+    )
+    Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, dtype=torch_dtype)
+    latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500, rep=10000, backend="cupti")
+    return latency
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=int, default=8, help="batch size")

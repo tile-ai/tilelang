@@ -12,6 +12,7 @@
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
@@ -147,7 +148,7 @@ void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
 }
 
 void ParallelLoopNestVisitor::VisitStmt_(const BufferStoreNode *op) {
-  if (op->buffer.scope() == "local.fragment") {
+  if (IsFragmentBuffer(op->buffer)) {
     if (p->indice_map_.find(op->buffer) != p->indice_map_.end()) {
       ICHECK(StructuralEqual()(p->indice_map_.at(op->buffer), op->indices))
           << op->buffer << ": " << op->indices << " and "
@@ -161,7 +162,7 @@ void ParallelLoopNestVisitor::VisitStmt_(const BufferStoreNode *op) {
 }
 
 void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
-  if (op->buffer.scope() == "local.fragment") {
+  if (IsFragmentBuffer(op->buffer)) {
     if (p->indice_map_.find(op->buffer) != p->indice_map_.end()) {
       ICHECK(StructuralEqual()(p->indice_map_.at(op->buffer), op->indices))
           << op->buffer << ": " << op->indices << " and "
@@ -180,6 +181,46 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
 TileOperator ParallelOpNode::Clone() const {
   auto op = tvm::ffi::make_object<ParallelOpNode>(*this);
   return ParallelOp(op);
+}
+
+void ParallelOpNode::ExpandLetBindings(
+    const Map<Var, PrimExpr> &let_var_to_expr) {
+  if (let_var_to_expr.empty())
+    return;
+
+  // Helper function to recursively find BufferLoads through let bindings
+  std::function<void(const PrimExpr &)> expand = [&](const PrimExpr &expr) {
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (auto bl = node.as<BufferLoadNode>()) {
+        if (IsFragmentBuffer(bl->buffer) && !indice_map_.count(bl->buffer)) {
+          LOG(INFO) << "ExpandLetBindings: set buffer " << bl->buffer
+                    << " with indices " << bl->indices;
+          indice_map_.Set(bl->buffer, bl->indices);
+        }
+      } else if (auto var_node = node.as<VarNode>()) {
+        auto var = tvm::ffi::GetRef<Var>(var_node);
+        if (let_var_to_expr.count(var)) {
+          expand(let_var_to_expr[var]);
+        }
+      }
+    });
+  };
+
+  // Only expand let bindings that are used in root_
+  // First, collect all vars used in root_
+  std::unordered_set<const VarNode *> used_vars;
+  PostOrderVisit(root_, [&](const ObjectRef &node) {
+    if (auto var_node = node.as<VarNode>()) {
+      used_vars.insert(var_node);
+    }
+  });
+
+  // Only expand let bindings for vars that are actually used in root_
+  for (const auto &[var, expr] : let_var_to_expr) {
+    if (used_vars.count(var.get())) {
+      expand(expr);
+    }
+  }
 }
 
 Stmt ParallelOpNode::Lower(const LowerArgs &T,
@@ -215,6 +256,11 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   if (loop_layout_.defined())
     return {};
 
+  // Expand let bindings to find fragment buffer accesses
+  if (!T.let_var_to_expr.empty()) {
+    const_cast<ParallelOpNode *>(this)->ExpandLetBindings(T.let_var_to_expr);
+  }
+
   if (level == InferLevel::kStrict) {
     LayoutMap results;
     // Deduce buffers that should be complicated replicated.
@@ -226,7 +272,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       if (T.layout_map.count(buffer)) {
         continue;
       }
-      if (buffer.scope() != "local.fragment")
+      if (!IsFragmentBuffer(buffer))
         continue;
 
       // Check if all indices are zero
@@ -270,7 +316,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     return results;
   }
   auto buffer_is_completed_replicated = [&](const Buffer &buffer) {
-    if (buffer.scope() != "local.fragment")
+    if (!IsFragmentBuffer(buffer))
       return false;
     auto frag = T.layout_map[buffer].as<Fragment>().value();
     // buffer indices should be IntImm
@@ -286,7 +332,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   // Collect fragment buffers with const index and all fragment_buffers
   std::vector<Buffer> const_index_fragment_buffer, fragment_buffers;
   for (const auto &[buffer, indices] : indice_map_) {
-    if (buffer.scope() != "local.fragment")
+    if (!IsFragmentBuffer(buffer))
       continue;
     fragment_buffers.push_back(buffer);
 
@@ -439,7 +485,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         if (buffer.scope() == "shared" || buffer.scope() == "shared.dyn" ||
             buffer.scope() == "global") {
           store_shared_global_buffers.emplace_back(buffer);
-        } else if (buffer.scope() == "local.fragment") {
+        } else if (IsFragmentBuffer(buffer)) {
           store_fragment_buffers.emplace_back(buffer);
         }
       }

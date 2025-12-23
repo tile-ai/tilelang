@@ -205,5 +205,35 @@ def main(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
     print("Torch: {:.2f} ms".format(latency))
 
 
+def run_regression_perf(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
+    if batch_sizes is None:
+        batch_sizes = [2048, 6144]
+    if dtype == "float":
+        x = torch.randn(M, N, device="cuda", dtype=torch.float32)
+    elif dtype == "float16":
+        x = torch.randn(M, N, device="cuda", dtype=torch.float16)
+    elif dtype == "bfloat16":
+        x = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    batch_sizes = torch.tensor(batch_sizes, device="cuda", dtype=torch.int32)
+    M_max = int(ceil_div(batch_sizes.max(), 128) * 128)
+
+    kernel = group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m)
+
+    x_fp8, x_amax = kernel(x, batch_sizes)
+    x_fp8_ref, x_amax_ref = ref_program(x, batch_sizes)
+
+    torch_assert_close(x_fp8.to(torch.float32), x_fp8_ref.to(torch.float32), rtol=0.01, atol=0.01)
+    torch_assert_close(x_amax, x_amax_ref, rtol=0.01, atol=0.01)
+
+    from tilelang.profiler import do_bench
+
+    def run_tilelang():
+        kernel(x, batch_sizes)
+
+    return do_bench(run_tilelang, backend="cupti")
+
+
 if __name__ == "__main__":
     main()

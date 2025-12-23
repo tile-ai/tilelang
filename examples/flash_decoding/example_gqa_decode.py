@@ -483,6 +483,14 @@ def main(batch: int = 1, heads: int = 32, groups: int = 8, kv_seqlen: int = 8192
         print(f"Ref latency: {ref_latency}")
 
 
+def run_regression_perf(batch: int = 1, heads: int = 32, groups: int = 8, kv_seqlen: int = 8192, dim: int = 128):
+    batch, heads, groups, kv_seqlen, dim = batch, heads, groups, kv_seqlen, dim
+    config, _ = get_heuristic_config()
+    kernel = flashattn(batch, heads, groups, kv_seqlen, dim, **config)
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
+    return profiler.do_bench(warmup=500, backend="cupti")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=int, default=1, help="batch size")
