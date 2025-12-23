@@ -178,6 +178,8 @@ CPP_LAUNCHER_TEMPLATE = """\
 #include <vector>
 #include <cstring>
 #include <string>
+#include <mutex>
+#include <atomic>
 
 // TVM Headers
 #include <tvm/ffi/container/tensor.h>
@@ -186,11 +188,13 @@ CPP_LAUNCHER_TEMPLATE = """\
 
 // Cached module handle
 static CUmodule g_module = nullptr;
-static bool g_module_initialized = false;
+static std::atomic<bool> g_module_initialized(false);
+static std::mutex g_module_mutex;
 
 // Cached kernel functions
 static CUfunction g_kernels[{num_kernels}] = {{nullptr}};
-static bool g_kernels_initialized = false;
+static std::atomic<bool> g_kernels_initialized(false);
+static std::mutex g_kernels_mutex;
 
 // Find kernel by pattern (substring match, prefer base name over _N variants)
 CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction* out_func) {{
@@ -286,12 +290,58 @@ CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction
 
 
 // Initialize CUDA module (called once on first launch)
-static CUresult tilelang_init_cuda_module(const std::string& cubin_path) {{
-  if (g_module_initialized) return CUDA_SUCCESS;
+// Thread-safe using double-checked locking pattern
+// device_id: PyTorch CUDA device ID (e.g., 0, 1, 2...)
+static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int device_id) {{
+  // Fast path: module already initialized (lock-free check)
+  if (g_module_initialized.load(std::memory_order_acquire)) {{
+    return CUDA_SUCCESS;
+  }}
+
+  // Slow path: need to initialize (acquire lock)
+  std::lock_guard<std::mutex> lock(g_module_mutex);
+
+  // Double-check: another thread might have initialized while we waited for lock
+  if (g_module_initialized.load(std::memory_order_relaxed)) {{
+    return CUDA_SUCCESS;
+  }}
 
   CUresult result;
   result = cuInit(0);
   if (result != CUDA_SUCCESS) return result;
+
+  // Ensure there is an active CUDA context (required by cuModuleLoadData)
+  // PyTorch uses CUDA Runtime API which creates a primary context automatically,
+  // but CUDA Driver API needs explicit context management.
+  CUcontext ctx;
+  result = cuCtxGetCurrent(&ctx);
+  if (result != CUDA_SUCCESS) {{
+    std::cerr << "Failed to get current CUDA context: " << result << "\\n";
+    return result;
+  }}
+
+  // If no context exists, retain and set the primary context (created by PyTorch)
+  if (ctx == nullptr) {{
+    CUdevice device;
+    // Use the device_id passed from PyTorch (supports multi-GPU)
+    result = cuDeviceGet(&device, device_id);
+    if (result != CUDA_SUCCESS) {{
+      std::cerr << "Failed to get CUDA device " << device_id << ": " << result << "\\n";
+      return result;
+    }}
+
+    result = cuDevicePrimaryCtxRetain(&ctx, device);
+    if (result != CUDA_SUCCESS) {{
+      std::cerr << "Failed to retain primary context for device " << device_id << ": " << result << "\\n";
+      return result;
+    }}
+
+    result = cuCtxSetCurrent(ctx);
+    if (result != CUDA_SUCCESS) {{
+      std::cerr << "Failed to set current context for device " << device_id << ": " << result << "\\n";
+      return result;
+    }}
+  }}
 
   std::ifstream cubin_file(cubin_path.c_str(), std::ios::binary);
   if (!cubin_file) {{
@@ -314,18 +364,33 @@ static CUresult tilelang_init_cuda_module(const std::string& cubin_path) {{
     return result;
   }}
 
-  g_module_initialized = true;
+  // Mark as initialized (release semantic ensures all above writes are visible)
+  g_module_initialized.store(true, std::memory_order_release);
   return CUDA_SUCCESS;
 }}
 
 // Initialize all kernel functions (called once after module load)
+// Thread-safe using double-checked locking pattern
 static CUresult tilelang_init_kernels() {{
-  if (g_kernels_initialized) return CUDA_SUCCESS;
+  // Fast path: kernels already initialized (lock-free check)
+  if (g_kernels_initialized.load(std::memory_order_acquire)) {{
+    return CUDA_SUCCESS;
+  }}
+
+  // Slow path: need to initialize (acquire lock)
+  std::lock_guard<std::mutex> lock(g_kernels_mutex);
+
+  // Double-check: another thread might have initialized while we waited for lock
+  if (g_kernels_initialized.load(std::memory_order_relaxed)) {{
+    return CUDA_SUCCESS;
+  }}
+
   CUresult result;
 
 {kernel_inits}
 
-  g_kernels_initialized = true;
+  // Mark as initialized (release semantic)
+  g_kernels_initialized.store(true, std::memory_order_release);
   return CUDA_SUCCESS;
 }}
 
@@ -333,11 +398,11 @@ static CUresult tilelang_init_kernels() {{
 {tma_init_func}
 
 // Main kernel launcher
-extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, tvm::ffi::Bytes cubin_path) {{
+extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, int device_id, tvm::ffi::Bytes cubin_path) {{
   CUresult result;
 
   std::string cubin_path_str(reinterpret_cast<const char*>(cubin_path.data()), cubin_path.size());
-  result = tilelang_init_cuda_module(cubin_path_str);
+  result = tilelang_init_cuda_module(cubin_path_str, device_id);
   if (result != CUDA_SUCCESS) return result;
 
   result = tilelang_init_kernels();
@@ -355,13 +420,16 @@ extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, tvm::ffi:
 
 // Cleanup function
 extern "C" CUresult cleanup_module() {{
-  if (g_module_initialized && g_module != nullptr) {{
+  std::lock_guard<std::mutex> module_lock(g_module_mutex);
+  std::lock_guard<std::mutex> kernels_lock(g_kernels_mutex);
+
+  if (g_module_initialized.load(std::memory_order_relaxed) && g_module != nullptr) {{
     cuModuleUnload(g_module);
     g_module = nullptr;
-    g_module_initialized = false;
+    g_module_initialized.store(false, std::memory_order_release);
   }}
 
-  g_kernels_initialized = false;
+  g_kernels_initialized.store(false, std::memory_order_release);
 
   return CUDA_SUCCESS;
 }}
@@ -505,8 +573,13 @@ def _load_cpp_launcher():
   _cpp_launcher = _cpp_launcher_lib["launch_kernel"]
   return _cpp_launcher
 
-def call({call_func_params}, stream):
-  \"\"\"Kernel dispatch function.\"\"\"
+def call({call_func_params}, stream, device_id=0):
+  \"\"\"Kernel dispatch function.
+
+  Args:
+      stream: CUDA stream handle
+      device_id: CUDA device ID (should be passed from caller, defaults to 0 for backward compatibility)
+  \"\"\"
   global _cubin_path_bytes, _cubin_needs_generation
 
   if _cubin_needs_generation:
@@ -516,7 +589,7 @@ def call({call_func_params}, stream):
 {arg_prep_code}
 
   launcher = _load_cpp_launcher()
-  result = launcher({launcher_call_args}, stream, _cubin_path_bytes)
+  result = launcher({launcher_call_args}, stream, device_id, _cubin_path_bytes)
 
   if result != 0:
     raise RuntimeError(f"Kernel launch failed with CUDA error {{result}}")

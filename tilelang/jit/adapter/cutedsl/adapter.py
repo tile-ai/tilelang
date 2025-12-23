@@ -213,9 +213,15 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         """
         return self.device_kernel_source
 
-    def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
-        """Low-level function to call the compiled CUDA kernel."""
-        result = self.pymodule.call(*args, stream=stream)
+    def _forward_from_prebuild_lib(self, *args, stream: int | None = None, device_id: int = 0):
+        """Low-level function to call the compiled CUDA kernel.
+
+        Args:
+            *args: Kernel arguments (tensors and scalars)
+            stream: CUDA stream handle
+            device_id: CUDA device ID for multi-GPU support
+        """
+        result = self.pymodule.call(*args, stream=stream, device_id=device_id)
 
         # After first call, save cubin to cache if needed
         self._save_cubin_to_cache_if_needed()
@@ -345,7 +351,10 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             else:
                 stream = 0
 
-        self._forward_from_prebuild_lib(*args, stream=stream)
+        # Get device_id from first tensor for multi-GPU support
+        device_id = first_tensor.device.index if first_tensor.device.type == "cuda" else 0
+
+        self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
 
         if len(self.result_idx) == 1:
             return args[self.result_idx[0]]
