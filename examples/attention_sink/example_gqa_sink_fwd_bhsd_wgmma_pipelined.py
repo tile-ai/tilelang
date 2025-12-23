@@ -11,7 +11,6 @@ import argparse
 from typing import Optional
 
 
-
 def get_configs():
     iter_params = dict(block_M=[128], block_N=[128], num_stages=[0, 1, 2], threads=[128, 256])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
