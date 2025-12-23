@@ -148,12 +148,6 @@ def flashattn(
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([block_M], dtype)
 
-            T.annotate_layout(
-                {
-                    O_shared: make_swizzled_layout(O_shared),
-                }
-            )
-
             T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)

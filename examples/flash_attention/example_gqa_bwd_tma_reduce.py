@@ -310,9 +310,6 @@ def flashattn_bwd_split_novarlen(batch, heads, seq_len, dim_qk, dim_v, is_causal
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
 

@@ -51,11 +51,6 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
 
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
-            T.annotate_layout(
-                {
-                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                }
-            )
 
             T.copy(Q[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_shared)
             T.copy(Q_pe[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
@@ -125,11 +120,6 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
 
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
-            T.annotate_layout(
-                {
-                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                }
-            )
 
             T.copy(Q[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_shared)
             T.copy(Q_pe[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_pe_shared)

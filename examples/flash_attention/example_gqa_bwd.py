@@ -196,7 +196,6 @@ def flashattn_bwd_atomic_add(batch, heads, seq_len, dim_qk, dim_v, is_causal, bl
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                 }
             )
 
@@ -291,8 +290,6 @@ def flashattn_bwd_split(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
 

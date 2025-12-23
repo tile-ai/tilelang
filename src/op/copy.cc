@@ -545,18 +545,28 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     return results;
   }
 
-  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
+  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore
+  || copy_inst == CopyInst::kBulkLoad1D || copy_inst == CopyInst::kBulkStore1D) {
     // if can apply swizzling, we skip layout inference
     // for bulk load/store, we can directly apply the layout of normal copy
     // This must be a global/shared layout, so we can skip the parallel op
     // layout inference (parallel layout inference only annotate the loop layout
     // and the register layout).
-    bool is_load =
-        copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
-    Buffer global_tensor = is_load ? src : dst;
-    Buffer shared_tensor = is_load ? dst : src;
-
     Map<Buffer, Layout> result_map;
+
+    bool is_tma_1d = copy_inst == CopyInst::kBulkLoad1D || copy_inst == CopyInst::kBulkStore1D;
+    bool is_load = copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
+    bool is_store = copy_inst == CopyInst::kBulkStore || copy_inst == CopyInst::kBulkStore1D;
+    auto global_tensor = is_load ? src : dst;
+    auto shared_tensor = is_load ? dst : src;
+    auto shared_range = is_load ? dst_range : src_range;
+
+    if (is_tma_1d && shared_range.size() == 1) {
+      // 1D TMA Store with single dimension can not be swizzled
+      // But 1D TMA can also have multiple dimensions when the last
+      // dimension is continuous.
+      return result_map;
+    }
 
     // Collect fragment buffers from indices and mark them as fully replicated
     // For Bulk Load/Store, fragment buffers used as indices should be
@@ -578,12 +588,34 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     // check shared layout is non-swizzle
     // skip layout inference if shared layout is already annotated
     if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
-      // create a new layout map for tma linear layout
-      Layout linear_layout = ComputeLinearLayout(shared_tensor);
-      result_map.Set(shared_tensor, linear_layout);
+      if (is_store) {
+        // For BulkStore, we should perform swizzle if possible.
+        // TMA Store is always 1d like, we can directly use the last two dimensions to
+        // analysis swizzling.
+        int dim = shared_tensor->shape.size();
+        const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
+        const int64_t mat_continuous =
+            *as_const_int(shared_tensor->shape[dim - 1]);
+        Layout swizzle_layout = makeGemmABLayoutHopper(
+            mat_stride, mat_continuous, mat_continuous,
+            shared_tensor->dtype.bits(), /*k_inner=*/true);
+        // If makeGemmABLayoutHopper returns a linear layout, fallback to
+        // ComputeLinearLayout which handles arbitrary tensor shapes correctly.
+        if (StructuralEqual()(swizzle_layout,
+                              makeGemmLayoutLinear(mat_stride, mat_continuous))) {
+          result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
+        } else {
+          result_map.Set(shared_tensor, swizzle_layout);
+        }
+      } else {
+        // create a new layout map for tma linear layout
+        Layout linear_layout = ComputeLinearLayout(shared_tensor);
+        result_map.Set(shared_tensor, linear_layout);
+      }
     }
     return result_map;
   }
+
   // for LDSM/STSM, the layout was deduced from register layout
   // so we can directly apply the layout of normal copy
   // Use parallel op to infer the layout

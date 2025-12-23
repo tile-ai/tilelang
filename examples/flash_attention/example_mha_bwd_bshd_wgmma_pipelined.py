@@ -162,14 +162,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             dk_shared = T.alloc_shared([block_M, dim], dtype)
             dq_shared = T.alloc_shared([block_N, dim], accum_dtype)
 
-            T.annotate_layout(
-                {
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-                    dq_shared: tilelang.layout.make_swizzled_layout(dq_shared),
-                }
-            )
-
             T.copy(K[bz, by * block_M : (by + 1) * block_M, bx, :], K_shared)
             T.copy(V[bz, by * block_M : (by + 1) * block_M, bx, :], V_shared)
             T.clear(dv)

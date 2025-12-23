@@ -337,33 +337,16 @@ def matmul(
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
             B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype)
-            Bias_shared = T.alloc_shared(Bias_shared_shape, out_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
             # To use 1D TMA, the last dim of Scale_shared must have stride=1
             # May use much more shared memory than necessary
             Scale_shared = T.alloc_shared((block_N, K // scale_size), storage_dtype)
 
-            T.annotate_layout(
-                {
-                    C_shared: tilelang.layout.make_swizzled_layout(C_shared),
-                }
-            )
-
-            if with_bias:
-                T.annotate_layout(
-                    {
-                        Bias_shared: tilelang.layout.make_swizzled_layout(Bias_shared),
-                    }
-                )
-
             if threads == 512:
                 T.disable_warp_group_reg_alloc()
 
             if with_bias:
-                # T.copy(Bias[by * block_M:(by + 1) * block_M, bx * block_N:(bx + 1) * block_N],
-                #        Bias_shared)
-                # T.copy(Bias_shared, C_local)
                 T.copy(Bias[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N], C_local)
             else:
                 T.clear(C_local)

@@ -137,12 +137,6 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
 
                 T.create_list_of_mbarrier([128] * 9)
 
-                T.annotate_layout(
-                    {
-                        O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                    }
-                )
-
                 block_count = BlockCount[bz, by, bx]
                 column_count = ColumnCount[bz, by, bx]
 

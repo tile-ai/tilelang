@@ -100,8 +100,6 @@ def tilelang_recompute_w_u_fwd(
                 {
                     K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                     V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    W_shared: tilelang.layout.make_swizzled_layout(W_shared),
-                    U_shared: tilelang.layout.make_swizzled_layout(U_shared),
                 }
             )
 

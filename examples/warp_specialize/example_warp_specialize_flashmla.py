@@ -81,13 +81,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
             cur_kv_head = hid // (kv_group_num // block_H)
 
-            T.annotate_layout(
-                {
-                    O_shared_l: tilelang.layout.make_swizzled_layout(O_shared_l),
-                    O_shared_r: tilelang.layout.make_swizzled_layout(O_shared_r),
-                }
-            )
-
             # barriers_Q
             q_shared_ready_barrier = T.alloc_barrier(arrive_count=256)
 

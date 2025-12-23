@@ -11,7 +11,7 @@ import itertools
 import argparse
 from typing import Optional
 
-
+tilelang.disable_cache()
 def get_configs():
     iter_params = dict(block_M=[128], block_N=[128], num_stages=[0, 1, 2], threads=[128, 256])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
@@ -155,12 +155,6 @@ def flashattn(
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([block_M], dtype)
-
-            T.annotate_layout(
-                {
-                    O_shared: make_swizzled_layout(O_shared),
-                }
-            )
 
             T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)

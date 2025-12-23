@@ -280,7 +280,6 @@ def matmul(
             T.annotate_layout(
                 {
                     B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                    C_shared: tilelang.layout.make_swizzled_layout(C_shared),
                 }
             )
             T.use_swizzle(10)

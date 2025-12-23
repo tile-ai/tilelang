@@ -258,8 +258,6 @@ def flashattn_bwd(
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
             T.copy(K[bz, bx, by * block_M : (by + 1) * block_M, :], K_shared)
