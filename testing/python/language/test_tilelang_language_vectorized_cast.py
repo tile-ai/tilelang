@@ -127,5 +127,4 @@ def test_vectorized_cast_fp4(src_dtype, dst_dtype, check_str, lanes):
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_vectorized_cast_fp4(T.float16, T.float4_e2m1fn, "__tl_cvt_half2_to_fp4x2", 2)
+    tilelang.testing.main()
