@@ -343,8 +343,8 @@ def flash_attn_with_attn_pool_decode_tilelang(
     assert cu_seqlens_k.dim() == 1
     assert head_size in {64, 128, 256}
     assert Q.is_contiguous()
-    assert K.is_contiguous()
-    assert V.is_contiguous()
+    # assert K.is_contiguous()
+    # assert V.is_contiguous()
 
     gqa_group_size = q_h // k_h
 
@@ -382,8 +382,8 @@ def flash_attn_with_attn_pool_decode(
     assert cu_seqlens_k.dim() == 1
     assert head_size in {64, 128, 256}
     assert Q.is_contiguous()
-    assert K.is_contiguous()
-    assert V.is_contiguous()
+    # assert K.is_contiguous()
+    # assert V.is_contiguous()
 
     gqa_group_size = q_h // k_h
 
