@@ -353,6 +353,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                 stream = 0
 
         # Get device_id from first tensor for multi-GPU support
+        if not first_tensor.is_cuda:
+            raise ValueError(f"CuTeDSL kernels require CUDA tensors, got tensor on device: {first_tensor.device}")
         device_id = first_tensor.device.index or 0
 
         self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
@@ -378,7 +380,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         # Register cleanup for this instance using weakref.finalize
         # This will automatically call cleanup when the object is garbage collected
-        if self.pymodule is not None and hasattr(self.pymodule, 'cleanup_module'):
+        if self.pymodule is not None and hasattr(self.pymodule, "cleanup_module"):
             weakref.finalize(self, self._cleanup_module, self.pymodule)
 
     @staticmethod
@@ -389,7 +391,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         It can also be called explicitly via the cleanup() instance method.
         """
         try:
-            if hasattr(pymodule, 'cleanup_module'):
+            if hasattr(pymodule, "cleanup_module"):
                 pymodule.cleanup_module()
         except Exception:
             # Suppress errors during cleanup (might be called during shutdown)
