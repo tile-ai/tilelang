@@ -171,6 +171,7 @@ class Builder(BaseBuilder):
         self.out_idx = []
         self.out_tensor_cnt = 0
         self.constexpr_var = set()
+        self.lazy_jit = False
 
     @classmethod
     def current(cls) -> Self:
@@ -831,6 +832,8 @@ def get_type_hints(func):
 
 def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
     builder = Builder.current()
+    assert builder is not None, "const can only be used inside `tilelang.lazy_jit` function"
+    assert builder.lazy_jit, "const can only be used inside `tilelang.lazy_jit` function"
     if "," in name:
         names = re.split(r"\s*,\s*", name)
         return tuple(builder.constexpr(n, dtype) for n in names)
