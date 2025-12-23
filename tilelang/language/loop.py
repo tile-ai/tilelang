@@ -98,6 +98,28 @@ def Pipelined(
 def serial(
     start: tir.PrimExpr, stop: tir.PrimExpr | None = None, step: tir.PrimExpr | None = None, *, annotations: dict[str, Any] | None = None
 ) -> frame.ForFrame:
+    """The serial For statement.
+
+    Parameters
+    ----------
+    start : PrimExpr
+        The minimum value of iteration.
+
+    stop : PrimExpr
+        The maximum value of iteration.
+
+    step : PrimExpr
+        The step size of the iteration.
+
+    annotations : Dict[str, Any]
+        The optional annotations of the For statement.
+
+    Returns
+    -------
+    res : frame.ForFrame
+        The ForFrame.
+    """
+
     step_is_one = False
     step_is_one |= isinstance(step, int) and step == 1
     step_is_one |= isinstance(step, IntImm) and step.value == 1
@@ -179,8 +201,14 @@ def unroll(
 
 
 def Serial(
-    start: tir.PrimExpr, stop: tir.PrimExpr | None = None, step: tir.PrimExpr | None = None, *, annotations: dict[str, Any] | None = None
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    step: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
 ):
+    """Alias of T.serial."""
+
     return serial(start, stop, step, annotations=annotations)
 
 
@@ -193,4 +221,6 @@ def Unroll(
     unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
 ):
+    """Alias of T.unroll."""
+
     return unroll(start, stop, step, explicit=explicit, unroll_factor=unroll_factor, annotations=annotations)
