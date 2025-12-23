@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Literal
+from typing import Callable, Literal
 from typing_extensions import override
 
 from tvm.target import Target
@@ -54,6 +54,7 @@ class CuTeDSLKernelCache(KernelCache):
     @override
     def _build_kernel(
         self,
+        func: Callable | None,
         host_kernel_source: str,
         device_kernel_source: str,
         kernel_lib_path: str,
@@ -67,7 +68,7 @@ class CuTeDSLKernelCache(KernelCache):
     ) -> JITKernel | None:
         if kernel_params:
             return JITKernel.from_database(
-                func=None,
+                func=func,
                 host_kernel_source=host_kernel_source,
                 device_kernel_source=device_kernel_source,
                 kernel_lib_path=kernel_lib_path,

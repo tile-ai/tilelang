@@ -389,6 +389,7 @@ class KernelCache:
             self.logger.exception("Error loading kernel parameters from disk")
 
         return self._build_kernel(
+            func=func,
             host_kernel_source=host_kernel_source,
             device_kernel_source=device_kernel_source,
             kernel_lib_path=kernel_lib_path,
@@ -467,6 +468,7 @@ class KernelCache:
 
     def _build_kernel(
         self,
+        func: Callable | None,
         host_kernel_source: str,
         device_kernel_source: str,
         kernel_lib_path: str,
@@ -480,7 +482,7 @@ class KernelCache:
     ) -> JITKernel | None:
         if host_kernel_source and device_kernel_source and kernel_params:
             return JITKernel.from_database(
-                func=None,
+                func=func,
                 host_kernel_source=host_kernel_source,
                 device_kernel_source=device_kernel_source,
                 kernel_lib_path=kernel_lib_path,
