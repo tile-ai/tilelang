@@ -114,18 +114,18 @@ CUresult tma_init(CUtensorMap* tma_descs, {func_args}) {{
 # Kernel initialization template
 CPP_KERNEL_INIT_TEMPLATE = """\
   // Find and configure kernel {kernel_idx}: {kernel_name}
-  result = find_kernel_by_pattern(g_module, "{kernel_name}", &g_kernels[{kernel_idx}]);
+  result = find_kernel_by_pattern(module, "{kernel_name}", &kernels[{kernel_idx}]);
   if (result != CUDA_SUCCESS) {{
-    std::cerr << "Failed to find kernel {kernel_name}: " << result << "\\n";
+    std::cerr << "Failed to find kernel {kernel_name} on device " << device_id << ": " << result << "\\n";
     return result;
   }}
 
   if ({smem_size} > 0) {{
-    result = cuFuncSetAttribute(g_kernels[{kernel_idx}],
+    result = cuFuncSetAttribute(kernels[{kernel_idx}],
                                 CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                                 {smem_size});
     if (result != CUDA_SUCCESS) {{
-      std::cerr << "Failed to set smem for {kernel_name}: " << result << "\\n";
+      std::cerr << "Failed to set smem for {kernel_name} on device " << device_id << ": " << result << "\\n";
       return result;
     }}
   }}
@@ -152,9 +152,17 @@ CPP_TMA_LAUNCH_INIT_TEMPLATE = """\
 CPP_KERNEL_LAUNCH_TEMPLATE = """\
   // Launch kernel {kernel_idx}: {kernel_name}
   {{
+    // Get the kernel for current device
+    auto kernels_it = g_device_kernels.find(device_id);
+    if (kernels_it == g_device_kernels.end()) {{
+      std::cerr << "Kernels not initialized for device " << device_id << "\\n";
+      return CUDA_ERROR_NOT_INITIALIZED;
+    }}
+    const std::vector<CUfunction>& kernels = kernels_it->second;
+
     void* args[] = {{{kernel_args}}};
     result = cuLaunchKernel(
-        g_kernels[{kernel_idx}],
+        kernels[{kernel_idx}],
         {grid_x}, {grid_y}, {grid_z},
         {block_x}, {block_y}, {block_z},
         {smem_size},
@@ -163,7 +171,7 @@ CPP_KERNEL_LAUNCH_TEMPLATE = """\
         nullptr
     );
     if (result != CUDA_SUCCESS) {{
-      std::cerr << "Failed to launch kernel {kernel_name}: " << result << "\\n";
+      std::cerr << "Failed to launch kernel {kernel_name} on device " << device_id << ": " << result << "\\n";
       return result;
     }}
   }}
@@ -180,21 +188,18 @@ CPP_LAUNCHER_TEMPLATE = """\
 #include <string>
 #include <mutex>
 #include <atomic>
+#include <unordered_map>
 
 // TVM Headers
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/function.h>
 
-// Cached module handle
-static CUmodule g_module = nullptr;
-static std::atomic<bool> g_module_initialized(false);
-static std::mutex g_module_mutex;
-
-// Cached kernel functions
-static CUfunction g_kernels[{num_kernels}] = {{nullptr}};
-static std::atomic<bool> g_kernels_initialized(false);
-static std::mutex g_kernels_mutex;
+// Per-device module and kernel storage for multi-GPU support
+// Each device needs its own CUmodule because modules are tied to CUDA contexts
+static std::unordered_map<int, CUmodule> g_device_modules;
+static std::unordered_map<int, std::vector<CUfunction>> g_device_kernels;
+static std::mutex g_devices_mutex;
 
 // Find kernel by pattern (substring match, prefer base name over _N variants)
 CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction* out_func) {{
@@ -289,20 +294,14 @@ CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction
 }}
 
 
-// Initialize CUDA module (called once on first launch)
-// Thread-safe using double-checked locking pattern
+// Initialize CUDA module for a specific device (called once per device)
+// Thread-safe and supports multi-GPU by tracking modules per device
 // device_id: PyTorch CUDA device ID (e.g., 0, 1, 2...)
 static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int device_id) {{
-  // Fast path: module already initialized (lock-free check)
-  if (g_module_initialized.load(std::memory_order_acquire)) {{
-    return CUDA_SUCCESS;
-  }}
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
 
-  // Slow path: need to initialize (acquire lock)
-  std::lock_guard<std::mutex> lock(g_module_mutex);
-
-  // Double-check: another thread might have initialized while we waited for lock
-  if (g_module_initialized.load(std::memory_order_relaxed)) {{
+  // Fast path: module already initialized for this device
+  if (g_device_modules.find(device_id) != g_device_modules.end()) {{
     return CUDA_SUCCESS;
   }}
 
@@ -358,39 +357,47 @@ static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int dev
     return CUDA_ERROR_INVALID_IMAGE;
   }}
 
-  result = cuModuleLoadData(&g_module, cubin_data.data());
+  // Load module for this specific device
+  CUmodule module;
+  result = cuModuleLoadData(&module, cubin_data.data());
   if (result != CUDA_SUCCESS) {{
-    std::cerr << "Failed to load CUDA module: " << result << "\\n";
+    std::cerr << "Failed to load CUDA module on device " << device_id << ": " << result << "\\n";
     return result;
   }}
 
-  // Mark as initialized (release semantic ensures all above writes are visible)
-  g_module_initialized.store(true, std::memory_order_release);
+  // Store module for this device
+  g_device_modules[device_id] = module;
+
   return CUDA_SUCCESS;
 }}
 
-// Initialize all kernel functions (called once after module load)
-// Thread-safe using double-checked locking pattern
-static CUresult tilelang_init_kernels() {{
-  // Fast path: kernels already initialized (lock-free check)
-  if (g_kernels_initialized.load(std::memory_order_acquire)) {{
+// Initialize kernel functions for a specific device (called once per device)
+// Thread-safe and supports multi-GPU by tracking kernels per device
+static CUresult tilelang_init_kernels(int device_id) {{
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+
+  // Fast path: kernels already initialized for this device
+  if (g_device_kernels.find(device_id) != g_device_kernels.end()) {{
     return CUDA_SUCCESS;
   }}
 
-  // Slow path: need to initialize (acquire lock)
-  std::lock_guard<std::mutex> lock(g_kernels_mutex);
-
-  // Double-check: another thread might have initialized while we waited for lock
-  if (g_kernels_initialized.load(std::memory_order_relaxed)) {{
-    return CUDA_SUCCESS;
+  // Get the module for this device
+  auto module_it = g_device_modules.find(device_id);
+  if (module_it == g_device_modules.end()) {{
+    std::cerr << "Module not initialized for device " << device_id << "\\n";
+    return CUDA_ERROR_NOT_INITIALIZED;
   }}
+  CUmodule module = module_it->second;
 
+  // Initialize kernel storage for this device
+  std::vector<CUfunction> kernels({num_kernels});
   CUresult result;
 
 {kernel_inits}
 
-  // Mark as initialized (release semantic)
-  g_kernels_initialized.store(true, std::memory_order_release);
+  // Store kernels for this device
+  g_device_kernels[device_id] = kernels;
+
   return CUDA_SUCCESS;
 }}
 
@@ -405,7 +412,7 @@ extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, int devic
   result = tilelang_init_cuda_module(cubin_path_str, device_id);
   if (result != CUDA_SUCCESS) return result;
 
-  result = tilelang_init_kernels();
+  result = tilelang_init_kernels(device_id);
   if (result != CUDA_SUCCESS) return result;
 
 {get_ptr_code}
@@ -420,16 +427,16 @@ extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, int devic
 
 // Cleanup function
 extern "C" CUresult cleanup_module() {{
-  std::lock_guard<std::mutex> module_lock(g_module_mutex);
-  std::lock_guard<std::mutex> kernels_lock(g_kernels_mutex);
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
 
-  if (g_module_initialized.load(std::memory_order_relaxed) && g_module != nullptr) {{
-    cuModuleUnload(g_module);
-    g_module = nullptr;
-    g_module_initialized.store(false, std::memory_order_release);
+  // Unload modules for all devices
+  for (auto& pair : g_device_modules) {{
+    if (pair.second != nullptr) {{
+      cuModuleUnload(pair.second);
+    }}
   }}
-
-  g_kernels_initialized.store(false, std::memory_order_release);
+  g_device_modules.clear();
+  g_device_kernels.clear();
 
   return CUDA_SUCCESS;
 }}
