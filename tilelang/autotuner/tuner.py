@@ -145,7 +145,7 @@ class AutoTuner:
         out_idx: list[int] | int | None = None,
         target: Literal["auto", "cuda", "hip", "metal"] | None = None,
         execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] | None = None,
-        target_host: str | Target = None,
+        target_host: str | Target | None = None,
         verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
     ):

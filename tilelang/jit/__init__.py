@@ -599,7 +599,7 @@ def lazy_jit(
     func: Callable[_P, _T] | PrimFunc | None = None,
     *,  # Indicates subsequent arguments are keyword-only
     target: str | Target | None = None,
-    target_host: str | Target = None,
+    target_host: str | Target | None = None,
     execution_backend: ExecutionBackend | None = None,
     verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
