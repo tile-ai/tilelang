@@ -341,6 +341,12 @@ def matmul(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
+            T.annotate_layout(
+                {
+                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                }
+            )
+
             if with_bias:
                 T.annotate_layout(
                     {
