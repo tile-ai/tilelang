@@ -924,6 +924,7 @@ class LazyJITFunc(Generic[_P, _T]):
         tir_temp = self.p1_cache.get(p1_key, None)
         if tir_temp is None:
             builder = Builder()
+            builder.lazy_jit = True
             with builder.prim_func(self.orig_func.__name__):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
