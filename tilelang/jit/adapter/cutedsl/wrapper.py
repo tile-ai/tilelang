@@ -307,41 +307,36 @@ static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int dev
 
   CUresult result;
   result = cuInit(0);
-  if (result != CUDA_SUCCESS) return result;
-
-  // Ensure there is an active CUDA context (required by cuModuleLoadData)
-  // PyTorch uses CUDA Runtime API which creates a primary context automatically,
-  // but CUDA Driver API needs explicit context management.
-  CUcontext ctx;
-  result = cuCtxGetCurrent(&ctx);
   if (result != CUDA_SUCCESS) {{
-    std::cerr << "Failed to get current CUDA context: " << result << "\\n";
+    std::cerr << "Failed to initialize CUDA: " << result << "\\n";
     return result;
   }}
 
-  // If no context exists, retain and set the primary context (created by PyTorch)
-  if (ctx == nullptr) {{
-    CUdevice device;
-    // Use the device_id passed from PyTorch (supports multi-GPU)
-    result = cuDeviceGet(&device, device_id);
-    if (result != CUDA_SUCCESS) {{
-      std::cerr << "Failed to get CUDA device " << device_id << ": " << result << "\\n";
-      return result;
-    }}
-
-    result = cuDevicePrimaryCtxRetain(&ctx, device);
-    if (result != CUDA_SUCCESS) {{
-      std::cerr << "Failed to retain primary context for device " << device_id << ": " << result << "\\n";
-      return result;
-    }}
-
-    result = cuCtxSetCurrent(ctx);
-    if (result != CUDA_SUCCESS) {{
-      std::cerr << "Failed to set current context for device " << device_id << ": " << result << "\\n";
-      return result;
-    }}
+  // Get device handle for the requested device_id
+  CUdevice device;
+  result = cuDeviceGet(&device, device_id);
+  if (result != CUDA_SUCCESS) {{
+    std::cerr << "Failed to get CUDA device " << device_id << ": " << result << "\\n";
+    return result;
+  }}
+  
+  // Retain and set the primary context for this device
+  // PyTorch (Runtime API) creates and activates the primary context
+  // We need to explicitly acquire it via Driver API and set it as current
+  CUcontext ctx;
+  result = cuDevicePrimaryCtxRetain(&ctx, device);
+  if (result != CUDA_SUCCESS) {{
+    std::cerr << "Failed to retain primary context for device " << device_id << ": " << result << "\\n";
+    return result;
+  }}
+  
+  result = cuCtxSetCurrent(ctx);
+  if (result != CUDA_SUCCESS) {{
+    std::cerr << "Failed to set current context for device " << device_id << ": " << result << "\\n";
+    return result;
   }}
 
+  // Read cubin file
   std::ifstream cubin_file(cubin_path.c_str(), std::ios::binary);
   if (!cubin_file) {{
     std::cerr << "Failed to open cubin file: " << cubin_path << "\\n";

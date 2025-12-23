@@ -352,7 +352,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                 stream = 0
 
         # Get device_id from first tensor for multi-GPU support
-        device_id = first_tensor.get_device()
+        device_id = first_tensor.device.index or 0
 
         self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
 
