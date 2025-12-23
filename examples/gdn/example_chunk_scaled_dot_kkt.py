@@ -96,7 +96,6 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
 
             T.annotate_layout(
                 {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                     A_shared: tilelang.layout.make_swizzled_layout(A_shared),
                 }
             )

@@ -54,7 +54,6 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
             T.annotate_layout(
                 {
                     O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                    S_shared: tilelang.layout.make_swizzled_layout(S_shared),
                 }
             )
 
@@ -129,7 +128,6 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
             T.annotate_layout(
                 {
                     O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                    S_shared: tilelang.layout.make_swizzled_layout(S_shared),
                 }
             )
 

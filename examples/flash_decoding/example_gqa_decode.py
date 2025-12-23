@@ -233,15 +233,6 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
             lse_max_local = T.alloc_fragment([128], accum_dtype)
             scale_local = T.alloc_fragment([128], accum_dtype)
 
-            T.annotate_layout(
-                {
-                    lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-                    lse_max_local: T.Fragment(lse_max_local.shape, forward_thread_fn=lambda i: i),
-                    # lse_local: (local_id, thread_id)
-                    lse_local: T.Fragment(lse_local.shape, forward_fn=lambda i, j: (j, i)),
-                }
-            )
-
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
             for k, j in T.Parallel(num_split, 128):

@@ -250,7 +250,6 @@ def tilelang_kernel_bwd_dkv(
 
             T.annotate_layout(
                 {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                     dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
                     dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }

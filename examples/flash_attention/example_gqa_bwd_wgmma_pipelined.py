@@ -41,7 +41,6 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)

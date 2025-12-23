@@ -165,7 +165,6 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
             T.annotate_layout(
                 {
-                    o_accum_local: T.Fragment(o_accum_local.shape, forward_thread_fn=lambda i, j: i),
                     o_shared: tilelang.layout.make_swizzled_layout(o_shared),
                     po_shared: tilelang.layout.make_swizzled_layout(po_shared),
                 }

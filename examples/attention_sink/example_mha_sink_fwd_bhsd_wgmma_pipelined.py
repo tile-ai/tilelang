@@ -152,9 +152,6 @@ def flashattn(
 
             T.annotate_layout(
                 {
-                    Q_shared: make_swizzled_layout(Q_shared),
-                    K_shared: make_swizzled_layout(K_shared),
-                    V_shared: make_swizzled_layout(V_shared),
                     O_shared: make_swizzled_layout(O_shared),
                 }
             )

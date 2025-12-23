@@ -66,8 +66,6 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
-
             for i, d in T.Parallel(block_M, dim_qk):
                 if bx * block_M + i < q_current_seqlen:
                     Q_shared[i, d] = Q[q_start_idx + bx * block_M + i, by, d]

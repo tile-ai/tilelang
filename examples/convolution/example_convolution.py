@@ -51,8 +51,6 @@ def convolution(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages
             T.annotate_layout(
                 {
                     out_shared: tilelang.layout.make_swizzled_layout(out_shared),
-                    data_shared: tilelang.layout.make_swizzled_layout(data_shared),
-                    kernel_shared: tilelang.layout.make_swizzled_layout(kernel_shared),
                 }
             )
 

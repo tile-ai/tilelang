@@ -51,8 +51,6 @@ def kernel(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages, thr
             T.annotate_layout(
                 {
                     out_shared: make_swizzled_layout(out_shared),
-                    data_shared: make_swizzled_layout(data_shared),
-                    kernel_shared: make_swizzled_layout(kernel_shared),
                 }
             )
 

@@ -95,7 +95,6 @@ def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, bl
             T.annotate_layout(
                 {
                     O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                    Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
                 }
             )
 

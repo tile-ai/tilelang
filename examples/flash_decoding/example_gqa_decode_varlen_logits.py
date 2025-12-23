@@ -243,16 +243,6 @@ def flashattn(
             # S_fragment = T.alloc_fragment([block_H, math.ceil(max_seqlen_kv / block_N)], accum_dtype)
             s_aux_shared = T.alloc_shared([block_H], T.float32)
 
-            T.annotate_layout(
-                {
-                    # Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-                    # K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    # V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    # O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                    # S_shared: tilelang.layout.make_swizzled_layout(S_shared),
-                }
-            )
-
             bid = bx
             hid = by
             cur_kv_head = hid // (kv_group_num // valid_block_H)

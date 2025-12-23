@@ -110,11 +110,6 @@ def tilelang_chunk_fwd_o(
 
             T.annotate_layout(
                 {
-                    Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    H_shared: tilelang.layout.make_swizzled_layout(H_shared),
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
                     O_shared: tilelang.layout.make_swizzled_layout(O_shared),
                 }
             )
