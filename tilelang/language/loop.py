@@ -98,6 +98,28 @@ def Pipelined(
 def serial(
     start: tir.PrimExpr, stop: tir.PrimExpr | None = None, step: tir.PrimExpr | None = None, *, annotations: dict[str, Any] | None = None
 ) -> frame.ForFrame:
+    """The serial For statement.
+
+    Parameters
+    ----------
+    start : PrimExpr
+        The minimum value of iteration.
+
+    stop : PrimExpr
+        The maximum value of iteration.
+
+    step : PrimExpr
+        The step size of the iteration.
+
+    annotations : Dict[str, Any]
+        The optional annotations of the For statement.
+
+    Returns
+    -------
+    res : frame.ForFrame
+        The ForFrame.
+    """
+
     step_is_one = False
     step_is_one |= isinstance(step, int) and step == 1
     step_is_one |= isinstance(step, IntImm) and step.value == 1
@@ -178,9 +200,27 @@ def unroll(
 # "Serial" and "Unroll" are aliases of "T.serial" and "T.unroll". We use uppercase to emphasize that they are tile-level loops.
 
 
-def Serial(*args, **kwargs):
-    return serial(*args, **kwargs)
+def Serial(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    step: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
+):
+    """Alias of T.serial."""
+
+    return serial(start, stop, step, annotations=annotations)
 
 
-def Unroll(*args, **kwargs):
-    return unroll(*args, **kwargs)
+def Unroll(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    step: tir.PrimExpr | None = None,
+    *,
+    explicit: bool = False,
+    unroll_factor: int | None = None,
+    annotations: dict[str, Any] | None = None,
+):
+    """Alias of T.unroll."""
+
+    return unroll(start, stop, step, explicit=explicit, unroll_factor=unroll_factor, annotations=annotations)
