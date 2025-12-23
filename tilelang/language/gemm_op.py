@@ -1,6 +1,7 @@
 """GEMM (General Matrix Multiplication) operators exposed on the TileLang language surface."""
 
 from __future__ import annotations
+
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir
@@ -184,4 +185,38 @@ def gemm_v2(
 
 
 # Default to v2; allow forcing v1 via environment variable
-gemm = gemm_v1 if _env.use_gemm_v1() else gemm_v2
+# gemm = gemm_v1 if _env.use_gemm_v1() else gemm_v2
+
+
+def gemm(
+    A: tir.Buffer | tir.Var,
+    B: tir.Buffer | tir.Var,
+    C: tir.Buffer | tir.Var,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+    k_pack: int = 1,
+    wg_wait: int = 0,
+    mbar: tir.Buffer | None = None,
+):
+    """TileLang GEMM operator.
+
+    Args:
+        A (tir.Buffer | tir.Var): Input buffer A.
+        B (tir.Buffer | tir.Var): Input buffer B.
+        C (tir.Buffer | tir.Var): Output buffer C.
+        transpose_A (bool): Whether to transpose A. Defaults to False.
+        transpose_B (bool): Whether to transpose B. Defaults to False.
+        policy (GemmWarpPolicy): GEMM warp partition policy.
+        clear_accum (bool): Whether to clear the accumulator.
+        k_pack (int): Numbers of packed matrix cores, for ROCm only. Defaults to 1.
+        wg_wait (int): Int identifier of the warpgroup MMA batch to wait on.. Defaults to 0.
+        mbar (tir.Buffer | None, optional): Mbarrier in Blackwell. Defaults to None.
+
+    Returns:
+        tir.Call: A handle to the GEMM operation.
+    """
+
+    impl = gemm_v1 if _env.use_gemm_v1() else gemm_v2
+    return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum, k_pack, wg_wait, mbar)

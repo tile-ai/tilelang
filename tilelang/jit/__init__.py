@@ -50,7 +50,7 @@ _Ret = TypeVar("_Ret")
 def compile(
     func: PrimFunc[_KP, _T] = None,
     out_idx: list[int] | int | None = None,
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
     target: str | Target | None = None,
     target_host: str | Target | None = None,
     verbose: bool | None = None,
@@ -66,7 +66,7 @@ def compile(
         The TileLang TIR function to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
-    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"], optional
+    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
     target : Union[str, Target], optional
@@ -139,7 +139,7 @@ def compile(
 def par_compile(
     funcs: Iterable[PrimFunc[_KP, _T]],
     out_idx: list[int] | int | None = None,
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
     target: str | Target | None = None,
     target_host: str | Target | None = None,
     verbose: bool | None = None,
@@ -157,7 +157,7 @@ def par_compile(
         The TileLang TIR functions to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
-    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"], optional
+    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
     target : Union[str, Target], optional
@@ -244,7 +244,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     out_idx : list[int] | int | None
         Which output tensor(s) of the compiled kernel should be returned to the
         caller. Accepts a single index, a list of indices, or None to return all.
-    execution_backend : Literal["dlpack", "ctypes", "cython"]
+    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
         Backend used for exchanging arguments and executing the generated kernel.
     target : str | tvm.target.Target
         TVM compilation target (e.g. "cuda", "llvm", or "auto").
@@ -298,7 +298,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     """
 
     out_idx: list[int] | int | None
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"]
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
     target: str | Target
     target_host: str | Target
     verbose: bool
@@ -466,7 +466,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             return kernel
 
 
-ExecutionBackend = Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"]
+ExecutionBackend = Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
 
 
 @overload
@@ -516,7 +516,7 @@ def jit(  # This is the new public interface
         TILELANG_TARGET environment variable (defaults to "auto").
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"], optional
+    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
         Backend for kernel execution and argument passing. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
     verbose : bool, optional
