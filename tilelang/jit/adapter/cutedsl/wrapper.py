@@ -319,7 +319,7 @@ static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int dev
     std::cerr << "Failed to get CUDA device " << device_id << ": " << result << "\\n";
     return result;
   }}
-  
+
   // Retain and set the primary context for this device
   // PyTorch (Runtime API) creates and activates the primary context
   // We need to explicitly acquire it via Driver API and set it as current
@@ -329,7 +329,7 @@ static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int dev
     std::cerr << "Failed to retain primary context for device " << device_id << ": " << result << "\\n";
     return result;
   }}
-  
+
   result = cuCtxSetCurrent(ctx);
   if (result != CUDA_SUCCESS) {{
     std::cerr << "Failed to set current context for device " << device_id << ": " << result << "\\n";
