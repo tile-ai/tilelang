@@ -337,5 +337,40 @@ def test_sparse_mla_bwd(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, to
     print(f"bwd tflops = ", per_token_flop * S / (ms * 1e-3) / 1e12)
 
 
+def run_regression_perf(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, topk=2048, dtype=torch.bfloat16):
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    q = torch.randn((B, S, H, DQKV), dtype=dtype, device="cuda").requires_grad_(True)
+    kv = torch.randn((B, SKV, HKV, DQKV), dtype=dtype, device="cuda").requires_grad_(True)
+    do = torch.randn((B, S, H, DV), dtype=dtype, device="cuda")
+
+    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
+    for b in range(B):
+        for t in range(S):
+            for h in range(HKV):
+                i_i = torch.randperm(max(1, t))[:topk]
+                indices[b, t, h, : len(i_i)] = i_i
+
+    from sparse_mla_fwd import sparse_mla_fwd_interface
+
+    tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
+    B, S, H, dim_plus_tail_dim = q.shape
+    _, S_kv, kv_group, _ = kv.shape
+    D = 512
+    D_tail = dim_plus_tail_dim - D
+    topk = indices.shape[-1]
+    preprocess_kernel = preprocess(B, S, H, D)
+    bwd_kernel = bwd(B, S, S_kv, H, D, D_tail, topk, kv_group, None, True)
+    delta = preprocess_kernel(tl_out, do)
+    dkv = torch.zeros_like(kv, dtype=torch.float32)
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        return bwd_kernel(q, kv, do, indices, tl_lse, delta, dkv)
+
+    return do_bench(run_kernel_only, rep=1000, warmup=250, backend="cupti")
+
+
 if __name__ == "__main__":
     test_sparse_mla_bwd(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, topk=2048, dtype=torch.bfloat16, check_correctness=True)

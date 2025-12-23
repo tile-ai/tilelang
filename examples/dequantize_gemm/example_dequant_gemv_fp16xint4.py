@@ -217,5 +217,62 @@ def main() -> None:
     torch.testing.assert_close(C, ref_c, atol=1e3, rtol=1e-1)
 
 
+def run_regression_perf():
+    M = 1
+    N = 1024
+    K = 1024
+    in_dtype = "float16"
+    out_dtype = "float16"
+    accum_dtype = "float16"
+    num_bits = 4
+    storage_dtype = "int8"
+    source_format = "uint"
+    n_partition = 4
+    reduce_thread = 32
+    fast_decoding = True
+    trans_A = False
+    trans_B = True
+    group_size = -1
+    with_scaling = False
+
+    kernel = dequantize_gemv(
+        M,
+        N,
+        K,
+        in_dtype,
+        out_dtype,
+        accum_dtype,
+        num_bits,
+        storage_dtype,
+        source_format,
+        n_partition,
+        reduce_thread,
+        fast_decoding,
+        trans_A,
+        trans_B,
+        group_size,
+        with_scaling,
+    )
+
+    storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
+    num_elems_per_byte = storage_nbit // num_bits
+    A = torch.rand(M, K, dtype=getattr(torch, in_dtype)).cuda()
+    qB = torch.randint(0, 127, (N, K // num_elems_per_byte), dtype=getattr(torch, storage_dtype)).cuda()
+    C = torch.zeros(M, N, dtype=getattr(torch, accum_dtype)).cuda()
+
+    if fast_decoding:
+        from tilelang.quantize.utils import interleave_weight
+
+        qB = interleave_weight(qB, num_bits, in_dtype)
+    kernel(A, qB, C)
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(A, qB, C)
+
+    return do_bench(run_kernel_only, warmup=100, rep=1000, backend="cupti")
+
+
 if __name__ == "__main__":
     main()

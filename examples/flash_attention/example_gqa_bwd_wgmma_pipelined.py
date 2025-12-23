@@ -339,6 +339,40 @@ def main(BATCH: int = 1, H: int = 32, N_CTX: int = 256, D_HEAD_QK: int = 192, D_
     print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
 
+def run_regression_perf():
+    BATCH = 1
+    H = 32
+    N_CTX = 256
+    D_HEAD_QK = 192
+    D_HEAD_V = 128
+    groups = 16
+    causal = False
+    device = "cuda"
+    torch.manual_seed(42)
+    head_kv = H // groups
+    Q = torch.randn(BATCH, N_CTX, H, D_HEAD_QK, device=device, dtype=torch.half)
+    K = torch.randn(BATCH, N_CTX, head_kv, D_HEAD_QK, device=device, dtype=torch.half)
+    V = torch.randn(BATCH, N_CTX, head_kv, D_HEAD_V, device=device, dtype=torch.half)
+    O = torch.randn(BATCH, N_CTX, H, D_HEAD_V, device=device, dtype=torch.half)
+    dO = torch.randn(BATCH, N_CTX, H, D_HEAD_V, device=device, dtype=torch.half)
+    lse = torch.zeros(BATCH, H, N_CTX, device=device, dtype=torch.float32)
+    with torch.no_grad():
+        mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
+        kernel = flashattn_bwd(
+            BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, causal, block_M=128, block_N=32, threads=256, num_stages=2, groups=groups
+        )
+    dQ = torch.zeros_like(Q, dtype=torch.float32)
+    dK = torch.zeros(BATCH, N_CTX, head_kv, D_HEAD_QK, device=device, dtype=torch.float32)
+    dV = torch.zeros(BATCH, N_CTX, head_kv, D_HEAD_V, device=device, dtype=torch.float32)
+    Delta = mod_prep(O, dO)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(Q, K, V, dO, lse, Delta, dQ, dK, dV)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=int, default=8, help="Batch size")

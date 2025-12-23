@@ -167,33 +167,27 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
         with T.Kernel(heads, batch, threads=128) as (hid, bz):
             po_local = T.alloc_fragment([dim], dtype)
             o_accum_local = T.alloc_fragment([dim], accum_dtype)
-            lse_local_split = T.alloc_local([1], accum_dtype)
-            lse_logsum_local = T.alloc_local([1], accum_dtype)
-            lse_max_local = T.alloc_local([1], accum_dtype)
-            scale_local = T.alloc_local([1], accum_dtype)
-
-            T.annotate_layout(
-                {
-                    lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-                }
-            )
+            lse_local_split = T.alloc_var(accum_dtype)
+            lse_logsum_local = T.alloc_var(accum_dtype)
+            lse_max_local = T.alloc_var(accum_dtype)
+            scale_local = T.alloc_var(accum_dtype)
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
-            lse_max_local[0] = -T.infinity(accum_dtype)
+            lse_max_local = -T.infinity(accum_dtype)
             for k in T.serial(num_split):
-                lse_max_local[0] = T.max(lse_max_local[0], glse[bz, hid, k])
+                lse_max_local = T.max(lse_max_local, glse[bz, hid, k])
             for k in T.Pipelined(num_split, num_stages=1):
-                lse_local_split[0] = glse[bz, hid, k]
-                lse_logsum_local[0] += T.exp2(lse_local_split[0] - lse_max_local[0])
-            lse_logsum_local[0] = T.log2(lse_logsum_local[0]) + lse_max_local[0]
+                lse_local_split = glse[bz, hid, k]
+                lse_logsum_local += T.exp2(lse_local_split - lse_max_local)
+            lse_logsum_local = T.log2(lse_logsum_local) + lse_max_local
             for k in T.serial(num_split):
                 for i in T.Parallel(dim):
                     po_local[i] = Output_partial[bz, hid, k, i]
-                lse_local_split[0] = glse[bz, hid, k]
-                scale_local[0] = T.exp2(lse_local_split[0] - lse_logsum_local[0])
+                lse_local_split = glse[bz, hid, k]
+                scale_local = T.exp2(lse_local_split - lse_logsum_local)
                 for i in T.Parallel(dim):
-                    o_accum_local[i] += po_local[i] * scale_local[0]
+                    o_accum_local[i] += po_local[i] * scale_local
             for i in T.Parallel(dim):
                 Output[bz, hid, i] = o_accum_local[i]
 
@@ -286,6 +280,25 @@ def main(
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
+
+
+def run_regression_perf(
+    batch=1,
+    heads=128,
+    kv_heads=1,
+    kv_ctx=8192,
+    dim=512,
+    pe_dim=64,
+):
+    BLOCK_N = 64
+    BLOCK_H = min(64, heads // kv_heads)
+    num_split = 1
+    softmax_scale = (dim + pe_dim) ** -0.5
+
+    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, softmax_scale)
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
+    return profiler.do_bench(warmup=500, backend="cupti")
 
 
 if __name__ == "__main__":

@@ -160,6 +160,26 @@ def main(
     print(f"Ref latency: {ref_latency}")
 
 
+def run_regression_perf(
+    n: int = 128,
+    c: int = 128,
+    h: int = 64,
+    w: int = 64,
+    f: int = 128,
+    k: int = 3,
+    s: int = 1,
+    d: int = 1,
+    p: int = 1,
+    use_autotune: bool = False,
+    with_roller: bool = True,
+):
+    N, C, H, W, F, K, S, D, P = n, c, h, w, f, k, s, d, p
+    config = get_heuristic_config()
+    kernel = convolution(N, C, H, W, F, K, S, D, P, **config)
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
+    return profiler.do_bench(backend="cupti")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
     parser.add_argument("--n", type=int, default=128, help="n")

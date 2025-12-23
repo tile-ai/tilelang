@@ -64,5 +64,19 @@ def main():
     print(kernel.get_kernel_source())
 
 
+def run_regression_perf():
+    kernel = matmul(1024, 1024, 1024, 128, 128, 32)
+    import torch
+
+    a = torch.randn(1024, 1024).cuda().half()
+    b = torch.randn(1024, 1024).cuda().half()
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(a, b)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     main()

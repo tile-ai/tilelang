@@ -269,6 +269,28 @@ protected:
    * @return Reference to the singleton TVM Op representing this operator.
    */
   TileOperator Clone() const;
+
+private:
+  /*!
+   * \brief Collect fragment buffers from expression and create fully replicated
+   * layouts.
+   *
+   * Recursively searches the expression for BufferLoad nodes with
+   * "local.fragment" scope, following let bindings. For each found fragment
+   * buffer, creates a fully replicated layout and adds it to result_map.
+   *
+   * \param expr            Expression to search.
+   * \param let_var_to_expr Map from let variables to their bound expressions.
+   * \param existing_layouts Existing layout map to check for already-inferred
+   * layouts. \param thread_extent   Number of threads for replication. \param
+   * thread_bounds   Thread bounds for binding the layout. \param result_map
+   * Output map to store collected fragment layouts.
+   */
+  void CollectFragmentLayouts(const PrimExpr &expr,
+                              const Map<Var, PrimExpr> &let_var_to_expr,
+                              const LayoutMap &existing_layouts,
+                              PrimExpr thread_extent, Range thread_bounds,
+                              Map<Buffer, Layout> &result_map) const;
 };
 
 class Copy : public TileOperator {

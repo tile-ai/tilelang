@@ -508,6 +508,61 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
     print("All checks pass. ✅")
 
 
+def run_regression_perf(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, with_bias=False, tune=False):
+    block_M, block_N, block_K = 128, 256, 128
+    num_stages = 1
+    threads = 512
+    split = 1
+    num_bits = 4
+    num_elems_per_byte = 8 // num_bits
+    qk = k // num_elems_per_byte
+    A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M = get_data(m, n, k, qk, scale_size, topk, E, block_M)
+
+    if tune:
+        with set_autotune_inputs([A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids]):
+            kernel = matmul(
+                m,
+                n,
+                k,
+                topk,
+                E,
+                padding_M,
+                "bfloat16",
+                "bfloat16",
+                "float32",
+                num_bits=num_bits,
+                scale_size=scale_size,
+                fast_dequant=fast_dequant,
+                with_bias=with_bias,
+            )
+    else:
+        kernel = matmul(
+            m,
+            n,
+            k,
+            topk,
+            E,
+            padding_M,
+            "bfloat16",
+            "bfloat16",
+            "float32",
+            num_bits=num_bits,
+            scale_size=scale_size,
+            fast_dequant=fast_dequant,
+            with_bias=with_bias,
+            block_M=block_M,
+            block_N=block_N,
+            block_K=block_K,
+            num_stages=num_stages,
+            threads=threads,
+            split=split,
+        )
+
+    return tilelang.profiler.do_bench(
+        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100, backend="cupti"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--M", type=int, default=16384, help="M")  # From gpt-oss-20b MoE's first gemm

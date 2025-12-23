@@ -130,23 +130,23 @@ def mqa_attn_return_logits(
 
             seq_len_i = bx * block_Q
 
-            cu_k_s_min = T.alloc_local([1], index_dtype)
-            cu_k_e_max = T.alloc_local([1], index_dtype)
+            cu_k_s_min = T.alloc_var(index_dtype)
+            cu_k_e_max = T.alloc_var(index_dtype)
 
-            cu_k_s_min[0] = 2147483647
-            cu_k_e_max[0] = -2147483648
+            cu_k_s_min = 2147483647
+            cu_k_e_max = -2147483648
 
             for bq_i in T.serial(block_Q):
-                cu_k_s_min[0] = T.min(cu_k_s_min[0], T.min(CuSeqLenKS[seq_len_i + bq_i], seq_len_kv))
+                cu_k_s_min = T.min(cu_k_s_min, T.min(CuSeqLenKS[seq_len_i + bq_i], seq_len_kv))
             for bq_i in T.serial(block_Q):
-                cu_k_e_max[0] = T.max(cu_k_e_max[0], T.min(CuSeqLenKE[seq_len_i + bq_i], seq_len_kv))
+                cu_k_e_max = T.max(cu_k_e_max, T.min(CuSeqLenKE[seq_len_i + bq_i], seq_len_kv))
 
             T.copy(IndexQ[seq_len_i * heads, 0], index_q_shared)
             T.copy(Weights[seq_len_i, 0], weights)
 
-            for nbn_i in T.Pipelined(T.ceildiv(cu_k_e_max[0] - cu_k_s_min[0], block_N), num_stages=num_stages):
-                T.copy(IndexK[cu_k_s_min[0] + nbn_i * block_N, 0], index_k_shared)
-                T.copy(IndexKScale[cu_k_s_min[0] + nbn_i * block_N], index_k_scale_fragment)
+            for nbn_i in T.Pipelined(T.ceildiv(cu_k_e_max - cu_k_s_min, block_N), num_stages=num_stages):
+                T.copy(IndexK[cu_k_s_min + nbn_i * block_N, 0], index_k_shared)
+                T.copy(IndexKScale[cu_k_s_min + nbn_i * block_N], index_k_scale_fragment)
 
                 T.gemm(
                     index_k_shared,
@@ -165,7 +165,7 @@ def mqa_attn_return_logits(
                 T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
 
                 for bq_i, bn_i in T.Parallel(block_Q, block_N):
-                    Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = logits[bn_i, bq_i]
+                    Logits[seq_len_i + bq_i, cu_k_s_min + nbn_i * block_N + bn_i] = logits[bn_i, bq_i]
 
     return mqa_attn_return_logits_kernel
 
@@ -189,15 +189,13 @@ def clean_logits_(
     ):
         with T.Kernel(seq_len, threads=threads) as bx:
             tx = T.thread_binding(0, threads, thread="threadIdx.x")
-            cu_k_s = T.alloc_local([1], indices_dtype)
-            cu_k_e = T.alloc_local([1], indices_dtype)
-            cu_k_s[0] = CuSeqLenKS[bx]
-            cu_k_e[0] = CuSeqLenKE[bx]
+            cu_k_s = CuSeqLenKS[bx]
+            cu_k_e = CuSeqLenKE[bx]
 
             for n_i in T.Pipelined(T.ceildiv(seq_len_kv, block_K)):
                 for k_i in T.serial(block_K // threads):
                     idx = n_i * block_K + k_i * threads + tx
-                    if idx < cu_k_s[0] or idx >= cu_k_e[0]:
+                    if idx < cu_k_s or idx >= cu_k_e:
                         Logits[bx, idx] = -T.infinity(dtype)
 
     return clean_logits_kernel
@@ -278,6 +276,36 @@ def test_fp8_lighting_indexer(S=4096, SKV=8192, H=32, HKV=1, D=64, kv_stride=1):
     logits_tflops = logits_flops / (logits_ms * 1e-3) / 1e12
     print(f"logits_tflops: {logits_tflops}, logits_ms: {logits_ms}")
     print(f"cost_ref: {cost_ref}")
+
+
+def run_regression_perf(S=4096, SKV=8192, H=32, HKV=1, D=64, kv_stride=1):
+    torch.manual_seed(0)
+    q = torch.randn(S, H, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
+    kv = torch.randn(SKV, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
+    weights = torch.randn(S, H, device="cuda", dtype=torch.float32)
+    p = (torch.randn(S, SKV, device="cuda", dtype=torch.float32) * 4).softmax(dim=-1)
+
+    ks, ke = generate_random_cu_seqlens(per_cp_seqlen=S, cp_size=4, cp_rank=3, kv_stride=kv_stride, average_q_len=2048)
+
+    logits_ref, cost_ref = ref_fp8_mqa_logits(q=q, kv=kv, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
+
+    q_fp8 = q.to(torch.float8_e4m3fn)
+    kv_fp8, kv_scales = per_custom_dims_cast_to_fp8(kv, (0,), False)
+
+    logits_tl = mqa_attn_return_logits_interface(q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
+    diff = validate_tensor_match(logits_ref, logits_tl, tolerance=1e-14, tensor_name="logits", should_raise=False)
+
+    from tilelang.profiler import do_bench
+
+    def logits_fn():
+        return mqa_attn_return_logits_interface(q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
+
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+        logits_fn()
+
+    print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=50))
+
+    return do_bench(logits_fn, warmup=100, rep=100, backend="cupti")
 
 
 if __name__ == "__main__":

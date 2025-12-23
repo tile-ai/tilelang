@@ -138,6 +138,18 @@ def main(B=1, S=512, H=16, D=128):
     print(f"Speedup: {t1 / t2:.3f}x")
 
 
+def run_regression_perf(B=1, S=512, H=16, D=128):
+    q = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    k = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    v = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    q, _ = l2norm_fwd(q)
+    k, _ = l2norm_fwd(k)
+    B, S, H, D = q.shape
+    kernel = tl_fused_chunk_fwd_kernel(B, S, H, D, D)
+    o = torch.zeros((B, S, H, D), device="cuda", dtype=torch.float32)
+    return do_bench(lambda: kernel(q, k, v, o), backend="cupti")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--B", type=int, default=8, help="Batch size")

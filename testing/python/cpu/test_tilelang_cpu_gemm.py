@@ -101,7 +101,7 @@ def test_matmul_compile():
     block_M, block_N, block_K = M // 4, N // 4, K // 4
     cpu_func = matmul_jit_test(M, N, K, block_M, block_N, block_K)
     with tvm.target.Target("c"):
-        complied_fun = tilelang.compile(cpu_func, -1, execution_backend="ctypes")
+        complied_fun = tilelang.compile(cpu_func, -1, execution_backend="cython")
 
     in_dtype = T.float16
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype))

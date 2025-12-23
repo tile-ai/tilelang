@@ -56,5 +56,28 @@ def main():
     torch.testing.assert_close(c, ref_c.to(c.dtype), rtol=1e-2, atol=1e-2)
 
 
+def run_regression_perf():
+    M = 1024
+    N = 1024
+    K = 1024
+    block_M = 128
+    block_N = 128
+    block_K = 32
+    split_k = 4
+    kernel = matmul(M, N, K, block_M, block_N, block_K, split_k)
+    import torch
+
+    torch.random.manual_seed(42)
+    a = torch.randn(M, K).cuda().half()
+    b = torch.randn(K, N).cuda().half()
+    c = torch.zeros(M, N).cuda().float()
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(a, b, c)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     main()

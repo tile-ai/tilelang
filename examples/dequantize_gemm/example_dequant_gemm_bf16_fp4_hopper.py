@@ -438,6 +438,27 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
 
+def run_regression_perf(m=256, n=256, k=256, fast_dequant=True):
+    kernel = matmul(
+        m,
+        n,
+        k,
+        "bfloat16",
+        "bfloat16",
+        "float32",
+        num_bits=4,
+        fast_dequant=fast_dequant,
+        block_M=256,
+        block_N=128,
+        block_K=128,
+        num_stages=2,
+        threads=256,
+        split=1,
+    )
+    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
+    return profiler.do_bench(warmup=500, backend="cupti")
+
+
 if __name__ == "__main__":
     main(256, 256, 256, True)
     main(256, 256, 256, False)

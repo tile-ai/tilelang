@@ -126,6 +126,17 @@ def main(M=4096, N=4096, K=4096):
     print(f"Persistent GEMM Speedup: {non_persistent_latency / persistent_latency}")
 
 
+def run_regression_perf(M=4096, N=4096, K=4096):
+    BLOCK_M = 128
+    BLOCK_N = 256
+    BLOCK_K = 64
+    threads = 256
+    num_stages = 3
+    persistent_kernel = matmul_persistent(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, threads, num_stages)
+    persistent_profiler = persistent_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    return persistent_profiler.do_bench(warmup=500, backend="cupti")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--M", type=int, default=8192, help="M dimension")

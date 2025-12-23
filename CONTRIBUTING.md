@@ -2,7 +2,7 @@
 
 That would be awesome if you want to contribute something to TileLang!
 
-### Table of Contents  <!-- omit in toc --> <!-- markdownlint-disable heading-increment -->
+## Table of Contents  <!-- omit in toc --> <!-- markdownlint-disable heading-increment -->
 
 - [Report Bugs](#report-bugs)
 - [Ask Questions](#ask-questions)

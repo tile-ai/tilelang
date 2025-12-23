@@ -144,7 +144,7 @@ class AutoTuner:
         self,
         out_idx: list[int] | int | None = None,
         target: Literal["auto", "cuda", "hip", "metal"] = "auto",
-        execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"] = "auto",
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] = "auto",
         target_host: str | Target = None,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
@@ -725,7 +725,7 @@ def autotune(  # This is the new public interface
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch"], optional
+    execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"], optional
         Backend for kernel execution and argument passing. Use "auto" to pick a sensible
         default per target (cuda->tvm_ffi, metal->torch, others->cython).
     verbose : bool, optional

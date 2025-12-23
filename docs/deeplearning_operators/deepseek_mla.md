@@ -1,6 +1,5 @@
 # 🚀 Write High Performance FlashMLA with TileLang on Hopper
 
-
 <div style="text-align: left;">
     <em>Author:</em> <a href="https://github.com/chengyupku">Yu Cheng</a>
     <em>Author:</em> <a href="https://github.com/LeiWang1999">Lei Wang</a>
@@ -106,7 +105,6 @@ T.use_swizzle(panel_size: int, order: str = "row")
 
 Here, `panel_size` specifies the width of the swizzled threadblock group, and `order` determines the swizzling pattern, which can be either "row" or "col".
 
-
 ### Shared Memory Swizzling
 
 In CUDA programming, shared memory is divided into multiple memory banks, with each bank capable of servicing one thread request per clock cycle in parallel. Bank conflicts occur when multiple threads simultaneously access different addresses mapped to the same bank, forcing these accesses to be serialized and degrading performance.
@@ -123,16 +121,13 @@ T.annotate_layout({
 
 Here, `T.annotate_layout` allows users to specify any desired layout for a buffer. For convenience, TileLang provides the `make_swizzled_layout` primitive to automatically generate a swizzled layout.
 
-
 ### Warp-Specialization
 
 The Hopper architecture commonly employs warp specialization for performance optimization. A typical approach is to designate one warpgroup as a producer that handles data movement using TMA (Tensor Memory Accelerator), while the remaining warpgroups serve as consumers performing computations. However, this programming pattern is complex, requiring developers to manually manage the execution logic for producers and consumers, including synchronization through the `mbarrier` objects.
 
 In TileLang, users are completely shielded from these implementation details. The frontend script is automatically transformed into a warp-specialized form, where TileLang handles all producer-consumer synchronization automatically, enabling efficient computation.
 
-
 ### Pipeline
-
 
 Pipeline is a technique used to improve memory access efficiency by overlapping memory access and computation. In TileLang, pipeline can be implemented through the `T.pipelined` annotation:
 
@@ -142,13 +137,11 @@ T.pipelined(range: int, stage: int)
 
 Here, `range` specifies the range of the pipeline, and `stage` specifies the stage of the pipeline. Multi-stage pipelining enables overlapping of computation and memory access, which can significantly improve performance for memory-intensive operators. However, setting a higher number of stages consumes more shared memory resources, so the optimal configuration needs to be determined based on specific use cases.
 
-
 ### Split-KV
 
 We have also implemented Split-KV optimization similar to [FlashDecoding](https://pytorch.org/blog/flash-decoding/). Specifically, when the batch size is small, parallel SM resources cannot be fully utilized due to low parallelism. In such cases, we can split the kv_ctx dimension across multiple SMs for parallel computation and then merge the results.
 
 In our implementation, we have developed both split and combine kernels, allowing users to control the split size through a `num_split` parameter.
-
 
 ## 🚀 On AMD MI300X Accelerators
 

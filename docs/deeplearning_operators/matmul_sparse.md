@@ -51,7 +51,6 @@ Here, `A_sparse` contains all the non-zero elements of `A`, while `E` stores the
 The metadata is reordered internally to optimize memory access patterns (e.g., for ldsm instructions and vectorized loads).
 For more information, see **A note on `gemm_sp` and `gemm_sp_v2`**.
 
-
 ## `T.gemm_sp` with CUTLASS's compressor
 
 :::{warning}

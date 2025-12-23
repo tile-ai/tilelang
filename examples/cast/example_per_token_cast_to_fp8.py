@@ -109,5 +109,16 @@ def main(M=8192, N=8192, blk_m=8):
     print("Triton: {:.2f} ms".format(latency))
 
 
+def run_regression_perf(M=8192, N=8192, blk_m=8):
+    kernel = per_token_cast_to_fp8(M, N, blk_m)
+    x = torch.randn(M, N, device="cuda", dtype=torch.float32)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(x)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     main()

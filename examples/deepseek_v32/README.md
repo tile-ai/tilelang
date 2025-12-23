@@ -121,7 +121,7 @@ for i_i in T.Pipelined(NI, num_stages=num_stages):
     # ... compute attention over selected tokens
 ```
 
-This reduces compute from O(seq_len * seq_len_kv) to O(seq_len * topk). The causal mask is enforced by checking whether each index position is valid:
+This reduces compute from O(seq_len *seq_len_kv) to O(seq_len* topk). The causal mask is enforced by checking whether each index position is valid:
 
 ```python
 for bi_i in T.Parallel(BI):

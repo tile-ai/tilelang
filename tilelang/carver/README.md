@@ -6,7 +6,7 @@ Carver combines hardware architecture information, user-defined tile structures,
 
 ---
 
-### Key Features
+## Key Features
 - **Unified Tiling Framework**: Generate tile candidates for multiple backends under a unified API.
 - **Architecture-Specific Modeling**: Take into account architecture constraints (e.g., CUDA `smem_cap`, warp size, CPU cache structure, etc.) when generating hints.
 - **Flexible Templates**: High-level templates (like `MatmulTemplate`, `GeneralReductionTemplate`, `ElementwiseTemplate`) let you concisely specify kernel structures.
@@ -71,7 +71,6 @@ for hint in hints:
 A tile structure composed of S and R can simulate various cases. For example, structure `SS` represents a 2D element-wise operation, while `SSR` can represent a general matrix multiplication.
 
 We can specialize more advanced templates to provide finer-grained information, such as `MatmulTemplate`.
-
 
 ### Matmul Template
 
@@ -190,8 +189,6 @@ You might interpret this in **Triton** as:
 
 This helps quickly test multiple configurations without manually guessing.
 
-
-
 ## Supported Templates
 
 Carver abstracts common loop patterns through templates:
@@ -202,7 +199,6 @@ Carver abstracts common loop patterns through templates:
 - **`ElementwiseTemplate`**: For elementwise transformations or pointwise ops.
 
 You can also create your own specialized templates if you have unique loop structures or constraints. For instance, you might define specialized templates for convolution, flash attention, etc.
-
 
 ## TODO Items
 
