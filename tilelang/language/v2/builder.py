@@ -889,7 +889,7 @@ class TirTemplate(Generic[_P, _T]):
                 if isinstance(v, Buffer):
                     result.append(v.strides[i])
                 else:
-                    result.append(kwargs[k].strides()[i])
+                    result.append(kwargs[k].stride()[i])
         return tuple(result)
 
     def get_tir(self, **kwargs):
