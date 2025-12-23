@@ -23,7 +23,7 @@ def get_configs():
 
 
 # @autotune(configs=get_configs(), warmup=10, rep=10)
-@tilelang.jit(out_idx=[-2, -1], debug_root_path="./examples/flash_decoding")
+@tilelang.jit(out_idx=[-2, -1])
 def flashattn(
     batch,
     heads,
@@ -55,15 +55,15 @@ def flashattn(
     valid_block_H = min(block_H, kv_group_num)
     # TODO: check if max_seqlen_kv is correct for varlen case
 
-    @T.macro
-    def flash_attn(
+    @T.prim_func
+    def flashattn_gqa_decode_no_split(
         Q: T.Tensor(shape_q, dtype),
         K: T.Tensor(shape_k, dtype),
         V: T.Tensor(shape_v, dtype),
         cu_seqlens_k: T.Tensor([batch + 1], T.int32),
         s_aux: T.Tensor([heads], T.float32),
-        BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / block_N)], T.int32),
-        Output: T.Tensor([batch, heads, dim], dtype),
+        BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / page_block_size)], T.int32),
+        Output: T.Tensor(shape_o, dtype),
         S: T.Tensor(shape_s, dtype),
     ):
         with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
@@ -140,19 +140,6 @@ def flashattn(
             T.copy(acc_o[:valid_block_H, :], O_shared)
             T.copy(O_shared, Output[bid, hid * valid_block_H : (hid + 1) * valid_block_H, :])
             T.copy(S_shared[:valid_block_H, :], S[bid, hid * valid_block_H : (hid + 1) * valid_block_H, :])
-
-    @T.prim_func
-    def flashattn_gqa_decode_no_split(
-        Q: T.Tensor(shape_q, dtype),
-        K: T.Tensor(shape_k, dtype),
-        V: T.Tensor(shape_v, dtype),
-        cu_seqlens_k: T.Tensor([batch + 1], T.int32),
-        s_aux: T.Tensor([heads], T.float32),
-        BLOCK_TABLE: T.Tensor([batch, math.ceil(max_seqlen_kv / page_block_size)], T.int32),
-        Output: T.Tensor(shape_o, dtype),
-        S: T.Tensor(shape_s, dtype),
-    ):
-        flash_attn(Q, K, V, cu_seqlens_k, s_aux, BLOCK_TABLE, Output, S)
 
     # TODO: split version
     return flashattn_gqa_decode_no_split
