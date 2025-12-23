@@ -10,7 +10,6 @@ import itertools
 import argparse
 from typing import Optional
 
-tilelang.disable_cache()
 
 
 def get_configs():
