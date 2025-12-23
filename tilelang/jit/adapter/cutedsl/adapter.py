@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import weakref
 from typing import Any, Callable
 
 import torch
@@ -370,6 +371,39 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             A callable function that takes tensors and returns tensor(s)
         """
         return self._wrap_forward_from_prebuild_lib
+
+    def _post_init(self):
+        """Override base class _post_init to register cleanup via weakref.finalize."""
+        super()._post_init()
+
+        # Register cleanup for this instance using weakref.finalize
+        # This will automatically call cleanup when the object is garbage collected
+        if self.pymodule is not None and hasattr(self.pymodule, 'cleanup_module'):
+            weakref.finalize(self, self._cleanup_module, self.pymodule)
+
+    @staticmethod
+    def _cleanup_module(pymodule):
+        """Cleanup a single adapter instance's CUDA module and contexts.
+
+        This is called automatically when the adapter instance is garbage collected.
+        It can also be called explicitly via the cleanup() instance method.
+        """
+        try:
+            if hasattr(pymodule, 'cleanup_module'):
+                pymodule.cleanup_module()
+        except Exception:
+            # Suppress errors during cleanup (might be called during shutdown)
+            pass
+
+    def cleanup(self):
+        """Explicitly cleanup this adapter's CUDA resources.
+
+        This method can be called explicitly to immediately release CUDA resources
+        without waiting for garbage collection. Useful in Jupyter notebooks or tests.
+
+        Note: This is safe to call multiple times as the C++ implementation is idempotent.
+        """
+        self._cleanup_module(self.pymodule)
 
     @property
     def prim_func(self) -> tir.PrimFunc:

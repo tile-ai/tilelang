@@ -187,7 +187,6 @@ CPP_LAUNCHER_TEMPLATE = """\
 #include <cstring>
 #include <string>
 #include <mutex>
-#include <atomic>
 #include <unordered_map>
 
 // TVM Headers
@@ -199,6 +198,7 @@ CPP_LAUNCHER_TEMPLATE = """\
 // Each device needs its own CUmodule because modules are tied to CUDA contexts
 static std::unordered_map<int, CUmodule> g_device_modules;
 static std::unordered_map<int, std::vector<CUfunction>> g_device_kernels;
+static std::unordered_map<int, CUcontext> g_device_contexts;  // Track retained contexts for cleanup
 static std::mutex g_devices_mutex;
 
 // Find kernel by pattern (substring match, prefer base name over _N variants)
@@ -336,6 +336,9 @@ static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int dev
     return result;
   }}
 
+  // Store the retained context for cleanup
+  g_device_contexts[device_id] = ctx;
+
   // Read cubin file
   std::ifstream cubin_file(cubin_path.c_str(), std::ios::binary);
   if (!cubin_file) {{
@@ -424,16 +427,51 @@ extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, int devic
 extern "C" CUresult cleanup_module() {{
   std::lock_guard<std::mutex> lock(g_devices_mutex);
 
-  // Unload modules for all devices
+  CUresult last_error = CUDA_SUCCESS;
+
+  // Step 1: Unload modules for all devices
   for (auto& pair : g_device_modules) {{
     if (pair.second != nullptr) {{
-      cuModuleUnload(pair.second);
+      CUresult result = cuModuleUnload(pair.second);
+      if (result != CUDA_SUCCESS) {{
+        std::cerr << "Failed to unload module for device " << pair.first
+                  << ": " << result << "\\n";
+        last_error = result;
+        // Continue cleanup even if unload fails
+      }}
     }}
   }}
+
+  // Step 2: Release primary contexts (must execute even if module unload failed)
+  // This ensures the reference count is decremented for every cuDevicePrimaryCtxRetain
+  for (auto& pair : g_device_contexts) {{
+    int device_id = pair.first;
+    CUcontext ctx = pair.second;
+
+    if (ctx != nullptr) {{
+      CUdevice device;
+      CUresult result = cuDeviceGet(&device, device_id);
+      if (result == CUDA_SUCCESS) {{
+        result = cuDevicePrimaryCtxRelease(device);
+        if (result != CUDA_SUCCESS) {{
+          std::cerr << "Failed to release primary context for device "
+                    << device_id << ": " << result << "\\n";
+          last_error = result;
+        }}
+      }} else {{
+        std::cerr << "Failed to get device " << device_id
+                  << " for context release: " << result << "\\n";
+        last_error = result;
+      }}
+    }}
+  }}
+
+  // Step 3: Clear all maps
   g_device_modules.clear();
   g_device_kernels.clear();
+  g_device_contexts.clear();
 
-  return CUDA_SUCCESS;
+  return last_error;
 }}
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(launch_kernel, launch_kernel);
