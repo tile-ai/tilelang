@@ -62,7 +62,7 @@ class CuTeDSLKernelCache(KernelCache):
         target: str | Target,
         target_host: str | Target | None,
         out_idx: list[int] | None,
-        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"],
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"],
         pass_configs: dict | None,
         compile_flags: list[str] | str | None,
     ) -> JITKernel | None:

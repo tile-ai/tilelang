@@ -7,7 +7,6 @@ from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
 from tilelang import env
-from tilelang.jit.adapter.ctypes.kernel_cache import CTypesKernelCache
 from tilelang.jit.adapter.cutedsl.kernel_cache import CuTeDSLKernelCache
 from tilelang.jit.adapter.cython.kernel_cache import CythonKernelCache
 from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
@@ -20,7 +19,6 @@ if TYPE_CHECKING:
 # Create a map of singleton instance of KernelCaches
 _dispatch_map: dict[str, KernelCache] = {
     "tvm_ffi": TVMFFIKernelCache(),
-    "ctypes": CTypesKernelCache(),
     "cython": CythonKernelCache(),
     "nvrtc": NVRTCKernelCache(),
     "cutedsl": CuTeDSLKernelCache(),
