@@ -2,7 +2,6 @@ import argparse
 import itertools
 import logging
 
-import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit

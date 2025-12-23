@@ -162,7 +162,6 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             lse_max_local = T.alloc_fragment([block_M], accum_dtype)
             scale_local = T.alloc_fragment([block_M], accum_dtype)
 
-
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
             T.copy(

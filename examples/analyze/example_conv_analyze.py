@@ -2,7 +2,6 @@ import tilelang.language as T
 from tilelang.tools import Analyzer
 from tilelang.carver.arch import CUDA
 from tilelang.carver.arch import CDNA
-from tilelang.layout import make_swizzled_layout
 import torch
 
 N = 64

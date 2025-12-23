@@ -6,7 +6,6 @@ import tilelang
 from tilelang.autotuner import autotune
 from tilelang.profiler import do_bench
 import tilelang.language as T
-from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
 from typing import Optional

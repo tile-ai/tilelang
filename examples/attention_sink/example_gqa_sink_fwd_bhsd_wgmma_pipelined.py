@@ -6,12 +6,13 @@ import tilelang
 from tilelang.autotuner import autotune
 from tilelang.profiler import do_bench
 import tilelang.language as T
-from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
 from typing import Optional
 
 tilelang.disable_cache()
+
+
 def get_configs():
     iter_params = dict(block_M=[128], block_N=[128], num_stages=[0, 1, 2], threads=[128, 256])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]

@@ -545,8 +545,9 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     return results;
   }
 
-  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore
-  || copy_inst == CopyInst::kBulkLoad1D || copy_inst == CopyInst::kBulkStore1D) {
+  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
+      copy_inst == CopyInst::kBulkLoad1D ||
+      copy_inst == CopyInst::kBulkStore1D) {
     // if can apply swizzling, we skip layout inference
     // for bulk load/store, we can directly apply the layout of normal copy
     // This must be a global/shared layout, so we can skip the parallel op
@@ -554,9 +555,12 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     // and the register layout).
     Map<Buffer, Layout> result_map;
 
-    bool is_tma_1d = copy_inst == CopyInst::kBulkLoad1D || copy_inst == CopyInst::kBulkStore1D;
-    bool is_load = copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
-    bool is_store = copy_inst == CopyInst::kBulkStore || copy_inst == CopyInst::kBulkStore1D;
+    bool is_tma_1d = copy_inst == CopyInst::kBulkLoad1D ||
+                     copy_inst == CopyInst::kBulkStore1D;
+    bool is_load =
+        copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
+    bool is_store = copy_inst == CopyInst::kBulkStore ||
+                    copy_inst == CopyInst::kBulkStore1D;
     auto global_tensor = is_load ? src : dst;
     auto shared_tensor = is_load ? dst : src;
     auto shared_range = is_load ? dst_range : src_range;
@@ -590,8 +594,8 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
       if (is_store) {
         // For BulkStore, we should perform swizzle if possible.
-        // TMA Store is always 1d like, we can directly use the last two dimensions to
-        // analysis swizzling.
+        // TMA Store is always 1d like, we can directly use the last two
+        // dimensions to analysis swizzling.
         int dim = shared_tensor->shape.size();
         const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
         const int64_t mat_continuous =
@@ -601,8 +605,9 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
             shared_tensor->dtype.bits(), /*k_inner=*/true);
         // If makeGemmABLayoutHopper returns a linear layout, fallback to
         // ComputeLinearLayout which handles arbitrary tensor shapes correctly.
-        if (StructuralEqual()(swizzle_layout,
-                              makeGemmLayoutLinear(mat_stride, mat_continuous))) {
+        if (StructuralEqual()(
+                swizzle_layout,
+                makeGemmLayoutLinear(mat_stride, mat_continuous))) {
           result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
         } else {
           result_map.Set(shared_tensor, swizzle_layout);

@@ -33,12 +33,16 @@ enum class InferLevel : uint8_t {
 };
 
 /// Convert InferLevel enum to string for debugging
-inline const char* InferLevelToString(InferLevel level) {
+inline const char *InferLevelToString(InferLevel level) {
   switch (level) {
-    case InferLevel::kFree:   return "Free";
-    case InferLevel::kCommon: return "Common";
-    case InferLevel::kStrict: return "Strict";
-    default:                  return "Unknown";
+  case InferLevel::kFree:
+    return "Free";
+  case InferLevel::kCommon:
+    return "Common";
+  case InferLevel::kStrict:
+    return "Strict";
+  default:
+    return "Unknown";
   }
 }
 

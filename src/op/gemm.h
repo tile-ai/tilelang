@@ -23,13 +23,18 @@ enum class GemmWarpPolicyType : uint8_t {
 };
 
 /// Convert GemmWarpPolicyType enum to string for debugging
-inline const char* GemmWarpPolicyTypeToString(GemmWarpPolicyType type) {
+inline const char *GemmWarpPolicyTypeToString(GemmWarpPolicyType type) {
   switch (type) {
-    case GemmWarpPolicyType::kSquare:  return "Square";
-    case GemmWarpPolicyType::kFullRow: return "FullRow";
-    case GemmWarpPolicyType::kFullCol: return "FullCol";
-    case GemmWarpPolicyType::kFree:    return "Free";
-    default:                           return "Unknown";
+  case GemmWarpPolicyType::kSquare:
+    return "Square";
+  case GemmWarpPolicyType::kFullRow:
+    return "FullRow";
+  case GemmWarpPolicyType::kFullCol:
+    return "FullCol";
+  case GemmWarpPolicyType::kFree:
+    return "Free";
+  default:
+    return "Unknown";
   }
 }
 
@@ -37,13 +42,18 @@ inline const char* GemmWarpPolicyTypeToString(GemmWarpPolicyType type) {
 enum class GemmInst : uint8_t { kMMA, kWGMMA, kTCGEN5MMA, kMFMA };
 
 /// Convert GemmInst enum to string for debugging
-inline const char* GemmInstToString(GemmInst inst) {
+inline const char *GemmInstToString(GemmInst inst) {
   switch (inst) {
-    case GemmInst::kMMA:       return "MMA";
-    case GemmInst::kWGMMA:     return "WGMMA";
-    case GemmInst::kTCGEN5MMA: return "TCGEN5MMA";
-    case GemmInst::kMFMA:      return "MFMA";
-    default:                   return "Unknown";
+  case GemmInst::kMMA:
+    return "MMA";
+  case GemmInst::kWGMMA:
+    return "WGMMA";
+  case GemmInst::kTCGEN5MMA:
+    return "TCGEN5MMA";
+  case GemmInst::kMFMA:
+    return "MFMA";
+  default:
+    return "Unknown";
   }
 }
 

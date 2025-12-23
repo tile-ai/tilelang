@@ -150,7 +150,6 @@ def matmul(
     Scale_shape = (N, K // scale_size)
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, Block_QK)
-    Bias_shared_shape = (block_M, block_N)
     B_dequantize_shared_shape = (block_N, block_K)
     assert K % (block_K * split) == 0
 
