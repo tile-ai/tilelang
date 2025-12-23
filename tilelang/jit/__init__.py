@@ -202,7 +202,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     out_idx : list[int] | int | None
         Which output tensor(s) of the compiled kernel should be returned to the
         caller. Accepts a single index, a list of indices, or None to return all.
-    execution_backend : Literal["dlpack", "cython"]
+    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
         Backend used for exchanging arguments and executing the generated kernel.
     target : str | tvm.target.Target
         TVM compilation target (e.g. "cuda", "llvm", or "auto").
