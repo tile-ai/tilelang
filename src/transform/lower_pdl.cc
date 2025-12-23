@@ -1,6 +1,6 @@
 /*!
  * \file lower_pdl.cc
- * \brief Mark Device PrimFunc with attributes if CUDA sync functions are called
+ * \brief Mark Device PrimFunc with attributes if CUDA PDL functions are called
  */
 
 #include "../op/builtin.h"
