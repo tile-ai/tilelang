@@ -39,7 +39,6 @@ class KernelCache:
     device_kernel_path = "device_kernel.cu"
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
-    kernel_cubin_path = "kernel.cubin"
     params_path = "params.pkl"
 
     def __new__(cls):
