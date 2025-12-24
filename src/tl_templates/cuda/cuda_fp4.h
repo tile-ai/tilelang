@@ -154,4 +154,52 @@ TL_DEVICE fp4_e2_32_t make_fp4_e2_32_t(
   return result;
 }
 
+// fp4_e2m1x2 (1 byte) -> half2
+// Uses PTX cvt.rn.f16x2.e2m1x2 instruction
+TL_DEVICE half2 __tl_cvt_fp4x2_to_half2(const uint8_t src) {
+  half2 out;
+  uint32_t *out_ptr = reinterpret_cast<uint32_t *>(&out);
+  uint16_t src_packed = static_cast<uint16_t>(src);
+  asm volatile("{\n"
+               ".reg .b8 byte0, byte1;\n"
+               "mov.b16 {byte0, byte1}, %1;\n"
+               "cvt.rn.f16x2.e2m1x2 %0, byte0;\n"
+               "}\n"
+               : "=r"(*out_ptr)
+               : "h"(src_packed));
+  return out;
+}
+
+// fp4_e2m1x2 (1 byte) -> float2
+TL_DEVICE float2 __tl_cvt_fp4x2_to_float2(const uint8_t src) {
+  half2 tmp = __tl_cvt_fp4x2_to_half2(src);
+  float2 result;
+  result.x = __half2float(tmp.x);
+  result.y = __half2float(tmp.y);
+  return result;
+}
+
+// half2 -> fp4_e2m1x2 (1 byte)
+// Uses PTX cvt.rn.satfinite.e2m1x2.f16x2 instruction
+TL_DEVICE uint8_t __tl_cvt_half2_to_fp4x2(const half2 src) {
+  uint16_t out;
+  uint32_t const *src_ptr = reinterpret_cast<uint32_t const *>(&src);
+  asm volatile("{\n"
+               ".reg .b8 result_byte;\n"
+               "cvt.rn.satfinite.e2m1x2.f16x2 result_byte, %1;\n"
+               "mov.b16 %0, {result_byte, 0};\n"
+               "}\n"
+               : "=h"(out)
+               : "r"(*src_ptr));
+  return static_cast<uint8_t>(out);
+}
+
+// float2 -> fp4_e2m1x2 (1 byte)
+TL_DEVICE uint8_t __tl_cvt_float2_to_fp4x2(const float2 src) {
+  half2 tmp;
+  tmp.x = __float2half(src.x);
+  tmp.y = __float2half(src.y);
+  return __tl_cvt_half2_to_fp4x2(tmp);
+}
+
 #endif

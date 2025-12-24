@@ -64,10 +64,10 @@ class AnalysisResult:
 ```
 ### `Analyzer` Class Methods
 #### `analysis(fn, device)`
-* ​Parameters:
-    * fn: TVM IRModule or PrimFunc
-    * device: Device configuration object
-* Returns: AnalysisResult
+- ​Parameters:
+  - fn: TVM IRModule or PrimFunc
+  - device: Device configuration object
+- Returns: AnalysisResult
 #### Supported Architectures
 ```python
 # Extendable to custom hardware via: "compute_capability": (cores_per_SM, clock_GHz, flops_per_cycle, max_SM_count)

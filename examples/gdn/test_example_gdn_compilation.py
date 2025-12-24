@@ -1,5 +1,4 @@
 import torch
-import tilelang.testing
 from tilelang import language as T
 
 B = 1
@@ -317,4 +316,5 @@ def test_example_chunk_delta_bwd_compilation():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_example_chunk_delta_bwd_compilation()

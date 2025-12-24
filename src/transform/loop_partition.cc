@@ -28,6 +28,8 @@
 
 #include <utility>
 
+#include "../op/utils.h"
+
 namespace tvm {
 namespace tl {
 
@@ -218,14 +220,14 @@ public:
 
 private:
   void VisitExpr_(const BufferLoadNode *op) final {
-    if (op->buffer.scope() == "local.fragment") {
+    if (IsFragmentBuffer(op->buffer)) {
       has_fragment_ = true;
     }
     StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    if (op->buffer.scope() == "local.fragment") {
+    if (IsFragmentBuffer(op->buffer)) {
       has_fragment_ = true;
     }
     StmtExprVisitor::VisitStmt_(op);

@@ -175,6 +175,20 @@ public:
                    PrimExpr forward_thread, PrimExpr replicate_size,
                    Optional<Var> replicate_var);
 
+  /*!
+   * \brief Create a fully replicated fragment layout.
+   *
+   * A fully replicated fragment means all threads hold identical copies of the
+   * entire buffer. This is useful for index buffers or masks that need to be
+   * accessed uniformly across all threads.
+   *
+   * \param shape The shape of the buffer.
+   * \param thread_extent The number of threads.
+   * \return A Fragment where each thread has a complete copy of all elements.
+   */
+  TVM_DLL static Fragment FullyReplicated(Array<PrimExpr> shape,
+                                          PrimExpr thread_extent);
+
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fragment, Layout, FragmentNode);
 };
 

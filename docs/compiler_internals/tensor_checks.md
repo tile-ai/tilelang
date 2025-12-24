@@ -384,4 +384,3 @@ Fix: pass correct scalar types, e.g., `scalar_check(1, True)`.
 ## Closing Notes
 - Cross-check “shape / strides / device / dtype” against the kernel signature to localize issues efficiently.
 - For complex symbolic relations, print the host source to confirm binding/solving order, then adjust runtime shapes/layouts accordingly.
-

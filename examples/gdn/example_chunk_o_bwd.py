@@ -199,13 +199,15 @@ def tilelang_chunk_o_bwd_dqkwg(
             dg_fragment = T.alloc_fragment((block_S,), dtype=gate_dtype)
             dg_fragment_2 = T.alloc_fragment((block_S,), dtype=gate_dtype)
             dg_fragment_final = T.alloc_fragment((block_S,), dtype=gate_dtype)
-            dg_last_local = T.alloc_local((2,), dtype=gate_dtype)
+            dg_last_local_0 = T.alloc_var(dtype=gate_dtype)
+            dg_last_local_1 = T.alloc_var(dtype=gate_dtype)
+            G_last_local = T.alloc_var(dtype=gate_dtype)
+
             dg_last_fragment = T.alloc_fragment((block_DV * block_DK), dtype=gate_dtype)
             dg_last_fragment_scalar = T.alloc_fragment((1,), dtype=gate_dtype)
             dg_last_fragment_2 = T.alloc_fragment((block_S * block_DK), dtype=gate_dtype)
             dg_last_fragment_scalar_2 = T.alloc_fragment((1,), dtype=gate_dtype)
-            G_shared = T.alloc_shared((block_S, block_DK), dtype=gate_dtype, scope="shared")
-            G_last_local = T.alloc_local((1,), dtype=gate_dtype)
+            G_shared = T.alloc_shared((block_S, block_DK), dtype=gate_dtype)
 
             T.use_swizzle(10)
 
@@ -221,7 +223,8 @@ def tilelang_chunk_o_bwd_dqkwg(
                 }
             )
 
-            T.clear(dg_last_local)
+            T.clear(dg_last_local_0)
+            T.clear(dg_last_local_1)
             T.clear(G_last_local)
             T.clear(G_shared)
             T.clear(q_fragment)
@@ -247,7 +250,7 @@ def tilelang_chunk_o_bwd_dqkwg(
                     for i_kv in T.Parallel(block_DK * block_DV):
                         dg_last_fragment[i_kv] = h_shared[i_kv // block_DV, i_kv % block_DV] * dh_shared[i_kv // block_DV, i_kv % block_DV]
                     T.reduce_sum(dg_last_fragment, dg_last_fragment_scalar, dim=-1, clear=False)
-                    dg_last_local[0] += dg_last_fragment_scalar[0]
+                    dg_last_local_0 = dg_last_local_0 + dg_last_fragment_scalar[0]
 
                 T.gemm(dO_shared, V_shared, ds_fragment, transpose_B=True)
                 T.gemm(dO_shared, h_shared, dq_fragment, transpose_B=True)
@@ -272,9 +275,9 @@ def tilelang_chunk_o_bwd_dqkwg(
                 T.clear(dg_fragment_2)
                 for i_s, i_k in T.Parallel(block_S, block_DK):
                     G_shared[i_s, i_k] = G[bb, bs * block_S + i_s, bh]
-                G_last_local[0] = G[bb, bs * block_S + block_S - 1, bh]
+                dg_last_local_0 = G[bb, bs * block_S + block_S - 1, bh]
                 # Use gmem directly instead of local register
-                dg_last_local[0] = dg_last_local[0] * T.exp(G[bb, bs * block_S + block_S - 1, bh])
+                dg_last_local_0 = dg_last_local_0 * T.exp(G[bb, bs * block_S + block_S - 1, bh])
 
                 for i_s, i_k in T.Parallel(block_S, block_DK):
                     dq_fragment[i_s, i_k] = dq_fragment[i_s, i_k] * T.exp(G[bb, bs * block_S + i_s, bh]) * scale
@@ -285,11 +288,11 @@ def tilelang_chunk_o_bwd_dqkwg(
                 T.reduce_sum(dg_fragment_reduce_tmp, dg_fragment, dim=-1, clear=False)
 
                 for i_s, i_k in T.Parallel(block_S, block_DK):
-                    with T.If(G_last_local[0] - G[bb, bs * block_S + i_s, bh] <= 0):
-                        with T.Then():
-                            dk_fragment[i_s, i_k] = dk_fragment[i_s, i_k] * T.exp(G_last_local[0] - G[bb, bs * block_S + i_s, bh])
-                        with T.Else():
-                            dk_fragment[i_s, i_k] = 0
+                    dk_fragment[i_s, i_k] = (
+                        dk_fragment[i_s, i_k] * T.exp(G_last_local - G[bb, bs * block_S + i_s, bh])
+                        if G_last_local - G[bb, bs * block_S + i_s, bh] <= 0
+                        else 0
+                    )
                 T.clear(dg_fragment_reduce_tmp)
                 for i_s, i_k in T.Parallel(block_S, block_DK):
                     dg_fragment_reduce_tmp[i_s, i_k] = dk_fragment[i_s, i_k] * (-k_shared[i_s, i_k])
@@ -303,16 +306,14 @@ def tilelang_chunk_o_bwd_dqkwg(
                     i_s, i_k = i_sk // block_DK, i_sk % block_DK
                     dg_last_fragment_2[i_sk] = dk_shared[i_s, i_k] * k_shared[i_s, i_k]
                 T.reduce_sum(dg_last_fragment_2, dg_last_fragment_scalar_2, dim=-1, clear=False)
-                dg_last_local[1] = dg_last_fragment_scalar_2[0]
+                dg_last_local_1 = dg_last_fragment_scalar_2[0]
 
                 for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    with T.If(i_s1 >= i_s2 and G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh] <= 0):
-                        with T.Then():
-                            ds_fragment[i_s1, i_s2] = (
-                                ds_fragment[i_s1, i_s2] * T.exp(G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh]) * scale
-                            )
-                        with T.Else():
-                            ds_fragment[i_s1, i_s2] = 0
+                    ds_fragment[i_s1, i_s2] = (
+                        (ds_fragment[i_s1, i_s2] * T.exp(G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh]) * scale)
+                        if G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh] <= 0
+                        else 0
+                    )
 
                 T.clear(ds_fragment_positive)
                 T.clear(ds_fragment_positive_transpose)
@@ -340,9 +341,7 @@ def tilelang_chunk_o_bwd_dqkwg(
                 T.gemm(ds_shared, q_shared, dk_fragment, transpose_A=True)
 
                 for i_s in T.Parallel(block_S):
-                    with T.If(i_s >= block_S - 1):  # noqa: SIM117
-                        with T.Then():
-                            dg_fragment_final[i_s] = dg_fragment_final[i_s] + dg_last_local[0] + dg_last_local[1]
+                    dg_fragment_final[i_s] = dg_fragment_final[i_s] + dg_last_local_0 + dg_last_local_1
 
                 T.copy(dq_fragment, dq[bb, bs * block_S : (bs + 1) * block_S, bh, bk * block_DK : (bk + 1) * block_DK])
                 T.copy(dk_fragment, dk[bb, bs * block_S : (bs + 1) * block_S, bh, bk * block_DK : (bk + 1) * block_DK])
@@ -351,9 +350,7 @@ def tilelang_chunk_o_bwd_dqkwg(
 
             else:
                 for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    with T.If(i_s1 < i_s2):  # noqa: SIM117
-                        with T.Then():
-                            ds_fragment[i_s1, i_s2] = 0
+                    ds_fragment[i_s1, i_s2] = 0 if i_s1 < i_s2 else ds_fragment[i_s1, i_s2]
                 T.clear(dk_fragment_2)
                 T.copy(ds_fragment, ds_shared)
                 T.gemm(ds_shared, k_shared, dq_fragment)

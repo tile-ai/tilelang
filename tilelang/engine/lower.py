@@ -107,19 +107,22 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
                     tokens.append(str(flag))
         options += tokens
 
+    verbose = False
     if enable_fast_math:
         options.append("--use_fast_math")
     if ptxas_usage_level is not None:
         options.append(f"--ptxas-options=--register-usage-level={ptxas_usage_level}")
     if verbose_ptxas_output:
         options.append("--ptxas-options=--verbose")
+        options.append("-w")  # Suppress warnings to make ptxas output more readable
+        verbose = True
 
     ptx = nvcc.compile_cuda(
         code,
         compile_format,
         arch,
         options=options,
-        verbose=False,
+        verbose=verbose,
     )
 
     return ptx

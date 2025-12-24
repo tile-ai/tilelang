@@ -39,6 +39,9 @@ struct LowerArgs {
   AddWorkspaceCallback AddWorkspace;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
+  // Map from LetStmt variable to its bound expression, for resolving
+  // fragment buffer accesses through let bindings
+  Map<Var, PrimExpr> let_var_to_expr;
 };
 
 struct LayoutInferArgs {
@@ -48,6 +51,9 @@ struct LayoutInferArgs {
   arith::Analyzer *analyzer;
   bool buffer_oob = false;
   Map<Buffer, Buffer> buffer_remap;
+  // Map from LetStmt variable to its bound expression, for resolving
+  // fragment buffer accesses through let bindings
+  Map<Var, PrimExpr> let_var_to_expr;
 };
 
 class TileOperator;

@@ -10,12 +10,6 @@ class PassConfigKey(str, Enum):
     TL_SIMPLIFY = "tl.Simplify"
     """Enable/disable TileLang simplification passes. Default: True"""
 
-    TL_DYNAMIC_ALIGNMENT = "tl.dynamic_alignment"
-    """Memory alignment requirement for dynamic shapes. Default: 16"""
-
-    TL_DISABLE_DYNAMIC_TAIL_SPLIT = "tl.disable_dynamic_tail_split"
-    """Disable dynamic tail splitting optimization. Default: False"""
-
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 

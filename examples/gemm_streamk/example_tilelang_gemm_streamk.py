@@ -199,5 +199,30 @@ def main():
     torch.testing.assert_close(C, b_c, rtol=1e-2, atol=1e-2)
 
 
+def run_regression_perf():
+    kernel = tl_matmul_streamk(
+        m,
+        n,
+        k,
+        streamk_tiles,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        False,
+        True,
+        "float16",
+        "float16",
+        "float32",
+        2,
+        64,
+    )
+    b_c = torch.zeros((m, n), device="cuda", dtype=torch.float16)
+    torch.cuda.synchronize()
+
+    from tilelang.profiler import do_bench
+
+    return do_bench(lambda: kernel(A, B, b_c), warmup=10, rep=100, backend="cupti")
+
+
 if __name__ == "__main__":
     main()

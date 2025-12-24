@@ -20,6 +20,7 @@
 #include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
+#include "../op/utils.h"
 #include "../target/utils.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
@@ -110,10 +111,14 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    auto updates =
-        next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
-                                          cur_analyzer, buffer_oob},
-                          level);
+    auto updates = next->InferLayout(LayoutInferArgs{target_,
+                                                     thread_bounds,
+                                                     layout_map,
+                                                     cur_analyzer,
+                                                     buffer_oob,
+                                                     {},
+                                                     let_var_to_expr_},
+                                     level);
 
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
@@ -166,8 +171,8 @@ public:
 
       if (layout_map.count(buffer)) {
         // If new layout contains the old one, update map
-        if (buffer.scope() == "local.fragment" &&
-            level != InferLevel::kStrict && !strict_layout_map.count(buffer)) {
+        if (IsFragmentBuffer(buffer) && level != InferLevel::kStrict &&
+            !strict_layout_map.count(buffer)) {
           // Actually this test has been done in ParallelOp::InferLayout
           // already. Just do it again to avoid missing implementations in other
           // `TileOperator`s.
@@ -304,6 +309,17 @@ public:
       q.push_back(i);
     }
 
+    // step 0: set fully replicated layout for floating fragment buffers
+    // Floating buffers are accessed outside TileOps (e.g., in if conditions),
+    // so they must be replicated across all threads.
+    for (const auto &[buffer, thread_bounds] : floating_fragment_buffers_) {
+      if (layout_map.count(buffer))
+        continue;
+      auto frag =
+          Fragment::FullyReplicated(buffer->shape, thread_bounds->extent);
+      layout_map.Set(buffer, frag);
+    }
+
     // step 1: infer strict layout
     for (int i = 0; i < num_infer; i++) {
       RunInferStep(i, InferLevel::kStrict, false, layout_map, strict_layout_map,
@@ -317,7 +333,6 @@ public:
     // step 2: infer common layout with BFS
     FinishInferQueue(InferLevel::kCommon, layout_map, strict_layout_map, q,
                      in_queue);
-
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
 
@@ -365,7 +380,7 @@ public:
 
     // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
-      if (buffer.scope() == "local.fragment") {
+      if (IsFragmentBuffer(buffer)) {
         ICHECK_NE(layout_map.count(buffer), 0)
             << "The layout for fragment " << buffer
             << " can not be inferred correctly.";
@@ -418,6 +433,8 @@ public:
         << "Layout_Inference: Require the target attribute";
     target_ = target.value();
     this->operator()(f->body);
+    // Compute floating fragment buffers after collection
+    ComputeFloatingFragmentBuffers(f->body);
   }
 
 private:
@@ -479,6 +496,10 @@ private:
         } else if (auto buffer = getBufferFromRegion(arg)) {
           addToUseList(buffer.value());
         }
+        // Check if the argument uses any LetStmt variables that reference
+        // fragment buffers. If so, add those buffers to the use list.
+        // This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0], ...)
+        CollectFragmentBuffersFromExpr(arg);
       }
       // Compute thread_var_ and thread_bounds_
       thread_var_vec_.push_back(thread_var_);
@@ -571,7 +592,7 @@ private:
 
   void addToUseList(const Buffer &buffer) {
     // buffer scope must be local.fragment
-    if (buffer.scope() != "local.fragment") {
+    if (!IsFragmentBuffer(buffer)) {
       return;
     }
     int infer_idx = infer_list_.size();
@@ -754,6 +775,30 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
+  void VisitStmt_(const LetStmtNode *op) final {
+    // Record Let variable to its bound expression.
+    // This enables tracking fragment buffer accesses through let bindings.
+    let_var_to_expr_.Set(op->var, op->value);
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  // Helper: recursively collect fragment buffers from an expression,
+  // following let bindings chain.
+  void CollectFragmentBuffersFromExpr(const PrimExpr &expr) {
+    PostOrderVisit(expr, [this](const ObjectRef &node) {
+      if (auto bl = node.as<BufferLoadNode>()) {
+        if (IsFragmentBuffer(bl->buffer)) {
+          addToUseList(bl->buffer);
+        }
+      } else if (auto var_node = node.as<VarNode>()) {
+        auto var = tvm::ffi::GetRef<Var>(var_node);
+        if (let_var_to_expr_.count(var)) {
+          CollectFragmentBuffersFromExpr(let_var_to_expr_[var]);
+        }
+      }
+    });
+  }
+
   void VisitExpr_(const BufferLoadNode *op) final {
     // Collect buffer from BufferLoad
     if (op->buffer.defined() && op->buffer->data.defined()) {
@@ -814,9 +859,122 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
+  // Compute floating fragment buffers after collection is done.
+  //
+  // A "floating" fragment buffer is one that has accesses outside of any
+  // TileOp (Copy, Gemm, Reduce, Parallel, etc.). For example:
+  //
+  //   T.copy(BlockMask[by, :], block_mask_f)  // block_mask_f accessed IN
+  //   TileOp for i in T.Pipelined(N_S):
+  //       if block_mask_f[i] >= 0:           // block_mask_f accessed OUTSIDE
+  //       TileOp (floating!)
+  //           T.copy(A[...], A_shared)
+  //
+  // In this example, `block_mask_f[i]` in the if-condition is a "floating"
+  // access because it's not inside any TileOp. Such buffers need special
+  // handling: they must be fully replicated across all threads since the
+  // access pattern cannot be inferred from TileOp semantics.
+  //
+  // This function identifies these buffers by:
+  // 1. Collecting all IR nodes that are inside TileOps (from infer_list_stmt_)
+  // 2. Scanning the entire function body for fragment buffer accesses
+  // 3. Any access not inside a TileOp means the buffer is "floating"
+  // 4. Recording the thread_bounds at the point of each floating access
+  void ComputeFloatingFragmentBuffers(const Stmt &func_body) {
+    // Step 1: Collect all nodes that are inside TileOps
+    std::unordered_set<const Object *> nodes_in_tileops;
+    for (const auto &stmt : infer_list_stmt_) {
+      PostOrderVisit(stmt, [&](const ObjectRef &node) {
+        nodes_in_tileops.insert(node.get());
+      });
+    }
+
+    // Step 2: Use a visitor to scan for floating accesses while tracking thread
+    // context
+    class FloatingBufferCollector : public IRVisitorWithAnalyzer {
+    public:
+      FloatingBufferCollector(
+          const std::unordered_set<const Object *> &nodes_in_tileops,
+          std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
+              &floating_buffers)
+          : nodes_in_tileops_(nodes_in_tileops),
+            floating_buffers_(floating_buffers) {}
+
+      void VisitStmt_(const AttrStmtNode *op) final {
+        if (op->attr_key == tir::attr::thread_extent) {
+          IterVar iv = Downcast<IterVar>(op->node);
+          if (iv->thread_tag == "threadIdx.x") {
+            thread_var_ = iv;
+          }
+        }
+        IRVisitorWithAnalyzer::VisitStmt_(op);
+      }
+
+      void VisitExpr_(const BufferLoadNode *op) final {
+        CheckFloatingAccess(op->buffer, op);
+        IRVisitorWithAnalyzer::VisitExpr_(op);
+      }
+
+      void VisitStmt_(const BufferStoreNode *op) final {
+        CheckFloatingAccess(op->buffer, op);
+        IRVisitorWithAnalyzer::VisitStmt_(op);
+      }
+
+    private:
+      void CheckFloatingAccess(const Buffer &buffer, const Object *node) {
+        if (!IsFragmentBuffer(buffer))
+          return;
+        if (nodes_in_tileops_.find(node) != nodes_in_tileops_.end())
+          return;
+        // This is a floating access - record buffer with current thread_bounds
+        if (floating_buffers_.find(buffer) != floating_buffers_.end())
+          return; // Already recorded
+        Range thread_bounds = Range::FromMinExtent(0, 1);
+        if (thread_var_.defined() &&
+            analyzer_.const_int_bound.IsBound(thread_var_->var)) {
+          auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+          auto dtype = thread_var_->var.dtype();
+          auto extent =
+              const_int_bound->max_value - const_int_bound->min_value + 1;
+          thread_bounds = Range::FromMinExtent(
+              IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent));
+        }
+        floating_buffers_[buffer] = thread_bounds;
+      }
+
+      const std::unordered_set<const Object *> &nodes_in_tileops_;
+      std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
+          &floating_buffers_;
+      IterVar thread_var_;
+    };
+
+    FloatingBufferCollector collector(nodes_in_tileops,
+                                      floating_fragment_buffers_);
+    collector(func_body);
+
+    // Debug log floating fragment buffers
+    if (!floating_fragment_buffers_.empty()) {
+      DLOG(INFO)
+          << "Floating fragment buffers (have accesses outside TileOps):";
+      for (const auto &[buffer, thread_bounds] : floating_fragment_buffers_) {
+        DLOG(INFO) << "    " << buffer
+                   << " with thread_bounds: " << thread_bounds;
+      }
+    }
+  }
+
   Map<Var, Array<Buffer>> buffer_data_to_buffers_;
+  // Map from LetStmt variable to its bound expression
+  Map<Var, PrimExpr> let_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
+  // Fragment buffers that have accesses outside of TileOps.
+  // These "floating" buffers need fully replicated layouts since their
+  // access patterns cannot be inferred from TileOp semantics.
+  // Maps buffer -> thread_bounds at the point of floating access.
+  // See ComputeFloatingFragmentBuffers() for detailed explanation.
+  std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
+      floating_fragment_buffers_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
       use_list_;
   // Per-op list of buffers it touches (fragment scope), used for prioritization
@@ -1107,7 +1265,7 @@ private:
     bool store_into_local = false;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (store->buffer.scope() == "local") {
+        if (IsLocalBuffer(store->buffer)) {
           store_into_local = true;
         }
         // if the case is like:
@@ -1127,11 +1285,11 @@ private:
     bool local_register_only = true;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (store->buffer.scope() != "local") {
+        if (!IsLocalBuffer(store->buffer)) {
           local_register_only = false;
         }
       } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (load->buffer.scope() != "local") {
+        if (!IsLocalBuffer(load->buffer)) {
           local_register_only = false;
         }
       }
@@ -1152,12 +1310,12 @@ private:
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
       if (const auto *load = obj.as<BufferLoadNode>()) {
         String scope = load->buffer.scope();
-        if (scope != "local" && scope != "local.fragment") {
+        if (!IsLocalBuffer(load->buffer) && !IsFragmentBuffer(load->buffer)) {
           has_non_local = true;
         }
       } else if (const auto *store = obj.as<BufferStoreNode>()) {
         String scope = store->buffer.scope();
-        if (scope != "local" && scope != "local.fragment") {
+        if (!IsLocalBuffer(store->buffer) && !IsFragmentBuffer(store->buffer)) {
           has_non_local = true;
         }
       }
@@ -1177,13 +1335,10 @@ private:
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
       if (const auto *cast = obj.as<CastNode>()) {
         // Check if this is a non-reducer store with Cast operation
-        DataType src_type = cast->value.dtype();
-        DataType dst_type = cast->dtype;
-        bool src_ok =
-            src_type.is_float() || src_type.is_bfloat() || src_type.is_float8();
-        bool dst_ok =
-            dst_type.is_float() || dst_type.is_bfloat() || dst_type.is_float8();
-        if (src_ok && dst_ok && TargetIsCuda(Target::Current())) {
+        DataType from_ty = cast->value.dtype();
+        DataType target_ty = cast->dtype;
+        if (IsCudaVectorizableCast(from_ty, target_ty) &&
+            TargetIsCuda(Target::Current())) {
           has_cast_operations = true;
         }
       }

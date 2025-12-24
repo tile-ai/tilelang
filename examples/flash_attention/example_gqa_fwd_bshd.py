@@ -243,6 +243,15 @@ def main(
         print(f"Ref latency: {ref_latency}")
 
 
+def run_regression_perf(
+    batch: int = 1, heads: int = 64, seq_len: int = 4096, dim: int = 128, is_causal: bool = False, groups: int = 16, tune: bool = False
+):
+    kernel = flashattn(batch, heads, seq_len, dim, is_causal, groups=groups, block_M=64, block_N=64, num_stages=2, threads=128)
+
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    return profiler.do_bench(backend="cupti")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=int, default=1, help="batch size")

@@ -17,7 +17,6 @@ get_started/overview
 get_started/targets
 :::
 
-
 :::{toctree}
 :maxdepth: 1
 :caption: TUTORIALS

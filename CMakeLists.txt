@@ -313,7 +313,7 @@ set(TILELANG_OUTPUT_TARGETS
   tvm_runtime
 )
 
-unset(PATCHELF_EXECUTABLE)
+unset(PATCHELF_EXECUTABLE CACHE)
 
 if(APPLE)
   set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
