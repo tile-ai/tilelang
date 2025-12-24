@@ -534,7 +534,7 @@ void ArgBinder::BindDLTensors(
           cast(DataType::UInt(64), expect_bits) *
           cast(DataType::UInt(64), expect_lanes) *
           cast(DataType::UInt(64),
-               buffer->shape.size() == 0
+               buffer->shape.empty()
                    ? make_const(DataType::UInt(64), 1)
                    : foldl([](PrimExpr a, PrimExpr b, Span) { return a * b; },
                            make_const(DataType::UInt(64), 1), buffer->shape));
