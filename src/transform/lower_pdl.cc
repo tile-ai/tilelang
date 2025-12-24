@@ -5,6 +5,7 @@
 
 #include "../op/builtin.h"
 #include "../target/utils.h"
+#include "common/attr.h"
 #include "tvm/ir/type.h"
 #include "tvm/tir/builtin.h"
 #include "tvm/tir/expr.h"
@@ -17,12 +18,6 @@
 
 namespace tvm {
 namespace tl {
-
-namespace attr {
-// Attributes to mark CUDA sync calls
-constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";
-constexpr const char *kHasGridSync = "has_cuda_pdl_sync";
-} // namespace attr
 
 using namespace tir;
 
@@ -40,13 +35,6 @@ public:
       new_f = WithAttr(std::move(new_f), attr::kHasGridSync, 1);
     }
     return new_f;
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const auto *call = op->value.as<tir::CallNode>()) {
-      CheckCall(call);
-    }
-    return StmtExprMutator::VisitStmt_(op);
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
@@ -88,15 +76,6 @@ public:
     new_f.CopyOnWrite()->body = mutator.VisitStmt(f->body);
 
     return new_f;
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const auto *call = op->value.as<tir::CallNode>()) {
-      if (CheckCall(call)) {
-        return Evaluate(make_zero(call->dtype));
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
