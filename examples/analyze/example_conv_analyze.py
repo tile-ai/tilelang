@@ -2,7 +2,6 @@ import tilelang.language as T
 from tilelang.tools import Analyzer
 from tilelang.carver.arch import CUDA
 from tilelang.carver.arch import CDNA
-from tilelang.layout import make_swizzled_layout
 import torch
 
 N = 64
@@ -47,14 +46,6 @@ def kernel(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages, thr
 
             kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)
             out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
-
-            T.annotate_layout(
-                {
-                    out_shared: make_swizzled_layout(out_shared),
-                    data_shared: make_swizzled_layout(data_shared),
-                    kernel_shared: make_swizzled_layout(kernel_shared),
-                }
-            )
 
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):

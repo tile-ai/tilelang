@@ -242,7 +242,6 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             bb, bh = bbh // H, bbh % H
 
             b_dh_shared = T.alloc_shared((DK, block_DV), dtype=output_dtype)
-            b_dh_shared_fp32 = T.alloc_shared((DK, block_DV), dtype=state_dtype)
             b_dh_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
             b_dh_fragment_1 = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
             b_dh_fragment_2 = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
@@ -256,7 +255,6 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
             Q_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
-            Q_shared_fp32 = T.alloc_shared((block_S, DK), dtype=T.float32)
             W_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
             G_shared = T.alloc_shared((block_S), dtype=gate_dtype, scope="shared")
@@ -270,15 +268,8 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
 
             T.annotate_layout(
                 {
-                    b_dh_shared: tilelang.layout.make_swizzled_layout(b_dh_shared),
-                    b_dh_shared_fp32: tilelang.layout.make_swizzled_layout(b_dh_shared_fp32),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
                     dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
-                    dO_shared_t: tilelang.layout.make_swizzled_layout(dO_shared_t),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                     Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-                    Q_shared_fp32: tilelang.layout.make_swizzled_layout(Q_shared_fp32),
-                    W_shared: tilelang.layout.make_swizzled_layout(W_shared),
                 }
             )
 

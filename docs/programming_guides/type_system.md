@@ -39,4 +39,3 @@ Notes
   GEMM with `float16` inputs and `float32` accumulators).
 - The complete, up‑to‑date list is exposed in
   `tilelang.language.v2.dtypes` and rendered in the API Reference.
-

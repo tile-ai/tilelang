@@ -32,6 +32,20 @@ enum class InferLevel : uint8_t {
   kStrict = 2,
 };
 
+/// Convert InferLevel enum to string for debugging
+inline const char *InferLevelToString(InferLevel level) {
+  switch (level) {
+  case InferLevel::kFree:
+    return "Free";
+  case InferLevel::kCommon:
+    return "Common";
+  case InferLevel::kStrict:
+    return "Strict";
+  default:
+    return "Unknown";
+  }
+}
+
 struct LowerArgs {
   Target target;
   Range thread_bounds;

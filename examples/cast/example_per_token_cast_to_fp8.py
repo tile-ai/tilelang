@@ -25,12 +25,6 @@ def per_token_cast_to_fp8(M, N, blk_m):
             y_q_local = T.alloc_fragment((blk_m, group_size), dtype)
             y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
 
-            T.annotate_layout(
-                {
-                    y_local: T.Fragment(y_local.shape, forward_thread_fn=lambda i, j: (i // (blk_m // 4)) * 32 + j % 32),
-                }
-            )
-
             T.copy(X[row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size], y_local)
             T.reduce_absmax(y_local, y_amax_local, dim=1)
             for i in T.Parallel(blk_m):
