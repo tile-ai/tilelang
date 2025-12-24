@@ -112,11 +112,11 @@ class KernelCache:
         func: PrimFunc = None,
         out_idx: list[int] = None,
         *args,
-        target: str | Target | None = None,
+        target: str | Target,
         target_host: str | Target | None = None,
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
-        verbose: bool | None = None,
-        pass_configs: dict = None,
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        verbose: bool,
+        pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,
     ) -> JITKernel:
         """
@@ -146,40 +146,13 @@ class KernelCache:
         TILELANG_VERBOSE : str
             Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
         """
-        # Apply environment variable defaults if parameters are not explicitly set
-        # This is the SINGLE source of truth for env var processing
-        if target is None:
-            target = env.get_default_target()
-        if execution_backend is None:
-            execution_backend = env.get_default_execution_backend()
-        if verbose is None:
-            verbose = env.get_default_verbose()
-
-        # Normalize target and resolve execution backend before proceeding
-        from tilelang.utils.target import determine_target as _determine_target
-        from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target
-
-        norm_target = Target(_determine_target(target)) if isinstance(target, str) else target
-        requested_backend = execution_backend
-        execution_backend = resolve_execution_backend(requested_backend, norm_target)
-        if verbose:
-            allowed_now = allowed_backends_for_target(norm_target, include_unavailable=False)
-            # Avoid duplicate logs when caller already resolved explicitly
-            if requested_backend in (None, "auto") or requested_backend != execution_backend:
-                self.logger.info(
-                    "Execution backend resolved -> '%s' (requested='%s', target='%s', allowed: %s)",
-                    execution_backend,
-                    requested_backend,
-                    norm_target.kind.name,
-                    ", ".join(sorted(allowed_now)),
-                )
 
         if not env.is_cache_enabled():
             return JITKernel(
                 func,
                 out_idx=out_idx,
                 execution_backend=execution_backend,
-                target=norm_target,
+                target=target,
                 target_host=target_host,
                 verbose=verbose,
                 pass_configs=pass_configs,
@@ -191,7 +164,7 @@ class KernelCache:
             out_idx=out_idx,
             execution_backend=execution_backend,
             args=args,
-            target=norm_target,
+            target=target,
             target_host=target_host,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
@@ -212,7 +185,7 @@ class KernelCache:
 
             # Then check disk cache
             kernel = self._load_kernel_from_disk(
-                key, norm_target, target_host, out_idx, execution_backend, pass_configs, compile_flags, func, verbose
+                key, target, target_host, out_idx, execution_backend, pass_configs, compile_flags, func, verbose
             )
             if kernel is not None:
                 if verbose:
@@ -228,7 +201,7 @@ class KernelCache:
             func,
             out_idx=out_idx,
             execution_backend=execution_backend,
-            target=norm_target,
+            target=target,
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs,
