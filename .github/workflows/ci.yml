@@ -370,8 +370,38 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
-            --ignore=./python/jit/test_tilelang_jit_cutedsl.py \
+            --ignore=./python/jit \
             ./python
+
+      # Run JIT suite twice to catch cache-related regressions. Postproc tests need cache disabled
+      # on the second run to avoid conflicts with previously cached artifacts.
+      - name: Run CUDA JIT tests (pass 1) with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        id: cuda-jit-tests-pass1
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+            --ignore=./python/jit/test_tilelang_jit_cutedsl.py \
+            ./python/jit
+
+      - name: Run CUDA JIT tests (pass 2, cache disabled for postproc) with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        id: cuda-jit-tests-pass2
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        env:
+          TILELANG_DISABLE_CACHE: "1"
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+            --ignore=./python/jit/test_tilelang_jit_cutedsl.py \
+            ./python/jit
 
       # CuTeDSL JIT tests require GEMM v1 (must be set before importing tilelang).
       # Run them in a dedicated step to avoid changing the default GEMM selection
