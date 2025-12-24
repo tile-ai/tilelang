@@ -18,7 +18,7 @@ def cached(
     out_idx: list[int] = None,
     *args,
     target: str | Target | None = None,
-    target_host: str | Target = None,
+    target_host: str | Target | None = None,
     execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] | None = None,
     verbose: bool | None = None,
     pass_configs: dict | None = None,

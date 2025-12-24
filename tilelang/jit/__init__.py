@@ -117,7 +117,7 @@ def par_compile(
     verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     compile_flags: list[str] | str | None = None,
-    num_workers: int = None,
+    num_workers: int | None = None,
     ignore_error: bool = False,
 ) -> list[JITKernel[_KP, _T]]:
     """
