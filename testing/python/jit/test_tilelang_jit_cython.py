@@ -10,7 +10,7 @@ def test_cython_pdl():
 
     N = 64
 
-    @tilelang.jit(execution_backend="ctypes")
+    @tilelang.jit(execution_backend="cython")
     def multi_kernels_with_pdl(N, block_size=256, dtype=T.float32):
         @T.prim_func
         def main(
