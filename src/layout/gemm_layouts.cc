@@ -768,9 +768,11 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
 
   if (mat_stride % 8 == 0) {
     if (mat_continuous % (vector_size * 8) == 0)
-      return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+      return makeFullBankSwizzleLayout(mat_stride, mat_continuous,
+                                       element_size);
     else if (mat_continuous % (vector_size * 4) == 0)
-      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous,
+                                       element_size);
     else if (mat_continuous % (vector_size * 2) == 0)
       return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
                                           element_size);
@@ -794,9 +796,11 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
 
   if (mat_stride % 8 == 0) {
     if (mat_continuous % (vector_size * 8) == 0)
-      return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+      return makeFullBankSwizzleLayout(mat_stride, mat_continuous,
+                                       element_size);
     else if (mat_continuous % (vector_size * 4) == 0)
-      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous,
+                                       element_size);
     else if (mat_continuous % (vector_size * 2) == 0)
       return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
                                           element_size);
