@@ -48,7 +48,7 @@ def test_error_no_cyclic_reference() -> None:
 
     try:
         # We should create a class as a probe to detect gc activity
-        # beacuse weakref doesn't support list, dict or other trivial types
+        # because weakref doesn't support list, dict or other trivial types
         class SampleObject: ...
 
         # trigger a C++ side KeyError by accessing a non-existent key
