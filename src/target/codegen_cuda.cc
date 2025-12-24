@@ -995,7 +995,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       };
 
   // Handle conversion from float16 to float32
-  if (from_ty.is_float16() && target_ty.is_float()) {
+  if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32) {
     // Use __half22float2 for vectorized conversion (half2 -> float2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__half22float2", "half2", "float2");
@@ -1004,7 +1004,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float32 to float16
-  if (from_ty.is_float() && target_ty.is_float16()) {
+  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_float16()) {
     // Use __float22half2_rn for vectorized conversion (float2 -> half2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__float22half2_rn", "float2", "half2");
@@ -1013,7 +1013,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from bfloat16 to float32
-  if (from_ty.is_bfloat16() && target_ty.is_float()) {
+  if (from_ty.is_bfloat16() && target_ty.is_float() && target_ty.bits() == 32) {
     // Use __bfloat1622float2 for vectorized conversion (bfloat162 -> float2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__bfloat1622float2", "__nv_bfloat162", "float2", "",
@@ -1023,7 +1023,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float32 to bfloat16
-  if (from_ty.is_float() && target_ty.is_bfloat16()) {
+  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_bfloat16()) {
     // Use __float22bfloat162_rn for vectorized conversion (float2 -> bfloat162)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__float22bfloat162_rn", "float2", "__nv_bfloat162",
@@ -1033,7 +1033,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float32 to float8 (E4M3/E5M2)
-  if (from_ty.is_float() && tl::IsCudaVectorizableFP8(target_ty)) {
+  if (from_ty.is_float() && from_ty.bits() == 32 &&
+      tl::IsCudaVectorizableFP8(target_ty)) {
     bool target_type_is_e4m3 =
         target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
     std::string type_suffix = target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
@@ -1102,7 +1103,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from double to float4 (E2M1)
-  if (from_ty.is_float64() && target_ty.is_float4_e2m1fn()) {
+  if (from_ty.is_float() && from_ty.bits() == 64 &&
+      target_ty.is_float4_e2m1fn()) {
     // Use __tl_cvt_double2_to_fp4x2 for vectorized conversion (double2 ->
     // fp4x2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
@@ -1113,7 +1115,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float4 (E2M1) to double
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float64()) {
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
+      target_ty.bits() == 64) {
     // Use __tl_cvt_fp4x2_to_double2 for vectorized conversion (fp4x2 ->
     // double2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
