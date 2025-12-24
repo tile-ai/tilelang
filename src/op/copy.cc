@@ -3,7 +3,6 @@
  * \brief Define copy operator for various memory transfer strategies (Normal,
  *        Bulk/TMA, LDSM/STSM) and lowering logic for GPU code generation.
  *
- * This module is part of TVM TensorIR's Tensor Layout (TL) operations,
  * implementing memory copy operations that can target CPUs or GPUs with
  * optimization for different instructions like bulk copy, matrix load/store,
  * and Hopper's new TMA (Tensor Memory Accelerator).
@@ -31,11 +30,7 @@ namespace tl {
 
 using namespace tir;
 
-/*!
- * \brief Helper to map TVM's DataType to CUDA's CUtensorMapDataType enum value.
- * This function converts TVM data types to CUDA tensor map data types for TMA
- * operations.
- */
+// Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 static int to_CUtensorMapDataType(DataType dtype) {
   CUtensorMapDataType tp;
   if (dtype.is_float()) {
@@ -99,35 +94,15 @@ static int to_CUtensorMapDataType(DataType dtype) {
   return static_cast<int>(tp);
 }
 
-/*!
- * \brief Utility function to reverse an array.
- * This is commonly used to convert between row-major and column-major layouts.
- */
+// Reverses an array (used for row-major/column-major layout conversion).
 template <typename T> static Array<T> ReverseArray(Array<T> array) {
   return Array<T>{array.rbegin(), array.rend()};
 }
 
-/*!
- * \brief Construct a Copy operator node from call arguments and a buffer map.
- *
- * This constructor parses the first two entries of `args` as regions
- * (BufferLoad/BufferRegion), extracts their Buffers and Ranges, and stores
- * them on the newly created CopyNode. It also
- * reads optional arguments:
- * - args[2] (IntImm): coalesced width (stored only if > 0),
- * - args[3] (Bool): disable TMA lowering flag,
- * - args[4] (IntImm): eviction policy.
- *
- * Preconditions:
- * - `args` must contain at least two region-compatible PrimExpr entries
- *   (BufferLoad/BufferRegion); ICHECK will fail otherwise.
- *
- * @param args Array of PrimExpr where:
- *   - args[0] is the source Region call,
- *   - args[1] is the destination Region call,
- *   - optional args[2..4] are coalesced width, disable_tma, and eviction
- * policy.
- */
+// Constructs a Copy operator node from call arguments.
+// args[0]: source region, args[1]: destination region
+// Optional: args[2] coalesced_width, args[3] disable_tma, args[4]
+// eviction_policy
 Copy::Copy(Array<PrimExpr> args) {
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   Array<Range> rgs[2];
@@ -154,16 +129,7 @@ Copy::Copy(Array<PrimExpr> args) {
   data_ = std::move(node);
 }
 
-/**
- * @brief Create a shallow clone of this CopyNode as a TileOperator.
- *
- * Produces a new CopyNode object copy-constructed from this node. If a parallel
- * sub-operation (par_op_) is present, the sub-operation is cloned as well and
- * attached to the new node. The returned value is a TileOperator wrapper
- * around the newly created node.
- *
- * @return TileOperator A TileOperator owning the cloned CopyNode.
- */
+// Creates a shallow clone of this CopyNode.
 TileOperator CopyNode::Clone() const {
   auto op = tvm::ffi::make_object<CopyNode>(*this);
   if (par_op_.defined()) {
@@ -172,12 +138,7 @@ TileOperator CopyNode::Clone() const {
   return Copy(op);
 }
 
-/*!
- * \brief Create iterator variables for the copy operation.
- * This function creates iteration variables for dimensions that have extent
- * > 1. \return Array of IterVar representing the iterator variables for the
- * copy operation.
- */
+// Creates iterator variables for dimensions with extent > 1.
 Array<IterVar> CopyNode::MakeIterVars() const {
   // Choose the range set from the lowest-level memory scope between src and
   // dst. Scope levels: global < shared/shared.dyn/shared.tmem < local.fragment
@@ -272,15 +233,8 @@ Array<IterVar> CopyNode::MakeIterVars() const {
   return loop_vars;
 }
 
-/*!
- * \brief Create s for the copy operation.
- * This function generates the actual index expressions for accessing source or
- * destination buffers. For dimensions with extent=1, it uses the range minimum;
- * for others, it adds the iteration variable. \param ivs Array of IterVar
- * returned by MakeIterVars(). \param src_dst 0 for src_indices, 1 for
- * dst_indices. \return Array of PrimExpr representing the indices for the copy
- * operation.
- */
+// Generates index expressions for accessing src (src_dst=0) or dst (src_dst=1)
+// buffers.
 Array<PrimExpr> CopyNode::MakeIndices(const Array<IterVar> &ivs,
                                       int src_dst) const {
   Array<PrimExpr> indices;
@@ -300,28 +254,8 @@ Array<PrimExpr> CopyNode::MakeIndices(const Array<IterVar> &ivs,
   return indices;
 }
 
-/**
- * @brief Build a boundary predicate that guards memory accesses for the copy.
- *
- * Constructs a conjunction of per-dimension bounds checks (e.g. `min + iv <
- * extent` and `min + iv >= 0`) for every dynamic dimension involved in the
- * copy. Uses the provided arithmetic analyzer to elide checks that can be
- * proven statically.
- *
- * The function ICHECKs that the supplied `extents` align with the operator's
- * recorded ranges for the selected side (source when `src_dst == 0`,
- * destination when `src_dst == 1`).
- *
- * @param ivs IterVars corresponding to the varying dimensions of the copy. Each
- *   IterVar maps to a non-unit extent dimension in the stored ranges.
- * @param extents Extents of the tensor being accessed (must match the number of
- *   ranges); used as the upper bounds for generated checks.
- * @param src_dst Selects which side's ranges to use: `0` for source, `1` for
- *   destination.
- * @return PrimExpr A conjunction of necessary bounds checks, or an empty
- * `PrimExpr` (null) if all checks are provably true and no predicate is
- * required.
- */
+// Builds a boundary predicate for memory accesses.
+// Returns a conjunction of bounds checks, or empty PrimExpr if all checks pass.
 PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
                                  const Array<IterVar> &ivs,
                                  Array<PrimExpr> extents, int src_dst) const {
@@ -353,26 +287,7 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
   }
 }
 
-/**
- * @brief Construct a SIMT-style nested loop that implements the copy.
- *
- * Builds a loop nest that performs element-wise loads from the source buffer
- * and stores into the destination buffer. For a scalar copy (no varying
- * iteration dimensions) this returns a single serial loop executing one
- * store. For multi-dimensional copies it:
- * - creates data-parallel loops (Parallel For) for each varying dimension,
- * - binds the resulting iteration variables to the provided arithmetic
- *   analyzer for simplification,
- * - computes source and destination index expressions,
- * - applies per-buffer boundary predicates (if needed) to mask out-of-range
- *   accesses,
- * - inserts a cast when src and dst dtypes differ,
- * - applies an optional `coalesced_width` annotation to generated parallel
- *   loops when present.
- *
- * @param analyzer Analyzer used to simplify and bind loop variable domains.
- * @return For A nested For statement representing the generated SIMT loop nest.
- */
+// Constructs a SIMT-style nested loop that implements the copy.
 For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
@@ -418,20 +333,8 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   return Downcast<For>(body);
 }
 
-/**
- * @brief Compute a linearized shared-memory layout used for TMA transfers.
- *
- * Creates a Layout that maps an N-D shared tensor into a 1-D-like ordering
- * suitable for TMA by blocking each dimension into 256-element tiles and
- * splitting each original index into a quotient and remainder. Effectively
- * transforms each index i_k into two coordinates: floor(i_k / 256) and
- * i_k % 256, producing an ordering equivalent to concatenating all quotients
- * followed by all remainders.
- *
- * @param shared_tensor The shared-memory buffer whose shape defines the input
- *        dimensions for the layout inference.
- * @return Layout A Layout describing the linearized ordering for the TMA copy.
- */
+// Computes a linearized shared-memory layout for TMA transfers.
+// Maps [i, j] -> [i // 256, j // 256, i % 256, j % 256]
 Layout CopyNode::ComputeLinearLayout(const Buffer &shared_tensor) const {
   Array<PrimExpr> input_size = shared_tensor->shape;
   Array<PrimExpr> forward_vars;
@@ -449,28 +352,8 @@ Layout CopyNode::ComputeLinearLayout(const Buffer &shared_tensor) const {
   return Layout(input_size, forward_index);
 }
 
-/**
- * @brief Infer memory layouts for this Copy operation.
- *
- * Determines an appropriate LayoutMap for the copy based on the target and
- * enabled lowering paths. For TMA-capable targets when the chosen copy
- * instruction is BulkLoad or BulkStore, this may produce a linearized shared
- * memory layout suitable for TMA transfers (only when inference is invoked at
- * InferLevel::kFree and no layout for the shared buffer is already annotated).
- * For other cases (including LDSM/STSM and the normal copy path), layout
- * inference is delegated to the SIMT parallel operation produced by
- * MakeSIMTLoop().
- *
- * This method may read PassContext configuration (kDisableTMALower) and may
- * lazily construct and cache the parallel operation in par_op_ as a side
- * effect.
- *
- * @param T LayoutInferArgs containing target and the current layout map.
- * @param level The inference level controlling how aggressive/layouts may be
- *              proposed.
- * @return LayoutMap mapping buffers to inferred layouts (may be empty if no
- *         additional layouts are suggested).
- */
+// Infers memory layouts for this Copy operation based on target and copy
+// instruction.
 LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
                                 InferLevel level) const {
   auto target = T.target;
@@ -545,18 +428,32 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     return results;
   }
 
-  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
+  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
+      copy_inst == CopyInst::kBulkLoad1D ||
+      copy_inst == CopyInst::kBulkStore1D) {
     // if can apply swizzling, we skip layout inference
     // for bulk load/store, we can directly apply the layout of normal copy
     // This must be a global/shared layout, so we can skip the parallel op
     // layout inference (parallel layout inference only annotate the loop layout
     // and the register layout).
+    Map<Buffer, Layout> result_map;
+
+    bool is_tma_1d = copy_inst == CopyInst::kBulkLoad1D ||
+                     copy_inst == CopyInst::kBulkStore1D;
     bool is_load =
         copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
-    Buffer global_tensor = is_load ? src : dst;
-    Buffer shared_tensor = is_load ? dst : src;
+    bool is_store = copy_inst == CopyInst::kBulkStore ||
+                    copy_inst == CopyInst::kBulkStore1D;
+    auto global_tensor = is_load ? src : dst;
+    auto shared_tensor = is_load ? dst : src;
+    auto shared_range = is_load ? dst_range : src_range;
 
-    Map<Buffer, Layout> result_map;
+    if (is_tma_1d && shared_range.size() == 1) {
+      // 1D TMA Store with single dimension can not be swizzled
+      // But 1D TMA can also have multiple dimensions when the last
+      // dimension is continuous.
+      return result_map;
+    }
 
     // Collect fragment buffers from indices and mark them as fully replicated
     // For Bulk Load/Store, fragment buffers used as indices should be
@@ -578,12 +475,35 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     // check shared layout is non-swizzle
     // skip layout inference if shared layout is already annotated
     if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
-      // create a new layout map for tma linear layout
-      Layout linear_layout = ComputeLinearLayout(shared_tensor);
-      result_map.Set(shared_tensor, linear_layout);
+      if (is_store) {
+        // For BulkStore, we should perform swizzle if possible.
+        // TMA Store is always 1d like, we can directly use the last two
+        // dimensions to analysis swizzling.
+        int dim = shared_tensor->shape.size();
+        const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
+        const int64_t mat_continuous =
+            *as_const_int(shared_tensor->shape[dim - 1]);
+        Layout swizzle_layout = makeGemmABLayoutHopper(
+            mat_stride, mat_continuous, mat_continuous,
+            shared_tensor->dtype.bits(), /*k_inner=*/true);
+        // If makeGemmABLayoutHopper returns a linear layout, fallback to
+        // ComputeLinearLayout which handles arbitrary tensor shapes correctly.
+        if (StructuralEqual()(swizzle_layout, makeLinearLayout(Array<PrimExpr>{
+                                                  Integer(mat_stride),
+                                                  Integer(mat_continuous)}))) {
+          result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
+        } else {
+          result_map.Set(shared_tensor, swizzle_layout);
+        }
+      } else if (level == InferLevel::kFree) {
+        // create a new layout map for tma linear layout
+        Layout linear_layout = ComputeLinearLayout(shared_tensor);
+        result_map.Set(shared_tensor, linear_layout);
+      }
     }
     return result_map;
   }
+
   // for LDSM/STSM, the layout was deduced from register layout
   // so we can directly apply the layout of normal copy
   // Use parallel op to infer the layout
@@ -594,25 +514,8 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   auto layout_map = par_op_->InferLayout(T, level);
   return layout_map;
 }
-/**
- * @brief Determine whether this CopyNode can be lowered to a Bulk Load (TMA)
- * instruction.
- *
- * The function returns true when all of the following hold:
- * - the target architecture advertises bulk-copy/TMA support;
- * - the source buffer resides in global memory;
- * - the destination buffer resides in shared memory (either "shared" or
- * "shared.dyn");
- * - the source and destination have the same element data type.
- *
- * If the source and destination dtypes differ, a warning is logged and the
- * function returns false (the caller is expected to fall back to a normal
- * copy).
- *
- * @param target The compilation target to query for bulk-copy support.
- * @return true if the copy can be implemented as a Bulk Load (TMA); false
- * otherwise.
- */
+// Checks if this copy can be lowered to a Bulk Load (TMA) instruction.
+// Requires: TMA support, global->shared scope, matching dtypes.
 bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
                              bool check_last_dim) const {
   // 1. arch must have bulk copy support
@@ -655,10 +558,14 @@ bool CopyNode::CheckBulkCopy1D(const Buffer &global_tensor,
                                const LayoutMap &layout_map,
                                arith::Analyzer *analyzer) const {
 
-  // Step 1: check shared is contiguous
+  // Step 1: check shared is contiguous (linear layout is also contiguous)
   bool shared_is_contiguous = true;
   if (layout_map.count(shared_tensor)) {
-    shared_is_contiguous = false;
+    // Check if the layout is linear
+    Layout existing =
+        layout_map.Get(shared_tensor).value().as<Layout>().value();
+    Layout linear_layout = makeLinearLayout(shared_tensor->shape);
+    shared_is_contiguous = StructuralEqual()(existing, linear_layout);
   }
   // Step 2: check global is contiguous
   bool global_is_contiguous = true;
@@ -719,18 +626,8 @@ bool CopyNode::CheckBulkStore1D(Target target, const LayoutMap &layout_map,
                          shared_range, layout_map, analyzer);
 }
 
-/**
- * @brief Determine if this CopyNode can be lowered to a CUDA BulkStore (TMA
- * store).
- *
- * Checks whether the target supports bulk copy, the source buffer is in shared
- * memory (shared or shared.dyn), the destination buffer is in global memory,
- * and both buffers have the same element data type. If the data types differ,
- * a warning is logged and false is returned.
- *
- * @param target Target device/architecture to check for bulk-copy support.
- * @return true if all conditions for a BulkStore are met; false otherwise.
- */
+// Checks if this copy can be lowered to a Bulk Store (TMA) instruction.
+// Requires: TMA support, shared->global scope, matching dtypes.
 bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
                               bool check_last_dim) const {
   // 1. arch must have bulk copy support
@@ -765,82 +662,38 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
   return true;
 }
 
-/*!
- * \brief Check if the copy operation is a LDSM copy.
- * This function verifies if the copy operation can be implemented using CUDA's
- * Load Matrix (LDSM) instruction. Requirements include: target supports
- * LDMATRIX, source is shared.dyn, destination is local.fragment. \param target
- * Target device. \return True if the copy operation is a LDSM copy, false
- * otherwise.
- */
+// Checks if copy can use CUDA's Load Matrix (LDSM) instruction.
+// Requires: LDMATRIX support, shared->fragment scope.
 bool CopyNode::CheckLDSMCopy(Target target) const {
   return TargetHasLdmatrix(target) &&
          (src.scope() == "shared.dyn" || src.scope() == "shared") &&
          IsFragmentBuffer(dst);
 }
 
-/**
- * @brief Determine whether this copy can use the STMATRIX store (STSM) path.
- *
- * Returns true when the target supports STMATRIX and the source buffer is in
- * the `local.fragment` scope while the destination buffer is in shared memory
- * (`shared` or `shared.dyn`).
- *
- * @param target The compilation target to query for STMATRIX support.
- * @return true if the copy may be lowered to an STSM instruction; false
- * otherwise.
- */
+// Checks if copy can use CUDA's Store Matrix (STSM) instruction.
+// Requires: STMATRIX support, fragment->shared scope.
 bool CopyNode::CheckSTSMCopy(Target target) const {
   return TargetHasStmatrix(target) && IsFragmentBuffer(src) &&
          (dst.scope() == "shared.dyn" || dst.scope() == "shared");
 }
 
-/**
- * @brief Determine whether this copy can use tensor memory load (tcgen05.ld).
- *
- * Returns true when the target supports tensor memory and the source buffer is
- * in `shared.tmem` scope while the destination buffer is in `local.fragment`.
- *
- * @param target The compilation target to query for tensor memory support.
- * @return true if the copy may be lowered to a tcgen05.ld instruction; false
- * otherwise.
- */
+// Checks if copy can use tensor memory load (tcgen05.ld).
+// Requires: tmem support, shared.tmem->fragment scope.
 bool CopyNode::CheckTMemLoad(Target target) const {
   return TargetHasTmem(target) && src.scope() == "shared.tmem" &&
          IsFragmentBuffer(dst);
 }
 
-/**
- * @brief Determine whether this copy can use tensor memory store (tcgen05.st).
- *
- * Returns true when the target supports tensor memory and the source buffer is
- * in `local.fragment` scope while the destination buffer is in `shared.tmem`.
- *
- * @param target The compilation target to query for tensor memory support.
- * @return true if the copy may be lowered to a tcgen05.st instruction; false
- * otherwise.
- */
+// Checks if copy can use tensor memory store (tcgen05.st).
+// Requires: tmem support, fragment->shared.tmem scope.
 bool CopyNode::CheckTMemStore(Target target) const {
   return TargetHasTmem(target) && IsFragmentBuffer(src) &&
          dst.scope() == "shared.tmem";
 }
 
-/**
- * @brief Selects the most specific copy instruction supported for the given
- * target and buffers.
- *
- * Determines which specialized copy lowering to use (TMA bulk load/store, LDSM,
- * STSM, TMem load/store) based on target capabilities and the memory scopes of
- * the source/destination buffers. If TMA lowering is disabled via the flag,
- * BulkLoad/BulkStore are not selected. The selection priority is: TMemLoad,
- * TMemStore, BulkLoad1D, BulkStore1D, BulkLoad, BulkStore, LDSM, STSM, then
- * Normal (fallback).
- *
- * @param target The compilation target used to query hardware capabilities.
- * @param disable_tma_lower If true, prevents selecting TMA-based bulk
- * load/store instructions.
- * @return CopyInst The chosen copy instruction enum value.
- */
+// Selects the most specific copy instruction for the given target and buffers.
+// Priority: BulkLoad1D, BulkStore1D, BulkLoad, BulkStore, LDSM, STSM, TMemLoad,
+// TMemStore, Normal.
 CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
                                const LayoutMap &layout_map,
                                arith::Analyzer *analyzer,
@@ -874,18 +727,8 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
   }
 }
 
-/*!
- * \brief Lower the copy operation to PTX code.
- * This function converts the high-level copy operation into low-level PTX
- * instructions. It dispatches to specialized lowering functions based on the
- * determined copy instruction type:
- * - Bulk Load/Store: Uses Tensor Memory Accelerator (TMA) instructions
- * - LDSM/STSM: Uses matrix load/store instructions for tensor cores
- * - Normal: Uses standard load/store operations with loop transformations
- * \param T LowerArgs containing target and layout map.
- * \param analyzer Arithmetic analyzer for simplification.
- * \return Stmt representing the PTX code for the copy operation.
- */
+// Lowers the copy operation to PTX code by dispatching to specialized lowering
+// functions.
 Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
 
@@ -920,24 +763,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 }
 
-/**
- * @brief Lower the copy operator using the generic (non-specialized) path.
- *
- * Generates standard load/store code paths for targets that cannot or should
- * not use specialized copy instructions (TMA, LDSM/STSM). Builds a SIMT loop,
- * fuses and transforms parallel loops, infers and applies loop layouts on GPU
- * targets, partitions by thread, and applies vectorization appropriate to the
- * device (CPU or GPU). If a thread-level predicate is required, the resulting
- * body is guarded with an IfThenElse.
- *
- * @param T Lowering context including the target, thread bounds, thread var,
- *          layout map, and buffer remapping used during layout inference and
- *          loop partitioning.
- * @param analyzer Arithmetic analyzer used to simplify and reason about bounds
- *                 during loop partitioning and predicate construction.
- * @return Stmt Lowered statement representing the transformed, vectorized
- *              normal-copy loop (possibly wrapped in a predicate).
- */
+// Lowers the copy using standard load/store with loop transformations.
 Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                                arith::Analyzer *analyzer) const {
   bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;
@@ -984,30 +810,8 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
   return vectorized_thread_loop;
 }
 
-/**
- * @brief Lower a Copy operator to LDSM/STSM (warp-level 8x8 matrix)
- * instructions.
- *
- * Lowers a CopyNode into PTX matrix load/store (LDSM/STSM) sequences when the
- * access/layouts meet the hardware constraints required by warp-level 8x8
- * fragment transfers (thread-mapped 8x8 fragment layout, 16-byte contiguous
- * shared memory accesses, full-range local tiles, matching dtypes for loads,
- * and no access predicates). If these conditions are not met the function
- * falls back to lowering via LowerNormalCopy().
- *
- * The routine validates layout/thread-mapping compatibility (including support
- * for transposed fragment layouts), determines vectorization factor (4/2/1)
- * based on extent alignment, computes shared/local addresses, emits the
- * appropriate ptx_ldmatrix/ptx_stmatrix call(s), and wraps them in a small
- * loop that may be unrolled and adjusted for thread-bounds offsets.
- *
- * @param T Lowering context (target, layout/ buffer remaps, thread/ bounds).
- * @param analyzer Arithmetic analyzer used to simplify and prove bounds.
- * @param copy_inst Must be either CopyInst::kLDSM or CopyInst::kSTSM to select
- *                  matrix-load vs matrix-store lowering.
- * @return Stmt A statement implementing the LDSM/STSM lowering, or the result
- *              of LowerNormalCopy(...) when constraints require fallback.
- */
+// Lowers copy to LDSM/STSM (warp-level 8x8 matrix) instructions.
+// Falls back to LowerNormalCopy if hardware constraints are not met.
 Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
                              CopyInst copy_inst) const {
   ICHECK(copy_inst == CopyInst::kLDSM || copy_inst == CopyInst::kSTSM)
@@ -1190,30 +994,8 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   return for_node;
 }
 
-/**
- * @brief Lower tensor memory copy operations (tcgen05.ld/st/cp).
- *
- * Handles copy operations involving shared.tmem buffers (tensor memory on
- * SM100/Blackwell). Supports three types of tensor memory copies:
- * - tcgen05.ld: tensor memory -> register (local.fragment)
- * - tcgen05.st: register (local.fragment) -> tensor memory
- * - tcgen05.cp: shared memory -> tensor memory
- *
- * The function validates buffer scopes, extracts 2D loop structure, performs
- * layout compatibility checks, selects an appropriate TCGEN05 instruction
- * variant based on data width and thread count, and emits the corresponding PTX
- * intrinsic call.
- *
- * Currently only tcgen05.ld is fully supported; st/cp will trigger an ICHECK
- * failure.
- *
- * @param T Lowering context (target, thread bounds, layout maps, buffer
- * remaps).
- * @param analyzer Arithmetic analyzer for proving bounds and simplifying
- * expressions.
- * @return Stmt The lowered tensor memory copy statement, or an empty Stmt if
- * this copy does not involve tensor memory.
- */
+// Lowers tensor memory copy operations (tcgen05.ld/st/cp).
+// Currently only tcgen05.ld is fully supported.
 Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
                              arith::Analyzer *analyzer) const {
   if (src.scope() != "shared.tmem" && dst.scope() != "shared.tmem") {
@@ -1238,8 +1020,9 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   } else if (src.scope() == "shared.dyn" && dst.scope() == "shared.tmem") {
     is_cp = true;
   } else {
-    ICHECK(0) << "Unsupported tensor memory copy: " << "src scope = "
-              << src.scope() << ", dst scope = " << dst.scope();
+    LOG(FATAL) << "Unsupported tensor memory copy: "
+               << "src scope = " << src.scope()
+               << ", dst scope = " << dst.scope();
   }
   // Currently tcgen05.cp is not supported
   // TODO (mzw) Support tcgen05.cp
@@ -1396,32 +1179,8 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   return body;
 }
 
-/**
- * @brief Lower a Copy operator to a bulk TMA (Tensor Memory Accelerator)
- * transfer.
- *
- * Lowers the copy to an optimized TMA load or store when the target and buffer
- * layouts permit. Constructs a TMADesc, detects shared-memory
- * swizzle/interleave patterns, encodes global shape/stride/SMEM parameters, and
- * emits either a 1D TMA transfer (when global/shared are contiguous and element
- * counts match, currently only for loads) or a full multi-dimensional TMA call.
- * The emitted statement is guarded so only the thread with min thread id
- * executes the TMA.
- *
- * If preconditions are not satisfied (unsupported swizzle, stride/size limits,
- * mismatched element counts, OOB risks, or other hardware constraints), this
- * function falls back to LowerNormalCopy.
- *
- * @param T LowerArgs containing target information, thread/bounds variables,
- *          and layout/ buffer remap information used for descriptor
- * construction.
- * @param analyzer Analyzer used to prove shapes/contiguity/equality
- * constraints.
- * @param copy_inst Indicates whether to emit a BulkLoad (TMA load) or BulkStore
- *                  (TMA store). Must be CopyInst::kBulkLoad or kBulkStore.
- * @return Stmt A TIR statement performing the bulk TMA copy (or the result of
- *         LowerNormalCopy when falling back).
- */
+// Lowers copy to a bulk TMA (Tensor Memory Accelerator) transfer.
+// Falls back to LowerNormalCopy if preconditions are not satisfied.
 Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
                              CopyInst copy_inst) const {
   ICHECK(copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore)
@@ -1788,13 +1547,8 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
   return tma_copy;
 }
-/*!
- * \brief Encode the TMA descriptor into an array of PrimExpr.
- * This function serializes the TMA descriptor fields into a format suitable for
- * passing to the create_tma_descriptor() builtin function. The encoding follows
- * the expected argument order for the TMA descriptor creation.
- * \return Array of PrimExpr representing the encoded TMA descriptor.
- */
+// Encodes the TMA descriptor into an array of PrimExpr for
+// create_tma_descriptor().
 Array<PrimExpr> TMADesc::EncodeCallArgs() const {
   Array<PrimExpr> args;
   args.reserve(rank * 4 + 7);
@@ -1818,28 +1572,9 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
   return args;
 }
 
-/**
- * @brief Construct a Conv2DIm2ColOp node.
- *
- * Initializes a Conv2DIm2ColOpNode from raw TL-call arguments and a buffer map.
- * The constructor extracts source and destination Buffers from vmap and reads
- * convolution parameters encoded in args:
- * - args[0]: source tensor access pointer
- * - args[1]: destination tensor access pointer
- * - args[2]: nhw_step (PrimExpr)
- * - args[3]: c_step (PrimExpr)
- * - args[4]: kernel (IntImm)
- * - args[5]: stride (IntImm)
- * - args[6]: dilation (IntImm)
- * - args[7]: padding (IntImm)
- * - args[8]: eviction_policy (IntImm)
- *
- * The created node stores these values (src, dst, nhw_step, c_step, kernel,
- * stride, dilation, padding, eviction_policy) for later lowering to TMA-based
- * GPU intrinsics.
- *
- * @param args Array of PrimExpr TL-call arguments (see list above).
- */
+// Constructs a Conv2DIm2ColOp node from call arguments.
+// args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding,
+// eviction_policy
 Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args) {
   ObjectPtr<Conv2DIm2ColOpNode> node =
       tvm::ffi::make_object<Conv2DIm2ColOpNode>();
@@ -1857,50 +1592,13 @@ Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args) {
   data_ = std::move(node);
 }
 
-/**
- * @brief Create a shallow copy of this Conv2DIm2ColOpNode wrapped as a
- * TileOperator.
- *
- * Produces a new Conv2DIm2ColOp that owns a freshly allocated
- * Conv2DIm2ColOpNode initialized from this node (member-wise copy). This is
- * used to duplicate the operator node for compiler passes that require
- * independent operator instances.
- *
- * @return TileOperator A TileOperator containing the cloned Conv2DIm2ColOpNode.
- */
+// Creates a shallow copy of this Conv2DIm2ColOpNode.
 TileOperator Conv2DIm2ColOpNode::Clone() const {
   auto op = tvm::ffi::make_object<Conv2DIm2ColOpNode>(*this);
   return Conv2DIm2ColOp(op);
 }
 
-/**
- * @brief Lower Conv2D im2col into a TMA-backed PTX sequence for Hopper.
- *
- * Constructs a TMA im2col descriptor from the Conv2DIm2ColOp parameters
- * (kernel, stride, dilation, padding, channel/image tiling, dtype and shapes),
- * emits a call to create the im2col descriptor, and returns a statement that
- * invokes the corresponding tma_load_im2col builtin guarded to a single
- * thread. The lowering assumes the destination resides in shared memory and the
- * source in global memory and uses the provided layout information (when
- * available) to select the appropriate shared-memory swizzle.
- *
- * Preconditions (checked with ICHECK):
- * - Target is Hopper.
- * - src.scope() == "global" and dst.scope() is "shared.dyn" or "shared".
- * - src->shape has rank 4 and dst->shape has rank 2.
- * - src and dst have the same dtype.
- * - When a shared layout is supplied it must match a recognized TMA swizzle
- *   pattern (32B/64B/128B) or an ICHECK will fail.
- *
- * @param T Lowering context (target, layout map, thread_var, thread_bounds,
- *          buffer remapping, etc.). Used to fetch target/layout and to emit a
- *          thread-guarded TMA call.
- * @param analyzer Arithmetic analyzer used to prove divisibility and simplify
- *                 expressions required by descriptor construction.
- * @return Stmt A TIR statement that performs a tma_load_im2col call wrapped in
- *              a thread-min guard (IfThenElse). The returned statement is ready
- *              to be inserted into the lowered TIR.
- */
+// Lowers Conv2D im2col into a TMA-backed PTX sequence for Hopper.
 Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
                                arith::Analyzer *analyzer) const {
   ICHECK(TargetIsHopper(T.target));
@@ -1966,7 +1664,7 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
                                                     dst_->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
-      ICHECK(0) << "Cannot detect TMA layout.";
+      LOG(FATAL) << "Cannot detect TMA layout.";
     }
   }
 
@@ -2025,14 +1723,7 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   return tma_copy;
 }
 
-/*!
- * \brief Encode the TMA im2col descriptor into an array of PrimExpr.
- * This function serializes the TMA im2col descriptor fields for passing to the
- * create_tma_im2col_descriptor() builtin function. It includes
- * convolution-specific parameters like kernel size, stride, padding, and
- * dilation in addition to standard tensor descriptor fields. \return Array of
- * PrimExpr representing the encoded TMA im2col descriptor.
- */
+// Encodes the TMA im2col descriptor for create_tma_im2col_descriptor().
 Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
   Array<PrimExpr> args;
   args.reserve(rank * 5 + 5);
@@ -2094,16 +1785,7 @@ TIR_REGISTER_TL_TILE_OP(Copy, copy)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-/**
- * @brief Layout inference hook for Conv2DIm2ColOpNode.
- *
- * This operator does not provide any layout inference; the function
- * intentionally returns an empty LayoutMap to indicate no layout suggestions.
- *
- * @param T Context for layout inference (ignored).
- * @param level Inference level (ignored).
- * @return LayoutMap An empty map.
- */
+// Layout inference hook - returns empty map (no layout suggestions).
 LayoutMap Conv2DIm2ColOpNode::InferLayout(const LayoutInferArgs &T,
                                           InferLevel level) const {
   return {};

@@ -94,13 +94,6 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
             G_shared = T.alloc_shared((block_S,), dtype=accum_dtype, scope="shared")
             G_diff_local = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
 
-            T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                }
-            )
-
             T.fill(A_fragment, 0)
             T.disable_warp_group_reg_alloc()
             for i_s in T.Parallel(block_S):

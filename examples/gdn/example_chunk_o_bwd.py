@@ -213,11 +213,6 @@ def tilelang_chunk_o_bwd_dqkwg(
 
             T.annotate_layout(
                 {
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
-                    h_shared: tilelang.layout.make_swizzled_layout(h_shared),
-                    dh_shared: tilelang.layout.make_swizzled_layout(dh_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
                     q_shared: tilelang.layout.make_swizzled_layout(q_shared),
                     k_shared: tilelang.layout.make_swizzled_layout(k_shared),
                 }

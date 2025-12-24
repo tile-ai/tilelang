@@ -32,8 +32,8 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
         part_shape = [batch, heads, num_split, dim_v]
         valid_block_H = min(block_H, kv_group_num)
 
-        @T.macro
-        def flash_attn_split(
+        @T.prim_func
+        def main(
             Q: T.Tensor(shape_q, dtype),
             K: T.Tensor(shape_k, dtype),
             V: T.Tensor(shape_v, dtype),
@@ -41,12 +41,12 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
             cache_seqlens: T.Tensor([batch], T.int32),
             glse: T.Tensor([batch, heads, num_split], accum_dtype),
             Output_partial: T.Tensor(part_shape, accum_dtype),
+            Output: T.Tensor(shape_o, dtype),
         ):
             with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_H, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim_v], dtype)
-                # O_shared = T.alloc_shared([valid_block_H, dim_v], dtype)
                 acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
                 acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
                 acc_o = T.alloc_fragment([block_H, dim_v], accum_dtype)
@@ -112,12 +112,6 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                     if i < valid_block_H:
                         Output_partial[bid, hid * valid_block_H + i, sid, j] = acc_o[i, j]
 
-        @T.macro
-        def combine(
-            glse: T.Tensor([batch, heads, num_split], accum_dtype),
-            Output_partial: T.Tensor(part_shape, accum_dtype),
-            Output: T.Tensor(shape_o, dtype),
-        ):
             with T.Kernel(heads, batch, threads=128) as (by, bz):
                 po_local = T.alloc_fragment([dim_v], accum_dtype)
                 o_accum_local = T.alloc_fragment([dim_v], accum_dtype)
@@ -144,20 +138,6 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                         o_accum_local[i] += po_local[i] * scale_local
                 for i in T.Parallel(dim_v):
                     Output[bz, by, i] = o_accum_local[i]
-
-        @T.prim_func
-        def main(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            block_mask: T.Tensor(shape_mask, T.bool),
-            cache_seqlens: T.Tensor([batch], T.int32),
-            glse: T.Tensor([batch, heads, num_split], accum_dtype),
-            Output_partial: T.Tensor(part_shape, accum_dtype),
-            Output: T.Tensor(shape_o, dtype),
-        ):
-            flash_attn_split(Q, K, V, block_mask, cache_seqlens, glse, Output_partial)
-            combine(glse, Output_partial, Output)
 
         return main
 

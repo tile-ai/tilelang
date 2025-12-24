@@ -13,10 +13,8 @@ def get_bwd_configs():
     sm_version = sm_major * 10 + sm_minor
     if sm_version == 80:
         return 64, 32, 1, 128
-    elif sm_version == 90:
-        return 128, 32, 2, 256
     else:
-        raise ValueError(f"Unsupported SM version: {sm_version}")
+        return 128, 32, 2, 256
 
 
 @tilelang.jit(
@@ -74,7 +72,6 @@ def flashattn_fwd(
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([heads], dtype)
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -252,9 +249,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
             T.copy(K[bz, bx // groups, by * block_M : (by + 1) * block_M, :], K_shared)
