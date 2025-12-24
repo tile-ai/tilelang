@@ -7,7 +7,6 @@ import tilelang
 import tilelang.language as T
 
 torch.manual_seed(0)
-tilelang.disable_cache()
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -197,7 +196,6 @@ def get_configs():
     return configs
 
 
-@tilelang.autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(out_idx=[-2, -1])
 def flashattn(
     batch, heads, k_heads, max_seqlen_kv, total_seqlen_k, dim, has_sink, block_N=128, block_H=64, num_split=1, num_stages=1, threads=128
