@@ -1025,7 +1025,8 @@ private:
     Stmt pipeline_body_root{nullptr};
     bool pipeline_body_from_block = false;
     Array<Buffer> pipeline_allocs;
-    Array<Buffer> block_local_allocs; // buffers allocated in the pipeline block itself
+    Array<Buffer>
+        block_local_allocs; // buffers allocated in the pipeline block itself
     if (const auto *realize = for_node->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;
       for (const auto &buffer : block->alloc_buffers) {
@@ -1149,8 +1150,7 @@ private:
       const auto *nested_block_realize = child.as<BlockRealizeNode>();
       if (nested_block_realize && is_one(nested_block_realize->predicate) &&
           nested_block_realize->block->body->IsInstance<SeqStmtNode>()) {
-        for (const auto &buffer :
-             nested_block_realize->block->alloc_buffers) {
+        for (const auto &buffer : nested_block_realize->block->alloc_buffers) {
           local_allocs_set.insert(buffer);
         }
       }
