@@ -24,13 +24,11 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
-from tilelang import env
 from tilelang.language.v2 import PrimFunc, PrimFuncCreater, prim_func
 from tilelang.language.v2.annot import Annot
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
-from tilelang.utils.target import determine_target
 from tilelang.cache import cached
 from os import path, makedirs
 from logging import getLogger
@@ -91,38 +89,12 @@ def compile(
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     """
 
-    # Apply environment variable defaults if parameters are not explicitly set
-    if target is None:
-        target = env.get_default_target()
-    if execution_backend is None:
-        execution_backend = env.get_default_execution_backend()
-    if verbose is None:
-        verbose = env.get_default_verbose()
-
     assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
 
     if hasattr(func, "out_idx_override"):
         if func.out_idx_override is not None and out_idx is not None:
             raise ValueError("Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors")
         out_idx = func.out_idx_override or out_idx
-
-    # This path is not a performance critical path, so we can afford to convert the target.
-    target = Target(determine_target(target))
-
-    # Resolve execution backend (handles aliases, auto, validation per target)
-    requested_backend = execution_backend
-    from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target
-
-    execution_backend = resolve_execution_backend(requested_backend, target)
-    if verbose:
-        allowed_now = allowed_backends_for_target(target, include_unavailable=False)
-        logger.info(
-            "Execution backend resolved -> '%s' (requested='%s', target='%s', allowed: %s)",
-            execution_backend,
-            requested_backend,
-            target.kind.name,
-            ", ".join(sorted(allowed_now)),
-        )
 
     return cached(
         func=func,
@@ -181,14 +153,6 @@ def par_compile(
     TILELANG_VERBOSE : str
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     """
-
-    # Apply environment variable defaults if parameters are not explicitly set
-    if target is None:
-        target = env.get_default_target()
-    if execution_backend is None:
-        execution_backend = env.get_default_execution_backend()
-    if verbose is None:
-        verbose = env.get_default_verbose()
 
     with concurrent.futures.ThreadPoolExecutor(num_workers, "tl-par-comp") as executor:
         futures = []
@@ -298,10 +262,10 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     """
 
     out_idx: list[int] | int | None
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
-    target: str | Target
-    target_host: str | Target
-    verbose: bool
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None
+    target: str | Target | None
+    target_host: str | Target | None
+    verbose: bool | None
     pass_configs: dict[str, Any] | None
     debug_root_path: str | None
     compile_flags: list[str] | str | None
@@ -454,7 +418,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
         tune_params = kwargs.pop("__tune_params", {})
 
-        kernel = self._kernel_cache.get(key, None)
+        kernel = self._kernel_cache.get(key)
         if kernel is None:
             kernel = self.compile(*args, **kwargs, **tune_params)
             self._kernel_cache[key] = kernel
@@ -543,14 +507,6 @@ def jit(  # This is the new public interface
         instance that can then be applied to a function.
     """
 
-    # Apply environment variable defaults if parameters are not explicitly set
-    if target is None:
-        target = env.get_default_target()
-    if execution_backend is None:
-        execution_backend = env.get_default_execution_backend()
-    if verbose is None:
-        verbose = env.get_default_verbose()
-
     def decorator(func: Callable[_P, _T]) -> JITImpl[_P, _T]:
         if isinstance(func, (PrimFunc, PrimFuncCreater)):
             orig_func = func.orig_func
@@ -612,14 +568,6 @@ def lazy_jit(
     Supports environment variable defaults for target, execution_backend, and verbose.
     See `jit` documentation for parameter details and environment variables.
     """
-
-    # Apply environment variable defaults
-    if target is None:
-        target = env.get_default_target()
-    if execution_backend is None:
-        execution_backend = env.get_default_execution_backend()
-    if verbose is None:
-        verbose = env.get_default_verbose()
 
     compile_args = dict(
         out_idx=None,
