@@ -99,13 +99,6 @@ def convolution(
             kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)
             out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
 
-            if is_hopper:
-                T.annotate_layout(
-                    {
-                        out_shared: tilelang.layout.make_swizzled_layout(out_shared),
-                    }
-                )
-
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
                 if is_hopper:

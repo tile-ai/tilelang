@@ -31,20 +31,14 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
             y_s_local = T.alloc_fragment((blk_m,), accum_dtype)
             y_q_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
             y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
-            row_offset = T.alloc_fragment((1,), T.int32)
+            row_offset = T.alloc_var(dtype=T.int32)
 
-            T.annotate_layout(
-                {
-                    y_local: T.Fragment(y_local.shape, forward_thread_fn=lambda i, j: (i // (blk_m // 4)) * 32 + j % 32),
-                }
-            )
-
-            row_offset[0] = 0
+            row_offset = 0
             for i in T.serial(bg):
-                row_offset[0] += batch_sizes[i]
+                row_offset += batch_sizes[i]
 
             T.copy(
-                X[row_offset[0] + row * blk_m : row_offset[0] + (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size],
+                X[row_offset + row * blk_m : row_offset + (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size],
                 y_local,
             )
             T.reduce_absmax(y_local, y_amax_local, dim=1)

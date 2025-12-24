@@ -35,16 +35,16 @@ def allowed_backends_for_target(target: Target, *, include_unavailable: bool = T
     if is_cutedsl_target(target):
         return ["cutedsl"]
     elif kind == "cuda":
-        allowed = ["tvm_ffi", "nvrtc", "cython", "ctypes"]
+        allowed = ["tvm_ffi", "nvrtc", "cython"]
     elif kind == "hip":
-        allowed = ["tvm_ffi", "cython", "ctypes"]
+        allowed = ["tvm_ffi", "cython"]
     elif kind == "metal":
         allowed = ["torch"]
     elif kind == "c":  # CPU C backend
-        allowed = ["cython", "ctypes", "tvm_ffi"]
+        allowed = ["cython", "tvm_ffi"]
     else:
         # Fallback: prefer portable hosts
-        allowed = ["cython", "ctypes", "tvm_ffi"]
+        allowed = ["cython", "tvm_ffi"]
 
     if not include_unavailable:
         # Drop NVRTC if not importable

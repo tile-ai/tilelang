@@ -48,7 +48,7 @@ class KernelCache:
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
-    execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi"
+    execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi"
 
     def __new__(cls):
         """
@@ -77,7 +77,7 @@ class KernelCache:
         self,
         func: Callable,
         out_idx: list[int],
-        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         args=None,
         target: str | Target = "auto",
         target_host: str | Target = None,
@@ -123,7 +123,7 @@ class KernelCache:
         *args,
         target: str | Target = "auto",
         target_host: str | Target = None,
-        execution_backend: Literal["auto", "tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"] = "auto",
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "auto",
         verbose: bool = False,
         pass_configs: dict = None,
         compile_flags: list[str] | str | None = None,
@@ -389,7 +389,7 @@ class KernelCache:
         target: str | Target = "auto",
         target_host: str | Target | None = None,
         out_idx: list[int] | None = None,
-        execution_backend: Literal["tvm_ffi", "ctypes", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,
         func: Callable | None = None,

@@ -115,7 +115,6 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
         # combine
         with T.Kernel(T.ceildiv(seqlen_q, block_M), heads, batch, threads=128) as (bx, by, bz):
             po_local = T.alloc_fragment([block_M, dim], dtype)
-            po_shared = T.alloc_shared([block_M, dim], dtype)
             o_accum_local = T.alloc_fragment([block_M, dim], accum_dtype)
             o_shared = T.alloc_shared([block_M, dim], dtype)
             lse_local = T.alloc_fragment([num_split, block_M], dtype)
@@ -123,13 +122,6 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             lse_logsum_local = T.alloc_fragment([block_M], accum_dtype)
             lse_max_local = T.alloc_fragment([block_M], accum_dtype)
             scale_local = T.alloc_fragment([block_M], accum_dtype)
-
-            T.annotate_layout(
-                {
-                    o_shared: tilelang.layout.make_swizzled_layout(o_shared),
-                    po_shared: tilelang.layout.make_swizzled_layout(po_shared),
-                }
-            )
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
@@ -150,8 +142,7 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             for i in T.Parallel(block_M):
                 lse_logsum_local[i] = T.log2(lse_logsum_local[i]) + lse_max_local[i]
             for k in T.Pipelined(num_split, num_stages=2):
-                T.copy(Output_partial[bz, bx * block_M : (bx + 1) * block_M, by, k, :], po_shared, disable_tma=True)
-                T.copy(po_shared, po_local)
+                T.copy(Output_partial[bz, bx * block_M : (bx + 1) * block_M, by, k, :], po_local)
                 for i in T.Parallel(block_M):
                     lse_local_split[i] = lse_local[k, i]
                 for i in T.Parallel(block_M):

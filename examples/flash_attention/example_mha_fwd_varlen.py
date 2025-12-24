@@ -116,12 +116,6 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.annotate_layout(
-                {
-                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                }
-            )
-
             batch_idx = bz
             head_idx = by
 

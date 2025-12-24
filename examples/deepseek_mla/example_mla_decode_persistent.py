@@ -55,11 +55,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             lse_max_local = T.alloc_var(accum_dtype)
             scale_local = T.alloc_var(accum_dtype)
 
-            T.annotate_layout(
-                {
-                    S_shared: tilelang.layout.make_swizzled_layout(S_shared),
-                }
-            )
             T.use_swizzle(10)
 
             total_tiles = batch * (heads // min(block_H, kv_group_num)) * num_split

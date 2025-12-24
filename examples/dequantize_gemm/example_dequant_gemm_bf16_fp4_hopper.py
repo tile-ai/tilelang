@@ -326,12 +326,6 @@ def matmul(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
-            T.annotate_layout(
-                {
-                    C_shared: tilelang.layout.make_swizzled_layout(C_shared),
-                }
-            )
-
             T.clear(C_local)
             for k in T.Pipelined(K // block_K, num_stages=num_stages):
                 T.copy(A[by * block_M, k * block_K], A_shared)
