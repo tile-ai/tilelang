@@ -487,11 +487,23 @@ Layout makeGemmABLayoutF64_Kouter(int stride, int continuous) {
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
-// The Default Layout for Tensor Access
-Layout makeGemmLayoutLinear(int stride, int continuous) {
-  IterVar i = make_itervar("i", stride);
-  IterVar j = make_itervar("j", continuous);
-  return Layout(Array{i, j}, {i * continuous + j});
+// The Default Layout for Tensor Access (row-major linear layout)
+Layout makeLinearLayout(Array<PrimExpr> shape) {
+  int ndim = static_cast<int>(shape.size());
+  Array<IterVar> iter_vars;
+  for (int i = 0; i < ndim; i++) {
+    iter_vars.push_back(make_itervar(std::string{char('i' + i)}, shape[i]));
+  }
+  // Row-major: index = i0 * (d1 * d2 * ...) + i1 * (d2 * ...) + ... + i_{n-1}
+  PrimExpr linear_index = 0;
+  for (int i = 0; i < ndim; i++) {
+    PrimExpr stride = 1;
+    for (int j = i + 1; j < ndim; j++) {
+      stride = stride * shape[j];
+    }
+    linear_index = linear_index + iter_vars[i]->var * stride;
+  }
+  return Layout(iter_vars, {linear_index});
 }
 
 Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size) {
@@ -745,20 +757,30 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
       return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
     if (k_inner && continuity % 16 == 0) // float64 NxK
       return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
+    // fallback for float64 when stride % 8 != 0
+    if (mat_stride % 8 != 0)
+      return makeLinearLayout(
+          Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
     return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
                                         element_size);
   }
   int vector_size = 128 / element_size;
 
-  if (mat_continuous % (vector_size * 8) == 0)
-    return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
-  else if (mat_continuous % (vector_size * 4) == 0)
-    return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
-  else if (mat_continuous % (vector_size * 2) == 0)
-    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                        element_size);
-  else if (mat_continuous % vector_size == 0)
-    return makeGemmLayoutLinear(mat_stride, mat_continuous);
+  if (mat_stride % 8 == 0) {
+    if (mat_continuous % (vector_size * 8) == 0)
+      return makeFullBankSwizzleLayout(mat_stride, mat_continuous,
+                                       element_size);
+    else if (mat_continuous % (vector_size * 4) == 0)
+      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous,
+                                       element_size);
+    else if (mat_continuous % (vector_size * 2) == 0)
+      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                          element_size);
+  }
+
+  if (mat_continuous % vector_size == 0)
+    return makeLinearLayout(
+        Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
   else
     ICHECK(0) << "Unsupported layout for Hopper with stride=" << mat_stride
               << ", continuous=" << mat_continuous
@@ -771,15 +793,22 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
     ICHECK(0) << "float64 on sm100 is not supported now";
   }
   int vector_size = 128 / element_size;
-  if (mat_continuous % (vector_size * 8) == 0)
-    return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
-  else if (mat_continuous % (vector_size * 4) == 0)
-    return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
-  else if (mat_continuous % (vector_size * 2) == 0)
-    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                        element_size);
-  else if (mat_continuous % vector_size == 0)
-    return makeGemmLayoutLinear(mat_stride, mat_continuous);
+
+  if (mat_stride % 8 == 0) {
+    if (mat_continuous % (vector_size * 8) == 0)
+      return makeFullBankSwizzleLayout(mat_stride, mat_continuous,
+                                       element_size);
+    else if (mat_continuous % (vector_size * 4) == 0)
+      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous,
+                                       element_size);
+    else if (mat_continuous % (vector_size * 2) == 0)
+      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                          element_size);
+  }
+
+  if (mat_continuous % vector_size == 0)
+    return makeLinearLayout(
+        Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
   else
     ICHECK(0) << "Unsupported layout for sm100 with stride=" << mat_stride
               << ", continuous=" << mat_continuous

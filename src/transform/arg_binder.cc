@@ -333,9 +333,7 @@ void ArgBinder::BindDLTensors(
 
     // Scan buffer shape for symbolic variables
     for (size_t k = 0; k < buffer->shape.size(); ++k) {
-      if (buffer->dtype == DataType::Int(4) ||
-          buffer->dtype == DataType::UInt(4) ||
-          buffer->dtype == DataType::Int(1)) {
+      if (buffer->dtype.bits() < 8) {
         break;
       }
 
@@ -524,21 +522,40 @@ void ArgBinder::BindDLTensors(
       cond =
           cond || int8_ok || uint8_ok || kdlbool8_ok || kdlbool1_ok || bit1_ok;
     }
-    // Allow float4 to match int8 at runtime (PyTorch uses int8 as storage for
-    // FP4).
-    if (buffer->dtype.is_float4()) {
-      PrimExpr code_int = IntImm(DataType::UInt(8), DataType::kInt);
-      PrimExpr bits8 = IntImm(DataType::UInt(8), 8);
-      // For FP4, we pack 2 elements per byte, but we still use same lanes at
-      // storage level Accept int8 with same lanes as the fp4 type
-      PrimExpr fp4_lanes_ok = (v_type_lanes == expect_lanes);
-      PrimExpr int8_ok =
-          (v_type_code == code_int && v_type_bits == bits8 && fp4_lanes_ok);
-      cond = cond || int8_ok;
+    // Allow with bits < 8 to match any type with the same total bit count at
+    // runtime (PyTorch uses int8 as storage for FP4).
+    bool data_is_subtype = buffer->dtype.bits() < 8;
+    if (data_is_subtype) {
+      // Get the pre-created shape buffer for reading runtime shape
+      Buffer buf_shape = shape_buffer_map[arg_name];
+
+      // Calculate expected total bits using compile-time buffer->shape
+      PrimExpr expect_total_bits =
+          cast(DataType::UInt(64), expect_bits) *
+          cast(DataType::UInt(64), expect_lanes) *
+          cast(DataType::UInt(64),
+               buffer->shape.empty()
+                   ? make_const(DataType::UInt(64), 1)
+                   : foldl([](PrimExpr a, PrimExpr b, Span) { return a * b; },
+                           make_const(DataType::UInt(64), 1), buffer->shape));
+
+      // Calculate actual total bits using runtime shape from DLTensor
+      PrimExpr actual_total_bits = cast(DataType::UInt(64), v_type_bits) *
+                                   cast(DataType::UInt(64), v_type_lanes);
+      for (size_t k = 0; k < buffer->shape.size(); ++k) {
+        PrimExpr dim_val =
+            cast(DataType::UInt(64),
+                 BufferLoad(buf_shape,
+                            {IntImm(DataType::Int(32), static_cast<int>(k))}));
+        actual_total_bits = actual_total_bits * dim_val;
+      }
+
+      PrimExpr bits_match = (actual_total_bits == expect_total_bits);
+      BinderAddAssert(&analyzer_, bits_match,
+                      arg_name + " is a subtype, but total bits mismatch",
+                      &asserts_, is_null);
     }
-    if (!(buffer->dtype == DataType::Int(1) ||
-          buffer->dtype == DataType::Int(4) ||
-          buffer->dtype == DataType::UInt(4) || buffer->dtype.is_float4())) {
+    if (!data_is_subtype) {
       // Build FFI packed call to __tvm_error_dtype_mismatch when mismatch
       // occurs. Only issue the call when handle is non-NULL and cond is false.
       ffi::Array<PrimExpr> packed_args;
@@ -578,9 +595,7 @@ void ArgBinder::BindDLTensors(
     for (size_t k = 0; k < buffer->shape.size(); ++k) {
       // These packed-bit dtype shapes were not bound in the original
       // implementation, so we just use them as is.
-      if (buffer->dtype == DataType::Int(4) ||
-          buffer->dtype == DataType::UInt(4) ||
-          buffer->dtype == DataType::Int(1)) {
+      if (data_is_subtype) {
         break;
       }
 

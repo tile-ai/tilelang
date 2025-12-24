@@ -51,13 +51,13 @@ Figure 1: High-level overview of the TileLang compilation flow.
 
 ## Tile-based Programming Model
 
-[Figure 2](#fig-overview-gemm) provides a concise matrix multiplication (GEMM) example in ``TileLang``, 
-illustrating how developers can employ high-level constructs such as tiles, memory placement, pipelining, 
+[Figure 2](#fig-overview-gemm) provides a concise matrix multiplication (GEMM) example in ``TileLang``,
+illustrating how developers can employ high-level constructs such as tiles, memory placement, pipelining,
 and operator calls to manage data movement and computation with fine-grained control.
-In particular, this snippet ([Figure 2](#fig-overview-gemm) (a)) demonstrates how multi-level tiling 
-leverages different memory hierarchies (global, shared, and registers) to optimize bandwidth utilization 
+In particular, this snippet ([Figure 2](#fig-overview-gemm) (a)) demonstrates how multi-level tiling
+leverages different memory hierarchies (global, shared, and registers) to optimize bandwidth utilization
 and reduce latency.
-Overall, [Figure 2](#fig-overview-gemm) (b) showcases how the Python-like syntax of ``TileLang`` 
+Overall, [Figure 2](#fig-overview-gemm) (b) showcases how the Python-like syntax of ``TileLang``
 allows developers to reason about performance-critical optimizations within a user-friendly programming model.
 
 ```{figure} ../_static/img/MatmulExample.png

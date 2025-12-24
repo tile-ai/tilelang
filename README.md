@@ -24,7 +24,7 @@ Check out the preview here:
 This includes implementations across two branches:
 [ascendc_pto](https://github.com/tile-ai/tilelang-ascend) and
 [npuir](https://github.com/tile-ai/tilelang-ascend/tree/npuir).
-Feel free to explore and share your feedback! 
+Feel free to explore and share your feedback!
 - 07/04/2025 🚀: Introduced `T.gemm_sp` for 2:4 sparse tensor core support, check out [Pull Request #526](https://github.com/tile-ai/tilelang/pull/526) for details.
 - 06/05/2025 ✨: Added [NVRTC Backend](https://github.com/tile-ai/tilelang/pull/461) to significantly reduce compilation time for cute templates!
 - 04/14/2025 🚀: Added high-performance FlashMLA implementation for AMD MI300X, achieving performance parity with hand-optimized assembly kernels of Aiter! See [example_mla_amd](./examples/deepseek_mla/amd/README.md) for details.
@@ -48,7 +48,6 @@ Although tile-lang aims to be portable across a range of Devices, it has been sp
 - [Native Sparse Attention](./examples/deepseek_nsa/)
 
 Within the `examples` directory, you will also find additional complex kernels—such as convolutions, forward/backward passes for FlashAttention, more operators will continuously be added.
-
 
 ## Benchmark Summary
 
@@ -109,9 +108,9 @@ pip install -e . -v # remove -e option if you don't want to install in editable 
 
 ### Method 2: Build from Source
 We currently provide three ways to install **tile-lang** from source:
- - [Install from Source (using your own TVM installation)](./docs/get_started/Installation.md#method-1-install-from-source-using-your-own-tvm-installation)
- - [Install from Source (using the bundled TVM submodule)](./docs/get_started/Installation.md#method-2-install-from-source-using-the-bundled-tvm-submodule)
- - [Install Using the Provided Script](./docs/get_started/Installation.md#method-3-install-using-the-provided-script)
+- [Install from Source (using your own TVM installation)](./docs/get_started/Installation.md#method-1-install-from-source-using-your-own-tvm-installation)
+- [Install from Source (using the bundled TVM submodule)](./docs/get_started/Installation.md#method-2-install-from-source-using-the-bundled-tvm-submodule)
+- [Install Using the Provided Script](./docs/get_started/Installation.md#method-3-install-using-the-provided-script)
 
 ### Method 3: Install with Nightly Version
 
