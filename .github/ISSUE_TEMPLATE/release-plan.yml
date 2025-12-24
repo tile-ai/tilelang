@@ -1,0 +1,63 @@
+name: "Release Plan"
+description: "Plan the next release"
+title: "[Release Plan] vX.Y.Z"
+labels:
+  - release-plan
+  - tracking
+assignees: []
+body:
+  - type: input
+    id: version
+    attributes:
+      label: "Version"
+      placeholder: "v0.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: milestone
+    attributes:
+      label: "Milestone"
+      description: "Link or name of the milestone for this release"
+      placeholder: "https://github.com/tile-ai/tilelang/milestone/XX"
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: "Scope"
+      description: "Goals and non-goals (brief)"
+      placeholder: |
+        - Goals: ...
+        - Non-goals: ...
+
+  - type: textarea
+    id: tasks
+    attributes:
+      label: "Tasks"
+      description: "Task list; link issues/PRs"
+      value: |
+        - [ ] Features
+        - [ ] Fixes
+        - [ ] Docs
+        - [ ] API/Breaking changes
+        - [ ] Benchmarks
+        - [ ] Release notes
+
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: "Readiness"
+      options:
+        - label: "All planned issues closed or deferred"
+        - label: "Docs updated"
+        - label: "CI green; artifacts verified"
+        - label: "Release notes drafted"
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: "Notes"
+      description: "Risks or communications (optional)"
+      placeholder: |
+        - Risk: ...
+        - Communication: ...

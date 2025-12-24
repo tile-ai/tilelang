@@ -1,0 +1,6 @@
+# Format and lint requirements
+pre-commit
+clang-format==21.1.7
+clang-tidy==21.1.6
+codespell[toml]==2.4.1
+ruff==0.14.9

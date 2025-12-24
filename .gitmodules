@@ -1,0 +1,9 @@
+[submodule "3rdparty/cutlass"]
+	path = 3rdparty/cutlass
+	url = https://github.com/NVIDIA/cutlass
+[submodule "3rdparty/tvm"]
+	path = 3rdparty/tvm
+	url = https://github.com/TileLang/tvm
+[submodule "3rdparty/composable_kernel"]
+	path = 3rdparty/composable_kernel
+	url = https://github.com/ROCm/composable_kernel

@@ -1,0 +1,11 @@
+# Lint requirements
+--requirement requirements-lint.txt
+
+# Common test requirements
+--requirement requirements-test.txt
+
+# CUDA specific requirements
+flash-attn==2.5.8
+cuda-python==12.9.4
+# CuTeDSL (CUTLASS Python DSL with CuTe support)
+nvidia-cutlass-dsl==4.3.3

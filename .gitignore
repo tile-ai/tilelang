@@ -1,0 +1,122 @@
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.so
+*.obj
+*.pyc
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# emacs
+*~
+
+# vim
+*.swp
+*.swo
+
+debug/
+build/
+*dist/
+dist*/
+wheelhouse/
+__pycache__
+nnfusion.tar.gz
+
+# makeenv and test intermediate files
+tmp/
+
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.vscode/
+.vs/
+
+# VisualGDB files
+VisualGDB/
+toolchain.cmake
+
+# docbuild artifacts
+doc/sphinx/build/*
+doc/doxygen/*.xml
+doc/doxygen/*.html
+doc/doxygen/man/*
+doc/doxygen/latex/*
+doc/doxygen/xml/*
+doc/doxygen/html/*
+
+# git merge
+*.orig
+\#*
+\.#*
+
+# idea
+.idea/*
+
+# python egg
+*.egg-info
+
+# Macos
+**/.DS_Store
+
+nnfusion_rt/
+models/frozenmodels/
+
+# log
+*.log
+
+# pkl
+*.pkl_*
+
+# .pytest_cache
+.pytest_cache
+
+# .hypothesis
+.hypothesis
+
+# .ruff_cache
+.ruff_cache
+
+# exclude debug testing folder
+!testing/python/debug
+
+# ignore lib with develop mode
+tilelang/lib
+
+# cython
+tilelang/jit/adapter/cython/.cycache
+
+# cache directory for clangd
+.cache/
+
+# claude
+**/.claude
+
+# CMake
+cmake-build/
+cmake-build-*/
+
+# Git version for sdist
+.git_commit.txt
+
+# pre-commit cache
+.pre-commit-cache/*
+
+# host checks logs
+maint/host_checks/logs/*
+
+# ncu
+*.ncu-rep
+
+# csv
+*.csv
+
+# clang-tidy
+/run-clang-tidy.py

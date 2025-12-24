@@ -1,0 +1,60 @@
+---
+InheritParentConfig: true
+ExtraArgs: []
+FormatStyle: file
+UseColor: true
+WarningsAsErrors: '*'
+# FIXME: Use `ExcludeHeaderFilterRegex` instead when all maintainers upgraded their `clang-tidy`
+HeaderFilterRegex: '^(?!.*(?:/|^)(3rdparty|tvm)/).*'
+# ExcludeHeaderFilterRegex: '^(3rdparty|tvm)/.*$'
+
+# NOTE: there must be no spaces before the '-', so put the comma last.
+Checks: >-
+  # 1. Retained categories: easier to find bugs/performance issues
+  clang-analyzer-*,
+  cppcoreguidelines-pro-type-static-cast-downcast,
+  cppcoreguidelines-pro-type-member-init,
+  cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-narrowing-conversions,
+  performance-*,
+
+  # 2. Readability: only keep useful rules
+  readability-braces-around-statements,
+  readability-container-size-empty,
+  readability-delete-null-pointer,
+  readability-redundant-member-init,
+  readability-redundant-smartptr-get,
+  readability-redundant-string-cstr,
+
+  # 3. Disable all intrusive/style-breaking rules
+  -readability-identifier-length,
+  -readability-avoid-const-params-in-decls,
+  -readability-else-after-return,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -modernize-use-auto,
+  -modernize-pass-by-value,
+  -modernize-return-braced-init-list,
+  -modernize-use-default-member-init,
+  -modernize-loop-convert,
+  -modernize-concat-nested-namespaces,
+  -llvm-include-order,
+  -bugprone-unused-return-value,
+  -clang-diagnostic-unused-result,
+  -cppcoreguidelines-special-member-functions,
+  -performance-noexcept-move-constructor,
+  -cppcoreguidelines-narrowing-conversions,
+  -clang-diagnostic-error,
+  -cppcoreguidelines-pro-type-member-init,
+  -clang-analyzer-optin.cplusplus.UninitializedObject,
+  -cppcoreguidelines-pro-type-static-cast-downcast,
+  -performance-unnecessary-value-param,
+  -performance-enum-size,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -clang-analyzer-deadcode.DeadStores,
+  -clang-analyzer-optin.cplusplus.VirtualCall,
+  -clang-diagnostic-tautological-constant-compare,
