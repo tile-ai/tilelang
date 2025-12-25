@@ -13,7 +13,6 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.transform import PassConfigKey
-from tilelang.utils.deprecated import deprecated_warning
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
@@ -76,12 +75,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
     # Read pass-config keys (string-valued) like in jit.adapter.libgen.compile_lib
     cfg = pass_config or {}
-    if cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH, False):
-        deprecated_warning("TL_DISABLE_FAST_MATH", "TL_ENABLE_FAST_MATH", "0.1.7")
-        disable_fast_math = bool(cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH, True))
-        enable_fast_math = not disable_fast_math
-    else:
-        enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
+    enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
 
     ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
     verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))

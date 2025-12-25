@@ -5,6 +5,8 @@ import os
 import json
 from tabulate import tabulate
 import pandas as pd
+import numpy as np
+import textwrap
 
 try:
     import tilelang
@@ -48,86 +50,132 @@ def run_cmd(cmd, env=None):
     return p.stdout
 
 
-def draw(df):
+def draw(df: pd.DataFrame) -> None:
     import matplotlib.pyplot as plt
-    import seaborn as sns
 
-    if len(df) == 0:
+    if df is None or len(df) == 0:
         return
 
-    num_items = len(df)
-    calculated_width = max(8, num_items * 0.6)
-    calculated_height = 10  # A reasonable fixed height
+    # ---- copy + sanitize ----
+    df = df.copy()
+    df["Speedup"] = pd.to_numeric(df["Speedup"], errors="coerce")
+    df = df.dropna(subset=["Speedup"])
 
-    plt.figure(figsize=(calculated_width, calculated_height))
+    # categorize
+    df["Performance"] = np.where(df["Speedup"] >= 1.0, "Improved", "Regressed")
+    df["DeltaPct"] = (df["Speedup"] - 1.0) * 100.0
 
-    font_scale = 1.1 if num_items > 20 else 0.9
-    sns.set_theme(style="whitegrid", font_scale=font_scale)
+    # sort: worst regressions at top? (common for dashboards)
+    # If you prefer best-to-worst, change ascending=False
+    df = df.sort_values("Speedup", ascending=True).reset_index(drop=True)
 
-    df["Type"] = df["Speedup"].apply(lambda x: "Speedup" if x >= 1.0 else "Slowdown")
-    palette = {"Speedup": "#4CAF50", "Slowdown": "#F44336"}  # Green for good, Red for bad
-
-    ax = sns.barplot(
-        data=df,
-        x="File",
-        y="Speedup",
-        hue="Type",
-        palette=palette,
-        dodge=False,  # Don't split bars based on hue
+    # ---- style ----
+    plt.rcParams.update(
+        {
+            "figure.dpi": 120,
+            "savefig.dpi": 300,
+            "axes.titlesize": 16,
+            "axes.labelsize": 12,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+        }
     )
-    # Remove the hue legend as it's self-explanatory
-    if ax.get_legend():
-        ax.get_legend().remove()
-    # ---------------------------
 
-    top3_idx = df.nlargest(min(3, len(df)), "Speedup").index
-    bot3_idx = df.nsmallest(min(3, len(df)), "Speedup").index
-    label_idx = set(top3_idx.tolist() + bot3_idx.tolist())
+    n = len(df)
+    # height: ~0.35 inch per row + margins, with a sensible cap/floor
+    fig_h = min(max(6.0, 0.35 * n + 2.2), 22.0)
+    fig_w = 14.0
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # Add the text labels over the bars
-    # We need to iterate through the patches (the actual bars drawn)
-    for i, patch in enumerate(ax.patches):
-        if i in label_idx:
-            # Get X and Y coordinates from the bar itself
-            x_coords = patch.get_x() + patch.get_width() / 2
-            y_coords = patch.get_height()
+    # palette
+    colors = {"Improved": "#2ecc71", "Regressed": "#e74c3c"}
+    bar_colors = df["Performance"].map(colors).tolist()
 
-            val = df.iloc[i]["Speedup"]
+    # wrap long labels (optional)
+    def wrap_label(s: str, width: int = 42) -> str:
+        return "\n".join(textwrap.wrap(str(s), width=width)) if len(str(s)) > width else str(s)
 
-            plt.text(
-                x_coords,
-                y_coords + 0.02,
-                f"{val:.2f}x",
-                ha="center",
-                va="bottom",
-                color="black",  # Black is usually easier to read than red on white
-                fontsize=10,
-                fontweight="bold",
-            )
+    ylabels = [wrap_label(x) for x in df["File"].tolist()]
+    y = np.arange(n)
 
-    plt.xticks(rotation=70, ha="right", fontsize=11)
-    plt.ylabel("Speedup Ratio (Higher is better)", fontsize=13)
-    plt.xlabel("Benchmark File", fontsize=13)
-    plt.title("Current Speedup vs Original", fontsize=15, fontweight="bold")
+    # bars
+    ax.barh(y, df["Speedup"].values, color=bar_colors, edgecolor="black", linewidth=0.4, height=0.72)
 
-    plt.axhline(y=1.0, color="gray", linestyle="--", linewidth=1)
+    # baseline at 1.0x
+    ax.axvline(1.0, linestyle="--", linewidth=1.4, alpha=0.85)
 
-    max_val = df["Speedup"].max()
-    plt.ylim(0, max(max_val * 1.15, 1.1))  # Ensure at least a little headroom above 1.0
+    # grid
+    ax.xaxis.grid(True, linestyle="-", linewidth=0.6, alpha=0.25)
+    ax.set_axisbelow(True)
 
-    sns.despine()
+    # y ticks
+    ax.set_yticks(y)
+    ax.set_yticklabels(ylabels)
 
-    plt.tight_layout()
+    # x limits with padding (ensure 1.0 included)
+    x_min = float(df["Speedup"].min())
+    x_max = float(df["Speedup"].max())
+    pad = max(0.02, (x_max - x_min) * 0.12)
+    left = min(1.0, x_min) - pad
+    right = max(1.0, x_max) + pad
+    ax.set_xlim(left, right)
 
-    print(f"Saving plot to {OUT_PNG} with dimensions ({calculated_width:.1f}x{calculated_height:.1f} inches)")
-    plt.savefig(OUT_PNG, dpi=300, bbox_inches="tight")
+    # annotate each bar
+    for i, (sx, dp) in enumerate(zip(df["Speedup"].values, df["DeltaPct"].values)):
+        label = f"{sx:.3f}x ({dp:+.2f}%)"
+        # place to right for improved, left for regressed (near bar end)
+        if sx >= 1.0:
+            ax.text(sx + 0.003, i, label, va="center", ha="left", fontsize=9)
+        else:
+            ax.text(sx - 0.003, i, label, va="center", ha="right", fontsize=9)
 
-    # Optional: Also save as SVG for perfect clarity
-    # svg_path = OUT_PNG.replace(".png", ".svg")
-    # plt.savefig(svg_path, bbox_inches='tight')
-    # print(f"Also saved SVG version to {svg_path}")
+    # labels & title
+    ax.set_xlabel("Speedup Ratio (New / Old)")
+    ax.set_ylabel("Benchmark File")
+    ax.set_title("Performance Regression Analysis")
 
-    plt.close()
+    # legend
+    from matplotlib.patches import Patch
+
+    legend_handles = [
+        Patch(facecolor=colors["Improved"], edgecolor="black", label="Improved (>= 1.0x)"),
+        Patch(facecolor=colors["Regressed"], edgecolor="black", label="Regressed (< 1.0x)"),
+    ]
+    ax.legend(handles=legend_handles, loc="upper left", frameon=True)
+
+    # summary box
+    num_improved = int((df["Performance"] == "Improved").sum())
+    num_regressed = int((df["Performance"] == "Regressed").sum())
+    best = df.iloc[df["Speedup"].idxmax()]
+    worst = df.iloc[df["Speedup"].idxmin()]
+    summary = (
+        f"Items: {n}\n"
+        f"Improved: {num_improved}\n"
+        f"Regressed: {num_regressed}\n"
+        f"Best:  {best['File']}  {best['Speedup']:.3f}x\n"
+        f"Worst: {worst['File']}  {worst['Speedup']:.3f}x"
+    )
+    ax.text(
+        0.99,
+        0.01,
+        summary,
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.45", facecolor="white", edgecolor="0.3", alpha=0.9),
+    )
+
+    # clean spines
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    fig.tight_layout()
+    print(f"Saving plot to {OUT_PNG} ({fig_w:.1f}x{fig_h:.1f} inches)")
+    fig.savefig(OUT_PNG, bbox_inches="tight")
+    # Optional: also save SVG
+    # fig.savefig(OUT_PNG.replace(".png", ".svg"), bbox_inches="tight")
+    plt.close(fig)
 
 
 env = {"TL_PERF_REGRESSION_FORMAT": "json"}

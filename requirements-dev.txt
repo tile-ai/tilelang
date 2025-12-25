@@ -1,6 +1,6 @@
 # Requirements to run local build with `--no-build-isolation` or other developments
 
-apache-tvm-ffi>=0.1.6
+apache-tvm-ffi~=0.1.0,>=0.1.6
 build
 cmake>=3.26
 cython>=3.0.0

@@ -333,9 +333,7 @@ void ArgBinder::BindDLTensors(
 
     // Scan buffer shape for symbolic variables
     for (size_t k = 0; k < buffer->shape.size(); ++k) {
-      if (buffer->dtype == DataType::Int(4) ||
-          buffer->dtype == DataType::UInt(4) ||
-          buffer->dtype == DataType::Int(1)) {
+      if (buffer->dtype.bits() < 8) {
         break;
       }
 
@@ -524,21 +522,40 @@ void ArgBinder::BindDLTensors(
       cond =
           cond || int8_ok || uint8_ok || kdlbool8_ok || kdlbool1_ok || bit1_ok;
     }
-    // Allow float4 to match int8 at runtime (PyTorch uses int8 as storage for
-    // FP4).
-    if (buffer->dtype.is_float4()) {
-      PrimExpr code_int = IntImm(DataType::UInt(8), DataType::kInt);
-      PrimExpr bits8 = IntImm(DataType::UInt(8), 8);
-      // For FP4, we pack 2 elements per byte, but we still use same lanes at
-      // storage level Accept int8 with same lanes as the fp4 type
-      PrimExpr fp4_lanes_ok = (v_type_lanes == expect_lanes);
-      PrimExpr int8_ok =
-          (v_type_code == code_int && v_type_bits == bits8 && fp4_lanes_ok);
-      cond = cond || int8_ok;
+    // Allow with bits < 8 to match any type with the same total bit count at
+    // runtime (PyTorch uses int8 as storage for FP4).
+    bool data_is_subtype = buffer->dtype.bits() < 8;
+    if (data_is_subtype) {
+      // Get the pre-created shape buffer for reading runtime shape
+      Buffer buf_shape = shape_buffer_map[arg_name];
+
+      // Calculate expected total bits using compile-time buffer->shape
+      PrimExpr expect_total_bits =
+          cast(DataType::UInt(64), expect_bits) *
+          cast(DataType::UInt(64), expect_lanes) *
+          cast(DataType::UInt(64),
+               buffer->shape.empty()
+                   ? make_const(DataType::UInt(64), 1)
+                   : foldl([](PrimExpr a, PrimExpr b, Span) { return a * b; },
+                           make_const(DataType::UInt(64), 1), buffer->shape));
+
+      // Calculate actual total bits using runtime shape from DLTensor
+      PrimExpr actual_total_bits = cast(DataType::UInt(64), v_type_bits) *
+                                   cast(DataType::UInt(64), v_type_lanes);
+      for (size_t k = 0; k < buffer->shape.size(); ++k) {
+        PrimExpr dim_val =
+            cast(DataType::UInt(64),
+                 BufferLoad(buf_shape,
+                            {IntImm(DataType::Int(32), static_cast<int>(k))}));
+        actual_total_bits = actual_total_bits * dim_val;
+      }
+
+      PrimExpr bits_match = (actual_total_bits == expect_total_bits);
+      BinderAddAssert(&analyzer_, bits_match,
+                      arg_name + " is a subtype, but total bits mismatch",
+                      &asserts_, is_null);
     }
-    if (!(buffer->dtype == DataType::Int(1) ||
-          buffer->dtype == DataType::Int(4) ||
-          buffer->dtype == DataType::UInt(4) || buffer->dtype.is_float4())) {
+    if (!data_is_subtype) {
       // Build FFI packed call to __tvm_error_dtype_mismatch when mismatch
       // occurs. Only issue the call when handle is non-NULL and cond is false.
       ffi::Array<PrimExpr> packed_args;
@@ -578,9 +595,7 @@ void ArgBinder::BindDLTensors(
     for (size_t k = 0; k < buffer->shape.size(); ++k) {
       // These packed-bit dtype shapes were not bound in the original
       // implementation, so we just use them as is.
-      if (buffer->dtype == DataType::Int(4) ||
-          buffer->dtype == DataType::UInt(4) ||
-          buffer->dtype == DataType::Int(1)) {
+      if (data_is_subtype) {
         break;
       }
 
@@ -698,100 +713,105 @@ void ArgBinder::BindDLTensors(
     }
 
     // strides field
-    Buffer buf_strides =
-        decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
-                    tvm_shape_type, arg_name + ".strides");
-    def_handle_dtype_.Set(buf_strides->data,
-                          tir::TypeAnnotation(tvm_shape_type));
-    init_nest_.emplace_back(
-        LetStmt(buf_strides->data,
-                tvm::if_then_else(Not(is_null),
-                                  TVMArrayGet(DataType::Handle(), handle,
-                                              builtin::kArrStrides),
-                                  make_zero(DataType::Handle())),
-                nop));
-    init_nest_.emplace_back(DeclBuffer(buf_strides, nop));
-    PrimExpr v_strides_is_null =
-        Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
+    // Skip stride checks for subbyte types (bits < 8), as they use packed
+    // storage and stride semantics don't apply directly.
+    if (!data_is_subtype) {
+      Buffer buf_strides =
+          decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
+                      tvm_shape_type, arg_name + ".strides");
+      def_handle_dtype_.Set(buf_strides->data,
+                            tir::TypeAnnotation(tvm_shape_type));
+      init_nest_.emplace_back(
+          LetStmt(buf_strides->data,
+                  tvm::if_then_else(Not(is_null),
+                                    TVMArrayGet(DataType::Handle(), handle,
+                                                builtin::kArrStrides),
+                                    make_zero(DataType::Handle())),
+                  nop));
+      init_nest_.emplace_back(DeclBuffer(buf_strides, nop));
+      PrimExpr v_strides_is_null =
+          Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
 
-    if (buffer->strides.empty()) {
-      // Assert the buffer is compact
-      DataType stype = buffer->DefaultIndexType();
-      PrimExpr expect_stride = make_const(stype, 1);
-      ffi::Array<PrimExpr> conds;
-      for (size_t i = buffer->shape.size(); i != 0; --i) {
-        size_t k = i - 1;
-        PrimExpr svalue =
-            cast(stype, BufferLoad(buf_strides, {IntImm(DataType::Int(32),
-                                                        static_cast<int>(k))}));
-        conds.push_back(buffer->shape[k] == 1 || expect_stride == svalue);
-        expect_stride = expect_stride * buffer->shape[k];
-      }
-      std::ostringstream stride_err_msg;
-      stride_err_msg
-          << stride_handle_name()
-          << ": expected to be compact array, but got non-compact strides";
-      if (!conds.empty()) {
-        PrimExpr all_ok =
-            foldl([](PrimExpr a, PrimExpr b,
-                     Span span) { return logical_and(a, b, span); },
-                  const_true(1), conds);
-        // Packed generic violation for non-compact strides
-        std::string kernel_nm3 = arg_name;
-        std::string buf_nm3 = arg_name;
-        size_t dot_pos3 = arg_name.find('.');
-        if (dot_pos3 != std::string::npos) {
-          kernel_nm3 = arg_name.substr(0, dot_pos3);
-          buf_nm3 = arg_name.substr(dot_pos3 + 1);
+      if (buffer->strides.empty()) {
+        // Assert the buffer is compact
+        DataType stype = buffer->DefaultIndexType();
+        PrimExpr expect_stride = make_const(stype, 1);
+        ffi::Array<PrimExpr> conds;
+        for (size_t i = buffer->shape.size(); i != 0; --i) {
+          size_t k = i - 1;
+          PrimExpr svalue = cast(
+              stype, BufferLoad(buf_strides, {IntImm(DataType::Int(32),
+                                                     static_cast<int>(k))}));
+          conds.push_back(buffer->shape[k] == 1 || expect_stride == svalue);
+          expect_stride = expect_stride * buffer->shape[k];
         }
-        ffi::Array<PrimExpr> pargs4;
-        pargs4.push_back(StringImm(tvm_error_constraint_violation));
-        pargs4.push_back(StringImm(kernel_nm3));
-        pargs4.push_back(StringImm(buf_nm3));
-        pargs4.push_back(StringImm("strides"));
-        Stmt call_err4 = Evaluate(
-            Call(DataType::Int(32), builtin::tvm_call_packed(), pargs4));
-        // Only check when strides array is present and condition fails
-        Stmt check =
-            IfThenElse(Not(v_strides_is_null),
-                       IfThenElse(Not(all_ok), call_err4), Evaluate(0));
-        asserts_.emplace_back(SeqStmt({check, Evaluate(0)}));
+        std::ostringstream stride_err_msg;
+        stride_err_msg
+            << stride_handle_name()
+            << ": expected to be compact array, but got non-compact strides";
+        if (!conds.empty()) {
+          PrimExpr all_ok =
+              foldl([](PrimExpr a, PrimExpr b,
+                       Span span) { return logical_and(a, b, span); },
+                    const_true(1), conds);
+          // Packed generic violation for non-compact strides
+          std::string kernel_nm3 = arg_name;
+          std::string buf_nm3 = arg_name;
+          size_t dot_pos3 = arg_name.find('.');
+          if (dot_pos3 != std::string::npos) {
+            kernel_nm3 = arg_name.substr(0, dot_pos3);
+            buf_nm3 = arg_name.substr(dot_pos3 + 1);
+          }
+          ffi::Array<PrimExpr> pargs4;
+          pargs4.push_back(StringImm(tvm_error_constraint_violation));
+          pargs4.push_back(StringImm(kernel_nm3));
+          pargs4.push_back(StringImm(buf_nm3));
+          pargs4.push_back(StringImm("strides"));
+          Stmt call_err4 = Evaluate(
+              Call(DataType::Int(32), builtin::tvm_call_packed(), pargs4));
+          // Only check when strides array is present and condition fails
+          Stmt check =
+              IfThenElse(Not(v_strides_is_null),
+                         IfThenElse(Not(all_ok), call_err4), Evaluate(0));
+          asserts_.emplace_back(SeqStmt({check, Evaluate(0)}));
+        }
+      } else if (buffer->buffer_type == kAutoBroadcast) {
+        PrimExpr stride_from_shape = 1;
+        for (size_t i = buffer->shape.size(); i != 0; --i) {
+          size_t k = i - 1;
+          DataType stride_dtype = buffer->strides[k].dtype();
+          PrimExpr explicit_stride = cast(
+              stride_dtype,
+              BufferLoad(buf_strides,
+                         {IntImm(DataType::Int(32), static_cast<int>(k))}));
+
+          PrimExpr stride_val = tvm::if_then_else(
+              v_strides_is_null, stride_from_shape, explicit_stride);
+
+          BindNullable(buffer->strides[k], stride_val, stride_element_name(k),
+                       true, is_null);
+        }
+      } else {
+        PrimExpr stride_from_shape = 1;
+
+        for (int k = static_cast<int>(buffer->strides.size()) - 1; k >= 0;
+             --k) {
+          DataType stride_dtype = buffer->strides[k].dtype();
+          PrimExpr explicit_stride =
+              cast(stride_dtype,
+                   BufferLoad(buf_strides, {IntImm(DataType::Int(32), k)}));
+          PrimExpr shape_stride =
+              cast(stride_dtype,
+                   BufferLoad(buf_shape, {IntImm(DataType::Int(32), k)}));
+
+          PrimExpr stride_val = tvm::if_then_else(
+              v_strides_is_null, stride_from_shape, explicit_stride);
+
+          BindNullable(buffer->strides[k], stride_val, stride_element_name(k),
+                       true, is_null);
+        }
       }
-    } else if (buffer->buffer_type == kAutoBroadcast) {
-      PrimExpr stride_from_shape = 1;
-      for (size_t i = buffer->shape.size(); i != 0; --i) {
-        size_t k = i - 1;
-        DataType stride_dtype = buffer->strides[k].dtype();
-        PrimExpr explicit_stride =
-            cast(stride_dtype,
-                 BufferLoad(buf_strides,
-                            {IntImm(DataType::Int(32), static_cast<int>(k))}));
-
-        PrimExpr stride_val = tvm::if_then_else(
-            v_strides_is_null, stride_from_shape, explicit_stride);
-
-        BindNullable(buffer->strides[k], stride_val, stride_element_name(k),
-                     true, is_null);
-      }
-    } else {
-      PrimExpr stride_from_shape = 1;
-
-      for (int k = static_cast<int>(buffer->strides.size()) - 1; k >= 0; --k) {
-        DataType stride_dtype = buffer->strides[k].dtype();
-        PrimExpr explicit_stride =
-            cast(stride_dtype,
-                 BufferLoad(buf_strides, {IntImm(DataType::Int(32), k)}));
-        PrimExpr shape_stride =
-            cast(stride_dtype,
-                 BufferLoad(buf_shape, {IntImm(DataType::Int(32), k)}));
-
-        PrimExpr stride_val = tvm::if_then_else(
-            v_strides_is_null, stride_from_shape, explicit_stride);
-
-        BindNullable(buffer->strides[k], stride_val, stride_element_name(k),
-                     true, is_null);
-      }
-    }
+    } // !data_is_subtype
 
     // Byte_offset field.
     int data_bytes = GetVectorBytes(buffer->dtype);

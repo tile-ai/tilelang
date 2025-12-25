@@ -4,7 +4,7 @@ import tilelang.testing
 from tilelang import tvm as tvm
 
 
-@tilelang.jit(pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 8})
+@tilelang.jit
 def matmul_dynamic_mnk(
     block_M,
     block_N,

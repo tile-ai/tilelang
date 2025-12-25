@@ -517,8 +517,6 @@ def tilelang_sparse_attention(
             scores_sum = T.alloc_fragment([G], accum_dtype)
             logsum = T.alloc_fragment([G], accum_dtype)
 
-            T.annotate_layout({O_shared: tilelang.layout.make_swizzled_layout(O_shared)})
-
             i_t, i_v, i_bh = bx, by, bz
             i_b, i_h = i_bh // head_kv, i_bh % head_kv
 

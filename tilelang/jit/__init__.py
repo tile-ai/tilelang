@@ -29,7 +29,6 @@ from tilelang.language.v2.annot import Annot
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
-from tilelang.utils.target import determine_target
 from tilelang.cache import cached
 from os import path, makedirs
 from logging import getLogger
@@ -49,15 +48,16 @@ _Ret = TypeVar("_Ret")
 def compile(
     func: PrimFunc[_KP, _T] = None,
     out_idx: list[int] | int | None = None,
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "auto",
-    target: str | Target = "auto",
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    target: str | Target | None = None,
     target_host: str | Target | None = None,
-    verbose: bool = False,
+    verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     compile_flags: list[str] | str | None = None,
 ) -> JITKernel[_KP, _T]:
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
+
     Parameters
     ----------
     func : tvm.tir.PrimFunc, optional
@@ -65,17 +65,28 @@ def compile(
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
     execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
-        Execution backend to use for kernel execution. Use "auto" to pick a sensible
-        default per target (cuda->tvm_ffi, metal->torch, others->cython).
+        Execution backend to use for kernel execution. If None, reads from
+        TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
     target : Union[str, Target], optional
-        Compilation target, either as a string or a TVM Target object (default: "auto").
+        Compilation target, either as a string or a TVM Target object. If None, reads from
+        TILELANG_TARGET environment variable (defaults to "auto").
     target_host : Union[str, Target], optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
-        Whether to enable verbose output (default: False).
+        Whether to enable verbose output. If None, reads from
+        TILELANG_VERBOSE environment variable (defaults to False).
     pass_configs : dict, optional
         Additional keyword arguments to pass to the Compiler PassContext.
         Refer to `tilelang.transform.PassConfigKey` for supported options.
+
+    Environment Variables
+    ---------------------
+    TILELANG_TARGET : str
+        Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+    TILELANG_EXECUTION_BACKEND : str
+        Default execution backend. Defaults to "auto".
+    TILELANG_VERBOSE : str
+        Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     """
 
     assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
@@ -84,24 +95,6 @@ def compile(
         if func.out_idx_override is not None and out_idx is not None:
             raise ValueError("Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors")
         out_idx = func.out_idx_override or out_idx
-
-    # This path is not a performance critical path, so we can afford to convert the target.
-    target = Target(determine_target(target))
-
-    # Resolve execution backend (handles aliases, auto, validation per target)
-    requested_backend = execution_backend
-    from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target
-
-    execution_backend = resolve_execution_backend(requested_backend, target)
-    if verbose:
-        allowed_now = allowed_backends_for_target(target, include_unavailable=False)
-        logger.info(
-            "Execution backend resolved -> '%s' (requested='%s', target='%s', allowed: %s)",
-            execution_backend,
-            requested_backend,
-            target.kind.name,
-            ", ".join(sorted(allowed_now)),
-        )
 
     return cached(
         func=func,
@@ -118,17 +111,18 @@ def compile(
 def par_compile(
     funcs: Iterable[PrimFunc[_KP, _T]],
     out_idx: list[int] | int | None = None,
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "auto",
-    target: str | Target = "auto",
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    target: str | Target | None = None,
     target_host: str | Target | None = None,
-    verbose: bool = False,
+    verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     compile_flags: list[str] | str | None = None,
-    num_workers: int = None,
+    num_workers: int | None = None,
     ignore_error: bool = False,
 ) -> list[JITKernel[_KP, _T]]:
     """
     Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
+
     Parameters
     ----------
     funcs : Iterable[tvm.tir.PrimFunc]
@@ -136,18 +130,30 @@ def par_compile(
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
     execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
-        Execution backend to use for kernel execution. Use "auto" to pick a sensible
-        default per target (cuda->tvm_ffi, metal->torch, others->cython).
+        Execution backend to use for kernel execution. If None, reads from
+        TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
     target : Union[str, Target], optional
-        Compilation target, either as a string or a TVM Target object (default: "auto").
+        Compilation target, either as a string or a TVM Target object. If None, reads from
+        TILELANG_TARGET environment variable (defaults to "auto").
     target_host : Union[str, Target], optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
-        Whether to enable verbose output (default: False).
+        Whether to enable verbose output. If None, reads from
+        TILELANG_VERBOSE environment variable (defaults to False).
     pass_configs : dict, optional
         Additional keyword arguments to pass to the Compiler PassContext.
         Refer to `tilelang.transform.PassConfigKey` for supported options.
+
+    Environment Variables
+    ---------------------
+    TILELANG_TARGET : str
+        Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+    TILELANG_EXECUTION_BACKEND : str
+        Default execution backend. Defaults to "auto".
+    TILELANG_VERBOSE : str
+        Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     """
+
     with concurrent.futures.ThreadPoolExecutor(num_workers, "tl-par-comp") as executor:
         futures = []
         future_map = {}
@@ -256,10 +262,10 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     """
 
     out_idx: list[int] | int | None
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
-    target: str | Target
-    target_host: str | Target
-    verbose: bool
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None
+    target: str | Target | None
+    target_host: str | Target | None
+    verbose: bool | None
     pass_configs: dict[str, Any] | None
     debug_root_path: str | None
     compile_flags: list[str] | str | None
@@ -412,7 +418,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
         tune_params = kwargs.pop("__tune_params", {})
 
-        kernel = self._kernel_cache.get(key, None)
+        kernel = self._kernel_cache.get(key)
         if kernel is None:
             kernel = self.compile(*args, **kwargs, **tune_params)
             self._kernel_cache[key] = kernel
@@ -435,10 +441,10 @@ def jit(func: Callable[_P, PrimFunc[_KP, _T]]) -> JITImpl[_P, _KP, _T, JITKernel
 def jit(
     *,  # Indicates subsequent arguments are keyword-only
     out_idx: Any = None,
-    target: str | Target = "auto",
-    target_host: str | Target = None,
-    execution_backend: ExecutionBackend = "auto",
-    verbose: bool = False,
+    target: str | Target | None = None,
+    target_host: str | Target | None = None,
+    execution_backend: ExecutionBackend | None = None,
+    verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
@@ -449,10 +455,10 @@ def jit(  # This is the new public interface
     func: Callable[_P, _T] | PrimFunc | None = None,
     *,  # Indicates subsequent arguments are keyword-only
     out_idx: Any = None,
-    target: str | Target = "auto",
-    target_host: str | Target = None,
-    execution_backend: ExecutionBackend = "auto",
-    verbose: bool = False,
+    target: str | Target | None = None,
+    target_host: str | Target | None = None,
+    execution_backend: ExecutionBackend | None = None,
+    verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
@@ -470,18 +476,29 @@ def jit(  # This is the new public interface
         If using `@tilelang.jit` directly on a function, this argument is implicitly
         the function to be decorated (and `out_idx` will be `None`).
     target : Union[str, Target], optional
-        Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
+        Compilation target for TVM (e.g., "cuda", "llvm"). If None, reads from
+        TILELANG_TARGET environment variable (defaults to "auto").
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
     execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
-        Backend for kernel execution and argument passing. Use "auto" to pick a sensible
-        default per target (cuda->tvm_ffi, metal->torch, others->cython).
+        Backend for kernel execution and argument passing. If None, reads from
+        TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
     verbose : bool, optional
-        Enables verbose logging during compilation. Defaults to False.
+        Enables verbose logging during compilation. If None, reads from
+        TILELANG_VERBOSE environment variable (defaults to False).
     pass_configs : Optional[Dict[str, Any]], optional
         Configurations for TVM's pass context. Defaults to None.
     debug_root_path : Optional[str], optional
         Directory to save compiled kernel source for debugging. Defaults to None.
+
+    Environment Variables
+    ---------------------
+    TILELANG_TARGET : str
+        Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+    TILELANG_EXECUTION_BACKEND : str
+        Default execution backend. Defaults to "auto".
+    TILELANG_VERBOSE : str
+        Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
 
     Returns
     -------
@@ -524,10 +541,10 @@ def lazy_jit(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]: ...
 def lazy_jit(
     *,
     out_idx: Any = None,
-    target: str | Target = "auto",
-    target_host: str | Target = None,
-    execution_backend: ExecutionBackend = "auto",
-    verbose: bool = False,
+    target: str | Target | None = None,
+    target_host: str | Target | None = None,
+    execution_backend: ExecutionBackend | None = None,
+    verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
@@ -537,14 +554,21 @@ def lazy_jit(
 def lazy_jit(
     func: Callable[_P, _T] | PrimFunc | None = None,
     *,  # Indicates subsequent arguments are keyword-only
-    target: str | Target = "auto",
-    target_host: str | Target = None,
-    execution_backend: ExecutionBackend = "auto",
-    verbose: bool = False,
+    target: str | Target | None = None,
+    target_host: str | Target | None = None,
+    execution_backend: ExecutionBackend | None = None,
+    verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
 ):
+    """
+    Lazy JIT compiler decorator - returns the kernel object on first call, then executes it.
+
+    Supports environment variable defaults for target, execution_backend, and verbose.
+    See `jit` documentation for parameter details and environment variables.
+    """
+
     compile_args = dict(
         out_idx=None,
         execution_backend=execution_backend,

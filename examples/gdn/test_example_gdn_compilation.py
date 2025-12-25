@@ -20,7 +20,7 @@ save_new_value = True
 block_DK = 64
 block_DV = 32
 threads = 128
-num_stages = 1
+num_stages = 0
 
 
 def test_example_wy_fast_compilation():
