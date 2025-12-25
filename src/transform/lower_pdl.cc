@@ -21,6 +21,18 @@ namespace tl {
 
 using namespace tir;
 
+// NVCC has issues with __ldg when using PDL (Programmatic Dependent Launch)
+// synchronization. Suppress the annotation when kHasGridSync is set.
+class CheckLDGCalls : public StmtExprVisitor {
+public:
+  void VisitExpr_(const tir::CallNode *op) final {
+    if (op->op.same_as(tl::__ldg())) {
+      LOG(FATAL) << "Cannot invoke __ldg function with pdl_sync";
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+};
+
 class MarkCudaSyncCalls : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -33,6 +45,8 @@ public:
     }
     if (mutator.has_grid_sync_) {
       new_f = WithAttr(std::move(new_f), attr::kHasGridSync, 1);
+      CheckLDGCalls analyzer;
+      analyzer(f->body);
     }
     return new_f;
   }
