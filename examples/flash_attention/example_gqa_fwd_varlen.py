@@ -19,8 +19,6 @@ def attention_ref(
     window_size=(-1, -1),
     upcast=True,
 ):
-    if causal:
-        window_size = (window_size[0], 0)
     dtype_og = q.dtype
     if upcast:
         q, k, v = q.float(), k.float(), v.float()
@@ -30,13 +28,28 @@ def attention_ref(
     k = repeat(k, "b s h d -> b s (h g) d", g=Hq // k.shape[2])
     v = repeat(v, "b s h d -> b s (h g) d", g=Hq // v.shape[2])
     scores = torch.einsum("bthd,bshd->bhts", q, k)
-    left, right = window_size
-    left = S if left is None or left < 0 else int(left)
-    right = S if right is None or right < 0 else int(right)
-    t_idx = torch.arange(T, device=scores.device)[:, None]
-    s_idx = torch.arange(S, device=scores.device)[None, :]
-    visible_ts = (s_idx >= (t_idx - left)) & (s_idx <= (t_idx + right))
-    visible_mask = visible_ts.unsqueeze(0).unsqueeze(0)
+    t_idx = torch.arange(T, device=scores.device).view(1, 1, T, 1)
+    s_idx = torch.arange(S, device=scores.device).view(1, 1, 1, S)
+    if causal:
+        if query_padding_mask is not None:
+            q_valid_len = query_padding_mask.sum(dim=1).view(b, 1, 1, 1)
+        else:
+            q_valid_len = torch.full((b, 1, 1, 1), T, device=q.device)
+        if key_padding_mask is not None:
+            k_valid_len = key_padding_mask.sum(dim=1).view(b, 1, 1, 1)
+        else:
+            k_valid_len = torch.full((b, 1, 1, 1), S, device=k.device)
+        offset = k_valid_len - q_valid_len
+        visible_ts = s_idx <= (t_idx + offset)
+        if window_size[0] != -1 and window_size[0] >= 0:
+            visible_ts = visible_ts & (s_idx >= (t_idx + offset - int(window_size[0])))
+        visible_mask = visible_ts
+    else:
+        left, right = window_size
+        left = S if left is None or left < 0 else int(left)
+        right = S if right is None or right < 0 else int(right)
+        visible_ts = (s_idx >= (t_idx - left)) & (s_idx <= (t_idx + right))
+        visible_mask = visible_ts
     if key_padding_mask is not None:
         k_keep = rearrange(key_padding_mask, "b s -> b 1 1 s")
         visible_mask = visible_mask & k_keep
@@ -110,8 +123,10 @@ def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, bl
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
+            offset = kv_current_seqlen - q_current_seqlen
+            max_visible_k_idx = offset + (bx + 1) * block_M
             loop_range = (
-                T.min(T.ceildiv((bx + 1) * block_M, block_N), T.ceildiv(kv_current_seqlen, block_N))
+                T.min(T.ceildiv(max_visible_k_idx, block_N), T.ceildiv(kv_current_seqlen, block_N))
                 if is_causal
                 else T.ceildiv(kv_current_seqlen, block_N)
             )
@@ -122,7 +137,7 @@ def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, bl
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(
-                            (bx * block_M + i < k * block_N + j)
+                            (bx * block_M + i + offset < k * block_N + j)
                             or (bx * block_M + i >= q_current_seqlen or k * block_N + j >= kv_current_seqlen),
                             -1e9,
                             0,
