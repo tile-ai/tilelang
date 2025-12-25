@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "../transform/common/attr.h"
 #include "./ptx.h"
 #include "./utils.h"
 #include "arith/pattern_match.h"
@@ -3332,6 +3333,8 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   CodeGenC::PrintType(func->ret_type, os);
   CodeGenC::PrintExtraAttrs(func, os);
   bool no_alias = func->HasNonzeroAttr(tir::attr::kNoAlias);
+  // remove __restrict__ due to NVCC's bug
+  bool has_cuda_pdl_sync = func->HasNonzeroAttr(tl::attr::kHasGridSync);
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
           func->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
@@ -3381,7 +3384,7 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
         }
       }
 
-      if (no_alias && !non_restrict.count(v.get())) {
+      if (!has_cuda_pdl_sync && no_alias && !non_restrict.count(v.get())) {
         PrintRestrict(v, os);
       }
     } else {
@@ -3417,6 +3420,8 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   ICHECK(global_symbol)
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
   bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
+  // remove __restrict__ due to NVCC's bug
+  bool has_cuda_pdl_sync = f->HasNonzeroAttr(tl::attr::kHasGridSync);
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
           f->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
@@ -3468,7 +3473,7 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
         }
       }
 
-      if (no_alias && !non_restrict.count(v.get())) {
+      if (!has_cuda_pdl_sync && no_alias && !non_restrict.count(v.get())) {
         PrintRestrict(v, stream);
       }
     } else {
