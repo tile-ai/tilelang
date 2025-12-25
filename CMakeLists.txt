@@ -311,25 +311,61 @@ if(USE_Z3 AND USE_PYPI_Z3)
   endif()
 endif()
 
+set(TILELANG_OUTPUT_TARGETS
+  tilelang
+  tilelang_module
+  tvm
+  tvm_runtime
+)
+
+unset(PATCHELF_EXECUTABLE CACHE)
+
 if(APPLE)
   set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     # some z3 is placed in lib/ and some in bin/, we add both in rpath
-    list(APPEND TILELANG_INSTALL_RPATH "@loader_path/../../z3/lib" "@loader_path/../../z3/bin")
+    string(APPEND TILELANG_INSTALL_RPATH ";@loader_path/../../z3/lib;@loader_path/../../z3/bin")
   endif()
 elseif(UNIX)
   set(TILELANG_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
-    # cmake uses ; by default, we explicitly use : for linux
     string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../z3/lib")
+  endif()
+  find_program(PATCHELF_EXECUTABLE patchelf)
+  if (NOT PATCHELF_EXECUTABLE)
+    message(STATUS "`patchelf` not found.")
   endif()
 endif()
 
+# let libtilelang to search tvm/tvm_runtime in same dir
+foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+  set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
+endforeach()
+
+# exclude libcuda.so to allow importing on a CPU-only machine
+if(USE_CUDA AND PATCHELF_EXECUTABLE)
+  # run patchelf on built libraries to avoid race conditions during linking: use `install(CODE ...)`
+  foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+    install(CODE "
+      execute_process(
+        COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so \"$<TARGET_FILE:${target}>\"
+        WORKING_DIRECTORY \"${CMAKE_INSTALL_PREFIX}\"
+        RESULT_VARIABLE patchelf_result
+      )
+      if(patchelf_result EQUAL 0)
+        message(STATUS \"`patchelf` successfully removed dependency `libcuda.so` from $<TARGET_FILE:${target}>\")
+      else()
+        message(WARNING \"`patchelf` failed to remove dependency `libcuda.so` from $<TARGET_FILE:${target}>\")
+      endif()
+    ")
+  endforeach()
+endif()
+
 set_target_properties(
-  tilelang tilelang_module tvm tvm_runtime
+  ${TILELANG_OUTPUT_TARGETS}
   PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
 
 install(
-  TARGETS tvm tvm_runtime tilelang_module tilelang
+  TARGETS ${TILELANG_OUTPUT_TARGETS}
   LIBRARY DESTINATION tilelang/lib
 )
