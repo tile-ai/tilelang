@@ -41,7 +41,7 @@ public:
     new_f.CopyOnWrite()->body = mutator.VisitStmt(f->body);
 
     if (!support_pdl) {
-      ICHECK(!mutator.has_trigger_launch_ && mutator.has_grid_sync_)
+      ICHECK(!mutator.has_trigger_launch_ && !mutator.has_grid_sync_)
           << "PDL is not supported";
     }
 
