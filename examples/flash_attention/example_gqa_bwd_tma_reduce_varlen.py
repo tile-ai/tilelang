@@ -66,8 +66,6 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
-
             for i, d in T.Parallel(block_M, dim_qk):
                 if bx * block_M + i < q_current_seqlen:
                     Q_shared[i, d] = Q[q_start_idx + bx * block_M + i, by, d]
@@ -293,7 +291,6 @@ def flashattn_bwd_atomic_add(
                     dQ: make_dq_layout(dQ),
                     dK: make_dq_layout(dK),
                     dV: make_dq_layout(dV),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                 }
             )
 
@@ -431,9 +428,6 @@ def flashattn_bwd_split(
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
 

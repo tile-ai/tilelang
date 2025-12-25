@@ -25,10 +25,10 @@ VLOG(1) << "aaa";
 
 - **LOG**: Standard logging preserved in code for displaying necessary information at different levels during runtime. Most Tilelang C++ error reporting is implemented via `LOG(FATAL) << "error msg"`.
 - **DLOG**: Debug logging for developer debugging output. DLOG is controlled at build time by the TVM_LOG_DEBUG environment variable and is **eliminated in Release builds through dead code elimination**.
-    - The key difference between LOG(DEBUG) and DLOG is this build-time elimination. We recommend using DLOG over LOG(DEBUG), as the latter has overlapping functionality and gets compiled into the release runtime.
+  - The key difference between LOG(DEBUG) and DLOG is this build-time elimination. We recommend using DLOG over LOG(DEBUG), as the latter has overlapping functionality and gets compiled into the release runtime.
 - **VLOG**: [Verbose logging](https://google.github.io/glog/stable/logging/#verbose-logging), primarily for debugging. Its main feature is customizable verbosity levels. For example, VLOG(n) where n can be 1, 2, 3, 4, 5, or 6, enabling complex tracing requirements. In contrast, LOG and DLOG typically use predefined verbose levels like INFO and DEBUG.
-    - In practical Tilelang development, VLOG is used less frequently.
-    - TVM's VLOG is implemented using DLOG, thus inheriting DLOG's characteristics.
+  - In practical Tilelang development, VLOG is used less frequently.
+  - TVM's VLOG is implemented using DLOG, thus inheriting DLOG's characteristics.
 
 Additional useful macros include various **CHECK** variants:
 
@@ -114,5 +114,3 @@ Then you also need to specify the runtime environment variables. For example, to
 
    These two should ideally have different names, but TVM uses the same name for both, which can cause confusion.
 :::
-
-
