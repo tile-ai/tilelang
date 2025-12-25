@@ -116,12 +116,6 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.annotate_layout(
-                {
-                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                }
-            )
-
             batch_idx = bz
             head_idx = by
 
@@ -335,7 +329,7 @@ def run_regression_perf(batch: int = 8, heads: int = 64, seq_len: int = 2048, di
     UQ = q_unpad.shape[0]
     UK = k_unpad.shape[0]
     UKV = k_unpad.shape[0]
-    kernel = flashattn(batch, UQ, UKV, heads, dim, causal)
+    kernel = flashattn(batch, UQ, UKV, heads, dim, causal, block_M=128, block_N=128, num_stages=2, threads=256)
 
     from tilelang.profiler import do_bench
 

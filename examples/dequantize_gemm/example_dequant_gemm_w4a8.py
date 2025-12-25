@@ -123,7 +123,6 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
                 T.annotate_layout(
                     {
                         B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                        Ct_shared: tilelang.layout.make_swizzled_layout(Ct_shared),
                     }
                 )
 

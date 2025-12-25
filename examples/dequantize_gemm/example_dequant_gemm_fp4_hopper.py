@@ -148,12 +148,10 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                 B_dequantize_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
                 B_dequantize_prev_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
                 Ct_local = T.alloc_fragment((block_N, block_M), accum_dtype)
-                Ct_shared = T.alloc_shared((block_N, block_M), out_dtype)
 
                 T.annotate_layout(
                     {
                         B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                        Ct_shared: tilelang.layout.make_swizzled_layout(Ct_shared),
                     }
                 )
 
@@ -198,7 +196,6 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                 T.annotate_layout(
                     {
                         B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                        Ct_shared: tilelang.layout.make_swizzled_layout(Ct_shared),
                     }
                 )
 

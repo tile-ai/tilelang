@@ -79,7 +79,12 @@ _extended_torch_dtypes = [
 ]
 for dtype_name_tuple in _extended_torch_dtypes:
     dtype_name = dtype_name_tuple[0]
-    torch_dtype = getattr(torch, dtype_name, None)
+    torch_dtype = None
+    if dtype_name == "float4_e2m1fnx2":
+        torch_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+    else:
+        torch_dtype = getattr(torch, dtype_name, None)
+
     if torch_dtype is not None:
         _TORCH_DTYPE_TO_STR[torch_dtype] = dtype_name
 
@@ -193,7 +198,7 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
         return torch.float4_e2m1fn_x2
     elif dtype_str == "float4_e2m1fn":
         logger.info("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
-        return torch.float4_e2m1fn_x2
+        return torch.float4_e2m1fn_x2 if hasattr(torch, "float4_e2m1fn_x2") else torch.int8
     elif dtype_str in _STR_TO_TORCH_DTYPE:
         return _STR_TO_TORCH_DTYPE[dtype_str]
 

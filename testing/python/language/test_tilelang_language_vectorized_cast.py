@@ -116,10 +116,18 @@ def test_vectorized_cast_fp8(src_dtype, dst_dtype, check_str, lanes):
 @pytest.mark.parametrize(
     "src_dtype, dst_dtype, check_str, lanes",
     [
+        # FP4 <-> Half
         (T.float4_e2m1fn, T.float16, "__tl_cvt_fp4x2_to_half2", 2),
         (T.float16, T.float4_e2m1fn, "__tl_cvt_half2_to_fp4x2", 2),
+        # FP4 <-> Float
         (T.float4_e2m1fn, T.float32, "__tl_cvt_fp4x2_to_float2", 2),
         (T.float32, T.float4_e2m1fn, "__tl_cvt_float2_to_fp4x2", 2),
+        # FP4 <-> Double
+        (T.float4_e2m1fn, T.float64, "__tl_cvt_fp4x2_to_double2", 2),
+        (T.float64, T.float4_e2m1fn, "__tl_cvt_double2_to_fp4x2", 2),
+        # FP4 <-> BFloat16
+        (T.float4_e2m1fn, T.bfloat16, "__tl_cvt_fp4x2_to_bfloat162", 2),
+        (T.bfloat16, T.float4_e2m1fn, "__tl_cvt_bfloat162_to_fp4x2", 2),
     ],
 )
 def test_vectorized_cast_fp4(src_dtype, dst_dtype, check_str, lanes):

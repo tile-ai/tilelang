@@ -108,17 +108,6 @@ def tilelang_chunk_fwd_o(
             G_shared = T.alloc_shared((block_S,), dtype=gate_dtype, scope="shared")
             G_diff_local = T.alloc_fragment((block_S, block_S), dtype=gate_dtype)
 
-            T.annotate_layout(
-                {
-                    Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    H_shared: tilelang.layout.make_swizzled_layout(H_shared),
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                }
-            )
-
             T.clear(A_fragment)
             T.clear(O_fragment)
             T.disable_warp_group_reg_alloc()

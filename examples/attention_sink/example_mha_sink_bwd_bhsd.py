@@ -71,7 +71,6 @@ def flashattn_fwd(
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([heads], dtype)
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -259,9 +258,6 @@ def flashattn_bwd(
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
             T.copy(K[bz, bx, by * block_M : (by + 1) * block_M, :], K_shared)
