@@ -74,5 +74,27 @@ def main(M=1024, N=1024, K=1024):
     print(f"Latency: {latency} ms")
 
 
+def run_regression_perf(M=1024, N=1024, K=1024):
+    block_M = 128
+    block_N = 128
+    block_K = 64
+
+    jit_kernel = matmul_warp_specialize_copy_0_gemm_1(M, N, K, block_M, block_N, block_K)
+
+    import torch
+
+    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+
+    c = jit_kernel(a, b)
+    ref_c = a @ b
+
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+
+    profiler = jit_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+
+    return profiler.do_bench(backend="cupti")
+
+
 if __name__ == "__main__":
     main()

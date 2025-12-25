@@ -31,7 +31,7 @@ dependencies = [
     # Extra constraint to tvm-ffi for abi issue,
     # should be removed after our tvm's update.
     # See discussion in tilelang#1373 and apache/tvm-ffi#307
-    "apache-tvm-ffi>=0.1.3",
+    "apache-tvm-ffi>=0.1.6",
     # torch-c-dlpack-ext provides prebuilt torch extensions.
     # Without it, TVM FFI may require JIT compilation on first import.
     "torch-c-dlpack-ext",

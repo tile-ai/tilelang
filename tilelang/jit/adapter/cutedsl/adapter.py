@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import weakref
 from typing import Any, Callable
 
 import torch
@@ -213,9 +214,15 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         """
         return self.device_kernel_source
 
-    def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
-        """Low-level function to call the compiled CUDA kernel."""
-        result = self.pymodule.call(*args, stream=stream)
+    def _forward_from_prebuild_lib(self, *args, stream: int | None = None, device_id: int = 0):
+        """Low-level function to call the compiled CUDA kernel.
+
+        Args:
+            *args: Kernel arguments (tensors and scalars)
+            stream: CUDA stream handle
+            device_id: CUDA device ID for multi-GPU support
+        """
+        result = self.pymodule.call(*args, stream=stream, device_id=device_id)
 
         # After first call, save cubin to cache if needed
         self._save_cubin_to_cache_if_needed()
@@ -345,7 +352,12 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             else:
                 stream = 0
 
-        self._forward_from_prebuild_lib(*args, stream=stream)
+        # Get device_id from first tensor for multi-GPU support
+        if not first_tensor.is_cuda:
+            raise ValueError(f"CuTeDSL kernels require CUDA tensors, got tensor on device: {first_tensor.device}")
+        device_id = first_tensor.device.index or 0
+
+        self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
 
         if len(self.result_idx) == 1:
             return args[self.result_idx[0]]
@@ -361,6 +373,39 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             A callable function that takes tensors and returns tensor(s)
         """
         return self._wrap_forward_from_prebuild_lib
+
+    def _post_init(self):
+        """Override base class _post_init to register cleanup via weakref.finalize."""
+        super()._post_init()
+
+        # Register cleanup for this instance using weakref.finalize
+        # This will automatically call cleanup when the object is garbage collected
+        if self.pymodule is not None and hasattr(self.pymodule, "cleanup_module"):
+            weakref.finalize(self, self._cleanup_module, self.pymodule)
+
+    @staticmethod
+    def _cleanup_module(pymodule):
+        """Cleanup a single adapter instance's CUDA module and contexts.
+
+        This is called automatically when the adapter instance is garbage collected.
+        It can also be called explicitly via the cleanup() instance method.
+        """
+        try:
+            if hasattr(pymodule, "cleanup_module"):
+                pymodule.cleanup_module()
+        except Exception:
+            # Suppress errors during cleanup (might be called during shutdown)
+            pass
+
+    def cleanup(self):
+        """Explicitly cleanup this adapter's CUDA resources.
+
+        This method can be called explicitly to immediately release CUDA resources
+        without waiting for garbage collection. Useful in Jupyter notebooks or tests.
+
+        Note: This is safe to call multiple times as the C++ implementation is idempotent.
+        """
+        self._cleanup_module(self.pymodule)
 
     @property
     def prim_func(self) -> tir.PrimFunc:

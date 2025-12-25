@@ -175,6 +175,20 @@ public:
                    PrimExpr forward_thread, PrimExpr replicate_size,
                    Optional<Var> replicate_var);
 
+  /*!
+   * \brief Create a fully replicated fragment layout.
+   *
+   * A fully replicated fragment means all threads hold identical copies of the
+   * entire buffer. This is useful for index buffers or masks that need to be
+   * accessed uniformly across all threads.
+   *
+   * \param shape The shape of the buffer.
+   * \param thread_extent The number of threads.
+   * \return A Fragment where each thread has a complete copy of all elements.
+   */
+  TVM_DLL static Fragment FullyReplicated(Array<PrimExpr> shape,
+                                          PrimExpr thread_extent);
+
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fragment, Layout, FragmentNode);
 };
 
@@ -209,8 +223,8 @@ Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int warp_n, const int element_size,
                                const int k_pack, bool transposed = false);
 
-// Default Memory Layout
-Layout makeGemmLayoutLinear(int stride, int continuous);
+// Default Memory Layout (row-major linear layout for any dimension)
+Layout makeLinearLayout(Array<PrimExpr> shape);
 Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size);
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, bool k_inner = true);

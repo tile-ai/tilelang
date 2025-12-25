@@ -364,5 +364,23 @@ def main(do_bench: bool = True):
         print(f"TileLang BlockReduce Latency: {tilelang_tile_latency} ms\n")
 
 
+def run_regression_perf():
+    N, K = 1024, 1024
+    latency = 0.0
+    kernel_list = [
+        naive_gemv(N, K, 128, 128),
+        naive_splitk_gemv(N, K, 32, 32),
+        splitk_gemv(N, K, 32, 32, 32),
+        splitk_gemv_vectorized(N, K, 2, 32),
+        splitk_gemv_vectorized_tvm(N, K, 2, 32),
+        gemv_alloc_reducer(N, K, block_M=128, block_N=128),
+    ]
+    for kernel in kernel_list:
+        profiler = kernel.get_profiler()
+        # Benchmark the TileLang kernel itself, not the PyTorch reference.
+        latency += profiler.do_bench(warmup=50, backend="cupti")
+    return latency / len(kernel_list)
+
+
 if __name__ == "__main__":
     main()

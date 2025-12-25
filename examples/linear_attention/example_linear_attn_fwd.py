@@ -58,7 +58,6 @@ def tl_fused_chunk_fwd_kernel(
             o = T.alloc_fragment([chunk_size, BV], accum_dtype)
             o_shared = T.alloc_shared([chunk_size, BV], accum_dtype)
 
-            T.annotate_layout({o_shared: tilelang.layout.make_swizzled_layout(o_shared)})
             T.use_swizzle(10)
 
             T.clear(h)
@@ -136,6 +135,18 @@ def main(B=1, S=512, H=16, D=128):
     print(f"Triton latency: {t1:.3f} ms")
     print(f"TileLang latency: {t2:.3f} ms")
     print(f"Speedup: {t1 / t2:.3f}x")
+
+
+def run_regression_perf(B=1, S=512, H=16, D=128):
+    q = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    k = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    v = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    q, _ = l2norm_fwd(q)
+    k, _ = l2norm_fwd(k)
+    B, S, H, D = q.shape
+    kernel = tl_fused_chunk_fwd_kernel(B, S, H, D, D)
+    o = torch.zeros((B, S, H, D), device="cuda", dtype=torch.float32)
+    return do_bench(lambda: kernel(q, k, v, o), backend="cupti")
 
 
 if __name__ == "__main__":

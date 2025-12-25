@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""Kernel launching language interface in TileLang."""
 
 from __future__ import annotations
 from collections import deque

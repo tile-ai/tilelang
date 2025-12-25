@@ -7,6 +7,7 @@ import argparse
 import time
 import math
 from heuristic import num_splits_heuristic
+from tilelang.profiler import do_bench
 
 
 def flashattn(batch, heads, heads_kv, dim, dim_v):
@@ -30,8 +31,8 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
         part_shape = [batch, heads, num_split, dim_v]
         valid_block_H = min(block_H, kv_group_num)
 
-        @T.macro
-        def flash_attn_split(
+        @T.prim_func
+        def main(
             Q: T.Tensor(shape_q, dtype),
             K: T.Tensor(shape_k, dtype),
             V: T.Tensor(shape_v, dtype),
@@ -40,7 +41,10 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
             # actual_num_blocks: T.Tensor([batch], T.int32),
             glse: T.Tensor([batch, heads, num_split], accum_dtype),
             Output_partial: T.Tensor(part_shape, accum_dtype),
+            Output: T.Tensor(shape_o, dtype),
         ):
+            # flash_attn_split(Q, K, V, block_indices, cache_seqlens, actual_num_blocks, glse, Output_partial)
+            # flash_attn_split
             with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_H, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
@@ -115,67 +119,40 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                     if i < valid_block_H:
                         Output_partial[bid, hid * valid_block_H + i, sid, j] = acc_o[i, j]
 
-        @T.macro
-        def combine(
-            glse: T.Tensor([batch, heads, num_split], accum_dtype),
-            Output_partial: T.Tensor(part_shape, accum_dtype),
-            Output: T.Tensor(shape_o, dtype),
-        ):
+            # combine
             with T.Kernel(heads, batch, threads=128) as (by, bz):
                 po_local = T.alloc_fragment([dim_v], accum_dtype)
                 o_accum_local = T.alloc_fragment([dim_v], accum_dtype)
-                lse_local_split = T.alloc_local([1], accum_dtype)
-                lse_logsum_local = T.alloc_local([1], accum_dtype)
-                lse_max_local = T.alloc_local([1], accum_dtype)
-                scale_local = T.alloc_local([1], accum_dtype)
-                max_split = T.alloc_local([1], T.int32)
-
-                T.annotate_layout(
-                    {
-                        lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-                    }
-                )
+                lse_local_split = T.alloc_var(accum_dtype)
+                lse_logsum_local = T.alloc_var(accum_dtype)
+                lse_max_local = T.alloc_var(accum_dtype)
+                scale_local = T.alloc_var(accum_dtype)
+                max_split = T.alloc_var(T.int32)
 
                 T.clear(lse_logsum_local)
                 T.clear(o_accum_local)
-                lse_max_local[0] = -T.infinity(accum_dtype)
+                lse_max_local = -T.infinity(accum_dtype)
                 for k in T.serial(num_split):
-                    lse_local_split[0] = glse[bz, by, k]
-                    if lse_local_split[0] != 0:
-                        max_split[0] = k
-                        lse_max_local[0] = T.max(lse_max_local[0], glse[bz, by, k])
+                    lse_local_split = glse[bz, by, k]
+                    if lse_local_split != 0:
+                        max_split = k
+                        lse_max_local = T.max(lse_max_local, glse[bz, by, k])
 
                 for k in T.Pipelined(num_split, num_stages=1):
-                    if k <= max_split[0]:
-                        lse_local_split[0] = glse[bz, by, k]
-                        lse_logsum_local[0] += T.exp2(lse_local_split[0] - lse_max_local[0])
-                lse_logsum_local[0] = T.log2(lse_logsum_local[0]) + lse_max_local[0]
+                    if k <= max_split:
+                        lse_local_split = glse[bz, by, k]
+                        lse_logsum_local += T.exp2(lse_local_split - lse_max_local)
+                lse_logsum_local = T.log2(lse_logsum_local) + lse_max_local
                 for k in T.serial(num_split):
-                    if k <= max_split[0]:
+                    if k <= max_split:
                         for i in T.Parallel(dim_v):
                             po_local[i] = Output_partial[bz, by, k, i]
-                        lse_local_split[0] = glse[bz, by, k]
-                        scale_local[0] = T.exp2(lse_local_split[0] - lse_logsum_local[0])
+                        lse_local_split = glse[bz, by, k]
+                        scale_local = T.exp2(lse_local_split - lse_logsum_local)
                         for i in T.Parallel(dim_v):
-                            o_accum_local[i] += po_local[i] * scale_local[0]
+                            o_accum_local[i] += po_local[i] * scale_local
                 for i in T.Parallel(dim_v):
                     Output[bz, by, i] = o_accum_local[i]
-
-        @T.prim_func
-        def main(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            block_indices: T.Tensor(shape_indices, T.int32),
-            cache_seqlens: T.Tensor([batch], T.int32),
-            # actual_num_blocks: T.Tensor([batch], T.int32),
-            glse: T.Tensor([batch, heads, num_split], accum_dtype),
-            Output_partial: T.Tensor(part_shape, accum_dtype),
-            Output: T.Tensor(shape_o, dtype),
-        ):
-            # flash_attn_split(Q, K, V, block_indices, cache_seqlens, actual_num_blocks, glse, Output_partial)
-            flash_attn_split(Q, K, V, block_indices, cache_seqlens, glse, Output_partial)
-            combine(glse, Output_partial, Output)
 
         return main
 
@@ -419,6 +396,58 @@ def main(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=12
         out = sparse_kernel(Q, K, V, block_indices, cache_seqlens)
     torch.cuda.synchronize()
     print("sparse time: ", (time.time() - start) / 100 * 1000)
+
+
+def run_regression_perf(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=128, sparse_ratio=0.8, block_size=32):
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
+    sparse_ratio = sparse_ratio
+    block_size = block_size
+    max_selected_blocks = int(math.ceil(max_cache_seqlen * (1 - sparse_ratio) / block_size))
+    dtype = torch.float16
+    Q = torch.randn((batch, heads, dim), dtype=dtype, device="cuda")
+    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device="cuda")
+    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device="cuda")
+    cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device="cuda")
+    max_valid_num_blocks = torch.ceil(cache_seqlens / block_size).int()
+    block_indices = torch.full((batch, heads_kv, max_selected_blocks), -1, dtype=torch.int32, device="cuda")
+
+    for b in range(batch):
+        max_valid_block = max_valid_num_blocks[b].item()
+        if max_valid_block > 0:
+            for h in range(heads_kv):
+                valid_indices = torch.randperm(max_valid_block, device="cuda", dtype=torch.int32)[:max_selected_blocks]
+                block_indices[b, h, : len(valid_indices)] = valid_indices
+
+    block_indices, _ = block_indices.sort(dim=-1, descending=True)
+    sparse_kernel = SparseFlashAttn(batch, heads, heads_kv, dim, dim_v, block_size)
+    batch = sparse_kernel.batch
+    heads = sparse_kernel.heads
+    heads_kv = sparse_kernel.heads_kv
+    dim_v = sparse_kernel.dim_v
+    dim = sparse_kernel.dim
+    block_size = sparse_kernel.block_size
+    max_selected_blocks = block_indices.shape[-1]
+
+    num_m_blocks = 1 * (heads // heads_kv + sparse_kernel.block_H - 1) // sparse_kernel.block_H
+    num_n_blocks = max_selected_blocks
+    size_one_kv_head = max_selected_blocks * block_size * (dim + dim_v) * 2
+    total_mblocks = batch * heads_kv * num_m_blocks
+    num_sm = sparse_kernel.num_sm
+
+    num_split = num_splits_heuristic(
+        total_mblocks, num_sm, num_n_blocks, num_m_blocks, size_one_kv_head, is_causal_or_local=True, max_splits=128
+    )
+
+    glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device="cuda")
+    output_partial = torch.empty((batch, heads, num_split, dim_v), dtype=torch.float32, device="cuda")
+    kernel = sparse_kernel.kernel
+
+    def run_kernel_only():
+        kernel(Q, K, V, block_indices, cache_seqlens, glse, output_partial)
+
+    return do_bench(run_kernel_only, warmup=100, rep=1000, backend="cupti")
 
 
 if __name__ == "__main__":

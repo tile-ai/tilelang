@@ -28,6 +28,32 @@ enum class CopyInst : uint8_t {
   kTMemStore = 8,   // tcgen05.st (register -> tensor memory)
 };
 
+/// Convert CopyInst enum to string for debugging
+inline const char *CopyInstToString(CopyInst inst) {
+  switch (inst) {
+  case CopyInst::kNormal:
+    return "Normal";
+  case CopyInst::kLDSM:
+    return "LDSM";
+  case CopyInst::kSTSM:
+    return "STSM";
+  case CopyInst::kBulkLoad:
+    return "BulkLoad";
+  case CopyInst::kBulkStore:
+    return "BulkStore";
+  case CopyInst::kBulkLoad1D:
+    return "BulkLoad1D";
+  case CopyInst::kBulkStore1D:
+    return "BulkStore1D";
+  case CopyInst::kTMemLoad:
+    return "TMemLoad";
+  case CopyInst::kTMemStore:
+    return "TMemStore";
+  default:
+    return "Unknown";
+  }
+}
+
 /// Descriptor for Tensor Memory Access (TMA) copy operations
 struct TMADesc {
   size_t rank;                   ///< Tensor rank (number of dimensions)
@@ -269,6 +295,28 @@ protected:
    * @return Reference to the singleton TVM Op representing this operator.
    */
   TileOperator Clone() const;
+
+private:
+  /*!
+   * \brief Collect fragment buffers from expression and create fully replicated
+   * layouts.
+   *
+   * Recursively searches the expression for BufferLoad nodes with
+   * "local.fragment" scope, following let bindings. For each found fragment
+   * buffer, creates a fully replicated layout and adds it to result_map.
+   *
+   * \param expr            Expression to search.
+   * \param let_var_to_expr Map from let variables to their bound expressions.
+   * \param existing_layouts Existing layout map to check for already-inferred
+   * layouts. \param thread_extent   Number of threads for replication. \param
+   * thread_bounds   Thread bounds for binding the layout. \param result_map
+   * Output map to store collected fragment layouts.
+   */
+  void CollectFragmentLayouts(const PrimExpr &expr,
+                              const Map<Var, PrimExpr> &let_var_to_expr,
+                              const LayoutMap &existing_layouts,
+                              PrimExpr thread_extent, Range thread_bounds,
+                              Map<Buffer, Layout> &result_map) const;
 };
 
 class Copy : public TileOperator {

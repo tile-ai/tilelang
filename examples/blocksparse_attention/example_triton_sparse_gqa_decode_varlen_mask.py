@@ -4,7 +4,6 @@ import triton.language as tl
 import argparse
 from einops import rearrange, einsum
 import torch.nn.functional as F
-
 import math
 import time
 from heuristic import num_splits_heuristic

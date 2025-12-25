@@ -15,6 +15,7 @@
 
 #include "../op/builtin.h"
 #include "./ptx.h"
+#include "./utils.h"
 #include "arith/pattern_match.h"
 
 namespace tvm {
@@ -128,10 +129,9 @@ static std::string GetTileLangFP8Type(DataType type) {
         << "Only support scalar and vector types of width (2, 4, 8, 16, 32) "
            "for FP8";
   }
-  if (type.is_float8_e4m3fn() || type.is_float8_e4m3fnuz() ||
-      type.is_float8_e4m3()) {
+  if (type.is_float8_e4m3() || type.is_float8_e4m3fn()) {
     stream << "fp8_e4" << vec << "_t";
-  } else if (type.is_float8_e5m2() || type.is_float8_e5m2fnuz()) {
+  } else if (type.is_float8_e5m2()) {
     stream << "fp8_e5" << vec << "_t";
   } else if (type.is_float8_e8m0fnu()) {
     stream << "fp8_e8" << vec << "_t";
@@ -970,273 +970,180 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   stream << ' ' << sret << ";\n";
   std::string src = SSAGetID(PrintExpr(op->value), from_ty);
 
-  // Handle conversion between float16 and float32
-  if (from_ty.is_float16() && target_ty.is_float()) {
+  int lanes = from_ty.lanes();
+
+  auto PrintVectorizedCast =
+      [&](const std::string &cast_func, const std::string &src_type,
+          const std::string &dst_type, const std::string &extra_args = "",
+          bool src_needs_reinterpret = false,
+          bool dst_needs_reinterpret = false) {
+        int num_chunks = lanes / 2;
+        std::string src_cast = src_needs_reinterpret
+                                   ? "reinterpret_cast<" + src_type + "*>"
+                                   : "(" + src_type + "*)";
+        std::string dst_cast = dst_needs_reinterpret
+                                   ? "reinterpret_cast<" + dst_type + "*>"
+                                   : "(" + dst_type + "*)";
+
+        for (int i = 0; i < num_chunks; i++) {
+          PrintIndent();
+          stream << "(" << dst_cast << "(&" << sret << "))[" << i
+                 << "] = " << cast_func << "((" << src_cast << "(&" << src
+                 << "))[" << i << "]" << extra_args << ");\n";
+        }
+        os << sret;
+      };
+
+  // Handle conversion from float16 to float32
+  if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32) {
     // Use __half22float2 for vectorized conversion (half2 -> float2)
-    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
-      // half2 -> float2
-      PrintIndent();
-      stream << sret << " = __half22float2(*(half2*)(&(" << src << ")));\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
-      // half4 -> float4
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[0] = "
-             << "__half22float2(*(half2*)(&(" << src << ")));\n";
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[1] = "
-             << "__half22float2(*((half2*)(&(" << src << "))+1));\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
-      // half8 -> float8
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[0] = "
-             << "__half22float2(*(half2*)(&(" << src << ")));\n";
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[1] = "
-             << "__half22float2(*((half2*)(&(" << src << "))+1));\n";
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[2] = "
-             << "__half22float2(*((half2*)(&(" << src << "))+2));\n";
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[3] = "
-             << "__half22float2(*((half2*)(&(" << src << "))+3));\n";
-      os << sret;
-      return;
-    }
-  } else if (from_ty.is_float() && target_ty.is_float16()) {
-    // Use __float22half2_rn for vectorized conversion (float2 -> half2)
-    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
-      // float2 -> half2
-      PrintIndent();
-      stream << "*(half2*)(&(" << sret << ")) = __float22half2_rn(*(float2*)(&("
-             << src << ")));\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
-      // float4 -> half4
-      PrintIndent();
-      stream << "((half2*)(&" << sret << "))[0] = "
-             << "__float22half2_rn(*(float2*)(&(" << src << ")));\n";
-      PrintIndent();
-      stream << "((half2*)(&" << sret << "))[1] = "
-             << "__float22half2_rn(*((float2*)(&(" << src << "))+1));\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
-      // float8 -> half8
-      PrintIndent();
-      stream << "((half2*)(&" << sret << "))[0] = "
-             << "__float22half2_rn(*(float2*)(&(" << src << ")));\n";
-      PrintIndent();
-      stream << "((half2*)(&" << sret << "))[1] = "
-             << "__float22half2_rn(*((float2*)(&(" << src << "))+1));\n";
-      PrintIndent();
-      stream << "((half2*)(&" << sret << "))[2] = "
-             << "__float22half2_rn(*((float2*)(&(" << src << "))+2));\n";
-      PrintIndent();
-      stream << "((half2*)(&" << sret << "))[3] = "
-             << "__float22half2_rn(*((float2*)(&(" << src << "))+3));\n";
-      os << sret;
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__half22float2", "half2", "float2");
       return;
     }
   }
 
-  // Handle conversion between bfloat16 and float32
-  if (from_ty.is_bfloat16() && target_ty.is_float()) {
-    // Use __bfloat1622float2 for vectorized conversion (bfloat162 -> float2)
-    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
-      // bfloat162 -> float2
-      PrintIndent();
-      stream << sret
-             << " = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&("
-             << src << ")));\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
-      // bfloat162x2 -> float4
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[0] = "
-             << "__bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&("
-             << src << ")));\n";
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[1] = "
-             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&("
-             << src << "))+1));\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
-      // bfloat162x4 -> float8
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[0] = "
-             << "__bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&("
-             << src << ")));\n";
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[1] = "
-             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&("
-             << src << "))+1));\n";
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[2] = "
-             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&("
-             << src << "))+2));\n";
-      PrintIndent();
-      stream << "((float2*)(&" << sret << "))[3] = "
-             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&("
-             << src << "))+3));\n";
-      os << sret;
+  // Handle conversion from float32 to float16
+  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_float16()) {
+    // Use __float22half2_rn for vectorized conversion (float2 -> half2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__float22half2_rn", "float2", "half2");
       return;
     }
-  } else if (from_ty.is_float() && target_ty.is_bfloat16()) {
+  }
+
+  // Handle conversion from bfloat16 to float32
+  if (from_ty.is_bfloat16() && target_ty.is_float() && target_ty.bits() == 32) {
+    // Use __bfloat1622float2 for vectorized conversion (bfloat162 -> float2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__bfloat1622float2", "__nv_bfloat162", "float2", "",
+                          true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float32 to bfloat16
+  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_bfloat16()) {
     // Use __float22bfloat162_rn for vectorized conversion (float2 -> bfloat162)
-    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
-      // float2 -> bfloat162
-      PrintIndent();
-      stream << "*reinterpret_cast<__nv_bfloat162*>(&(" << sret
-             << ")) = __float22bfloat162_rn(*(float2*)(&(" << src << ")));\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
-      // float4 -> bfloat162x2
-      PrintIndent();
-      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[0] = "
-             << "__float22bfloat162_rn(*(float2*)(&(" << src << ")));\n";
-      PrintIndent();
-      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[1] = "
-             << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+1));\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
-      // float8 -> bfloat162x4
-      PrintIndent();
-      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[0] = "
-             << "__float22bfloat162_rn(*(float2*)(&(" << src << ")));\n";
-      PrintIndent();
-      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[1] = "
-             << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+1));\n";
-      PrintIndent();
-      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[2] = "
-             << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+2));\n";
-      PrintIndent();
-      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[3] = "
-             << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+3));\n";
-      os << sret;
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__float22bfloat162_rn", "float2", "__nv_bfloat162",
+                          "", false, true);
       return;
     }
   }
 
   // Handle conversion from float32 to float8 (E4M3/E5M2)
-  if (from_ty.is_float() && (target_ty.is_float8())) {
-    bool target_type_is_e4m3 = target_ty.is_float8_e4m3() ||
-                               target_ty.is_float8_e4m3fn() ||
-                               target_ty.is_float8_e4m3fnuz();
-    // FP32 -> FP8: Use __nv_cvt_float2_to_fp8x2 for vectorized conversion
-    // (float2 -> fp8x2)
-    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
-      // float2 -> fp8x2
-      PrintIndent();
-      stream << "*reinterpret_cast<__nv_fp8x2_storage_t*>(&(" << sret
-             << ")) = __nv_cvt_float2_to_fp8x2(*reinterpret_cast<float2*>(&("
-             << src << ")), __NV_SATFINITE, "
-             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
-      // float4 -> fp8x4
-      PrintIndent();
-      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[0] = "
-             << "__nv_cvt_float2_to_fp8x2(*(float2*)(&(" << src
-             << ")), __NV_SATFINITE, "
-             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
-      PrintIndent();
-      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[1] = "
-             << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
-             << "))+1), __NV_SATFINITE, "
-             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
-      os << sret;
-      return;
-    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
-      // float8 -> fp8x8
-      PrintIndent();
-      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[0] = "
-             << "__nv_cvt_float2_to_fp8x2(*(float2*)(&(" << src
-             << ")), __NV_SATFINITE, "
-             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
-      PrintIndent();
-      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[1] = "
-             << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
-             << "))+1), __NV_SATFINITE, "
-             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
-      PrintIndent();
-      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[2] = "
-             << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
-             << "))+2), __NV_SATFINITE, "
-             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
-      PrintIndent();
-      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[3] = "
-             << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
-             << "))+3), __NV_SATFINITE, "
-             << (target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
-      os << sret;
+  if (from_ty.is_float() && from_ty.bits() == 32 &&
+      tl::IsCudaVectorizableFP8(target_ty)) {
+    bool target_type_is_e4m3 =
+        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    std::string type_suffix = target_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+
+    // Use __nv_cvt_float2_to_fp8x2 for vectorized conversion (float2 -> fp8x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      std::string extra_args = ", __NV_SATFINITE, " + type_suffix;
+      PrintVectorizedCast("__nv_cvt_float2_to_fp8x2", "float2",
+                          "__nv_fp8x2_storage_t", extra_args, false, true);
       return;
     }
   }
 
-  if (from_ty.is_float8() && target_ty.is_float()) {
-    bool from_type_is_e4m3 = from_ty.is_float8_e4m3() ||
-                             from_ty.is_float8_e4m3fn() ||
-                             from_ty.is_float8_e4m3fnuz();
-    // FP8 -> FP32: Use __tl_cvt_fp8x2_to_float2 for vectorized conversion
-    // (fp8x2 -> float2)
-    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
-      // fp8x2 -> float2
-      PrintIndent();
-      stream << "*reinterpret_cast<float2*>(&(" << sret
-             << ")) = "
-                "__tl_cvt_fp8x2_to_float2(*reinterpret_cast<__nv_fp8x2_storage_"
-                "t*>(&("
-             << src << ")), " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
-      os << sret;
+  // Handle conversion from float8 (E4M3/E5M2) to float32
+  if (tl::IsCudaVectorizableFP8(from_ty) && target_ty.is_float()) {
+    bool from_type_is_e4m3 =
+        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    std::string type_suffix = from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2";
+
+    // Use __tl_cvt_fp8x2_to_float2 for vectorized conversion (fp8x2 -> float2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp8x2_to_float2", "__nv_fp8x2_storage_t",
+                          "float2", ", " + type_suffix, true, false);
       return;
-    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
-      // fp8x4 -> float4
-      PrintIndent();
-      stream << "*(float2*)(&" << sret << ") = "
-             << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[0], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
-      PrintIndent();
-      stream << "*((float2*)(&" << sret << ")+1) = "
-             << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[1], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
-      os << sret;
+    }
+  }
+
+  // Handle conversion from float16 to float4 (E2M1)
+  if (from_ty.is_float16() && target_ty.is_float4_e2m1fn()) {
+    // Use __tl_cvt_half2_to_fp4x2 for vectorized conversion (half2 -> fp4x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_half2_to_fp4x2", "half2", "uint8_t", "",
+                          false, true);
       return;
-    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
-      // fp8x8 -> float8
-      PrintIndent();
-      stream << "*(float2*)(&" << sret << ") = "
-             << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[0], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
-      PrintIndent();
-      stream << "*((float2*)(&" << sret << ")+1) = "
-             << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[1], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
-      PrintIndent();
-      stream << "*((float2*)(&" << sret << ")+2) = "
-             << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[2], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
-      PrintIndent();
-      stream << "*((float2*)(&" << sret << ")+3) = "
-             << "__tl_cvt_fp8x2_to_float2(((__nv_fp8x2_storage_t*)(&" << src
-             << "))[3], " << (from_type_is_e4m3 ? "__NV_E4M3" : "__NV_E5M2")
-             << ");\n";
-      os << sret;
+    }
+  }
+
+  // Handle conversion from float32 to float4 (E2M1)
+  if (from_ty.is_float() && target_ty.is_float4_e2m1fn()) {
+    // Use __tl_cvt_float2_to_fp4x2 for vectorized conversion (float2 -> fp4x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_float2_to_fp4x2", "float2", "uint8_t", "",
+                          false, true);
+      return;
+    }
+  }
+
+  // Handle conversion from float4 (E2M1) to float16
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_float16()) {
+    // Use __tl_cvt_fp4x2_to_half2 for vectorized conversion (fp4x2 -> half2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp4x2_to_half2", "uint8_t", "half2", "",
+                          true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float4 (E2M1) to float32
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_float()) {
+    // Use __tl_cvt_fp4x2_to_float2 for vectorized conversion (fp4x2 -> float2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp4x2_to_float2", "uint8_t", "float2", "",
+                          true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from double to float4 (E2M1)
+  if (from_ty.is_float() && from_ty.bits() == 64 &&
+      target_ty.is_float4_e2m1fn()) {
+    // Use __tl_cvt_double2_to_fp4x2 for vectorized conversion (double2 ->
+    // fp4x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_double2_to_fp4x2", "double2", "uint8_t", "",
+                          false, true);
+      return;
+    }
+  }
+
+  // Handle conversion from float4 (E2M1) to double
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
+      target_ty.bits() == 64) {
+    // Use __tl_cvt_fp4x2_to_double2 for vectorized conversion (fp4x2 ->
+    // double2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp4x2_to_double2", "uint8_t", "double2", "",
+                          true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from bfloat16 to float4 (E2M1)
+  if (from_ty.is_bfloat16() && target_ty.is_float4_e2m1fn()) {
+    // Use __tl_cvt_bfloat162_to_fp4x2 for vectorized conversion (bfloat162 ->
+    // fp4x2)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_bfloat162_to_fp4x2", "__nv_bfloat162",
+                          "uint8_t", "", false, true);
+      return;
+    }
+  }
+
+  // Handle conversion from float4 (E2M1) to bfloat16
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_bfloat16()) {
+    // Use __tl_cvt_fp4x2_to_bfloat162 for vectorized conversion (fp4x2 ->
+    // bfloat162)
+    if (lanes == 2 || lanes == 4 || lanes == 8) {
+      PrintVectorizedCast("__tl_cvt_fp4x2_to_bfloat162", "uint8_t",
+                          "__nv_bfloat162", "", true, false);
       return;
     }
   }
@@ -1412,13 +1319,22 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     // int32.  Therefore, we need to divide by the ratio of their
     // sizes in that case.
     int div_factor = (t.lanes() == 1) ? (32 / t.bits()) : t.lanes();
+    index_str =
+        PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
 
-    os << "*("
-       << "(" << ptr_cast(t) << vid << ")"
-       << " + " << index_str << " / " << div_factor << ")";
+    os << "*((" << ptr_cast(t) << vid << ")" << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     os << buffer_str << "[" << index_str << "]";
   } else {
+    // Fix fp4 pointer arithmetic: fp4 elements are 4-bit packed 2 per byte.
+    // fp4* + n incorrectly advances n bytes (skipping 2n elements).
+    int div_factor = 1;
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+      div_factor = 2;
+    }
+    index_str =
+        PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
+
     os << "*" << ptr_cast(t) << "(" << buffer_str << " + " << index_str << ")";
   }
 
@@ -2270,7 +2186,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
          << "[(i % 8) / 4 * " + smem_stride +
                 " * 16 + (threadIdx.x % 4) * 4 * " + smem_stride +
                 "+ (i % 4) * " + smem_stride +
-                " + threadIdx.x / 4 +  (i / 8) * 8];\n";
+                " + threadIdx.x / 4 + (i / 8) * 8];\n";
       os << "}\n";
     } else {
       std::string smem_elem_offset = this->PrintExpr(op->args[6]);
@@ -2948,11 +2864,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   } else {
     bool can_vector_load = false;
     arith::PVar<PrimExpr> base;
-    // For sub-byte types with lanes > 1 in element_dtype, adjust the ramp
-    // pattern
-    int ramp_lanes = (element_dtype.lanes() > 1 && element_dtype.bits() < 8)
-                         ? value_dtype.lanes() / element_dtype.lanes()
-                         : value_dtype.lanes();
+    int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
     if (arith::ramp(base, 1, ramp_lanes).Match(index)) {
       const RampNode *ramp = index.as<RampNode>();
       ICHECK(ramp);
@@ -3016,12 +2928,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     stream << ref << " = " << value << ";\n";
   } else {
     arith::PVar<PrimExpr> base;
-    // For sub-byte types with lanes > 1 in element_dtype, adjust the ramp
-    // pattern
-    int ramp_lanes = (element_dtype.lanes() > 1 && element_dtype.bits() < 8)
-                         ? value_dtype.lanes() / element_dtype.lanes()
-                         : value_dtype.lanes();
-
+    int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
     if (arith::ramp(base, 1, ramp_lanes).Match(index_expr)) {
       std::string value = this->PrintExpr(op->value);
       this->PrintVecStore(op->buffer.get(), value_dtype, base.Eval(), value);

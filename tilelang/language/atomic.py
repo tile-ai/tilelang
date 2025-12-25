@@ -1,6 +1,4 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
-"""Atomic operations for tilelang."""
+"""Atomic operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
 

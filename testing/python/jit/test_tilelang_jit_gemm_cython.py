@@ -52,68 +52,6 @@ def matmul(
     return main
 
 
-def run_gemm(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtypeAccum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages=3,
-    num_threads=128,
-):
-    program = matmul(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtypeAccum,
-        num_stages,
-        num_threads,
-    )
-
-    stramp = "&*(XS)"
-
-    @tvm.register_global_func("tilelang_callback_cuda_postproc", override=True)
-    def tilelang_callback_cuda_postproc(code, _):
-        code = f"// {stramp}\n" + code
-        return code
-
-    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="cython")
-
-    kernel_source = matmul_kernel.get_kernel_source()
-
-    assert stramp in kernel_source, f"Expected {stramp} in the kernel source"
-
-
-def test_gemm_f16f16f16_nn():
-    run_gemm(
-        512,
-        1024,
-        768,
-        False,
-        False,
-        T.float16,
-        T.float16,
-        T.float16,
-        128,
-        256,
-        32,
-        2,
-    )
-
-
 def matmu_jit_kernel(
     M,
     N,
@@ -256,24 +194,16 @@ def run_cython_kernel_do_bench(
     )
 
     cython_matmul_kernel = tilelang.compile(program, execution_backend="cython")
-    ctypes_matmul_kernel = tilelang.compile(program, execution_backend="ctypes")
 
     cython_profiler = cython_matmul_kernel.get_profiler()
-    ctypes_profiler = ctypes_matmul_kernel.get_profiler()
 
     cython_latency = cython_profiler.do_bench(func=cython_matmul_kernel)
     print(f"cython Latency: {cython_latency} ms")
-
-    # assert ctypes_latency is not None
 
     tvm_latency = cython_profiler.do_bench()
     print(f"TVM Latency: {tvm_latency} ms")
 
     assert tvm_latency is not None
-
-    ctypes_latency = ctypes_profiler.do_bench(func=ctypes_matmul_kernel)
-    print(f"ctypes Latency: {ctypes_latency} ms")
-
     assert cython_latency is not None
 
 

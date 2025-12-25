@@ -93,12 +93,6 @@ class ExitedMacroFrame(Frame): ...
 class BoolOpFrame(Frame): ...
 
 
-class ConstIfFrame(Frame): ...
-
-
-class BlockFrame(Frame): ...
-
-
 class ContinueFrame(Frame): ...
 
 
@@ -254,26 +248,23 @@ class Builder(BaseBuilder):
             with self.with_frame(tir.If(cond)):
                 yield self._has_if_frame
         else:
-            with self.with_frame(ConstIfFrame()):
-                yield cond
+            yield cond
 
     def ctx_then(self, val):
         if val is self._has_if_frame:
             with self.with_frame(tir.Then()):
                 yield
         else:
-            with self.with_frame(BlockFrame()):
-                if val:
-                    yield
+            if val:
+                yield
 
     def ctx_else(self, val):
         if val is self._has_if_frame:
             with self.with_frame(tir.Else()):
                 yield
         else:
-            with self.with_frame(BlockFrame()):
-                if not val:
-                    yield
+            if not val:
+                yield
 
     def eval(self, val: Any):
         val = unwrap_expr(val)

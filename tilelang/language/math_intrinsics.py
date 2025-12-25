@@ -1,3 +1,5 @@
+"""Common math intrinsics exposed on the TileLang language surface."""
+
 from tvm import tir
 
 

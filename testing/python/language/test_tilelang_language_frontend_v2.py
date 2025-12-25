@@ -470,5 +470,31 @@ def test_boolop():
     cond()
 
 
+def test_constexpr_if():
+    @tilelang.jit
+    def probe(tmp: bool):
+        @T.prim_func
+        def foo(A: T.Tensor[[2], T.int32]):
+            with T.Kernel(1):
+                if tmp:
+                    v = A[0]
+                else:
+                    v = A[1]
+                if tmp:
+                    A[1] = v + 1
+                else:
+                    A[0] = v + 1
+
+        return foo
+
+    A = torch.tensor([10, 20], dtype=torch.int32).cuda()
+    expect_1 = torch.tensor([10, 11], dtype=torch.int32).cuda()
+    expect_2 = torch.tensor([12, 11], dtype=torch.int32).cuda()
+    probe(True)(A)
+    assert torch.equal(A, expect_1)
+    probe(False)(A)
+    assert torch.equal(A, expect_2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

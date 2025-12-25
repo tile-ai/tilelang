@@ -31,3 +31,6 @@ tabulate
 tornado
 wheel
 z3-solver>=4.13.0
+matplotlib
+seaborn
+pandas

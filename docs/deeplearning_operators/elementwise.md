@@ -280,8 +280,8 @@ To evaluate complexity, one could implement the same elementwise addition operat
 
 ```c++
 template<int NUM_ELE_PER_THREAD=8>
-__global__ void elementwise_add(nv_bfloat16* C, 
-                                 const nv_bfloat16* A, 
+__global__ void elementwise_add(nv_bfloat16* C,
+                                 const nv_bfloat16* A,
                                  const nv_bfloat16* B,
                                  int N) {
   using namespace cute;

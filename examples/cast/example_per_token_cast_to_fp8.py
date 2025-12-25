@@ -25,12 +25,6 @@ def per_token_cast_to_fp8(M, N, blk_m):
             y_q_local = T.alloc_fragment((blk_m, group_size), dtype)
             y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
 
-            T.annotate_layout(
-                {
-                    y_local: T.Fragment(y_local.shape, forward_thread_fn=lambda i, j: (i // (blk_m // 4)) * 32 + j % 32),
-                }
-            )
-
             T.copy(X[row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size], y_local)
             T.reduce_absmax(y_local, y_amax_local, dim=1)
             for i in T.Parallel(blk_m):
@@ -107,6 +101,17 @@ def main(M=8192, N=8192, blk_m=8):
     x_fp8_triton, x_amax_triton = run_triton()
     latency = do_bench(run_triton)
     print("Triton: {:.2f} ms".format(latency))
+
+
+def run_regression_perf(M=8192, N=8192, blk_m=8):
+    kernel = per_token_cast_to_fp8(M, N, blk_m)
+    x = torch.randn(M, N, device="cuda", dtype=torch.float32)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(x)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
 
 
 if __name__ == "__main__":

@@ -58,12 +58,12 @@ from .allocate import (
     alloc_tcgen05_instr_desc,  # noqa: F401
     empty,  # noqa: F401
 )
-from .copy import copy, c2d_im2col  # noqa: F401
+from .copy_op import copy, c2d_im2col  # noqa: F401
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
-from .gemm import gemm, gemm_v1, gemm_v2  # noqa: F401
+from .gemm_op import gemm, gemm_v1, gemm_v2  # noqa: F401
 from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401
-from .fill import fill, clear  # noqa: F401
-from .reduce import (
+from .fill_op import fill, clear  # noqa: F401
+from .reduce_op import (
     reduce,  # noqa: F401
     reduce_max,  # noqa: F401
     reduce_min,  # noqa: F401
@@ -81,7 +81,7 @@ from .reduce import (
     warp_reduce_bitand,  # noqa: F401
     warp_reduce_bitor,  # noqa: F401
 )
-from .print import print, device_assert  # noqa: F401
+from .print_op import print, device_assert  # noqa: F401
 from .customize import (
     atomic_max,  # noqa: F401
     atomic_min,  # noqa: F401

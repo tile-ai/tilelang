@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""Buffer/Tensor proxy in TileLang."""
 
 from __future__ import annotations
 

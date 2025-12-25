@@ -4,10 +4,13 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import argparse
+from tilelang.profiler import do_bench
+from tilelang.autotuner import set_autotune_inputs, autotune
 
 import torch
 from einops import rearrange, repeat
 from varlen_utils import generate_random_padding_mask, generate_qkv
+import itertools
 
 
 def attention_ref(
@@ -67,13 +70,19 @@ def attention_ref(
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
 
 
+def get_configs():
+    iter_params = dict(block_M=[64, 128], block_N=[64, 128], num_stages=[0, 1, 2, 3], threads=[128, 256])
+    return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
+
+
+@autotune(configs=get_configs())
 @tilelang.jit(
     out_idx=[6],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64, num_stages=0, threads=32):
+def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64, num_stages=1, threads=128):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     q_shape = [UQ, heads, dim]
     k_shape = [UKV, heads, dim]
@@ -94,10 +103,10 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64
         Output_unpad: T.Tensor(o_shape, dtype),
     ):
         with T.Kernel(T.ceildiv(max_seqlen_q, block_M), heads, batch_size, threads=threads) as (bx, by, bz):
-            Q_shared = T.alloc_shared([block_M, dim], dtype, "shared")
-            K_shared = T.alloc_shared([block_N, dim], dtype, "shared")
-            V_shared = T.alloc_shared([block_N, dim], dtype, "shared")
-            O_shared = T.alloc_shared([block_M, dim], dtype, "shared")
+            Q_shared = T.alloc_shared([block_M, dim], dtype)
+            K_shared = T.alloc_shared([block_N, dim], dtype)
+            V_shared = T.alloc_shared([block_N, dim], dtype)
+            O_shared = T.alloc_shared([block_M, dim], dtype)
             acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
             acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
             acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
@@ -121,11 +130,9 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64
             k_current_seqlen = k_end_idx - k_start_idx
             v_current_seqlen = v_end_idx - v_start_idx
 
-            for i, d in T.Parallel(block_M, dim):
-                if bx * block_M + i < q_current_seqlen:
-                    Q_shared[i, d] = Q_unpad[q_start_idx + bx * block_M + i, head_idx, d]
-                else:
-                    Q_shared[i, d] = 0
+            T.copy(
+                Q_unpad[q_start_idx + bx * block_M : q_start_idx + bx * block_M + block_M, head_idx, :], Q_shared
+            )  # OOB positions will be handled below
 
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -135,11 +142,9 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64
 
             for k in T.Pipelined(loop_range, num_stages=num_stages):
                 # Q * K
-                for i, d in T.Parallel(block_N, dim):
-                    if k * block_N + i < k_current_seqlen:
-                        K_shared[i, d] = K_unpad[k_start_idx + k * block_N + i, head_idx, d]
-                    else:
-                        K_shared[i, d] = 0
+                T.copy(
+                    K_unpad[k_start_idx + k * block_N : k_start_idx + k * block_N + block_N, head_idx, :], K_shared
+                )  # OOB positions will be handled below
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(
@@ -184,26 +189,23 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64
                     acc_o[i, j] *= scores_scale[i]
 
                 # V * softmax(Q * K)
-                for i, d in T.grid(block_N, dim):
-                    if k * block_N + i < v_current_seqlen:
-                        V_shared[i, d] = V_unpad[v_start_idx + k * block_N + i, head_idx, d]
-                    else:
-                        V_shared[i, d] = 0
+                T.copy(
+                    V_unpad[v_start_idx + k * block_N : v_start_idx + k * block_N + block_N, head_idx, :], V_shared
+                )  # OOB positions' weights are 0
 
                 T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
-
-            for i, d in T.Parallel(block_M, dim):
-                if bx * block_M + i < q_current_seqlen:
-                    Output_unpad[q_start_idx + bx * block_M + i, head_idx, d] = O_shared[i, d]
+            T.copy(
+                O_shared, Output_unpad[q_start_idx + bx * block_M : q_start_idx + bx * block_M + block_M, head_idx, :]
+            )  # TMA will handle OOB
 
     return main
 
 
-def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128):
+def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128, tune: bool = False):
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
 
@@ -243,7 +245,12 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128):
     UK = k_unpad.shape[0]  # unpadded key length
     UKV = k_unpad.shape[0]  # unpadded query key length
 
-    kernel = flashattn(batch, UQ, UKV, heads, dim, causal)
+    if tune:
+        with set_autotune_inputs(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q):
+            kernel = flashattn(batch, UQ, UKV, heads, dim, causal)
+    else:
+        kernel = flashattn(batch, UQ, UKV, heads, dim, causal, block_M=64, block_N=64, num_stages=1, threads=128)
+        # NOTE: (128, 128, 2or3, 256) is recommended for Hopper
 
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
     out = output_pad_fn(out_unpad)
@@ -276,6 +283,61 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128):
 
     print("All checks passed.✅")
 
+    # benchmark
+    t = do_bench(lambda: kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q))
+    print(f"Tilelang time: {t} ms")
+    print(f"Tilelang: {total_flops / t * 1e-9} TFlops")
+    t = do_bench(
+        lambda: flash_attn.flash_attn_varlen_func(
+            q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, 0.0, causal=causal
+        )
+    )
+    print(f"FA2 time: {t} ms")
+    print(f"FA2: {total_flops / t * 1e-9} TFlops")
+
+
+def run_regression_perf(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128):
+    flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
+    total_flops = 2 * flops_per_matmul
+    tilelang.testing.set_random_seed(0)
+    causal = False
+    if causal:
+        total_flops *= 0.5
+    dtype = torch.float16
+    device = torch.device("cuda")
+    window_size = (-1, -1)
+    q = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
+    k = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
+    v = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
+    query_padding_mask = generate_random_padding_mask(seq_len, batch, device, mode="random")
+    key_padding_mask = generate_random_padding_mask(seq_len, batch, device, mode="random")
+    (
+        q_unpad,
+        k_unpad,
+        v_unpad,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        q,
+        k,
+        v,
+        output_pad_fn,
+        dq_pad_fn,
+        dk_pad_fn,
+    ) = generate_qkv(q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
+    UQ = q_unpad.shape[0]
+    UK = k_unpad.shape[0]
+    UKV = k_unpad.shape[0]
+    kernel = flashattn(batch, UQ, UKV, heads, dim, causal, block_M=128, block_N=128, num_stages=2, threads=256)
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
+
+    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -283,6 +345,7 @@ if __name__ == "__main__":
     parser.add_argument("--heads", type=int, default=64, help="heads")
     parser.add_argument("--seq_len", type=int, default=2048, help="sequence length")
     parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--tune", action="store_true", default=False, help="tune the kernel")
 
     args = parser.parse_args()
-    main(args.batch, args.heads, args.seq_len, args.dim)
+    main(args.batch, args.heads, args.seq_len, args.dim, args.tune)

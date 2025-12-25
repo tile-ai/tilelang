@@ -140,6 +140,15 @@ class KernelParam:
         """
         return T.dtype(self.dtype).as_torch()
 
+    def tilelang_dtype(self) -> T.dtype:
+        """
+        Converts the TVM DataType to TileLang dtype.
+
+        Returns:
+            T.dtype: Corresponding TileLang dtype
+        """
+        return T.dtype(self.dtype)
+
 
 @dataclass
 class CompiledArtifact:

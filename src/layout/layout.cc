@@ -549,6 +549,12 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
   data_ = std::move(n);
 }
 
+Fragment Fragment::FullyReplicated(Array<PrimExpr> shape,
+                                   PrimExpr thread_extent) {
+  return Fragment(shape, {}, ReplicationPlaceholder(), thread_extent,
+                  std::nullopt);
+}
+
 // which means the forward_thread is rep_var -> lambda i, rep: rep
 bool FragmentNode::IsCompletedReplicated() const {
   arith::Analyzer analyzer;
@@ -825,9 +831,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              return makeQuarterBankSwizzleLayout(stride, continuous,
                                                  element_size);
            })
-      .def("tl.make_linear_layout", [](int stride, int continuous) {
-        return makeGemmLayoutLinear(stride, continuous);
-      });
+      .def("tl.make_linear_layout",
+           [](Array<PrimExpr> shape) { return makeLinearLayout(shape); });
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

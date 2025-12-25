@@ -13,10 +13,8 @@ def get_bwd_configs():
     sm_version = sm_major * 10 + sm_minor
     if sm_version == 80:
         return 64, 32, 1, 128
-    elif sm_version == 90:
-        return 128, 32, 2, 256
     else:
-        raise ValueError(f"Unsupported SM version: {sm_version}")
+        return 128, 32, 2, 256
 
 
 @tilelang.jit(
@@ -74,7 +72,6 @@ def flashattn_fwd(
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([heads], dtype)
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -252,9 +249,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
             T.copy(K[bz, bx // groups, by * block_M : (by + 1) * block_M, :], K_shared)
@@ -321,16 +315,15 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: T.dtype = T.flo
         dsinks: T.Tensor(shape, dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block), batch, threads=256) as (bx, by, bz):
-            sink = T.alloc_local([1], dtype)
             lse_fragment = T.alloc_fragment([block], accum_dtype)
             delta_fragment = T.alloc_fragment([block], accum_dtype)
             dsink_fragment = T.alloc_fragment([block], dtype)
 
-            sink[0] = Sinks[bx]
+            sink = Sinks[bx]
             T.copy(lse[bz, bx, by * block : (by + 1) * block], lse_fragment)
             T.copy(Delta[bz, bx, by * block : (by + 1) * block], delta_fragment)
             for i in T.Parallel(block):
-                dsink_fragment[i] = -T.exp2(Sinks[bx] * 1.44269504 - lse_fragment[i]) * delta_fragment[i]
+                dsink_fragment[i] = -T.exp2(sink * 1.44269504 - lse_fragment[i]) * delta_fragment[i]
             T.copy(dsink_fragment, dsinks[bz, bx, by * block : (by + 1) * block])
 
     return flash_bwd_dsink
@@ -497,6 +490,49 @@ def main(
     latency = do_bench(tl_bwd, warmup=500)
     print("tilelang: {:.2f} ms".format(latency))
     print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+
+
+def run_regression_perf(
+    BATCH: int = 1,
+    H: int = 8,
+    N_CTX: int = 512,
+    D_HEAD: int = 64,
+    groups: int = 2,
+    window_size: Optional[int] = None,
+    dtype: str = "float16",
+):
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    with torch.no_grad():
+        Q = torch.randn(BATCH, H, N_CTX, D_HEAD, dtype=torch_dtype, device="cuda")
+        K = torch.randn(BATCH, H // groups, N_CTX, D_HEAD, dtype=torch_dtype, device="cuda")
+        V = torch.randn_like(K)
+        sinks = torch.randn(H, dtype=torch_dtype, device="cuda")
+        dO = torch.randn_like(Q)
+        fwd = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, groups, window_size, dtype=dtype)
+        O, lse = fwd(Q, K, V, sinks)
+
+        def maybe_contiguous(x):
+            return x if x.stride(-1) == 1 else x.contiguous()
+
+        do, q, k, v, sinks_c, o = [maybe_contiguous(x) for x in (dO, Q, K, V, sinks, O)]
+        k_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
+        Delta = k_prep(o, do)
+        k_bwd = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, groups, window_size, dtype=dtype)
+        k_dsink = flashattn_bwd_dsink(BATCH, H, N_CTX, dtype=dtype)
+        q_shape = (BATCH, H, N_CTX, D_HEAD)
+        head_kv = H // groups
+        kv_shape = (BATCH, head_kv, N_CTX, D_HEAD)
+        dq = torch.zeros(q_shape, dtype=torch.float32, device="cuda")
+        dk = torch.zeros(kv_shape, dtype=torch.float32, device="cuda")
+        dv = torch.zeros(kv_shape, dtype=torch.float32, device="cuda")
+        k_bwd(q, k, v, do, lse, Delta, dq, dk, dv)
+        _ = k_dsink(sinks_c, Delta, lse).sum(0).sum(1)
+
+        def run_kernel_only():
+            k_bwd(q, k, v, do, lse, Delta, dq, dk, dv)
+
+        latency_ms = do_bench(run_kernel_only, warmup=500, rep=10000, backend="cupti")
+        return latency_ms
 
 
 if __name__ == "__main__":

@@ -6,7 +6,6 @@ import tilelang
 from tilelang.autotuner import autotune
 from tilelang.profiler import do_bench
 import tilelang.language as T
-from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
 from typing import Optional
@@ -52,81 +51,6 @@ def flashattn(
     past_len = seq_kv - seq_q
     assert past_len >= 0, "seq_kv must be greater than or equal to seq_q"
 
-    @T.macro
-    def MMA0(
-        K: T.Tensor(kv_shape, dtype),
-        Q_shared: T.SharedBuffer([block_M, dim], dtype),
-        K_shared: T.SharedBuffer([block_N, dim], dtype),
-        acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-        k: T.int32,
-        bx: T.int32,
-        by: T.int32,
-        bz: T.int32,
-    ):
-        T.copy(K[bz, by, k * block_N : (k + 1) * block_N, :], K_shared)
-        for i, j in T.Parallel(block_M, block_N):
-            q_idx = bx * block_M + i + past_len
-            k_idx = k * block_N + j
-            if window_size is not None:
-                acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size, 0, -T.infinity(acc_s.dtype))
-            else:
-                acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
-        T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-
-    @T.macro
-    def MMA1(
-        V: T.Tensor(kv_shape, dtype),
-        V_shared: T.SharedBuffer([block_M, dim], dtype),
-        acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
-        acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
-        k: T.int32,
-        by: T.int32,
-        bz: T.int32,
-    ):
-        T.copy(V[bz, by, k * block_N : (k + 1) * block_N, :], V_shared)
-        T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
-
-    @T.macro
-    def Softmax(
-        acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-        acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
-        scores_max: T.FragmentBuffer([block_M], accum_dtype),
-        scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
-        scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-        scores_sum: T.FragmentBuffer([block_M], accum_dtype),
-        logsum: T.FragmentBuffer([block_M], accum_dtype),
-    ):
-        T.copy(scores_max, scores_max_prev)
-        T.fill(scores_max, -T.infinity(accum_dtype))
-        T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-        for i in T.Parallel(block_M):
-            scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
-        # To do causal softmax, we need to set the scores_max to 0 if it is -inf
-        # This process is called Check_inf in FlashAttention3 code, and it only need to be done
-        # NOTE(wt): check_inf is necessary for sliding window attention.
-        for i in T.Parallel(block_M):
-            if window_size is not None:
-                scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
-            scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-
-        for i, j in T.Parallel(block_M, block_N):
-            # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
-            # max * log_2(e)) This allows the compiler to use the ffma
-            # instruction instead of fadd and fmul separately.
-            acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-        T.reduce_sum(acc_s, scores_sum, dim=1)
-        for i in T.Parallel(block_M):
-            logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-        T.copy(acc_s, acc_s_cast)
-
-    @T.macro
-    def Rescale(
-        acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
-        scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-    ):
-        for i, j in T.Parallel(block_M, dim):
-            acc_o[i, j] *= scores_scale[i]
-
     @T.prim_func
     def main(
         Q: T.Tensor(q_shape, dtype),
@@ -150,15 +74,6 @@ def flashattn(
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([block_M], dtype)
 
-            T.annotate_layout(
-                {
-                    Q_shared: make_swizzled_layout(Q_shared),
-                    K_shared: make_swizzled_layout(K_shared),
-                    V_shared: make_swizzled_layout(V_shared),
-                    O_shared: make_swizzled_layout(O_shared),
-                }
-            )
-
             T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -178,10 +93,44 @@ def flashattn(
                 stage=[-1, 0, 0, 1, -1, 1],
                 group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10, 11], [12], [13], [14]],
             ):
-                MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum)
-                Rescale(acc_o, scores_scale)
-                MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
+                T.copy(K[bz, by, k * block_N : (k + 1) * block_N, :], K_shared)
+                for i, j in T.Parallel(block_M, block_N):
+                    q_idx = bx * block_M + i + past_len
+                    k_idx = k * block_N + j
+                    if window_size is not None:
+                        acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size, 0, -T.infinity(acc_s.dtype))
+                    else:
+                        acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
+                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+
+                T.copy(scores_max, scores_max_prev)
+                T.fill(scores_max, -T.infinity(accum_dtype))
+                T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                for i in T.Parallel(block_M):
+                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+                # To do causal softmax, we need to set the scores_max to 0 if it is -inf
+                # This process is called Check_inf in FlashAttention3 code, and it only need to be done
+                # NOTE(wt): check_inf is necessary for sliding window attention.
+                for i in T.Parallel(block_M):
+                    if window_size is not None:
+                        scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                for i, j in T.Parallel(block_M, block_N):
+                    # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
+                    # max * log_2(e)) This allows the compiler to use the ffma
+                    # instruction instead of fadd and fmul separately.
+                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                T.reduce_sum(acc_s, scores_sum, dim=1)
+                for i in T.Parallel(block_M):
+                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                T.copy(acc_s, acc_s_cast)
+
+                for i, j in T.Parallel(block_M, dim):
+                    acc_o[i, j] *= scores_scale[i]
+
+                T.copy(V[bz, by, k * block_N : (k + 1) * block_N, :], V_shared)
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+
             for i in T.Parallel(block_M):
                 logsum[i] += T.exp2(sinks[i] * 1.44269504 - scores_max[i] * scale)  # The only change for attention sink
             for i, j in T.Parallel(block_M, dim):
@@ -306,6 +255,29 @@ def main(
         latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
         print("Tilelang: {:.2f} ms".format(latency))
         print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+
+
+def run_regression_perf(
+    batch: int = 1,
+    heads: int = 32,
+    seq_q: int = 256,
+    seq_kv: int = 256,
+    dim: int = 128,
+    window_size: Optional[int] = None,
+    dtype: str = "float16",
+    tune: bool = False,
+):
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    block_M = 128
+    block_N = 128
+    num_stages = 2
+    threads = 256
+    kernel = flashattn(
+        batch, heads, seq_q, seq_kv, dim, window_size, block_M=block_M, block_N=block_N, num_stages=num_stages, threads=threads, dtype=dtype
+    )
+    Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, dtype=torch_dtype)
+    latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500, rep=10000, backend="cupti")
+    return latency
 
 
 if __name__ == "__main__":

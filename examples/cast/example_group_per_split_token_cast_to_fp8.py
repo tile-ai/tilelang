@@ -31,20 +31,14 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
             y_s_local = T.alloc_fragment((blk_m,), accum_dtype)
             y_q_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
             y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
-            row_offset = T.alloc_fragment((1,), T.int32)
+            row_offset = T.alloc_var(dtype=T.int32)
 
-            T.annotate_layout(
-                {
-                    y_local: T.Fragment(y_local.shape, forward_thread_fn=lambda i, j: (i // (blk_m // 4)) * 32 + j % 32),
-                }
-            )
-
-            row_offset[0] = 0
+            row_offset = 0
             for i in T.serial(bg):
-                row_offset[0] += batch_sizes[i]
+                row_offset += batch_sizes[i]
 
             T.copy(
-                X[row_offset[0] + row * blk_m : row_offset[0] + (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size],
+                X[row_offset + row * blk_m : row_offset + (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size],
                 y_local,
             )
             T.reduce_absmax(y_local, y_amax_local, dim=1)
@@ -203,6 +197,36 @@ def main(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
 
     latency = do_bench(run_torch)
     print("Torch: {:.2f} ms".format(latency))
+
+
+def run_regression_perf(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
+    if batch_sizes is None:
+        batch_sizes = [2048, 6144]
+    if dtype == "float":
+        x = torch.randn(M, N, device="cuda", dtype=torch.float32)
+    elif dtype == "float16":
+        x = torch.randn(M, N, device="cuda", dtype=torch.float16)
+    elif dtype == "bfloat16":
+        x = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    batch_sizes = torch.tensor(batch_sizes, device="cuda", dtype=torch.int32)
+    M_max = int(ceil_div(batch_sizes.max(), 128) * 128)
+
+    kernel = group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m)
+
+    x_fp8, x_amax = kernel(x, batch_sizes)
+    x_fp8_ref, x_amax_ref = ref_program(x, batch_sizes)
+
+    torch_assert_close(x_fp8.to(torch.float32), x_fp8_ref.to(torch.float32), rtol=0.01, atol=0.01)
+    torch_assert_close(x_amax, x_amax_ref, rtol=0.01, atol=0.01)
+
+    from tilelang.profiler import do_bench
+
+    def run_tilelang():
+        kernel(x, batch_sizes)
+
+    return do_bench(run_tilelang, backend="cupti")
 
 
 if __name__ == "__main__":
