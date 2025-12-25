@@ -117,7 +117,7 @@ def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, bl
             for i, j in T.Parallel(block_M, dim):
                 # When sq > skv, some tokens can see nothing
                 acc_o[i, j] = 0 if is_causal and bx * block_M + i + offset < 0 else acc_o[i, j] / logsum[i]
-           
+
             T.copy(acc_o, O_shared)
             for i, d in T.Parallel(block_M, dim):
                 if bx * block_M + i < q_current_seqlen:
