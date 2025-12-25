@@ -4,66 +4,8 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from einops import rearrange, repeat
 from tilelang.profiler import do_bench
 from varlen_utils import generate_random_padding_mask, generate_qkv
-
-
-def attention_ref(
-    q,
-    k,
-    v,
-    query_padding_mask=None,
-    key_padding_mask=None,
-    causal=False,
-    window_size=(-1, -1),
-    upcast=True,
-):
-    dtype_og = q.dtype
-    if upcast:
-        q, k, v = q.float(), k.float(), v.float()
-    b, T, Hq, D = q.shape
-    S = k.shape[1]
-    scale = (1.0 / D) ** 0.5
-    k = repeat(k, "b s h d -> b s (h g) d", g=Hq // k.shape[2])
-    v = repeat(v, "b s h d -> b s (h g) d", g=Hq // v.shape[2])
-    scores = torch.einsum("bthd,bshd->bhts", q, k)
-    t_idx = torch.arange(T, device=scores.device).view(1, 1, T, 1)
-    s_idx = torch.arange(S, device=scores.device).view(1, 1, 1, S)
-    if causal:
-        if query_padding_mask is not None:
-            q_valid_len = query_padding_mask.sum(dim=1).view(b, 1, 1, 1)
-        else:
-            q_valid_len = torch.full((b, 1, 1, 1), T, device=q.device)
-        if key_padding_mask is not None:
-            k_valid_len = key_padding_mask.sum(dim=1).view(b, 1, 1, 1)
-        else:
-            k_valid_len = torch.full((b, 1, 1, 1), S, device=k.device)
-        offset = k_valid_len - q_valid_len
-        visible_ts = s_idx <= (t_idx + offset)
-        if window_size[0] != -1 and window_size[0] >= 0:
-            visible_ts = visible_ts & (s_idx >= (t_idx + offset - int(window_size[0])))
-        visible_mask = visible_ts
-    else:
-        left, right = window_size
-        left = S if left is None or left < 0 else int(left)
-        right = S if right is None or right < 0 else int(right)
-        visible_ts = (s_idx >= (t_idx - left)) & (s_idx <= (t_idx + right))
-        visible_mask = visible_ts
-    if key_padding_mask is not None:
-        k_keep = rearrange(key_padding_mask, "b s -> b 1 1 s")
-        visible_mask = visible_mask & k_keep
-    neg_inf = torch.finfo(scores.dtype).min
-    scores = scores * scale
-    scores = scores.masked_fill(~visible_mask, neg_inf)
-    attention = torch.softmax(scores, dim=-1).to(v.dtype)
-    if query_padding_mask is not None:
-        q_keep = rearrange(query_padding_mask, "b t -> b 1 t 1")
-        attention = attention.masked_fill(~q_keep, 0.0)
-    output = torch.einsum("bhts,bshd->bthd", attention, v)
-    if query_padding_mask is not None:
-        output = output.masked_fill(rearrange(~query_padding_mask, "b t -> b t 1 1"), 0.0)
-    return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
 
 
 @tilelang.jit(
@@ -233,15 +175,22 @@ def main(
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
     out = output_pad_fn(out_unpad)
 
-    out_ref, _ = attention_ref(
-        q,
-        k,
-        v,
-        query_padding_mask=query_padding_mask,
-        key_padding_mask=key_padding_mask,
+    import flash_attn
+
+    fa_out_unpad = flash_attn.flash_attn_varlen_func(
+        q_unpad,
+        k_unpad,
+        v_unpad,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        0.0,
         causal=is_causal,
     )
-    torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
+    fa_out = output_pad_fn(fa_out_unpad)
+    torch.testing.assert_close(out, fa_out, rtol=1e-2, atol=1e-2)
+
     print("All checks passed.✅")
     latency = do_bench(lambda: kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q), _n_warmup=5, _n_repeat=5)
     print("Tile-lang: {:.2f} ms".format(latency))
