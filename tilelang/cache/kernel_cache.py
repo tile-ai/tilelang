@@ -121,26 +121,49 @@ class KernelCache:
         func: PrimFunc = None,
         out_idx: list[int] = None,
         *args,
-        target: str | Target = "auto",
-        target_host: str | Target = None,
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "auto",
-        verbose: bool = False,
+        target: str | Target | None = None,
+        target_host: str | Target | None = None,
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+        verbose: bool | None = None,
         pass_configs: dict = None,
         compile_flags: list[str] | str | None = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
 
+        This is the ONLY place where environment variable processing, target normalization,
+        and execution backend resolution should happen. All compilation paths go through here.
+
         Args:
             func: Function to be compiled or a prepared PrimFunc
             out_idx: Indices specifying which outputs to return
-            target: Compilation target platform
+            target: Compilation target platform (None = read from TILELANG_TARGET env var)
             target_host: Host target platform
+            execution_backend: Execution backend (None = read from TILELANG_EXECUTION_BACKEND)
+            verbose: Enable verbose output (None = read from TILELANG_VERBOSE)
             *args: Arguments passed to func
 
         Returns:
             JITKernel: The compiled kernel, either freshly compiled or from cache
+
+        Environment Variables
+        ---------------------
+        TILELANG_TARGET : str
+            Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+        TILELANG_EXECUTION_BACKEND : str
+            Default execution backend. Defaults to "auto".
+        TILELANG_VERBOSE : str
+            Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
         """
+        # Apply environment variable defaults if parameters are not explicitly set
+        # This is the SINGLE source of truth for env var processing
+        if target is None:
+            target = env.get_default_target()
+        if execution_backend is None:
+            execution_backend = env.get_default_execution_backend()
+        if verbose is None:
+            verbose = env.get_default_verbose()
+
         # Normalize target and resolve execution backend before proceeding
         from tilelang.utils.target import determine_target as _determine_target
         from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target

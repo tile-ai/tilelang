@@ -1,7 +1,6 @@
 import tilelang.testing
 import example_dequant_gemm_bf16_fp4_hopper
 import example_dequant_gemm_bf16_mxfp4_hopper
-import example_dequant_gemm_bf16_mxfp4_hopper_tma
 import example_dequant_gemm_fp4_hopper
 import example_dequant_gemm_w4a8
 import example_dequant_gemv_fp16xint4
@@ -22,10 +21,6 @@ def regression_example_dequant_gemm_bf16_fp4_hopper():
 
 def regression_example_dequant_gemm_bf16_mxfp4_hopper():
     tilelang.testing.process_func(example_dequant_gemm_bf16_mxfp4_hopper.run_regression_perf)
-
-
-def regression_example_dequant_gemm_bf16_mxfp4_hopper_tma():
-    tilelang.testing.process_func(example_dequant_gemm_bf16_mxfp4_hopper_tma.run_regression_perf)
 
 
 def regression_example_dequant_groupedgemm_bf16_mxfp4_hopper():

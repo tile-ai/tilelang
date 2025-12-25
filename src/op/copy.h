@@ -28,6 +28,32 @@ enum class CopyInst : uint8_t {
   kTMemStore = 8,   // tcgen05.st (register -> tensor memory)
 };
 
+/// Convert CopyInst enum to string for debugging
+inline const char *CopyInstToString(CopyInst inst) {
+  switch (inst) {
+  case CopyInst::kNormal:
+    return "Normal";
+  case CopyInst::kLDSM:
+    return "LDSM";
+  case CopyInst::kSTSM:
+    return "STSM";
+  case CopyInst::kBulkLoad:
+    return "BulkLoad";
+  case CopyInst::kBulkStore:
+    return "BulkStore";
+  case CopyInst::kBulkLoad1D:
+    return "BulkLoad1D";
+  case CopyInst::kBulkStore1D:
+    return "BulkStore1D";
+  case CopyInst::kTMemLoad:
+    return "TMemLoad";
+  case CopyInst::kTMemStore:
+    return "TMemStore";
+  default:
+    return "Unknown";
+  }
+}
+
 /// Descriptor for Tensor Memory Access (TMA) copy operations
 struct TMADesc {
   size_t rank;                   ///< Tensor rank (number of dimensions)

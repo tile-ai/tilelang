@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from collections.abc import Sequence
+import warnings
 
 try:
     from tabulate import tabulate
@@ -31,6 +32,7 @@ class PerfResult:
 
 _RESULTS: list[PerfResult] = []
 
+_MAX_RETRY_NUM = 5
 
 _RESULTS_JSON_PREFIX = "__TILELANG_PERF_RESULTS_JSON__="
 
@@ -59,7 +61,7 @@ def _reset_results() -> None:
     _RESULTS.clear()
 
 
-def process_func(func: Callable[..., float], name: str | None = None, /, **kwargs: Any) -> float:
+def process_func(func: Callable[..., float], name: str | None = None, /, **kwargs: Any) -> None:
     """Execute a single perf function and record its latency.
 
     `func` is expected to return a positive latency scalar (seconds or ms; we
@@ -69,8 +71,12 @@ def process_func(func: Callable[..., float], name: str | None = None, /, **kwarg
     if result_name.startswith("regression_"):
         result_name = result_name[len("regression_") :]
     latency = float(func(**kwargs))
-    if not (latency > 0.0):
-        print(f"Warning: non-positive latency {latency} from {result_name}")
+    _iter = 0
+    while latency <= 0.0 and _iter < _MAX_RETRY_NUM:
+        latency = float(func(**kwargs))
+        _iter += 1
+    if latency <= 0.0:
+        warnings.warn(f"{result_name} has latency {latency} <= 0. Please verify the profiling results.", RuntimeWarning, 1)
         return
     _RESULTS.append(PerfResult(name=result_name, latency=latency))
 

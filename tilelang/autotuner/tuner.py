@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import tilelang
 from tilelang import tvm as tvm
+from tilelang import env
 from tilelang.jit import JITImpl
 from tilelang.jit.kernel import JITKernel
 from tvm.tir import PrimFunc, Var
@@ -35,7 +36,6 @@ import threading
 import traceback
 from pathlib import Path
 
-from tilelang import env
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.utils.language import get_prim_func_name
 from tilelang.autotuner.capture import get_autotune_inputs
@@ -143,25 +143,40 @@ class AutoTuner:
     def set_compile_args(
         self,
         out_idx: list[int] | int | None = None,
-        target: Literal["auto", "cuda", "hip", "metal"] = "auto",
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] = "auto",
-        target_host: str | Target = None,
-        verbose: bool = False,
+        target: Literal["auto", "cuda", "hip", "metal"] | None = None,
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] | None = None,
+        target_host: str | Target | None = None,
+        verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
     ):
         """Set compilation arguments for the auto-tuner.
 
         Args:
             out_idx: List of output tensor indices.
-            target: Target platform.
-            execution_backend: Execution backend to use for kernel execution.
+            target: Target platform. If None, reads from TILELANG_TARGET environment variable (defaults to "auto").
+            execution_backend: Execution backend to use for kernel execution. If None, reads from
+                TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
             target_host: Target host for cross-compilation.
-            verbose: Whether to enable verbose output.
+            verbose: Whether to enable verbose output. If None, reads from
+                TILELANG_VERBOSE environment variable (defaults to False).
             pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
+
+        Environment Variables:
+            TILELANG_TARGET: Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+            TILELANG_EXECUTION_BACKEND: Default execution backend. Defaults to "auto".
+            TILELANG_VERBOSE: Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
 
         Returns:
             AutoTuner: Self for method chaining.
         """
+        # Apply environment variable defaults if parameters are not explicitly set
+        if target is None:
+            target = env.get_default_target()
+        if execution_backend is None:
+            execution_backend = env.get_default_execution_backend()
+        if verbose is None:
+            verbose = env.get_default_verbose()
+
         # Normalize target to a concrete TVM Target and resolve execution backend
         t = Target(determine_target(target))
         from tilelang.jit.execution_backend import resolve_execution_backend

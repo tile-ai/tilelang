@@ -223,8 +223,8 @@ Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int warp_n, const int element_size,
                                const int k_pack, bool transposed = false);
 
-// Default Memory Layout
-Layout makeGemmLayoutLinear(int stride, int continuous);
+// Default Memory Layout (row-major linear layout for any dimension)
+Layout makeLinearLayout(Array<PrimExpr> shape);
 Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size);
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, bool k_inner = true);

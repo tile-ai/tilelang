@@ -221,7 +221,7 @@ def bitnet_158_int8xint2_prefill(
             B_local = T.alloc_local([local_size_compressed], storage_dtype)
             B_dequantize_local = T.alloc_local([local_size], in_dtype)
 
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
+            thread_bindings = T.get_thread_binding(0)
 
             T.annotate_layout(
                 {

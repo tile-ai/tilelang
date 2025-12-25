@@ -10,6 +10,7 @@
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/stmt_functor.h>
 
+#include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/parallel.h"
 #include "../target/utils.h"
@@ -565,7 +566,37 @@ Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
 LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &T,
                                     InferLevel level) const {
-  return {};
+  // Only infer layout in strict mode
+  if (level != InferLevel::kStrict) {
+    return {};
+  }
+
+  LayoutMap result_map;
+
+  auto make_linear_layout = [](const Buffer &buf) -> Layout {
+    return makeLinearLayout(buf->shape);
+  };
+
+  auto check_or_set_linear_layout = [&](const Buffer &buf) {
+    if (!IsSharedBuffer(buf))
+      return;
+
+    Layout linear_layout = make_linear_layout(buf);
+    if (T.layout_map.count(buf)) {
+      // Check if existing layout is linear
+      Layout existing = T.layout_map.Get(buf).value().as<Layout>().value();
+      ICHECK(StructuralEqual()(existing, linear_layout))
+          << "CumSum requires linear layout for shared buffer " << buf->name
+          << ", but got non-linear layout.";
+    } else {
+      result_map.Set(buf, linear_layout);
+    }
+  };
+
+  check_or_set_linear_layout(src);
+  check_or_set_linear_layout(dst);
+
+  return result_map;
 }
 
 TIR_REGISTER_TL_TILE_OP(CumSumOp, cumsum)

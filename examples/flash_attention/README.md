@@ -34,8 +34,6 @@ def flash_attention(
         scores_sum = T.alloc_fragment([block_M], accum_dtype)
         logsum = T.alloc_fragment([block_M], accum_dtype)
 
-        # Annotate layout for Q_shared, e.g., use a swizzled layout to optimize memory access
-        T.annotate_layout({Q_shared: tl.layout.make_swizzled_layout(Q_shared)})
 
         # Copy a block of Q from global memory to Q_shared
         T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
