@@ -71,11 +71,12 @@ def _find_cuda_home() -> str:
         # from pypi package nvidia-cuda-nvcc, nvidia-cuda-nvcc-cu12, etc.
         import importlib.util
 
-        for submodule in ["cu13", "cu12", "cu11", "cuda_nvcc"]:
-            spec = importlib.util.find_spec(f"nvidia.{submodule}")
-            if spec is not None and spec.submodule_search_locations:
-                cuda_home = os.path.join(spec.submodule_search_locations[0])
-                break
+        if importlib.util.find_spec("nvidia") is not None:
+            for submodule in ["cu13", "cu12", "cu11", "cuda_nvcc"]:
+                spec = importlib.util.find_spec(f"nvidia.{submodule}")
+                if spec is not None and spec.submodule_search_locations:
+                    cuda_home = os.path.join(spec.submodule_search_locations[0])
+                    break
 
     if cuda_home is None:
         # Guess #4
