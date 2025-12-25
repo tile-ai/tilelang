@@ -715,9 +715,7 @@ void ArgBinder::BindDLTensors(
     // strides field
     // Skip stride checks for subbyte types (bits < 8), as they use packed
     // storage and stride semantics don't apply directly.
-    if (data_is_subtype) {
-      // Skip stride binding for subbyte types
-    } else {
+    if (!data_is_subtype) {
       Buffer buf_strides =
           decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
                       tvm_shape_type, arg_name + ".strides");
@@ -813,7 +811,7 @@ void ArgBinder::BindDLTensors(
                        true, is_null);
         }
       }
-    } // end of else block for !data_is_subtype
+    } // !data_is_subtype
 
     // Byte_offset field.
     int data_bytes = GetVectorBytes(buffer->dtype);
