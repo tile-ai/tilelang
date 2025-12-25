@@ -211,8 +211,8 @@ def run_atomic_addx2(M, N, block_M, block_N):
     kernel = atomic_addx2_program(M, N, block_M, block_N)
     import torch
 
-    A = torch.randn(M, N, dtype=torch.float16).cuda()
-    B = torch.zeros(M, N, dtype=torch.float16).cuda()
+    A = torch.randn(M, N, dtype=torch.float32).cuda()
+    B = torch.zeros(M, N, dtype=torch.float32).cuda()
     ref_B = B.clone()
 
     for i in range(M):
@@ -235,10 +235,12 @@ def test_atomic_min():
     run_atomic_min(4, 64, 64, 16, 16)
 
 
+@tilelang.testing.requires_cuda
 def test_atomic_load_store():
     run_atomic_load_store(64, 64, 16, 16)
 
 
+@tilelang.testing.requires_cuda
 def test_atomic_memory_order():
     run_atomic_memory_order(4, 64, 64, 16, 16)
 
@@ -343,6 +345,7 @@ def run_atomic_return_prev(M, N, block_M, block_N, dtype=T.float32):
     torch.testing.assert_close(B, initial_B + A, atol=1e-3, rtol=1e-3)
 
 
+@tilelang.testing.requires_cuda
 def test_atomic_different_memory_orders():
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.float32)
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.float16)

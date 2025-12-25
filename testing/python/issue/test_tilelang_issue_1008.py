@@ -39,12 +39,14 @@ def _fill_with_dynamic_region_kernel():
     return buggy_kernel
 
 
+@tilelang.testing.requires_cuda
 def test_fill_with_static_region_kernel():
     kernel = _fill_with_static_region_kernel()
     x = torch.zeros((256,), dtype=torch.int64, device="cuda")
     kernel(x)
 
 
+@tilelang.testing.requires_cuda
 def test_fill_with_dynamic_region_kernel():
     kernel = _fill_with_dynamic_region_kernel()
     x = torch.zeros((256,), dtype=torch.int64, device="cuda")

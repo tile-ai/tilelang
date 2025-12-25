@@ -336,7 +336,8 @@ def test_swap_logic():
     ref = torch.tensor([2.0, 1.0], dtype=torch.float32).cuda()
     torch.testing.assert_close(data, ref)
 
-
+# TODO(Gong): ROCm is not supported alloc_var with initializer
+@tilelang.testing.requires_cuda
 def test_while_loop():
     @tilelang.jit(out_idx=-1)
     @T.prim_func

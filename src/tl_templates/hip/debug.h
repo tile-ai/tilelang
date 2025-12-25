@@ -47,6 +47,17 @@ __device__ void debug_print_var<unsigned int>(const char *msg,
          (int)threadIdx.x, (int)threadIdx.y, (int)threadIdx.z, var);
 }
 
+// Specialization for unsigned short type
+template <>
+__device__ void debug_print_var<half_t>(const char *msg, half_t var) {
+  const char *safe_msg = msg;
+  float value = static_cast<float>(var);
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): "
+         "dtype=half_t value=%f\n",
+         safe_msg, (int)blockIdx.x, (int)blockIdx.y, (int)blockIdx.z,
+         (int)threadIdx.x, (int)threadIdx.y, (int)threadIdx.z, value);
+}
+
 // Specialization for float type
 template <> __device__ void debug_print_var<float>(const char *msg, float var) {
   const char *safe_msg = msg;
@@ -131,6 +142,20 @@ debug_print_buffer_value<unsigned char>(const char *msg, const char *buf_name,
          safe_msg, (int)blockIdx.x, (int)blockIdx.y, (int)blockIdx.z,
          (int)threadIdx.x, (int)threadIdx.y, (int)threadIdx.z, safe_buf_name,
          index, value);
+}
+
+// Specialization for bool type
+template <>
+__device__ void debug_print_buffer_value<bool>(const char *msg,
+                                              const char *buf_name, int index,
+                                              bool var) {
+  const char *safe_msg = msg;
+  const char *safe_buf_name = buf_name;
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=bool value=%s\n",
+         safe_msg, (int)blockIdx.x, (int)blockIdx.y, (int)blockIdx.z,
+         (int)threadIdx.x, (int)threadIdx.y, (int)threadIdx.z, safe_buf_name,
+         index, var ? "true" : "false");
 }
 
 // Specialization for integer type

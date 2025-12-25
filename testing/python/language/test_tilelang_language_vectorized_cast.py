@@ -75,6 +75,7 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
     torch.testing.assert_close(A.to(dst_dtype.as_torch()), C)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "src_dtype, dst_dtype, check_str, lanes",
     [

@@ -23,6 +23,7 @@ def _cumsum_view_infer_layout(hidden):
     return buggy_kernel
 
 
+@tilelang.testing.requires_cuda
 def test_cumsum_view_infer_layout():
     hidden = 128
     x = torch.randn(1, hidden, device="cuda", dtype=torch.float)

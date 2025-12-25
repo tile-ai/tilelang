@@ -402,7 +402,8 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
-            ./python/amd
+            --ignore=./python/runtime --ignore=./python/transform \
+            ./python
 
       # Apple Metal tests
       - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})

@@ -196,6 +196,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
+@tilelang.testing.requires_cuda
 def test_assert_tl_matmul_correctness():
     assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
     assert_tl_matmul_correctness(128, 128, 64, T.int8, T.int32, T.int32)
@@ -399,6 +400,7 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
 
 @tilelang.testing.requires_package("bitblas")
 @tilelang.testing.requires_llvm
+@tilelang.testing.requires_cuda
 def test_assert_tl_matmul_weight_only_transform():
     assert_tl_matmul_weight_only_transform_correctness(128, 128, 128, T.int8, T.int32, T.int32)
 
