@@ -66,13 +66,6 @@ def tl_fused_chunk_bwd_kernel(
             dh = T.alloc_fragment([BK, BV], accum_dtype)
             dh_shared = T.alloc_shared([BK, BV], dtype)
 
-            T.annotate_layout(
-                {
-                    dq_shared: tilelang.layout.make_swizzled_layout(dq_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                }
-            )
             T.use_swizzle(10)
 
             T.clear(h)
