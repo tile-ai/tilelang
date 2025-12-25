@@ -253,6 +253,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
 
+    # Mark the function contains pdl_sync or pdl_trigger
     mod = tilelang.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
 
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
