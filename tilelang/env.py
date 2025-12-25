@@ -69,21 +69,12 @@ def _find_cuda_home() -> str:
     if cuda_home is None:
         # Guess #3
         # from pypi package nvidia-cuda-nvcc, nvidia-cuda-nvcc-cu12, etc.
-        target_candidates = [
-            "nvidia/cu13/bin/nvcc",
-            "nvidia/cu12/bin/nvcc",
-            "nvidia/cu11/bin/nvcc",
-            "nvidia/cuda_nvcc/bin/nvcc",  # fallback
-        ]
-        if sys.platform == "win32":
-            target_candidates = [i + ".exe" for i in target_candidates]
-        for candidate in target_candidates:
-            for base in sys.path:
-                nvcc_path = os.path.join(base, candidate)
-                if os.path.exists(nvcc_path):
-                    cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
-                    break
-            if cuda_home is not None:
+        import importlib.util
+
+        for submodule in ["cu13", "cu12", "cu11", "cuda_nvcc"]:
+            spec = importlib.util.find_spec(f"nvidia.{submodule}")
+            if spec is not None and spec.submodule_search_locations:
+                cuda_home = os.path.join(spec.submodule_search_locations[0])
                 break
 
     if cuda_home is None:
