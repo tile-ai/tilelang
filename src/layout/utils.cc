@@ -188,7 +188,7 @@ struct IterExprPP {
     os << "IterExpr(\n";
     os << "  expr=" << pp.data << "\n";
     os << "  iter_mark_extents=";
-    if (pp.marks.size() == 0) {
+    if (pp.marks.empty()) {
       os << "{}\n";
     } else {
       os << "{\n";
