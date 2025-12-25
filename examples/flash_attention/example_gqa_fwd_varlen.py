@@ -65,7 +65,7 @@ def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, bl
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
-            offset = kv_current_seqlen - q_current_seqlen
+            offset = kv_current_seqlen - q_current_seqlen  # always right padded
             max_visible_k_idx = offset + (bx + 1) * block_M
             loop_range = (
                 T.min(T.ceildiv(max_visible_k_idx, block_N), T.ceildiv(kv_current_seqlen, block_N))
@@ -115,7 +115,10 @@ def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, bl
                 T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             for i, j in T.Parallel(block_M, dim):
-                acc_o[i, j] /= logsum[i]
+                if is_causal and bx * block_M + i + offset < 0:
+                    acc_o[i, j] = 0  # When sq > skv, some tokens can see nothing
+                else:
+                    acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
 
             for i, d in T.Parallel(block_M, dim):
