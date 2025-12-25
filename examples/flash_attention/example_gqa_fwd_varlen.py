@@ -111,7 +111,7 @@ def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, bl
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = (
-                T.min(T.ceildiv(q_current_seqlen + (bx + 1) * block_M, block_N), T.ceildiv(kv_current_seqlen, block_N))
+                T.min(T.ceildiv((bx + 1) * block_M, block_N), T.ceildiv(kv_current_seqlen, block_N))
                 if is_causal
                 else T.ceildiv(kv_current_seqlen, block_N)
             )
