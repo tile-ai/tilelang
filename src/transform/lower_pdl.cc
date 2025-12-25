@@ -35,10 +35,15 @@ public:
 
 class MarkCudaSyncCalls : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
+  static PrimFunc Substitute(PrimFunc f, bool support_pdl) {
     MarkCudaSyncCalls mutator;
     PrimFunc new_f = f;
     new_f.CopyOnWrite()->body = mutator.VisitStmt(f->body);
+
+    if (!support_pdl) {
+      ICHECK(!mutator.has_trigger_launch_ && mutator.has_grid_sync_)
+          << "PDL is not supported";
+    }
 
     if (mutator.has_trigger_launch_) {
       new_f = WithAttr(std::move(new_f), attr::kHasTriggerLaunch, 1);
@@ -52,18 +57,9 @@ public:
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
-    CheckCall(op);
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-private:
-  void CheckCall(const tir::CallNode *call) {
-    if (!call)
-      return;
-    if (call->op.same_as(builtin::call_extern())) {
-      if (!call->args.empty()) {
-        if (const auto *str_node =
-                call->args[0].as<tvm::tir::StringImmNode>()) {
+    if (op && op->op.same_as(builtin::call_extern())) {
+      if (!op->args.empty()) {
+        if (const auto *str_node = op->args[0].as<tvm::tir::StringImmNode>()) {
           std::string func_name = str_node->value;
           if (func_name == "cudaTriggerProgrammaticLaunchCompletion") {
             has_trigger_launch_ = true;
@@ -73,6 +69,7 @@ private:
         }
       }
     }
+    return StmtExprMutator::VisitExpr_(op);
   }
 
 private:
@@ -82,56 +79,11 @@ private:
   MarkCudaSyncCalls() = default;
 };
 
-class EliminateCudaSyncCalls : public StmtExprMutator {
-public:
-  static PrimFunc Substitute(PrimFunc f) {
-    EliminateCudaSyncCalls mutator;
-    PrimFunc new_f = f;
-    new_f.CopyOnWrite()->body = mutator.VisitStmt(f->body);
-
-    return new_f;
-  }
-
-  PrimExpr VisitExpr_(const tir::CallNode *op) final {
-    if (CheckCall(op)) {
-      return make_zero(op->dtype);
-    }
-
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-private:
-  bool CheckCall(const tir::CallNode *call) {
-    if (!call)
-      return false;
-
-    if (call->op.same_as(builtin::call_extern())) {
-      if (!call->args.empty()) {
-        if (const auto *str_node =
-                call->args[0].as<tvm::tir::StringImmNode>()) {
-          std::string func_name = str_node->value;
-          if (func_name == "cudaTriggerProgrammaticLaunchCompletion") {
-            return true;
-          } else if (func_name == "cudaGridDependencySynchronize") {
-            return true;
-          }
-        }
-      }
-    }
-
-    return false;
-  }
-
-private:
-  EliminateCudaSyncCalls() = default;
-};
-
 using namespace tir::transform;
 
-tvm::transform::Pass MarkCudaSyncCallsPass(bool have_pdl) {
+tvm::transform::Pass MarkCudaSyncCallsPass(bool support_pdl) {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return have_pdl ? MarkCudaSyncCalls::Substitute(f)
-                    : EliminateCudaSyncCalls::Substitute(f);
+    return MarkCudaSyncCalls::Substitute(f, support_pdl);
   };
 
   return CreatePrimFuncPass(pass_func, 0, "tl.MarkCudaSyncCalls", {});
