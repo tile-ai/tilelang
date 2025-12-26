@@ -48,8 +48,7 @@ inline bool IsGlobalBuffer(const Buffer &buffer) {
 }
 
 inline bool IsLocalBuffer(const Buffer &buffer) {
-  return buffer.defined() &&
-         (buffer.scope() == "local" || buffer.scope() == "local.var");
+  return buffer.defined() && buffer.scope() == "local";
 }
 
 } // namespace tl

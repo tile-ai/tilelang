@@ -193,8 +193,6 @@ void ParallelOpNode::ExpandLetBindings(
     PostOrderVisit(expr, [&](const ObjectRef &node) {
       if (auto bl = node.as<BufferLoadNode>()) {
         if (IsFragmentBuffer(bl->buffer) && !indice_map_.count(bl->buffer)) {
-          LOG(INFO) << "ExpandLetBindings: set buffer " << bl->buffer
-                    << " with indices " << bl->indices;
           indice_map_.Set(bl->buffer, bl->indices);
         }
       } else if (auto var_node = node.as<VarNode>()) {
