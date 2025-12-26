@@ -261,7 +261,6 @@ DEFINE_PRINT_TRAIT(long long, "long long", "%lld", long long);
 
 DEFINE_PRINT_TRAIT(float, "float", "%f", float);
 DEFINE_PRINT_TRAIT(double, "double", "%lf", double);
-DEFINE_PRINT_TRAIT(half, "half", "%f", float);
 DEFINE_PRINT_TRAIT(half_t, "half_t", "%f", float);
 DEFINE_PRINT_TRAIT(bfloat16_t, "bfloat16_t", "%f", float);
 
