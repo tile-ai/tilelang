@@ -57,6 +57,16 @@ class suppress_stdout_stderr:
         self.errnull_file.close()
 
 
+IS_CUDA = torch.cuda.is_available()
+IS_MPS = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+if IS_CUDA:
+    device = "cuda:0"
+elif IS_MPS:
+    device = "mps:0"
+else:
+    device = "cpu"
+
+
 class Event:
     """Dummy event class for CPU timing compatibility."""
 
@@ -92,16 +102,6 @@ class Event:
             return (end_event.record_time - self.record_time) / 1e6  # Convert ns to ms
         else:
             return 0.0
-
-
-IS_CUDA = torch.cuda.is_available()
-IS_MPS = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-if IS_CUDA:
-    device = "cuda:0"
-elif IS_MPS:
-    device = "mps:0"
-else:
-    device = "cpu"
 
 
 def _synchronize() -> None:

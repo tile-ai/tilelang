@@ -73,5 +73,5 @@ class MetalKernelAdapter(BaseKernelAdapter):
 
         return self._kernel
 
-    def get_kernel_source(self) -> str:
+    def get_kernel_source(self, kernel_only: bool = False) -> str:
         return self.kernel_global_source or ""
