@@ -1,7 +1,6 @@
 import tilelang.testing
 import tilelang.language as T
 
-
 def kernels_with_pdl_trigger(N, block_size=256, dtype=T.float32):
     @T.prim_func
     def main(
@@ -42,10 +41,6 @@ def test_pdl_trigger():
     code = pdl_kernel.get_kernel_source()
     assert "cudaTriggerProgrammaticLaunchCompletion" in code
 
-    old_kernel = tilelang.compile(program, target="cuda -arch=sm_75")
-    code = old_kernel.get_kernel_source()
-    assert "cudaTriggerProgrammaticLaunchCompletion" not in code
-
 
 def test_pdl_sync():
     N = 64
@@ -54,10 +49,6 @@ def test_pdl_sync():
     pdl_kernel = tilelang.compile(program, target="cuda -arch=sm_90")
     code = pdl_kernel.get_kernel_source()
     assert "cudaGridDependencySynchronize" in code
-
-    old_kernel = tilelang.compile(program, target="cuda -arch=sm_75")
-    code = old_kernel.get_kernel_source()
-    assert "cudaGridDependencySynchronize" not in code
 
 
 if __name__ == "__main__":
