@@ -588,6 +588,7 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         "int64": "int64_t",
         "int32": "int",
         "uint32": "unsigned int",
+        "uint64": "uint64_t",
         "bool": "int8_t",
         "int8": "int8_t",
         "uint8": "uint8_t",
