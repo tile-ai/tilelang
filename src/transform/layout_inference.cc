@@ -28,8 +28,8 @@
 #include "common/loop_fusion_utils.h"
 #include "common/loop_parallel_transform_utils.h"
 #include "common/union_find.h"
-#include "parallel_loop_layout_validator.h"
 #include "layout_reducer.h"
+#include "parallel_loop_layout_validator.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {

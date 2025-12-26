@@ -224,8 +224,7 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     if memory_order is not None:
         ann["memory_order"] = _MEMORY_ORDER_ID_MAP[memory_order]
 
-    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst,
-                         annotations=ann if ann else None)
+    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, annotations=ann if ann else None)
 
 
 def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:

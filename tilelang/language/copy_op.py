@@ -104,9 +104,7 @@ def copy(
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
 
-    return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.tileop.copy"),
-        src, dst, annotations=ann if ann else None)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
 
 
 def c2d_im2col(

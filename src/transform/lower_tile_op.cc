@@ -307,8 +307,9 @@ private:
       if (!load_expr.same_as(access_ptr_call->args[0])) {
         auto node = access_ptr_call.CopyOnWrite();
         node->args.Set(0, load_expr);
-        access_ptr_call = Call(access_ptr_call->dtype, access_ptr_call->op,
-                               {load_expr}, access_ptr_call->annotations, access_ptr_call->span);
+        access_ptr_call =
+            Call(access_ptr_call->dtype, access_ptr_call->op, {load_expr},
+                 access_ptr_call->annotations, access_ptr_call->span);
       }
       BufferLoad load = Downcast<BufferLoad>(access_ptr_call->args[0]);
       Array<PrimExpr> indices = load->indices;
@@ -475,7 +476,8 @@ private:
       if (!load_expr.same_as(address_of_call->args[0])) {
         auto call_node = call.CopyOnWrite();
         call_node->args.Set(5, Call(address_of_call->dtype, address_of_call->op,
-                                    {load_expr}, address_of_call->annotations, address_of_call->span));
+                                    {load_expr}, address_of_call->annotations,
+                                    address_of_call->span));
         address_of_call = Downcast<Call>(call->args[5]);
         access_ptr = call->args[5];
       }
@@ -680,7 +682,8 @@ private:
    *
    * Special handling for reducers and local buffers:
    * - If the loop stores into local buffers, thread partitioning is skipped.
-   * - If the loop only manipulates local buffers, thread partitioning is skipped.
+   * - If the loop only manipulates local buffers, thread partitioning is
+   * skipped.
    * - If reducers are present, vectorization is skipped.
    * - Vectorization is only applied if non-local buffers or vectorizable casts
    *   are present.
@@ -704,9 +707,9 @@ private:
       return for_node;
     }
 
-    // For nested parallel loops, the annotation is placed on the outermost loop.
-    // Inner parallel loops without annotation should be skipped here - they will
-    // be processed as part of the outer loop's partitioning.
+    // For nested parallel loops, the annotation is placed on the outermost
+    // loop. Inner parallel loops without annotation should be skipped here -
+    // they will be processed as part of the outer loop's partitioning.
     if (!op->annotations.count(attr::kParallelLoopLayout)) {
       return for_node;
     }

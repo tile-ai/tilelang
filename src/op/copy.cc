@@ -101,7 +101,8 @@ template <typename T> static Array<T> ReverseArray(Array<T> array) {
 
 // Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
-// annotations: Map containing coalesced_width, disable_tma, eviction_policy, etc.
+// annotations: Map containing coalesced_width, disable_tma, eviction_policy,
+// etc.
 Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   Array<Range> rgs[2];
@@ -1560,7 +1561,8 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
 // Constructs a Conv2DIm2ColOp node from call arguments.
 // args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding,
 // eviction_policy
-Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args,
+                               Map<String, ObjectRef> annotations) {
   ObjectPtr<Conv2DIm2ColOpNode> node =
       tvm::ffi::make_object<Conv2DIm2ColOpNode>();
   node->srcRegion_ = NormalizeToBufferRegion(args[0]);

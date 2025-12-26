@@ -411,8 +411,9 @@ class Conv2DIm2ColOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Conv2DIm2ColOp, TileOperator,
                                              Conv2DIm2ColOpNode);
-  TVM_DLL Conv2DIm2ColOp(Array<PrimExpr> args,
-                         Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TVM_DLL
+  Conv2DIm2ColOp(Array<PrimExpr> args,
+                 Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

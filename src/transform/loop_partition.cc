@@ -271,9 +271,8 @@ For LoopPragmaUnroll(For stmt) {
 }
 
 Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
-                       arith::Analyzer *analyzer,
-                       Optional<PrimExpr> predicate, bool parallel_loop,
-                       bool should_vectorize) {
+                       arith::Analyzer *analyzer, Optional<PrimExpr> predicate,
+                       bool parallel_loop, bool should_vectorize) {
   // Save analyzer state to prevent conflicted bindings during vectorization
   auto saved_analyzer = analyzer->Clone();
 
