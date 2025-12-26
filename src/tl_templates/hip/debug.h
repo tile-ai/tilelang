@@ -257,6 +257,7 @@ DEFINE_PRINT_TRAIT(int, "int", "%d", int);
 DEFINE_PRINT_TRAIT(unsigned int, "uint", "%u", unsigned int);
 DEFINE_PRINT_TRAIT(long, "long", "%ld", long);
 DEFINE_PRINT_TRAIT(unsigned long, "ulong", "%lu", unsigned long);
+DEFINE_PRINT_TRAIT(unsigned long long, "ulong long", "%llu", unsigned long long);
 DEFINE_PRINT_TRAIT(long long, "long long", "%lld", long long);
 
 DEFINE_PRINT_TRAIT(float, "float", "%f", float);
@@ -285,6 +286,21 @@ template <> struct PrintTraits<bool> {
   }
 };
 
+template <typename T> struct PrintTraits<T *> {
+  static __device__ void print_var(const char *msg, T *val) {
+    printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): "
+           "dtype=pointer value=%p\n",
+           msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+           threadIdx.z, (void *)val);
+  }
+  static __device__ void print_buffer(const char *msg, const char *buf_name,
+                                      int index, T *val) {
+    printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+           "index=%d, dtype=pointer value=%p\n",
+           msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+           threadIdx.z, buf_name, index, (void *)val);
+  }
+};
 
 template <typename T> __device__ void debug_print_var(const char *msg, T var) {
   PrintTraits<T>::print_var(msg, var);

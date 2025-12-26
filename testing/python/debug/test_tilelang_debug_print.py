@@ -1,5 +1,5 @@
 # type: ignore
-
+import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
@@ -17,19 +17,9 @@ def debug_print_buffer(M=16, N=16, dtype=T.float16):
     profiler.run_once()
 
 
-def test_debug_print_buffer():
-    debug_print_buffer(dtype=T.int8)
-    debug_print_buffer(dtype=T.int16)
-    debug_print_buffer(dtype=T.int32)
-    debug_print_buffer(dtype=T.int64)
-    debug_print_buffer(dtype=T.uint8)
-    debug_print_buffer(dtype=T.uint16)
-    debug_print_buffer(dtype=T.uint32)
-    debug_print_buffer(dtype=T.uint64)
-    debug_print_buffer(dtype=T.float16)
-    debug_print_buffer(dtype=T.float32)
-    debug_print_buffer(dtype=T.float64)
-    debug_print_buffer(dtype=T.bfloat16)
+@pytest.mark.parametrize("dtype", [T.int8, T.int16, T.int32, T.int64, T.uint8, T.uint16, T.uint32, T.uint64, T.float16, T.float32, T.float64, T.bfloat16])
+def test_debug_print_buffer(dtype):
+    debug_print_buffer(dtype=dtype)
 
 
 @tilelang.testing.requires_cuda
