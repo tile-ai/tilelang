@@ -4,7 +4,6 @@ from collections.abc import Iterable
 
 from tvm.target import Target
 from tilelang.jit.adapter.utils import is_cutedsl_target
-from tilelang.env import env as _env
 
 # Canonical names for execution backends used internally
 _CANONICAL_MAP = {
@@ -76,25 +75,9 @@ def resolve_execution_backend(requested: str | None, target: Target) -> str:
     allowed_all = allowed_backends_for_target(target, include_unavailable=True)
     allowed_avail = allowed_backends_for_target(target, include_unavailable=False)
 
-    def _require_gemm_v1_for_cutedsl():
-        if not _env.use_gemm_v1():
-            raise ValueError(
-                "CuTeDSL backend requires GEMM v1. Please set environment variable TILELANG_USE_GEMM_V1=1 before importing tilelang."
-            )
-        # Fail fast with a clear error if CuTeDSL dependencies are missing or incompatible.
-        try:
-            from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available  # lazy
-
-            check_cutedsl_available()
-        except ImportError as e:
-            # Keep resolve_execution_backend's error semantics (ValueError) while
-            # preserving the actionable ImportError message.
-            raise ValueError(str(e)) from e
-
     # Default selection for auto/None
     if req in (None, "auto"):
         if is_cutedsl_target(target):
-            _require_gemm_v1_for_cutedsl()
             return "cutedsl"
         kind = _target_kind(target)
         if kind == "cuda":
@@ -121,9 +104,5 @@ def resolve_execution_backend(requested: str | None, target: Target) -> str:
             f"Execution backend '{requested}' requires extra dependencies and is not available now. "
             f"Try one of: {_format_options(allowed_avail)}."
         )
-
-    # CuTeDSL requires GEMM v1
-    if req == "cutedsl":
-        _require_gemm_v1_for_cutedsl()
 
     return req
