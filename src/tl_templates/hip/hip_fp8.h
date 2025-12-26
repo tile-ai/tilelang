@@ -1,3 +1,4 @@
+#pragma once
 #include <hip/amd_detail/amd_hip_fp8.h>
 
 #define HIP_FP8_ENABLED 1
