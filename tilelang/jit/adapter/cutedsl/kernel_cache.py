@@ -13,6 +13,7 @@ from tilelang.jit import JITKernel
 class CuTeDSLKernelCache(KernelCache):
     # CuTeDSL C++ launcher specific
     host_kernel_path = "kernel.py"
+    kernel_lib_path = "kernel.py"
     launcher_lib_path = "launcher_lib.so"
     launcher_cpp_path = "launcher.cpp"
 
