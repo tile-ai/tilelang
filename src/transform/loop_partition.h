@@ -26,6 +26,7 @@
 #define TVM_TL_LOOP_PARTITION_H_
 
 #include <tvm/tir/op.h>
+#include <tvm/tir/stmt.h>
 
 #include "../layout/layout.h"
 
@@ -44,6 +45,24 @@ Fragment PlanLoopPartition(const For &op, int vectorize_size,
                            const Range &thread_range);
 
 For LoopPragmaUnroll(For stmt);
+
+/*!
+ * \brief Lower a parallel loop by partitioning and vectorizing it.
+ *
+ * This function combines PartitionLoop and VectorizeLoop into a single
+ * operation, and optionally wraps the result with an IfThenElse if a
+ * predicate is provided.
+ *
+ * \param loop The parallel For loop to lower.
+ * \param loop_layout The Fragment layout for partitioning.
+ * \param thread_var The thread variable for partitioning.
+ * \param analyzer The arithmetic analyzer.
+ * \param predicate Optional predicate to wrap the loop with IfThenElse.
+ * \return The lowered statement.
+ */
+Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
+                       arith::Analyzer *analyzer,
+                       Optional<PrimExpr> predicate = Optional<PrimExpr>());
 
 } // namespace tl
 } // namespace tvm

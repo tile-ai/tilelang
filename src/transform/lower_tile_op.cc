@@ -664,6 +664,50 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
+  /**
+   * @brief Handle a Parallel For node, lowering it based on the layout
+   * annotation.
+   *
+   * This method checks if the For node has a parallel_loop_layout annotation.
+   * If the For node is a parallel loop (ForKind::kParallel):
+   * - It must have the parallel_loop_layout annotation, otherwise an error is
+   *   raised.
+   * - The loop is partitioned and vectorized based on the annotated layout.
+   * - If a predicate annotation exists, the loop is wrapped with an IfThenElse.
+   *
+   * @return Stmt The lowered statement.
+   */
+  Stmt VisitStmt_(const ForNode *op) final {
+    // First visit the body
+    For for_node = Downcast<For>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+
+    // Only process parallel loops
+    if (op->kind != ForKind::kParallel) {
+      return for_node;
+    }
+
+    // Check if the parallel loop has the layout annotation
+    ICHECK(op->annotations.count(attr::kParallelLoopLayout))
+        << "Parallel loop must have " << attr::kParallelLoopLayout
+        << " annotation. "
+        << "Make sure LayoutInference pass has been run before LowerTileOp.\n"
+        << "Loop: " << tvm::ffi::GetRef<For>(op);
+
+    auto loop_layout = Downcast<Fragment>(
+        op->annotations.Get(attr::kParallelLoopLayout).value());
+
+    // Get predicate if it exists
+    Optional<PrimExpr> predicate;
+    if (op->annotations.count(attr::kParallelLoopPredicate)) {
+      predicate = Downcast<PrimExpr>(
+          op->annotations.Get(attr::kParallelLoopPredicate).value());
+    }
+
+    // Lower the parallel loop using the common function
+    return LowerParallelLoop(for_node, loop_layout, thread_var_->var, analyzer_,
+                             predicate);
+  }
+
   Target target_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Layout> layout_map_;

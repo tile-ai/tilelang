@@ -783,6 +783,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                    << "` may cause conflicted write.";
     }
     vectorized_thread_loop = VectorizeLoop(transformed_loop);
+    return vectorized_thread_loop;
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
@@ -797,17 +798,11 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    auto thread_var = T.thread_var;
-    auto thread_loop =
-        PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-    vectorized_thread_loop = VectorizeLoop(thread_loop, analyzer);
+    // Use LowerParallelLoop to handle partitioning, vectorization, and
+    // predicate
+    return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
+                             analyzer, par_op->GetPredicate(T.thread_var));
   }
-
-  if (par_op->GetPredicate(T.thread_var).defined()) {
-    return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                      vectorized_thread_loop);
-  }
-  return vectorized_thread_loop;
 }
 
 // Lowers copy to LDSM/STSM (warp-level 8x8 matrix) instructions.
