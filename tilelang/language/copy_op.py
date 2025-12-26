@@ -92,7 +92,7 @@ def copy(
     src = to_buffer_region(src, access_type="r", extents=src_extent)
     dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
-    # Build annotations map
+    # Build annotations dict
     ann = annotations.copy() if annotations else {}
 
     # Individual arguments take lower precedence than annotations
@@ -104,10 +104,9 @@ def copy(
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
 
-    # Convert to TVM Map
-    ann_map = {k: tir.const(v) if isinstance(v, (int, bool)) else v for k, v in ann.items()}
-
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, ann_map)
+    return tir.call_intrin(
+        "handle", tir.op.Op.get("tl.tileop.copy"),
+        src, dst, annotations=ann if ann else None)
 
 
 def c2d_im2col(

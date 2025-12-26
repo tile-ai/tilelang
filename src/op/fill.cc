@@ -58,7 +58,7 @@ using namespace tir;
  * lanes) and will terminate (via CHECK/ICHECK) if inputs are unsupported or out
  * of bounds.
  */
-Fill::Fill(Array<PrimExpr> args) {
+Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
 
   BufferRegion region = NormalizeToBufferRegion(args[0]);

@@ -84,7 +84,8 @@ class AtomicAdd : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicAdd, TileOperator,
                                              AtomicAddNode);
-  TVM_DLL AtomicAdd(Array<PrimExpr> args);
+  TVM_DLL AtomicAdd(Array<PrimExpr> args,
+                    Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

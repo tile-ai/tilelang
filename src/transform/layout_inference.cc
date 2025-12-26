@@ -28,6 +28,7 @@
 #include "common/loop_fusion_utils.h"
 #include "common/loop_parallel_transform_utils.h"
 #include "common/union_find.h"
+#include "parallel_loop_layout_validator.h"
 #include "layout_reducer.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -1247,8 +1248,6 @@ private:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
-      // Bind thread variable range to analyzer for predicate simplification
-      analyzer_->Bind(iv->var, Range::FromMinExtent(0, op->value));
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
@@ -1265,7 +1264,10 @@ tvm::transform::Pass LayoutInference() {
     collector(f->body);
     bool has_thread_binding = !collector.thread_binding_.empty();
     bool skip_thread_partition = !has_thread_binding;
-    return LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+    f = LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+    // Validate parallel loop layout annotations
+    ParallelLoopLayoutValidator::Validate(f->body);
+    return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
 }

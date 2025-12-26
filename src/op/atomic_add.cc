@@ -24,23 +24,24 @@ namespace tl {
 using namespace tir;
 
 /**
- * @brief Construct an AtomicAdd operator from call arguments and a buffer map.
+ * @brief Construct an AtomicAdd operator from call arguments and annotations.
  *
  * Builds the internal AtomicAddNode, extracts the source and destination
  * regions and their backing Buffers from the first two region-style expressions
  * in `args` (BufferLoad/BufferRegion), and stores them along with their
- * ranges. If a third argument is provided, it is interpreted as an integer
- * immediate and stored as the node's coalesced width.
+ * ranges. Annotations are copied directly from the Call node.
  *
  * @param args Call-style PrimExprs where:
  *             - args[0] is the source region call,
- *             - args[1] is the destination region call,
- *             - args[2] (optional) is annotations map.
+ *             - args[1] is the destination region call.
+ * @param annotations Map containing optional keys:
+ *             - "use_tma": whether to use TMA for memory operations
+ *             - "memory_order": memory order for atomic operations
  * Notes:
  * - The constructor checks that args[0] and args[1] are region-compatible.
  * - The constructed node is stored in this->data_.
  */
-AtomicAdd::AtomicAdd(Array<PrimExpr> args) {
+AtomicAdd::AtomicAdd(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
@@ -51,12 +52,8 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args) {
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
-  // Parse annotations map from args[2]
-  if (args.size() >= 3) {
-    if (auto ann_map = args[2].as<Map<String, ObjectRef>>()) {
-      node->annotations = ann_map.value();
-    }
-  }
+  // Copy annotations from the Call node
+  node->annotations = annotations;
   data_ = std::move(node);
 }
 

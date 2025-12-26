@@ -99,10 +99,10 @@ template <typename T> static Array<T> ReverseArray(Array<T> array) {
   return Array<T>{array.rbegin(), array.rend()};
 }
 
-// Constructs a Copy operator node from call arguments.
+// Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
-// args[2]: annotations map (optional)
-Copy::Copy(Array<PrimExpr> args) {
+// annotations: Map containing coalesced_width, disable_tma, eviction_policy, etc.
+Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
@@ -113,12 +113,8 @@ Copy::Copy(Array<PrimExpr> args) {
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
-  // Parse annotations map from args[2]
-  if (args.size() >= 3) {
-    if (auto ann_map = args[2].as<Map<String, ObjectRef>>()) {
-      node->annotations = ann_map.value();
-    }
-  }
+  // Copy annotations from the Call node
+  node->annotations = annotations;
   data_ = std::move(node);
 }
 
@@ -1564,7 +1560,7 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
 // Constructs a Conv2DIm2ColOp node from call arguments.
 // args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding,
 // eviction_policy
-Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args) {
+Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<Conv2DIm2ColOpNode> node =
       tvm::ffi::make_object<Conv2DIm2ColOpNode>();
   node->srcRegion_ = NormalizeToBufferRegion(args[0]);

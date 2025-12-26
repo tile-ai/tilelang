@@ -342,9 +342,10 @@ public:
   /*!
    * \brief Constructor.
    * \param args  Expression arguments for the copy.
-   * \param vmap  Buffer variable mapping.
+   * \param annotations  Annotations map from the Call node.
    */
-  TVM_DLL Copy(Array<PrimExpr> args);
+  TVM_DLL Copy(Array<PrimExpr> args,
+               Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
 
   /*!
    * \brief Get the TVM Op handle corresponding to this Copy op.
@@ -410,7 +411,8 @@ class Conv2DIm2ColOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Conv2DIm2ColOp, TileOperator,
                                              Conv2DIm2ColOpNode);
-  TVM_DLL Conv2DIm2ColOp(Array<PrimExpr> args);
+  TVM_DLL Conv2DIm2ColOp(Array<PrimExpr> args,
+                         Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 
