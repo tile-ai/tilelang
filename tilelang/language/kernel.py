@@ -226,58 +226,22 @@ class KernelLaunchFrame(TIRFrame):
 
 
 def Kernel(
-    *blocks: list[tir.PrimExpr],
+    *blocks: tir.PrimExpr,
     threads: int | list[int] | tuple | None = None,
     is_cpu: bool = False,
     prelude: str | None = None,
 ):
-    """Tools to quickly construct a GPU kernel launch frame.
-
-    Parameters
-    ----------
-    blocks : List[int]
-        A list of extent, can be 1-3 dimension, representing gridDim.(x|y|z)
-    threads : int
-        A integer representing blockDim.x
-        Or a list of integers representing blockDim.(x|y|z)
-        if the value is -1, we skip the threadIdx.x binding.
-    is_cpu : bool
-        Whether the kernel is running on CPU.
-        Thus we will not bind threadIdx.x, threadIdx.y, threadIdx.z.
-        and blockIdx.x, blockIdx.y, blockIdx.z.
-    prelude : str
-        The import c code of the kernel,
-        will be injected before the generated kernel code.
-
-    Returns
-    -------
-    res : Tuple[frame.LaunchThreadFrame]
-        The result LaunchThreadFrame.
-
-    Examples
-    --------
-    Create a 1-D CUDA kernel launch and unpack the single block index:
-
-    .. code-block:: python
-
-        with T.Kernel(T.ceildiv(N, 128), threads=128) as bx:
-            # bx is the blockIdx.x binding (also iterable as (bx,))
-            ...
-
-    Launch a 2-D grid while requesting two thread dimensions:
-
-    .. code-block:: python
-
-        with T.Kernel(grid_x, grid_y, threads=(64, 2)) as (bx, by):
-            tx, ty = T.get_thread_bindings()
-            ...
-
-    Emit a CPU kernel where thread bindings are skipped:
-
-    .. code-block:: python
-
-        with T.Kernel(loop_extent, is_cpu=True) as (i,):
-            ...
+    """
+    Construct a kernel launch frame for TileLang and return a launch-frame descriptor usable as a context manager.
+    
+    Parameters:
+        blocks: One to three tir.PrimExpr values specifying grid dimensions for blockIdx.(x|y|z).
+        threads: An int, list, or tuple specifying thread block dimensions. When not provided and not a CPU kernel, defaults to 128 for the first dimension and 1 for missing dimensions; values are normalized to a length-three list [x, y, z].
+        is_cpu: If True, mark the frame as a CPU kernel so thread and block thread-bindings are not created.
+        prelude: Optional C source to be injected before the generated kernel code via pragma_import_c.
+    
+    Returns:
+        A KernelLaunchFrame descriptor (FFI handle) that can be used as a context manager; entering the context yields the block binding Var for a single-dimension grid or a tuple/list of Vars for multiple dimensions.
     """
     attrs: dict = {}
 

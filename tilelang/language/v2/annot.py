@@ -582,7 +582,33 @@ if TYPE_CHECKING:
         @property
         def strides(self) -> tuple[tir.PrimExpr]: ...
 
-        def scope(self) -> Scope: ...
+        def scope(self) -> Scope: """
+Get the memory scope identifier used for buffers when emitting TIR.
+
+Returns:
+    scope (Scope): Memory scope name (e.g. "global", "local", "shared.dyn", "local.fragment") used for the created buffer.
+"""
+...
+
+        def __getitem__(self, idx) -> Buffer: """
+Access a sub-buffer or view of this Buffer using indexing.
+
+Parameters:
+    idx (int | slice | tuple): Index, slice, or tuple of indices that selects the sub-buffer, dimension(s), or region.
+
+Returns:
+    Buffer: A Buffer representing the selected sub-buffer or view.
+"""
+...
+
+        def __setitem__(self, idx, val): """
+Assign a value to the buffer element(s) specified by `idx`.
+
+Parameters:
+    idx: An index or slice specifying which element(s) of the buffer to assign.
+    val: The value to assign to the selected element(s); should be a buffer-compatible object.
+"""
+...
 
     class Tensor(Generic[_Shape, _DType], Buffer[_Shape, _DType]):
         def __new__(
@@ -596,7 +622,25 @@ if TYPE_CHECKING:
             offset_factor=0,
             buffer_type="",
             axis_separators=None,
-        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
+        ) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: """
+            Construct a Tensor annotation with the given shape, dtype, and buffer properties.
+            
+            Parameters:
+                shape (tuple): Tensor shape expressed as ints or PrimExprs; a single int is treated as a 1-D shape when provided.
+                dtype (str | dt.dtype): Element data type for the tensor (defaults to "float32").
+                data: Optional backing object or constant used to populate the buffer (framework-specific).
+                strides: Optional tuple of strides; if omitted, contiguous row-major strides are computed.
+                elem_offset: Optional element offset within the buffer.
+                scope (str): Memory scope string for the buffer (e.g., "global", "local"); uses the annot's default when None.
+                align (int): Alignment in bytes for the buffer.
+                offset_factor (int): Offset factor for buffer addressing.
+                buffer_type (str): Optional buffer type metadata string.
+                axis_separators: Optional layout separators for visual/serialization purposes.
+            
+            Returns:
+                Tensor: A Tensor annotation describing a buffer with the specified shape, dtype, and layout properties.
+            """
+            ...
 
     class StridedTensor(Generic[_Shape, _Stride, _DType], Buffer[_Shape, _DType]):
         def __new__(
