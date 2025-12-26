@@ -52,11 +52,7 @@ class PostProcCounter:
     def register_callback(self, backend: str):
         """Register postproc callback for the given backend."""
         comment_prefix = "#" if backend == "cutedsl" else "//"
-        global_func = (
-            "tilelang_callback_cutedsl_postproc"
-            if backend == "cutedsl"
-            else "tilelang_callback_cuda_postproc"
-        )
+        global_func = "tilelang_callback_cutedsl_postproc" if backend == "cutedsl" else "tilelang_callback_cuda_postproc"
 
         def callback(code, _):
             self.count += 1
@@ -171,9 +167,7 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
         execution_backend=backend,
     )
 
-    assert counter.count == 1, (
-        f"Cache hit: postproc should not be called again, got {counter.count} calls"
-    )
+    assert counter.count == 1, f"Cache hit: postproc should not be called again, got {counter.count} calls"
 
     source2 = kernel2.get_kernel_source()
     assert counter.marker in source2, f"Expected cached marker '{counter.marker}' in source"
@@ -238,9 +232,7 @@ def test_cache_miss_detection(clean_cache_env, backend):
         execution_backend=backend,
     )
 
-    assert counter.count == 2, (
-        f"Different function should cause cache miss, expected 2 calls, got {counter.count}"
-    )
+    assert counter.count == 2, f"Different function should cause cache miss, expected 2 calls, got {counter.count}"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -286,12 +278,8 @@ def cleanup_postproc():
     """Clean up postproc callbacks after each test."""
     yield
     # Restore default callbacks
-    tvm_ffi.register_global_func(
-        "tilelang_callback_cuda_postproc", f=lambda code, _: code, override=True
-    )
-    tvm_ffi.register_global_func(
-        "tilelang_callback_cutedsl_postproc", f=lambda code, _: code, override=True
-    )
+    tvm_ffi.register_global_func("tilelang_callback_cuda_postproc", f=lambda code, _: code, override=True)
+    tvm_ffi.register_global_func("tilelang_callback_cutedsl_postproc", f=lambda code, _: code, override=True)
 
 
 if __name__ == "__main__":
