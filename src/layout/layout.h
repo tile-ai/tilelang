@@ -262,6 +262,8 @@ constexpr const char *kLayoutMap = "layout_map";
 constexpr const char *kParallelLoopLayout = "parallel_loop_layout";
 // ForAttr, Containing the predicate for a parallel for loop
 constexpr const char *kParallelLoopPredicate = "parallel_loop_predicate";
+// ForAttr, Width (in elements) for coalesced memory access
+constexpr const char *kCoalescedWidth = "coalesced_width";
 } // namespace attr
 
 } // namespace tl

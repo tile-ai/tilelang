@@ -101,8 +101,7 @@ template <typename T> static Array<T> ReverseArray(Array<T> array) {
 
 // Constructs a Copy operator node from call arguments.
 // args[0]: source region, args[1]: destination region
-// Optional: args[2] coalesced_width, args[3] disable_tma, args[4]
-// eviction_policy
+// args[2]: annotations map (optional)
 Copy::Copy(Array<PrimExpr> args) {
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   Array<Range> rgs[2];
@@ -114,17 +113,11 @@ Copy::Copy(Array<PrimExpr> args) {
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
+  // Parse annotations map from args[2]
   if (args.size() >= 3) {
-    auto coalesced_width = Downcast<IntImm>(args[2]);
-    if (coalesced_width->value > 0) {
-      node->coalesced_width = coalesced_width;
+    if (auto ann_map = args[2].as<Map<String, ObjectRef>>()) {
+      node->annotations = ann_map.value();
     }
-  }
-  if (args.size() >= 4) {
-    node->disable_tma = Downcast<Bool>(args[3]);
-  }
-  if (args.size() >= 5) {
-    node->eviction_policy = args[4].as<IntImmNode>()->value;
   }
   data_ = std::move(node);
 }
@@ -323,12 +316,13 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
     return For(Var("i"), 0, 1, ForKind::kSerial, body);
   }
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
-    Map<String, ObjectRef> annotations = {};
-    if (coalesced_width.defined()) {
-      annotations.Set("coalesced_width", coalesced_width);
+    Map<String, ObjectRef> loop_annotations;
+    if (annotations.count(attr::kCoalescedWidth)) {
+      loop_annotations.Set(attr::kCoalescedWidth,
+                           annotations.Get(attr::kCoalescedWidth).value());
     }
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body, std::nullopt, annotations);
+               ForKind::kParallel, body, std::nullopt, loop_annotations);
   }
   return Downcast<For>(body);
 }
@@ -361,7 +355,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
-  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
+  auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
                                T.layout_map, T.analyzer, T.buffer_oob);
 
   // Handle tensor memory (tmem) layout inference
@@ -736,7 +730,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
-  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
+  auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
                                T.layout_map, analyzer);
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
     auto tmem_copy = LowerTmemCopy(T, analyzer);
@@ -1447,7 +1441,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     int need_reduce = 0;
     if (!is_load)
       args.push_back(need_reduce);
-    args.push_back(this->eviction_policy);
+    args.push_back(GetEvictionPolicy());
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), op, args)));
   } else {
@@ -1459,7 +1453,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     int need_reduce = 0;
     if (!is_load)
       args.push_back(need_reduce);
-    args.push_back(this->eviction_policy);
+    args.push_back(GetEvictionPolicy());
     tma_copy = Evaluate(Call(DataType::Handle(), op, args));
   }
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
@@ -1531,13 +1525,13 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
     tma_copy = Evaluate(
         Call(DataType::Handle(), tma_load(),
              {shared_addr, global_addr, 0,
-              elements * shared_tensor->dtype.bytes(), this->eviction_policy}));
+              elements * shared_tensor->dtype.bytes(), GetEvictionPolicy()}));
   } else {
     int need_reduce = 0;
     tma_copy = Evaluate(
         Call(DataType::Handle(), tma_store(),
              {global_addr, shared_addr, elements * shared_tensor->dtype.bytes(),
-              need_reduce, this->eviction_policy}));
+              need_reduce, GetEvictionPolicy()}));
   }
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
   return tma_copy;

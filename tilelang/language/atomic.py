@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tilelang.language as T
-from tvm import ir
+from tvm import ir, tir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 
@@ -217,10 +217,17 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     if return_prev:
         raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
-    if memory_order is None:
-        return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, use_tma, 0)
-    else:
-        return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, use_tma, _MEMORY_ORDER_ID_MAP[memory_order])
+    # Build annotations map
+    ann = {}
+    if use_tma:
+        ann["use_tma"] = use_tma
+    if memory_order is not None:
+        ann["memory_order"] = _MEMORY_ORDER_ID_MAP[memory_order]
+
+    # Convert to TVM Map
+    ann_map = {k: tir.const(v) if isinstance(v, (int, bool)) else v for k, v in ann.items()}
+
+    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, ann_map)
 
 
 def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:
