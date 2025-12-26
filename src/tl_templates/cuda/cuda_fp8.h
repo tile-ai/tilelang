@@ -6,7 +6,19 @@
 
 using fp8_e4_t = tl::float_e4m3_t;
 using fp8_e5_t = tl::float_e5m2_t;
+
+// __nv_fp8_e8m0 is only available in CUDA 12.6+
+#if __CUDACC_VER_MAJOR__ > 12 ||                                               \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 6)
 using fp8_e8_t = __nv_fp8_e8m0;
+#define TL_HAS_FP8_E8M0 1
+#else
+// Placeholder for CUDA < 12.6
+struct fp8_e8_t {
+  unsigned char data;
+};
+#define TL_HAS_FP8_E8M0 0
+#endif
 
 struct __CUDA_ALIGN__(2) fp8_e4_2_t {
   fp8_e4_t x;

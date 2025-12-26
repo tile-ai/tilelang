@@ -73,6 +73,9 @@ class PassConfigKey(str, Enum):
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
 
+    TL_AST_PRINT_ENABLE = "tl.ast_print_enable"
+    """Enable TIR AST printing for debugging purposes. Default: False"""
+
     TL_LAYOUT_VISUALIZATION_ENABLE = "tl.layout_visualization_enable"
     """Enable layout inference visualization. Default: False"""
 

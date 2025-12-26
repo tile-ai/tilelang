@@ -59,7 +59,7 @@ jobs:
             const { owner, repo } = context.repo
             const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username })
             core.setOutput('permission', data.permission) // admin|maintain|write|triage|read|none
-      
+
       - name: Reject if not allowed
         if: ${{ steps.perm.outputs.permission != 'admin' && steps.perm.outputs.permission != 'maintain' && steps.perm.outputs.permission != 'write' }}
         run: |
@@ -241,10 +241,10 @@ jobs:
             const fs = require('fs');
             // Read the file directly instead of passing via env/outputs to avoid escaping issues
             const md = fs.readFileSync('regression_result.md', 'utf8');
-            
+
             const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
-            
-            const body = 
+
+            const body =
               'Performance Benchmark Report\n' +
               '============================\n\n' +
               `Triggered by: @${context.payload.comment.user.login}\n` +
@@ -262,4 +262,3 @@ jobs:
               issue_number: context.issue.number,
               body
             });
-

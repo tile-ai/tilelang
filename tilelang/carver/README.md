@@ -33,8 +33,8 @@ arch = CUDA("nvidia/geforce-rtx-4090")
 #         for k in Reduce(1024):
 #             ...
 carve_template = carver.GeneralReductionTemplate(
-    structure="SSR",          
-    shape=[1024, 1024, 1024], 
+    structure="SSR",
+    shape=[1024, 1024, 1024],
     dtype="float16",
 ).with_arch(arch)
 
