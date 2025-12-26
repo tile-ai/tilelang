@@ -44,7 +44,6 @@ class CuTeDSLKernelCache(KernelCache):
     def _get_required_files(self, cache_path: str) -> list[str]:
         return super()._get_required_files(cache_path) + [os.path.join(cache_path, self.launcher_lib_path)]
 
-
     @override
     def _set_adapter_cache_path(self, kernel: JITKernel, cache_path: str):
         if hasattr(kernel, "adapter"):
