@@ -174,7 +174,7 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                         vectorized_thread_loop);
     }
     return vectorized_thread_loop;
-  } else if (IsLocalBuffer(dst)) {
+  } else if (IsLocalBuffer(dst) || IsLocalVarBuffer(dst)) {
     auto init_loop = MakeSIMTLoop(analyzer);
     auto vectorized_thread_loop = VectorizeLoop(init_loop, analyzer);
     return vectorized_thread_loop;
