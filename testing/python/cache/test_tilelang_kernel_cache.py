@@ -159,7 +159,7 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
 
     # Verify cache files created
     cache_files = list(Path(clean_cache_env).rglob("*.*"))
-    assert len(cache_files) > 0, f"Cache files should be created, found none"
+    assert len(cache_files) > 0, "Cache files should be created, found none"
 
     # === Pass 2: Cache hit ===
     _dispatch_map[backend]._memory_cache.clear()
@@ -213,7 +213,7 @@ def test_cache_miss_detection(clean_cache_env, backend):
     unique_id_1 = uuid.uuid4().hex[:8]
     kernel_func1 = func1.with_attr("global_symbol", f"func1_{backend}_{unique_id_1}")
 
-    kernel1 = tilelang.compile(
+    tilelang.compile(
         kernel_func1,
         out_idx=[1],
         target=_get_target_from_backend(backend),
@@ -231,7 +231,7 @@ def test_cache_miss_detection(clean_cache_env, backend):
     unique_id_2 = uuid.uuid4().hex[:8]
     kernel_func2 = func2.with_attr("global_symbol", f"func2_{backend}_{unique_id_2}")
 
-    kernel2 = tilelang.compile(
+    tilelang.compile(
         kernel_func2,
         out_idx=[1],
         target=_get_target_from_backend(backend),
@@ -266,7 +266,7 @@ def test_cache_isolation_between_tests(clean_cache_env, backend):
 
     kernel_func = simple.with_attr("global_symbol", f"simple_{backend}_{unique_id}")
 
-    kernel = tilelang.compile(
+    tilelang.compile(
         kernel_func,
         out_idx=[1],
         target=_get_target_from_backend(backend),
