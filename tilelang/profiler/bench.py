@@ -177,14 +177,14 @@ def do_bench(
 
     # Benchmarking phase
     if backend == "event":
-        return _bench_with_cuda_events(fn, cache, n_repeat, quantiles, return_mode)
+        return _bench_with_events(fn, cache, n_repeat, quantiles, return_mode)
     elif backend == "cupti":
         return _bench_with_cupti(fn, cache, n_repeat)
     else:
         raise ValueError(f"Unknown profiler backend: {backend}")
 
 
-def _bench_with_cuda_events(
+def _bench_with_events(
     fn: Callable,
     cache: torch.Tensor,
     n_repeat: int,
