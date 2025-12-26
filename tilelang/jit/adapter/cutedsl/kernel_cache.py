@@ -12,8 +12,9 @@ from tilelang.jit import JITKernel
 
 class CuTeDSLKernelCache(KernelCache):
     # CuTeDSL C++ launcher specific
-    host_kernel_path = "kernel.py"
     kernel_lib_path = "kernel.py"
+    device_kernel_path = "kernel.py"
+    host_kernel_path = "kernel.py"
     launcher_lib_path = "launcher_lib.so"
     launcher_cpp_path = "launcher.cpp"
 
@@ -45,7 +46,9 @@ class CuTeDSLKernelCache(KernelCache):
 
     @override
     def _load_kernel_source(self, device_kernel_path: str, host_kernel_path: str, verbose: bool = False) -> tuple[str | None, str | None]:
-        return "", ""
+        with open(device_kernel_path) as f:
+            kernel_source = f.read()
+        return kernel_source, kernel_source
 
     @override
     def _set_adapter_cache_path(self, kernel: JITKernel, cache_path: str):
