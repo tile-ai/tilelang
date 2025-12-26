@@ -42,6 +42,8 @@ from cuda.bindings.driver import (
     cuuint64_t,
     cuuint32_t,
     CUkernel,
+    CUlaunchAttribute,
+    CUlaunchAttributeID,
 )
 import ctypes
 
@@ -170,12 +172,6 @@ L2_PERSISTENT_MAP_RESET_HANDLE_PY = """
 """
 
 PDL_SYNC_PY = """
-    from cuda.bindings.driver import (
-        CUlaunchAttribute,
-        CUlaunchConfig,
-        CUlaunchAttributeID,
-    )
-
     num_attrs = 1
     attrs = [CUlaunchAttribute()]
     attrs[0].id = CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
