@@ -257,7 +257,6 @@ DEFINE_PRINT_TRAIT(int, "int", "%d", int);
 DEFINE_PRINT_TRAIT(unsigned int, "uint", "%u", unsigned int);
 DEFINE_PRINT_TRAIT(long, "long", "%ld", long);
 DEFINE_PRINT_TRAIT(unsigned long, "ulong", "%lu", unsigned long);
-DEFINE_PRINT_TRAIT(unsigned long long, "ulong long", "%llu", unsigned long long);
 DEFINE_PRINT_TRAIT(long long, "long long", "%lld", long long);
 
 DEFINE_PRINT_TRAIT(float, "float", "%f", float);
