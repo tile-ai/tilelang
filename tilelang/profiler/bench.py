@@ -87,7 +87,7 @@ class Event:
 
     def elapsed_time(self, end_event: Event) -> float:
         if self.inner is not None and end_event.inner is not None:
-            return self.inner.elapsed_time(end_event.inner) # type: ignore
+            return self.inner.elapsed_time(end_event.inner)  # type: ignore
         elif self.record_time is not None and end_event.record_time is not None:
             return (end_event.record_time - self.record_time) / 1e6  # Convert ns to ms
         else:
