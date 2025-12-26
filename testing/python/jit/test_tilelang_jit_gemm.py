@@ -103,7 +103,7 @@ def run_gemm_kernel_jit(
     tilelang.testing.torch_assert_close(C, ref_C, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
-def test_gemm_f16f16f16_nn_kernel_jit():
+def test_gemm_f16f16f32_nn_kernel_jit():
     run_gemm_kernel_jit(
         512,
         1024,
@@ -112,7 +112,7 @@ def test_gemm_f16f16f16_nn_kernel_jit():
         False,
         T.float16,
         T.float16,
-        T.float16,
+        T.float32,
         128,
         128,
         32,

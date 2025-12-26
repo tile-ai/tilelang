@@ -55,7 +55,7 @@ def debug_print_buffer_conditional(M=16, N=16):
             if bx == 0 and by == 0 and bz == 0:
                 T.print(shared_buf)
 
-    jit_kernel = tilelang.compile(program, target="cuda")
+    jit_kernel = tilelang.compile(program, target="auto")
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 
@@ -74,7 +74,7 @@ def debug_print_value_conditional(M=16, N=16):
             if tid == 0:
                 T.print(bx + by + bz)
 
-    jit_kernel = tilelang.compile(program, target="cuda")
+    jit_kernel = tilelang.compile(program, target="auto")
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 
@@ -93,7 +93,7 @@ def debug_print_register_files(M=16, N=16):
             for i, j in T.Parallel(M, N):
                 T.print(register_buf[i, j])
 
-    jit_kernel = tilelang.compile(program, target="cuda")
+    jit_kernel = tilelang.compile(program, target="auto")
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 
@@ -112,7 +112,7 @@ def debug_print_msg(M=16, N=16):
             if tid == 0:
                 T.print(bx + by + bz, msg="hello world")
 
-    jit_kernel = tilelang.compile(program, target="cuda")
+    jit_kernel = tilelang.compile(program, target="auto")
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 

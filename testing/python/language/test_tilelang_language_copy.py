@@ -29,7 +29,7 @@ def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16)
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        target="cuda",
+        target="auto",
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
     )
     source = kernel.get_kernel_source()
@@ -66,7 +66,7 @@ def run_tilelang_copy_with_stride(M=1024, N=1024, NN=2048, block_M=128, block_N=
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        target="cuda",
+        target="auto",
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
@@ -131,7 +131,7 @@ def run_tilelang_copy_buffer_load_with_parallel(M=1024, N=1024, block_M=128, blo
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        target="cuda",
+        target="auto",
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
     )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
