@@ -189,17 +189,11 @@ def run_regression_perf(
     dim: int = 128,
     is_causal: bool = False,
     groups: int = 16,
-    tune: bool = False,
 ):
-    flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
-    total_flops = 2 * flops_per_matmul
-    if is_causal:
-        total_flops *= 0.5
-
     kernel = flashattn(batch, heads, seq_len, dim, is_causal, groups=groups, block_M=128, block_N=128, num_stages=2, threads=256)
 
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
-    return profiler.do_bench(warmup=500, backend="cupti")
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

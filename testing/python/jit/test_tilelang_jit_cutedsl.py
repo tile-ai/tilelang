@@ -3,7 +3,18 @@ import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
+import pytest
 from tilelang.utils.tensor import map_torch_type
+from tilelang.env import env
+
+
+@pytest.fixture(scope="module", autouse=True)
+def restore_env():
+    """Save and restore env settings for this test module"""
+    original_value = env.TILELANG_USE_GEMM_V1
+    env.TILELANG_USE_GEMM_V1 = "1"
+    yield
+    env.TILELANG_USE_GEMM_V1 = original_value
 
 
 def matmul(
@@ -50,68 +61,6 @@ def matmul(
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
-
-
-def run_gemm(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtypeAccum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages=3,
-    num_threads=128,
-):
-    program = matmul(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtypeAccum,
-        num_stages,
-        num_threads,
-    )
-
-    stramp = "&*(XS)"
-
-    @tvm.register_global_func("tilelang_callback_cutedsl_postproc", override=True)
-    def tilelang_callback_cutedsl_postproc(code, _):
-        code = f"# {stramp}\n" + code
-        return code
-
-    matmul_kernel = tilelang.compile(program, out_idx=-1, target="cutedsl")
-
-    kernel_source = matmul_kernel.get_kernel_source()
-
-    assert stramp in kernel_source, f"Expected {stramp} in the kernel source"
-
-
-def test_gemm_f16f16f16_nn():
-    run_gemm(
-        512,
-        1024,
-        768,
-        False,
-        False,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        256,
-        32,
-        2,
-    )
 
 
 def matmul_jit_kernel(

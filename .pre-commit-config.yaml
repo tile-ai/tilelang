@@ -13,15 +13,13 @@ repos:
     hooks:
       - id: check-symlinks
       - id: destroyed-symlinks
-      # FIXME: enable these hooks
-      # - id: trailing-whitespace
-      # - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
       - id: check-added-large-files
       - id: check-merge-conflict
         fail_fast: true
-      # FIXME: enable these hooks
-      # - id: check-executables-have-shebangs
-      # - id: check-shebang-scripts-are-executable
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
       - id: detect-private-key
       - id: check-yaml
       - id: check-toml

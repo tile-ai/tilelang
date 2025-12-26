@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 MODEL_DIR=$1
 REMOTE_DIR=$2
 
