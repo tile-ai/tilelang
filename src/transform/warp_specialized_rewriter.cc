@@ -164,6 +164,18 @@ public:
       if (call->op.same_as(loop_break())) {
         role = Role::kBoth;
       }
+      if (call->op.same_as(builtin::call_extern())) {
+        if (!call->args.empty()) {
+          if (const auto *str_node =
+                  call->args[0].as<tvm::tir::StringImmNode>()) {
+            std::string func_name = str_node->value;
+            if (func_name == "cudaGridDependencySynchronize" ||
+                func_name == "cudaTriggerProgrammaticLaunchCompletion") {
+              role = Role::kBoth;
+            }
+          }
+        }
+      }
     }
     SetRole(op, role);
   }

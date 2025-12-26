@@ -138,6 +138,10 @@ Annotation helpers
 - `T.annotate_safe_value(var, ...)`: Safety/const hints.
 - `T.annotate_l2_hit_ratio(buf, ratio)`: Cache behavior hint.
 
+Synchronization helpers
+- `T.pdl_trigger()`: Signal programmatic launch completion for the current kernel.
+- `T.pdl_sync()`: Wait until kernel dependencies are satisfied.
+
 Atomics
 - `T.atomic_add(dst, value, memory_order=None, return_prev=False, use_tma=False)`.
 - `T.atomic_addx2(dst, value, return_prev=False)`; `T.atomic_addx4(...)`.

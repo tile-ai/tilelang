@@ -197,6 +197,14 @@ class NVRTCLibraryGenerator(LibraryGenerator):
                 f"-I{cuda_home}/targets/{target_arch}/include/cccl",
                 f"-D__CUDACC_VER_MAJOR__={__CUDACC_VER_MAJOR__}",
             ]
+
+            # Add CUDA C++ standard library include path.
+            # CUDA 13+ uses the CCCL-based cuda::std layout, while older versions use the legacy path.
+            if __CUDACC_VER_MAJOR__ >= 13:
+                options += [f"-I{cuda_home}/targets/{target_arch}/include/cccl/cuda/std"]
+            else:
+                options += [f"-I{cuda_home}/targets/{target_arch}/include/cuda/std"]
+
             if self.compile_flags:
                 options += [item for flag in self.compile_flags for item in flag.split() if item not in options]
 

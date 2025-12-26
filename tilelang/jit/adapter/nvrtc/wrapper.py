@@ -42,6 +42,8 @@ from cuda.bindings.driver import (
     cuuint64_t,
     cuuint32_t,
     CUkernel,
+    CUlaunchAttribute,
+    CUlaunchAttributeID,
 )
 import ctypes
 
@@ -169,6 +171,16 @@ L2_PERSISTENT_MAP_RESET_HANDLE_PY = """
         raise RuntimeError(f"Failed to restore L2 cache size limit: {{res}}")
 """
 
+PDL_SYNC_PY = """
+    num_attrs = 1
+    attrs = [CUlaunchAttribute()]
+    attrs[0].id = CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
+    attrs[0].value.programmaticStreamSerializationAllowed = 1
+
+    config.numAttrs = num_attrs
+    config.attrs = attrs
+"""
+
 KERNEL_LAUNCH_FUNC_PY = """
     res = cuKernelSetAttribute(
         CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
@@ -188,6 +200,7 @@ KERNEL_LAUNCH_FUNC_PY = """
     config.blockDimZ = {6}
     config.sharedMemBytes = {7}
     config.hStream = stream
+    {11}
 
     arg_values = {8}
     arg_types = {9}
@@ -403,6 +416,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
 
+            pdl_sync_code = self.generate_pdl_sync_code(function_name)
+
             # Generate kernel launch code
             kernel_launch_code += KERNEL_LAUNCH_FUNC_PY.format(
                 function_name,
@@ -416,6 +431,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                 arg_names,
                 arg_types,
                 device_index,
+                pdl_sync_code,
             )
 
         # Reset L2 persistent map after all kernel execution
@@ -455,6 +471,15 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC_PY.format(buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes))
 
         return init_l2_persistent_map
+
+    def generate_pdl_sync_code(self, function_name: str) -> str:
+        """
+        Generate Python code to insert PDL synchronization for a given kernel.
+        """
+        if function_name not in self.pdl_sync_map:
+            return ""
+
+        return PDL_SYNC_PY
 
     def generate_tma_descriptor_args(self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
         """Generate Python code to initialize TMA descriptors.

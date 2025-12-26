@@ -1,5 +1,7 @@
+#include "../transform/common/attr.h"
 #include "codegen_cuda.h"
 #include "runtime/cuda/cuda_module.h"
+#include "runtime/meta_data.h"
 #include "runtime/pack_args.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
@@ -38,6 +40,10 @@ ExtractFuncInfo(const IRModule &mod) {
       }
     }
     auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
+    if (f->HasNonzeroAttr(tl::attr::kHasGridSync)) {
+      info.launch_param_tags.push_back(
+          runtime::launch_param::kUseProgramaticDependentLaunch);
+    }
     fmap[static_cast<std::string>(global_symbol.value())] = info;
   }
   return fmap;
