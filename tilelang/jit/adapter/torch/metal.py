@@ -26,6 +26,9 @@ class MetalKernelAdapter(BaseKernelAdapter):
         #  compile_flags: Optional[List[str]] = None
     ):
         self.kernel_global_source = kernel_global_source
+        # Metal backend compiles from source via torch.mps.compile_shader; there is
+        # no on-disk shared library artifact like CUDA/ROCm backends.
+        self.libpath = None
         if isinstance(func_or_mod, tir.PrimFunc):
             func_name = func_or_mod.attrs["global_symbol"]
         else:
@@ -69,3 +72,6 @@ class MetalKernelAdapter(BaseKernelAdapter):
             self._kernel = launcher
 
         return self._kernel
+
+    def get_kernel_source(self) -> str:
+        return self.kernel_global_source or ""

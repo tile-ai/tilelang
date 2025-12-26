@@ -407,7 +407,11 @@ class KernelCache:
 
     def _save_so_cubin_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
-        src_lib_path = kernel.adapter.libpath
+        src_lib_path = getattr(kernel.adapter, "libpath", None)
+        if not src_lib_path:
+            # Some backends (e.g., Metal via torch.mps.compile_shader) do not
+            # produce a standalone binary artifact to cache on disk.
+            return
         if verbose:
             self.logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
         KernelCache._safe_write_file(kernel_lib_path, "wb", lambda file: file.write(KernelCache._load_binary(src_lib_path)))

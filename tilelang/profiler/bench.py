@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from typing import Callable, Literal
 
 import torch
@@ -56,9 +57,58 @@ class suppress_stdout_stderr:
         self.errnull_file.close()
 
 
+class Event:
+    """Dummy event class for CPU timing compatibility."""
+
+    def __init__(self, *args, **kwargs):
+        self.inner = None
+        if IS_CUDA:
+            self.inner = torch.cuda.Event(*args, **kwargs)
+        elif IS_MPS:
+            self.inner = torch.mps.Event(*args, **kwargs)
+        self.enable_timing = kwargs.get("enable_timing", False)
+        self.record_time = None
+
+    def record(self):
+        if self.inner is not None:
+            self.inner.record()
+        elif self.enable_timing:
+            self.record_time = time.perf_counter_ns()
+
+    def synchronize(self):
+        # On MPS, per-event synchronization can hang depending on when/where the
+        # underlying command buffer is committed. Global device synchronization
+        # is the reliable primitive.
+        if IS_MPS:
+            torch.mps.synchronize()
+            return
+        if self.inner is not None:
+            self.inner.synchronize()
+
+    def elapsed_time(self, end_event: Event) -> float:
+        if self.inner is not None and end_event.inner is not None:
+            return self.inner.elapsed_time(end_event.inner) # type: ignore
+        elif self.record_time is not None and end_event.record_time is not None:
+            return (end_event.record_time - self.record_time) / 1e6  # Convert ns to ms
+        else:
+            return 0.0
+
+
 IS_CUDA = torch.cuda.is_available()
-device = "cuda:0" if IS_CUDA else "mps:0"
-Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
+IS_MPS = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+if IS_CUDA:
+    device = "cuda:0"
+elif IS_MPS:
+    device = "mps:0"
+else:
+    device = "cpu"
+
+
+def _synchronize() -> None:
+    if IS_CUDA:
+        torch.cuda.synchronize()
+    elif IS_MPS:
+        torch.mps.synchronize()
 
 
 def do_bench(
@@ -98,24 +148,23 @@ def do_bench(
 
     # Initial function call and synchronization
     fn()
-    torch.cuda.synchronize()
+    _synchronize()
 
     # Create L2 cache flush buffer (256 MB)
     # Fast flush uses int32 (4 bytes), regular uses int8 (1 byte)
     cache_size = int(256e6 // 4) if fast_flush else int(256e6)
     cache_dtype = torch.int if fast_flush else torch.int8
-    cache = torch.empty(cache_size, dtype=cache_dtype, device="cuda")
+    cache = torch.empty(cache_size, dtype=cache_dtype, device=device)
 
     # Estimate kernel runtime with 5 iterations
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = Event(enable_timing=True)
+    end_event = Event(enable_timing=True)
     start_event.record()
     for _ in range(5):
         cache.zero_()
         fn()
     end_event.record()
-    start_event.synchronize()
-    end_event.synchronize()
+    _synchronize()
     estimate_ms = start_event.elapsed_time(end_event) / 5
 
     # Calculate warmup and repeat counts (minimum 1 iteration each)
@@ -144,8 +193,8 @@ def _bench_with_cuda_events(
 ) -> float | list[float]:
     """Benchmark using CUDA events for timing."""
     # Create timing events
-    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
-    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
+    start_events = [Event(enable_timing=True) for _ in range(n_repeat)]
+    end_events = [Event(enable_timing=True) for _ in range(n_repeat)]
 
     # Run benchmark iterations
     for i in range(n_repeat):
@@ -155,7 +204,7 @@ def _bench_with_cuda_events(
         end_events[i].record()
 
     # Synchronize and collect timings
-    torch.cuda.synchronize()
+    _synchronize()
     times = torch.tensor(
         [s.elapsed_time(e) for s, e in zip(start_events, end_events)],
         dtype=torch.float,
