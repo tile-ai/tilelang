@@ -453,20 +453,29 @@ class KernelCache:
         pass_configs: dict | None,
         compile_flags: list[str] | str | None,
     ) -> JITKernel | None:
-        if host_kernel_source and device_kernel_source and kernel_params:
-            return JITKernel.from_database(
-                func=func,
-                host_kernel_source=host_kernel_source,
-                device_kernel_source=device_kernel_source,
-                kernel_lib_path=kernel_lib_path,
-                params=kernel_params,
-                target=target,
-                target_host=target_host,
-                out_idx=out_idx,
-                execution_backend=execution_backend,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-            )
-        else:
-            # TODO(lei): report what the reason is.
+        # Check all required components and report specific failures
+        missing_components = []
+        if not host_kernel_source:
+            missing_components.append("host_kernel_source")
+        if not device_kernel_source:
+            missing_components.append("device_kernel_source")
+        if not kernel_params:
+            missing_components.append("kernel_params")
+
+        if missing_components:
+            self.logger.warning("Cannot build kernel from cache: missing required component(s): %s", ", ".join(missing_components))
             return None
+
+        return JITKernel.from_database(
+            func=func,
+            host_kernel_source=host_kernel_source,
+            device_kernel_source=device_kernel_source,
+            kernel_lib_path=kernel_lib_path,
+            params=kernel_params,
+            target=target,
+            target_host=target_host,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+        )
