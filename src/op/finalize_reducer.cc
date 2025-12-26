@@ -98,7 +98,8 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
   int reducing_threads = extent;
   std::stringstream ss;
   auto thread_offset = T.thread_bounds->min;
-  if (TargetIsHopper(T.target) || TargetIsSm100(T.target)) {
+  if (TargetIsHopper(T.target) || TargetIsSm100(T.target) ||
+      TargetIsSM120(T.target)) {
     auto all_threads = T.thread_bounds->extent;
     ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
        << ", " << thread_offset << ", " << all_threads << ">::run_hopper";
