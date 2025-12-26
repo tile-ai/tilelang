@@ -63,6 +63,29 @@ class PostProcCounter:
         return callback
 
 
+@pytest.fixture(scope="module", autouse=True)
+def setup_module_env():
+    """Setup and restore module-level environment and cache state."""
+    # Save original env values
+    original_cache_dir = env.TILELANG_CACHE_DIR
+    original_tmp_dir = env.TILELANG_TMP_DIR
+    original_use_gemm_v1 = env.TILELANG_USE_GEMM_V1
+
+    # Enable cache once for entire module
+    tilelang.enable_cache()
+
+    yield
+
+    # Restore env at module end
+    env.TILELANG_CACHE_DIR = original_cache_dir
+    env.TILELANG_TMP_DIR = original_tmp_dir
+    env.TILELANG_USE_GEMM_V1 = original_use_gemm_v1
+
+    # Restore default postproc callbacks
+    tvm_ffi.register_global_func("tilelang_callback_cuda_postproc", f=lambda code, _: code, override=True)
+    tvm_ffi.register_global_func("tilelang_callback_cutedsl_postproc", f=lambda code, _: code, override=True)
+
+
 @pytest.fixture(scope="function")
 def clean_cache_env(tmp_path, request):
     """Provide isolated cache environment for each test.
@@ -74,12 +97,12 @@ def clean_cache_env(tmp_path, request):
     - No "Invalid cross-device link" errors (os.replace requires same filesystem)
 
     Technical notes:
-    - Direct attribute assignment (env.X = Y) is used because tilelang.env reads
-      environment variables at module import time
     - TILELANG_TMP_DIR MUST be on same filesystem as TILELANG_CACHE_DIR because
       cache implementation uses os.replace() for atomic writes
+    - Env restoration is handled by setup_module_env at module scope
     """
-    backend = request.node.callspec.params.get("backend", "nvrtc")
+    # This fixture should ONLY be used with @pytest.mark.parametrize("backend", ...)
+    backend = request.node.callspec.params["backend"]  # Will raise KeyError if missing
 
     cache_dir = tmp_path / "tilelang_cache"
     cache_dir.mkdir()
@@ -87,22 +110,15 @@ def clean_cache_env(tmp_path, request):
     tmp_dir = tmp_path / "tilelang_tmp"
     tmp_dir.mkdir()
 
-    # Patch tilelang.env module variables
+    # Patch env variables to point to isolated directories
     env.TILELANG_CACHE_DIR = str(cache_dir)
     env.TILELANG_TMP_DIR = str(tmp_dir)
-    if backend == "cutedsl":
-        env.TILELANG_USE_GEMM_V1 = "1"
-    else:
-        env.TILELANG_USE_GEMM_V1 = "0"
-
-    # Enable cache
-    tilelang.enable_cache()
+    env.TILELANG_USE_GEMM_V1 = "1" if backend == "cutedsl" else "0"
 
     # Clear memory caches to force disk I/O
-    for backend_cache in _dispatch_map.values():
-        backend_cache._memory_cache.clear()
+    _dispatch_map[backend]._memory_cache.clear()
 
-    yield cache_dir
+    return cache_dir
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -135,12 +151,9 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
             for i in T.serial(N):
                 C[bx, i] = A[bx, i] + B[bx, i]
 
-    # Modify global_symbol to include unique_id (affects TIR script hash)
     kernel_func = vector_add.with_attr("global_symbol", f"vector_add_{backend}_{unique_id}")
 
-    # === Pass 1: Cache miss ===
-    _dispatch_map[backend]._memory_cache.clear()
-
+    # === Pass 1: Cache miss (memory cache already cleared by fixture) ===
     kernel1 = tilelang.compile(
         kernel_func,
         out_idx=[2],
@@ -157,7 +170,7 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
     cache_files = list(Path(clean_cache_env).rglob("*.*"))
     assert len(cache_files) > 0, "Cache files should be created, found none"
 
-    # === Pass 2: Cache hit ===
+    # === Pass 2: Cache hit (clear memory cache to force disk read) ===
     _dispatch_map[backend]._memory_cache.clear()
 
     kernel2 = tilelang.compile(
@@ -271,15 +284,6 @@ def test_cache_isolation_between_tests(clean_cache_env, backend):
     # Verify cache files created
     cache_files_after = list(Path(clean_cache_env).rglob("*.*"))
     assert len(cache_files_after) > 0, f"Cache files should be created, found: {cache_files_after}"
-
-
-@pytest.fixture(autouse=True)
-def cleanup_postproc():
-    """Clean up postproc callbacks after each test."""
-    yield
-    # Restore default callbacks
-    tvm_ffi.register_global_func("tilelang_callback_cuda_postproc", f=lambda code, _: code, override=True)
-    tvm_ffi.register_global_func("tilelang_callback_cutedsl_postproc", f=lambda code, _: code, override=True)
 
 
 if __name__ == "__main__":

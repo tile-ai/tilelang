@@ -92,6 +92,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         self.libpath = self.lib_generator.libpath
         with open(self.libpath) as f:
             self.device_kernel_source = f.read()
+        self.kernel_global_source = self.device_kernel_source
         self.pymodule = self.lib_generator.pymodule
 
         self._post_init()
@@ -147,6 +148,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         adapter.libpath = kernel_lib_path
+        adapter.kernel_global_source = host_kernel_source
         adapter.pymodule = adapter.lib_generator.pymodule
 
         adapter._post_init()
