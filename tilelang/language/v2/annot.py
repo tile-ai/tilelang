@@ -584,6 +584,10 @@ if TYPE_CHECKING:
 
         def scope(self) -> Scope: ...
 
+        def __getitem__(self, idx) -> Buffer: ...
+
+        def __setitem__(self, idx, val): ...
+
     class Tensor(Generic[_Shape, _DType], Buffer[_Shape, _DType]):
         def __new__(
             shape: tuple[Unpack[_Shapes]],
