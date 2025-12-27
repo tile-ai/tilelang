@@ -3,18 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
-import pytest
 from tilelang.utils.tensor import map_torch_type
-from tilelang.env import env
-
-
-@pytest.fixture(scope="module", autouse=True)
-def restore_env():
-    """Save and restore env settings for this test module"""
-    original_value = env.TILELANG_USE_GEMM_V1
-    env.TILELANG_USE_GEMM_V1 = "1"
-    yield
-    env.TILELANG_USE_GEMM_V1 = original_value
 
 
 def matmul(

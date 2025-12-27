@@ -69,7 +69,6 @@ def setup_module_env():
     # Save original env values
     original_cache_dir = env.TILELANG_CACHE_DIR
     original_tmp_dir = env.TILELANG_TMP_DIR
-    original_use_gemm_v1 = env.TILELANG_USE_GEMM_V1
 
     # Enable cache once for entire module
     tilelang.enable_cache()
@@ -79,7 +78,6 @@ def setup_module_env():
     # Restore env at module end
     env.TILELANG_CACHE_DIR = original_cache_dir
     env.TILELANG_TMP_DIR = original_tmp_dir
-    env.TILELANG_USE_GEMM_V1 = original_use_gemm_v1
 
     # Restore default postproc callbacks
     tvm_ffi.register_global_func("tilelang_callback_cuda_postproc", f=lambda code, _: code, override=True)
@@ -113,7 +111,6 @@ def clean_cache_env(tmp_path, request):
     # Patch env variables to point to isolated directories
     env.TILELANG_CACHE_DIR = str(cache_dir)
     env.TILELANG_TMP_DIR = str(tmp_dir)
-    env.TILELANG_USE_GEMM_V1 = "1" if backend == "cutedsl" else "0"
 
     # Clear memory caches to force disk I/O
     _dispatch_map[backend]._memory_cache.clear()
