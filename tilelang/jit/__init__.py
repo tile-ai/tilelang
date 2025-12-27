@@ -24,8 +24,7 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
-from tilelang.language.v2 import PrimFunc, PrimFuncCreater, prim_func
-from tilelang.language.v2.annot import Annot
+from tilelang.language.v2 import PrimFunc, prim_func, LazyJITFunc
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
@@ -273,12 +272,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     signature: inspect.Signature
     lazy_jit: bool
     # place func at the last element for better __repr__
-    func: Callable[_P, _T] | PrimFunc[_KP, _T]
-
-    @property
-    def annot(self) -> dict[str, Annot]:
-        assert self.lazy_jit, "annot is only support in @tilelang.jit2"
-        return self.func.func_annot.annots
+    func: Callable[_P, _T] | PrimFunc[_KP, _T] | LazyJITFunc[_KP, _T]
 
     def __post_init__(self):
         if self.debug_root_path is not None and not path.isabs(self.debug_root_path):
@@ -294,8 +288,8 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         """
         Retrieve a TIR (Tensor Intermediate Representation) PrimFunc from the stored callable or object.
         """
-        if isinstance(self.func, PrimFuncCreater):
-            tir = self.func(*args, **kwargs)
+        if isinstance(self.func, LazyJITFunc):
+            tir = self.func.get_tir(*args, **kwargs)
         elif isinstance(self.func, PrimFunc):
             tir = self.func
         elif callable(self.func):
@@ -379,23 +373,12 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         return kernel_result
 
     def parse_cache_key(self, *args: _P.args, **kwargs: _P.kwargs):
-        if isinstance(self.func, PrimFuncCreater):
-            tune_params = kwargs.pop("__tune_params", {})
-            return self.func.func_annot.parse_key(*args, **kwargs, **tune_params)
-        else:
-            tune_params = kwargs.pop("__tune_params", {})
-            key_args_tuple = args
-            key_kwargs_tuple = tuple(sorted(kwargs.items()))
-            tuned_key_kwargs_tuple = tuple(sorted(tune_params.items()))
-            key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
-            return key
-
-    def convert_kernel_args(self, *args: _P.args, **kwargs: _P.kwargs):
-        if isinstance(self.func, PrimFuncCreater):
-            tune_params = kwargs.pop("__tune_params", {})
-            return self.func.func_annot.convert_to_kernel_args(*args, **kwargs, **tune_params)
-        else:
-            raise NotImplementedError("convert_arg_to_kernel_args is only implemented for PrimFuncCreater.")
+        tune_params = kwargs.pop("__tune_params", {})
+        key_args_tuple = args
+        key_kwargs_tuple = tuple(sorted(kwargs.items()))
+        tuned_key_kwargs_tuple = tuple(sorted(tune_params.items()))
+        key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
+        return key
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         # Separate out the tuning parameters from the user's kwargs
@@ -414,19 +397,22 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             }
             return compile_args
 
-        key = self.parse_cache_key(*args, **kwargs)
-
-        tune_params = kwargs.pop("__tune_params", {})
-
-        kernel = self._kernel_cache.get(key)
-        if kernel is None:
-            kernel = self.compile(*args, **kwargs, **tune_params)
-            self._kernel_cache[key] = kernel
-
         if self.lazy_jit:
-            args = self.func.func_annot.convert_to_kernel_args(*args, **kwargs, **tune_params)
-            return kernel(*args)
+            kwargs.update(kwargs.pop("__tune_params", {}))
+            key, kernel_args = self.func.parse_args(*args, **kwargs)
+            kernel = self._kernel_cache.get(key, None)
+            if kernel is None:
+                kernel = self.compile(*args, **kwargs)
+                self._kernel_cache[key] = kernel
+            return kernel(*kernel_args.values())
+
         else:
+            key = self.parse_cache_key(*args, **kwargs)
+            tune_params = kwargs.pop("__tune_params", {})
+            kernel = self._kernel_cache.get(key, None)
+            if kernel is None:
+                kernel = self.compile(*args, **kwargs, **tune_params)
+                self._kernel_cache[key] = kernel
             return kernel
 
 
@@ -508,7 +494,7 @@ def jit(  # This is the new public interface
     """
 
     def decorator(func: Callable[_P, _T]) -> JITImpl[_P, _T]:
-        if isinstance(func, (PrimFunc, PrimFuncCreater)):
+        if isinstance(func, PrimFunc):
             orig_func = func.orig_func
         else:
             orig_func = func
@@ -581,11 +567,7 @@ def lazy_jit(
     )
 
     def decorator(func: Callable[_P, _T]):
-        pf: PrimFunc[_P, _T] | PrimFuncCreater[_P, _T] = prim_func(func, generator=True)
-        # if isinstance(pf, PrimFunc):
-        #     compile_args.pop('debug_root_path', None)
-        #     return compile(pf, **compile_args)
-        # else:
+        pf: LazyJITFunc[_P, _T] = prim_func(func, lazy_jit=True)
         return JITImpl(
             func=pf, **compile_args, func_source=inspect.getsource(pf.orig_func), signature=inspect.signature(pf.orig_func), lazy_jit=True
         )

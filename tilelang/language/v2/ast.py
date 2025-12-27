@@ -1,6 +1,6 @@
 from __future__ import annotations
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Generic, Any, Literal, TypeVar
 from contextlib import AbstractContextManager
 from collections.abc import Iterable
@@ -14,6 +14,7 @@ import inspect
 
 # from .utils import get_ast, get_compiled_object
 from . import utils
+from . import dtypes
 
 _span_attrs = ["lineno", "col_offset", "end_lineno", "end_col_offset"]
 
@@ -248,9 +249,11 @@ class BaseBuilder:
 
 
 class DSLMutator(ast.NodeTransformer):
-    def __init__(self, closure_names: list[str]):
+    def __init__(self, nonlocals: dict[str, Any], globals: dict[str, Any]):
         self.tmp_counter = 0
-        self.closure_names = closure_names
+        self.nonlocals = nonlocals
+        self.globals = globals
+        self.extra_type_hints: dict[str, Any] = {}
 
     def get_tmp(self) -> str:
         name = f"__{self.tmp_counter}"
@@ -445,24 +448,29 @@ class DSLMutator(ast.NodeTransformer):
         return quote1("for _ in __tb.ctx_while(lambda: cond):\n  pass", cond=node.test, passes=[node.body], span=node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        node = self.generic_visit(node)
+        stmts = []
+        arg_names = set()
         all_args = node.args.posonlyargs + node.args.args
         if node.args.vararg is not None:
             all_args += node.args.vararg
         all_args += node.args.kwonlyargs
-        stmts = []
         for arg in all_args:
             name = arg.arg
+            arg_names.add(name)
             if arg.annotation is not None:
                 arg_stmt = quote1(f'{name} = __tb.arg("{name}", {name})', span=arg)
             else:
                 arg_stmt = quote1(f'{name} = __tb.arg("{name}", {name})', span=arg)
             arg.annotation = None
             stmts.append(arg_stmt)
+        # trying to find `A: T.Tensor, b: T.float32` like type hints
+        for stmt in node.body:
+            self._parse_arg_annot(stmt, arg_names)
+        node = self.generic_visit(node)
         node.body = stmts + node.body
         node.decorator_list.clear()
         return quote1(
-            f"def make_closure({', '.join(self.closure_names)}):\n"
+            f"def make_closure({', '.join(self.nonlocals.keys())}):\n"
             f"  def {node.name}(__tb):\n"
             "    range = __tb.override('range')\n"
             "    pass\n"
@@ -470,6 +478,41 @@ class DSLMutator(ast.NodeTransformer):
             f"  return {node.name}",
             passes=[node],
         )
+
+    def _try_eval(self, node: ast.expr) -> Any:
+        try:
+            code = "lambda " + ",".join(self.nonlocals.keys()) + ": " + ast.unparse(node)
+            return eval(code, self.globals)(**self.nonlocals)
+        except Exception:
+            return _empty
+
+    def _parse_arg_annot(self, stmt: ast.stmt, arg_names: set[str]):
+        if not isinstance(stmt, ast.AnnAssign):
+            return
+        if not isinstance(stmt.target, ast.Name):
+            return
+        if stmt.value is not None:
+            return
+        name = stmt.target.id
+        if name not in arg_names:
+            return
+        annot = stmt.annotation
+        # case 1: subscript(attribute(T, Tensor), ...)
+        # case 2: attribute(T, float32)
+        if isinstance(annot, ast.Attribute) and annot.attr in dtypes._all_dtypes:
+            eval_res = self._try_eval(annot)
+            if isinstance(eval_res, dtypes.dtype):
+                self.extra_type_hints[name] = eval_res
+                return
+        if isinstance(annot, ast.Subscript) and isinstance(annot.value, ast.Attribute):
+            inner = annot.value
+            if inner.attr in ["Tensor", "StridedTensor", "ptr"]:
+                eval_res = self._try_eval(inner)
+                from tilelang.language.proxy import TensorProxy, StridedTensorProxy, ptr
+
+                if isinstance(eval_res, (TensorProxy, StridedTensorProxy)) or eval_res is ptr:
+                    self.extra_type_hints[name] = ptr
+                    return
 
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
@@ -537,6 +580,7 @@ _P = ParamSpec("_P")
 class IRGenerator(Generic[_P, _T]):
     gen: Callable[[BaseBuilder], Callable[_P, _T]]
     source: str
+    extra_type_hints: dict[str, Any] = field(default_factory=dict)
 
 
 def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
@@ -583,7 +627,8 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     #       def bar(): x
     #       return bar
     #     ```
-    tree = DSLMutator(nonlocals.keys()).visit(tree)
+    mut = DSLMutator(nonlocals, func.__globals__)
+    tree = mut.visit(tree)
 
     make_closure = utils.get_compiled_object(
         tree,
@@ -592,4 +637,4 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
         func.__globals__,  # use the original globalns
     )
     fn = make_closure(**nonlocals)
-    return IRGenerator(gen=fn, source=ast.unparse(tree))
+    return IRGenerator(gen=fn, source=ast.unparse(tree), extra_type_hints=mut.extra_type_hints)

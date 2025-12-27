@@ -5,6 +5,7 @@ from functools import reduce
 from tvm import IRModule, DataType
 from tvm.tir import PrimFunc
 from tvm import ir, tir
+from tvm.tir.expr import CallEffectKind
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.
 
@@ -502,3 +503,9 @@ def get_prim_func_name(func: PrimFunc | None, default: str | None = None) -> str
         return str(name) if name is not None else default
     except Exception:
         return default
+
+
+def side_effect(expr: PrimExpr) -> CallEffectKind:
+    from tilelang import _ffi_api
+
+    return _ffi_api.SideEffect(expr)

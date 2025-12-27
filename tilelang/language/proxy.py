@@ -97,7 +97,6 @@ class BaseTensorProxy:
         scope = scope or self.default_scope
         align = align or self.default_align
         offset_factor = offset_factor or self.default_offset_factor
-
         return buffer(
             shape,
             dtype=dtype,
@@ -114,7 +113,7 @@ class BaseTensorProxy:
     def __getitem__(self, keys) -> tir.Buffer:
         assert isinstance(keys, tuple)
         # Single argument (the shape)
-        if all([type(s) not in (tuple, str, list) for s in keys]):
+        if all([not isinstance(s, (tuple, list, str)) for s in keys]):
             keys = (keys,)
         return self(*keys)
 
