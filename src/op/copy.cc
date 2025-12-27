@@ -99,11 +99,11 @@ template <typename T> static Array<T> ReverseArray(Array<T> array) {
   return Array<T>{array.rbegin(), array.rend()};
 }
 
-// Constructs a Copy operator node from call arguments.
+// Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
-// Optional: args[2] coalesced_width, args[3] disable_tma, args[4]
-// eviction_policy
-Copy::Copy(Array<PrimExpr> args) {
+// annotations: Map containing coalesced_width, disable_tma, eviction_policy,
+// etc.
+Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
@@ -114,18 +114,8 @@ Copy::Copy(Array<PrimExpr> args) {
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
-  if (args.size() >= 3) {
-    auto coalesced_width = Downcast<IntImm>(args[2]);
-    if (coalesced_width->value > 0) {
-      node->coalesced_width = coalesced_width;
-    }
-  }
-  if (args.size() >= 4) {
-    node->disable_tma = Downcast<Bool>(args[3]);
-  }
-  if (args.size() >= 5) {
-    node->eviction_policy = args[4].as<IntImmNode>()->value;
-  }
+  // Copy annotations from the Call node
+  node->annotations = annotations;
   data_ = std::move(node);
 }
 
@@ -323,12 +313,13 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
     return For(Var("i"), 0, 1, ForKind::kSerial, body);
   }
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
-    Map<String, ObjectRef> annotations = {};
-    if (coalesced_width.defined()) {
-      annotations.Set("coalesced_width", coalesced_width);
+    Map<String, ObjectRef> loop_annotations;
+    if (annotations.count(attr::kCoalescedWidth)) {
+      loop_annotations.Set(attr::kCoalescedWidth,
+                           annotations.Get(attr::kCoalescedWidth).value());
     }
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body, std::nullopt, annotations);
+               ForKind::kParallel, body, std::nullopt, loop_annotations);
   }
   return Downcast<For>(body);
 }
@@ -361,7 +352,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
-  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
+  auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
                                T.layout_map, T.analyzer, T.buffer_oob);
 
   // Handle tensor memory (tmem) layout inference
@@ -736,7 +727,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
-  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
+  auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
                                T.layout_map, analyzer);
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
     auto tmem_copy = LowerTmemCopy(T, analyzer);
@@ -783,6 +774,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                    << "` may cause conflicted write.";
     }
     vectorized_thread_loop = VectorizeLoop(transformed_loop);
+    return vectorized_thread_loop;
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
@@ -797,17 +789,11 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
-    auto thread_var = T.thread_var;
-    auto thread_loop =
-        PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-    vectorized_thread_loop = VectorizeLoop(thread_loop, analyzer);
+    // Use LowerParallelLoop to handle partitioning, vectorization, and
+    // predicate
+    return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
+                             analyzer, par_op->GetPredicate(T.thread_var));
   }
-
-  if (par_op->GetPredicate(T.thread_var).defined()) {
-    return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                      vectorized_thread_loop);
-  }
-  return vectorized_thread_loop;
 }
 
 // Lowers copy to LDSM/STSM (warp-level 8x8 matrix) instructions.
@@ -1452,7 +1438,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     int need_reduce = 0;
     if (!is_load)
       args.push_back(need_reduce);
-    args.push_back(this->eviction_policy);
+    args.push_back(GetEvictionPolicy());
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), op, args)));
   } else {
@@ -1464,7 +1450,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     int need_reduce = 0;
     if (!is_load)
       args.push_back(need_reduce);
-    args.push_back(this->eviction_policy);
+    args.push_back(GetEvictionPolicy());
     tma_copy = Evaluate(Call(DataType::Handle(), op, args));
   }
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
@@ -1536,13 +1522,13 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
     tma_copy = Evaluate(
         Call(DataType::Handle(), tma_load(),
              {shared_addr, global_addr, 0,
-              elements * shared_tensor->dtype.bytes(), this->eviction_policy}));
+              elements * shared_tensor->dtype.bytes(), GetEvictionPolicy()}));
   } else {
     int need_reduce = 0;
     tma_copy = Evaluate(
         Call(DataType::Handle(), tma_store(),
              {global_addr, shared_addr, elements * shared_tensor->dtype.bytes(),
-              need_reduce, this->eviction_policy}));
+              need_reduce, GetEvictionPolicy()}));
   }
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
   return tma_copy;
@@ -1575,7 +1561,8 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
 // Constructs a Conv2DIm2ColOp node from call arguments.
 // args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding,
 // eviction_policy
-Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args) {
+Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args,
+                               Map<String, ObjectRef> annotations) {
   ObjectPtr<Conv2DIm2ColOpNode> node =
       tvm::ffi::make_object<Conv2DIm2ColOpNode>();
   node->srcRegion_ = NormalizeToBufferRegion(args[0]);

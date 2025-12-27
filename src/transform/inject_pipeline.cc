@@ -219,7 +219,7 @@ private:
         new_args.Set(i + 1, new_index);
       }
     }
-    return Call(call->dtype, call->op, new_args, call->span);
+    return Call(call->dtype, call->op, new_args, call->annotations, call->span);
   }
 
   Stmt VisitStmt_(const BlockNode *op) final {

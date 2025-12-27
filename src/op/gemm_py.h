@@ -83,7 +83,8 @@ private:
 class GemmPy : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmPy, TileOperator, GemmPyNode);
-  TVM_DLL GemmPy(Array<PrimExpr> args);
+  TVM_DLL GemmPy(Array<PrimExpr> args,
+                 Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

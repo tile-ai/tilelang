@@ -258,6 +258,12 @@ Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
 namespace attr {
 // BlockAttr, Containing the layout for all the buffers in the block
 constexpr const char *kLayoutMap = "layout_map";
+// ForAttr, Containing the parallel loop layout for a parallel for loop
+constexpr const char *kParallelLoopLayout = "parallel_loop_layout";
+// ForAttr, Containing the predicate for a parallel for loop
+constexpr const char *kParallelLoopPredicate = "parallel_loop_predicate";
+// ForAttr, Width (in elements) for coalesced memory access
+constexpr const char *kCoalescedWidth = "coalesced_width";
 } // namespace attr
 
 } // namespace tl

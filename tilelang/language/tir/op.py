@@ -117,7 +117,7 @@ def call_cpacked_lowered(*args, span=None):
     return _tvm_op.call_cpacked_lowered(*args, span=span)
 
 
-def call_intrin(dtype, func_name, *args, span=None):
+def call_intrin(dtype, func_name, *args, annotations=None, span=None):
     """Build expression by calling an intrinsic function.
 
     Intrinsics can be overloaded with multiple data types via
@@ -142,7 +142,7 @@ def call_intrin(dtype, func_name, *args, span=None):
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.call_intrin(dtype, func_name, *args, span=span)
+    return _tvm_op.call_intrin(dtype, func_name, *args, annotations=annotations, span=span)
 
 
 def call_pure_extern(dtype, func_name, *args, span=None):

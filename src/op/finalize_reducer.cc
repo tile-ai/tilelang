@@ -31,7 +31,8 @@ using namespace tir;
  *             `args[0]` is an access pointer identifying the reducer variable
  * and `args[1]` is an integer encoding a `ReducerOpType` (e.g., Sum/Max/Min).
  */
-FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args) {
+FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
+                                     Map<String, ObjectRef> annotations) {
   auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
   // Normalize any supported region expression
   // (BufferRegion/BufferLoad/tl.region) to a BufferRegion, then take the

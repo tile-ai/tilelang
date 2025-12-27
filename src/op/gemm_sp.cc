@@ -83,7 +83,7 @@ std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
  *
  * @note An ICHECK failure is raised if a provided kPack is not 1 or 2.
  */
-GemmSP::GemmSP(Array<PrimExpr> args) {
+GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
   node->aRegion_ = NormalizeToBufferRegion(args[0]);
   node->eRegion_ = NormalizeToBufferRegion(args[1]);

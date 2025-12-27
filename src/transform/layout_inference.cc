@@ -29,9 +29,7 @@
 #include "common/loop_parallel_transform_utils.h"
 #include "common/union_find.h"
 #include "layout_reducer.h"
-#include "loop_partition.h"
-#include "loop_vectorize.h"
-#include "runtime/thread_storage_scope.h"
+#include "parallel_loop_layout_validator.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -1166,16 +1164,15 @@ public:
     BufferUseDefCollector collector(skip_thread_partition);
     collector.Collect(f);
     auto result = collector.Run();
-    LayoutInferencer substituter(result, skip_thread_partition, &analyzer);
+    LayoutInferencer substituter(result, &analyzer);
     fptr->body = substituter.VisitStmt(f->body);
     return f;
   }
 
 private:
   LayoutInferencer(const LayoutInferenceResult &result,
-                   bool skip_thread_partition, arith::Analyzer *analyzer)
-      : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
-        skip_thread_partition_(skip_thread_partition) {};
+                   arith::Analyzer *analyzer)
+      : arith::IRMutatorWithAnalyzer(analyzer), result_(result) {};
 
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
@@ -1208,170 +1205,55 @@ private:
   }
 
   /**
-   * @brief Visit and transform For nodes according to inferred layout
-   * information.
+   * @brief Visit and transform For nodes by storing inferred layout information
+   *        as annotations instead of expanding the loop.
    *
-   * If the For node is present in result_.for_map, this method applies
-   * loop-level layout-driven transformations: it optionally partitions the loop
-   * across the thread index, vectorizes the loop body, and wraps the loop with
-   * a predicate if one was inferred for the loop root.
+   * If the For node is present in result_.for_map, this method stores the
+   * inferred loop layout and predicate as annotations on the For node, rather
+   * than performing loop partition and vectorization.
    *
-   * Detailed behavior:
-   * - Reads reducer information from the For node's attr::kReducerInfo
-   * annotation (if present) to detect reduction targets.
-   * - Detects register-local buffer stores (buffers with scope "local") in the
-   *   original loop body; if only register-local stores are present the loop is
-   *   treated as a register-local scenario and is not partitioned across
-   * threads.
-   * - Obtains the loop layout from result_.for_map[root] and, unless the loop
-   * is register-local or skip_thread_partition_ is set, partitions the loop via
-   *   PartitionLoop using thread_var_ and analyzer_.
-   * - Scans the transformed loop body to determine whether it accesses any
-   *   non-local buffers (scopes other than "local" or "local.fragment").
-   * - Scans the transformed loop body to detect reducers (based on
-   * reducer_info). If a reducer is present the loop is NOT vectorized
-   * (reduction axes are excluded from vectorization as a conservative
-   * workaround).
-   * - If the loop has non-local accesses and no reducer, the loop is vectorized
-   *   via VectorizeLoop.
-   * - If a predicate exists in result_.predicate_map for the loop root and the
-   *   loop was partitioned, the method returns an IfThenElse surrounding the
-   *   (possibly partitioned/vectorized) loop with that predicate; otherwise it
-   *   returns the transformed For.
+   * The stored annotations are:
+   * - attr::kParallelLoopLayout: The Fragment layout for the parallel loop
+   * - attr::kParallelLoopPredicate: The predicate expression (if any)
    *
-   * @return The possibly transformed For statement (or an IfThenElse wrapping
-   * it)
+   * @return The For statement with layout annotations attached
    */
   Stmt VisitStmt_(const ForNode *op) final {
-    Map<Var, ReducerInfo> reducer_info;
-    if (op->annotations.count(attr::kReducerInfo))
-      reducer_info = op->annotations.Get(attr::kReducerInfo)
-                         ->as<Map<Var, ReducerInfo>>()
-                         .value();
     if (!result_.for_map.count(tvm::ffi::GetRef<For>(op))) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
-    // the analyzer will be modified in PartitionLoop and VectorizeLoop
-    // we need to save its state to prevent conflicted bindings
-    auto saved_analyzer = analyzer_->Clone();
+
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto root = tvm::ffi::GetRef<For>(op);
-    // This check is a workaround to support T.Parallel for local buffers.
-    // For example:
-    //   for i in T.Parallel(1024):
-    //     A_local[i] = A_global[i]
-    // Here, A_local is a register-local buffer held independently by each
-    // thread, so explicit thread binding is not required.
-    bool store_into_local = false;
-    PostOrderVisit(root, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (IsLocalBuffer(store->buffer)) {
-          store_into_local = true;
-        }
-        // if the case is like:
-        // for i in T.Parallel(1024):
-        //     A_local[i] = B_global[i]
-        //     A_frag[i] = A_global[i]
-        // exception will be raise in Parallel::LayoutInference
-      }
-    });
-    // This check if for the loop that only manuplates "local" buffers,
-    // for i in T.Parallel(1024):
-    //     A_local[i] = B_local[i]
-    // Though this might be illegal
-    // We use PostOrderVisit to detect whether the loop only manuplates
-    // "local" buffers, which indicates register usage and justifies skipping
-    // thread binding.
-    bool local_register_only = true;
-    PostOrderVisit(root, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (!IsLocalBuffer(store->buffer)) {
-          local_register_only = false;
-        }
-      } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (!IsLocalBuffer(load->buffer)) {
-          local_register_only = false;
-        }
-      }
-    });
 
     auto loop_layout = result_.for_map[root];
-    // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
-    // NOTE(lei): a bit ugly, we should rethink about this part in future.
-    bool parallel_loop =
-        !skip_thread_partition_ && !local_register_only && !store_into_local;
 
-    if (parallel_loop) {
-      for_node =
-          PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);
-    }
-    // If none thread bindings are provided, partition the loop
-    bool has_non_local = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *load = obj.as<BufferLoadNode>()) {
-        String scope = load->buffer.scope();
-        if (!IsLocalBuffer(load->buffer) && !IsFragmentBuffer(load->buffer)) {
-          has_non_local = true;
-        }
-      } else if (const auto *store = obj.as<BufferStoreNode>()) {
-        String scope = store->buffer.scope();
-        if (!IsLocalBuffer(store->buffer) && !IsFragmentBuffer(store->buffer)) {
-          has_non_local = true;
-        }
+    // Store the loop layout as an annotation on the For node
+    auto for_ptr = for_node.CopyOnWrite();
+    for_ptr->annotations.Set(attr::kParallelLoopLayout, loop_layout);
+
+    // Store the predicate as an annotation if it exists and is not trivially
+    // true
+    if (result_.predicate_map.count(root)) {
+      PrimExpr predicate = analyzer_->Simplify(result_.predicate_map[root]);
+      // Only store predicate if it's not trivially true
+      if (!is_const_int(predicate, 1)) {
+        for_ptr->annotations.Set(attr::kParallelLoopPredicate, predicate);
       }
-    });
-    // Workaround: if reducer is presented, don't vectorize loop
-    // Best solution should be isolate reduction axis out of vectorization
-    bool has_reducer = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (!has_reducer)
-        if (const auto *store = obj.as<BufferStoreNode>()) {
-          has_reducer = reducer_info.count(store->buffer->data) != 0;
-        }
-    });
-
-    // If a cast operation exists, vectorization may still be required
-    bool has_cast_operations = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *cast = obj.as<CastNode>()) {
-        // Check if this is a non-reducer store with Cast operation
-        DataType from_ty = cast->value.dtype();
-        DataType target_ty = cast->dtype;
-        if (IsCudaVectorizableCast(from_ty, target_ty) &&
-            TargetIsCuda(Target::Current())) {
-          has_cast_operations = true;
-        }
-      }
-    });
-
-    if ((has_non_local || has_cast_operations) && !has_reducer) {
-      DLOG(INFO) << "Try to vectorize loop";
-      for_node = VectorizeLoop(for_node, saved_analyzer.get());
     }
 
-    if (result_.predicate_map.count(root) && parallel_loop) {
-      return IfThenElse(result_.predicate_map[root], for_node);
-    } else {
-      return for_node;
-    }
+    return for_node;
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
-      ICHECK_NE(iv->thread_tag.length(), 0U);
-      if (iv->thread_tag == "threadIdx.x") {
-        thread_var_ = iv;
-      }
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
 private:
   const LayoutInferenceResult result_;
-  IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
-                                IterVarType::kDataPar);
-  bool skip_thread_partition_{false};
 };
 
 tvm::transform::Pass LayoutInference() {
@@ -1382,7 +1264,10 @@ tvm::transform::Pass LayoutInference() {
     collector(f->body);
     bool has_thread_binding = !collector.thread_binding_.empty();
     bool skip_thread_partition = !has_thread_binding;
-    return LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+    f = LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+    // Validate parallel loop layout annotations
+    ParallelLoopLayoutValidator::Validate(f->body);
+    return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
 }
