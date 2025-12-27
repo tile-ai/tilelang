@@ -57,51 +57,37 @@ class suppress_stdout_stderr:
         self.errnull_file.close()
 
 
-IS_CUDA = torch.cuda.is_available()
-IS_MPS = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-if IS_CUDA:
-    device = "cuda:0"
-elif IS_MPS:
-    device = "mps:0"
-else:
-    device = "cpu"
-
-
-class Event:
+class CpuEvent:
     """Dummy event class for CPU timing compatibility."""
 
     def __init__(self, *args, **kwargs):
-        self.inner = None
-        if IS_CUDA:
-            self.inner = torch.cuda.Event(*args, **kwargs)
-        elif IS_MPS:
-            self.inner = torch.mps.Event(*args, **kwargs)
         self.enable_timing = kwargs.get("enable_timing", False)
         self.record_time = None
 
     def record(self):
-        if self.inner is not None:
-            self.inner.record()
-        elif self.enable_timing:
+        if self.enable_timing:
             self.record_time = time.perf_counter_ns()
 
     def synchronize(self):
-        # On MPS, per-event synchronization can hang depending on when/where the
-        # underlying command buffer is committed. Global device synchronization
-        # is the reliable primitive.
-        if IS_MPS:
-            torch.mps.synchronize()
-            return
-        if self.inner is not None:
-            self.inner.synchronize()
+        pass
 
-    def elapsed_time(self, end_event: Event) -> float:
-        if self.inner is not None and end_event.inner is not None:
-            return self.inner.elapsed_time(end_event.inner)  # type: ignore
-        elif self.record_time is not None and end_event.record_time is not None:
+    def elapsed_time(self, end_event: CpuEvent) -> float:
+        if self.record_time is not None and end_event.record_time is not None:
             return (end_event.record_time - self.record_time) / 1e6  # Convert ns to ms
-        else:
-            return 0.0
+        return 0.0
+
+
+IS_CUDA = torch.cuda.is_available()
+IS_MPS = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+if IS_CUDA:
+    device = "cuda:0"
+    Event = torch.cuda.Event
+elif IS_MPS:
+    device = "mps:0"
+    Event = torch.mps.Event
+else:
+    device = "cpu"
+    Event = CpuEvent
 
 
 def _synchronize() -> None:
@@ -165,7 +151,7 @@ def do_bench(
         fn()
     end_event.record()
     _synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
+    estimate_ms = start_event.elapsed_time(end_event) / 5  # type: ignore
 
     # Calculate warmup and repeat counts (minimum 1 iteration each)
     n_warmup = _n_warmup if _n_warmup > 0 else max(1, int(warmup / estimate_ms))
@@ -191,7 +177,7 @@ def _bench_with_events(
     quantiles: list[float] | None,
     return_mode: str,
 ) -> float | list[float]:
-    """Benchmark using CUDA events for timing."""
+    """Benchmark using cross-backend timing events (CUDA/MPS/CPU)."""
     # Create timing events
     start_events = [Event(enable_timing=True) for _ in range(n_repeat)]
     end_events = [Event(enable_timing=True) for _ in range(n_repeat)]
@@ -206,7 +192,7 @@ def _bench_with_events(
     # Synchronize and collect timings
     _synchronize()
     times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_events, end_events)],
+        [s.elapsed_time(e) for s, e in zip(start_events, end_events)],  # type: ignore
         dtype=torch.float,
     )
 
