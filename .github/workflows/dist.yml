@@ -108,6 +108,8 @@ jobs:
         target:
           - { runner: ubuntu-latest, toolkit: "CUDA-12.8" }
           - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
+          - { runner: ubuntu-latest, toolkit: "CUDA-13.1" }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-13.1" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
           # Wheels are built with Python 3.8 Limited API, they should work with all Python >= 3.8.
@@ -132,13 +134,10 @@ jobs:
           create-symlink: true
           evict-old-files: "7d"
           append-timestamp: false
-          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}-${{ hashFiles('**/*.cc') }}
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
           restore-keys: |
-            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}-${{ hashFiles('**/*.cc') }}
-            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
             wheel-${{ runner.os }}-${{ runner.arch }}
-            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
-            ${{ runner.os }}-${{ runner.arch }}
 
       - name: Set CIBW_BUILD
         run: |
