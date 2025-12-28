@@ -145,7 +145,8 @@ if [[ "${SKIP_BUILD_OLD}" != "1" ]]; then
     echo "============================================"
 
     # Clean build artifacts before switching
-    git clean -dxf -e "${WORK_DIR}" -e .cache/ -e "*.egg-info"
+    # Note: -e requires relative paths, not absolute paths
+    git clean -dxf -e .perf_regression/ -e .cache/ -e "*.egg-info" -e "build.bak.*"
 
     git checkout "${REMOTE}/main"
     git submodule update --init --recursive
