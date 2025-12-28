@@ -22,6 +22,14 @@ RESULT_PNG="${WORK_DIR}/regression_result.png"
 
 UPSTREAM_URL="https://github.com/tile-ai/tilelang"
 
+# Check if user has a local build directory that might conflict with pip install
+BUILD_DIR="${REPO_ROOT}/build"
+BUILD_BACKUP=""
+if [[ -d "${BUILD_DIR}" ]]; then
+    BUILD_BACKUP="${BUILD_DIR}.bak.$$"
+    echo "Found existing build directory, will rename to ${BUILD_BACKUP}"
+fi
+
 echo "============================================"
 echo "Performance Regression Test"
 echo "============================================"
@@ -80,6 +88,12 @@ cleanup() {
         echo "Restoring stashed changes..."
         git stash pop || true
     fi
+    # Restore original build directory if it was backed up
+    if [[ -n "${BUILD_BACKUP}" && -d "${BUILD_BACKUP}" ]]; then
+        echo "Restoring original build directory..."
+        rm -rf "${BUILD_DIR}" 2>/dev/null || true
+        mv "${BUILD_BACKUP}" "${BUILD_DIR}"
+    fi
 }
 trap cleanup EXIT
 
@@ -90,6 +104,12 @@ mkdir -p "${WORK_DIR}"
 echo ""
 echo "Fetching ${REMOTE}/main..."
 git fetch "${REMOTE}" main
+
+# Backup existing build directory to avoid conflict with pip install
+if [[ -n "${BUILD_BACKUP}" ]]; then
+    echo "Renaming build -> ${BUILD_BACKUP##*/}"
+    mv "${BUILD_DIR}" "${BUILD_BACKUP}"
+fi
 
 # ============================================
 # Build NEW version (current branch)
