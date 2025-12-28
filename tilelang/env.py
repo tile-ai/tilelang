@@ -50,7 +50,7 @@ def _find_cuda_home() -> str:
     Adapted from https://github.com/pytorch/pytorch/blob/main/torch/utils/cpp_extension.py
     """
     # Guess #1
-    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or None
     if cuda_home is None:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
