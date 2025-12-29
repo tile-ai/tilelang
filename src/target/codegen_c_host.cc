@@ -496,7 +496,7 @@ using tvm::ffi::String;
 
   std::string code = cg.Finish();
   if (const auto f =
-    ffi::Function::GetGlobal("tilelang_callback_c_host_postproc")) {
+          ffi::Function::GetGlobal("tilelang_callback_c_host_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
   return ::tvm::codegen::CSourceModuleCreate(code, "c", cg.GetFunctionNames());

@@ -598,15 +598,15 @@ void ArgBinder::BindDLTensors(
       if (data_is_subtype) {
         break;
       }
-  
+
       // The "real" runtime shape value read from DLTensor.
       // Guard the load with `is_null` to avoid dereferencing NULL handles.
-      PrimExpr raw_shape_val = cast(
-          buffer->shape[k].dtype(),
-          BufferLoad(buf_shape,
-                     {IntImm(DataType::Int(32), static_cast<int>(k))}));
-      PrimExpr shape_val = tvm::if_then_else(Not(is_null), raw_shape_val,
-                                             make_const(raw_shape_val.dtype(), 0));
+      PrimExpr raw_shape_val =
+          cast(buffer->shape[k].dtype(),
+               BufferLoad(buf_shape,
+                          {IntImm(DataType::Int(32), static_cast<int>(k))}));
+      PrimExpr shape_val = tvm::if_then_else(
+          Not(is_null), raw_shape_val, make_const(raw_shape_val.dtype(), 0));
 
       // Check if this dimension is a symbolic variable
       if (const VarNode *v = buffer->shape[k].as<VarNode>()) {
@@ -704,8 +704,8 @@ void ArgBinder::BindDLTensors(
             init_nest_.emplace_back(
                 LetStmt(v_arg, cascaded_value, Evaluate(0)));
           } else {
-            // Single source or no special handling needed, use nullable binding.
-            // When the only source is NULL, bind m to 0 safely.
+            // Single source or no special handling needed, use nullable
+            // binding. When the only source is NULL, bind m to 0 safely.
             BindNullable(buffer->shape[k], shape_val, shape_element_name(k),
                          true, is_null);
           }
