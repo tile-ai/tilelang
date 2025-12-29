@@ -207,10 +207,35 @@ elseif(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
   set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc")
   add_compile_definitions("CUDA_MAJOR_VERSION=${CUDAToolkit_VERSION_MAJOR}")
-  add_compile_definitions("TILELANG_LAZY_LOAD_LIBCUDA=1")
 
   # Set `USE_CUDA=/usr/local/cuda-x.y`
   cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
+
+  # ============================================================================
+  # CUDA Driver Stub Library (libcuda_stub.so)
+  # ============================================================================
+  # This library provides drop-in replacements for CUDA driver API functions.
+  # Instead of linking directly against libcuda.so (which would fail on
+  # CPU-only machines), we link against this stub which loads libcuda.so
+  # lazily at runtime on first API call.
+  #
+  # The stub exports global C functions matching the CUDA driver API:
+  #   - cuModuleLoadData, cuLaunchKernel, cuMemsetD32_v2, etc.
+  # These can be called directly without any wrapper macros.
+  # ============================================================================
+  add_library(cuda_stub SHARED src/target/stubs/cuda.cc)
+  target_include_directories(cuda_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  # Export symbols with visibility="default" when building
+  target_compile_definitions(cuda_stub PRIVATE TILELANG_CUDA_STUB_EXPORTS)
+  # dlopen/dlsym for runtime library loading
+  target_link_libraries(cuda_stub PRIVATE ${CMAKE_DL_LIBS})
+  set_target_properties(cuda_stub PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    # Use consistent naming
+    OUTPUT_NAME "cuda_stub"
+  )
 
   file(GLOB TILE_LANG_CUDA_SRCS
     src/runtime/runtime.cc
@@ -221,7 +246,6 @@ elseif(USE_CUDA)
     src/target/codegen_cutedsl.cc
     src/target/rt_mod_cuda.cc
     src/target/rt_mod_cutedsl.cc
-    src/target/stubs/cuda.cc
   )
   list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
 
@@ -238,6 +262,12 @@ endif()
 
 # Include tvm after configs have been populated
 add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+
+# Link TVM libraries against CUDA stub for lazy loading
+if(USE_CUDA)
+  target_link_libraries(tvm PUBLIC cuda_stub)
+  target_link_libraries(tvm_runtime PUBLIC cuda_stub)
+endif()
 
 # Resolve compile warnings in tvm
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
@@ -257,6 +287,14 @@ add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 add_library(tilelang_module SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime tvm)
 target_link_libraries(tilelang_module PUBLIC tvm)
+
+# Link against CUDA stub library instead of libcuda.so
+# This enables lazy loading of libcuda.so at runtime, allowing
+# `import tilelang` to succeed on CPU-only machines.
+if(USE_CUDA)
+  target_link_libraries(tilelang PUBLIC cuda_stub)
+  target_link_libraries(tilelang_module PUBLIC cuda_stub)
+endif()
 
 # Place dev build outputs under build/lib for consistency
 set_target_properties(tilelang PROPERTIES
@@ -319,6 +357,11 @@ set(TILELANG_OUTPUT_TARGETS
   tvm
   tvm_runtime
 )
+
+# Include CUDA stub in output targets for RPATH configuration
+if(USE_CUDA)
+  list(APPEND TILELANG_OUTPUT_TARGETS cuda_stub)
+endif()
 
 unset(PATCHELF_EXECUTABLE CACHE)
 

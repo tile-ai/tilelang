@@ -1,8 +1,13 @@
 /**
  * \file cuda.cc
- * \brief Stub library for lazy loading libcuda.so at runtime.
+ * \brief Implementation of CUDA driver API stub library.
  *
- * This allows tilelang to be imported on CPU-only machines without CUDA.
+ * This file implements lazy loading of libcuda.so and provides global wrapper
+ * functions that serve as drop-in replacements for the CUDA driver API.
+ *
+ * The library is loaded on first API call using dlopen(). If loading fails
+ * (e.g., on a CPU-only machine), an exception is thrown at call time rather
+ * than at import time, allowing tilelang to be imported without CUDA.
  */
 
 #include "cuda.h"
@@ -114,3 +119,151 @@ CUDADriverAPI *CUDADriverAPI::get() {
 }
 
 } // namespace tvm::tl::cuda
+
+// ============================================================================
+// Global wrapper function implementations
+// ============================================================================
+// These are the implementations for the extern "C" functions declared in the
+// header. They provide ABI-compatible replacements for libcuda.so functions.
+
+using tvm::tl::cuda::CUDADriverAPI;
+
+extern "C" {
+
+CUresult cuGetErrorName(CUresult error, const char **pStr) {
+  return CUDADriverAPI::get()->cuGetErrorName_(error, pStr);
+}
+
+CUresult cuGetErrorString(CUresult error, const char **pStr) {
+  return CUDADriverAPI::get()->cuGetErrorString_(error, pStr);
+}
+
+CUresult cuCtxGetDevice(CUdevice *device) {
+  return CUDADriverAPI::get()->cuCtxGetDevice_(device);
+}
+
+CUresult cuCtxGetLimit(size_t *pvalue, CUlimit limit) {
+  return CUDADriverAPI::get()->cuCtxGetLimit_(pvalue, limit);
+}
+
+CUresult cuCtxSetLimit(CUlimit limit, size_t value) {
+  return CUDADriverAPI::get()->cuCtxSetLimit_(limit, value);
+}
+
+CUresult cuCtxResetPersistingL2Cache(void) {
+  return CUDADriverAPI::get()->cuCtxResetPersistingL2Cache_();
+}
+
+CUresult cuDeviceGetName(char *name, int len, CUdevice dev) {
+  return CUDADriverAPI::get()->cuDeviceGetName_(name, len, dev);
+}
+
+CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib,
+                              CUdevice dev) {
+  return CUDADriverAPI::get()->cuDeviceGetAttribute_(pi, attrib, dev);
+}
+
+CUresult cuModuleLoadData(CUmodule *module, const void *image) {
+  return CUDADriverAPI::get()->cuModuleLoadData_(module, image);
+}
+
+CUresult cuModuleLoadDataEx(CUmodule *module, const void *image,
+                            unsigned int numOptions, CUjit_option *options,
+                            void **optionValues) {
+  return CUDADriverAPI::get()->cuModuleLoadDataEx_(module, image, numOptions,
+                                                   options, optionValues);
+}
+
+CUresult cuModuleUnload(CUmodule hmod) {
+  return CUDADriverAPI::get()->cuModuleUnload_(hmod);
+}
+
+CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod,
+                             const char *name) {
+  return CUDADriverAPI::get()->cuModuleGetFunction_(hfunc, hmod, name);
+}
+
+CUresult cuModuleGetGlobal_v2(CUdeviceptr *dptr, size_t *bytes, CUmodule hmod,
+                              const char *name) {
+  return CUDADriverAPI::get()->cuModuleGetGlobal_(dptr, bytes, hmod, name);
+}
+
+CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunction_attribute attrib,
+                            int value) {
+  return CUDADriverAPI::get()->cuFuncSetAttribute_(hfunc, attrib, value);
+}
+
+CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
+                        unsigned int gridDimY, unsigned int gridDimZ,
+                        unsigned int blockDimX, unsigned int blockDimY,
+                        unsigned int blockDimZ, unsigned int sharedMemBytes,
+                        CUstream hStream, void **kernelParams, void **extra) {
+  return CUDADriverAPI::get()->cuLaunchKernel_(
+      f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
+      sharedMemBytes, hStream, kernelParams, extra);
+}
+
+CUresult cuLaunchKernelEx(const CUlaunchConfig *config, CUfunction f,
+                          void **kernelParams, void **extra) {
+  return CUDADriverAPI::get()->cuLaunchKernelEx_(config, f, kernelParams,
+                                                 extra);
+}
+
+CUresult cuLaunchCooperativeKernel(CUfunction f, unsigned int gridDimX,
+                                   unsigned int gridDimY, unsigned int gridDimZ,
+                                   unsigned int blockDimX,
+                                   unsigned int blockDimY,
+                                   unsigned int blockDimZ,
+                                   unsigned int sharedMemBytes,
+                                   CUstream hStream, void **kernelParams) {
+  return CUDADriverAPI::get()->cuLaunchCooperativeKernel_(
+      f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
+      sharedMemBytes, hStream, kernelParams);
+}
+
+CUresult cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
+  return CUDADriverAPI::get()->cuMemsetD32_(dstDevice, ui, N);
+}
+
+CUresult cuStreamSetAttribute(CUstream hStream, CUstreamAttrID attr,
+                              const CUstreamAttrValue *value) {
+  return CUDADriverAPI::get()->cuStreamSetAttribute_(hStream, attr, value);
+}
+
+#if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
+CUresult cuTensorMapEncodeTiled(
+    CUtensorMap *tensorMap, CUtensorMapDataType tensorDataType,
+    cuuint32_t tensorRank, void *globalAddress, const cuuint64_t *globalDim,
+    const cuuint64_t *globalStrides, const cuuint32_t *boxDim,
+    const cuuint32_t *elementStrides, CUtensorMapInterleave interleave,
+    CUtensorMapSwizzle swizzle, CUtensorMapL2promotion l2Promotion,
+    CUtensorMapFloatOOBfill oobFill) {
+  auto fn = CUDADriverAPI::get()->cuTensorMapEncodeTiled_;
+  if (fn == nullptr) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+  }
+  return fn(tensorMap, tensorDataType, tensorRank, globalAddress, globalDim,
+            globalStrides, boxDim, elementStrides, interleave, swizzle,
+            l2Promotion, oobFill);
+}
+
+CUresult cuTensorMapEncodeIm2col(
+    CUtensorMap *tensorMap, CUtensorMapDataType tensorDataType,
+    cuuint32_t tensorRank, void *globalAddress, const cuuint64_t *globalDim,
+    const cuuint64_t *globalStrides, const int *pixelBoxLowerCorner,
+    const int *pixelBoxUpperCorner, cuuint32_t channelsPerPixel,
+    cuuint32_t pixelsPerColumn, const cuuint32_t *elementStrides,
+    CUtensorMapInterleave interleave, CUtensorMapSwizzle swizzle,
+    CUtensorMapL2promotion l2Promotion, CUtensorMapFloatOOBfill oobFill) {
+  auto fn = CUDADriverAPI::get()->cuTensorMapEncodeIm2col_;
+  if (fn == nullptr) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+  }
+  return fn(tensorMap, tensorDataType, tensorRank, globalAddress, globalDim,
+            globalStrides, pixelBoxLowerCorner, pixelBoxUpperCorner,
+            channelsPerPixel, pixelsPerColumn, elementStrides, interleave,
+            swizzle, l2Promotion, oobFill);
+}
+#endif
+
+} // extern "C"
