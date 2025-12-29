@@ -483,12 +483,19 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         }
       }
     });
+    // In free inference, try two mechanisms and prefer the one that
+    // minimizes replication while remaining compatible:
+    // 1) compute_loop_layout_from_buffer (always correct but may over-replicate)
+    // 2) PlanLoopPartition (often smaller replication)
+    Fragment candidate_from_buffer;
+    Fragment candidate_from_plan;
+
     if (read_source_buffer.defined() && allow_layout_propgate) {
-      loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
+      candidate_from_buffer = compute_loop_layout_from_buffer(read_source_buffer);
     }
 
-    if (!loop_layout_.defined()) {
-      // No source buffer available, use free mode inference
+    // try to infer loop layout with two mechanisms and choose the best one
+    {
       // Vectorize Size must be aware of the buffer_remap
       // As the pass will do post processing to the layout
       auto maybe_remapped_root_ =
@@ -528,9 +535,52 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
                  << " ############# vector_size = " << vector_size
                  << ", thread_bounds = " << T.thread_bounds << '\n';
-      loop_layout_ = PlanLoopPartition(root_, vector_size, T.thread_bounds);
-      DLOG(INFO) << "[PlanLoopPartition] loop_layout_ = "
-                 << loop_layout_->DebugOutput() << '\n';
+      auto plan = PlanLoopPartition(root_, vector_size, T.thread_bounds);
+      DLOG(INFO) << "[PlanLoopPartition] candidate = " << plan->DebugOutput()
+                 << '\n';
+      candidate_from_plan = plan;
+    }
+
+    // Choose the best candidate:
+    if (candidate_from_buffer.defined() && candidate_from_plan.defined()) {
+      auto vars =
+          loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
+      auto contains = [&](const Fragment &big, const Fragment &small) {
+        return ProveFragmentContains(small, big, vars, vars, analyzer_);
+      };
+      // If compute-from-buffer contains plan, prefer plan (smaller rep)
+      bool buf_contains_plan =
+          contains(candidate_from_buffer, candidate_from_plan);
+      bool plan_contains_buf =
+          contains(candidate_from_plan, candidate_from_buffer);
+
+      auto rep_buf = candidate_from_buffer->ReplicateExtent();
+      auto rep_plan = candidate_from_plan->ReplicateExtent();
+
+      if (buf_contains_plan && !plan_contains_buf) {
+        loop_layout_ = candidate_from_plan;
+        DLOG(INFO) << "[FreeInfer] choose PlanLoopPartition (contained by buffer,"
+                   << " smaller rep)." << '\n';
+      } else if (plan_contains_buf && !buf_contains_plan) {
+        loop_layout_ = candidate_from_buffer;
+        DLOG(INFO) << "[FreeInfer] choose compute_from_buffer (contained by plan)."
+                   << '\n';
+      } else if (analyzer_.CanProve(rep_plan <= rep_buf)) {
+        // If neither strictly contains the other but plan has provably
+        // smaller/equal replication, try plan to minimize replication.
+        loop_layout_ = candidate_from_plan;
+        DLOG(INFO) << "[FreeInfer] choose PlanLoopPartition by smaller rep.";
+      } else {
+        // Fallback to buffer-based candidate (always correct)
+        loop_layout_ = candidate_from_buffer;
+        DLOG(INFO) << "[FreeInfer] fallback to compute_from_buffer.";
+      }
+    } else if (candidate_from_plan.defined()) {
+      loop_layout_ = candidate_from_plan;
+      DLOG(INFO) << "[FreeInfer] only PlanLoopPartition available, choose it.";
+    } else if (candidate_from_buffer.defined()) {
+      loop_layout_ = candidate_from_buffer;
+      DLOG(INFO) << "[FreeInfer] only compute_from_buffer available, choose it.";
     }
 
     // Lambda that guards replicated accesses:
