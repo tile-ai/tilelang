@@ -41,7 +41,7 @@ void *try_load_libcuda() {
  */
 template <typename T> T get_symbol(void *handle, const char *name) {
   // Clear any existing error
-  dlerror();
+  (void)dlerror();
   void *sym = dlsym(handle, name);
   // Check for error (symbol could legitimately be nullptr in some cases)
   const char *error = dlerror();
@@ -74,9 +74,10 @@ CUDADriverAPI create_driver_api() {
 #define LOOKUP_REQUIRED(name)                                                  \
   api.name##_ = get_symbol<decltype(&name)>(handle, #name);                    \
   if (api.name##_ == nullptr) {                                                \
+    const char *error = dlerror();                                             \
     throw std::runtime_error(                                                  \
         std::string("Failed to load required CUDA driver symbol: ") + #name +  \
-        ". Error: " + (dlerror() ? dlerror() : "unknown"));                    \
+        ". Error: " + (error ? error : "unknown"));                            \
   }
   TILELANG_LIBCUDA_API_REQUIRED(LOOKUP_REQUIRED)
 #undef LOOKUP_REQUIRED
