@@ -74,7 +74,7 @@ def main(M=1024, N=1024, K=1024):
     print(f"Latency: {latency} ms")
 
 
-def run_regression_perf(M=1024, N=1024, K=1024):
+def run_regression_perf(M=4096, N=4096, K=4096):
     block_M = 128
     block_N = 128
     block_K = 64

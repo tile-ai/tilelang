@@ -56,9 +56,9 @@ def main():
 
 
 def run_regression_perf():
-    M = 1024
-    N = 1024
-    K = 1024
+    M = 4096
+    N = 4096
+    K = 4096
     block_M = 128
     block_N = 128
     block_K = 32
@@ -76,7 +76,7 @@ def run_regression_perf():
     def run_kernel_only():
         kernel(a, b, c)
 
-    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

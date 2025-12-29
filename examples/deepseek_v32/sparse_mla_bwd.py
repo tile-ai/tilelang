@@ -365,7 +365,7 @@ def run_regression_perf(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, to
     def run_kernel_only():
         return bwd_kernel(q, kv, do, indices, tl_lse, delta, dkv)
 
-    return do_bench(run_kernel_only, rep=1000, warmup=250, backend="cupti")
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

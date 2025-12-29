@@ -365,7 +365,7 @@ def main(do_bench: bool = True):
 
 
 def run_regression_perf():
-    N, K = 1024, 1024
+    N, K = 4096, 4096
     latency = 0.0
     kernel_list = [
         naive_gemv(N, K, 128, 128),
@@ -378,7 +378,7 @@ def run_regression_perf():
     for kernel in kernel_list:
         profiler = kernel.get_profiler()
         # Benchmark the TileLang kernel itself, not the PyTorch reference.
-        latency += profiler.do_bench(warmup=50, backend="cupti")
+        latency += profiler.do_bench(backend="cupti")
     return latency / len(kernel_list)
 
 
