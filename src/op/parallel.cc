@@ -485,13 +485,14 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     });
     // In free inference, try two mechanisms and prefer the one that
     // minimizes replication while remaining compatible:
-    // 1) compute_loop_layout_from_buffer (always correct but may over-replicate)
-    // 2) PlanLoopPartition (often smaller replication)
+    // 1) compute_loop_layout_from_buffer (always correct but may
+    // over-replicate) 2) PlanLoopPartition (often smaller replication)
     Fragment candidate_from_buffer;
     Fragment candidate_from_plan;
 
     if (read_source_buffer.defined() && allow_layout_propgate) {
-      candidate_from_buffer = compute_loop_layout_from_buffer(read_source_buffer);
+      candidate_from_buffer =
+          compute_loop_layout_from_buffer(read_source_buffer);
     }
 
     // try to infer loop layout with two mechanisms and choose the best one
@@ -559,12 +560,14 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
       if (buf_contains_plan && !plan_contains_buf) {
         loop_layout_ = candidate_from_plan;
-        DLOG(INFO) << "[FreeInfer] choose PlanLoopPartition (contained by buffer,"
-                   << " smaller rep)." << '\n';
+        DLOG(INFO)
+            << "[FreeInfer] choose PlanLoopPartition (contained by buffer,"
+            << " smaller rep)." << '\n';
       } else if (plan_contains_buf && !buf_contains_plan) {
         loop_layout_ = candidate_from_buffer;
-        DLOG(INFO) << "[FreeInfer] choose compute_from_buffer (contained by plan)."
-                   << '\n';
+        DLOG(INFO)
+            << "[FreeInfer] choose compute_from_buffer (contained by plan)."
+            << '\n';
       } else if (analyzer_.CanProve(rep_plan <= rep_buf)) {
         // If neither strictly contains the other but plan has provably
         // smaller/equal replication, try plan to minimize replication.
@@ -580,7 +583,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       DLOG(INFO) << "[FreeInfer] only PlanLoopPartition available, choose it.";
     } else if (candidate_from_buffer.defined()) {
       loop_layout_ = candidate_from_buffer;
-      DLOG(INFO) << "[FreeInfer] only compute_from_buffer available, choose it.";
+      DLOG(INFO)
+          << "[FreeInfer] only compute_from_buffer available, choose it.";
     }
 
     // Lambda that guards replicated accesses:

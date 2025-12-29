@@ -600,9 +600,9 @@ private:
 
     // Track which buffers this op (infer_idx) touches for prioritization.
     // Avoid duplicates.
-    auto& vec = op_touched_buffers_[infer_idx];
+    auto &vec = op_touched_buffers_[infer_idx];
     if (std::none_of(vec.begin(), vec.end(),
-                     [&](const Buffer& b) { return b.same_as(buffer); })) {
+                     [&](const Buffer &b) { return b.same_as(buffer); })) {
       vec.push_back(buffer);
     }
   }
