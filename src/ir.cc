@@ -112,8 +112,6 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
       anno.Set("tl_pipeline_order", order);
     if (!stages.empty())
       anno.Set("tl_pipeline_stage", stages);
-    if (!sync.empty())
-      anno.Set("tl_pipeline_sync", sync);
     if (!groups.empty())
       anno.Set("tl_pipeline_group", groups);
     Optional<PrimExpr> step =
