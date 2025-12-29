@@ -490,7 +490,7 @@ def main(BATCH: int = 1, H: int = 1, N_CTX: int = 512, D_HEAD: int = 128, window
 
 def run_regression_perf(
     BATCH: int = 1,
-    H: int = 1,
+    H: int = 32,
     N_CTX: int = 512,
     D_HEAD: int = 128,
     window_size: Optional[int] = None,

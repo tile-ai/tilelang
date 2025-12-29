@@ -3,7 +3,7 @@ import example_dynamic
 
 
 def regression_example_dynamic():
-    tilelang.testing.process_func(example_dynamic.run_regression_perf, M=1024, N=1024, K=1024)
+    tilelang.testing.process_func(example_dynamic.run_regression_perf)
 
 
 if __name__ == "__main__":

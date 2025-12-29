@@ -365,7 +365,7 @@ def main(do_bench: bool = True):
 
 
 def run_regression_perf():
-    N, K = 1024, 1024
+    N, K = 4096, 4096
     latency = 0.0
     kernel_list = [
         naive_gemv(N, K, 128, 128),

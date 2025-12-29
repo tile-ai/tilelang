@@ -432,7 +432,7 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
 
-def run_regression_perf(m=256, n=256, k=256, fast_dequant=True):
+def run_regression_perf(m=4096, n=4096, k=4096, fast_dequant=True):
     kernel = matmul(
         m,
         n,

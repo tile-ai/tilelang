@@ -225,7 +225,7 @@ def main():
 
 
 def run_regression_perf():
-    M, N, K = 128, 128, 128
+    M, N, K = 4096, 4096, 4096
     out_dtype, accum_dtype = "float32", "float32"
     in_dtype = T.float8_e4m3fn
     kernel_e4m3 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)

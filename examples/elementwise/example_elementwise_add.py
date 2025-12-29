@@ -55,8 +55,8 @@ def main(M=1024, N=1024, use_autotune=False):
 
 def run_regression_perf():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--m", type=int, default=1024)
-    parser.add_argument("--n", type=int, default=1024)
+    parser.add_argument("--m", type=int, default=4096)
+    parser.add_argument("--n", type=int, default=4096)
     args, _ = parser.parse_known_args()
     M, N = args.m, args.n
     a = torch.randn(M, N, dtype=torch.float32, device="cuda")

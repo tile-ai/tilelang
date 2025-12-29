@@ -60,7 +60,7 @@ def main():
 
 
 def run_regression_perf():
-    M, N, K = 1024, 1024, 1024
+    M, N, K = 4096, 4096, 4096
     dtype = "float8_e4m3"
     kernel_e4m3 = matmul(M, N, K, 128, 128, 64, dtype)
     profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
