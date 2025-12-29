@@ -378,7 +378,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         key_kwargs_tuple = tuple(sorted(kwargs.items()))
         tuned_key_kwargs_tuple = tuple(sorted(tune_params.items()))
         key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
-        return key, tune_params
+        return key
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         # Separate out the tuning parameters from the user's kwargs
@@ -407,7 +407,8 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             return kernel(*kernel_args.values())
 
         else:
-            key, tune_params = self.parse_cache_key(*args, **kwargs)
+            key = self.parse_cache_key(*args, **kwargs)
+            tune_params = kwargs.pop("__tune_params", {})
             kernel = self._kernel_cache.get(key, None)
             if kernel is None:
                 kernel = self.compile(*args, **kwargs, **tune_params)
