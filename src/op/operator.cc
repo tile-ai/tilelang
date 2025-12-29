@@ -31,7 +31,7 @@ TileOperator ParseOperator(Call call) {
   auto op_map = Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
   Op op = call->op.as<Op>().value();
   if (op_map.count(op)) {
-    auto tile_op = op_map[op](call->args);
+    auto tile_op = op_map[op](call->args, call->annotations);
     ICHECK(tile_op.defined());
     return tile_op;
   }

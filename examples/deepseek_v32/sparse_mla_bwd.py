@@ -122,6 +122,9 @@ def bwd(
 
     H = H_kv
     padded_H = max(tilelang.math.next_power_of_2(H_kv), 16)
+    block_H = min(64, padded_H)
+    assert padded_H % block_H == 0
+    NH = padded_H // block_H
     BS = block_size
     NS = tilelang.cdiv(topk, block_size)
 
@@ -138,23 +141,23 @@ def bwd(
         dQ: T.Tensor(q_shape, dtype),
         dKV: T.Tensor(k_shape, accum_dtype),
     ):
-        with T.Kernel(S, B, kv_group, threads=threads) as (s_i, by, bz):
-            Q_shared = T.alloc_shared([padded_H, D], dtype)
-            Q_tail_shared = T.alloc_shared([padded_H, D_tail], dtype)
+        with T.Kernel(S, B, kv_group * NH, threads=threads) as (s_i, by, bz):
+            Q_shared = T.alloc_shared([block_H, D], dtype)
+            Q_tail_shared = T.alloc_shared([block_H, D_tail], dtype)
             KV_shared = T.alloc_shared([BS, D], dtype)
             KV_tail_shared = T.alloc_shared([BS, D_tail], dtype)
-            dO_shared = T.alloc_shared([padded_H, D], dtype)
+            dO_shared = T.alloc_shared([block_H, D], dtype)
             mask = T.alloc_fragment([BS], "bool")
 
-            P_shared_cast = T.alloc_shared([padded_H, BS], dtype)
-            dP_shared_cast = T.alloc_shared([padded_H, BS], dtype)
-            dQ_shared = T.alloc_shared([padded_H, D], dtype)
-            dQ_tail_shared = T.alloc_shared([padded_H, D_tail], dtype)
+            P_shared_cast = T.alloc_shared([block_H, BS], dtype)
+            dP_shared_cast = T.alloc_shared([block_H, BS], dtype)
+            dQ_shared = T.alloc_shared([block_H, D], dtype)
+            dQ_tail_shared = T.alloc_shared([block_H, D_tail], dtype)
 
-            acc_p = T.alloc_fragment([padded_H, BS], accum_dtype)
-            acc_dp = T.alloc_fragment([padded_H, BS], accum_dtype)
-            acc_dq = T.alloc_fragment([padded_H, D], accum_dtype)
-            acc_dq_tail = T.alloc_fragment([padded_H, D_tail], accum_dtype)
+            acc_p = T.alloc_fragment([block_H, BS], accum_dtype)
+            acc_dp = T.alloc_fragment([block_H, BS], accum_dtype)
+            acc_dq = T.alloc_fragment([block_H, D], accum_dtype)
+            acc_dq_tail = T.alloc_fragment([block_H, D_tail], accum_dtype)
             acc_dkv = T.alloc_fragment([BS, D], accum_dtype)
             acc_dkv_tail = T.alloc_fragment([BS, D_tail], accum_dtype)
             acc_dkv_shared = T.alloc_shared([BS // split_store, D], accum_dtype)
@@ -162,9 +165,9 @@ def bwd(
 
             max_kv_i = s_i
 
-            T.copy(Q[by, s_i, bz * padded_H : (bz + 1) * padded_H, :D], Q_shared)
-            T.copy(Q[by, s_i, bz * padded_H : (bz + 1) * padded_H, D:], Q_tail_shared)
-            T.copy(dO[by, s_i, bz * padded_H : (bz + 1) * padded_H, :D], dO_shared)
+            T.copy(Q[by, s_i, bz * block_H : (bz + 1) * block_H, :D], Q_shared)
+            T.copy(Q[by, s_i, bz * block_H : (bz + 1) * block_H, D:], Q_tail_shared)
+            T.copy(dO[by, s_i, bz * block_H : (bz + 1) * block_H, :D], dO_shared)
 
             T.clear(acc_dq)
             T.clear(acc_dq_tail)
@@ -173,31 +176,31 @@ def bwd(
             for i_i in T.Pipelined(NS, num_stages=num_stages):
                 # Check which indices are valid
                 for bi_i in T.Parallel(BS):
-                    mask[bi_i] = Indices[by, s_i, bz, i_i * BS + bi_i] <= max_kv_i
+                    mask[bi_i] = Indices[by, s_i, bz // NH, i_i * BS + bi_i] <= max_kv_i
 
                 # Compute attention scores
-                for h_i, bi_i in T.Parallel(padded_H, BS):
+                for h_i, bi_i in T.Parallel(block_H, BS):
                     acc_p[h_i, bi_i] = T.if_then_else(mask[bi_i], 0, -T.infinity(acc_p.dtype))
 
                 # Load KV, V for this block of indices
                 for bi_i, d_i in T.Parallel(BS, D):
-                    KV_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz, i_i * BS + bi_i], bz, d_i]
+                    KV_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz // NH, i_i * BS + bi_i], bz // NH, d_i]
 
                 T.gemm(Q_shared, KV_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
 
                 for bi_i, d_i in T.Parallel(BS, D_tail):
-                    KV_tail_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz, i_i * BS + bi_i], bz, D + d_i]
+                    KV_tail_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz // NH, i_i * BS + bi_i], bz // NH, D + d_i]
                 T.gemm(Q_tail_shared, KV_tail_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
 
-                for h_i, bi_i in T.Parallel(padded_H, BS):
-                    acc_p[h_i, bi_i] = T.exp2(acc_p[h_i, bi_i] * sm_scale_mul_reciprocal_log2 - Lse[by, s_i, bz * padded_H + h_i])
+                for h_i, bi_i in T.Parallel(block_H, BS):
+                    acc_p[h_i, bi_i] = T.exp2(acc_p[h_i, bi_i] * sm_scale_mul_reciprocal_log2 - Lse[by, s_i, bz * block_H + h_i])
 
                 T.copy(acc_p, P_shared_cast)
 
                 T.gemm(dO_shared, KV_shared, acc_dp, transpose_B=True, policy=T.GemmWarpPolicy.FullCol, clear_accum=True)
 
-                for h_i, bi_i in T.Parallel(padded_H, BS):
-                    acc_dp[h_i, bi_i] = acc_p[h_i, bi_i] * (acc_dp[h_i, bi_i] - Delta[by, s_i, bz * padded_H + h_i]) * sm_scale
+                for h_i, bi_i in T.Parallel(block_H, BS):
+                    acc_dp[h_i, bi_i] = acc_p[h_i, bi_i] * (acc_dp[h_i, bi_i] - Delta[by, s_i, bz * block_H + h_i]) * sm_scale
 
                 T.copy(acc_dp, dP_shared_cast)
                 T.gemm(dP_shared_cast, KV_shared, acc_dq, policy=T.GemmWarpPolicy.FullCol)
@@ -220,14 +223,14 @@ def bwd(
 
                     for bi_i, d_i in T.Parallel(BS // split_store, D // 4):
                         T.atomic_addx4(
-                            dKV[by, Indices[by, s_i, bz, i_i * BS + bi_i + s * (BS // split_store)], bz, d_i * 4],
+                            dKV[by, Indices[by, s_i, bz // NH, i_i * BS + bi_i + s * (BS // split_store)], bz // NH, d_i * 4],
                             acc_dkv_shared[bi_i, d_i * 4],
                         )
 
                     # Atomically update dKV, dKV_tail tensors
                     for bi_i, d_i in T.Parallel(BS // split_store, D_tail // 4):
                         T.atomic_addx4(
-                            dKV[by, Indices[by, s_i, bz, i_i * BS + bi_i + s * (BS // split_store)], bz, D + d_i * 4],
+                            dKV[by, Indices[by, s_i, bz // NH, i_i * BS + bi_i + s * (BS // split_store)], bz // NH, D + d_i * 4],
                             acc_dkv_tail_shared[bi_i, d_i * 4],
                         )
 
@@ -235,8 +238,8 @@ def bwd(
             T.copy(acc_dq, dQ_shared)
             T.copy(acc_dq_tail, dQ_tail_shared)
 
-            T.copy(dQ_shared, dQ[by, s_i, bz * padded_H : (bz + 1) * padded_H, :D])
-            T.copy(dQ_tail_shared, dQ[by, s_i, bz * padded_H : (bz + 1) * padded_H, D:])
+            T.copy(dQ_shared, dQ[by, s_i, bz * block_H : (bz + 1) * block_H, :D])
+            T.copy(dQ_tail_shared, dQ[by, s_i, bz * block_H : (bz + 1) * block_H, D:])
 
     return sparse_mla_bwd_kernel
 

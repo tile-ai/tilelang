@@ -137,6 +137,49 @@ TL_DEVICE int4_t make_int4(short x0, short x1, short y0, short y1, short z0,
   return result;
 }
 
+// Pack four char values.
+TL_DEVICE unsigned int make_uint(unsigned char x0, unsigned char x1,
+                                 unsigned char x2, unsigned char x3) {
+  return (x3 << 24) | (x2 << 16) | (x1 << 8) | x0;
+}
+
+// Pack eight char values.
+TL_DEVICE uint2 make_uint2(unsigned char x0, unsigned char x1, unsigned char x2,
+                           unsigned char x3, unsigned char y0, unsigned char y1,
+                           unsigned char y2, unsigned char y3) {
+  uint2 result;
+  result.x = make_uint(x0, x1, x2, x3);
+  result.y = make_uint(y0, y1, y2, y3);
+  return result;
+}
+
+// Pack sixteen char values.
+TL_DEVICE uint4 make_uint4(unsigned char x0, unsigned char x1, unsigned char x2,
+                           unsigned char x3, unsigned char y0, unsigned char y1,
+                           unsigned char y2, unsigned char y3, unsigned char z0,
+                           unsigned char z1, unsigned char z2, unsigned char z3,
+                           unsigned char w0, unsigned char w1, unsigned char w2,
+                           unsigned char w3) {
+  uint4 result;
+  result.x = make_uint(x0, x1, x2, x3);
+  result.y = make_uint(y0, y1, y2, y3);
+  result.z = make_uint(z0, z1, z2, z3);
+  result.w = make_uint(w0, w1, w2, w3);
+  return result;
+}
+
+TL_DEVICE uint4 make_uint4(unsigned short x0, unsigned short x1,
+                           unsigned short y0, unsigned short y1,
+                           unsigned short z0, unsigned short z1,
+                           unsigned short w0, unsigned short w1) {
+  uint4 result;
+  *((ushort2 *)&result.x) = make_ushort2(x0, x1);
+  *((ushort2 *)&result.y) = make_ushort2(y0, y1);
+  *((ushort2 *)&result.z) = make_ushort2(z0, z1);
+  *((ushort2 *)&result.w) = make_ushort2(w0, w1);
+  return result;
+}
+
 // Pack eight int values.
 TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
                                    int z1, int w0, int w1) {

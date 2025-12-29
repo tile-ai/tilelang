@@ -19,11 +19,6 @@ namespace tl {
 
 using namespace tir;
 
-namespace attr {
-/*! \brief Mark that how the loop is vectorized. */
-constexpr const char *coalesced_width = "coalesced_width";
-} // namespace attr
-
 // ProveFragmentContains checks whether the threads that access elements of a
 // smaller fragment (small_frag) are a subset of the threads that access
 // elements of a larger fragment (large_frag) for any given loop index. This
@@ -193,8 +188,6 @@ void ParallelOpNode::ExpandLetBindings(
     PostOrderVisit(expr, [&](const ObjectRef &node) {
       if (auto bl = node.as<BufferLoadNode>()) {
         if (IsFragmentBuffer(bl->buffer) && !indice_map_.count(bl->buffer)) {
-          LOG(INFO) << "ExpandLetBindings: set buffer " << bl->buffer
-                    << " with indices " << bl->indices;
           indice_map_.Set(bl->buffer, bl->indices);
         }
       } else if (auto var_node = node.as<VarNode>()) {
@@ -519,7 +512,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
       // Check if coalesced_width is defined
       if (auto coalesced_width =
-              root_->annotations.Get(tl::attr::coalesced_width)) {
+              root_->annotations.Get(attr::kCoalescedWidth)) {
         if (const auto *imm = coalesced_width->as<IntImmNode>()) {
           int expected = imm->value;
           // Verify that vector_size is divisible by expected

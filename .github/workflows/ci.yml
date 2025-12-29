@@ -370,26 +370,7 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
-            --ignore=./python/jit/test_tilelang_jit_cutedsl.py \
             ./python
-
-      # CuTeDSL JIT tests require GEMM v1 (must be set before importing tilelang).
-      # Run them in a dedicated step to avoid changing the default GEMM selection
-      # (and to keep the rest of the CUDA tests on GEMM v2).
-      - name: Run CuTeDSL JIT tests (GEMM v1) with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
-        id: cutedsl-tests
-        if: contains(matrix.runner.toolkit, 'CUDA')
-        env:
-          TILELANG_USE_GEMM_V1: "1"
-        run: |
-          cd testing
-          PYTEST=(
-            uv run --no-project -m --
-            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
-          )
-          # Avoid xdist contention on a single GPU by running this file in one worker.
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=1 \
-            ./python/jit/test_tilelang_jit_cutedsl.py
 
       # AMD ROCm tests
       - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})

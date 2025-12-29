@@ -28,7 +28,7 @@ using namespace tir;
 
 // MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
 
-ReduceOp::ReduceOp(Array<PrimExpr> args) {
+ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<ReduceOpNode> node = tvm::ffi::make_object<ReduceOpNode>();
   // Accept BufferRegion/BufferLoad for src/dst
   node->srcRegion_ = NormalizeToBufferRegion(args[0]);
@@ -309,7 +309,8 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         std::stringstream ss;
 
         auto thread_offset = T.thread_bounds->min;
-        if (TargetIsHopper(T.target) || TargetIsSm100(T.target)) {
+        if (TargetIsHopper(T.target) || TargetIsSm100(T.target) ||
+            TargetIsSM120(T.target)) {
           auto all_threads = T.thread_bounds->extent;
           ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
              << reducing_threads << ", " << (*scale) << ", " << thread_offset
@@ -494,7 +495,7 @@ static BufferRegion ConvertBufferToBufferRegion(const Buffer &buf) {
   return BufferRegion(buf, ranges);
 }
 
-CumSumOp::CumSumOp(Array<PrimExpr> args) {
+CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   /// CumSum constructor arguments:
   /// - src: input buffer
   /// - dst: output buffer

@@ -254,24 +254,6 @@ def test_marco_return():
             check(d, (int, float, T.PrimExpr))
 
 
-def test_prim_func_generator():
-    @T.prim_func(generator=True)
-    def prim_func_gen(
-        A=T.Tensor((128,), T.float32),  # noqa: B008
-        B=T.Tensor((128,), T.float32),  # noqa: B008
-    ):
-        with T.Kernel(128) as (tx,):
-            T.copy(A[tx], B[tx])
-
-    prim_func_gen()
-
-    @T.prim_func
-    def foo() -> T.Tensor((128,), T.float32):
-        pass
-
-    assert isinstance(foo, T.PrimFunc)
-
-
 def test_serial_for_with_step():
     @tilelang.jit(out_idx=-1)
     @T.prim_func

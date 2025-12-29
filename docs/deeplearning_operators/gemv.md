@@ -6,7 +6,7 @@
 </div>
 
 :::{warning}
-   This document is still **experimental** and may be incomplete.  
+   This document is still **experimental** and may be incomplete.
    Suggestions and improvements are highly encouraged—please submit a PR!
 :::
 

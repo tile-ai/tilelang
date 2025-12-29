@@ -163,7 +163,7 @@ with _lazy_load_lib():
     from .language.v2 import dtypes  # noqa: F401
     from .autotuner import autotune  # noqa: F401
     from .transform import PassConfigKey  # noqa: F401
-    from .engine import lower, register_cuda_postproc, register_hip_postproc  # noqa: F401
+    from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
     from .math import *  # noqa: F403
     from . import ir  # noqa: F401
     from . import tileop  # noqa: F401

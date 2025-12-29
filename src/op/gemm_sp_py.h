@@ -84,7 +84,9 @@ class GemmSPPy : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSPPy, TileOperator,
                                              GemmSPPyNode);
-  TVM_DLL GemmSPPy(Array<PrimExpr> args);
+  TVM_DLL
+  GemmSPPy(Array<PrimExpr> args,
+           Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

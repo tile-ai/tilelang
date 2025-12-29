@@ -193,10 +193,10 @@ for i_i in T.Pipelined(NI, num_stages=num_stages):
     # Load KV data for selected indices
     for bi_i, d_i in T.Parallel(BI, D):
         KV_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz, i_i * BI + bi_i], bz, d_i]
-    
+
     # Recompute attention scores for backward
     T.gemm(Q_shared, KV_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-    
+
     # Apply softmax gradient: dP = P * (dP_raw - Delta)
     for h_i, bi_i in T.Parallel(padded_H, BI):
         acc_dp[h_i, bi_i] = acc_p[h_i, bi_i] * (acc_dp[h_i, bi_i] - Delta[by, s_i, bz * padded_H + h_i]) * sm_scale
@@ -212,7 +212,7 @@ The key gradient computations are:
 ```python
 # Atomically update dKV at selected indices
 for bi_i, d_i in T.Parallel(BI // split_store, D // 4):
-    T.atomic_addx4(dKV[by, Indices[by, s_i, bz, i_i * BI + bi_i + s * (BI // split_store)], bz, d_i * 4], 
+    T.atomic_addx4(dKV[by, Indices[by, s_i, bz, i_i * BI + bi_i + s * (BI // split_store)], bz, d_i * 4],
                    acc_dkv_shared[bi_i, d_i * 4])
 ```
 

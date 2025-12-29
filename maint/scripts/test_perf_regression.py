@@ -7,6 +7,7 @@ from tabulate import tabulate
 import pandas as pd
 import numpy as np
 import textwrap
+from pathlib import Path
 
 try:
     import tilelang
@@ -180,9 +181,10 @@ def draw(df: pd.DataFrame) -> None:
 
 env = {"TL_PERF_REGRESSION_FORMAT": "json"}
 print("Running regression on OLD version...")
-output_v1 = run_cmd([OLD_PYTHON, "-c", "import tilelang.testing.perf_regression as pr; pr.regression_all()"], env=env)
+test_file = Path(__file__).parent / "regression_all.py"
+output_v1 = run_cmd([OLD_PYTHON, str(test_file)], env=env)
 print("Running regression on NEW version...")
-output_v2 = run_cmd([NEW_PYTHON, "-c", "import tilelang.testing.perf_regression as pr; pr.regression_all()"], env=env)
+output_v2 = run_cmd([NEW_PYTHON, str(test_file)], env=env)
 
 data_v1 = parse_output(output_v1)
 data_v2 = parse_output(output_v2)

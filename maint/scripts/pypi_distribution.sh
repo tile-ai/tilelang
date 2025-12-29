@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 set -eux
 
 rm -rf dist raw_dist

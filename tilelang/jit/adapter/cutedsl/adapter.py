@@ -78,23 +78,21 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         wrapper_result = self.wrapper.wrap(device_kernel_source)
         self.host_func = wrapper_result["host_func"]
         self.function_names = wrapper_result["function_names"]
-        self.tma_cpp_init_code = wrapper_result["tma_cpp_init_code"]
-        self.tma_lib_name = wrapper_result["tma_lib_name"]
         self.launcher_cpp_code = wrapper_result.get("launcher_cpp_code", None)
         self.launcher_lib_name = wrapper_result.get("launcher_lib_name", None)
 
         self.lib_generator = CuTeDSLLibraryGenerator(self.target, self.verbose)
         self.lib_generator.update_lib_code(self.device_kernel_source)
         self.lib_generator.update_host_func(self.host_func)
-        self.lib_generator.update_tma_cpp_init_code(self.tma_cpp_init_code)
-        self.lib_generator.update_tma_lib_name(self.tma_lib_name)
         self.lib_generator.update_launcher_cpp_code(self.launcher_cpp_code)
         self.lib_generator.update_launcher_lib_name(self.launcher_lib_name)
         self.lib_generator.assign_compile_flags(compile_flags)
         self.lib_generator.compile_lib()
         self.lib_generator.load_lib()
         self.libpath = self.lib_generator.libpath
-        self.device_kernel_source = open(self.libpath).read()
+        with open(self.libpath) as f:
+            self.device_kernel_source = f.read()
+        self.kernel_global_source = self.device_kernel_source
         self.pymodule = self.lib_generator.pymodule
 
         self._post_init()
@@ -150,7 +148,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         adapter.libpath = kernel_lib_path
-        adapter.kernel_global_source = open(adapter.libpath).read()
+        adapter.kernel_global_source = device_kernel_source
         adapter.pymodule = adapter.lib_generator.pymodule
 
         adapter._post_init()
