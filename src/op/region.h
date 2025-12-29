@@ -81,7 +81,9 @@ public:
    * - args[1]: Integer access mask (1=r, 2=w, 3=rw).
    * - args[2 + i]: Extent of axis i (supports dynamic PrimExpr).
    */
-  TVM_DLL RegionOp(Array<PrimExpr> args);
+  TVM_DLL
+  RegionOp(Array<PrimExpr> args,
+           Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

@@ -29,6 +29,7 @@
 #include <utility>
 
 #include "../op/utils.h"
+#include "loop_vectorize.h"
 
 namespace tvm {
 namespace tl {
@@ -267,6 +268,32 @@ For LoopPragmaUnroll(For stmt) {
   LoopPramaUnroller unroller;
   For unrolled = Downcast<For>(unroller(std::move(stmt)));
   return unrolled;
+}
+
+Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
+                       arith::Analyzer *analyzer, Optional<PrimExpr> predicate,
+                       bool parallel_loop, bool should_vectorize) {
+  // Save analyzer state to prevent conflicted bindings during vectorization
+  auto saved_analyzer = analyzer->Clone();
+
+  For result_loop = loop;
+
+  // Step 1: Partition the loop based on the layout (if this is a parallel loop)
+  if (parallel_loop) {
+    result_loop = PartitionLoop(result_loop, thread_var, analyzer, loop_layout);
+  }
+
+  // Step 2: Vectorize the loop (if requested)
+  if (should_vectorize) {
+    result_loop = VectorizeLoop(result_loop, saved_analyzer.get());
+  }
+
+  // Step 3: Wrap with predicate if provided and this is a parallel loop
+  if (predicate.defined() && parallel_loop) {
+    return IfThenElse(predicate.value(), result_loop);
+  }
+
+  return result_loop;
 }
 
 } // namespace tl

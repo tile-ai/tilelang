@@ -17,6 +17,7 @@ def copy(
     coalesced_width: int | None = None,
     disable_tma: bool = False,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    annotations: dict | None = None,
 ):
     """Copy data between memory regions.
 
@@ -24,6 +25,11 @@ def copy(
         src (Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion]): Source memory region
         dst (Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion]): Destination memory region
         coalesced_width (Optional[int], optional): Width for coalesced memory access. Defaults to None.
+        disable_tma (bool, optional): Whether to disable TMA acceleration. Defaults to False.
+        eviction_policy (Optional[str], optional): Cache eviction policy. Defaults to None.
+        annotations (Optional[dict], optional): Additional annotations dict. If provided,
+            coalesced_width, disable_tma, and eviction_policy can also be specified here.
+            Values in annotations take precedence over individual arguments.
 
     Raises:
         TypeError: If copy extents cannot be deduced from arguments
@@ -86,13 +92,19 @@ def copy(
     src = to_buffer_region(src, access_type="r", extents=src_extent)
     dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
-    if coalesced_width is None:
-        coalesced_width = -1  # PrimExpr can not be None
-    if eviction_policy is None:
-        eviction_policy = 0
-    else:
-        eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, coalesced_width, disable_tma, eviction_policy)
+    # Build annotations dict
+    ann = annotations.copy() if annotations else {}
+
+    # Individual arguments take lower precedence than annotations
+    if "coalesced_width" not in ann and coalesced_width is not None:
+        ann["coalesced_width"] = coalesced_width
+    if "disable_tma" not in ann and disable_tma:
+        ann["disable_tma"] = disable_tma
+    if "eviction_policy" not in ann and eviction_policy is not None:
+        eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
+        ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
 
 
 def c2d_im2col(

@@ -36,12 +36,6 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
     def update_host_func(self, host_func: str):
         self.host_func = host_func
 
-    def update_tma_cpp_init_code(self, tma_cpp_init_code: str):
-        self.tma_cpp_init_code = tma_cpp_init_code
-
-    def update_tma_lib_name(self, tma_lib_name: str):
-        self.tma_lib_name = tma_lib_name
-
     def update_launcher_cpp_code(self, launcher_cpp_code: str):
         self.launcher_cpp_code = launcher_cpp_code
 

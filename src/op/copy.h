@@ -115,18 +115,15 @@ class CopyNode : public TileOperatorNode {
 public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
-  IntImm coalesced_width; // Width (in elements) for coalesced memory access
-  Bool disable_tma = Bool(false); // Whether to disable TMA acceleration
+  Map<String, ObjectRef> annotations; // Annotations for the copy operation
+  // Supported annotation keys:
+  //   - "coalesced_width": IntImm, width for coalesced memory access
+  //   - "disable_tma": Bool, whether to disable TMA acceleration
+  //   - "eviction_policy": IntImm, cache eviction policy (0=normal, 1=first,
+  //   2=last)
 
   mutable ParallelOp par_op_; // Optional associated parallelization operator
 
-  enum class EvictionPolicy : uint8_t {
-    kEvictNormal = 0,
-    kEvictFirst = 1,
-    kEvictLast = 2,
-  };
-
-  uint8_t eviction_policy; // Policy for cache eviction
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Copy", CopyNode, TileOperatorNode);
 
   static void RegisterReflection() {
@@ -136,7 +133,26 @@ public:
         .def_ro("dst", &CopyNode::dst)
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
-        .def_ro("coalesced_width", &CopyNode::coalesced_width);
+        .def_ro("annotations", &CopyNode::annotations);
+  }
+
+  // Helper methods to get annotation values
+  bool GetDisableTMA() const {
+    if (auto val = annotations.Get("disable_tma")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
+  int GetEvictionPolicy() const {
+    if (auto val = annotations.Get("eviction_policy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 0; // default: evict_normal
   }
 
   /*!
@@ -326,9 +342,10 @@ public:
   /*!
    * \brief Constructor.
    * \param args  Expression arguments for the copy.
-   * \param vmap  Buffer variable mapping.
+   * \param annotations  Annotations map from the Call node.
    */
-  TVM_DLL Copy(Array<PrimExpr> args);
+  TVM_DLL Copy(Array<PrimExpr> args,
+               Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
 
   /*!
    * \brief Get the TVM Op handle corresponding to this Copy op.
@@ -394,7 +411,9 @@ class Conv2DIm2ColOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Conv2DIm2ColOp, TileOperator,
                                              Conv2DIm2ColOpNode);
-  TVM_DLL Conv2DIm2ColOp(Array<PrimExpr> args);
+  TVM_DLL
+  Conv2DIm2ColOp(Array<PrimExpr> args,
+                 Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

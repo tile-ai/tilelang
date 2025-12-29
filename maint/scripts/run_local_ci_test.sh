@@ -19,8 +19,4 @@ cd ..
 # Do NOT export it globally here, or you'll silently change the default GEMM selection
 # for unrelated tests. Run the CuTeDSL JIT tests in a separate pytest invocation.
 cd testing/python
-python -m pytest -n 4 . --ignore=jit/test_tilelang_jit_cutedsl.py --verbose --color=yes --durations=0 --showlocals --cache-clear
-
-# CuTeDSL JIT tests (isolate env + avoid xdist contention on a single GPU)
-TILELANG_USE_GEMM_V1=1 python -m pytest -n 1 jit/test_tilelang_jit_cutedsl.py --verbose --color=yes --durations=0 --showlocals --cache-clear
-cd ..
+python -m pytest -n 4 . --verbose --color=yes --durations=0 --showlocals --cache-clear
