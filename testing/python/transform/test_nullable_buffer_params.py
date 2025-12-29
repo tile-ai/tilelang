@@ -69,5 +69,36 @@ def test_nullable_shared_shape():
     return True
 
 
+def test_nullable_single_source_shape():
+    """Test that a single buffer with a symbolic shape var must be non-null.
+
+    This guards against the previous segfault when binding m from x.shape[0]
+    with x == None.
+    """
+
+    @tilelang.jit
+    def get_kernel():
+        m = T.dynamic("m")
+
+        @T.prim_func
+        def sample_kernel(x: T.Tensor[(m,), T.int32]):
+            with T.Kernel(1, threads=1):
+                tx = T.get_thread_binding()
+                if tx == 0:
+                    T.print(m)
+
+        return sample_kernel
+
+    m = 16
+    kernel = get_kernel()
+
+    # Provide a valid tensor: should run
+    x = torch.randn((m,), device="cuda", dtype=torch.float32).to(torch.int32)
+    kernel(x)
+
+    # Passing None should not segfault; m binds to 0 and kernel is a no-op
+    kernel(None)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
