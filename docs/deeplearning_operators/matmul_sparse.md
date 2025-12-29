@@ -5,7 +5,7 @@
 </div>
 
 :::{warning}
-   This document is still **experimental** and may be incomplete.  
+   This document is still **experimental** and may be incomplete.
 
    This feature is still **experimental** and need further optimization.
 
@@ -40,7 +40,7 @@ Both `PyTorch` and `vLLM` use `CUTLASS` as their computation backend (see refere
 
 A set of **CUTLASS-compatible** compressors is provided in `tilelang.utils.sparse`, where a dense tensor—along with other required arguments (e.g., block_K for sm90, transpose options)—can be passed in to perform the compression.
 
-```python 
+```python
 from tilelang.utils.sparse import compress
 A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
 ```

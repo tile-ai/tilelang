@@ -8,7 +8,7 @@
 :class: myclass1 myclass2
 :name: a-tip-reference
 
-   This document is still **experimental** and may be incomplete.  
+   This document is still **experimental** and may be incomplete.
    Suggestions and improvements are highly encouraged—please submit a PR!
 :::
 

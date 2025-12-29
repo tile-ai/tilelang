@@ -19,7 +19,9 @@ docutils
 dtlib
 einops
 flash-linear-attention==0.3.2
+matplotlib
 packaging>=21.0
+pandas
 pytest-durations
 pytest-timeout
 pytest-xdist>=2.2.1
@@ -27,10 +29,8 @@ pytest>=6.2.4
 pyyaml
 requests
 scipy
+seaborn
 tabulate
 tornado
 wheel
 z3-solver>=4.13.0
-matplotlib
-seaborn
-pandas

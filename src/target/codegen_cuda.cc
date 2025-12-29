@@ -2830,8 +2830,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
 
 void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-  CHECK_LE(lanes, 4) << "Translate Ramp Node " << tvm::ffi::GetRef<Ramp>(op)
-                     << " with " << lanes << " lanes is not allowed.";
+  // TODO(chaofan): Comment the ramp lanes limit for now since we have
+  // LegalizeVectorizedLoop to automatically legalize vectorized loop whose
+  // width exceeds the limit. But we should add check here for safety in the
+  // future. The check should be aligned to certain bit width like 128bits or
+  // 256bits.
+
+  // CHECK_LE(lanes, 8) << "Translate Ramp Node " << tvm::ffi::GetRef<Ramp>(op)
+  //                    << "error: " << lanes << " exceeds max ramp lanes 8.";
   os << "(make_";
   PrintType(op->dtype, os);
   os << "(";

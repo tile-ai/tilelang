@@ -31,7 +31,7 @@ Notably, **TileLang accomplishes this with just around 80 lines of Python code**
 
 First, let's review the core computation logic of traditional FlashAttention:
 
-```python   
+```python
 # acc_s: [block_M, block_N]
 # scores_max: [block_M]
 # scores_scale: [block_M]

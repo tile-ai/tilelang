@@ -258,28 +258,28 @@ def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
             T.clear(A_sp_shared)
             T.clear(E_shared)
             # TODO: alloc_var seems buggy here
-            non_zero_cnt = T.alloc_var(dtype=T.uint8)
-            non_zero_elt_log_idx = T.alloc_shared((elem,), dtype=T.uint8)
+            non_zero_cnt = T.alloc_local((1,), dtype=T.uint8)
+            non_zero_elt_log_idx = T.alloc_local((elem,), dtype=T.uint8)
             T.copy(A[bx * block_M, by * block_K], A_shared)
             for tm in T.Parallel(block_M):
                 for g_i in range(0, block_K // group):
                     a_k = g_i * group
-                    non_zero_cnt = 0
+                    non_zero_cnt[0] = 0
                     for i in range(elem):
                         non_zero_elt_log_idx[i] = 0
                     for i in range(group):
                         val = A_shared[tm, a_k + i]
                         if val != 0.0:
-                            non_zero_elt_log_idx[non_zero_cnt] = i
-                            A_sp_shared[tm, a_k // 2 + non_zero_cnt] = val
-                            non_zero_cnt += 1
+                            non_zero_elt_log_idx[non_zero_cnt[0]] = i
+                            A_sp_shared[tm, a_k // 2 + non_zero_cnt[0]] = val
+                            non_zero_cnt[0] += 1
                     # TODO: use T.device_assert(non_zero_cnt <= 2) after rebasing main
-                    if non_zero_cnt == 1 and non_zero_elt_log_idx[0] == 3:
+                    if non_zero_cnt[0] == 1 and non_zero_elt_log_idx[0] == 3:
                         non_zero_elt_log_idx[0] = 0
                         non_zero_elt_log_idx[1] = 3
                         A_sp_shared[tm, a_k // 2 + 1] = A_sp_shared[tm, a_k // 2]
                         A_sp_shared[tm, a_k // 2] = 0.0
-                    elif non_zero_cnt == 1:
+                    elif non_zero_cnt[0] == 1:
                         A_sp_shared[tm, a_k // 2 + 1] = 0
                         non_zero_elt_log_idx[1] = 3
                     for i in T.serial(elem):

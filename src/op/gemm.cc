@@ -50,7 +50,7 @@ using namespace tir;
 
 // MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
 
-Gemm::Gemm(Array<PrimExpr> args) {
+Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
 
   node->aRegion_ = NormalizeToBufferRegion(args[0]);
