@@ -305,7 +305,7 @@ def run_regression_perf(S=4096, SKV=8192, H=32, HKV=1, D=64, kv_stride=1):
 
     print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=50))
 
-    return do_bench(logits_fn, warmup=100, rep=100, backend="cupti")
+    return do_bench(logits_fn, backend="cupti")
 
 
 if __name__ == "__main__":

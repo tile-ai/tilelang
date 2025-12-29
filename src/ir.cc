@@ -13,6 +13,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/script/ir_builder/tir/ir.h>
+#include <tvm/tir/analysis.h>
 
 #include <utility>
 
@@ -111,8 +112,6 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
       anno.Set("tl_pipeline_order", order);
     if (!stages.empty())
       anno.Set("tl_pipeline_stage", stages);
-    if (!sync.empty())
-      anno.Set("tl_pipeline_sync", sync);
     if (!groups.empty())
       anno.Set("tl_pipeline_group", groups);
     Optional<PrimExpr> step =
@@ -407,7 +406,9 @@ WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.WarpSpecialize", WarpSpecialize);
+  refl::GlobalDef()
+      .def("tl.WarpSpecialize", WarpSpecialize)
+      .def("tl.SideEffect", SideEffect);
   KernelLaunchFrameNode::RegisterReflection();
   WarpSpecializeFrameNode::RegisterReflection();
 }

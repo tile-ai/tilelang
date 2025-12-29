@@ -90,7 +90,7 @@ class KernelCache:
             str: SHA256 hash key for the kernel configuration.
         """
         self.execution_backend = execution_backend
-        func_binary = cloudpickle.dumps(func.script(show_meta=True))
+        func_binary = func.script(show_meta=True).encode()
         key_data = {
             "version": __version__,
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
@@ -148,6 +148,8 @@ class KernelCache:
         """
 
         if not env.is_cache_enabled():
+            if verbose:
+                self.logger.info("Cache is disabled; compiling kernel without caching.")
             return JITKernel(
                 func,
                 out_idx=out_idx,
@@ -169,6 +171,8 @@ class KernelCache:
             pass_configs=pass_configs,
             compile_flags=compile_flags,
         )
+        if verbose:
+            self.logger.info(f"Generated cache key: {key} for kernel {get_prim_func_name(func, '<unknown>')}")
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:

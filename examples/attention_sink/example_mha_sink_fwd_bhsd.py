@@ -252,7 +252,7 @@ def main(
 
 def run_regression_perf(
     batch: int = 1,
-    heads: int = 1,
+    heads: int = 32,
     seq_q: int = 256,
     seq_kv: int = 256,
     dim: int = 128,
@@ -268,7 +268,7 @@ def run_regression_perf(
         batch, heads, seq_q, seq_kv, dim, window_size, block_M=block_M, block_N=block_N, num_stages=num_stages, threads=threads, dtype=dtype
     )
     Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, dtype=torch_dtype)
-    latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500, rep=10000, backend="cupti")
+    latency = do_bench(lambda: kernel(Q, K, V, sinks), backend="cupti")
     return latency
 
 

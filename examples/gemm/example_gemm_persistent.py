@@ -134,7 +134,7 @@ def run_regression_perf(M=4096, N=4096, K=4096):
     num_stages = 3
     persistent_kernel = matmul_persistent(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, threads, num_stages)
     persistent_profiler = persistent_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
-    return persistent_profiler.do_bench(warmup=500, backend="cupti")
+    return persistent_profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

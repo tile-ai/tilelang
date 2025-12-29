@@ -599,11 +599,14 @@ void ArgBinder::BindDLTensors(
         break;
       }
 
-      // The "real" runtime shape value read from DLTensor
-      PrimExpr shape_val =
+      // The "real" runtime shape value read from DLTensor.
+      // Guard the load with `is_null` to avoid dereferencing NULL handles.
+      PrimExpr raw_shape_val =
           cast(buffer->shape[k].dtype(),
                BufferLoad(buf_shape,
                           {IntImm(DataType::Int(32), static_cast<int>(k))}));
+      PrimExpr shape_val = tvm::if_then_else(
+          Not(is_null), raw_shape_val, make_const(raw_shape_val.dtype(), 0));
 
       // Check if this dimension is a symbolic variable
       if (const VarNode *v = buffer->shape[k].as<VarNode>()) {
@@ -658,8 +661,8 @@ void ArgBinder::BindDLTensors(
               }
               Buffer src_shape_buf = it_buf->second;
 
-              // Construct the shape load
-              PrimExpr src_shape_val =
+              // Construct the shape load and guard it if the source may be NULL
+              PrimExpr src_raw_shape_val =
                   cast(buffer->shape[k].dtype(),
                        BufferLoad(src_shape_buf,
                                   {IntImm(DataType::Int(32),
@@ -671,18 +674,25 @@ void ArgBinder::BindDLTensors(
               if (is_first_source) {
                 // Base case: use this shape value directly (we know at least
                 // one is non-null from assert)
-                cascaded_value = src_shape_val;
+                if (src_is_used) {
+                  cascaded_value = src_raw_shape_val;
+                } else {
+                  Var src_is_null = is_null_map[src.buf_name];
+                  cascaded_value = tvm::if_then_else(
+                      Not(src_is_null), src_raw_shape_val,
+                      make_const(src_raw_shape_val.dtype(), 0));
+                }
                 is_first_source = false;
               } else {
                 // if !is_null then use this shape, else use previous cascaded
                 // value But if buffer is used (non-nullable), always use its
                 // shape
                 if (src_is_used) {
-                  cascaded_value = src_shape_val;
+                  cascaded_value = src_raw_shape_val;
                 } else {
                   Var src_is_null = is_null_map[src.buf_name];
                   cascaded_value = tvm::if_then_else(
-                      Not(src_is_null), src_shape_val, cascaded_value);
+                      Not(src_is_null), src_raw_shape_val, cascaded_value);
                 }
               }
             }
@@ -694,8 +704,8 @@ void ArgBinder::BindDLTensors(
             init_nest_.emplace_back(
                 LetStmt(v_arg, cascaded_value, Evaluate(0)));
           } else {
-            // Single source or no special handling needed, use the original
-            // nullable binding
+            // Single source or no special handling needed, use nullable
+            // binding. When the only source is NULL, bind m to 0 safely.
             BindNullable(buffer->shape[k], shape_val, shape_element_name(k),
                          true, is_null);
           }
