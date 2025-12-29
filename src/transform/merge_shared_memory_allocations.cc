@@ -751,7 +751,8 @@ private:
                 if (lhs.size_bytes != rhs.size_bytes) {
                   return lhs.size_bytes > rhs.size_bytes;
                 }
-                // Use name comparison for deterministic ordering instead of pointer comparison
+                // Use name comparison for deterministic ordering instead of
+                // pointer comparison
                 return lhs.var->name_hint < rhs.var->name_hint;
               });
 
@@ -1101,7 +1102,8 @@ private:
       }
     }
 
-    // Create a sorted vector of keys from shmem_allocs_ for deterministic iteration
+    // Create a sorted vector of keys from shmem_allocs_ for deterministic
+    // iteration
     std::vector<const VarNode *> sorted_vars;
     sorted_vars.reserve(shmem_allocs_.size());
     for (const auto &kv : shmem_allocs_) {
