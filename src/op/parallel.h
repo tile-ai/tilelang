@@ -101,8 +101,9 @@ private:
   Fragment CompleteBufferFragment(const Buffer &buffer) const;
   // Check if the buffer is accessed with common indices (i.e., loop variables).
   bool IsCommonAccessIndice(const Buffer &buffer) const;
-  // Validate a candidate loop layout against all source fragments in T.layout_map.
-  // Returns true if compatible with all fragments; otherwise false. Does not throw.
+  // Validate a candidate loop layout against all source fragments in
+  // T.layout_map. Returns true if compatible with all fragments; otherwise
+  // false. Does not throw.
   bool ValidateCandidateAgainstFragments(const Fragment &candidate,
                                          const LayoutInferArgs &T) const;
   // Choose the better loop layout from two candidates using validation,
@@ -113,7 +114,8 @@ private:
   // Compute loop layout from a source buffer's fragment mapping.
   Fragment ComputeLoopLayoutFromBuffer(const Buffer &buffer,
                                        const LayoutInferArgs &T) const;
-  // Compute plan-based loop layout candidate using vectorization and thread bounds.
+  // Compute plan-based loop layout candidate using vectorization and thread
+  // bounds.
   Fragment ComputePlanCandidate(const LayoutInferArgs &T) const;
   // Add replication guard predicates when needed for cross-thread stores.
   void BuildReplicationGuardsIfNeeded(

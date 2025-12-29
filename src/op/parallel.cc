@@ -470,10 +470,9 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           << "[FreeInfer] only compute_from_buffer available, choose it.";
     }
 
-    BuildReplicationGuardsIfNeeded(T, store_shared_global_buffers,
-                                   store_fragment_buffers,
-                                   has_cross_thread_access,
-                                   const_index_fragment_buffer);
+    BuildReplicationGuardsIfNeeded(
+        T, store_shared_global_buffers, store_fragment_buffers,
+        has_cross_thread_access, const_index_fragment_buffer);
   } else {
     return {};
   }
@@ -611,8 +610,9 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
   return true;
 }
 
-Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
-    const Buffer &buffer, const LayoutInferArgs &T) const {
+Fragment
+ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
+                                            const LayoutInferArgs &T) const {
   Fragment src_layout = T.layout_map[buffer].as<Fragment>().value();
   DLOG(INFO) << "[compute_loop_layout_from_buffer] infer from buffer `"
              << buffer << "` of layout " << src_layout->DebugOutput() << '\n';
@@ -628,7 +628,8 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
         src_layout->ForwardThread(indice_map_[buffer], rep);
     loop_var_to_thread = analyzer_.Simplify(loop_var_to_thread);
     PostOrderVisit(loop_var_to_thread, [&](const ObjectRef &objref) {
-      if (auto opt_var = objref.as<Var>(); opt_var && inner_vars_.count(*opt_var)) {
+      if (auto opt_var = objref.as<Var>();
+          opt_var && inner_vars_.count(*opt_var)) {
         std::ostringstream oss;
         oss << "loop_var_to_thread = " << loop_var_to_thread
             << "contains inner var" << *opt_var;
@@ -656,8 +657,7 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
   return result;
 }
 
-Fragment ParallelOpNode::ComputePlanCandidate(
-    const LayoutInferArgs &T) const {
+Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   // Vectorize Size must be aware of the buffer_remap
   // As the pass will do post processing to the layout
   auto maybe_remapped_root_ =
@@ -670,9 +670,8 @@ Fragment ParallelOpNode::ComputePlanCandidate(
     loop_total_size = loop_total_size * l.as<For>().value()->extent;
   DLOG(INFO) << "[PlanLoopPartition] loop_total_size = " << loop_total_size
              << '\n';
-  while (!analyzer_.CanProve(floormod(loop_total_size,
-                                      T.thread_bounds->extent * vector_size) ==
-                              0) &&
+  while (!analyzer_.CanProve(floormod(loop_total_size, T.thread_bounds->extent *
+                                                           vector_size) == 0) &&
          vector_size > 1)
     vector_size /= 2;
   DLOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
@@ -696,7 +695,8 @@ Fragment ParallelOpNode::ComputePlanCandidate(
              << " ############# vector_size = " << vector_size
              << ", thread_bounds = " << T.thread_bounds << '\n';
   auto plan = PlanLoopPartition(root_, vector_size, T.thread_bounds);
-  DLOG(INFO) << "[PlanLoopPartition] candidate = " << plan->DebugOutput() << '\n';
+  DLOG(INFO) << "[PlanLoopPartition] candidate = " << plan->DebugOutput()
+             << '\n';
   return plan;
 }
 
@@ -749,14 +749,16 @@ void ParallelOpNode::BuildReplicationGuardsIfNeeded(
     AddPredicate(EQ(rep, 0));
   }
 }
-Fragment ParallelOpNode::ChooseBestCandidate(
-    const Fragment &candidate_from_buffer, const Fragment &candidate_from_plan,
-    const LayoutInferArgs &T) const {
+Fragment
+ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
+                                    const Fragment &candidate_from_plan,
+                                    const LayoutInferArgs &T) const {
   // Strategy overview:
   // 1) Validate each candidate against all known source fragments. If only one
   //    is compatible, choose it immediately.
   // 2) If both are compatible, compare their containment relation:
-  //      - If buffer-based contains plan-based, prefer plan (usually smaller rep).
+  //      - If buffer-based contains plan-based, prefer plan (usually smaller
+  //      rep).
   //      - If plan-based contains buffer-based, prefer buffer.
   // 3) If neither contains the other, prefer the one with provably smaller or
   //    equal replication extent; otherwise fall back to buffer-based candidate.
@@ -778,7 +780,8 @@ Fragment ParallelOpNode::ChooseBestCandidate(
     return candidate_from_buffer;
   }
   if (plan_ok && !buf_ok) {
-    DLOG(INFO) << "[FreeInfer] prefer PlanLoopPartition (only valid candidate).";
+    DLOG(INFO)
+        << "[FreeInfer] prefer PlanLoopPartition (only valid candidate).";
     return candidate_from_plan;
   }
   if (!(buf_ok && plan_ok)) {
