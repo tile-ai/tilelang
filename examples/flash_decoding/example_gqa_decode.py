@@ -453,7 +453,7 @@ def run_regression_perf(batch: int = 1, heads: int = 32, groups: int = 8, kv_seq
     config, _ = get_heuristic_config()
     kernel = flashattn(batch, heads, groups, kv_seqlen, dim, **config)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
-    return profiler.do_bench(warmup=500, backend="cupti")
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

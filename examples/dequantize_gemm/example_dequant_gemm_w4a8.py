@@ -189,7 +189,7 @@ def run_regression_perf(m=128, n=256, k=256):
         block_M=32, block_N=32, block_K=128, num_stages=1, threads=128
     )
     profiler = kernel.get_profiler()
-    return profiler.do_bench(warmup=10, rep=100, backend="cupti")
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

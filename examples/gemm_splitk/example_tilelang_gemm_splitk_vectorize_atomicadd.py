@@ -76,7 +76,7 @@ def run_regression_perf():
     def run_kernel_only():
         kernel(a, b, c)
 
-    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

@@ -627,7 +627,7 @@ def run_regression_perf(
             moe.expert_output_routed,
         )
 
-    return do_bench(run_routed_kernel_only, warmup=100, rep=1000, backend="cupti")
+    return do_bench(run_routed_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

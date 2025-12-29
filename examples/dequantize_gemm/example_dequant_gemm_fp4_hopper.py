@@ -275,7 +275,7 @@ def run_regression_perf(m=256, n=256, k=256):
         block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1
     )
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
-    return profiler.do_bench(warmup=10, rep=100, backend="cupti")
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

@@ -378,7 +378,7 @@ def run_regression_perf():
     for kernel in kernel_list:
         profiler = kernel.get_profiler()
         # Benchmark the TileLang kernel itself, not the PyTorch reference.
-        latency += profiler.do_bench(warmup=50, backend="cupti")
+        latency += profiler.do_bench(backend="cupti")
     return latency / len(kernel_list)
 
 

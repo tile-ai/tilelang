@@ -65,7 +65,7 @@ def run_regression_perf():
     kernel = elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32")
     from tilelang.profiler import do_bench
 
-    return do_bench(lambda: kernel(a, b), warmup=10, rep=100, backend="cupti")
+    return do_bench(lambda: kernel(a, b), backend="cupti")
 
 
 if __name__ == "__main__":

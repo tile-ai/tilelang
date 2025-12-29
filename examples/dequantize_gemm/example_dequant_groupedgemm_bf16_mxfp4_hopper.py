@@ -556,9 +556,7 @@ def run_regression_perf(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_d
             split=split,
         )
 
-    return tilelang.profiler.do_bench(
-        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100, backend="cupti"
-    )
+    return tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), backend="cupti")
 
 
 if __name__ == "__main__":
