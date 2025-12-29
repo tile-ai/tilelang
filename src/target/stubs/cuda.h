@@ -27,8 +27,7 @@
 
 #pragma once
 
-#define TILELANG_LAZY_LOAD_LIBCUDA
-#include "origin/cuda.h" // Include the full CUDA driver API types
+#include "vendor/cuda.h" // Include the full CUDA driver API types
 
 // X-macro for listing all required CUDA driver API functions.
 // Format: _(function_name)

@@ -207,6 +207,7 @@ elseif(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
   set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc")
   add_compile_definitions("CUDA_MAJOR_VERSION=${CUDAToolkit_VERSION_MAJOR}")
+  add_compile_definitions("TILELANG_LAZY_LOAD_LIBCUDA=1")
 
   # Set `USE_CUDA=/usr/local/cuda-x.y`
   cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
