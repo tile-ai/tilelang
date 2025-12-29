@@ -33,6 +33,10 @@ ExtractFuncInfo(const IRModule &mod) {
         dtype = DataType::Int(32);
       info.arg_types.push_back(dtype);
     }
+    if (f->HasNonzeroAttr(tl::attr::kHasGridSync)) {
+      info.launch_param_tags.push_back(
+          runtime::launch_param::kUseProgramaticDependentLaunch);
+    }
     if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(
             tir::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
@@ -40,10 +44,6 @@ ExtractFuncInfo(const IRModule &mod) {
       }
     }
     auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
-    if (f->HasNonzeroAttr(tl::attr::kHasGridSync)) {
-      info.launch_param_tags.push_back(
-          runtime::launch_param::kUseProgramaticDependentLaunch);
-    }
     fmap[static_cast<std::string>(global_symbol.value())] = info;
   }
   return fmap;
