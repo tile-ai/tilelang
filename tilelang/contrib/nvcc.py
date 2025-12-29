@@ -415,7 +415,7 @@ def get_target_compute_version(target=None):
             minor = arch[2]
             return major + "." + minor
         else:
-            raise ValueError("Unsupported arch: {}")
+            raise ValueError(f"Unsupported arch: {arch}")
 
     # 3. GPU compute version
     if tvm.cuda(0).exist:
