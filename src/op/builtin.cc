@@ -10,7 +10,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "../target/cuda.h"
+#include "../target/stubs/cuda.h"
 #include "../target/utils.h"
 
 namespace tvm {
