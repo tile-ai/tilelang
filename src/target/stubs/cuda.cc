@@ -63,7 +63,6 @@ template <typename T> T get_symbol(void *handle, const char *name) {
  * Required symbols that are missing will cause an exception.
  * Optional symbols that are missing will be set to nullptr.
  *
- * \param[out] available Set to true if libcuda.so was loaded successfully.
  * \return The initialized CUDADriverAPI instance.
  * \throws std::runtime_error if a required symbol is missing.
  */

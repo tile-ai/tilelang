@@ -395,7 +395,9 @@ endforeach()
 
 # Exclude libcuda.so to allow importing on a CPU-only machine
 if(USE_CUDA AND PATCHELF_EXECUTABLE)
-  # Run patchelf on built libraries to avoid race conditions during linking: use `install(CODE ...)`
+  # Run `patchelf` on built libraries to remove libcuda.so dependency.
+  # Use `install(CODE ...)` instead of `add_custom_command(... POST_BUILD ...)`
+  # to avoid race conditions during linking.
   foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
     install(CODE "
       execute_process(
