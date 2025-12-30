@@ -4,7 +4,7 @@
 namespace tvm {
 namespace codegen {
 
-runtime::Module BuildMetal(IRModule mod, Target target) {
+ffi::Module BuildMetal(IRModule mod, Target target) {
   bool output_ssa = false;
   mod = tir::transform::PointerValueTypeRewrite()(std::move(mod));
 
@@ -15,8 +15,8 @@ runtime::Module BuildMetal(IRModule mod, Target target) {
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>()) << "CodeGenMetal: Can only take PrimFunc";
-    auto global_symbol = kv.second->GetAttr<String>(tvm::attr::kGlobalSymbol);
-    ICHECK(global_symbol.defined());
+    auto global_symbol = kv.second->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
+    ICHECK(global_symbol.has_value());  
     std::string func_name = global_symbol.value();
 
     source_maker << "// Function: " << func_name << "\n";
@@ -40,10 +40,10 @@ runtime::Module BuildMetal(IRModule mod, Target target) {
   return codegen::DeviceSourceModuleCreate(source_maker.str(), fmt, ExtractFuncInfo(mod), "metal");
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("target.build.tilelang_metal", BuildMetal);
-});
+}
 
 }  // namespace codegen
 }  // namespace tvm
