@@ -695,8 +695,24 @@ std::string FragmentNode::DebugOutput() const {
 bool LayoutNode::IsEqual(const LayoutNode *other, bool skip_index) const {
   bool ret = StructuralEqual()(this->InputShape(), other->InputShape());
   ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
+  if (!ret) {
+    return false;
+  }
   if (!skip_index) {
-    ret &= StructuralEqual()(this->forward_index_, other->forward_index_);
+    // Create common variables for comparison. Using Forward with common
+    // variables ensures we compare the actual mapping rather than AST
+    // structure, since InputPlaceholder may compare equal in StructuralEqual.
+    Array<PrimExpr> common_vars;
+    for (size_t i = 0; i < this->InputDim(); i++) {
+      common_vars.push_back(Var("_cmp_v" + std::to_string(i)));
+    }
+
+    auto this_forward = this->Forward(common_vars);
+    auto other_forward = other->Forward(common_vars);
+
+    if (!StructuralEqual()(this_forward, other_forward)) {
+      return false;
+    }
   }
   return ret;
 }
@@ -717,8 +733,32 @@ bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
   ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
   ret &= StructuralEqual()(this->ReplicateExtent(), other->ReplicateExtent());
   ret &= StructuralEqual()(this->ThreadExtent(), other->ThreadExtent());
+  if (!ret) {
+    return false;
+  }
   if (!skip_index) {
-    ret &= StructuralEqual()(this->forward_index_, other->forward_index_);
+    // Create common variables for comparison. Using Forward/ForwardThread with
+    // common variables ensures we compare the actual mapping rather than AST
+    // structure, since InputPlaceholder may compare equal in StructuralEqual.
+    Array<PrimExpr> common_vars;
+    for (size_t i = 0; i < this->InputDim(); i++) {
+      common_vars.push_back(Var("_cmp_v" + std::to_string(i)));
+    }
+    Var common_rep("_cmp_rep");
+
+    auto this_forward = this->Forward(common_vars);
+    auto other_forward = other->Forward(common_vars);
+
+    if (!StructuralEqual()(this_forward, other_forward)) {
+      return false;
+    }
+
+    // Also compare forward_thread mapping.
+    auto this_thread = this->ForwardThread(common_vars, common_rep);
+    auto other_thread = other->ForwardThread(common_vars, common_rep);
+    if (!StructuralEqual()(this_thread, other_thread)) {
+      return false;
+    }
   }
   return ret;
 }
