@@ -83,7 +83,7 @@ std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
  *
  * @note An ICHECK failure is raised if a provided kPack is not 1 or 2.
  */
-GemmSP::GemmSP(Array<PrimExpr> args) {
+GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
   node->aRegion_ = NormalizeToBufferRegion(args[0]);
   node->eRegion_ = NormalizeToBufferRegion(args[1]);
@@ -221,7 +221,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
   if (completed_)
     return {};
   LayoutMap results;
-  ICHECK(c_.scope() == "local.fragment");
+  ICHECK(IsFragmentBuffer(c_));
   auto thread_range = T.thread_bounds;
   auto block_size = *as_const_int(thread_range->extent);
   if (TargetIsHopper(T.target)) {
@@ -273,7 +273,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
       results.Set(a_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
                                                    a_->dtype.bits()));
-    } else if (a_.scope() == "local.fragment") {
+    } else if (IsFragmentBuffer(a_)) {
       // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
       //                                   A->dtype.bits(), trans_A);
       // results.Set(A, fragment->BindThreadRange(thread_range));
@@ -287,7 +287,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
       results.Set(b_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
                                                    b_->dtype.bits()));
-    } else if (b_.scope() == "local.fragment") {
+    } else if (IsFragmentBuffer(b_)) {
       // auto fragment =
       //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
       // results.Set(B, fragment->BindThreadRange(thread_range));

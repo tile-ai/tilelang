@@ -50,7 +50,7 @@ using namespace tir;
  *       fails with an ICHECK (runtime assertion). No other validation is
  *       performed here.
  */
-GemmPy::GemmPy(Array<PrimExpr> args) {
+GemmPy::GemmPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmPyNode> node = tvm::ffi::make_object<GemmPyNode>();
 
   node->aRegion_ = NormalizeToBufferRegion(args[0]);
@@ -133,9 +133,7 @@ GemmInst GemmPyNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
-  } else if (TargetIsVolta(target) || TargetIsAmpere(target) ||
-             TargetIsTuring(target) || TargetIsHopper(target) ||
-             TargetIsSm100(target) || TargetIsSM120(target)) {
+  } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();

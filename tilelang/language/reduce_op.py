@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""Reduce operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
 from tvm import tir

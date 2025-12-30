@@ -14,7 +14,7 @@ Auto-tuning a Tile Language program involves three main steps:
 
 ## Matrix Multiplication Example
 
-The following example demonstrates auto-tuning matrix multiplication. Code has been simplified for readability - see `examples/gemm/example_gemm.py` for complete implementation. 
+The following example demonstrates auto-tuning matrix multiplication. Code has been simplified for readability - see `examples/gemm/example_gemm.py` for complete implementation.
 
 ### Step 1: Implement with Reserved Parameters
 Users can implement matrix multiplication in Tile Language while reserving parameters for optimization:

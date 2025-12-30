@@ -293,7 +293,7 @@ def matmul_configs(M, N, K):
 
 Tune compile‑time options explicitly:
 - `target='auto'|'cuda'|'hip'|'metal'` (normalized to a TVM Target)
-- `execution_backend='auto'|'tvm_ffi'|'ctypes'|'cython'|'nvrtc'|'torch'`
+- `execution_backend='auto'|'tvm_ffi'|'cython'|'nvrtc'|'torch'`
 - `pass_configs={...}` to toggle TileLang/TVM passes for experiments
 
 On CUDA with multiple GPUs, the tuner sets the current device per worker thread

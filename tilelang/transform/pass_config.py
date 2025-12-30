@@ -10,19 +10,8 @@ class PassConfigKey(str, Enum):
     TL_SIMPLIFY = "tl.Simplify"
     """Enable/disable TileLang simplification passes. Default: True"""
 
-    TL_DYNAMIC_ALIGNMENT = "tl.dynamic_alignment"
-    """Memory alignment requirement for dynamic shapes. Default: 16"""
-
-    TL_DISABLE_DYNAMIC_TAIL_SPLIT = "tl.disable_dynamic_tail_split"
-    """Disable dynamic tail splitting optimization. Default: False"""
-
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
-
-    TL_DISABLE_FAST_MATH = "tl.disable_fast_math"
-    """Disable fast math optimization. Default: True
-    will be deprecated in the 0.1.7 release
-    """
 
     TL_ENABLE_FAST_MATH = "tl.enable_fast_math"
     """
@@ -83,6 +72,9 @@ class PassConfigKey(str, Enum):
 
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
+
+    TL_AST_PRINT_ENABLE = "tl.ast_print_enable"
+    """Enable TIR AST printing for debugging purposes. Default: False"""
 
     TL_LAYOUT_VISUALIZATION_ENABLE = "tl.layout_visualization_enable"
     """Enable layout inference visualization. Default: False"""

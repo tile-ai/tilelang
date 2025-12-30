@@ -55,19 +55,12 @@ static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
+static constexpr const char *kASTPrintEnable = "tl.ast_print_enable";
 static constexpr const char *kLayoutVisualizationEnable =
     "tl.layout_visualization_enable";
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
-/*!
- * \brief Whether to disable dynamic tail split
- *
- * kDisableDynamicTailSplit = "tl.disable_dynamic_tail_split"
- *
- */
-static constexpr const char *kDisableDynamicTailSplit =
-    "tl.disable_dynamic_tail_split";
 
 /*!
  * \brief Whether to disable thread storage synchronization
@@ -90,18 +83,6 @@ static constexpr const char *kDisableThreadStorageSync =
  *
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
-
-/*!
- * \brief The size of the vectorized dimension in buffer, designed by user
- *
- * For example, if the vectorized dimension is 128 bits and the dtype of buffer
- * A[m, k] is float16, the size of the vectorized dimension (i.e. k) in buffer A
- * should be divisible by 8 (8 = 128 / 16).
- *
- * kDynamicAlignment = "tl.dynamic_alignment"
- *
- */
-static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
 
 /*!
  * \brief Get the type of the CUDA tensor map

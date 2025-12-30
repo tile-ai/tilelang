@@ -83,8 +83,8 @@ cdef class CythonKernelWrapper:
                 tensor_device = tensor.device
                 device_type_match = device.type == tensor_device.type
                 device_index_match = (
-                    tensor_device.index is None or 
-                    device.index is None or 
+                    tensor_device.index is None or
+                    device.index is None or
                     tensor_device.index == device.index
                 )
                 if not (device_type_match and device_index_match):
@@ -116,7 +116,7 @@ cdef class CythonKernelWrapper:
                     f"expected {len(shape_list)} dimensions, "
                     f"got {tensor.dim()}"
                 )
-                
+
             # Check each dimension
             for shape_idx, expected_shape in shape_list:
                 actual_shape = tensor.shape[shape_idx]
@@ -176,7 +176,7 @@ cdef class CythonKernelWrapper:
             )
 
         # Use current CUDA stream if none specified
-        if stream == -1: 
+        if stream == -1:
             if torch.cuda.is_available():
                 try:
                     stream = torch._C._cuda_getCurrentRawStream(torch.cuda.current_device())
@@ -239,7 +239,7 @@ cdef class CythonKernelWrapper:
             torch.int64: ctypes.c_int64,
             torch.bool: ctypes.c_bool,
         }
-        
+
         call_args = []
         for i, tensor in enumerate(tensor_list):
             if isinstance(tensor, torch.Tensor):
@@ -286,4 +286,3 @@ cdef class CythonKernelWrapper:
             return tensor_list[self.result_idx[0]]
         else:
             return [tensor_list[i] for i in self.result_idx]
-    

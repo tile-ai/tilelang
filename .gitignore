@@ -120,3 +120,6 @@ maint/host_checks/logs/*
 
 # clang-tidy
 /run-clang-tidy.py
+
+# perf regression test
+.perf_regression/

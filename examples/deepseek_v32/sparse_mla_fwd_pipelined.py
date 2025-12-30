@@ -112,7 +112,7 @@ def sparse_mla_fwd(
             alpha_local = T.alloc_fragment([H_per_block], accum_dtype)
             m_i = T.alloc_fragment([H_per_block], accum_dtype)
             m_i_prev = T.alloc_fragment([H_per_block], accum_dtype)
-            indices_local = T.alloc_local([1], indices_dtype)
+            indices_local = T.alloc_var(indices_dtype)
 
             # TODO: Multi buffer
             bar_q = T.alloc_barrier(arrive_count=384)
@@ -263,44 +263,44 @@ def sparse_mla_fwd(
                     # Buffer 0
                     T.barrier_wait(bar_k_0_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        indices_local[0] = Indices[b_i, s_i, g_i, (i_i * 2) * BI + r * 16 + (tx - 256) // 8]
-                        is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local[0] <= max_kv_i
+                        indices_local = Indices[b_i, s_i, g_i, (i_i * 2) * BI + r * 16 + (tx - 256) // 8]
+                        is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local <= max_kv_i
                         if is_kv_valid[r * 16 + (tx - 256) // 8]:
                             with T.attr("default", "async_scope", 1):
                                 for u in T.serial(4):
                                     for v in T.vectorized(8):
                                         KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local[0], g_i, 64 * u + (tx - 256) % 8 * 8 + v
+                                            b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8 + v
                                         ]
                                         KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local[0], g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
+                                            b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
                                         ]
                             with T.attr("default", "async_scope", 1):
                                 for v in T.vectorized(8):
                                     K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[
-                                        b_i, indices_local[0], g_i, D + (tx - 256) % 8 * 8 + v
+                                        b_i, indices_local, g_i, D + (tx - 256) % 8 * 8 + v
                                     ]
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
                     # Buffer 1
                     T.barrier_wait(bar_k_1_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        indices_local[0] = Indices[b_i, s_i, g_i, (i_i * 2 + 1) * BI + r * 16 + (tx - 256) // 8]
-                        is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local[0] <= max_kv_i
+                        indices_local = Indices[b_i, s_i, g_i, (i_i * 2 + 1) * BI + r * 16 + (tx - 256) // 8]
+                        is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local <= max_kv_i
                         if is_kv_valid[r * 16 + (tx - 256) // 8]:
                             with T.attr("default", "async_scope", 1):
                                 for u in T.serial(4):
                                     for v in T.vectorized(8):
                                         KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local[0], g_i, 64 * u + (tx - 256) % 8 * 8 + v
+                                            b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8 + v
                                         ]
                                         KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local[0], g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
+                                            b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
                                         ]
                             with T.attr("default", "async_scope", 1):
                                 for v in T.vectorized(8):
                                     K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[
-                                        b_i, indices_local[0], g_i, D + (tx - 256) % 8 * 8 + v
+                                        b_i, indices_local, g_i, D + (tx - 256) % 8 * 8 + v
                                     ]
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
@@ -425,6 +425,37 @@ def test_sparse_mla_fwd_pipelined(
     print(f"Average time: {ms:.3f} ms")
     print(f"fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
     print(f"fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
+
+
+def run_regression_perf(B=1, S=4096, SKV=8192, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16, q_start_s_index=1024):
+    KV_stride = 1
+
+    torch.random.manual_seed(0)
+    q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True) / 10
+    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True) / 10
+    q.clamp_(-10, 10)
+    kv.clamp_(-10, 10)
+
+    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
+    for b in range(B):
+        for t in range(S):
+            for h in range(HKV):
+                i_i = torch.randperm(min(max(1, ((t + q_start_s_index) // KV_stride)), SKV))[:topk]
+                indices[b, t, h, : len(i_i)] = i_i
+
+    batch, seq_len, heads, dim_plus_tail_dim = q.shape
+    _, seq_len_kv, kv_group, _ = kv.shape
+    dim = 512
+    tail_dim = dim_plus_tail_dim - dim
+    CP0 = q_start_s_index == 0
+    kernel = sparse_mla_fwd(batch, seq_len, seq_len_kv, heads, dim, tail_dim, topk, KV_stride, kv_group, None, True, CP0)
+
+    def run_kernel_only():
+        kernel(q, kv, indices, torch.tensor([q_start_s_index], dtype=torch.int32, device="cuda"))
+
+    from tilelang.profiler import do_bench
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

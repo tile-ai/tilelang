@@ -14,11 +14,11 @@
 
 TileLang is a domain-specific language (DSL) designed for writing high-performance GPU kernels. It provides three main levels of abstraction:
 
-* **Level 1:** A user writes pure compute logic without knowledge of or concern for hardware details (e.g., GPU caches, tiling, etc.). The compiler or runtime performs automatic scheduling and optimization. This level is conceptually similar to the idea behind TVM.
+- **Level 1:** A user writes pure compute logic without knowledge of or concern for hardware details (e.g., GPU caches, tiling, etc.). The compiler or runtime performs automatic scheduling and optimization. This level is conceptually similar to the idea behind TVM.
 
-* **Level 2:** A user is aware of GPU architecture concepts—such as shared memory, tiling, and thread blocks—but does not necessarily want to drop down to the lowest level of explicit thread control. This mode is somewhat comparable to Triton's programming model, where you can write tile-level operations and let the compiler do layout inference, pipelining, etc.
+- **Level 2:** A user is aware of GPU architecture concepts—such as shared memory, tiling, and thread blocks—but does not necessarily want to drop down to the lowest level of explicit thread control. This mode is somewhat comparable to Triton's programming model, where you can write tile-level operations and let the compiler do layout inference, pipelining, etc.
 
-* **Level 3:** A user takes full control of thread-level primitives and can write code that is almost as explicit as a hand-written CUDA/HIP kernel. This is useful for performance experts who need to manage every detail, such as PTX inline assembly, explicit thread behavior, etc.
+- **Level 3:** A user takes full control of thread-level primitives and can write code that is almost as explicit as a hand-written CUDA/HIP kernel. This is useful for performance experts who need to manage every detail, such as PTX inline assembly, explicit thread behavior, etc.
 
 ```{figure} ../_static/img/overview.png
 :width: 50%
@@ -52,12 +52,12 @@ While Level 1 in TileLang can be very comfortable for general users—since it r
 
 Below is a simplified code snippet for a 1024 x 1024 x 1024 matrix multiplication. It uses:
 
-* **`T.Kernel(...)`** to initialize the thread block configuration (grid dimensions, block size, etc.).
-* **`T.alloc_shared(...)`** to allocate GPU shared memory.
-* **`T.alloc_fragment(...)`** to allocate a register fragment for accumulation.
-* **`T.Pipelined(...)`** to express software pipelining across the K dimension.
-* **`T.Parallel(...)`** to parallelize data copy loops.
-* **`T.gemm(...)`** to perform tile-level GEMM operations (which map to the appropriate backends, such as MMA instructions on NVIDIA GPUs).
+- **`T.Kernel(...)`** to initialize the thread block configuration (grid dimensions, block size, etc.).
+- **`T.alloc_shared(...)`** to allocate GPU shared memory.
+- **`T.alloc_fragment(...)`** to allocate a register fragment for accumulation.
+- **`T.Pipelined(...)`** to express software pipelining across the K dimension.
+- **`T.Parallel(...)`** to parallelize data copy loops.
+- **`T.gemm(...)`** to perform tile-level GEMM operations (which map to the appropriate backends, such as MMA instructions on NVIDIA GPUs).
 
 ```python
 import tilelang
@@ -147,13 +147,11 @@ with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx,
 - This sets up the block grid dimensions based on N/block_N and M/block_M.
 - `threads=128` specifies that each thread block uses 128 threads. The compiler will infer how loops map to these threads.
 
-
 ```{figure} ../_static/img/Parallel.png
 :alt: Parallel
 :align: center
 
 ```
-
 
 2. **Shared & Fragment Memory**:
 
@@ -181,7 +179,6 @@ for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
 :align: center
 
 ```
-
 
 4. **Parallel Copy**:
 
@@ -252,8 +249,8 @@ For more advanced usage—including partial lowering, explicitly controlling thr
 
 ## Further Resources
 
-* [TileLang GitHub](https://github.com/tile-ai/tilelang)
-* [BitBLAS](https://github.com/tile-ai/bitblas)
-* [Triton](https://github.com/openai/triton)
-* [Cutlass](https://github.com/NVIDIA/cutlass)
-* [PyCUDA](https://documen.tician.de/pycuda/)  <!-- codespell:ignore -->
+- [TileLang GitHub](https://github.com/tile-ai/tilelang)
+- [BitBLAS](https://github.com/tile-ai/bitblas)
+- [Triton](https://github.com/openai/triton)
+- [Cutlass](https://github.com/NVIDIA/cutlass)
+- [PyCUDA](https://documen.tician.de/pycuda/)  <!-- codespell:ignore -->

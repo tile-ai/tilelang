@@ -483,18 +483,20 @@ Layout LayoutNode::Inverse() const {
 PrimExpr infer_fragment_index(const Map<Var, Range> &input_iters,
                               const PrimExpr &forward_thread,
                               arith::Analyzer *analyzer) {
-  Array<arith::IterSplitExpr> splits = DivideUnusedIterators(
-      {forward_thread}, ToIterVars(input_iters), analyzer);
-
-  Array<arith::IterSplitExpr> split_without_rep;
-  for (const auto &split : splits) {
-    CHECK(split->source->source.as<Var>());
-    if (split->source->source.as<Var>().value().same_as(
-            ReplicationPlaceholder()))
-      continue;
-    split_without_rep.push_back(split);
+  // we build iter_vars from input_iters, but set _rep to range [0, 1)
+  // to make it not contribute to the index of the forward_idx
+  Array<IterVar> iter_vars;
+  for (const auto &[var, range_] : input_iters) {
+    Range range = range_;
+    if (var.same_as(ReplicationPlaceholder())) {
+      range = Range(0, 1);
+    }
+    iter_vars.push_back(IterVar(range, var, IterVarType::kDataPar));
   }
-  return MakeFlattenedExpression(split_without_rep);
+
+  Array<arith::IterSplitExpr> splits =
+      DivideUnusedIterators({forward_thread}, iter_vars, analyzer);
+  return MakeFlattenedExpression(splits);
 }
 
 FragmentNode::FragmentNode(Array<PrimExpr> input_size,
@@ -547,6 +549,12 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
   auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index,
                                                forward_thread, replicate_size);
   data_ = std::move(n);
+}
+
+Fragment Fragment::FullyReplicated(Array<PrimExpr> shape,
+                                   PrimExpr thread_extent) {
+  return Fragment(shape, {}, ReplicationPlaceholder(), thread_extent,
+                  std::nullopt);
 }
 
 // which means the forward_thread is rep_var -> lambda i, rep: rep
@@ -825,9 +833,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              return makeQuarterBankSwizzleLayout(stride, continuous,
                                                  element_size);
            })
-      .def("tl.make_linear_layout", [](int stride, int continuous) {
-        return makeGemmLayoutLinear(stride, continuous);
-      });
+      .def("tl.make_linear_layout",
+           [](Array<PrimExpr> shape) { return makeLinearLayout(shape); });
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

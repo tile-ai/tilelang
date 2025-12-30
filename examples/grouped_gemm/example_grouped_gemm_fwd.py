@@ -61,27 +61,27 @@ def grouped_gemm(batch_sizes_list, K, N, block_M, block_N, block_K, num_stages=2
             A_shared = T.alloc_shared([block_M, block_K], dtype)
             B_shared = T.alloc_shared([block_K, block_N], dtype)
             C_local = T.alloc_fragment([block_M, block_N], accum_dtype)
-            cur_batch_idx = T.alloc_local([1], T.int32)
-            cur_batch_size = T.alloc_local([1], T.int32)
+            cur_batch_idx = T.alloc_var(dtype=T.int32)
+            cur_batch_size = T.alloc_var(dtype=T.int32)
 
             m_start_padded = bx * block_M
 
             for i in range(batch_count):
                 in_cur_batch_idx = m_start_padded >= batch_padded_offsets[i]
-                cur_batch_idx[0] = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx[0])
+                cur_batch_idx = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx)
 
-            cur_batch_size[0] = batch_sizes[cur_batch_idx[0]]
-            m_start = m_start_padded - batch_padded_offsets[cur_batch_idx[0]] + batch_offsets[cur_batch_idx[0]]
-            actual_rows = T.max(0, T.min(block_M, cur_batch_size[0] + batch_padded_offsets[cur_batch_idx[0]] - m_start_padded))
+            cur_batch_size = batch_sizes[cur_batch_idx]
+            m_start = m_start_padded - batch_padded_offsets[cur_batch_idx] + batch_offsets[cur_batch_idx]
+            actual_rows = T.max(0, T.min(block_M, cur_batch_size + batch_padded_offsets[cur_batch_idx] - m_start_padded))
 
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A[m_start : m_start + block_M, k * block_K : (k + 1) * block_K], A_shared)
-                T.copy(B[cur_batch_idx[0], k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N], B_shared)
+                T.copy(B[cur_batch_idx, k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
 
             for i, j in T.Parallel(block_M, block_N):
-                with T.If(i < actual_rows), T.Then():
+                if i < actual_rows:
                     C[m_start + i, by * block_N + j] = C_local[i, j]
 
     return kernel

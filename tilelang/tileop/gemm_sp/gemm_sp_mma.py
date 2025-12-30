@@ -86,6 +86,7 @@ class GemmSPMMA(GemmSPBase):
         E_shared = self.E
         B_shared = self.B
         C_local = self.C
+        clear_accum = self.clear_accum
         assert micro_size_k <= self.K, f"K dimension {self.K} should be >= micro size k {micro_size_k}"
         if self.is_gemm_ss():
 
@@ -99,6 +100,9 @@ class GemmSPMMA(GemmSPBase):
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
                 E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+
+                if clear_accum:
+                    T.clear(C_local)
 
                 for ki in T.serial(0, (self.K // micro_size_k)):
                     # Load A into fragment
@@ -141,6 +145,9 @@ class GemmSPMMA(GemmSPBase):
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
                 E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
 
+                if clear_accum:
+                    T.clear(C_local)
+
                 for ki in T.serial(0, (self.K // micro_size_k)):
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
@@ -177,6 +184,9 @@ class GemmSPMMA(GemmSPBase):
                 E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
+                if clear_accum:
+                    T.clear(C_local)
+
                 for ki in T.serial(0, (self.K // micro_size_k)):
                     # Load E into fragment
                     mma_emitter.ldmatrix_e(
@@ -210,6 +220,9 @@ class GemmSPMMA(GemmSPBase):
                 accumulating into C_local.
                 """
                 E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
+
+                if clear_accum:
+                    T.clear(C_local)
 
                 for ki in T.serial(0, (self.K // micro_size_k)):
                     # Load E into fragment

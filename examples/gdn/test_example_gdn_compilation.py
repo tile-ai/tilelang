@@ -1,5 +1,4 @@
 import torch
-import tilelang.testing
 from tilelang import language as T
 
 B = 1
@@ -21,7 +20,7 @@ save_new_value = True
 block_DK = 64
 block_DV = 32
 threads = 128
-num_stages = 1
+num_stages = 0
 
 
 def test_example_wy_fast_compilation():
@@ -317,4 +316,5 @@ def test_example_chunk_delta_bwd_compilation():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_example_chunk_delta_bwd_compilation()

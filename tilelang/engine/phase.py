@@ -63,6 +63,12 @@ def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
     return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
 
 
+def should_enable_ast_print(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_AST_PRINT_ENABLE, False))
+
+
 def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -112,8 +118,9 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     Note: This is a validation-only pipeline of passes and does not modify or return the module.
     """
 
-    # Debug
-    # tilelang.analysis.ASTPrinter()(mod)
+    # Print AST for debugging purpose
+    if should_enable_ast_print():
+        tilelang.analysis.ASTPrinter()(mod)
     # Check if there are any invalid nested loops.
     tilelang.analysis.NestedLoopChecker()(mod)
     # Check if there are any invalid symbolic T.Parallel + fragment access.

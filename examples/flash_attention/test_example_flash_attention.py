@@ -13,6 +13,7 @@ import example_mha_fwd_varlen
 import example_mha_bwd_bshd_wgmma_pipelined
 import example_mha_fwd_bhsd
 import example_gqa_bwd_tma_reduce_varlen
+import example_gqa_fwd_varlen
 
 
 @tilelang.testing.requires_cuda
@@ -94,7 +95,14 @@ def test_example_mha_fwd_bshd():
 
 @tilelang.testing.requires_cuda
 def test_example_mha_fwd_varlen():
-    example_mha_fwd_varlen.main(batch=4, heads=16, seq_len=512, dim=64)
+    example_mha_fwd_varlen.main(batch=4, heads=16, seq_len=512, dim=64, causal=False)
+    example_mha_fwd_varlen.main(batch=4, heads=16, seq_len=512, dim=64, causal=True)
+
+
+@tilelang.testing.requires_cuda
+def test_example_gqa_fwd_varlen():
+    example_gqa_fwd_varlen.main(batch=4, heads=16, q_seqlen=512, k_seqlen=512, dim=64, is_causal=False)
+    example_gqa_fwd_varlen.main(batch=4, heads=16, q_seqlen=512, k_seqlen=512, dim=64, is_causal=True)
 
 
 if __name__ == "__main__":

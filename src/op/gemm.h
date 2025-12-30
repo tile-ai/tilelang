@@ -22,8 +22,41 @@ enum class GemmWarpPolicyType : uint8_t {
   kFree = 3,
 };
 
+/// Convert GemmWarpPolicyType enum to string for debugging
+inline const char *GemmWarpPolicyTypeToString(GemmWarpPolicyType type) {
+  switch (type) {
+  case GemmWarpPolicyType::kSquare:
+    return "Square";
+  case GemmWarpPolicyType::kFullRow:
+    return "FullRow";
+  case GemmWarpPolicyType::kFullCol:
+    return "FullCol";
+  case GemmWarpPolicyType::kFree:
+    return "Free";
+  default:
+    return "Unknown";
+  }
+}
+
 // Target GEMM instruction
 enum class GemmInst : uint8_t { kMMA, kWGMMA, kTCGEN5MMA, kMFMA };
+
+/// Convert GemmInst enum to string for debugging
+inline const char *GemmInstToString(GemmInst inst) {
+  switch (inst) {
+  case GemmInst::kMMA:
+    return "MMA";
+  case GemmInst::kWGMMA:
+    return "WGMMA";
+  case GemmInst::kTCGEN5MMA:
+    return "TCGEN5MMA";
+  case GemmInst::kMFMA:
+    return "MFMA";
+  default:
+    return "Unknown";
+  }
+}
+
 class GemmWarpPolicyNode : public Object {
 public:
   mutable int m_warp{0};
@@ -144,7 +177,8 @@ private:
 class Gemm : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Gemm, TileOperator, GemmNode);
-  TVM_DLL Gemm(Array<PrimExpr> args);
+  TVM_DLL Gemm(Array<PrimExpr> args,
+               Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

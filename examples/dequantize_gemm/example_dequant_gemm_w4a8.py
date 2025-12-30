@@ -123,7 +123,6 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
                 T.annotate_layout(
                     {
                         B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                        Ct_shared: tilelang.layout.make_swizzled_layout(Ct_shared),
                     }
                 )
 
@@ -183,6 +182,14 @@ def main(m=128, n=256, k=256, tune=False):
         print(f"Bset latency: {best_latency}")
         print(f"Best config: {best_config}")
         print(f"Best tflops: {total_flops / best_latency * 1e-9}")
+
+
+def run_regression_perf(m=4096, n=4096, k=4096):
+    kernel = matmul_int8xint4(m, n, k, "int8", "int32", "int32", num_bits=4, tune=False)(
+        block_M=32, block_N=32, block_K=128, num_stages=1, threads=128
+    )
+    profiler = kernel.get_profiler()
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

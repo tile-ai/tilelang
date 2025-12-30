@@ -1,3 +1,5 @@
+"""Fast math operations exposed on the TileLang language surface."""
+
 from tvm import tir
 
 

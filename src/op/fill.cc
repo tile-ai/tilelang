@@ -58,7 +58,7 @@ using namespace tir;
  * lanes) and will terminate (via CHECK/ICHECK) if inputs are unsupported or out
  * of bounds.
  */
-Fill::Fill(Array<PrimExpr> args) {
+Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
 
   BufferRegion region = NormalizeToBufferRegion(args[0]);
@@ -156,10 +156,15 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * @return Stmt The lowered TIR statement implementing the fill.
  */
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (dst.scope() == "local.fragment") {
+  if (IsFragmentBuffer(dst)) {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                         false, T.buffer_remap},
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
@@ -169,15 +174,19 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                         vectorized_thread_loop);
     }
     return vectorized_thread_loop;
-  } else if (dst.scope() == "local") {
+  } else if (IsLocalBuffer(dst) || IsLocalVarBuffer(dst)) {
     auto init_loop = MakeSIMTLoop(analyzer);
     auto vectorized_thread_loop = VectorizeLoop(init_loop, analyzer);
     return vectorized_thread_loop;
-  } else if (dst.scope() == "shared.dyn" || dst.scope() == "shared" ||
-             dst.scope() == "global") {
+  } else if (IsSharedBuffer(dst) || IsGlobalBuffer(dst)) {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                         false, T.buffer_remap},
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());

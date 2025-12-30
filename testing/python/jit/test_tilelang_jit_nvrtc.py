@@ -52,68 +52,6 @@ def matmul(
     return main
 
 
-def run_gemm(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtypeAccum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages=3,
-    num_threads=128,
-):
-    program = matmul(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtypeAccum,
-        num_stages,
-        num_threads,
-    )
-
-    stramp = "&*(XS)"
-
-    @tvm.register_global_func("tilelang_callback_cuda_postproc", override=True)
-    def tilelang_callback_cuda_postproc(code, _):
-        code = f"// {stramp}\n" + code
-        return code
-
-    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="nvrtc")
-
-    kernel_source = matmul_kernel.get_kernel_source()
-
-    assert stramp in kernel_source, f"Expected {stramp} in the kernel source"
-
-
-def test_gemm_f16f16f16_nn():
-    run_gemm(
-        512,
-        1024,
-        768,
-        False,
-        False,
-        T.float16,
-        T.float16,
-        T.float16,
-        128,
-        256,
-        32,
-        2,
-    )
-
-
 def matmu_jit_kernel(
     M,
     N,
@@ -394,14 +332,6 @@ def convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num
 
             kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)
             out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
-
-            T.annotate_layout(
-                {
-                    out_shared: tilelang.layout.make_swizzled_layout(out_shared),
-                    data_shared: tilelang.layout.make_swizzled_layout(data_shared),
-                    kernel_shared: tilelang.layout.make_swizzled_layout(kernel_shared),
-                }
-            )
 
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):

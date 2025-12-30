@@ -114,18 +114,18 @@ CUresult tma_init(CUtensorMap* tma_descs, {func_args}) {{
 # Kernel initialization template
 CPP_KERNEL_INIT_TEMPLATE = """\
   // Find and configure kernel {kernel_idx}: {kernel_name}
-  result = find_kernel_by_pattern(g_module, "{kernel_name}", &g_kernels[{kernel_idx}]);
+  result = find_kernel_by_pattern(module, "{kernel_name}", &kernels[{kernel_idx}]);
   if (result != CUDA_SUCCESS) {{
-    std::cerr << "Failed to find kernel {kernel_name}: " << result << "\\n";
+    std::cerr << "Failed to find kernel {kernel_name} on device " << device_id << ": " << result << "\\n";
     return result;
   }}
 
   if ({smem_size} > 0) {{
-    result = cuFuncSetAttribute(g_kernels[{kernel_idx}],
+    result = cuFuncSetAttribute(kernels[{kernel_idx}],
                                 CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                                 {smem_size});
     if (result != CUDA_SUCCESS) {{
-      std::cerr << "Failed to set smem for {kernel_name}: " << result << "\\n";
+      std::cerr << "Failed to set smem for {kernel_name} on device " << device_id << ": " << result << "\\n";
       return result;
     }}
   }}
@@ -152,9 +152,17 @@ CPP_TMA_LAUNCH_INIT_TEMPLATE = """\
 CPP_KERNEL_LAUNCH_TEMPLATE = """\
   // Launch kernel {kernel_idx}: {kernel_name}
   {{
+    // Get the kernel for current device
+    auto kernels_it = g_device_kernels.find(device_id);
+    if (kernels_it == g_device_kernels.end()) {{
+      std::cerr << "Kernels not initialized for device " << device_id << "\\n";
+      return CUDA_ERROR_NOT_INITIALIZED;
+    }}
+    const std::vector<CUfunction>& kernels = kernels_it->second;
+
     void* args[] = {{{kernel_args}}};
     result = cuLaunchKernel(
-        g_kernels[{kernel_idx}],
+        kernels[{kernel_idx}],
         {grid_x}, {grid_y}, {grid_z},
         {block_x}, {block_y}, {block_z},
         {smem_size},
@@ -163,7 +171,7 @@ CPP_KERNEL_LAUNCH_TEMPLATE = """\
         nullptr
     );
     if (result != CUDA_SUCCESS) {{
-      std::cerr << "Failed to launch kernel {kernel_name}: " << result << "\\n";
+      std::cerr << "Failed to launch kernel {kernel_name} on device " << device_id << ": " << result << "\\n";
       return result;
     }}
   }}
@@ -178,19 +186,20 @@ CPP_LAUNCHER_TEMPLATE = """\
 #include <vector>
 #include <cstring>
 #include <string>
+#include <mutex>
+#include <unordered_map>
 
 // TVM Headers
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/function.h>
 
-// Cached module handle
-static CUmodule g_module = nullptr;
-static bool g_module_initialized = false;
-
-// Cached kernel functions
-static CUfunction g_kernels[{num_kernels}] = {{nullptr}};
-static bool g_kernels_initialized = false;
+// Per-device module and kernel storage for multi-GPU support
+// Each device needs its own CUmodule because modules are tied to CUDA contexts
+static std::unordered_map<int, CUmodule> g_device_modules;
+static std::unordered_map<int, std::vector<CUfunction>> g_device_kernels;
+static std::unordered_map<int, CUcontext> g_device_contexts;  // Track retained contexts for cleanup
+static std::mutex g_devices_mutex;
 
 // Find kernel by pattern (substring match, prefer base name over _N variants)
 CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction* out_func) {{
@@ -285,14 +294,52 @@ CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction
 }}
 
 
-// Initialize CUDA module (called once on first launch)
-static CUresult tilelang_init_cuda_module(const std::string& cubin_path) {{
-  if (g_module_initialized) return CUDA_SUCCESS;
+// Initialize CUDA module for a specific device (called once per device)
+// Thread-safe and supports multi-GPU by tracking modules per device
+// device_id: PyTorch CUDA device ID (e.g., 0, 1, 2...)
+static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int device_id) {{
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+
+  // Fast path: module already initialized for this device
+  if (g_device_modules.find(device_id) != g_device_modules.end()) {{
+    return CUDA_SUCCESS;
+  }}
 
   CUresult result;
   result = cuInit(0);
-  if (result != CUDA_SUCCESS) return result;
+  if (result != CUDA_SUCCESS) {{
+    std::cerr << "Failed to initialize CUDA: " << result << "\\n";
+    return result;
+  }}
 
+  // Get device handle for the requested device_id
+  CUdevice device;
+  result = cuDeviceGet(&device, device_id);
+  if (result != CUDA_SUCCESS) {{
+    std::cerr << "Failed to get CUDA device " << device_id << ": " << result << "\\n";
+    return result;
+  }}
+
+  // Retain and set the primary context for this device
+  // PyTorch (Runtime API) creates and activates the primary context
+  // We need to explicitly acquire it via Driver API and set it as current
+  CUcontext ctx;
+  result = cuDevicePrimaryCtxRetain(&ctx, device);
+  if (result != CUDA_SUCCESS) {{
+    std::cerr << "Failed to retain primary context for device " << device_id << ": " << result << "\\n";
+    return result;
+  }}
+
+  result = cuCtxSetCurrent(ctx);
+  if (result != CUDA_SUCCESS) {{
+    std::cerr << "Failed to set current context for device " << device_id << ": " << result << "\\n";
+    return result;
+  }}
+
+  // Store the retained context for cleanup
+  g_device_contexts[device_id] = ctx;
+
+  // Read cubin file
   std::ifstream cubin_file(cubin_path.c_str(), std::ios::binary);
   if (!cubin_file) {{
     std::cerr << "Failed to open cubin file: " << cubin_path << "\\n";
@@ -308,24 +355,47 @@ static CUresult tilelang_init_cuda_module(const std::string& cubin_path) {{
     return CUDA_ERROR_INVALID_IMAGE;
   }}
 
-  result = cuModuleLoadData(&g_module, cubin_data.data());
+  // Load module for this specific device
+  CUmodule module;
+  result = cuModuleLoadData(&module, cubin_data.data());
   if (result != CUDA_SUCCESS) {{
-    std::cerr << "Failed to load CUDA module: " << result << "\\n";
+    std::cerr << "Failed to load CUDA module on device " << device_id << ": " << result << "\\n";
     return result;
   }}
 
-  g_module_initialized = true;
+  // Store module for this device
+  g_device_modules[device_id] = module;
+
   return CUDA_SUCCESS;
 }}
 
-// Initialize all kernel functions (called once after module load)
-static CUresult tilelang_init_kernels() {{
-  if (g_kernels_initialized) return CUDA_SUCCESS;
+// Initialize kernel functions for a specific device (called once per device)
+// Thread-safe and supports multi-GPU by tracking kernels per device
+static CUresult tilelang_init_kernels(int device_id) {{
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+
+  // Fast path: kernels already initialized for this device
+  if (g_device_kernels.find(device_id) != g_device_kernels.end()) {{
+    return CUDA_SUCCESS;
+  }}
+
+  // Get the module for this device
+  auto module_it = g_device_modules.find(device_id);
+  if (module_it == g_device_modules.end()) {{
+    std::cerr << "Module not initialized for device " << device_id << "\\n";
+    return CUDA_ERROR_NOT_INITIALIZED;
+  }}
+  CUmodule module = module_it->second;
+
+  // Initialize kernel storage for this device
+  std::vector<CUfunction> kernels({num_kernels});
   CUresult result;
 
 {kernel_inits}
 
-  g_kernels_initialized = true;
+  // Store kernels for this device
+  g_device_kernels[device_id] = kernels;
+
   return CUDA_SUCCESS;
 }}
 
@@ -333,14 +403,14 @@ static CUresult tilelang_init_kernels() {{
 {tma_init_func}
 
 // Main kernel launcher
-extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, tvm::ffi::Bytes cubin_path) {{
+extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, int device_id, tvm::ffi::Bytes cubin_path) {{
   CUresult result;
 
   std::string cubin_path_str(reinterpret_cast<const char*>(cubin_path.data()), cubin_path.size());
-  result = tilelang_init_cuda_module(cubin_path_str);
+  result = tilelang_init_cuda_module(cubin_path_str, device_id);
   if (result != CUDA_SUCCESS) return result;
 
-  result = tilelang_init_kernels();
+  result = tilelang_init_kernels(device_id);
   if (result != CUDA_SUCCESS) return result;
 
 {get_ptr_code}
@@ -355,15 +425,53 @@ extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, tvm::ffi:
 
 // Cleanup function
 extern "C" CUresult cleanup_module() {{
-  if (g_module_initialized && g_module != nullptr) {{
-    cuModuleUnload(g_module);
-    g_module = nullptr;
-    g_module_initialized = false;
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+
+  CUresult last_error = CUDA_SUCCESS;
+
+  // Step 1: Unload modules for all devices
+  for (auto& pair : g_device_modules) {{
+    if (pair.second != nullptr) {{
+      CUresult result = cuModuleUnload(pair.second);
+      if (result != CUDA_SUCCESS) {{
+        std::cerr << "Failed to unload module for device " << pair.first
+                  << ": " << result << "\\n";
+        last_error = result;
+        // Continue cleanup even if unload fails
+      }}
+    }}
   }}
 
-  g_kernels_initialized = false;
+  // Step 2: Release primary contexts (must execute even if module unload failed)
+  // This ensures the reference count is decremented for every cuDevicePrimaryCtxRetain
+  for (auto& pair : g_device_contexts) {{
+    int device_id = pair.first;
+    CUcontext ctx = pair.second;
 
-  return CUDA_SUCCESS;
+    if (ctx != nullptr) {{
+      CUdevice device;
+      CUresult result = cuDeviceGet(&device, device_id);
+      if (result == CUDA_SUCCESS) {{
+        result = cuDevicePrimaryCtxRelease(device);
+        if (result != CUDA_SUCCESS) {{
+          std::cerr << "Failed to release primary context for device "
+                    << device_id << ": " << result << "\\n";
+          last_error = result;
+        }}
+      }} else {{
+        std::cerr << "Failed to get device " << device_id
+                  << " for context release: " << result << "\\n";
+        last_error = result;
+      }}
+    }}
+  }}
+
+  // Step 3: Clear all maps
+  g_device_modules.clear();
+  g_device_kernels.clear();
+  g_device_contexts.clear();
+
+  return last_error;
 }}
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(launch_kernel, launch_kernel);
@@ -505,8 +613,13 @@ def _load_cpp_launcher():
   _cpp_launcher = _cpp_launcher_lib["launch_kernel"]
   return _cpp_launcher
 
-def call({call_func_params}, stream):
-  \"\"\"Kernel dispatch function.\"\"\"
+def call({call_func_params}, stream, device_id=0):
+  \"\"\"Kernel dispatch function.
+
+  Args:
+      stream: CUDA stream handle
+      device_id: CUDA device ID (should be passed from caller, defaults to 0 for backward compatibility)
+  \"\"\"
   global _cubin_path_bytes, _cubin_needs_generation
 
   if _cubin_needs_generation:
@@ -516,7 +629,7 @@ def call({call_func_params}, stream):
 {arg_prep_code}
 
   launcher = _load_cpp_launcher()
-  result = launcher({launcher_call_args}, stream, _cubin_path_bytes)
+  result = launcher({launcher_call_args}, stream, device_id, _cubin_path_bytes)
 
   if result != 0:
     raise RuntimeError(f"Kernel launch failed with CUDA error {{result}}")

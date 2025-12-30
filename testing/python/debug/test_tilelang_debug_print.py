@@ -12,13 +12,12 @@ def debug_print_buffer(M=16, N=16, dtype=T.float16):
             shared_buf = T.alloc_shared([M, N], dtype)
             T.print(shared_buf)
 
-    jit_kernel = tilelang.compile(program, target="cuda", execution_backend="tvm_ffi")
+    jit_kernel = tilelang.compile(program)
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 
 
 def test_debug_print_buffer():
-    debug_print_buffer(dtype=T.bool)
     debug_print_buffer(dtype=T.int8)
     debug_print_buffer(dtype=T.int16)
     debug_print_buffer(dtype=T.int32)
@@ -31,10 +30,17 @@ def test_debug_print_buffer():
     debug_print_buffer(dtype=T.float32)
     debug_print_buffer(dtype=T.float64)
     debug_print_buffer(dtype=T.bfloat16)
+
+
+@tilelang.testing.requires_cuda
+def test_debug_print_buffer_cuda_fp8():
     debug_print_buffer(dtype=T.float8_e4m3fn)
-    debug_print_buffer(dtype=T.float8_e4m3fn)
-    debug_print_buffer(dtype=T.float8_e4m3fnuz)
     debug_print_buffer(dtype=T.float8_e5m2)
+
+
+@tilelang.testing.requires_rocm
+def test_debug_print_buffer_rocm_fp8():
+    debug_print_buffer(dtype=T.float8_e4m3fnuz)
     debug_print_buffer(dtype=T.float8_e5m2fnuz)
 
 

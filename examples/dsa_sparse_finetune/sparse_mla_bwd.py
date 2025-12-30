@@ -177,13 +177,6 @@ def bwd(
             T.clear(acc_dq)
             T.clear(acc_dq_tail)
 
-            T.annotate_layout(
-                {
-                    dQ_shared: tilelang.layout.make_swizzled_layout(dQ_shared),
-                    dQ_tail_shared: tilelang.layout.make_swizzled_layout(dQ_tail_shared),
-                }
-            )
-
             # Process each block of indices
             for i_i in T.Pipelined(NS, num_stages=num_stages):
                 # Check which indices are valid

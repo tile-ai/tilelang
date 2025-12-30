@@ -5,7 +5,7 @@
 </div>
 
 :::{warning}
-   This document is still **experimental** and may be incomplete.  
+   This document is still **experimental** and may be incomplete.
 
    This feature is still **experimental** and need further optimization.
 
@@ -40,7 +40,7 @@ Both `PyTorch` and `vLLM` use `CUTLASS` as their computation backend (see refere
 
 A set of **CUTLASS-compatible** compressors is provided in `tilelang.utils.sparse`, where a dense tensor—along with other required arguments (e.g., block_K for sm90, transpose options)—can be passed in to perform the compression.
 
-```python 
+```python
 from tilelang.utils.sparse import compress
 A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
 ```
@@ -50,7 +50,6 @@ Here, `A_sparse` contains all the non-zero elements of `A`, while `E` stores the
 > NOTE: When using CUTLASS compressor, there is no naive position correspondence between the positions in `A_sparse`/`A` and `E`. (i.e. the 4-element group at [n, k] doesn't match the 4-bit metadata at [n, k] if you consider metadata as int4 tensor)
 The metadata is reordered internally to optimize memory access patterns (e.g., for ldsm instructions and vectorized loads).
 For more information, see **A note on `gemm_sp` and `gemm_sp_v2`**.
-
 
 ## `T.gemm_sp` with CUTLASS's compressor
 

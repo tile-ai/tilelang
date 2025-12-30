@@ -89,9 +89,7 @@ def chunk_state_fwd(
             m_idx = bx // T.ceildiv(dstate, block_N)
             n_idx = bx % T.ceildiv(dstate, block_N)
 
-            T.annotate_layout(
-                {x_shared: tilelang.layout.make_swizzled_layout(x_shared), acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared)}
-            )
+            T.annotate_layout({x_shared: tilelang.layout.make_swizzled_layout(x_shared)})
 
             dA_cs_last[0] = dA_cumsum[batch_idx, bz, chunk_idx, chunk_size - 1]
             T.clear(acc_o)

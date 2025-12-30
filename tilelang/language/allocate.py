@@ -15,13 +15,13 @@ with the appropriate memory scope.
 """
 
 from __future__ import annotations
-from typing import TypeVar, overload, Literal, Callable
+from typing import TypeVar, overload, Literal
 
 # Python 3.9 compatibility for advanced typing features (PEP 646)
 try:
-    from typing import TypeVarTuple, Unpack  # type: ignore[attr-defined]
+    from typing import TypeVarTuple  # type: ignore[attr-defined]
 except Exception:
-    from typing_extensions import TypeVarTuple, Unpack  # type: ignore
+    from typing_extensions import TypeVarTuple  # type: ignore
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
@@ -31,13 +31,12 @@ from tvm.tir.expr import FloatImm, IntImm
 from .v2 import dtypes as _dtypes
 from .v2.dtypes import dtype as tl_dtype
 from .v2.builder import OutTensor
-from .v2.annot import Tensor, SharedBuffer, LocalBuffer, FragmentBuffer
 
 _Shapes = TypeVarTuple("_Shapes")
 _DType = TypeVar("_DType")
 
 
-def alloc_shared(shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="shared.dyn") -> SharedBuffer[Callable[[Unpack[_Shapes]]], _DType]:
+def alloc_shared(shape, dtype: _DType, scope="shared.dyn"):
     """Allocate a shared memory buffer for inter-thread communication.
 
     Args:
@@ -55,7 +54,7 @@ def alloc_shared(shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="shared.dyn
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_local(shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="local") -> LocalBuffer[Callable[[Unpack[_Shapes]]], _DType]:
+def alloc_local(shape, dtype: _DType, scope="local"):
     """Allocate a local memory buffer for thread-private storage.
 
     Args:
@@ -69,9 +68,7 @@ def alloc_local(shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="local") -> 
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_fragment(
-    shape: tuple[Unpack[_Shapes]], dtype: _DType, scope="local.fragment"
-) -> FragmentBuffer[Callable[[Unpack[_Shapes]]], _DType]:
+def alloc_fragment(shape, dtype: _DType, scope="local.fragment"):
     """Allocate a fragment memory buffer for specialized operations.
 
     Args:
@@ -267,10 +264,10 @@ def alloc_tcgen05_instr_desc(dtype: str = _dtypes.uint32):
 
 
 @overload
-def empty(shape: tuple[Unpack[_Shapes]], dtype: str = _dtypes.float32) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]: ...
+def empty(shape, dtype: str = _dtypes.float32): ...
 
 
-def empty(*shape: Unpack[_Shapes], dtype: str = _dtypes.float32) -> Tensor[Callable[[Unpack[_Shapes]]], _DType]:
+def empty(*shape, dtype: str = _dtypes.float32):
     if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
         return OutTensor(shape[0], dtype)
     elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):

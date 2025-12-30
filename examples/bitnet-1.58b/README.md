@@ -2,7 +2,6 @@
 license: mit
 ---
 
-
 This is a Tilelang Implementation for the reproduced 1.58bit model from [1bitLLM/bitnet_b1_58-3B](https://huggingface.co/1bitLLM/bitnet_b1_58-3B). We replaced the original simulated Int8x3bit Quantized Inference Kernel with INT8xINT2 Kernel. We also evaluated the model's correctness and performance through `eval_correctness.py` and `benchmark_inference_latency.py`.
 
 ## Make Checkpoints for vLLM
@@ -42,7 +41,6 @@ python3 inference_with_bitblas_format.py
 | bitnet-3b-1.58bits     | pytorch-tilelang         | 240.33         | 103.09          | 493.31         |
 | bitnet-3b-1.58bits     | vllm-tilelang            | 379.25         | 117.43          | 752.55         |
 | bitnet-3b-1.58bits     | vllm-tilelang-cuda-graph | 2543.58        | 1621.08         | 2731.79        |
-
 
 ## BitBLAS Results
 

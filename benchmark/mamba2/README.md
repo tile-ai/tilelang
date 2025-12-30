@@ -45,7 +45,6 @@ PY
 | 16384 | 2.531    | 135.711                 |
 | 32768 | 5.076    | 135.379                 |
 
-
 ## Compare with Baselines
 
 - Triton: v3.5.0, mamba-ssm: v2.2.6.post3

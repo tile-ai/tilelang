@@ -48,11 +48,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
-            T.annotate_layout(
-                {
-                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                }
-            )
 
             T.copy(Q[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_shared)
             T.copy(Q_pe[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :], Q_pe_shared)

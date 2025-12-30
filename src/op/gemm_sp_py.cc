@@ -49,7 +49,7 @@ using namespace tir;
  *       fails with an ICHECK (runtime assertion). No other validation is
  *       performed here.
  */
-GemmSPPy::GemmSPPy(Array<PrimExpr> args) {
+GemmSPPy::GemmSPPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPPyNode> node = tvm::ffi::make_object<GemmSPPyNode>();
 
   node->aRegion_ = NormalizeToBufferRegion(args[0]);

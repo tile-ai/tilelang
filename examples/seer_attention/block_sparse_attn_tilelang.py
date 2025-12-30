@@ -47,46 +47,6 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
     block_mask_dtype = T.int8
 
     def kernel_func(block_M, block_N, num_stages, threads):
-        @T.macro
-        def Softmax(
-            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
-            scores_max: T.FragmentBuffer([block_M], accum_dtype),
-            scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-            scores_sum: T.FragmentBuffer([block_M], accum_dtype),
-            logsum: T.FragmentBuffer([block_M], accum_dtype),
-        ):
-            T.copy(scores_max, scores_max_prev)
-            T.fill(scores_max, -T.infinity(accum_dtype))
-            T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-            for i in T.Parallel(block_M):
-                scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
-            # To do causal softmax, we need to set the scores_max to 0 if it is -inf
-            # This process is called Check_inf in FlashAttention3 code, and it only need to be done
-            # in the first ceil_div(kBlockM, kBlockN) steps.
-            # for i in T.Parallel(block_M):
-            #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
-            for i in T.Parallel(block_M):
-                scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-            for i, j in T.Parallel(block_M, block_N):
-                # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
-                # max * log_2(e)) This allows the compiler to use the ffma
-                # instruction instead of fadd and fmul separately.
-                acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-            T.reduce_sum(acc_s, scores_sum, dim=1)
-            for i in T.Parallel(block_M):
-                logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-            T.copy(acc_s, acc_s_cast)
-
-        @T.macro
-        def Rescale(
-            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-        ):
-            for i, j in T.Parallel(block_M, dim):
-                acc_o[i, j] *= scores_scale[i]
-
         @T.prim_func
         def main(
             Q: T.Tensor(q_shape, dtype),
@@ -108,15 +68,14 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                 scores_scale = T.alloc_fragment([block_M], accum_dtype)
                 scores_sum = T.alloc_fragment([block_M], accum_dtype)
                 logsum = T.alloc_fragment([block_M], accum_dtype)
-                block_mask = T.alloc_local([downsample_len], block_mask_dtype)
+                block_mask = T.alloc_fragment([downsample_len], block_mask_dtype)
 
                 T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
                 T.fill(acc_o, 0)
                 T.fill(logsum, 0)
                 T.fill(scores_max, -T.infinity(accum_dtype))
 
-                for vj in T.serial(downsample_len):
-                    block_mask[vj] = BlockSparseMask[bz, by, bx, vj]
+                T.copy(BlockSparseMask[bz, by, bx, :], block_mask)
 
                 loop_range = T.ceildiv(seq_kv, block_N)
 
@@ -131,8 +90,31 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                             T.clear(acc_s)
                         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
-                        Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum)
-                        Rescale(acc_o, scores_scale)
+                        T.copy(scores_max, scores_max_prev)
+                        T.fill(scores_max, -T.infinity(accum_dtype))
+                        T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                        for i in T.Parallel(block_M):
+                            scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+                        # To do causal softmax, we need to set the scores_max to 0 if it is -inf
+                        # This process is called Check_inf in FlashAttention3 code, and it only need to be done
+                        # in the first ceil_div(kBlockM, kBlockN) steps.
+                        # for i in T.Parallel(block_M):
+                        #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
+                        for i in T.Parallel(block_M):
+                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                        for i, j in T.Parallel(block_M, block_N):
+                            # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
+                            # max * log_2(e)) This allows the compiler to use the ffma
+                            # instruction instead of fadd and fmul separately.
+                            acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                        T.reduce_sum(acc_s, scores_sum, dim=1)
+                        for i in T.Parallel(block_M):
+                            logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                        T.copy(acc_s, acc_s_cast)
+
+                        for i, j in T.Parallel(block_M, dim):
+                            acc_o[i, j] *= scores_scale[i]
+
                         T.copy(V[bz, by, k * block_N : (k + 1) * block_N, :], V_shared)
                         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
@@ -248,6 +230,57 @@ def test_topk_sparse_attention_qlen_lt_klen():
 def main():
     test_topk_sparse_attention()
     test_topk_sparse_attention_qlen_lt_klen()
+
+
+def run_regression_perf():
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = 4, 2, 256, 64
+    TOPK = 2
+    BLOCK = 64
+    torch.manual_seed(0)
+
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+
+    downsample_factor = BLOCK
+    downsample_len = math.ceil(SEQ_LEN / downsample_factor)
+    x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len], device="cuda", dtype=torch.float16)
+    x_ds[:, :, :, 0] = 100
+    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
+
+    kernel = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(q, k, v, block_mask.to(torch.int8))
+
+    latency_1 = do_bench(run_kernel_only, backend="cupti")
+
+    BATCH, N_HEADS = 1, 1
+    Q_LEN, K_LEN, D_HEAD = 128, 256, 64
+    TOPK = 1
+    BLOCK = 64
+    torch.manual_seed(0)
+
+    q = torch.randn(BATCH, N_HEADS, Q_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+
+    downsample_factor = BLOCK
+    downsample_len = math.ceil(K_LEN / downsample_factor)
+    x_ds = torch.randn(BATCH, N_HEADS, downsample_len, downsample_len, device="cuda", dtype=torch.float16)
+    x_ds[:, :, :, 0] = 100
+    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
+
+    kernel = blocksparse_flashattn(BATCH, N_HEADS, Q_LEN, K_LEN, D_HEAD, downsample_len, is_causal=True)
+    print(kernel.get_kernel_source())
+
+    def run_kernel_only2():
+        kernel(q, k, v, block_mask.to(torch.int8))
+
+    latency_2 = do_bench(run_kernel_only2, backend="cupti")
+
+    return (latency_1 + latency_2) / 2
 
 
 if __name__ == "__main__":

@@ -44,7 +44,6 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -217,7 +216,6 @@ def flashattn_bwd_atomic_add(batch, heads, seq_len, dim_qk, dim_v, is_causal, bl
                     dQ: make_dq_layout(dQ),
                     dK: make_dq_layout(dK),
                     dV: make_dq_layout(dV),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                 }
             )
 
@@ -312,9 +310,6 @@ def flashattn_bwd_split_novarlen(batch, heads, seq_len, dim_qk, dim_v, is_causal
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
 

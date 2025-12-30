@@ -19,10 +19,12 @@ class AtomicAddNode : public TileOperatorNode {
 public:
   Buffer src, dst; ///< Source and destination buffers
   Array<Range> src_range,
-      dst_range;          ///< Access ranges for source and destination
-  IntImm use_tma;         ///< Whether to use TMA for memory operations
-  IntImm coalesced_width; ///< Width for memory coalescing optimization
-  IntImm memory_order;    ///< Memory order for atomic operations
+      dst_range; ///< Access ranges for source and destination
+  Map<String, ObjectRef> annotations; ///< Annotations for the atomic operation
+  // Supported annotation keys:
+  //   - "use_tma": IntImm, whether to use TMA for memory operations
+  //   - "coalesced_width": IntImm, width for memory coalescing optimization
+  //   - "memory_order": IntImm, memory order for atomic operations
 
   mutable ParallelOp par_op_; ///< Associated parallel operation
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicAdd", AtomicAddNode,
@@ -41,9 +43,26 @@ public:
         .def_ro("dst", &AtomicAddNode::dst)
         .def_ro("src_range", &AtomicAddNode::src_range)
         .def_ro("dst_range", &AtomicAddNode::dst_range)
-        .def_ro("use_tma", &AtomicAddNode::use_tma)
-        .def_ro("coalesced_width", &AtomicAddNode::coalesced_width)
-        .def_ro("memory_order", &AtomicAddNode::memory_order);
+        .def_ro("annotations", &AtomicAddNode::annotations);
+  }
+
+  // Helper methods to get annotation values
+  bool GetUseTMA() const {
+    if (auto val = annotations.Get("use_tma")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
+  int GetMemoryOrder() const {
+    if (auto val = annotations.Get("memory_order")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 0; // default: relaxed
   }
 
 protected:
@@ -65,7 +84,9 @@ class AtomicAdd : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicAdd, TileOperator,
                                              AtomicAddNode);
-  TVM_DLL AtomicAdd(Array<PrimExpr> args);
+  TVM_DLL
+  AtomicAdd(Array<PrimExpr> args,
+            Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

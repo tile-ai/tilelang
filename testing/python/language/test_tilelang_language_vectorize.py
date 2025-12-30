@@ -1,6 +1,7 @@
 import torch
 import tilelang.testing
 import tilelang.language as T
+import pytest
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True})
@@ -110,6 +111,40 @@ def test_vectorize_invariant_index():
     run_vectorize_invariant_index(N, M, 8)
     run_vectorize_invariant_index(N, M * 3, 12)
     run_vectorize_invariant_index(N, M * 7, 14)
+
+
+@tilelang.jit
+def vectorize_test_all_dtypes(dtype, vec_num):
+    @T.prim_func
+    def main(A: T.Tensor[(64,), dtype]):
+        with T.Kernel(1, threads=256):
+            for i in T.vectorized(vec_num):
+                A[i] = T.cast(i + 1, dtype)
+
+    return main
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.uint8,
+        torch.uint16,
+        torch.uint32,
+        torch.uint64,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+        torch.float8_e8m0fnu,
+    ],
+)
+@pytest.mark.parametrize("vec_num", [1, 2, 4, 8])
+def test_vectorize_all_dtypes(dtype, vec_num):
+    x = torch.empty((64,), dtype=dtype, device="cuda")
+    kernel = vectorize_test_all_dtypes(dtype, vec_num)
+    kernel(x)
 
 
 if __name__ == "__main__":

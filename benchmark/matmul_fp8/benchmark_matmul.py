@@ -2,7 +2,6 @@ import argparse
 import itertools
 import torch
 import logging
-import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit
@@ -192,8 +191,6 @@ def matmul(
 
             # Enable (or disable) swizzling optimization
             T.use_swizzle(panel_size=10, enable=enable_rasteration)
-            # to utilize swizzle tma layout
-            T.annotate_layout({C_shared: tilelang.layout.make_swizzled_layout(C_shared)})
 
             # Clear out the accumulation buffer
             T.clear(C_local)

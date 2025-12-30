@@ -7,6 +7,7 @@ import os
 
 _CUTEDSL_PUBLIC_DIST = "nvidia-cutlass-dsl"
 _CUTEDSL_MIN_VERSION = (4, 3, 1)
+_CUTEDSL_BANNED_VERSIONS = {(4, 3, 4)}  # Known broken versions
 _VERSION_TRIPLE_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
@@ -27,7 +28,10 @@ def _min_version_str() -> str:
 
 
 def _requirement_spec() -> str:
-    return f"{_CUTEDSL_PUBLIC_DIST}>={_min_version_str()}"
+    spec = f"{_CUTEDSL_PUBLIC_DIST}>={_min_version_str()}"
+    for banned in _CUTEDSL_BANNED_VERSIONS:
+        spec += f",!={'.'.join(map(str, banned))}"
+    return spec
 
 
 def check_cutedsl_available() -> None:
@@ -54,6 +58,11 @@ def check_cutedsl_available() -> None:
             req = _requirement_spec()
             raise ImportError(
                 f"CuTeDSL backend requires `{req}`, but found version `{dist_version}`. Please run: `pip install -U '{req}'`."
+            )
+        if parsed in _CUTEDSL_BANNED_VERSIONS:
+            req = _requirement_spec()
+            raise ImportError(
+                f"CuTeDSL version `{dist_version}` is known to have compatibility issues and is not supported. Please run: `pip install -U '{req}'`."
             )
 
     # 2) Capability probe: keep it cheap.

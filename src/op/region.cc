@@ -18,7 +18,7 @@ namespace tvm {
 namespace tl {
 using namespace tir;
 
-RegionOp::RegionOp(Array<PrimExpr> args) {
+RegionOp::RegionOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   size_t n = args.size();
   size_t ndim = n - 2;
   auto load = args[0].as<BufferLoadNode>();

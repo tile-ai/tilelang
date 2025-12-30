@@ -14,6 +14,7 @@ the generated code. The most frequent choices are listed below:
 | --------- | ----------- |
 | `auto` | Detects CUDA → HIP → Metal in that order. Useful when running the same script across machines. |
 | `cuda` | NVIDIA GPUs. Supports options such as `-arch=sm_80`, `-max_num_threads=1024`, etc. |
+| `cutedsl` | NVIDIA CUTLASS/CuTe DSL backend. Requires `nvidia-cutlass-dsl`. `cuda` options can also be applied to this target. |
 | `hip` | AMD GPUs via ROCm. Options like `-mcpu=gfx90a` can be appended. |
 | `metal` | Apple Silicon GPUs (arm64 Macs). |
 | `llvm` | CPU execution; accepts the standard TVM LLVM switches. |

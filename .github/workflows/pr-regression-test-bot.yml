@@ -1,0 +1,273 @@
+name: Performance Regression Bot
+
+on:
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  # Use the issue/PR number to differentiate between different PRs
+  group: "${{ github.workflow }}-${{ github.event.issue.number }}"
+  cancel-in-progress: true
+
+env:
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  PYTHONPATH: "" # explicit cleanup
+  PIP_USER: "" # explicit cleanup
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+  UV_INDEX_STRATEGY: "unsafe-best-match"
+  UV_HTTP_TIMEOUT: "600"
+  XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
+  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
+  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
+  PRE_COMMIT_HOME: "${{ github.workspace }}/.cache/pip/.pre-commit" # to be updated
+
+jobs:
+  permissions-check:
+    name: Check bot permissions
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      github.event.issue.pull_request &&
+      (contains(github.event.comment.body, '@regression-perf'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get commenter permission
+        id: perm
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const username = context.payload.comment.user.login
+            const { owner, repo } = context.repo
+            const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username })
+            core.setOutput('permission', data.permission) // admin|maintain|write|triage|read|none
+
+      - name: Reject if not allowed
+        if: ${{ steps.perm.outputs.permission != 'admin' && steps.perm.outputs.permission != 'maintain' && steps.perm.outputs.permission != 'write' }}
+        run: |
+          echo "Not authorized: permission=${{ steps.perm.outputs.permission }}"
+          exit 1
+
+  pr-regression:
+    name: Performance regression test between PR and main
+    needs: [permissions-check]
+    runs-on: ${{ matrix.runner.tags }}
+    strategy:
+      matrix:
+        runner:
+          - tags: [self-hosted, nvidia]
+            name: self-hosted-nvidia
+            toolkit: CUDA-12.8
+        python-version:
+          - "3.12"
+      fail-fast: false
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/merge
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set environment (self-hosted runners)
+        if: startsWith(matrix.runner.name, 'self-hosted')
+        run: |
+          # Hide sensitive data in logs for self-hosted runners
+          if [[ -n "${{ secrets.SECRET_PATH_PREFIXES }}" ]]; then
+            echo "::add-mask::${{ secrets.SECRET_PATH_PREFIXES }}"
+            # Colon separated list of secrets to mask
+            for secret in $(echo "${{ secrets.SECRET_PATH_PREFIXES }}" | tr ':' '\n'); do
+              echo "::add-mask::${secret}"
+            done
+          fi
+
+          # Use runner tool_cache as cache root for self-hosted runners to avoid internet connection
+          # issues and to share cache between jobs.
+          export XDG_CACHE_HOME="${{ runner.tool_cache }}/.ci-cache-${{ github.workflow }}"
+          echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" | tee -a "${GITHUB_ENV}"
+          echo "PIP_CACHE_DIR=${XDG_CACHE_HOME}/pip" | tee -a "${GITHUB_ENV}"
+          echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
+          echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
+
+      # Do not use ccache on self-hosted runners, as it will download/upload caches which is slow.
+      # Self-hosted runners usually have more CPU power to compile without ccache.
+      - name: Setup ccache (GitHub-hosted runners)
+        id: setup-ccache
+        if: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          create-symlink: true
+          evict-old-files: "7d"
+          append-timestamp: false
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/*.cc') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/*.cc') }}
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}
+            ${{ runner.os }}-${{ runner.arch }}
+
+      - name: Set environment (CUDA)
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          TOOLKIT="${{ matrix.runner.toolkit }}"
+          CUDA_VERSION="${TOOLKIT##*-}"
+          CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
+          CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          else
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          fi
+          export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
+          export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_CUDA=ON"
+
+          echo "USE_CUDA=ON" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_VERSION_MAJMIN=${CUDA_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+          echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+          echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+
+          if [[ ! -x "$(command -v nvcc)" ]]; then
+            export PATH="/usr/local/cuda/bin:${PATH}"
+            export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
+          fi
+          if [[ -x "$(command -v nvcc)" ]]; then
+            echo "\$ $(command -v nvcc) --version" && nvcc --version
+          else
+            echo "::warning::nvcc not found in PATH!"
+          fi
+
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          # Do not use cache for self-hosted runners, as it will download/upload caches which is slow.
+          enable-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
+          prune-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
+          # Use runner tool_cache for self-hosted runners
+          cache-local-path: ${{ env.UV_CACHE_DIR }}
+          ignore-nothing-to-cache: true
+          # Extra cache key to upload/download caches on GitHub-hosted runners
+          cache-suffix: uv-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}
+          cache-dependency-glob: |
+            pyproject.toml
+            requirements*.txt
+
+      - name: Setup environments
+        id: setup-venv
+        run: |
+          set -e
+
+          uv venv --python "${{ matrix.python-version }}" new
+
+          source new/bin/activate
+          uv pip install -v -r requirements-test.txt
+          uv pip install -v .
+
+      - name: Install Main version (Baseline)
+        run: |
+          set -e
+          git clean -dxf -e new/ -e .cache/
+          git checkout main
+          git submodule update --init --recursive
+          uv venv --python "${{ matrix.python-version }}" old
+          source old/bin/activate
+
+          uv pip install -v -r requirements-test.txt
+          uv pip install -v .
+          rm -rf tilelang build
+
+          uv venv --python "${{ matrix.python-version }}" test_regression
+          source test_regression/bin/activate
+          uv pip install -v -r requirements-test.txt
+
+      - name: Clear uv cache for self-hosted runners (if setup failed)
+        if: >-
+          ${{
+            failure() &&
+            startsWith(matrix.runner.name, 'self-hosted') &&
+            (steps.setup-uv.conclusion == 'failure' || steps.setup-venv.conclusion == 'failure')
+          }}
+        run: |
+          echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
+          uv cache clean
+
+      - name: Enable core dump generation (Linux / GitHub-hosted runners)
+        if: ${{ runner.os == 'Linux' && !startsWith(matrix.runner.name, 'self-hosted') }}
+        run: |
+          sudo sysctl -w kernel.core_pattern="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
+          sudo sysctl -w kernel.core_uses_pid=0
+          sudo sysctl -w fs.suid_dumpable=1
+          sysctl kernel.core_pattern kernel.core_uses_pid fs.suid_dumpable
+
+      - name: Enable core dump generation (macOS / GitHub-hosted runners)
+        if: ${{ runner.os == 'macOS' && !startsWith(matrix.runner.name, 'self-hosted') }}
+        run: |
+          sudo sysctl -w kern.corefile="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
+          sudo sysctl -w kern.coredump=1
+          sudo sysctl -w kern.sugid_coredump=1
+          sysctl kern.corefile kern.coredump kern.sugid_coredump
+
+      - name: Run performance regression test
+        run: |
+          source test_regression/bin/activate
+          OLD_PYTHON=./old/bin/python NEW_PYTHON=./new/bin/python \
+            PERF_REGRESSION_MD=regression_result.md PERF_REGRESSION_PNG=regression_result.png \
+            python ./maint/scripts/test_perf_regression.py
+
+      - name: Read markdown table
+        id: read_md
+        run: |
+          echo "content<<EOF" >> $GITHUB_OUTPUT
+          cat regression_result.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload result image as artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: perf-regression-${{ github.run_id }}
+          path: regression_result.png
+
+      - name: Post test results as PR comment
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            // Read the file directly instead of passing via env/outputs to avoid escaping issues
+            const md = fs.readFileSync('regression_result.md', 'utf8');
+
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+
+            const body =
+              'Performance Regression Test Report\n' +
+              '============================\n\n' +
+              `Triggered by: @${context.payload.comment.user.login}\n` +
+              `Workflow run: ${runUrl}\n\n` +
+              'Results\n' +
+              '-------\n\n' +
+              md + '\n\n' +
+              'Artifacts\n' +
+              '---------\n\n' +
+              '- regression_result.png (speedup plot) is attached as a workflow artifact. Download it from the workflow run page above.\n';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });

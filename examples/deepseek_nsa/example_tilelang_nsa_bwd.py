@@ -248,14 +248,6 @@ def tilelang_kernel_bwd_dkv(
             # [BS, BV]
             T.clear(dv)
 
-            T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-                }
-            )
-
             loop_st = i_s * BS
             loop_ed = seq_len
             for i in T.Pipelined(
@@ -419,14 +411,6 @@ def tilelang_kernel_bwd_dqkv(
             T.clear(dk)
             # [BS, BV]
             T.clear(dv)
-
-            T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-                }
-            )
 
             loop_st = i_s * BS
             loop_ed = seq_len

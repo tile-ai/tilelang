@@ -335,14 +335,6 @@ def convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num
             kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)
             out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
 
-            T.annotate_layout(
-                {
-                    out_shared: tilelang.layout.make_swizzled_layout(out_shared),
-                    data_shared: tilelang.layout.make_swizzled_layout(data_shared),
-                    kernel_shared: tilelang.layout.make_swizzled_layout(kernel_shared),
-                }
-            )
-
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
                 T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)
