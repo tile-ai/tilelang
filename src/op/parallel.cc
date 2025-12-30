@@ -477,7 +477,9 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     }
 
     // try to infer loop layout with two mechanisms and choose the best one
-    { candidate_from_plan = ComputePlanCandidate(T); }
+    {
+      candidate_from_plan = ComputePlanCandidate(T);
+    }
 
     // Choose the best candidate:
     if (candidate_from_buffer.defined() && candidate_from_plan.defined()) {

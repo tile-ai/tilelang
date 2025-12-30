@@ -1,6 +1,5 @@
 """Tests for Layout and Fragment equality comparison."""
 
-import pytest
 import tilelang
 import tilelang.testing
 from tilelang.layout import Layout
@@ -84,16 +83,8 @@ class TestFragmentEqual:
 
     def test_different_forward_index_not_equal(self):
         """Fragments with different forward_index should not be equal."""
-        frag1 = Fragment(
-            [32, 4],
-            forward_thread_fn=lambda i, j: i * 4 + j,
-            forward_index_fn=lambda i, j: i
-        )
-        frag2 = Fragment(
-            [32, 4],
-            forward_thread_fn=lambda i, j: i * 4 + j,
-            forward_index_fn=lambda i, j: j
-        )
+        frag1 = Fragment([32, 4], forward_thread_fn=lambda i, j: i * 4 + j, forward_index_fn=lambda i, j: i)
+        frag2 = Fragment([32, 4], forward_thread_fn=lambda i, j: i * 4 + j, forward_index_fn=lambda i, j: j)
         assert not frag1.is_equal(frag2)
 
     def test_same_fragment_different_var_names(self):
@@ -104,66 +95,32 @@ class TestFragmentEqual:
 
     def test_fragment_with_replicate_equal(self):
         """Fragments with same replicate factor should be equal."""
-        frag1 = Fragment(
-            [32, 4],
-            forward_thread_fn=lambda i, j, rep: i * 4 + rep,
-            replicate=4
-        )
-        frag2 = Fragment(
-            [32, 4],
-            forward_thread_fn=lambda i, j, rep: i * 4 + rep,
-            replicate=4
-        )
+        frag1 = Fragment([32, 4], forward_thread_fn=lambda i, j, rep: i * 4 + rep, replicate=4)
+        frag2 = Fragment([32, 4], forward_thread_fn=lambda i, j, rep: i * 4 + rep, replicate=4)
         assert frag1.is_equal(frag2)
 
     def test_fragment_different_replicate_not_equal(self):
         """Fragments with different replicate factors should not be equal."""
-        frag1 = Fragment(
-            [32, 4],
-            forward_thread_fn=lambda i, j, rep: i * 4 + rep,
-            replicate=4
-        )
-        frag2 = Fragment(
-            [32, 4],
-            forward_thread_fn=lambda i, j, rep: i * 4 + rep,
-            replicate=2
-        )
+        frag1 = Fragment([32, 4], forward_thread_fn=lambda i, j, rep: i * 4 + rep, replicate=4)
+        frag2 = Fragment([32, 4], forward_thread_fn=lambda i, j, rep: i * 4 + rep, replicate=2)
         assert not frag1.is_equal(frag2)
 
     def test_fragment_with_forward_fn(self):
         """Fragments created with forward_fn should compare correctly."""
-        frag1 = Fragment(
-            [32, 4],
-            forward_fn=lambda i, j: (i * 4 + j, i * 4 + j)
-        )
-        frag2 = Fragment(
-            [32, 4],
-            forward_fn=lambda i, j: (i * 4 + j, i * 4 + j)
-        )
+        frag1 = Fragment([32, 4], forward_fn=lambda i, j: (i * 4 + j, i * 4 + j))
+        frag2 = Fragment([32, 4], forward_fn=lambda i, j: (i * 4 + j, i * 4 + j))
         assert frag1.is_equal(frag2)
 
     def test_fragment_forward_fn_different_thread(self):
         """Fragments with different thread mapping via forward_fn should not be equal."""
-        frag1 = Fragment(
-            [32, 4],
-            forward_fn=lambda i, j: (i * 4 + j, i)
-        )
-        frag2 = Fragment(
-            [32, 4],
-            forward_fn=lambda i, j: (j * 4 + i, i)
-        )
+        frag1 = Fragment([32, 4], forward_fn=lambda i, j: (i * 4 + j, i))
+        frag2 = Fragment([32, 4], forward_fn=lambda i, j: (j * 4 + i, i))
         assert not frag1.is_equal(frag2)
 
     def test_fragment_forward_fn_different_index(self):
         """Fragments with different forward_index via forward_fn should not be equal."""
-        frag1 = Fragment(
-            [32, 4],
-            forward_fn=lambda i, j: (i * 4 + j, i)
-        )
-        frag2 = Fragment(
-            [32, 4],
-            forward_fn=lambda i, j: (i * 4 + j, j)
-        )
+        frag1 = Fragment([32, 4], forward_fn=lambda i, j: (i * 4 + j, i))
+        frag2 = Fragment([32, 4], forward_fn=lambda i, j: (i * 4 + j, j))
         assert not frag1.is_equal(frag2)
 
 
@@ -203,6 +160,7 @@ class TestLayoutFragmentEdgeCases:
     def test_constant_layout_equal(self):
         """Layouts mapping to constant should be equal."""
         from tvm.tir import const
+
         layout1 = Layout([32, 4], lambda i, j: const(0, "int32"))
         layout2 = Layout([32, 4], lambda i, j: const(0, "int32"))
         assert layout1.is_equal(layout2)
@@ -210,6 +168,7 @@ class TestLayoutFragmentEdgeCases:
     def test_constant_vs_variable_layout_not_equal(self):
         """Layout mapping to constant vs variable should not be equal."""
         from tvm.tir import const
+
         layout1 = Layout([32, 4], lambda i, j: const(0, "int32"))
         layout2 = Layout([32, 4], lambda i, j: i)
         assert not layout1.is_equal(layout2)
