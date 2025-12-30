@@ -76,8 +76,8 @@ void CodeGenMetal::AddFunction(const GlobalVar& gvar, const PrimFunc& func) {
   name_supply_->FreshName("v_");
 
   // add to alloc buffer type.
-  auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
-  ICHECK(global_symbol.defined())
+  auto global_symbol = func->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
+  ICHECK(global_symbol.has_value())
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
 
   // Function header.
@@ -148,7 +148,7 @@ void CodeGenMetal::AddFunction(const GlobalVar& gvar, const PrimFunc& func) {
   ICHECK_EQ(name_supply_->FreshName("threadIdx"), "threadIdx");
   ICHECK_EQ(name_supply_->FreshName("blockIdx"), "blockIdx");
   int work_dim = 0;
-  auto launch_params = func->GetAttr<Array<String>>(tir::attr::kKernelLaunchParams).value();
+  auto launch_params = func->GetAttr<ffi::Array<ffi::String>>(tir::attr::kKernelLaunchParams).value();
   for (const auto& tag : launch_params) {
     if (tag != runtime::launch_param::kUseDynamicSharedMemoryTag) {
       runtime::ThreadScope scope = runtime::ThreadScope::Create(tag);
@@ -369,7 +369,7 @@ void CodeGenMetal::VisitExpr_(const CallNode* op, std::ostream& os) {  // NOLINT
   };
   if (op->op.same_as(builtin::make_filled_simdgroup_matrix())) {
     ICHECK_EQ(op->args.size(), 5);
-    Var var = runtime::Downcast<Var>(op->args[0]);
+    Var var = Downcast<Var>(op->args[0]);
     // Get the data type of the simdgroup matrix
     auto it = simdgroup_dtype_.find(var.get());
     ICHECK(it != simdgroup_dtype_.end())
