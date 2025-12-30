@@ -28,7 +28,13 @@
 
 #pragma once
 
-#include "vendor/cuda.h" // Include the full CUDA driver API types
+// Define guard before including vendor/cuda.h
+// This ensures vendor/cuda.h can only be included through this stub header.
+#define _TILELANG_CUDA_STUB_INCLUDE_GUARD
+
+#include "vendor/cuda.h" // include the full CUDA driver API types
+
+#undef _TILELANG_CUDA_STUB_INCLUDE_GUARD
 
 // Symbol visibility macros for shared library export
 #if defined(_WIN32) || defined(__CYGWIN__)
