@@ -101,6 +101,29 @@ private:
   Fragment CompleteBufferFragment(const Buffer &buffer) const;
   // Check if the buffer is accessed with common indices (i.e., loop variables).
   bool IsCommonAccessIndice(const Buffer &buffer) const;
+  // Validate a candidate loop layout against all source fragments in
+  // T.layout_map. Returns true if compatible with all fragments; otherwise
+  // false. Does not throw.
+  bool ValidateCandidateAgainstFragments(const Fragment &candidate,
+                                         const LayoutInferArgs &T) const;
+  // Choose the better loop layout from two candidates using validation,
+  // containment and replication heuristic.
+  Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,
+                               const Fragment &candidate_from_plan,
+                               const LayoutInferArgs &T) const;
+  // Compute loop layout from a source buffer's fragment mapping.
+  Fragment ComputeLoopLayoutFromBuffer(const Buffer &buffer,
+                                       const LayoutInferArgs &T) const;
+  // Compute plan-based loop layout candidate using vectorization and thread
+  // bounds.
+  Fragment ComputePlanCandidate(const LayoutInferArgs &T) const;
+  // Add replication guard predicates when needed for cross-thread stores.
+  void BuildReplicationGuardsIfNeeded(
+      const LayoutInferArgs &T,
+      const std::vector<Buffer> &store_shared_global_buffers,
+      const std::vector<Buffer> &store_fragment_buffers,
+      bool has_cross_thread_access,
+      const std::vector<Buffer> &const_index_fragment_buffer) const;
   // Add a predicate to the current predicate expression.
   void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;

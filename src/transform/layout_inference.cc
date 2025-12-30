@@ -333,7 +333,6 @@ public:
                      in_queue);
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
-
     // step 4: finalize alias layouts by Var
     // For each storage var, if any buffer in the group has a layout,
     // propagate (reshape if needed) to the rest to ensure completeness.
@@ -448,17 +447,17 @@ private:
     return buffer_map;
   }
 
-  // Return true if all buffers that this op (idx) touches already have
-  // inferred layouts in layout_map. Used to prioritize enqueue order.
-  bool ShouldPrioritize(int idx, const LayoutMap &layout_map) const {
+  // Return true if any buffer that this op (idx) touches already has
+  // an inferred layout in layout_map. Used to prioritize enqueue order.
+  bool HasKnownLayoutAnchor(int idx, const LayoutMap &layout_map) const {
     auto it = op_touched_buffers_.find(idx);
     if (it == op_touched_buffers_.end() || it->second.empty())
       return false;
     for (const auto &buf : it->second) {
-      if (!layout_map.count(buf))
-        return false;
+      if (layout_map.count(buf))
+        return true;
     }
-    return true;
+    return false;
   }
 
   // Enqueue idx to q with priority if all its buffers already
@@ -473,7 +472,7 @@ private:
     if (in_queue[idx])
       return;
     in_queue[idx] = true;
-    if (ShouldPrioritize(idx, layout_map)) {
+    if (HasKnownLayoutAnchor(idx, layout_map)) {
       q.push_front(idx);
     } else {
       q.push_back(idx);
@@ -602,15 +601,10 @@ private:
     // Track which buffers this op (infer_idx) touches for prioritization.
     // Avoid duplicates.
     auto &vec = op_touched_buffers_[infer_idx];
-    bool exists = false;
-    for (const auto &b : vec) {
-      if (b.same_as(buffer)) {
-        exists = true;
-        break;
-      }
-    }
-    if (!exists)
+    if (std::none_of(vec.begin(), vec.end(),
+                     [&](const Buffer &b) { return b.same_as(buffer); })) {
       vec.push_back(buffer);
+    }
   }
 
   void VisitStmt_(const ForNode *op) final {
