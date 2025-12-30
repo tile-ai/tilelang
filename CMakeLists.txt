@@ -263,12 +263,6 @@ endif()
 # Include tvm after configs have been populated
 add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
 
-# Link TVM libraries against CUDA stub for lazy loading
-if(USE_CUDA)
-  target_link_libraries(tvm PUBLIC cuda_stub)
-  target_link_libraries(tvm_runtime PUBLIC cuda_stub)
-endif()
-
 # Resolve compile warnings in tvm
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
 
