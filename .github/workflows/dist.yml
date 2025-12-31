@@ -158,6 +158,7 @@ jobs:
             CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
             echo "UV_INDEX=https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+            echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           fi
 
           if [[ "${{ runner.os }}" == "Linux" ]]; then
