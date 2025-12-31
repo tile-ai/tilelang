@@ -59,12 +59,13 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   decl_stream << "#include <stdio.h>\n";
   decl_stream << "#include <stdbool.h>\n";
 
+  decl_stream << "#ifdef __OBJC__\n";
   decl_stream << "#include <Metal/Metal.h>\n";
   decl_stream << "#include <Foundation/Foundation.h>\n";
-
-  decl_stream << "#include <optional>\n";
   decl_stream << "#include <ATen/native/mps/OperationUtils.h>\n";
   decl_stream << "#include <ATen/core/TensorBase.h>\n";
+  decl_stream << "#endif\n";
+
   CodeGenCHost::InitGlobalContext();
   tvm::codegen::CodeGenC::Init(output_ssa);
 }
