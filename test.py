@@ -10,6 +10,7 @@ from tilelang.engine.callback import register_metal_postproc_callback, register_
 # @register_metal_postproc_callback
 def print_c_mod(code: str, t) -> str:
     print(code)
+    print(t)
     return code
 
 @register_c_postproc_callback

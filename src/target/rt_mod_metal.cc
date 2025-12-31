@@ -18,12 +18,15 @@ ffi::Module BuildMetal(IRModule mod, Target target) {
 
   std::ostringstream source_maker;
   std::unordered_map<std::string, std::string> smap;
-  const auto fmetal_compile = tvm::ffi::Function::GetGlobal("tvm_callback_metal_compile");
+  const auto fmetal_compile =
+      tvm::ffi::Function::GetGlobal("tvm_callback_metal_compile");
   std::string fmt = fmetal_compile ? "metallib" : "metal";
 
   for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<PrimFuncNode>()) << "CodeGenMetal: Can only take PrimFunc";
-    auto global_symbol = kv.second->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
+    ICHECK(kv.second->IsInstance<PrimFuncNode>())
+        << "CodeGenMetal: Can only take PrimFunc";
+    auto global_symbol =
+        kv.second->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
     ICHECK(global_symbol.has_value());
     std::string func_name = global_symbol.value();
 
@@ -33,7 +36,8 @@ ffi::Module BuildMetal(IRModule mod, Target target) {
     auto f = Downcast<PrimFunc>(kv.second);
     auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
     ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch)
-        << "CodeGenMetal: expect calling_conv equals CallingConv::kDeviceKernelLaunch";
+        << "CodeGenMetal: expect calling_conv equals "
+           "CallingConv::kDeviceKernelLaunch";
 
     cg.AddFunction(kv.first, f);
 
@@ -58,5 +62,5 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("target.build.tilelang_metal", BuildMetal);
 }
 
-}  // namespace codegen
-}  // namespace tvm
+} // namespace codegen
+} // namespace tvm
