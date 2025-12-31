@@ -153,7 +153,7 @@ jobs:
           fi
 
           if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
-            # Avoid using same file name for same toolkit.
+            # Avoid using same file name for different toolkit.
             echo "NO_VERSION_LABEL=OFF" | tee -a "${GITHUB_ENV}"
             echo "NO_GIT_VERSION=ON" | tee -a "${GITHUB_ENV}"
           fi
