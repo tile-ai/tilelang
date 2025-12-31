@@ -51,5 +51,37 @@ def test_loop_layout_identity():
     assert "*(float4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(float4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));" in code
 
 
+@tilelang.lazy_jit
+def replicate_loop_layout_kernel(A, B, loop_layout):
+    M, N = T.const("M, N")
+    A: T.Tensor[(M, N), T.float32]
+    B: T.Tensor[(M, N), T.float32]
+
+    with T.Kernel(1, threads=128):
+        for i, j in T.Parallel(M, N, loop_layout=loop_layout):
+            B[i, j] = A[i, j]
+
+
+@tilelang.testing.requires_cuda
+def test_annotate_replicate_loop_layout_vec4():
+    M, N = 128, 32
+    A = T.Tensor((M, N), T.float32)
+    B = T.Tensor((M, N), T.float32)
+    def loop_layout_fn(i, j, rep):
+        # Flatten and plan for float4 vectorization with 2-way replication.
+        elems = i * 32 + j
+        # 2 replicate groups, 64 threads each: map (i,j,rep) -> thread
+        forward_thread = (elems // 4) % 64 + rep * 64
+        # Local index packs 4 contiguous elements per thread
+        forward_local = elems % 4 + (elems // (64 * 4)) * 4
+        return forward_thread, forward_local
+
+    loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn, replicate=2)
+
+    kernel = replicate_loop_layout_kernel.compile(A, B, loop_layout=loop_layout)
+    code = kernel.get_kernel_source()
+
+    assert "*(float4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(float4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));" in code
+
 if __name__ == "__main__":
     tilelang.testing.main()
