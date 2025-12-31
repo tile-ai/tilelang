@@ -36,6 +36,7 @@ ExtractFuncInfo(const IRModule &mod) {
     if (f->HasNonzeroAttr(tl::attr::kHasGridSync)) {
       info.launch_param_tags.push_back(
           runtime::launch_param::kUseProgramaticDependentLaunch);
+    }
     if (f->HasNonzeroAttr("use_cooperative_groups")) {
       info.launch_param_tags.push_back(
           runtime::launch_param::kUseCooperativeLaunch);
