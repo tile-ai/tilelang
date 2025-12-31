@@ -53,9 +53,18 @@ public:
   For root_;
   // The inferred layout for the loop, mutable to allow lazy inference.
   mutable Fragment loop_layout_;
+  // Whether loop_layout_ was inferred within InferLayout (vs. provided via
+  // annotations). When true, subsequent InferLayout calls can early-exit
+  // without re-emitting buffer layout updates.
+  mutable bool loop_layout_inferred_ = false;
   // The predicate expression for the loop, if any, mutable for lazy
   // construction.
   mutable Optional<PrimExpr> predicate_;
+  // If the user/compiler provided annotations on the outermost loop, we cache
+  // them here (layout without thread-range binding, and the predicate). This
+  // lets InferLayout adopt them cleanly without re-parsing annotations.
+  mutable Optional<Fragment> annotated_layout_unbound_;
+  mutable Optional<PrimExpr> annotated_predicate_;
 
   // Type key for TVM object system.
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ParallelOp", ParallelOpNode,
@@ -83,6 +92,9 @@ public:
   ParallelOpNode(const ParallelOpNode &other) : ParallelOpNode(other.root_) {
     loop_layout_ = other.loop_layout_;
     predicate_ = other.predicate_;
+    loop_layout_inferred_ = other.loop_layout_inferred_;
+    annotated_layout_unbound_ = other.annotated_layout_unbound_;
+    annotated_predicate_ = other.annotated_predicate_;
   }
 
   // Get the inferred loop layout.
@@ -112,6 +124,8 @@ private:
   Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,
                                const Fragment &candidate_from_plan,
                                const LayoutInferArgs &T) const;
+  // (No helper needed anymore; annotations are parsed once in ctor and adopted
+  // inside InferLayout.)
   // Compute loop layout from a source buffer's fragment mapping.
   Fragment ComputeLoopLayoutFromBuffer(const Buffer &buffer,
                                        const LayoutInferArgs &T) const;

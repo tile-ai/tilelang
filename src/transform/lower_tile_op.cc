@@ -708,8 +708,11 @@ private:
     }
 
     // For nested parallel loops, the annotation is placed on the outermost
-    // loop. Inner parallel loops without annotation should be skipped here -
+    // loop. Inner parallel loops without annotation should be skipped here –
     // they will be processed as part of the outer loop's partitioning.
+    // Rationale: inner loops cannot govern their outer loops; the outermost
+    // loop is the correct place to carry layout so we can rewrite the whole
+    // nested region in one place.
     if (!op->annotations.count(attr::kParallelLoopLayout)) {
       return for_node;
     }
@@ -725,6 +728,7 @@ private:
     }
 
     auto root = tvm::ffi::GetRef<For>(op);
+
 
     // Check if the loop stores into local buffers.
     // For example:

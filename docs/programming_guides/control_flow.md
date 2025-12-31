@@ -80,7 +80,11 @@ for i, j in T.Parallel(M, N):
     C[i, j] = A[i, j] + B[i, j]
 ```
 
-Optional: `coalesced_width=` can hint memory coalescing for the innermost loop.
+Optional hints:
+- `coalesced_width=` controls memory coalescing width (used for vectorization checks).
+- `loop_layout=` accepts a `T.Fragment` to annotate the layout of the entire
+  nested parallel loop. The annotation is attached to the outermost loop only
+  and must have `InputDim == number of nested parallel extents`.
 
 ### Pipelined (software pipelining)
 
