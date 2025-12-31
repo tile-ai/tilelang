@@ -230,8 +230,8 @@ private:
       // Only attempt to fuse when dimensions match the number of fused loops.
       if (old_dim == loop_chain.size()) {
         Array<PrimExpr> new_shape = {fused_extent};
-        Fragment fused_layout = Downcast<Fragment>(
-            old_layout->Reshape(new_shape, analyzer_));
+        Fragment fused_layout =
+            Downcast<Fragment>(old_layout->Reshape(new_shape, analyzer_));
         fused_for.CopyOnWrite()->annotations.Set(attr::kParallelLoopLayout,
                                                  fused_layout);
       } else {

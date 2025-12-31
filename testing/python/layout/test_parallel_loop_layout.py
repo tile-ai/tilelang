@@ -30,10 +30,7 @@ def test_loop_layout_fragment_vec4():
     code = kernel.get_kernel_source()
 
     # Expect vectorized copy along innermost dimension (float4)
-    assert (
-        "*(float4*)(B + ((i * 512) + (((int)threadIdx.x) * 4))) = *(float4*)(A + ((i * 512) + (((int)threadIdx.x) * 4)));"
-        in code
-    )
+    assert "*(float4*)(B + ((i * 512) + (((int)threadIdx.x) * 4))) = *(float4*)(A + ((i * 512) + (((int)threadIdx.x) * 4)));" in code
 
 
 @tilelang.testing.requires_cuda
@@ -50,10 +47,7 @@ def test_loop_layout_identity():
     kernel = loop_layout_kernel.compile(A=A, B=B, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
 
-    assert (
-        "*(float4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(float4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));"
-        in code
-    )
+    assert "*(float4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(float4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));" in code
 
 
 if __name__ == "__main__":

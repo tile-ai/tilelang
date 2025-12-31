@@ -199,8 +199,8 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
   // Cache any annotated layout/predicate on the outermost loop.
   using namespace attr;
   if (root_->annotations.count(kParallelLoopLayout)) {
-    annotated_layout_unbound_ = Downcast<Fragment>(
-        root_->annotations.Get(kParallelLoopLayout).value());
+    annotated_layout_unbound_ =
+        Downcast<Fragment>(root_->annotations.Get(kParallelLoopLayout).value());
   }
   if (root_->annotations.count(kParallelLoopPredicate)) {
     annotated_predicate_ = Downcast<PrimExpr>(
@@ -438,11 +438,13 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   // 4. Fully replicated write buffer (backup, may cause issues)
   // 5. Free inference mode (no source buffer)
   if (!loop_layout_.defined() && annotated_layout_unbound_.defined()) {
-    loop_layout_ = annotated_layout_unbound_.value()->BindThreadRange(T.thread_bounds);
+    loop_layout_ =
+        annotated_layout_unbound_.value()->BindThreadRange(T.thread_bounds);
     if (annotated_predicate_.defined()) {
       predicate_ = annotated_predicate_.value();
     }
-  } else if (!loop_layout_.defined() && source_buffer.defined() && allow_layout_propgate) {
+  } else if (!loop_layout_.defined() && source_buffer.defined() &&
+             allow_layout_propgate) {
     loop_layout_ = ComputeLoopLayoutFromBuffer(source_buffer, T);
   } else if (!loop_layout_.defined() && level == InferLevel::kFree) {
     // For free layout inference

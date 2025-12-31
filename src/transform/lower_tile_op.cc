@@ -729,7 +729,6 @@ private:
 
     auto root = tvm::ffi::GetRef<For>(op);
 
-
     // Check if the loop stores into local buffers.
     // For example:
     //   for i in T.Parallel(1024):
