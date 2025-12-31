@@ -3,6 +3,7 @@ import tilelang.testing
 import tilelang.language as T
 
 
+# TODO(lei): replicate loop layout and more complicated layout cases
 @tilelang.lazy_jit
 def loop_layout_kernel(A, B, loop_layout):
     M, N = T.const("M, N")
