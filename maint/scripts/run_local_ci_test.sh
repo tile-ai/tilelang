@@ -75,7 +75,7 @@ esac
 ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)
 
 # Change to the project root directory for local testing of changes
-cd $ROOT_DIR
+cd "$ROOT_DIR" || exit 1
 
 # Add the project root and plugin directory to PYTHONPATH so Python can find local modules and the pytest plugin
 export PYTHONPATH=$ROOT_DIR:$ROOT_DIR/maint/scripts:$PYTHONPATH
