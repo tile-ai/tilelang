@@ -108,8 +108,8 @@ jobs:
         target:
           - { runner: ubuntu-latest, toolkit: "CUDA-12.8" }
           - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
-          - { runner: ubuntu-latest, toolkit: "CUDA-13.1" }
-          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-13.1" }
+          - { runner: ubuntu-latest, toolkit: "CUDA-13.1", nightly: true }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-13.1", nightly: true }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
           # Wheels are built with Python 3.8 Limited API, they should work with all Python >= 3.8.
@@ -150,6 +150,10 @@ jobs:
             CUDA_VERSION="${{ matrix.target.toolkit }}"
             CUDA_VERSION="${CUDA_VERSION#CUDA-}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+          fi
+
+          if [[ "${{ matrix.target.nightly }}" ]]; then
+            echo "NO_VERSION_LABEL=OFF" | tee -a "${GITHUB_ENV}"
           fi
 
           if [[ "${{ runner.os }}" == "Linux" ]]; then
