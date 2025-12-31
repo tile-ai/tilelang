@@ -148,7 +148,7 @@ jobs:
 
           if [[ "${{ matrix.target.toolkit }}" == *"CUDA"* ]]; then
             CUDA_VERSION="${{ matrix.target.toolkit }}"
-            CUDA_VERSION="${CUDA_VERSION#CUDA-}"
+            CUDA_VERSION="${CUDA_VERSION##*-}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
           fi
 
