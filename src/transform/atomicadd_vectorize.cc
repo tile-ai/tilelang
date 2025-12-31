@@ -4,6 +4,7 @@
  */
 
 #include "atomicadd_vectorize.h"
+#include "../op/utils.h"
 
 namespace tvm {
 namespace tl {
@@ -233,22 +234,30 @@ private:
       const IntImm memory_order =
           node->args.size() >= 3 ? Downcast<IntImm>(node->args[2]) : IntImm(0);
       Array<PrimExpr> new_args;
-      Call address_of_dst =
-          Call(DataType::Handle(), builtin::address_of(), {dst_node});
-      Call address_of_value =
-          Call(DataType::Handle(), builtin::address_of(), {value_node});
+      // Convert BufferLoad to access_ptr
+      Array<Range> dst_ranges, value_ranges;
+      for (const PrimExpr &index : dst_node->indices) {
+        dst_ranges.push_back(Range::FromMinExtent(index, 1));
+      }
+      for (const PrimExpr &index : value_node->indices) {
+        value_ranges.push_back(Range::FromMinExtent(index, 1));
+      }
+      BufferRegion dst_region = BufferRegion(dst_node->buffer, dst_ranges);
+      BufferRegion value_region = BufferRegion(value_node->buffer, value_ranges);
+      PrimExpr dst_ptr = MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
+      PrimExpr value_ptr = MakeAccessPtrFromRegion(value_region, 1); // 1 = read access
       if (vector_size_ == 4) {
         new_args.push_back(StringImm("AtomicAddx4"));
-        new_args.push_back(address_of_dst);
-        new_args.push_back(address_of_value);
+        new_args.push_back(dst_ptr);
+        new_args.push_back(value_ptr);
       } else if (vector_size_ == 2) {
         new_args.push_back(StringImm("AtomicAddx2"));
-        new_args.push_back(address_of_dst);
-        new_args.push_back(address_of_value);
+        new_args.push_back(dst_ptr);
+        new_args.push_back(value_ptr);
       } else {
         // Scalar case: AtomicAdd now expects a pointer to destination.
         new_args.push_back(StringImm("AtomicAdd"));
-        new_args.push_back(address_of_dst);
+        new_args.push_back(dst_ptr);
         new_args.push_back(value_node);
       }
       new_args.push_back(memory_order);
@@ -263,13 +272,18 @@ private:
       // Ensure first argument is an address; keep value as-is.
       if (!node->args.empty()) {
         if (const auto *bl = node->args[0].as<BufferLoadNode>()) {
-          Call address_of_dst = Call(DataType::Handle(), builtin::address_of(),
-                                     {Downcast<BufferLoad>(node->args[0])});
-          new_args.push_back(address_of_dst);
+          // Convert BufferLoad to access_ptr
+          Array<Range> dst_ranges;
+          for (const PrimExpr &index : bl->indices) {
+            dst_ranges.push_back(Range::FromMinExtent(index, 1));
+          }
+          BufferRegion dst_region = BufferRegion(bl->buffer, dst_ranges);
+          PrimExpr dst_ptr = MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
+          new_args.push_back(dst_ptr);
         } else if (const auto *call = node->args[0].as<CallNode>()) {
-          // If it's already an address_of, forward it; otherwise, keep
-          // original.
-          if (call->op.same_as(builtin::address_of())) {
+          // If it's already an address_of or access_ptr, forward it; otherwise, keep original.
+          if (call->op.same_as(builtin::address_of()) || 
+              call->op.same_as(builtin::tvm_access_ptr())) {
             new_args.push_back(node->args[0]);
           } else {
             new_args.push_back(node->args[0]);

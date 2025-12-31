@@ -273,8 +273,13 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
     src_value = Cast(dst->dtype, src_value);
 
   // Build a pointer to destination element using tvm_access_ptr
-  PrimExpr dst_ptr = Call(DataType::Handle(), builtin::address_of(),
-                          {BufferLoad(dst, dst_indices)});
+  BufferLoad dst_load = BufferLoad(dst, dst_indices);
+  Array<Range> dst_ranges;
+  for (const PrimExpr &index : dst_indices) {
+    dst_ranges.push_back(Range::FromMinExtent(index, 1));
+  }
+  BufferRegion dst_region = BufferRegion(dst, dst_ranges);
+  PrimExpr dst_ptr = MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
 
   new_args.push_back(dst_ptr);
   new_args.push_back(src_value);
@@ -381,15 +386,22 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         << "src_size = " << src_size << ", dst_size = " << dst_size;
     BufferLoad src_node = BufferLoad(src, src_indices);
     BufferLoad dst_node = BufferLoad(dst, dst_indices);
-    Call address_of_src =
-        Call(DataType::Handle(), builtin::address_of(), {src_node});
-    Call address_of_dst =
-        Call(DataType::Handle(), builtin::address_of(), {dst_node});
+    Array<Range> src_ranges, dst_ranges;
+    for (const PrimExpr &index : src_indices) {
+      src_ranges.push_back(Range::FromMinExtent(index, 1));
+    }
+    for (const PrimExpr &index : dst_indices) {
+      dst_ranges.push_back(Range::FromMinExtent(index, 1));
+    }
+    BufferRegion src_region = BufferRegion(src, src_ranges);
+    BufferRegion dst_region = BufferRegion(dst, dst_ranges);
+    PrimExpr src_ptr = MakeAccessPtrFromRegion(src_region, 1); // 1 = read access
+    PrimExpr dst_ptr = MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
 
     int need_reduce = 1;
     int eviction_policy = 0;
     auto body = Evaluate(Call(DataType::Handle(), tma_store(),
-                              {address_of_src, address_of_dst,
+                              {src_ptr, dst_ptr,
                                ceildiv(src_size * src->dtype.bits(), 8),
                                need_reduce, eviction_policy}));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);

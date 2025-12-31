@@ -496,6 +496,70 @@ private:
   StorageScope sync_scope_;
 };
 
+// This class adds syncthreads after AtomicAdd operations on shared memory.
+// This is needed because atomic operations on shared memory require
+// synchronization before subsequent reads/writes to ensure visibility.
+class ThreadSyncAfterAtomicInserter : public StmtExprMutator {
+public:
+  explicit ThreadSyncAfterAtomicInserter(StorageScope sync_scope)
+      : sync_scope_(std::move(sync_scope)) {}
+
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(builtin::call_extern()) && call->args.size() >= 1) {
+        if (const auto *func_name = call->args[0].as<StringImmNode>()) {
+          std::string name = func_name->value;
+          // Check if this is an AtomicAdd call (AtomicAdd, AtomicAddx2, AtomicAddx4, etc.)
+          if (name == "AtomicAdd" || name == "AtomicAddx2" || name == "AtomicAddx4" ||
+              name == "AtomicAddRet" || name == "AtomicAddx2Ret" || name == "AtomicAddx4Ret") {
+            // Check if the first argument (destination pointer) is an access_ptr to shared memory
+            if (call->args.size() >= 2) {
+              if (const auto *ptr_call = call->args[1].as<CallNode>()) {
+                if (ptr_call->op.same_as(builtin::tvm_access_ptr()) &&
+                    ptr_call->args.size() >= 2) {
+                  if (const auto *buffer_var = ptr_call->args[1].as<VarNode>()) {
+                    StorageScope buffer_scope = StorageScope::Create(
+                        GetPtrStorageScope(tvm::ffi::GetRef<Var>(buffer_var)));
+                    // Check if the buffer is in shared memory scope
+                    if (sync_scope_.rank == StorageRank::kShared &&
+                        buffer_scope.rank == StorageRank::kShared) {
+                      // Insert sync after the atomic operation
+                      auto sync = Evaluate(Call(DataType::Int(32),
+                                                builtin::tvm_storage_sync(),
+                                                {StringImm(sync_scope_.to_string())}));
+                      auto ret = StmtExprMutator::VisitStmt_(op);
+                      return SeqStmt({ret, sync});
+                    }
+                  }
+                } else if (ptr_call->op.same_as(builtin::address_of()) &&
+                           ptr_call->args.size() >= 1) {
+                  // Handle legacy address_of case (for backward compatibility)
+                  if (const auto *load = ptr_call->args[0].as<BufferLoadNode>()) {
+                    StorageScope buffer_scope = StorageScope::Create(
+                        GetPtrStorageScope(load->buffer->data));
+                    if (sync_scope_.rank == StorageRank::kShared &&
+                        buffer_scope.rank == StorageRank::kShared) {
+                      auto sync = Evaluate(Call(DataType::Int(32),
+                                                builtin::tvm_storage_sync(),
+                                                {StringImm(sync_scope_.to_string())}));
+                      auto ret = StmtExprMutator::VisitStmt_(op);
+                      return SeqStmt({ret, sync});
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+private:
+  StorageScope sync_scope_;
+};
+
 class ThreadSyncInserter : public StmtExprMutator {
 public:
   ThreadSyncInserter(StorageScope sync_scope,
@@ -826,6 +890,10 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
 
   stmt =
       ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
+  // Insert sync after AtomicAdd operations on shared memory
+  if (sync_scope.rank == StorageRank::kShared) {
+    stmt = ThreadSyncAfterAtomicInserter(sync_scope)(std::move(stmt));
+  }
   n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
   return func;
 }
