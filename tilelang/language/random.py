@@ -65,7 +65,7 @@ def rng_rand_uniform_double():
     Returns
     -------
     random_value : PrimExpr
-        A 32-bit uniformly distributed double.
+        A 64-bit uniformly distributed double.
     """
     return tir.call_intrin("float64", tir.op.Op.get("tl.rng_rand_uniform_double"))
 
@@ -87,6 +87,6 @@ def rng_rand_normal_double():
     Returns
     -------
     random_value : PrimExpr
-        A 32-bit normally distributed double.
+        A 64-bit normally distributed double.
     """
     return tir.call_intrin("float64", tir.op.Op.get("tl.rng_rand_normal_double"))
