@@ -9,7 +9,6 @@ import logging
 # Each entry contains: (cores per SM, default clock (GHz), FLOPs per cycle, max SM count)
 ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128, 2.52, 2, 128)}
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
