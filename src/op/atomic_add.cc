@@ -395,15 +395,17 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
     BufferRegion src_region = BufferRegion(src, src_ranges);
     BufferRegion dst_region = BufferRegion(dst, dst_ranges);
-    PrimExpr src_ptr = MakeAccessPtrFromRegion(src_region, 1); // 1 = read access
-    PrimExpr dst_ptr = MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
+    PrimExpr src_ptr =
+        MakeAccessPtrFromRegion(src_region, 1); // 1 = read access
+    PrimExpr dst_ptr =
+        MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
 
     int need_reduce = 1;
     int eviction_policy = 0;
-    auto body = Evaluate(Call(DataType::Handle(), tma_store(),
-                              {src_ptr, dst_ptr,
-                               ceildiv(src_size * src->dtype.bits(), 8),
-                               need_reduce, eviction_policy}));
+    auto body = Evaluate(
+        Call(DataType::Handle(), tma_store(),
+             {src_ptr, dst_ptr, ceildiv(src_size * src->dtype.bits(), 8),
+              need_reduce, eviction_policy}));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);
   }
   auto simt_loop = MakeSIMTLoop(analyzer);

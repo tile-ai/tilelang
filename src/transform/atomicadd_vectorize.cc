@@ -243,9 +243,12 @@ private:
         value_ranges.push_back(Range::FromMinExtent(index, 1));
       }
       BufferRegion dst_region = BufferRegion(dst_node->buffer, dst_ranges);
-      BufferRegion value_region = BufferRegion(value_node->buffer, value_ranges);
-      PrimExpr dst_ptr = MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
-      PrimExpr value_ptr = MakeAccessPtrFromRegion(value_region, 1); // 1 = read access
+      BufferRegion value_region =
+          BufferRegion(value_node->buffer, value_ranges);
+      PrimExpr dst_ptr =
+          MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
+      PrimExpr value_ptr =
+          MakeAccessPtrFromRegion(value_region, 1); // 1 = read access
       if (vector_size_ == 4) {
         new_args.push_back(StringImm("AtomicAddx4"));
         new_args.push_back(dst_ptr);
@@ -278,11 +281,13 @@ private:
             dst_ranges.push_back(Range::FromMinExtent(index, 1));
           }
           BufferRegion dst_region = BufferRegion(bl->buffer, dst_ranges);
-          PrimExpr dst_ptr = MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
+          PrimExpr dst_ptr =
+              MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
           new_args.push_back(dst_ptr);
         } else if (const auto *call = node->args[0].as<CallNode>()) {
-          // If it's already an address_of or access_ptr, forward it; otherwise, keep original.
-          if (call->op.same_as(builtin::address_of()) || 
+          // If it's already an address_of or access_ptr, forward it; otherwise,
+          // keep original.
+          if (call->op.same_as(builtin::address_of()) ||
               call->op.same_as(builtin::tvm_access_ptr())) {
             new_args.push_back(node->args[0]);
           } else {
