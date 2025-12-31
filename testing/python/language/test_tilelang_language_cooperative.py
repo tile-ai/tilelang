@@ -7,6 +7,7 @@ import tilelang.testing
 @tilelang.jit
 def grid_sync(N=1024):
     block = 128
+
     @T.prim_func
     def kernel(A: T.Tensor((N), T.float32)):
         with T.Kernel(T.ceildiv(N, block), threads=128) as bx:
@@ -18,7 +19,9 @@ def grid_sync(N=1024):
             for i in T.Parallel(block):
                 if n_idx + i < N:
                     A[n_idx + i] = A[n_idx + i] + A[N - n_idx - i - 1]
+
     return kernel
+
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(6, 0)
