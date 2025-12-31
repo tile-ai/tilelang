@@ -497,7 +497,7 @@ class Builder(BaseBuilder):
         elif isinstance(value, (Buffer, tir.IterVar, tir.Var)):
             IRBuilder.name(name, value)
             return value
-        elif isinstance(value, PrimExpr):
+        elif isinstance(value, (PrimExpr, BufferRegion)):
             frame = tir.LetStmt(value)
             var = frame.var
             IRBuilder.name(name, var)
