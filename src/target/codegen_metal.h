@@ -24,14 +24,14 @@
 #ifndef TVM_TARGET_SOURCE_CODEGEN_METAL_H_
 #define TVM_TARGET_SOURCE_CODEGEN_METAL_H_
 
-#include <tvm/tir/transform.h>
 #include <tvm/target/codegen.h>
+#include <tvm/tir/transform.h>
 
 #include <string>
 #include <unordered_map>
 
-#include "target/source/codegen_c.h"
 #include "target/build_common.h"
+#include "target/source/codegen_c.h"
 
 #include "codegen_metal.h"
 
@@ -39,38 +39,40 @@ namespace tvm {
 namespace codegen {
 
 class CodeGenMetal final : public CodeGenC {
- public:
+public:
   explicit CodeGenMetal(Target target);
   // override print thread tag.
   void PrintArgUnionDecl();
-  void AddFunction(const GlobalVar& gvar, const PrimFunc& func) final;
-  void InitFuncState(const PrimFunc& f) final;
-  void PrintStorageScope(const std::string& scope, std::ostream& os) final;  // NOLINT(*)
-  void PrintStorageSync(const CallNode* op) final;                           // NOLINT(*)
-  void PrintType(DataType t, std::ostream& os) final;                        // NOLINT(*)
-  void BindThreadIndex(const IterVar& iv) final;                             // NOLINT(*)
+  void AddFunction(const GlobalVar &gvar, const PrimFunc &func) final;
+  void InitFuncState(const PrimFunc &f) final;
+  void PrintStorageScope(const std::string &scope,
+                         std::ostream &os) final;     // NOLINT(*)
+  void PrintStorageSync(const CallNode *op) final;    // NOLINT(*)
+  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
+  void BindThreadIndex(const IterVar &iv) final;      // NOLINT(*)
   // print load of single element
-  void PrintVecElemLoad(const std::string& vec, DataType t, int i,
-                        std::ostream& os) final;  // NOLINT(*)
+  void PrintVecElemLoad(const std::string &vec, DataType t, int i,
+                        std::ostream &os) final; // NOLINT(*)
   // print store of single element.
-  void PrintVecElemStore(const std::string& vec, DataType t, int i, const std::string& value) final;
+  void PrintVecElemStore(const std::string &vec, DataType t, int i,
+                         const std::string &value) final;
   // overload visitor
-  void VisitStmt_(const AllocateNode* op) final;                     // NOLINT(*)
-  void VisitExpr_(const SelectNode* op, std::ostream& os) final;     // NOLINT(*)
-  void VisitExpr_(const BroadcastNode* op, std::ostream& os) final;  // NOLINT(*)
-  void VisitExpr_(const CallNode* op, std::ostream& os) final;       // NOLINT(*)
-  void VisitExpr_(const FloatImmNode* op, std::ostream& os) final;   // NOLINT(*)
+  void VisitStmt_(const AllocateNode *op) final;                    // NOLINT(*)
+  void VisitExpr_(const SelectNode *op, std::ostream &os) final;    // NOLINT(*)
+  void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
+  void VisitExpr_(const CallNode *op, std::ostream &os) final;      // NOLINT(*)
+  void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;  // NOLINT(*)
 
   // reuse parent's function.
   using CodeGenC::PrintType;
 
- private:
-  std::unordered_map<const VarNode*, std::string> simdgroup_dtype_;
+private:
+  std::unordered_map<const VarNode *, std::string> simdgroup_dtype_;
   int thread_index_bits_{32};
   int thread_work_dim_{0};
   Target target_;
 };
-}  // namespace codegen
-}  // namespace tvm
+} // namespace codegen
+} // namespace tvm
 
-#endif  // TVM_TARGET_SOURCE_CODEGEN_METAL_H_
+#endif // TVM_TARGET_SOURCE_CODEGEN_METAL_H_

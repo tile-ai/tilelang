@@ -4,17 +4,11 @@ import tilelang.language as T
 import torch
 
 
-from tilelang.engine.callback import register_metal_postproc_callback, register_c_postproc
-
-
 # @register_metal_postproc_callback
 # @register_c_postproc
 def print_c_mod(code: str, t) -> str:
     print(code)
     print(t)
-    import ipdb
-
-    ipdb.set_trace()
     return code
 
 
