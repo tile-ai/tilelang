@@ -4,7 +4,43 @@ import tilelang.language as T
 import torch
 
 
-@tilelang.jit(execution_backend='tvm_ffi')
+from tilelang.engine.callback import register_metal_postproc_callback, register_c_postproc
+
+
+# @register_metal_postproc_callback
+# @register_c_postproc
+def print_c_mod(code: str, t) -> str:
+    print(code)
+    print(t)
+    import ipdb
+
+    ipdb.set_trace()
+    return code
+
+
+_cc = tilelang.tvm.contrib.cc._linux_compile
+
+from functools import wraps
+
+
+@wraps(_cc)
+def _patched_cc(output, objects, options, compile_cmd, *args, **kwargs):
+    """
+    monkey patch to tvm before finalized
+    """
+    if objects:
+        objects = ["-x", "objective-c++"] + objects
+    from torch.utils import cpp_extension
+
+    torch_opts = ["-I" + i for i in cpp_extension.include_paths()]
+    options += torch_opts + ["-std=gnu++17"]
+    return _cc(output, objects, options, compile_cmd, *args, **kwargs)
+
+
+tilelang.tvm.contrib.cc._linux_compile = _patched_cc
+
+
+@tilelang.jit(execution_backend="tvm_ffi")
 def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float32, accum_dtype=T.float32):
     @T.prim_func
     def gemm(
