@@ -1,3 +1,4 @@
+# ruff: noqa
 """CUDA-aware pytest-xdist scheduler.
 
 This plugin ensures that each xdist worker is pinned to a unique CUDA device.
@@ -9,7 +10,8 @@ from __future__ import annotations
 
 import os
 from collections import deque
-from typing import Any, Deque, Iterable, MutableMapping
+from typing import Any, Deque
+from collections.abc import Iterable, MutableMapping
 
 import pytest
 from _pytest.config import Config
@@ -22,8 +24,9 @@ WORKER_ENV_DEVICE = "PYTEST_XDIST_WORKER_CUDA_DEVICE"
 # Optional override: how many workers per selected GPU.
 ENV_WORKERS_PER_DEVICE = "PYTEST_XDIST_CUDA_WORKERS_PER_DEVICE"
 
-ALLOCATOR_KEY: StashKey["CudaDeviceAllocator"] = StashKey()
+ALLOCATOR_KEY: StashKey[CudaDeviceAllocator] = StashKey()
 NUM_WORKERS_PER_DEVICE = 4  # default if ENV_WORKERS_PER_DEVICE is unset/invalid
+
 
 def _workers_per_device() -> int:
     """Return number of workers per GPU from env or default."""
@@ -37,6 +40,7 @@ def _workers_per_device() -> int:
     except Exception:
         pass
     return NUM_WORKERS_PER_DEVICE
+
 
 class CudaDeviceAllocator:
     """Allocate one CUDA device per execnet spec/worker."""
@@ -68,8 +72,7 @@ class CudaDeviceAllocator:
             return self._assignments[key]
         if not self._queue:
             raise pytest.UsageError(
-                "Not enough CUDA devices for pytest-xdist workers; "
-                f"need at least {len(self._assignments) + 1}, available {self._total}."
+                f"Not enough CUDA devices for pytest-xdist workers; need at least {len(self._assignments) + 1}, available {self._total}."
             )
         device = self._queue.popleft()
         self._assignments[key] = device
@@ -90,10 +93,7 @@ class CudaDeviceScheduler(LoadScheduling):
         super().__init__(config, log)
         self._allocator = allocator
         if allocator.count < self.numnodes:
-            raise pytest.UsageError(
-                "Not enough CUDA devices for pytest-xdist workers: "
-                f"need {self.numnodes}, found {allocator.count}."
-            )
+            raise pytest.UsageError(f"Not enough CUDA devices for pytest-xdist workers: need {self.numnodes}, found {allocator.count}.")
 
     def add_node(self, node) -> None:  # WorkerController (runtime import avoidance)
         device = self._allocator.assign(node.gateway.spec)
@@ -158,10 +158,7 @@ def _ensure_allocator(config: Config) -> CudaDeviceAllocator:
     except KeyError:
         devices = _discover_cuda_devices()
         if not devices:
-            raise pytest.UsageError(
-                "Cannot auto-discover CUDA devices. Set CUDA_VISIBLE_DEVICES or "
-                f"{ENV_DEVICE_LIST}."
-            )
+            raise pytest.UsageError(f"Cannot auto-discover CUDA devices. Set CUDA_VISIBLE_DEVICES or {ENV_DEVICE_LIST}.")
         allocator = CudaDeviceAllocator(devices)
         config.stash[ALLOCATOR_KEY] = allocator
         return allocator
@@ -222,9 +219,7 @@ def pytest_runtest_protocol(item, nextitem):
     return None
 
 
-def _set_worker_process_title(
-    config: Config, device: str | None, test_name: str | None
-) -> None:
+def _set_worker_process_title(config: Config, device: str | None, test_name: str | None) -> None:
     """Optionally label worker processes for easier inspection."""
     try:
         import setproctitle
