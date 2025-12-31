@@ -506,7 +506,7 @@ public:
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(builtin::call_extern()) && call->args.size() >= 1) {
+      if (call->op.same_as(builtin::call_extern()) && !call->args.empty()) {
         if (const auto *func_name = call->args[0].as<StringImmNode>()) {
           std::string name = func_name->value;
           // Check if this is an AtomicAdd call (AtomicAdd, AtomicAddx2,
@@ -536,7 +536,7 @@ public:
                     }
                   }
                 } else if (ptr_call->op.same_as(builtin::address_of()) &&
-                           ptr_call->args.size() >= 1) {
+                           !ptr_call->args.empty()) {
                   // Handle legacy address_of case (for backward compatibility)
                   if (const auto *load =
                           ptr_call->args[0].as<BufferLoadNode>()) {

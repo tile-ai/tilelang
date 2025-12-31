@@ -273,7 +273,6 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
     src_value = Cast(dst->dtype, src_value);
 
   // Build a pointer to destination element using tvm_access_ptr
-  BufferLoad dst_load = BufferLoad(dst, dst_indices);
   Array<Range> dst_ranges;
   for (const PrimExpr &index : dst_indices) {
     dst_ranges.push_back(Range::FromMinExtent(index, 1));

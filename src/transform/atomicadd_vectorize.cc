@@ -285,14 +285,8 @@ private:
               MakeAccessPtrFromRegion(dst_region, 2); // 2 = write access
           new_args.push_back(dst_ptr);
         } else if (const auto *call = node->args[0].as<CallNode>()) {
-          // If it's already an address_of or access_ptr, forward it; otherwise,
-          // keep original.
-          if (call->op.same_as(builtin::address_of()) ||
-              call->op.same_as(builtin::tvm_access_ptr())) {
-            new_args.push_back(node->args[0]);
-          } else {
-            new_args.push_back(node->args[0]);
-          }
+          // Forward the call as-is (address_of, access_ptr, or other)
+          new_args.push_back(node->args[0]);
         } else {
           new_args.push_back(node->args[0]);
         }
