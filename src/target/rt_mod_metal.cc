@@ -1,5 +1,13 @@
 #include "codegen_metal.h"
+#include "dmlc/json.h"
+#include "tvm/ffi/reflection/accessor.h"
+#include "tvm/ffi/reflection/registry.h"
+#include <_static_assert.h>
+#include <cstddef>
+#include <sstream>
 
+#include "runtime/metal/metal_module.h"
+#include "target/build_common.h"
 
 namespace tvm {
 namespace codegen {
@@ -16,7 +24,7 @@ ffi::Module BuildMetal(IRModule mod, Target target) {
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>()) << "CodeGenMetal: Can only take PrimFunc";
     auto global_symbol = kv.second->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
-    ICHECK(global_symbol.has_value());  
+    ICHECK(global_symbol.has_value());
     std::string func_name = global_symbol.value();
 
     source_maker << "// Function: " << func_name << "\n";
@@ -37,7 +45,8 @@ ffi::Module BuildMetal(IRModule mod, Target target) {
     smap[func_name] = fsource;
   }
 
-  return codegen::DeviceSourceModuleCreate(source_maker.str(), fmt, ExtractFuncInfo(mod), "metal");
+  return runtime::MetalModuleCreate(smap, ExtractFuncInfo(mod), fmt,
+                                    source_maker.str());
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
