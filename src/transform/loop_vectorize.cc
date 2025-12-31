@@ -152,8 +152,7 @@ private:
     } else if (node->op == builtin::call_extern()) {
       // do not vectorize extern calls
       vector_size_ = 1;
-    } else if (node->op.same_as(tl::rng_rand()) ||
-               node->op.same_as(tl::rng_init())) {
+    } else if (node->op.same_as(tl::rng_init())) {
       // do not vectorize random operation
       vector_size_ = 1;
     }

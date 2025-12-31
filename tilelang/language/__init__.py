@@ -105,6 +105,10 @@ from .annotations import (  # noqa: F401
 from .random import (
     rng_init,  # noqa: F401
     rng_rand,  # noqa: F401
+    rng_rand_uniform,  # noqa: F401
+    rng_rand_uniform_double,  # noqa: F401
+    rng_rand_normal,  # noqa: F401
+    rng_rand_normal_double,  # noqa: F401
 )
 
 

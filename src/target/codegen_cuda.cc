@@ -2651,18 +2651,35 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << PrintExpr(op->args[1]) << ")";
   } else if (op->op.same_as(tl::rng_init())) {
     this->need_curand_kernel_h_ = true;
-    this->curand_philox_state = name_supply_->FreshName("__philox_state");
+    this->curand_random_generator_state =
+        name_supply_->FreshName("__random_generator_state");
+    this->curand_random_generator_state_type =
+        op->args[3].as<StringImmNode>()->value;
     this->PrintIndent();
-    this->stream << "curandStatePhilox4_32_10_t " << this->curand_philox_state
-                 << ";\n";
+    this->stream << op->args[3].as<StringImmNode>()->value << " "
+                 << this->curand_random_generator_state << ";\n";
     this->PrintIndent();
     this->stream << "curand_init(" << PrintExpr(op->args[0]) << ", "
                  << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2])
-                 << ", &" << this->curand_philox_state << ");\n";
+                 << ", &" << this->curand_random_generator_state << ");\n";
     // Store state_var for later use by rng_rand
   } else if (op->op.same_as(tl::rng_rand())) {
     this->need_curand_kernel_h_ = true;
-    os << "curand(&" << this->curand_philox_state << ")";
+    os << "curand(&" << this->curand_random_generator_state << ")";
+  } else if (op->op.same_as(tl::rng_rand_uniform())) {
+    this->need_curand_kernel_h_ = true;
+    os << "curand_uniform(&" << this->curand_random_generator_state << ")";
+  } else if (op->op.same_as(tl::rng_rand_uniform_double())) {
+    this->need_curand_kernel_h_ = true;
+    os << "curand_uniform_double(&" << this->curand_random_generator_state
+       << ")";
+  } else if (op->op.same_as(tl::rng_rand_normal())) {
+    this->need_curand_kernel_h_ = true;
+    os << "curand_normal(&" << this->curand_random_generator_state << ")";
+  } else if (op->op.same_as(tl::rng_rand_normal_double())) {
+    this->need_curand_kernel_h_ = true;
+    os << "curand_normal_double(&" << this->curand_random_generator_state
+       << ")";
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
     os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_max())) {
@@ -3109,6 +3126,52 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
 
     if (!fail) {
       return;
+    }
+  }
+
+  if (auto call = op->value.as<CallNode>()) {
+    if (this->curand_random_generator_state_type ==
+        "curandStatePhilox4_32_10_t") {
+      if (call->op.same_as(tl::rng_rand()) && lanes == 4) {
+        os << "curand4(&" << this->curand_random_generator_state << ")";
+        return;
+      }
+      if (call->op.same_as(tl::rng_rand_uniform()) && lanes == 4) {
+        os << "curand_uniform4(&" << this->curand_random_generator_state << ")";
+        return;
+      }
+      if (call->op.same_as(tl::rng_rand_uniform_double()) && lanes == 2) {
+        os << "curand_uniform2_double(&" << this->curand_random_generator_state
+           << ")";
+        return;
+      }
+      if (call->op.same_as(tl::rng_rand_normal()) && lanes == 4) {
+        os << "curand_normal4(&" << this->curand_random_generator_state << ")";
+        return;
+      }
+      if (call->op.same_as(tl::rng_rand_normal()) && lanes == 2) {
+        os << "curand_normal2(&" << this->curand_random_generator_state << ")";
+        return;
+      }
+      if (call->op.same_as(tl::rng_rand_normal_double()) && lanes == 2) {
+        os << "curand_normal2_double(&" << this->curand_random_generator_state
+           << ")";
+        return;
+      }
+    } else if (this->curand_random_generator_state_type ==
+               "curandStateMRG32k3a_t") {
+      if (call->op.same_as(tl::rng_rand_normal_double()) && lanes == 2) {
+        os << "curand_normal2_double(&" << this->curand_random_generator_state
+           << ")";
+        return;
+      }
+    } else if (this->curand_random_generator_state_type ==
+               "curandStateXORWOW_t") {
+      if (call->op.same_as(tl::rng_rand_normal_double()) && lanes == 2) {
+        os << "curand_normal2_double(&" << this->curand_random_generator_state
+           << ")";
+        return;
+      }
     }
   }
 
