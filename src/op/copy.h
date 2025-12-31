@@ -121,6 +121,9 @@ public:
   //   - "disable_tma": Bool, whether to disable TMA acceleration
   //   - "eviction_policy": IntImm, cache eviction policy (0=normal, 1=first,
   //   2=last)
+  //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
+  //     layout hint applied to the outermost generated parallel loop of this
+  //     copy's SIMT loop nest.
 
   mutable ParallelOp par_op_; // Optional associated parallelization operator
 

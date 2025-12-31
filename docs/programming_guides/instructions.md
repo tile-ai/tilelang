@@ -13,7 +13,7 @@ level, how they map to hardware concepts, and how to use them correctly.
 
 ## Data Movement
 
-Use `T.copy(src, dst, coalesced_width=None, disable_tma=False, eviction_policy=None)`
+Use `T.copy(src, dst, *, coalesced_width=None, disable_tma=False, eviction_policy=None, loop_layout=None)`
 to move tiles between memory scopes. It accepts `tir.Buffer`, `BufferLoad`, or
 `BufferRegion`; extents are inferred or broadcast when possible.
 
