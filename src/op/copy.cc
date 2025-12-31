@@ -312,23 +312,24 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   if (is_scalar) {
     return For(Var("i"), 0, 1, ForKind::kSerial, body);
   }
-  // Attach coalesced width on every parallel loop; attach loop layout only
-  // on the outermost generated parallel loop to satisfy validator rules.
-  bool has_loop_layout = annotations.count(attr::kParallelLoopLayout);
-  ObjectRef loop_layout;
-  if (has_loop_layout) {
-    loop_layout = annotations.Get(attr::kParallelLoopLayout).value();
-  }
+
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> loop_annotations;
-    if (annotations.count(attr::kCoalescedWidth)) {
-      loop_annotations.Set(attr::kCoalescedWidth,
-                           annotations.Get(attr::kCoalescedWidth).value());
+
+    // Only attach the parallel related annotations on the outermost loop (i ==
+    // 0)
+    if (i == 0) {
+      if (annotations.count(attr::kCoalescedWidth)) {
+        loop_annotations.Set(attr::kCoalescedWidth,
+                             annotations.Get(attr::kCoalescedWidth).value());
+      }
+      if (annotations.count(attr::kParallelLoopLayout)) {
+        loop_annotations.Set(
+            attr::kParallelLoopLayout,
+            annotations.Get(attr::kParallelLoopLayout).value());
+      }
     }
-    // Only attach the parallel loop layout on the outermost loop (i == 0)
-    if (has_loop_layout && i == 0) {
-      loop_annotations.Set(attr::kParallelLoopLayout, loop_layout);
-    }
+
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
                ForKind::kParallel, body, std::nullopt, loop_annotations);
   }

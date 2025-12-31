@@ -287,9 +287,11 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> loop_annotations;
-    if (annotations.count(attr::kCoalescedWidth)) {
-      loop_annotations.Set(attr::kCoalescedWidth,
-                           annotations.Get(attr::kCoalescedWidth).value());
+    if (i == 0) {
+      if (annotations.count(attr::kCoalescedWidth)) {
+        loop_annotations.Set(attr::kCoalescedWidth,
+                             annotations.Get(attr::kCoalescedWidth).value());
+      }
     }
 
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
