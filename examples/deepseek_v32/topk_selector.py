@@ -267,7 +267,7 @@ def run_regression_perf(batch=64, seq_len=32 * 1024, topk=2048):
     def run_kernel_only():
         tl_topk(input, starts, ends, topk)
 
-    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

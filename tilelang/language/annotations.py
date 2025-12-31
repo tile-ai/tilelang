@@ -2,7 +2,8 @@
 
 from typing import Callable
 
-from tilelang.layout import Layout
+from tilelang.layout import Fragment, Layout
+from tilelang.utils.language import is_fragment
 from tvm.script.parser.tir import attr, block_attr
 from tvm.tir import FloatImm
 
@@ -27,6 +28,8 @@ def annotate_layout(layout_map: dict):
     """Annotate the layout of the buffer."""
     _layout_map = {}
     for buffer, layout in layout_map.items():
+        if is_fragment(buffer):
+            assert isinstance(layout, Fragment), f"for Fragment {buffer}, layout must be a Fragment, but got {type(layout)}"
         if isinstance(layout, Layout):
             _layout_map[buffer.data] = layout
         elif isinstance(layout, Callable):

@@ -447,7 +447,7 @@ def run_regression_perf(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, di
     def run_kernel_only():
         kernel(Q, K, V, block_indices, cache_seqlens, glse, output_partial)
 
-    return do_bench(run_kernel_only, warmup=100, rep=1000, backend="cupti")
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

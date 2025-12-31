@@ -185,7 +185,7 @@ def run_regression_perf(M=4096, N=4096, K=4096):
     in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
     kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     profiler = kernel.get_profiler()
-    return profiler.do_bench(profiler.func, warmup=25, backend="cupti")
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

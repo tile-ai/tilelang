@@ -506,7 +506,7 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
     print("All checks pass. ✅")
 
 
-def run_regression_perf(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, with_bias=False, tune=False):
+def run_regression_perf(m=4096, n=4096, k=4096, scale_size=32, topk=4, E=32, fast_dequant=True, with_bias=False, tune=False):
     block_M, block_N, block_K = 128, 256, 128
     num_stages = 1
     threads = 512
@@ -556,9 +556,7 @@ def run_regression_perf(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_d
             split=split,
         )
 
-    return tilelang.profiler.do_bench(
-        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100, backend="cupti"
-    )
+    return tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), backend="cupti")
 
 
 if __name__ == "__main__":

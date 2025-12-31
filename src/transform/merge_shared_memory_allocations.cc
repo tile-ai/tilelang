@@ -751,7 +751,9 @@ private:
                 if (lhs.size_bytes != rhs.size_bytes) {
                   return lhs.size_bytes > rhs.size_bytes;
                 }
-                return lhs.var < rhs.var;
+                // Use name comparison for deterministic ordering instead of
+                // pointer comparison
+                return lhs.var->name_hint < rhs.var->name_hint;
               });
 
     std::priority_queue<ActiveInterval, std::vector<ActiveInterval>,
@@ -1100,11 +1102,22 @@ private:
       }
     }
 
+    // Create a sorted vector of keys from shmem_allocs_ for deterministic
+    // iteration
+    std::vector<const VarNode *> sorted_vars;
+    sorted_vars.reserve(shmem_allocs_.size());
+    for (const auto &kv : shmem_allocs_) {
+      sorted_vars.push_back(kv.first);
+    }
+    std::sort(sorted_vars.begin(), sorted_vars.end(),
+              [](const VarNode *a, const VarNode *b) {
+                return a->name_hint < b->name_hint;
+              });
+
     std::vector<BufInfo> buf_infos;
     buf_infos.reserve(shmem_allocs_.size());
     // Build a BufInfo for all allocations that participate in liveness.
-    for (const auto &kv : shmem_allocs_) {
-      const VarNode *var = kv.first;
+    for (const VarNode *var : sorted_vars) {
       auto start_it = start_index.find(var);
       if (start_it == start_index.end()) {
         continue;
@@ -1121,7 +1134,7 @@ private:
         info.alignment = std::max(info.alignment, align_it->second);
       }
 
-      const AllocateNode *alloc = kv.second;
+      const AllocateNode *alloc = shmem_allocs_.at(var);
       int64_t bytes_per_elem =
           static_cast<int64_t>(alloc->dtype.bytes() * alloc->dtype.lanes());
       DataType size_dtype = DataType::Int(32);

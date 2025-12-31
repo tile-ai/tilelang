@@ -177,7 +177,7 @@ def main():
 
 
 def run_regression_perf():
-    BATCH, N_HEADS, SEQ_LEN, D_HEAD = 1, 1, 256, 64
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = 1, 32, 256, 64
     TOPK = 2
     BLOCK = 64
     torch.manual_seed(0)

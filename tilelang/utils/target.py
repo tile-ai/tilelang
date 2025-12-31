@@ -1,4 +1,8 @@
 from __future__ import annotations
+
+
+import torch
+
 from platform import mac_ver
 from typing import Literal
 from tilelang import tvm as tvm
@@ -111,7 +115,10 @@ def determine_target(target: str | Target | Literal["auto"] = "auto", return_obj
 
         # Determine the target based on availability
         if is_cuda_available:
-            return_var = "cuda"
+            if torch.cuda.is_available() and (cap := torch.cuda.get_device_capability(0)):
+                return_var = Target({"kind": "cuda", "arch": f"sm_{nvcc.get_target_arch(cap)}"})
+            else:
+                return_var = "cuda"
         elif is_hip_available:
             return_var = "hip"
         elif check_metal_availability():

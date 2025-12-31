@@ -55,8 +55,8 @@ def main(M=1024, N=1024, use_autotune=False):
 
 def run_regression_perf():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--m", type=int, default=1024)
-    parser.add_argument("--n", type=int, default=1024)
+    parser.add_argument("--m", type=int, default=4096)
+    parser.add_argument("--n", type=int, default=4096)
     args, _ = parser.parse_known_args()
     M, N = args.m, args.n
     a = torch.randn(M, N, dtype=torch.float32, device="cuda")
@@ -65,7 +65,7 @@ def run_regression_perf():
     kernel = elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32")
     from tilelang.profiler import do_bench
 
-    return do_bench(lambda: kernel(a, b), warmup=10, rep=100, backend="cupti")
+    return do_bench(lambda: kernel(a, b), backend="cupti")
 
 
 if __name__ == "__main__":

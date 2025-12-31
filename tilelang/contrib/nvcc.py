@@ -405,21 +405,17 @@ def get_target_compute_version(target=None):
     # 2. Target.current()
     target = target or Target.current()
     if target and target.arch:
-        arch = target.arch.split("_")[1]
+        arch = target.arch.split("_")[1].rstrip("af")
         if len(arch) == 2:
             major, minor = arch
             # Handle old format like sm_89
             return major + "." + minor
         elif len(arch) == 3:
-            major = int(arch[0])
-            if major < 2:
-                major = arch[0:2]
-                minor = arch[2]
-                return major + "." + minor
-            else:
-                # This is for arch like "sm_90a"
-                major, minor, suffix = arch
-            return major + "." + minor + "." + suffix
+            major = arch[0:2]
+            minor = arch[2]
+            return major + "." + minor
+        else:
+            raise ValueError(f"Unsupported arch: {arch}")
 
     # 3. GPU compute version
     if tvm.cuda(0).exist:
@@ -453,8 +449,11 @@ def parse_compute_version(compute_version) -> tuple[int, int]:
         raise RuntimeError("Compute version parsing error") from err
 
 
-def get_target_arch(compute_version) -> str:
-    major, minor = parse_compute_version(compute_version)
+def get_target_arch(compute_version: str | tuple[int, int]) -> str:
+    if isinstance(compute_version, str):
+        major, minor = parse_compute_version(compute_version)
+    else:
+        major, minor = compute_version
     target_arch = str(major * 10 + minor)
     if major >= 9:
         target_arch += "a"
