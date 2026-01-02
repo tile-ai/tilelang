@@ -44,7 +44,30 @@ using namespace tir;
 bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> small_frag_indices,
                            Array<PrimExpr> large_frag_indices,
-                           arith::Analyzer &analyzer_) {
+                           arith::Analyzer &analyzer_,
+                           bool check_forward_index) {
+  // When check_forward_index is true, verify that the physical indices
+  // (forward index) of both fragments are equal. This is required when
+  // validating loop layout against buffer fragment, as code generation
+  // needs to correctly derive buffer physical indices from loop layout.
+  if (check_forward_index) {
+    auto small_physical = small_frag->Forward(small_frag_indices);
+    auto large_physical = large_frag->Forward(large_frag_indices);
+
+    // Dimension mismatch means they are not equal.
+    if (small_physical.size() != large_physical.size()) {
+      return false;
+    }
+
+    // Check each physical index component for equality.
+    for (size_t i = 0; i < small_physical.size(); i++) {
+      auto diff = analyzer_.Simplify(small_physical[i] - large_physical[i]);
+      if (!is_zero(diff)) {
+        return false;
+      }
+    }
+  }
+
   Var rep_small("__checking_frag_contains_rep");
   analyzer_.Bind(rep_small,
                  Range(IntImm(small_frag->ReplicateExtent()->dtype, 0),
@@ -308,6 +331,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     }
     return results;
   }
+
   auto buffer_is_completed_replicated = [&](const Buffer &buffer) {
     if (!IsFragmentBuffer(buffer))
       return false;
@@ -602,8 +626,10 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     if (!T.layout_map.count(buffer))
       continue;
     auto fragment = T.layout_map[buffer].as<Fragment>().value();
+    // check_forward_index=true: when validating loop layout against buffer
+    // fragment, we need to ensure physical indices match for correct code gen.
     if (!ProveFragmentContains(candidate, fragment, vars, indice_map_[buffer],
-                               analyzer_)) {
+                               analyzer_, /*check_forward_index=*/true)) {
       return false;
     }
   }

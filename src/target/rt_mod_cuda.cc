@@ -31,6 +31,10 @@ ExtractFuncInfo(const IRModule &mod) {
         dtype = DataType::Int(32);
       info.arg_types.push_back(dtype);
     }
+    if (f->HasNonzeroAttr("use_cooperative_groups")) {
+      info.launch_param_tags.push_back(
+          runtime::launch_param::kUseCooperativeLaunch);
+    }
     if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(
             tir::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {

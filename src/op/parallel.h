@@ -27,7 +27,8 @@ using namespace tir;
 bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> small_frag_indices,
                            Array<PrimExpr> large_frag_indices,
-                           arith::Analyzer &analyzer_);
+                           arith::Analyzer &analyzer_,
+                           bool check_forward_index = false);
 
 class ParallelOpNode;
 

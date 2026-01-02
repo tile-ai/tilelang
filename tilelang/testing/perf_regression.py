@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 from collections.abc import Sequence
@@ -66,7 +68,7 @@ def process_func(func: Callable[..., float], name: str | None = None, /, **kwarg
     _RESULTS.append(PerfResult(name=result_name, latency=latency))
 
 
-def regression(prefixes: Sequence[str] = ("regression_",)) -> None:
+def regression(prefixes: Sequence[str] = ("regression_",), verbose: bool = True) -> None:
     """Run entrypoints in the caller module and print a markdown table.
 
     This is invoked by many example scripts.
@@ -82,7 +84,27 @@ def regression(prefixes: Sequence[str] = ("regression_",)) -> None:
         if any(k.startswith(p) for p in prefixes):
             functions.append((k, v))
 
-    for _, fn in sorted(functions, key=lambda kv: kv[0]):
-        fn()
+    sorted_functions = sorted(functions, key=lambda kv: kv[0])
+    total = len(sorted_functions)
+
+    for idx, (name, fn) in enumerate(sorted_functions, 1):
+        if verbose:
+            # Strip 'regression_' prefix for cleaner display
+            display_name = name[len("regression_") :] if name.startswith("regression_") else name
+            print(f"  ├─ [{idx}/{total}] {display_name}", end="", flush=True)
+        start_time = time.perf_counter()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # Suppress logging warnings during benchmark execution
+            prev_level = logging.root.level
+            logging.disable(logging.WARNING)
+            try:
+                fn()
+            finally:
+                logging.disable(logging.NOTSET)
+                logging.root.setLevel(prev_level)
+        elapsed = time.perf_counter() - start_time
+        if verbose:
+            print(f" ({elapsed:.2f}s)", flush=True)
 
     _emit_results()

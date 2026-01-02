@@ -12,13 +12,6 @@ try:
 except Exception:  # pragma: no cover
     tabulate = None  # type: ignore
 
-try:
-    from tqdm import tqdm
-except ImportError:
-
-    def tqdm(iterable, **kwargs):  # type: ignore
-        return iterable
-
 
 @dataclass(frozen=True)
 class PerfResult:
@@ -94,48 +87,91 @@ def regression_all(examples_root: str | os.PathLike[str] | None = None) -> None:
     merged: dict[str, float] = {}
     failures: list[str] = []
 
-    for bench_file in tqdm(bench_files, desc="Running regression tests ..."):
-        proc = subprocess.run(
+    total = len(bench_files)
+    print(f"\n{'═' * 60}")
+    print("  TileLang Performance Regression Suite")
+    print(f"  Found {total} test file(s)")
+    print(f"{'═' * 60}")
+    for idx, bench_file in enumerate(bench_files, 1):
+        rel_path = bench_file.relative_to(root)
+        print(f"\n{'─' * 60}")
+        print(f"[{idx}/{total}] 📂 {rel_path}")
+        print(f"{'─' * 60}")
+
+        proc = subprocess.Popen(
             [sys.executable, str(bench_file)],
             cwd=str(bench_file.parent),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             env={
                 **os.environ,
-                # Keep child processes from picking up user-site or random paths.
                 "PYTHONNOUSERSITE": "1",
-                # Ask child to emit a single JSON marker line for robust parsing.
                 "TL_PERF_REGRESSION_FORMAT": "json",
             },
         )
+
+        stdout_lines: list[str] = []
+        # Stream stdout in real-time
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            stdout_lines.append(line)
+            # Don't print the JSON result line
+            if not line.startswith(_RESULTS_JSON_PREFIX):
+                print(line, end="", flush=True)
+
+        proc.wait()
+        stdout_content = "".join(stdout_lines)
+        stderr_content = proc.stderr.read() if proc.stderr else ""
+
         if proc.returncode != 0:
-            failures.append(f"{bench_file.relative_to(root)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+            failures.append(f"{rel_path}\nSTDOUT:\n{stdout_content}\nSTDERR:\n{stderr_content}")
+            print("  └─ ❌ FAILED")
             continue
 
-        parsed = _parse_table(proc.stdout)
+        parsed = _parse_table(stdout_content)
+        num_tests = len(parsed)
         for k, v in parsed.items():
-            # First writer wins to keep stable behavior if duplicates happen.
             if k not in merged:
                 merged[k] = v
                 _RESULTS.append(PerfResult(name=k, latency=v))
+
+        print(f"  └─ ✅ Completed ({num_tests} tests)")
+
+    # Print summary
+    print(f"\n{'═' * 60}")
+    print("  Summary")
+    print(f"{'═' * 60}")
+    passed = total - len(failures)
+    print(f"  ✅ Passed: {passed}/{total} files")
+    if failures:
+        print(f"  ❌ Failed: {len(failures)}/{total} files")
+    print(f"  📊 Total tests: {len(merged)}")
+    print()
 
     if failures and not merged:
         raise RuntimeError("All benchmark drivers failed:\n\n" + "\n\n".join(failures))
     if failures:
         # Don't hard-fail if we have some results; surface the errors for debugging.
-        print("# Some benchmark drivers failed (partial results)")
+        print(f"{'─' * 60}")
+        print("  Failed benchmarks (partial results):")
+        print(f"{'─' * 60}")
         for msg in failures:
-            print("# ---")
+            print("  ---")
             for line in msg.splitlines():
-                print(f"# {line}")
+                print(f"  {line}")
+        print()
 
     fmt = os.environ.get("TL_PERF_REGRESSION_FORMAT", "text").strip().lower()
     if fmt == "json":
         print(_RESULTS_JSON_PREFIX + json.dumps(merged, separators=(",", ":")))
         return
 
+    print(f"{'─' * 60}")
+    print("  Results")
+    print(f"{'─' * 60}")
     rows = [[k, merged[k]] for k in sorted(merged.keys())]
-    headers = ["File", "Latency"]
+    headers = ["Name", "Latency (ms)"]
     if tabulate is None:
         print(f"| {headers[0]} | {headers[1]} |")
         print("|---|---|")
