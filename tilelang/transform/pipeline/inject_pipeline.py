@@ -482,9 +482,7 @@ class PipelineInjector(PyStmtExprMutator):
             steady_body = SeqStmt(steady_stmts) if len(steady_stmts) > 1 else steady_stmts[0]
 
             new_annotations = {
-                k: v
-                for k, v in loop.annotations.items()
-                if k not in ("software_pipeline_stage", "software_pipeline_order", "num_stages")
+                k: v for k, v in loop.annotations.items() if k not in ("software_pipeline_stage", "software_pipeline_order", "num_stages")
             }
 
             steady_loop = For(

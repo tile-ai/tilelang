@@ -55,20 +55,16 @@ from tvm import tir
 from tvm.tir import (
     AttrStmt,
     Block,
-    BlockRealize,
     Buffer,
     BufferLoad,
     BufferStore,
     Call,
     For,
     ForKind,
-    IfThenElse,
     IntImm,
-    LetStmt,
     PrimExpr,
     PrimFunc,
     PyStmtExprMutator,
-    PyStmtExprVisitor,
     SeqStmt,
     Stmt,
     Var,
@@ -246,12 +242,18 @@ class StatementClassifier:
 
         def visitor(node):
             nonlocal result
-            if isinstance(node, BufferLoad) and is_shared(node.buffer):
+            if (
+                isinstance(node, BufferLoad)
+                and is_shared(node.buffer)
+                or (
+                    isinstance(node, Call)
+                    and node.op.same_as(_OP_ADDRESS_OF)
+                    and len(node.args) > 0
+                    and isinstance(node.args[0], BufferLoad)
+                    and is_shared(node.args[0].buffer)
+                )
+            ):
                 result = True
-            elif isinstance(node, Call) and node.op.same_as(_OP_ADDRESS_OF):
-                if len(node.args) > 0 and isinstance(node.args[0], BufferLoad):
-                    if is_shared(node.args[0].buffer):
-                        result = True
 
         post_order_visit(stmt, visitor)
         return result

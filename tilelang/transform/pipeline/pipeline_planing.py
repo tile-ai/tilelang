@@ -14,7 +14,6 @@ from tilelang import tvm as tvm
 from tvm import arith, ir, tir
 from tvm.ir import Range
 from tvm.tir import (
-    AttrStmt,
     Block,
     BlockRealize,
     Buffer,
