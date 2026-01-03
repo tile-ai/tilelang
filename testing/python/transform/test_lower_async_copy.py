@@ -1,8 +1,6 @@
 """Test for LowerAsyncCopy pass."""
 
-import tilelang
 from tilelang import tvm as tvm
-from tvm import tir
 from tvm.script import tir as T
 from tilelang.transform.pipeline import LowerAsyncCopy
 
@@ -23,12 +21,8 @@ def vectorized_copy_kernel(
         # Vectorized copy from global to shared
         for i in range(4):
             for vec in T.vectorized(8):
-                A_shared[
-                    (i * 8 + vec) // 8 * 32 + thread_binding // 4,
-                    thread_binding % 4 * 8 + (i * 8 + vec) % 8
-                ] = A[
-                    (i * 8 + vec) // 8 * 32 + thread_binding // 4,
-                    thread_binding % 4 * 8 + (i * 8 + vec) % 8
+                A_shared[(i * 8 + vec) // 8 * 32 + thread_binding // 4, thread_binding % 4 * 8 + (i * 8 + vec) % 8] = A[
+                    (i * 8 + vec) // 8 * 32 + thread_binding // 4, thread_binding % 4 * 8 + (i * 8 + vec) % 8
                 ]
 
         # Some computation

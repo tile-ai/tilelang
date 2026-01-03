@@ -48,8 +48,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Dict, List, Optional, Set, Tuple
-
 from tilelang import tvm as tvm
 from tilelang.language.tir import op as tl_op
 from tvm import tir
@@ -79,6 +77,7 @@ from tvm.tir.transform import prim_func_pass
 # =============================================================================
 # Utility Functions
 # =============================================================================
+
 
 def _get_buffer_scope(buf: Buffer) -> str:
     """Get the storage scope of a buffer."""
@@ -133,18 +132,20 @@ def _substitute_var(expr: PrimExpr, var: Var, value: PrimExpr) -> PrimExpr:
 # Pipeline Stage Information
 # =============================================================================
 
+
 @dataclass
 class PipelineStageAttr:
     """Information extracted from pipeline_stage attribute."""
-    stage_expr: PrimExpr          # The full stage expression
-    is_constant: bool             # True if stage is a constant (prologue/epilogue)
-    constant_value: Optional[int] # The constant stage value if is_constant
-    loop_var: Optional[Var]       # The loop variable if not constant
-    offset: Optional[int]         # Offset from loop var, e.g., 2 for (ko + 2) % 3
-    num_stages: Optional[int]     # Total number of stages (modulo value)
+
+    stage_expr: PrimExpr  # The full stage expression
+    is_constant: bool  # True if stage is a constant (prologue/epilogue)
+    constant_value: int | None  # The constant stage value if is_constant
+    loop_var: Var | None  # The loop variable if not constant
+    offset: int | None  # Offset from loop var, e.g., 2 for (ko + 2) % 3
+    num_stages: int | None  # Total number of stages (modulo value)
 
 
-def _extract_pipeline_stage_attr(attr: AttrStmt) -> Optional[PipelineStageAttr]:
+def _extract_pipeline_stage_attr(attr: AttrStmt) -> PipelineStageAttr | None:
     """Extract pipeline stage information from AttrStmt."""
     if attr.attr_key != "pipeline_stage":
         return None
@@ -203,7 +204,7 @@ def _is_pipeline_stage_attr(stmt: Stmt) -> bool:
     return isinstance(stmt, AttrStmt) and stmt.attr_key == "pipeline_stage"
 
 
-def _get_pipeline_stage_attr(stmt: Stmt) -> Optional[PipelineStageAttr]:
+def _get_pipeline_stage_attr(stmt: Stmt) -> PipelineStageAttr | None:
     """Get pipeline stage attr from statement if present."""
     if isinstance(stmt, AttrStmt) and stmt.attr_key == "pipeline_stage":
         return _extract_pipeline_stage_attr(stmt)
@@ -214,12 +215,14 @@ def _get_pipeline_stage_attr(stmt: Stmt) -> Optional[PipelineStageAttr]:
 # Statement Classification
 # =============================================================================
 
+
 class StmtKind(Enum):
     """Classification of statements for async copy synchronization."""
-    ASYNC_COPY = auto()      # Contains ptx_cp_async (needs commit_group after)
-    SHARED_CONSUMER = auto() # Reads from shared memory (needs wait_group before)
-    MIXED = auto()           # Contains both (steady state loop body)
-    OTHER = auto()           # Neither
+
+    ASYNC_COPY = auto()  # Contains ptx_cp_async (needs commit_group after)
+    SHARED_CONSUMER = auto()  # Reads from shared memory (needs wait_group before)
+    MIXED = auto()  # Contains both (steady state loop body)
+    OTHER = auto()  # Neither
 
 
 class StatementClassifier:
@@ -245,23 +248,32 @@ class StatementClassifier:
     def _contains_async_copy(self, stmt: Stmt) -> bool:
         """Check if statement contains ptx_cp_async."""
         result = [False]
+
         def visitor(node):
             if isinstance(node, Call) and "ptx_cp_async" in str(node.op):
                 result[0] = True
+
         post_order_visit(stmt, visitor)
         return result[0]
 
     def _reads_shared_memory(self, stmt: Stmt) -> bool:
         """Check if statement reads from shared memory."""
         result = [False]
+
         def visitor(node):
-            if isinstance(node, BufferLoad) and _is_shared_buffer(node.buffer):
+            if (
+                isinstance(node, BufferLoad)
+                and _is_shared_buffer(node.buffer)
+                or (
+                    isinstance(node, Call)
+                    and "address_of" in str(node.op)
+                    and len(node.args) > 0
+                    and isinstance(node.args[0], BufferLoad)
+                    and _is_shared_buffer(node.args[0].buffer)
+                )
+            ):
                 result[0] = True
-            elif isinstance(node, Call):
-                if "address_of" in str(node.op) and len(node.args) > 0:
-                    if isinstance(node.args[0], BufferLoad):
-                        if _is_shared_buffer(node.args[0].buffer):
-                            result[0] = True
+
         post_order_visit(stmt, visitor)
         return result[0]
 
@@ -270,9 +282,11 @@ class StatementClassifier:
 # Async Copy Pattern Matching
 # =============================================================================
 
+
 @dataclass
 class AsyncCopyMatch:
     """Result of matching a vectorized copy pattern."""
+
     store_buffer: Buffer
     load_buffer: Buffer
     vec_len: int
@@ -281,7 +295,7 @@ class AsyncCopyMatch:
     loop_var: Var
 
 
-def _match_vectorized_copy(loop: For) -> Optional[AsyncCopyMatch]:
+def _match_vectorized_copy(loop: For) -> AsyncCopyMatch | None:
     """Check if a For loop is a vectorized copy from global to shared memory."""
     if loop.kind != ForKind.VECTORIZED:
         return None
@@ -313,9 +327,8 @@ def _match_vectorized_copy(loop: For) -> Optional[AsyncCopyMatch]:
         load = store.value
     elif isinstance(store.value, Call):
         call = store.value
-        if hasattr(call, 'op') and 'if_then_else' in str(call.op):
-            if len(call.args) >= 2 and isinstance(call.args[1], BufferLoad):
-                load = call.args[1]
+        if hasattr(call, "op") and "if_then_else" in str(call.op) and len(call.args) >= 2 and isinstance(call.args[1], BufferLoad):
+            load = call.args[1]
 
     if load is None:
         return None
@@ -346,12 +359,13 @@ def _match_vectorized_copy(loop: For) -> Optional[AsyncCopyMatch]:
 # Async Copy Lowering
 # =============================================================================
 
+
 class AsyncCopyLowerer:
     """Lower vectorized global->shared copy to ptx_cp_async."""
 
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
-        self.buffer_data_to_buffer: Dict[Var, Buffer] = {}
+        self.buffer_data_to_buffer: dict[Var, Buffer] = {}
         self.has_async_copy: bool = False
 
     def transform(self, func: PrimFunc) -> Stmt:
@@ -397,8 +411,15 @@ class AsyncCopyLowerer:
             return op
 
         return Block(
-            op.iter_vars, op.reads, op.writes, op.name_hint,
-            new_body, op.init, op.alloc_buffers, op.match_buffers, op.annotations,
+            op.iter_vars,
+            op.reads,
+            op.writes,
+            op.name_hint,
+            new_body,
+            op.init,
+            op.alloc_buffers,
+            op.match_buffers,
+            op.annotations,
         )
 
     def _visit_for(self, loop: For) -> Stmt:
@@ -414,11 +435,16 @@ class AsyncCopyLowerer:
             return loop
 
         return For(
-            loop.loop_var, loop.min, loop.extent, loop.kind,
-            new_body, loop.thread_binding, loop.annotations,
+            loop.loop_var,
+            loop.min,
+            loop.extent,
+            loop.kind,
+            new_body,
+            loop.thread_binding,
+            loop.annotations,
         )
 
-    def _create_async_copy(self, match: AsyncCopyMatch) -> Optional[Stmt]:
+    def _create_async_copy(self, match: AsyncCopyMatch) -> Stmt | None:
         """Create ptx_cp_async call from matched pattern."""
         dtype_bytes = match.load_buffer.dtype.bits // 8
         copy_bytes = match.vec_len * dtype_bytes
@@ -463,6 +489,7 @@ class AsyncCopyLowerer:
 # Pipeline Synchronization Insertion
 # =============================================================================
 
+
 class PipelineSyncInserter:
     """
     Insert proper synchronization for software pipelining.
@@ -489,8 +516,15 @@ class PipelineSyncInserter:
             if new_body is stmt.body:
                 return stmt
             return Block(
-                stmt.iter_vars, stmt.reads, stmt.writes, stmt.name_hint,
-                new_body, stmt.init, stmt.alloc_buffers, stmt.match_buffers, stmt.annotations,
+                stmt.iter_vars,
+                stmt.reads,
+                stmt.writes,
+                stmt.name_hint,
+                new_body,
+                stmt.init,
+                stmt.alloc_buffers,
+                stmt.match_buffers,
+                stmt.annotations,
             )
         elif isinstance(stmt, BlockRealize):
             if stmt.block.name_hint and stmt.block.name_hint.startswith("_"):
@@ -505,8 +539,13 @@ class PipelineSyncInserter:
                 # Process steady state loop body
                 processed_body = self._process_steady_state_body(stmt.body)
                 return For(
-                    stmt.loop_var, stmt.min, stmt.extent, stmt.kind,
-                    processed_body, stmt.thread_binding, stmt.annotations,
+                    stmt.loop_var,
+                    stmt.min,
+                    stmt.extent,
+                    stmt.kind,
+                    processed_body,
+                    stmt.thread_binding,
+                    stmt.annotations,
                 )
             elif classification in (StmtKind.ASYNC_COPY, StmtKind.SHARED_CONSUMER):
                 return stmt
@@ -515,8 +554,13 @@ class PipelineSyncInserter:
             if new_body is stmt.body:
                 return stmt
             return For(
-                stmt.loop_var, stmt.min, stmt.extent, stmt.kind,
-                new_body, stmt.thread_binding, stmt.annotations,
+                stmt.loop_var,
+                stmt.min,
+                stmt.extent,
+                stmt.kind,
+                new_body,
+                stmt.thread_binding,
+                stmt.annotations,
             )
         elif isinstance(stmt, IfThenElse):
             new_then = self._visit_stmt(stmt.then_case)
@@ -536,8 +580,8 @@ class PipelineSyncInserter:
     def _visit_seq(self, seq: SeqStmt) -> Stmt:
         """Process a SeqStmt with proper pipeline synchronization using pipeline_stage attr."""
         new_stmts = []
-        pending_producers: List[Tuple[Stmt, Optional[int]]] = []  # (stmt, constant_stage)
-        current_stage: Optional[int] = None
+        pending_producers: list[tuple[Stmt, int | None]] = []  # (stmt, constant_stage)
+        current_stage: int | None = None
         epilogue_consumer_idx = 0
         has_seen_steady_state = False
 
@@ -560,12 +604,11 @@ class PipelineSyncInserter:
                     producer_stage = stage_attr.constant_value
 
                     # Flush on stage change
-                    if pending_producers and current_stage is not None:
-                        if producer_stage != current_stage:
-                            for p, _ in pending_producers:
-                                new_stmts.append(p)
-                            new_stmts.append(tir.Evaluate(tir.ptx_commit_group()))
-                            pending_producers = []
+                    if pending_producers and current_stage is not None and producer_stage != current_stage:
+                        for p, _ in pending_producers:
+                            new_stmts.append(p)
+                        new_stmts.append(tir.Evaluate(tir.ptx_commit_group()))
+                        pending_producers = []
 
                     pending_producers.append((new_s, producer_stage))
                     current_stage = producer_stage
@@ -639,7 +682,6 @@ class PipelineSyncInserter:
         pending_producers = []
 
         for s in body.seq:
-            stage_attr = _get_pipeline_stage_attr(s)
             classification = self.classifier.classify(s)
 
             if classification == StmtKind.ASYNC_COPY:
@@ -670,6 +712,7 @@ class PipelineSyncInserter:
 # Pipeline Attribute Cleanup
 # =============================================================================
 
+
 class PipelineAttrRemover:
     """Remove pipeline_stage attributes after synchronization insertion."""
 
@@ -693,8 +736,15 @@ class PipelineAttrRemover:
             if new_body is stmt.body:
                 return stmt
             return Block(
-                stmt.iter_vars, stmt.reads, stmt.writes, stmt.name_hint,
-                new_body, stmt.init, stmt.alloc_buffers, stmt.match_buffers, stmt.annotations,
+                stmt.iter_vars,
+                stmt.reads,
+                stmt.writes,
+                stmt.name_hint,
+                new_body,
+                stmt.init,
+                stmt.alloc_buffers,
+                stmt.match_buffers,
+                stmt.annotations,
             )
         elif isinstance(stmt, BlockRealize):
             new_block = self._visit_stmt(stmt.block)
@@ -706,8 +756,13 @@ class PipelineAttrRemover:
             if new_body is stmt.body:
                 return stmt
             return For(
-                stmt.loop_var, stmt.min, stmt.extent, stmt.kind,
-                new_body, stmt.thread_binding, stmt.annotations,
+                stmt.loop_var,
+                stmt.min,
+                stmt.extent,
+                stmt.kind,
+                new_body,
+                stmt.thread_binding,
+                stmt.annotations,
             )
         elif isinstance(stmt, IfThenElse):
             new_then = self._visit_stmt(stmt.then_case)
@@ -723,6 +778,7 @@ class PipelineAttrRemover:
 # =============================================================================
 # Main Pass
 # =============================================================================
+
 
 def _detect_num_stages(stmt: Stmt) -> int:
     """Detect the number of pipeline stages from buffer shapes."""

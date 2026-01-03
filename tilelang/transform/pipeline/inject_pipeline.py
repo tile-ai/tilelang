@@ -16,11 +16,8 @@ Key features:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set, Tuple
-
 from tilelang import tvm as tvm
-from tvm import ir, tir
-from tvm.ir import Range
+from tvm import tir
 from tvm.tir import (
     AttrStmt,
     Block,
@@ -68,11 +65,12 @@ class BufferCollector:
     """Collect buffers accessed in a statement."""
 
     def __init__(self):
-        self.read_buffers: Set[Buffer] = set()
-        self.write_buffers: Set[Buffer] = set()
+        self.read_buffers: set[Buffer] = set()
+        self.write_buffers: set[Buffer] = set()
 
     def collect(self, stmt: Stmt) -> None:
         """Collect all buffers accessed in the statement."""
+
         def visit(node):
             if isinstance(node, BufferLoad):
                 self.read_buffers.add(node.buffer)
@@ -132,15 +130,19 @@ class BufferRewriter:
             return AttrStmt(stmt.node, stmt.attr_key, stmt.value, new_body)
         elif isinstance(stmt, For):
             new_body = self._visit_stmt(stmt.body)
-            return For(
-                stmt.loop_var, stmt.min, stmt.extent, stmt.kind,
-                new_body, stmt.thread_binding, stmt.annotations
-            )
+            return For(stmt.loop_var, stmt.min, stmt.extent, stmt.kind, new_body, stmt.thread_binding, stmt.annotations)
         elif isinstance(stmt, Block):
             new_body = self._visit_stmt(stmt.body)
             return Block(
-                stmt.iter_vars, stmt.reads, stmt.writes, stmt.name_hint,
-                new_body, stmt.init, stmt.alloc_buffers, stmt.match_buffers, stmt.annotations
+                stmt.iter_vars,
+                stmt.reads,
+                stmt.writes,
+                stmt.name_hint,
+                new_body,
+                stmt.init,
+                stmt.alloc_buffers,
+                stmt.match_buffers,
+                stmt.annotations,
             )
         elif isinstance(stmt, BlockRealize):
             new_block = self._visit_stmt(stmt.block)
@@ -194,11 +196,7 @@ class BufferRewriter:
         elif isinstance(expr, tir.Min):
             return tir.Min(self._visit_expr(expr.a), self._visit_expr(expr.b))
         elif isinstance(expr, tir.Select):
-            return tir.Select(
-                self._visit_expr(expr.condition),
-                self._visit_expr(expr.true_value),
-                self._visit_expr(expr.false_value)
-            )
+            return tir.Select(self._visit_expr(expr.condition), self._visit_expr(expr.true_value), self._visit_expr(expr.false_value))
         else:
             return expr
 
@@ -235,9 +233,9 @@ class PipelineInjector:
 
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
-        self.buffer_data_to_buffer: Dict[Var, Buffer] = {}
+        self.buffer_data_to_buffer: dict[Var, Buffer] = {}
         # Maps original buffer -> expanded buffer with extra stage dimension
-        self.buffer_expansion_map: Dict[Buffer, Buffer] = {}
+        self.buffer_expansion_map: dict[Buffer, Buffer] = {}
         self.num_stages: int = 0
 
     def transform(self, func: PrimFunc) -> Stmt:
@@ -251,7 +249,6 @@ class PipelineInjector:
         """Create an expanded buffer with an extra dimension for stage indexing."""
         # Add num_stages as the first dimension
         new_shape = [IntImm("int32", num_stages)] + list(buf.shape)
-        new_strides = []  # Let TVM compute strides
 
         # Create new buffer with expanded shape
         new_name = f"{buf.name}_{num_stages}"
@@ -276,14 +273,14 @@ class PipelineInjector:
         rewriter = BufferRewriter(buf, expanded_buf, stage_idx, self.num_stages)
         return rewriter.rewrite(stmt)
 
-    def _collect_pipeline_buffers(self, body_stmts: List[Stmt], stages: List[int]) -> Set[Buffer]:
+    def _collect_pipeline_buffers(self, body_stmts: list[Stmt], stages: list[int]) -> set[Buffer]:
         """Collect shared memory buffers that need multi-buffering.
 
         A buffer needs multi-buffering if it's written by an early stage (copy)
         and read by a later stage (compute).
         """
-        stage_write_bufs: Dict[int, Set[Buffer]] = {}
-        stage_read_bufs: Dict[int, Set[Buffer]] = {}
+        stage_write_bufs: dict[int, set[Buffer]] = {}
+        stage_read_bufs: dict[int, set[Buffer]] = {}
 
         for stmt, stage in zip(body_stmts, stages):
             collector = BufferCollector()
@@ -307,7 +304,7 @@ class PipelineInjector:
         all_stages = sorted(set(stages))
 
         for i, early_stage in enumerate(all_stages):
-            for late_stage in all_stages[i + 1:]:
+            for late_stage in all_stages[i + 1 :]:
                 # Buffers written by early_stage and read by late_stage
                 written = stage_write_bufs.get(early_stage, set())
                 read = stage_read_bufs.get(late_stage, set())
@@ -346,9 +343,6 @@ class PipelineInjector:
 
     def _visit_block(self, op: Block) -> Block:
         """Visit a Block node."""
-        # Store the current buffer expansion map state
-        expansion_map_before = dict(self.buffer_expansion_map)
-
         new_body = self._visit_stmt(op.body)
 
         # Check if any buffers in alloc_buffers need to be replaced with expanded versions
@@ -414,7 +408,7 @@ class PipelineInjector:
         num_stages = max(stages) + 1
 
         if self.verbose:
-            print(f"\n[InjectPipeline] Transforming loop:")
+            print("\n[InjectPipeline] Transforming loop:")
             print(f"  stages: {stages}")
             print(f"  orders: {orders}")
             print(f"  num_stages: {num_stages}")
@@ -429,11 +423,9 @@ class PipelineInjector:
             return loop
 
         # Create the pipelined version
-        return self._create_pipelined_loop(
-            loop, body_stmts, stages, orders, num_stages
-        )
+        return self._create_pipelined_loop(loop, body_stmts, stages, orders, num_stages)
 
-    def _extract_int_array(self, anno) -> List[int]:
+    def _extract_int_array(self, anno) -> list[int]:
         """Extract integer array from annotation."""
         result = []
         try:
@@ -448,7 +440,7 @@ class PipelineInjector:
             return []
         return result
 
-    def _get_body_statements(self, body: Stmt) -> List[Stmt]:
+    def _get_body_statements(self, body: Stmt) -> list[Stmt]:
         """Extract statements from loop body."""
         # Navigate through BlockRealize/Block to get to SeqStmt
         current = body
@@ -471,9 +463,7 @@ class PipelineInjector:
                 # Single statement
                 return [current]
 
-    def _rewrite_stmt_with_multibuffer(
-        self, stmt: Stmt, loop_iter: PrimExpr, pipeline_buffers: Set[Buffer]
-    ) -> Stmt:
+    def _rewrite_stmt_with_multibuffer(self, stmt: Stmt, loop_iter: PrimExpr, pipeline_buffers: set[Buffer]) -> Stmt:
         """Rewrite a statement to use multi-buffered buffers with modulo indexing."""
         result = stmt
         for buf in pipeline_buffers:
@@ -498,19 +488,14 @@ class PipelineInjector:
         Stmt
             The statement wrapped with pipeline_stage attribute.
         """
-        return AttrStmt(
-            tir.StringImm("pipeline"),
-            "pipeline_stage",
-            stage_expr,
-            stmt
-        )
+        return AttrStmt(tir.StringImm("pipeline"), "pipeline_stage", stage_expr, stmt)
 
     def _create_pipelined_loop(
         self,
         loop: For,
-        body_stmts: List[Stmt],
-        stages: List[int],
-        orders: List[int],
+        body_stmts: list[Stmt],
+        stages: list[int],
+        orders: list[int],
         num_stages: int,
     ) -> Stmt:
         """
@@ -560,17 +545,13 @@ class PipelineInjector:
         prologue_stmts = []
         for prologue_iter in range(num_stages - 1):
             iter_stmts = []
-            for stmt, stage, order in stmt_order:
+            for stmt, stage, _order in stmt_order:
                 if stage <= prologue_iter:
                     # This statement works on loop iteration: prologue_iter - stage
                     actual_iter = prologue_iter - stage
-                    new_stmt = _substitute_var(
-                        stmt, loop_var, loop_min + IntImm("int32", actual_iter)
-                    )
+                    new_stmt = _substitute_var(stmt, loop_var, loop_min + IntImm("int32", actual_iter))
                     # Apply multi-buffer rewriting
-                    new_stmt = self._rewrite_stmt_with_multibuffer(
-                        new_stmt, IntImm("int32", actual_iter), pipeline_buffers
-                    )
+                    new_stmt = self._rewrite_stmt_with_multibuffer(new_stmt, IntImm("int32", actual_iter), pipeline_buffers)
                     # Wrap with pipeline_stage attribute (stage = actual_iter for prologue)
                     stage_expr = IntImm("int32", actual_iter)
                     new_stmt = self._wrap_with_pipeline_stage(new_stmt, stage_expr)
@@ -589,7 +570,7 @@ class PipelineInjector:
         steady_var = Var(loop_var.name, loop_var.dtype)
 
         steady_stmts = []
-        for stmt, stage, order in stmt_order:
+        for stmt, stage, _order in stmt_order:
             offset = max_stage - stage
             if offset > 0:
                 actual_iter = steady_var + IntImm("int32", offset)
@@ -597,9 +578,7 @@ class PipelineInjector:
                 actual_iter = steady_var
             new_stmt = _substitute_var(stmt, loop_var, loop_min + actual_iter)
             # Apply multi-buffer rewriting with the actual iteration for this stage
-            new_stmt = self._rewrite_stmt_with_multibuffer(
-                new_stmt, actual_iter, pipeline_buffers
-            )
+            new_stmt = self._rewrite_stmt_with_multibuffer(new_stmt, actual_iter, pipeline_buffers)
             # Wrap with pipeline_stage attribute
             # stage_expr = (steady_var + offset) % num_stages
             stage_expr = tir.floormod(actual_iter, IntImm("int32", num_stages))
@@ -610,9 +589,9 @@ class PipelineInjector:
             steady_body = SeqStmt(steady_stmts) if len(steady_stmts) > 1 else steady_stmts[0]
 
             new_annotations = {
-                k: v for k, v in loop.annotations.items()
-                if k not in ("software_pipeline_stage", "software_pipeline_order",
-                           "software_pipeline_async_stages", "num_stages")
+                k: v
+                for k, v in loop.annotations.items()
+                if k not in ("software_pipeline_stage", "software_pipeline_order", "software_pipeline_async_stages", "num_stages")
             }
 
             steady_loop = For(
@@ -635,20 +614,16 @@ class PipelineInjector:
         epilogue_stmts = []
         for epilogue_iter in range(num_stages - 1):
             iter_stmts = []
-            for stmt, stage, order in stmt_order:
+            for stmt, stage, _order in stmt_order:
                 if stage > epilogue_iter:
                     # Actual iteration for this statement
                     # steady_state_extent = loop_extent - num_stages + 1
                     actual_iter = (
-                        loop_extent - IntImm("int32", num_stages - 1)
-                        + IntImm("int32", max_stage - stage)
-                        + IntImm("int32", epilogue_iter)
+                        loop_extent - IntImm("int32", num_stages - 1) + IntImm("int32", max_stage - stage) + IntImm("int32", epilogue_iter)
                     )
                     new_stmt = _substitute_var(stmt, loop_var, loop_min + actual_iter)
                     # Apply multi-buffer rewriting
-                    new_stmt = self._rewrite_stmt_with_multibuffer(
-                        new_stmt, actual_iter, pipeline_buffers
-                    )
+                    new_stmt = self._rewrite_stmt_with_multibuffer(new_stmt, actual_iter, pipeline_buffers)
                     # Wrap with pipeline_stage attribute
                     # For epilogue, stage_expr = actual_iter % num_stages
                     stage_expr = tir.floormod(actual_iter, IntImm("int32", num_stages))

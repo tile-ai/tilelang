@@ -2,7 +2,7 @@ from __future__ import annotations
 import tilelang.language as T
 from typing import Literal, Callable
 from tvm import DataType
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, IntImm
+from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion
 from tvm import tir
 from tvm.ir import Range
 from tilelang import tvm as tvm
@@ -210,11 +210,8 @@ class TensorCoreIntrinEmitter:
         for i in range(ndim - 2):
             r = region.region[i]
             extent = r.extent
-            if isinstance(extent, tir.IntImm):
-                if extent.value != 1:
-                    raise ValueError(
-                        f"Multi-buffered region dimension {i} has extent {extent.value}, expected 1"
-                    )
+            if isinstance(extent, tir.IntImm) and extent.value != 1:
+                raise ValueError(f"Multi-buffered region dimension {i} has extent {extent.value}, expected 1")
             prefix_indices.append(r.min)
 
         return prefix_indices

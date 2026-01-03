@@ -322,7 +322,9 @@ class TensorCoreIntrinEmitter:
             for i in T.serial(warp_rows):
                 # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
-                A_shared_buf_elem = A_buf[(*A_prefix, A_base0 + wk, A_base1 + wi)] if a_transposed else A_buf[(*A_prefix, A_base0 + wi, A_base1 + wk)]
+                A_shared_buf_elem = (
+                    A_buf[(*A_prefix, A_base0 + wk, A_base1 + wi)] if a_transposed else A_buf[(*A_prefix, A_base0 + wi, A_base1 + wk)]
+                )
 
                 if ldmatrix_available:
                     T.ptx_ldmatrix(
@@ -441,7 +443,9 @@ class TensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = B_buf[(*B_prefix, B_base0 + wi, B_base1 + wk)] if b_transposed else B_buf[(*B_prefix, B_base0 + wk, B_base1 + wi)]
+                    B_shared_buf_elem = (
+                        B_buf[(*B_prefix, B_base0 + wi, B_base1 + wk)] if b_transposed else B_buf[(*B_prefix, B_base0 + wk, B_base1 + wi)]
+                    )
 
                     T.ptx_ldmatrix(
                         b_dtype,
@@ -838,9 +842,7 @@ class TensorCoreIntrinEmitter:
             # Check extent == 1
             if isinstance(extent, tir.IntImm):
                 if extent.value != 1:
-                    raise ValueError(
-                        f"Multi-buffered region dimension {i} has extent {extent.value}, expected 1"
-                    )
+                    raise ValueError(f"Multi-buffered region dimension {i} has extent {extent.value}, expected 1")
             else:
                 # For symbolic extents, we trust they are 1 (could add runtime check)
                 pass

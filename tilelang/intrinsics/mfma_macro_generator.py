@@ -683,11 +683,8 @@ class MatrixCoreIntrinEmitter:
         for i in range(ndim - 2):
             r = region.region[i]
             extent = r.extent
-            if isinstance(extent, tir.IntImm):
-                if extent.value != 1:
-                    raise ValueError(
-                        f"Multi-buffered region dimension {i} has extent {extent.value}, expected 1"
-                    )
+            if isinstance(extent, tir.IntImm) and extent.value != 1:
+                raise ValueError(f"Multi-buffered region dimension {i} has extent {extent.value}, expected 1")
             prefix_indices.append(r.min)
 
         return prefix_indices

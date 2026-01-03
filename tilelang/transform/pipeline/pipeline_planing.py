@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Set, Tuple
-
 from tilelang import tvm as tvm
 from tvm import arith, ir, tir
 from tvm.ir import Range
@@ -35,8 +33,7 @@ from tvm.tir import (
     Stmt,
     Var,
 )
-from tvm.tir.analysis import get_block_read_write_region
-from tvm.tir.stmt_functor import ir_transform, post_order_visit
+from tvm.tir.stmt_functor import post_order_visit
 from tvm.tir.transform import prim_func_pass
 
 # Get builtin operations using Op.get
@@ -60,7 +57,7 @@ def _full_buffer_region(buf: Buffer) -> BufferRegion:
     return BufferRegion(buf, region)
 
 
-def _may_conflict(region1: List[Range], region2: List[Range]) -> bool:
+def _may_conflict(region1: list[Range], region2: list[Range]) -> bool:
     """
     Check whether two regions have intersections.
 
@@ -144,10 +141,10 @@ class AsyncDependencyChainBuilder:
         The builder will link the mbarrier to the buffers used in the TCGEN5MMA
     """
 
-    def __init__(self, buffer_data_to_buffer: Dict[Var, Buffer]):
+    def __init__(self, buffer_data_to_buffer: dict[Var, Buffer]):
         self.buffer_data_to_buffer = buffer_data_to_buffer
-        self.mbar_to_buffer_reads: Dict[Buffer, List[BufferRegion]] = {}
-        self.mbar_to_buffer_writes: Dict[Buffer, List[BufferRegion]] = {}
+        self.mbar_to_buffer_reads: dict[Buffer, list[BufferRegion]] = {}
+        self.mbar_to_buffer_writes: dict[Buffer, list[BufferRegion]] = {}
 
     def __call__(self, stmt: Stmt) -> None:
         def visit(node):
@@ -156,7 +153,7 @@ class AsyncDependencyChainBuilder:
 
         post_order_visit(stmt, visit)
 
-    def _get_buf_from_access_ptr_call(self, expr: PrimExpr) -> Optional[Buffer]:
+    def _get_buf_from_access_ptr_call(self, expr: PrimExpr) -> Buffer | None:
         """Extract buffer from a tvm_access_ptr call."""
         if not isinstance(expr, Call):
             return None
@@ -174,11 +171,12 @@ class AsyncDependencyChainBuilder:
 
     def _visit_call(self, op: Call) -> None:
         args = op.args
-        if op.op.same_as(_OP_IF_THEN_ELSE):
+        if op.op.same_as(_OP_IF_THEN_ELSE) and len(args) >= 3:
             # Recursively visit then and else expressions
-            if len(args) >= 3: # condition, then, else are defined in the if_then_else node
-                post_order_visit(args[1], lambda n: self._visit_call(n) if isinstance(n, Call) else None)
-                post_order_visit(args[2], lambda n: self._visit_call(n) if isinstance(n, Call) else None)
+            # condition, then, else are defined in the if_then_else node
+            post_order_visit(args[1], lambda n: self._visit_call(n) if isinstance(n, Call) else None)
+            post_order_visit(args[2], lambda n: self._visit_call(n) if isinstance(n, Call) else None)
+
 
 class BufferRegionCollector:
     """
@@ -190,13 +188,13 @@ class BufferRegionCollector:
 
     def __init__(
         self,
-        buffer_data_to_buffer: Dict[Var, Buffer],
+        buffer_data_to_buffer: dict[Var, Buffer],
         chain_builder: AsyncDependencyChainBuilder,
     ):
         self.buffer_data_to_buffer = buffer_data_to_buffer
         self.chain_builder = chain_builder
-        self.reads: List[BufferRegion] = []
-        self.writes: List[BufferRegion] = []
+        self.reads: list[BufferRegion] = []
+        self.writes: list[BufferRegion] = []
         self.is_global_copy_pattern = False
         self._is_global_read = False
         self._within_condition_expr = False
@@ -212,9 +210,7 @@ class BufferRegionCollector:
         elif isinstance(stmt, SeqStmt):
             for s in stmt.seq:
                 self._visit_stmt(s)
-        elif isinstance(stmt, For):
-            self._visit_stmt(stmt.body)
-        elif isinstance(stmt, Block):
+        elif isinstance(stmt, (For, Block)):
             self._visit_stmt(stmt.body)
         elif isinstance(stmt, BlockRealize):
             self._visit_stmt(stmt.block.body)
@@ -307,9 +303,7 @@ class BufferRegionCollector:
             if len(args) > 0 and isinstance(args[0], BufferLoad):
                 mbar_buf = args[0].buffer
                 buffer_reads = self.chain_builder.mbar_to_buffer_reads.get(mbar_buf, [])
-                buffer_writes = self.chain_builder.mbar_to_buffer_writes.get(
-                    mbar_buf, []
-                )
+                buffer_writes = self.chain_builder.mbar_to_buffer_writes.get(mbar_buf, [])
                 self.reads.extend(buffer_reads)
                 self.writes.extend(buffer_writes)
 
@@ -366,9 +360,9 @@ class PipelineStageInfo:
 
     Attributes
     ----------
-    reads : List[BufferRegion]
+    reads : list[BufferRegion]
         Array of buffer regions read by this stage
-    writes : List[BufferRegion]
+    writes : list[BufferRegion]
         Array of buffer regions written by this stage
     original_stmt_index : int
         Original position of this stage in the pipeline before reordering
@@ -382,16 +376,16 @@ class PipelineStageInfo:
         Whether this stage produces data for a copy stage
     last_use_stmt_index : int
         Index of the last statement (in original order) that uses the results of this stage
-    predecessors : Set[int]
+    predecessors : set[int]
         Set of stage indices that this stage depends on (incoming edges in DAG)
-    successors : Set[int]
+    successors : set[int]
         Set of stage indices that depend on this stage (outgoing edges in DAG)
-    dependencies : List[StageDependency]
+    dependencies : list[StageDependency]
         Detailed dependency edges from predecessors to this stage
     """
 
-    reads: List[BufferRegion] = field(default_factory=list)
-    writes: List[BufferRegion] = field(default_factory=list)
+    reads: list[BufferRegion] = field(default_factory=list)
+    writes: list[BufferRegion] = field(default_factory=list)
     original_stmt_index: int = 0
     order: int = -1
     stage: int = -1
@@ -399,9 +393,9 @@ class PipelineStageInfo:
     producer_for_copy: bool = False
     last_use_stmt_index: int = -1
     # DAG fields
-    predecessors: Set[int] = field(default_factory=set)
-    successors: Set[int] = field(default_factory=set)
-    dependencies: List[StageDependency] = field(default_factory=list)
+    predecessors: set[int] = field(default_factory=set)
+    successors: set[int] = field(default_factory=set)
+    dependencies: list[StageDependency] = field(default_factory=list)
 
     def is_first_stage(self) -> bool:
         return self.copy_stage or self.producer_for_copy
@@ -429,7 +423,7 @@ class CopyStageDependencyReadsManager:
     """Helper class to manage copy stage dependency reads."""
 
     def __init__(self):
-        self.regions: List[BufferRegion] = []
+        self.regions: list[BufferRegion] = []
 
     def add_unique(self, region: BufferRegion) -> bool:
         """Add a region if not already present (by buffer identity)."""
@@ -441,16 +435,13 @@ class CopyStageDependencyReadsManager:
 
     def contains(self, region: BufferRegion) -> bool:
         """Check if a region is present (by buffer identity)."""
-        for copy_read in self.regions:
-            if region.buffer.same_as(copy_read.buffer):
-                return True
-        return False
+        return any(region.buffer.same_as(copy_read.buffer) for copy_read in self.regions)
 
     def size(self) -> int:
         return len(self.regions)
 
 
-def build_dependency_dag(stage_infos: List[PipelineStageInfo]) -> None:
+def build_dependency_dag(stage_infos: list[PipelineStageInfo]) -> None:
     """
     Build the dependency DAG by analyzing reads/writes between stages.
 
@@ -476,48 +467,33 @@ def build_dependency_dag(stage_infos: List[PipelineStageInfo]) -> None:
             # Check RAW: j reads what i writes
             for write_i in stage_i.writes:
                 for read_j in stage_j.reads:
-                    if write_i.buffer.same_as(read_j.buffer):
-                        if _may_conflict(list(write_i.region), list(read_j.region)):
-                            stage_i.successors.add(j)
-                            stage_j.predecessors.add(i)
-                            stage_j.dependencies.append(
-                                StageDependency(
-                                    i, j, DependencyType.RAW, write_i.buffer.name
-                                )
-                            )
+                    if write_i.buffer.same_as(read_j.buffer) and _may_conflict(list(write_i.region), list(read_j.region)):
+                        stage_i.successors.add(j)
+                        stage_j.predecessors.add(i)
+                        stage_j.dependencies.append(StageDependency(i, j, DependencyType.RAW, write_i.buffer.name))
 
             # Check WAW: j writes what i also writes
             for write_i in stage_i.writes:
                 for write_j in stage_j.writes:
-                    if write_i.buffer.same_as(write_j.buffer):
-                        if _may_conflict(list(write_i.region), list(write_j.region)):
-                            # Only add if not already connected
-                            if j not in stage_i.successors:
-                                stage_i.successors.add(j)
-                                stage_j.predecessors.add(i)
-                            stage_j.dependencies.append(
-                                StageDependency(
-                                    i, j, DependencyType.WAW, write_i.buffer.name
-                                )
-                            )
+                    if write_i.buffer.same_as(write_j.buffer) and _may_conflict(list(write_i.region), list(write_j.region)):
+                        # Only add if not already connected
+                        if j not in stage_i.successors:
+                            stage_i.successors.add(j)
+                            stage_j.predecessors.add(i)
+                        stage_j.dependencies.append(StageDependency(i, j, DependencyType.WAW, write_i.buffer.name))
 
             # Check WAR: j writes what i reads
             for read_i in stage_i.reads:
                 for write_j in stage_j.writes:
-                    if read_i.buffer.same_as(write_j.buffer):
-                        if _may_conflict(list(read_i.region), list(write_j.region)):
-                            # Only add if not already connected
-                            if j not in stage_i.successors:
-                                stage_i.successors.add(j)
-                                stage_j.predecessors.add(i)
-                            stage_j.dependencies.append(
-                                StageDependency(
-                                    i, j, DependencyType.WAR, read_i.buffer.name
-                                )
-                            )
+                    if read_i.buffer.same_as(write_j.buffer) and _may_conflict(list(read_i.region), list(write_j.region)):
+                        # Only add if not already connected
+                        if j not in stage_i.successors:
+                            stage_i.successors.add(j)
+                            stage_j.predecessors.add(i)
+                        stage_j.dependencies.append(StageDependency(i, j, DependencyType.WAR, read_i.buffer.name))
 
 
-def dag_to_dot(stage_infos: List[PipelineStageInfo], title: str = "Pipeline DAG") -> str:
+def dag_to_dot(stage_infos: list[PipelineStageInfo], title: str = "Pipeline DAG") -> str:
     """
     Generate DOT format string for the dependency DAG.
 
@@ -561,26 +537,22 @@ def dag_to_dot(stage_infos: List[PipelineStageInfo], title: str = "Pipeline DAG"
 
         # Style based on stage type
         if info.copy_stage:
-            style = 'style=filled fillcolor=lightblue'
+            style = "style=filled fillcolor=lightblue"
         elif info.producer_for_copy:
-            style = 'style=filled fillcolor=lightyellow'
+            style = "style=filled fillcolor=lightyellow"
         else:
-            style = 'style=filled fillcolor=white'
+            style = "style=filled fillcolor=white"
 
         lines.append(f'  {idx} [label="{label}" {style}];')
 
     # Add edges with dependency type labels
-    added_edges: Set[Tuple[int, int]] = set()
+    added_edges: set[tuple[int, int]] = set()
     for info in stage_infos:
         for dep in info.dependencies:
             edge_key = (dep.from_stage, dep.to_stage)
             if edge_key not in added_edges:
                 # Collect all dependency types for this edge
-                dep_types = [
-                    d.dep_type.name
-                    for d in info.dependencies
-                    if d.from_stage == dep.from_stage and d.to_stage == dep.to_stage
-                ]
+                dep_types = [d.dep_type.name for d in info.dependencies if d.from_stage == dep.from_stage and d.to_stage == dep.to_stage]
                 label = ",".join(sorted(set(dep_types)))
                 lines.append(f'  {dep.from_stage} -> {dep.to_stage} [label="{label}"];')
                 added_edges.add(edge_key)
@@ -589,7 +561,7 @@ def dag_to_dot(stage_infos: List[PipelineStageInfo], title: str = "Pipeline DAG"
     return "\n".join(lines)
 
 
-def dag_to_ascii(stage_infos: List[PipelineStageInfo], style: str = "vertical") -> str:
+def dag_to_ascii(stage_infos: list[PipelineStageInfo], style: str = "vertical") -> str:
     """
     Generate ASCII representation of the dependency DAG.
 
@@ -610,7 +582,7 @@ def dag_to_ascii(stage_infos: List[PipelineStageInfo], style: str = "vertical") 
     return _dag_to_ascii_vertical(stage_infos)
 
 
-def _dag_to_ascii_list(stage_infos: List[PipelineStageInfo]) -> str:
+def _dag_to_ascii_list(stage_infos: list[PipelineStageInfo]) -> str:
     """Simple list-style ASCII output."""
     lines = ["Pipeline Dependency DAG", "=" * 40]
 
@@ -624,10 +596,7 @@ def _dag_to_ascii_list(stage_infos: List[PipelineStageInfo]) -> str:
 
         for succ_idx in sorted(info.successors):
             succ_info = stage_infos[succ_idx]
-            deps_to_succ = [
-                d for d in succ_info.dependencies
-                if d.from_stage == info.original_stmt_index
-            ]
+            deps_to_succ = [d for d in succ_info.dependencies if d.from_stage == info.original_stmt_index]
             if deps_to_succ:
                 # Deduplicate dependencies
                 seen = set()
@@ -645,7 +614,7 @@ def _dag_to_ascii_list(stage_infos: List[PipelineStageInfo]) -> str:
     return "\n".join(lines)
 
 
-def _dag_to_ascii_vertical(stage_infos: List[PipelineStageInfo]) -> str:
+def _dag_to_ascii_vertical(stage_infos: list[PipelineStageInfo]) -> str:
     """
     Generate a vertical top-down ASCII DAG visualization.
 
@@ -668,8 +637,8 @@ def _dag_to_ascii_vertical(stage_infos: List[PipelineStageInfo]) -> str:
         return "Empty DAG"
 
     # Group stages by their "level" (topological order based on dependencies)
-    levels: Dict[int, List[int]] = {}
-    stage_level: Dict[int, int] = {}
+    levels: dict[int, list[int]] = {}
+    stage_level: dict[int, int] = {}
 
     # Compute levels using BFS from sources
     for info in stage_infos:
@@ -705,7 +674,7 @@ def _dag_to_ascii_vertical(stage_infos: List[PipelineStageInfo]) -> str:
     total_width = title_width + 2
 
     # Store positions for each stage for drawing connections
-    stage_positions: Dict[int, int] = {}
+    stage_positions: dict[int, int] = {}
 
     for level in range(max_level + 1):
         stage_indices = levels.get(level, [])
@@ -737,7 +706,7 @@ def _dag_to_ascii_vertical(stage_infos: List[PipelineStageInfo]) -> str:
             elif info.producer_for_copy:
                 label += " prod"
 
-            label = label[:box_width - 2].center(box_width - 2)
+            label = label[: box_width - 2].center(box_width - 2)
             pos = positions[i]
             start = pos - box_width // 2
 
@@ -795,7 +764,7 @@ def _dag_to_ascii_vertical(stage_infos: List[PipelineStageInfo]) -> str:
 
                 # Draw dependency labels next to lines
                 label_line = [" "] * total_width
-                for stage_idx, succ_idx, dep_names in connections:
+                for stage_idx, _succ_idx, dep_names in connections:
                     if dep_names:
                         pos = stage_positions[stage_idx]
                         label = dep_names[0][:10]  # Truncate long names
@@ -806,14 +775,9 @@ def _dag_to_ascii_vertical(stage_infos: List[PipelineStageInfo]) -> str:
 
                 lines.append("".join(label_line))
 
-                # Draw converging lines
-                next_spacing = total_width // (len(next_stages) + 1)
-                next_positions = [next_spacing * (i + 1) for i in range(len(next_stages))]
-
                 # Draw horizontal merge line
                 merge_line = [" "] * total_width
                 for succ_idx in next_stages:
-                    target_pos = next_positions[next_stages.index(succ_idx)]
                     # Find all sources for this target
                     source_positions = []
                     for stage_idx in stage_indices:
@@ -847,7 +811,7 @@ def _dag_to_ascii_vertical(stage_infos: List[PipelineStageInfo]) -> str:
 
                 # Draw arrow to target
                 arrow_line = [" "] * total_width
-                for i, succ_idx in enumerate(next_stages):
+                for succ_idx in next_stages:
                     # Find center of sources
                     source_positions = []
                     for stage_idx in stage_indices:
@@ -864,7 +828,7 @@ def _dag_to_ascii_vertical(stage_infos: List[PipelineStageInfo]) -> str:
     return "\n".join(lines)
 
 
-def dag_to_mermaid(stage_infos: List[PipelineStageInfo]) -> str:
+def dag_to_mermaid(stage_infos: list[PipelineStageInfo]) -> str:
     """
     Generate Mermaid format string for the dependency DAG.
 
@@ -906,7 +870,7 @@ def dag_to_mermaid(stage_infos: List[PipelineStageInfo]) -> str:
             lines.append(f"    S{idx}[{label}]")
 
     # Define edges
-    added_edges: Set[Tuple[int, int]] = set()
+    added_edges: set[tuple[int, int]] = set()
     for info in stage_infos:
         for succ_idx in info.successors:
             edge_key = (info.original_stmt_index, succ_idx)
@@ -933,23 +897,21 @@ def _target_has_async_copy(target: ir.Target) -> bool:
 
     # Check for SM80+ (Ampere and later)
     arch = target.attrs.get("arch", "")
-    if arch:
-        # Extract SM version from arch string like "sm_80" or "sm_100a"
-        if arch.startswith("sm_"):
-            try:
-                # Remove any trailing letters (like 'a' in 'sm_100a')
-                version_str = arch[3:]
-                numeric_part = ""
-                for c in version_str:
-                    if c.isdigit():
-                        numeric_part += c
-                    else:
-                        break
-                if numeric_part:
-                    sm_version = int(numeric_part)
-                    return sm_version >= 80
-            except ValueError:
-                pass
+    if arch and arch.startswith("sm_"):
+        try:
+            # Remove any trailing letters (like 'a' in 'sm_100a')
+            version_str = arch[3:]
+            numeric_part = ""
+            for c in version_str:
+                if c.isdigit():
+                    numeric_part += c
+                else:
+                    break
+            if numeric_part:
+                sm_version = int(numeric_part)
+                return sm_version >= 80
+        except ValueError:
+            pass
 
     return False
 
@@ -960,8 +922,8 @@ class PipelinePlanner:
     """
 
     def __init__(self, use_async_copy: bool = True, verbose: bool = False):
-        self.buffer_data_to_buffer: Dict[Var, Buffer] = {}
-        self.target: Optional[ir.Target] = None
+        self.buffer_data_to_buffer: dict[Var, Buffer] = {}
+        self.target: ir.Target | None = None
         self.use_async_copy = use_async_copy
         self.verbose = verbose
 
@@ -1120,11 +1082,7 @@ class PipelinePlanner:
             )
 
         # Extract num_stages value
-        num_stages = (
-            num_stages_anno.value
-            if isinstance(num_stages_anno, IntImm)
-            else int(num_stages_anno)
-        )
+        num_stages = num_stages_anno.value if isinstance(num_stages_anno, IntImm) else int(num_stages_anno)
 
         if num_stages < 1:
             raise ValueError("num_stages must be >= 1")
@@ -1133,7 +1091,7 @@ class PipelinePlanner:
             raise ValueError("Pipeline loop must be serial")
 
         # Find the pipeline body
-        pipeline_body_root: Optional[Stmt] = None
+        pipeline_body_root: Stmt | None = None
         if isinstance(loop.body, BlockRealize):
             block = loop.body.block
             for buffer in block.alloc_buffers:
@@ -1143,7 +1101,7 @@ class PipelinePlanner:
             pipeline_body_root = loop.body
 
         # Navigate through IfThenElse and LetStmt to find SeqStmt
-        pipeline_body_seq: Optional[SeqStmt] = None
+        pipeline_body_seq: SeqStmt | None = None
         current = pipeline_body_root
         while True:
             if isinstance(current, SeqStmt):
@@ -1151,16 +1109,12 @@ class PipelinePlanner:
                 break
             elif isinstance(current, IfThenElse):
                 if current.else_case is not None:
-                    raise ValueError(
-                        "Pipeline_Planning: Can't handle IfThenElse with else branch"
-                    )
+                    raise ValueError("Pipeline_Planning: Can't handle IfThenElse with else branch")
                 current = current.then_case
             elif isinstance(current, LetStmt):
                 current = current.body
             else:
-                raise ValueError(
-                    f"Pipeline_Planning: Can't handle body type {type(current)}"
-                )
+                raise ValueError(f"Pipeline_Planning: Can't handle body type {type(current)}")
 
         if pipeline_body_seq is None:
             raise ValueError("Pipeline_Planning: Could not find SeqStmt in loop body")
@@ -1170,7 +1124,7 @@ class PipelinePlanner:
         chain_builder(pipeline_body_root)
 
         # Create pipeline stage info for each statement
-        pipeline_stage_infos: List[PipelineStageInfo] = []
+        pipeline_stage_infos: list[PipelineStageInfo] = []
         for i, stmt in enumerate(pipeline_body_seq.seq):
             pinfo = self._make_pipeline_stage_info(stmt, i, chain_builder)
             pipeline_stage_infos.append(pinfo)
@@ -1235,36 +1189,24 @@ class PipelinePlanner:
 
                 iter_count += 1
                 if iter_count > max_iterations:
-                    raise RuntimeError(
-                        f"Pipeline planning: Exceeded maximum iterations ({max_iterations})"
-                    )
+                    raise RuntimeError(f"Pipeline planning: Exceeded maximum iterations ({max_iterations})")
 
         # Analyze use-def chain to determine last_use_stmt_index
         for pinfo in pipeline_stage_infos:
             if not pinfo.is_first_stage():
                 continue
 
-            for i in range(
-                pinfo.original_stmt_index + 1, len(pipeline_body_seq.seq)
-            ):
+            for i in range(pinfo.original_stmt_index + 1, len(pipeline_body_seq.seq)):
                 for read in pipeline_stage_infos[i].reads:
                     for write in pinfo.writes:
-                        if write.buffer.same_as(read.buffer) and _may_conflict(
-                            list(write.region), list(read.region)
-                        ):
-                            pinfo.last_use_stmt_index = max(
-                                pinfo.last_use_stmt_index, i
-                            )
+                        if write.buffer.same_as(read.buffer) and _may_conflict(list(write.region), list(read.region)):
+                            pinfo.last_use_stmt_index = max(pinfo.last_use_stmt_index, i)
 
                 # Check for write-after-write conflicts
                 if pinfo.is_copy_stage():
                     for write in pipeline_stage_infos[i].writes:
                         for pinfo_write in pinfo.writes:
-                            if pinfo_write.buffer.same_as(
-                                write.buffer
-                            ) and _may_conflict(
-                                list(pinfo_write.region), list(write.region)
-                            ):
+                            if pinfo_write.buffer.same_as(write.buffer) and _may_conflict(list(pinfo_write.region), list(write.region)):
                                 raise ValueError(
                                     f"Pipeline planning error: Multiple writes to overlapping buffer regions. "
                                     f"Stage {pinfo.original_stmt_index} and stage {i} "
@@ -1287,10 +1229,7 @@ class PipelinePlanner:
 
             # Schedule copy stages that have this stage as their last consumer
             for pinfo_1 in pipeline_stage_infos:
-                if (
-                    pinfo_1.is_first_stage()
-                    and pinfo_1.last_use_stmt_index == pinfo.original_stmt_index
-                ):
+                if pinfo_1.is_first_stage() and pinfo_1.last_use_stmt_index == pinfo.original_stmt_index:
                     pinfo_1.order = order_idx
                     order_idx += 1
                     pinfo_1.stage = 0
@@ -1317,9 +1256,7 @@ class PipelinePlanner:
 
         if copy_stage_at_end > 0 and num_stages >= 2:
             for pinfo in pipeline_stage_infos:
-                pinfo.order = (pinfo.order + copy_stage_at_end) % len(
-                    pipeline_stage_infos
-                )
+                pinfo.order = (pinfo.order + copy_stage_at_end) % len(pipeline_stage_infos)
                 if not pinfo.is_copy_stage() and not pinfo.is_producer_for_copy():
                     pinfo.stage -= 1
 
@@ -1363,9 +1300,7 @@ class PipelinePlanner:
             new_annotations,
         )
 
-    def _make_pipeline_stage_info(
-        self, stmt: Stmt, idx: int, chain_builder: AsyncDependencyChainBuilder
-    ) -> PipelineStageInfo:
+    def _make_pipeline_stage_info(self, stmt: Stmt, idx: int, chain_builder: AsyncDependencyChainBuilder) -> PipelineStageInfo:
         """Create PipelineStageInfo for a statement."""
         collector = BufferRegionCollector(self.buffer_data_to_buffer, chain_builder)
         collector(stmt)
