@@ -36,19 +36,17 @@ from tvm.tir import (
 from tvm.tir.stmt_functor import post_order_visit
 from tvm.tir.transform import prim_func_pass
 
+from tilelang.utils import is_global, is_shared
+
 # Get builtin operations using Op.get
 _OP_CALL_EXTERN = tir.op.Op.get("tir.call_extern")
 _OP_TVM_ACCESS_PTR = tir.op.Op.get("tir.tvm_access_ptr")
 _OP_ADDRESS_OF = tir.op.Op.get("tir.address_of")
 _OP_IF_THEN_ELSE = tir.op.Op.get("tir.if_then_else")
-
-
-def _get_buffer_scope(buf: Buffer) -> str:
-    """Get the storage scope of a buffer."""
-    ptr_type = buf.data.type_annotation
-    if hasattr(ptr_type, "storage_scope"):
-        return ptr_type.storage_scope
-    return ""
+_OP_MBARRIER_WAIT_PARITY = tir.op.Op.get("tl.mbarrier_wait_parity")
+_OP_TILEOP_REGION = tir.op.Op.get("tl.tileop.region")
+_OP_TILEOP_COPY = tir.op.Op.get("tl.tileop.copy")
+_OP_TILEOP_GEMM = tir.op.Op.get("tl.tileop.gemm")
 
 
 def _full_buffer_region(buf: Buffer) -> BufferRegion:
@@ -237,10 +235,8 @@ class BufferRegionCollector:
         self._is_global_read = False
         self._visit_expr(op.value)
 
-        if self._is_global_read:
-            scope = _get_buffer_scope(store_buffer)
-            if scope in ("shared", "shared.dyn"):
-                self.is_global_copy_pattern = True
+        if self._is_global_read and is_shared(store_buffer):
+            self.is_global_copy_pattern = True
 
         self._is_global_read = False
 
@@ -262,13 +258,11 @@ class BufferRegionCollector:
         load_region = BufferRegion(load_buffer, region)
         self.reads.append(load_region)
 
-        scope = _get_buffer_scope(load_buffer)
-        if scope == "global" and not self._within_condition_expr:
+        if is_global(load_buffer) and not self._within_condition_expr:
             self._is_global_read = True
 
     def _visit_call(self, op: Call) -> None:
         args = op.args
-        op_name = str(op.op)
 
         if op.op.same_as(_OP_ADDRESS_OF):
             buffer_region = None
@@ -299,7 +293,7 @@ class BufferRegionCollector:
             for i in range(1, len(args)):
                 self._visit_expr(args[i])
 
-        elif "tl.mbarrier_wait_parity" in op_name:
+        elif op.op.same_as(_OP_MBARRIER_WAIT_PARITY):
             if len(args) > 0 and isinstance(args[0], BufferLoad):
                 mbar_buf = args[0].buffer
                 buffer_reads = self.chain_builder.mbar_to_buffer_reads.get(mbar_buf, [])
@@ -307,7 +301,7 @@ class BufferRegionCollector:
                 self.reads.extend(buffer_reads)
                 self.writes.extend(buffer_writes)
 
-        elif "tl.tileop.region" in op_name:
+        elif op.op.same_as(_OP_TILEOP_REGION):
             # tl.region(buffer_load, access_type, *extents)
             # access_type: 1=read, 2=write, 3=rw
             if len(args) >= 2:
@@ -318,23 +312,21 @@ class BufferRegionCollector:
                     access_val = access_type.value if isinstance(access_type, IntImm) else int(access_type)
                     if access_val & 1:  # read
                         self.reads.append(region)
-                        scope = _get_buffer_scope(buffer_load.buffer)
-                        if scope == "global" and not self._within_condition_expr:
+                        if is_global(buffer_load.buffer) and not self._within_condition_expr:
                             self._is_global_read = True
                     if access_val & 2:  # write
                         self.writes.append(region)
-                        scope = _get_buffer_scope(buffer_load.buffer)
-                        if scope in ("shared", "shared.dyn"):
+                        if is_shared(buffer_load.buffer):
                             self.is_global_copy_pattern = self._is_global_read
 
-        elif "tl.tileop.copy" in op_name:
+        elif op.op.same_as(_OP_TILEOP_COPY):
             # tl.copy(src_region, dst_region, ...)
             # Recursively visit to extract regions
             for arg in args[:2]:  # First two args are src and dst regions
                 if isinstance(arg, Call):
                     self._visit_call(arg)
 
-        elif "tl.gemm" in op_name or "tl.tileop.gemm" in op_name:
+        elif op.op.same_as(_OP_TILEOP_GEMM):
             # tl.gemm(A_region, B_region, C_region, ...)
             # A, B are read; C is read-write (accumulate)
             for arg in args[:3]:  # First three args are A, B, C regions
@@ -493,427 +485,32 @@ def build_dependency_dag(stage_infos: list[PipelineStageInfo]) -> None:
                         stage_j.dependencies.append(StageDependency(i, j, DependencyType.WAR, read_i.buffer.name))
 
 
-def dag_to_dot(stage_infos: list[PipelineStageInfo], title: str = "Pipeline DAG") -> str:
-    """
-    Generate DOT format string for the dependency DAG.
+# Import visualization functions from separate module
+from .dag_visualization import dag_to_dot, dag_to_ascii, dag_to_mermaid
 
-    Parameters
-    ----------
-    stage_infos : List[PipelineStageInfo]
-        List of pipeline stage info objects with DAG fields populated.
-    title : str
-        Title for the graph.
-
-    Returns
-    -------
-    str
-        DOT format string that can be rendered by graphviz.
-
-    Example
-    -------
-    >>> print(dag_to_dot(stage_infos))
-    digraph PipelineDAG {
-      rankdir=TB;
-      label="Pipeline DAG";
-      0 [label="S0 [copy]" style=filled fillcolor=lightblue];
-      1 [label="S1 [copy]" style=filled fillcolor=lightblue];
-      2 [label="S2"];
-      0 -> 2 [label="RAW"];
-      1 -> 2 [label="RAW"];
-    }
-    """
-    lines = [
-        "digraph PipelineDAG {",
-        "  rankdir=TB;",
-        f'  label="{title}";',
-        "  labelloc=t;",
-        "  node [shape=box];",
-    ]
-
-    # Add nodes
-    for info in stage_infos:
-        idx = info.original_stmt_index
-        label = info.get_label()
-
-        # Style based on stage type
-        if info.copy_stage:
-            style = "style=filled fillcolor=lightblue"
-        elif info.producer_for_copy:
-            style = "style=filled fillcolor=lightyellow"
-        else:
-            style = "style=filled fillcolor=white"
-
-        lines.append(f'  {idx} [label="{label}" {style}];')
-
-    # Add edges with dependency type labels
-    added_edges: set[tuple[int, int]] = set()
-    for info in stage_infos:
-        for dep in info.dependencies:
-            edge_key = (dep.from_stage, dep.to_stage)
-            if edge_key not in added_edges:
-                # Collect all dependency types for this edge
-                dep_types = [d.dep_type.name for d in info.dependencies if d.from_stage == dep.from_stage and d.to_stage == dep.to_stage]
-                label = ",".join(sorted(set(dep_types)))
-                lines.append(f'  {dep.from_stage} -> {dep.to_stage} [label="{label}"];')
-                added_edges.add(edge_key)
-
-    lines.append("}")
-    return "\n".join(lines)
+# Pipeline DAG printing mask constants
+PRINT_DAG_LIST = 1  # ASCII list format
+PRINT_DAG_VERTICAL = 2  # ASCII vertical format
+PRINT_DAG_DOT = 4  # DOT format (Graphviz)
+PRINT_DAG_MERMAID = 8  # Mermaid format
 
 
-def dag_to_ascii(stage_infos: list[PipelineStageInfo], style: str = "vertical") -> str:
-    """
-    Generate ASCII representation of the dependency DAG.
-
-    Parameters
-    ----------
-    stage_infos : List[PipelineStageInfo]
-        List of pipeline stage info objects with DAG fields populated.
-    style : str
-        "vertical" for top-down graph, "list" for simple list format.
+def _get_pipeline_dag_print_mask() -> int:
+    """Get the pipeline DAG printing mask from PassContext config.
 
     Returns
     -------
-    str
-        ASCII art representation of the DAG.
+    int
+        Bitmask controlling which DAG formats to print:
+          0: No printing (default)
+          1: ASCII list format
+          2: ASCII vertical format
+          4: DOT format (Graphviz)
+          8: Mermaid format
+        Values can be combined, e.g., 3 = list + vertical.
     """
-    if style == "list":
-        return _dag_to_ascii_list(stage_infos)
-    return _dag_to_ascii_vertical(stage_infos)
-
-
-def _dag_to_ascii_list(stage_infos: list[PipelineStageInfo]) -> str:
-    """Simple list-style ASCII output."""
-    lines = ["Pipeline Dependency DAG", "=" * 40]
-
-    for info in stage_infos:
-        label = info.get_label()
-        pred_str = ""
-        if info.predecessors:
-            pred_list = sorted(info.predecessors)
-            pred_str = f"  <- [S{', S'.join(map(str, pred_list))}]"
-        lines.append(f"  {label}{pred_str}")
-
-        for succ_idx in sorted(info.successors):
-            succ_info = stage_infos[succ_idx]
-            deps_to_succ = [d for d in succ_info.dependencies if d.from_stage == info.original_stmt_index]
-            if deps_to_succ:
-                # Deduplicate dependencies
-                seen = set()
-                unique_deps = []
-                for d in deps_to_succ:
-                    key = (d.dep_type.name, d.buffer_name)
-                    if key not in seen:
-                        seen.add(key)
-                        unique_deps.append(f"{d.dep_type.name}:{d.buffer_name}")
-                dep_details = ", ".join(unique_deps)
-                lines.append(f"    └─> S{succ_idx} ({dep_details})")
-            else:
-                lines.append(f"    └─> S{succ_idx}")
-
-    return "\n".join(lines)
-
-
-def _dag_to_ascii_vertical(stage_infos: list[PipelineStageInfo]) -> str:
-    """
-    Generate a vertical top-down ASCII DAG visualization.
-
-    Example output:
-    ┌──────────────────────────────────────┐
-    │       Pipeline Dependency DAG        │
-    └──────────────────────────────────────┘
-
-        ┌──────────┐          ┌──────────┐
-        │ S0 copy  │          │ S1 copy  │
-        └────┬─────┘          └────┬─────┘
-             │   A_shared          │   B_shared
-             └─────────┬───────────┘
-                       ▼
-                 ┌──────────┐
-                 │    S2    │
-                 └──────────┘
-    """
-    if not stage_infos:
-        return "Empty DAG"
-
-    # Group stages by their "level" (topological order based on dependencies)
-    levels: dict[int, list[int]] = {}
-    stage_level: dict[int, int] = {}
-
-    # Compute levels using BFS from sources
-    for info in stage_infos:
-        idx = info.original_stmt_index
-        if not info.predecessors:
-            stage_level[idx] = 0
-        else:
-            max_pred_level = max(stage_level.get(p, 0) for p in info.predecessors)
-            stage_level[idx] = max_pred_level + 1
-
-    for idx, level in stage_level.items():
-        if level not in levels:
-            levels[level] = []
-        levels[level].append(idx)
-
-    # Sort stages within each level
-    for level in levels:
-        levels[level].sort()
-
-    # Build the visualization
-    lines = []
-    box_width = 12
-
-    # Title
-    title = "Pipeline Dependency DAG"
-    title_width = max(50, len(stage_infos) * (box_width + 6))
-    lines.append("┌" + "─" * title_width + "┐")
-    lines.append("│" + title.center(title_width) + "│")
-    lines.append("└" + "─" * title_width + "┘")
-    lines.append("")
-
-    max_level = max(levels.keys()) if levels else 0
-    total_width = title_width + 2
-
-    # Store positions for each stage for drawing connections
-    stage_positions: dict[int, int] = {}
-
-    for level in range(max_level + 1):
-        stage_indices = levels.get(level, [])
-        num_stages = len(stage_indices)
-
-        if num_stages == 0:
-            continue
-
-        # Calculate spacing
-        stage_spacing = total_width // (num_stages + 1)
-
-        # Calculate positions for this level
-        positions = []
-        for i in range(num_stages):
-            pos = stage_spacing * (i + 1)
-            positions.append(pos)
-            stage_positions[stage_indices[i]] = pos
-
-        # Build box lines
-        box_top = [" "] * total_width
-        box_mid = [" "] * total_width
-        box_bot = [" "] * total_width
-
-        for i, stage_idx in enumerate(stage_indices):
-            info = stage_infos[stage_idx]
-            label = f"S{stage_idx}"
-            if info.copy_stage:
-                label += " copy"
-            elif info.producer_for_copy:
-                label += " prod"
-
-            label = label[: box_width - 2].center(box_width - 2)
-            pos = positions[i]
-            start = pos - box_width // 2
-
-            # Draw box
-            box_top[start] = "┌"
-            for j in range(1, box_width - 1):
-                box_top[start + j] = "─"
-            box_top[start + box_width - 1] = "┐"
-
-            box_mid[start] = "│"
-            for j, c in enumerate(label):
-                box_mid[start + 1 + j] = c
-            box_mid[start + box_width - 1] = "│"
-
-            box_bot[start] = "└"
-            for j in range(1, box_width - 1):
-                box_bot[start + j] = "─"
-            box_bot[start + box_width - 1] = "┘"
-
-        lines.append("".join(box_top))
-        lines.append("".join(box_mid))
-        lines.append("".join(box_bot))
-
-        # Draw arrows to next level if not last level
-        if level < max_level:
-            next_stages = levels.get(level + 1, [])
-            if next_stages:
-                # Collect connections: from current level to next level
-                connections = []
-                for stage_idx in stage_indices:
-                    info = stage_infos[stage_idx]
-                    for succ_idx in info.successors:
-                        if succ_idx in next_stages:
-                            # Get dependency info
-                            succ_info = stage_infos[succ_idx]
-                            deps = [d for d in succ_info.dependencies if d.from_stage == stage_idx]
-                            # Deduplicate
-                            seen = set()
-                            dep_names = []
-                            for d in deps:
-                                if d.buffer_name not in seen:
-                                    seen.add(d.buffer_name)
-                                    dep_names.append(d.buffer_name)
-                            connections.append((stage_idx, succ_idx, dep_names))
-
-                # Draw vertical lines with labels
-                line1 = [" "] * total_width
-                for stage_idx in stage_indices:
-                    info = stage_infos[stage_idx]
-                    if any(s in next_stages for s in info.successors):
-                        pos = stage_positions[stage_idx]
-                        line1[pos] = "│"
-
-                lines.append("".join(line1))
-
-                # Draw dependency labels next to lines
-                label_line = [" "] * total_width
-                for stage_idx, _succ_idx, dep_names in connections:
-                    if dep_names:
-                        pos = stage_positions[stage_idx]
-                        label = dep_names[0][:10]  # Truncate long names
-                        start = pos + 2
-                        for j, c in enumerate(label):
-                            if start + j < total_width:
-                                label_line[start + j] = c
-
-                lines.append("".join(label_line))
-
-                # Draw horizontal merge line
-                merge_line = [" "] * total_width
-                for succ_idx in next_stages:
-                    # Find all sources for this target
-                    source_positions = []
-                    for stage_idx in stage_indices:
-                        info = stage_infos[stage_idx]
-                        if succ_idx in info.successors:
-                            source_positions.append(stage_positions[stage_idx])
-
-                    if source_positions:
-                        min_pos = min(source_positions)
-                        max_pos = max(source_positions)
-
-                        # Draw horizontal line from sources to target
-                        for p in range(min_pos, max_pos + 1):
-                            if merge_line[p] == " ":
-                                merge_line[p] = "─"
-
-                        # Draw corners
-                        for sp in source_positions:
-                            if sp == min_pos:
-                                merge_line[sp] = "└"
-                            elif sp == max_pos:
-                                merge_line[sp] = "┘"
-                            else:
-                                merge_line[sp] = "┴"
-
-                        # Draw down arrow point
-                        center = (min_pos + max_pos) // 2
-                        merge_line[center] = "┬"
-
-                lines.append("".join(merge_line))
-
-                # Draw arrow to target
-                arrow_line = [" "] * total_width
-                for succ_idx in next_stages:
-                    # Find center of sources
-                    source_positions = []
-                    for stage_idx in stage_indices:
-                        info = stage_infos[stage_idx]
-                        if succ_idx in info.successors:
-                            source_positions.append(stage_positions[stage_idx])
-                    if source_positions:
-                        center = (min(source_positions) + max(source_positions)) // 2
-                        arrow_line[center] = "▼"
-
-                lines.append("".join(arrow_line))
-                lines.append("")
-
-    return "\n".join(lines)
-
-
-def dag_to_mermaid(stage_infos: list[PipelineStageInfo]) -> str:
-    """
-    Generate Mermaid format string for the dependency DAG.
-
-    Mermaid is supported by GitHub markdown and many documentation tools.
-
-    Parameters
-    ----------
-    stage_infos : List[PipelineStageInfo]
-        List of pipeline stage info objects with DAG fields populated.
-
-    Returns
-    -------
-    str
-        Mermaid format string.
-
-    Example
-    -------
-    >>> print(dag_to_mermaid(stage_infos))
-    ```mermaid
-    graph TD
-        S0[S0 copy]:::copy --> S2
-        S1[S1 copy]:::copy --> S2
-        classDef copy fill:#add8e6
-    ```
-    """
-    lines = ["```mermaid", "graph TD"]
-
-    # Define nodes
-    for info in stage_infos:
-        idx = info.original_stmt_index
-        label = f"S{idx}"
-        if info.copy_stage:
-            label += " copy"
-            lines.append(f"    S{idx}[{label}]:::copy")
-        elif info.producer_for_copy:
-            label += " prod"
-            lines.append(f"    S{idx}[{label}]:::prod")
-        else:
-            lines.append(f"    S{idx}[{label}]")
-
-    # Define edges
-    added_edges: set[tuple[int, int]] = set()
-    for info in stage_infos:
-        for succ_idx in info.successors:
-            edge_key = (info.original_stmt_index, succ_idx)
-            if edge_key not in added_edges:
-                lines.append(f"    S{info.original_stmt_index} --> S{succ_idx}")
-                added_edges.add(edge_key)
-
-    # Add styles
-    lines.append("    classDef copy fill:#add8e6")
-    lines.append("    classDef prod fill:#fffacd")
-    lines.append("```")
-
-    return "\n".join(lines)
-
-
-def _target_has_async_copy(target: ir.Target) -> bool:
-    """Check if the target supports async copy."""
-    if target is None:
-        return False
-
-    kind = str(target.kind)
-    if kind != "cuda":
-        return False
-
-    # Check for SM80+ (Ampere and later)
-    arch = target.attrs.get("arch", "")
-    if arch and arch.startswith("sm_"):
-        try:
-            # Remove any trailing letters (like 'a' in 'sm_100a')
-            version_str = arch[3:]
-            numeric_part = ""
-            for c in version_str:
-                if c.isdigit():
-                    numeric_part += c
-                else:
-                    break
-            if numeric_part:
-                sm_version = int(numeric_part)
-                return sm_version >= 80
-        except ValueError:
-            pass
-
-    return False
+    ctx = tvm.transform.PassContext.current()
+    return ctx.config.get("tl.print_pipeline_dag", 0)
 
 
 class PipelinePlanner:
@@ -921,11 +518,10 @@ class PipelinePlanner:
     Pipeline planner that transforms loop bodies with pipeline annotations.
     """
 
-    def __init__(self, use_async_copy: bool = True, verbose: bool = False):
+    def __init__(self, use_async_copy: bool = True):
         self.buffer_data_to_buffer: dict[Var, Buffer] = {}
         self.target: ir.Target | None = None
         self.use_async_copy = use_async_copy
-        self.verbose = verbose
 
     def substitute(self, f: PrimFunc) -> Stmt:
         """Apply pipeline planning transformation to a PrimFunc."""
@@ -1053,9 +649,6 @@ class PipelinePlanner:
                 else:
                     new_annotations[key] = value
 
-            if _target_has_async_copy(self.target) and self.use_async_copy:
-                new_annotations["software_pipeline_async_stages"] = [0]
-
             return For(
                 loop.loop_var,
                 loop.min,
@@ -1131,16 +724,23 @@ class PipelinePlanner:
 
         # Build dependency DAG and optionally print it
         build_dependency_dag(pipeline_stage_infos)
-        if self.verbose:
+        print_mask = _get_pipeline_dag_print_mask()
+        if print_mask:
             print("\n" + "=" * 60)
             print("Pipeline Planning: Stage Analysis")
             print("=" * 60)
-            # First show detailed list format
-            print(dag_to_ascii(pipeline_stage_infos, style="list"))
-            print()
-            # Then show visual vertical format
-            print(dag_to_ascii(pipeline_stage_infos, style="vertical"))
-            print()
+            if print_mask & PRINT_DAG_LIST:
+                print(dag_to_ascii(pipeline_stage_infos, style="list"))
+                print()
+            if print_mask & PRINT_DAG_VERTICAL:
+                print(dag_to_ascii(pipeline_stage_infos, style="vertical"))
+                print()
+            if print_mask & PRINT_DAG_DOT:
+                print(dag_to_dot(pipeline_stage_infos))
+                print()
+            if print_mask & PRINT_DAG_MERMAID:
+                print(dag_to_mermaid(pipeline_stage_infos))
+                print()
 
         # Mark copy stage dependencies
         copy_stage_dependency_reads_mgr = CopyStageDependencyReadsManager()
@@ -1270,7 +870,7 @@ class PipelinePlanner:
         orders = [IntImm("int32", pinfo.order) for pinfo in pipeline_stage_infos]
         stages = [IntImm("int32", pinfo.stage) for pinfo in pipeline_stage_infos]
 
-        if self.verbose:
+        if print_mask:
             print("Pipeline Planning: Final Stage Assignments")
             print("-" * 40)
             for pinfo in pipeline_stage_infos:
@@ -1286,9 +886,6 @@ class PipelinePlanner:
 
         new_annotations["software_pipeline_stage"] = stages
         new_annotations["software_pipeline_order"] = orders
-
-        if _target_has_async_copy(self.target) and self.use_async_copy:
-            new_annotations["software_pipeline_async_stages"] = [IntImm("int32", 0)]
 
         return For(
             loop.loop_var,
@@ -1314,7 +911,7 @@ class PipelinePlanner:
         return pinfo
 
 
-def PipelinePlanning(use_async_copy: bool = True, verbose: bool = False):
+def PipelinePlanning(use_async_copy: bool = True):
     """
     Create a pipeline planning pass.
 
@@ -1326,8 +923,30 @@ def PipelinePlanning(use_async_copy: bool = True, verbose: bool = False):
     ----------
     use_async_copy : bool
         Whether to enable async copy for supported targets.
-    verbose : bool
-        Whether to print the dependency DAG and stage assignments for debugging.
+
+    Notes
+    -----
+    To print the pipeline DAG and stage assignments for debugging, set the
+    PassContext config option "tl.print_pipeline_dag" to a bitmask value:
+
+        # Print ASCII list format only
+        with tvm.transform.PassContext(config={"tl.print_pipeline_dag": 1}):
+            mod = PipelinePlanning()(mod)
+
+        # Print both list and vertical ASCII formats
+        with tvm.transform.PassContext(config={"tl.print_pipeline_dag": 3}):
+            mod = PipelinePlanning()(mod)
+
+        # Print all formats (list + vertical + DOT + Mermaid)
+        with tvm.transform.PassContext(config={"tl.print_pipeline_dag": 15}):
+            mod = PipelinePlanning()(mod)
+
+    Mask values:
+        0: No printing (default)
+        1: ASCII list format
+        2: ASCII vertical format
+        4: DOT format (Graphviz)
+        8: Mermaid format
 
     Returns
     -------
@@ -1336,7 +955,7 @@ def PipelinePlanning(use_async_copy: bool = True, verbose: bool = False):
     """
 
     def pass_fn(func: PrimFunc, mod, ctx) -> PrimFunc:
-        planner = PipelinePlanner(use_async_copy, verbose)
+        planner = PipelinePlanner(use_async_copy)
         new_body = planner.substitute(func)
         return func.with_body(new_body)
 

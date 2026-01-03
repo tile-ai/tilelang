@@ -85,6 +85,29 @@ class PassConfigKey(str, Enum):
 
     """
 
+    TL_PRINT_PIPELINE_DAG = "tl.print_pipeline_dag"
+    """Pipeline DAG printing mask for debugging.
+
+    Bitmask to control which DAG visualization formats to print:
+      0: No printing (default)
+      1: ASCII list format
+      2: ASCII vertical format
+      4: DOT format (Graphviz)
+      8: Mermaid format
+
+    Values can be combined, e.g., 3 = list + vertical, 15 = all formats.
+
+    Usage:
+
+    ```python
+    with tvm.transform.PassContext(config={"tl.print_pipeline_dag": 1}):
+        mod = PipelinePlanning()(mod)  # Print ASCII list format
+
+    with tvm.transform.PassContext(config={"tl.print_pipeline_dag": 3}):
+        mod = PipelinePlanning()(mod)  # Print both list and vertical
+    ```
+    """
+
     TL_STORAGE_REWRITE_DETECT_INPLACE = "tl.storage_rewrite_detect_inplace"
     """Control StorageRewrite inplace detection.
 
