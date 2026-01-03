@@ -1474,8 +1474,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << ", " << src << ", " << condition << ");\n";
     }
   } else if (op->op.same_as(tl::ptx_cp_async())) {
-    // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
-    // args[3] = predicate (optional)
+    // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr,
+    // args[2] = bytes, args[3] = predicate (optional)
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
         << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
            "src_access_ptr, bytes, [predicate])";
@@ -2322,8 +2322,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
           dst, src, size, this->PrintExpr(op->args[3]));
     }
   } else if (op->op.same_as(tl::ptx_cp_async())) {
-    // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
-    // args[3] = predicate (optional)
+    // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr,
+    // args[2] = bytes, args[3] = predicate (optional)
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
         << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
            "src_access_ptr, bytes, [predicate])";

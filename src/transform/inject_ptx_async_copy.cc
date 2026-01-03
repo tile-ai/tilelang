@@ -102,8 +102,7 @@ public:
 
           // Create access_ptr for destination (shared memory, write access)
           auto dst_access_ptr = store->buffer.access_ptr(
-              2, DataType::Handle(), 1, dst_offset,
-              PrimExpr(dst_elem_count));
+              2, DataType::Handle(), 1, dst_offset, PrimExpr(dst_elem_count));
 
           // Create access_ptr for source (global memory, read access)
           auto src_access_ptr = load->buffer.access_ptr(
@@ -158,8 +157,7 @@ public:
 
             // Create access_ptr for destination (shared memory, write access)
             auto dst_access_ptr = store->buffer.access_ptr(
-                2, DataType::Handle(), 1, dst_offset,
-                PrimExpr(dst_elem_count));
+                2, DataType::Handle(), 1, dst_offset, PrimExpr(dst_elem_count));
 
             // Create access_ptr for source (global memory, read access)
             auto src_access_ptr = load->buffer.access_ptr(
@@ -172,7 +170,8 @@ public:
                                  cp_async_args));
           }
         } else {
-          // Predicated vectorized cp.async - extract offsets from vectorized indices
+          // Predicated vectorized cp.async - extract offsets from vectorized
+          // indices
           auto src_offset = [=]() -> PrimExpr {
             if (load->indices[0]->IsInstance<RampNode>()) {
               return load->indices[0].as<RampNode>()->base;
@@ -204,9 +203,7 @@ public:
 
             // Create access_ptr for destination (shared memory, write access)
             auto dst_access_ptr = store->buffer.access_ptr(
-                2, DataType::Handle(), 1,
-                dst_offset,
-                PrimExpr(dst_elem_count));
+                2, DataType::Handle(), 1, dst_offset, PrimExpr(dst_elem_count));
 
             // Create access_ptr for source (global memory, read access)
             auto src_access_ptr = load->buffer.access_ptr(
@@ -214,15 +211,17 @@ public:
 
             // Predicated vectorized cp.async with 4 arguments
             ffi::Array<PrimExpr> cp_async_args{dst_access_ptr, src_access_ptr,
-                                               PrimExpr(bytes), predicate_value};
+                                               PrimExpr(bytes),
+                                               predicate_value};
             return Evaluate(Call(store->buffer->dtype,
                                  tvm::tir::builtin::ptx_cp_async(),
                                  cp_async_args));
           } else {
             // If we can't extract offsets from vectorized indices, fall back
-            LOG(WARNING) << "Cannot extract offsets from vectorized indices for "
-                            "predicated cp.async, "
-                         << "falling back to regular buffer store/load";
+            LOG(WARNING)
+                << "Cannot extract offsets from vectorized indices for "
+                   "predicated cp.async, "
+                << "falling back to regular buffer store/load";
           }
         }
       }

@@ -1388,6 +1388,7 @@ def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
     ... )
     """
     from tvm import tir
+
     if predicate is None:
         return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, bytes)
     else:
