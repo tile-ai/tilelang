@@ -269,7 +269,6 @@ def run_gemm_rs(
         num_stages,
         num_threads,
     )
-
     kernel = tilelang.compile(
         program,
         out_idx=[3],

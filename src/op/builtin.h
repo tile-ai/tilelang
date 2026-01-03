@@ -305,6 +305,15 @@ TVM_DLL const Op &ptx_stmatrix();
 TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 
 /*!
+ * \brief TileLang intrinsic for PTX async copy from global to shared memory
+ *
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate)
+ *
+ */
+TVM_DLL const Op &ptx_cp_async();
+
+/*!
  * \brief Pack two b16 value into a b32 value
  *
  * int32 pack_b16(b16_value, b16_value)
