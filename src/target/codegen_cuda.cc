@@ -2301,46 +2301,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << "for (int i = 0; i < " << num_elem << "; ++i) {\n";
     os << dst << "[" << dst_offset << " + i] = 0.0;";
     os << "}\n";
-  } else if (op->op.same_as(builtin::ptx_cp_async())) {
-    // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
-    // args[3] = predicate (optional)
-    ICHECK(op->args.size() == 3 || op->args.size() == 4)
-        << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
-           "src_access_ptr, bytes, [predicate])";
-
-    std::string dst = this->PrintExpr(op->args[0]);
-    std::string src = this->PrintExpr(op->args[1]);
-    std::string size = this->PrintExpr(op->args[2]);
-
-    need_cast_smem_ptr_to_int_ = true;
-    if (op->args.size() == 3) {
-      // Non-predicated version
-      this->stream << PrintCpAsyncAssembly(dst, src, size);
-    } else {
-      // Predicated version
-      this->stream << PrintPredicatedCpAsyncAssembly(
-          dst, src, size, this->PrintExpr(op->args[3]));
-    }
-  } else if (op->op.same_as(tl::ptx_cp_async())) {
-    // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr,
-    // args[2] = bytes, args[3] = predicate (optional)
-    ICHECK(op->args.size() == 3 || op->args.size() == 4)
-        << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
-           "src_access_ptr, bytes, [predicate])";
-
-    std::string dst = this->PrintExpr(op->args[0]);
-    std::string src = this->PrintExpr(op->args[1]);
-    std::string size = this->PrintExpr(op->args[2]);
-
-    need_cast_smem_ptr_to_int_ = true;
-    if (op->args.size() == 3) {
-      // Non-predicated version
-      this->stream << PrintCpAsyncAssembly(dst, src, size);
-    } else {
-      // Predicated version
-      this->stream << PrintPredicatedCpAsyncAssembly(
-          dst, src, size, this->PrintExpr(op->args[3]));
-    }
   } else if (op->op.same_as(builtin::ptx_cp_async_bulk())) {
     need_cast_smem_ptr_to_int_ = true;
     std::string dst = this->PrintExpr(op->args[0]);
