@@ -278,7 +278,9 @@ class MatrixCoreIntrinEmitter:
 
         # legalize shared buffer to region
         A_region = self._legalize_to_buffer_region(A_shared_buf)
+        assert len(A_region.region) >= 2, f"A_region must have at least 2 dimensions, got {len(A_region.region)}"
         A_buf = A_region.buffer
+        A_prefix = self._extract_nd_buffer_prefix(A_region)
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
 
@@ -296,13 +298,13 @@ class MatrixCoreIntrinEmitter:
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (rk * chunk + ki * (k_pack * micro_size_k), warp_m * warp_row_tiles + i * micro_size_x)
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[A_base0 + l + row, A_base1 + r + col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[(*A_prefix, A_base0 + l + row, A_base1 + r + col)]
             else:
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * (k_pack * micro_size_k))
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[A_base0 + l + row, A_base1 + r + col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[(*A_prefix, A_base0 + l + row, A_base1 + r + col)]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -320,7 +322,9 @@ class MatrixCoreIntrinEmitter:
 
         # legalize shared buffer to region
         B_region = self._legalize_to_buffer_region(B_shared_buf)
+        assert len(B_region.region) >= 2, f"B_region must have at least 2 dimensions, got {len(B_region.region)}"
         B_buf = B_region.buffer
+        B_prefix = self._extract_nd_buffer_prefix(B_region)
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
 
@@ -341,7 +345,7 @@ class MatrixCoreIntrinEmitter:
                             warp_n * warp_col_tiles + j * micro_size_y,
                             rk * chunk + ki * (k_pack * micro_size_k),
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[B_base0 + l + row, B_base1 + r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[(*B_prefix, B_base0 + l + row, B_base1 + r + col)]
 
             else:
                 for j in T.serial(warp_cols):
@@ -351,7 +355,7 @@ class MatrixCoreIntrinEmitter:
                             rk * chunk + ki * (k_pack * micro_size_k),
                             warp_n * warp_col_tiles + j * micro_size_y,
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[B_base0 + l + row, B_base1 + r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[(*B_prefix, B_base0 + l + row, B_base1 + r + col)]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
@@ -665,6 +669,28 @@ class MatrixCoreIntrinEmitter:
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
+
+    @staticmethod
+    def _extract_nd_buffer_prefix(region: BufferRegion) -> list:
+        """Extract prefix indices for multi-dimensional buffers (ndim > 2)."""
+        ndim = len(region.region)
+        assert ndim >= 2, f"Region must have at least 2 dimensions, got {ndim}"
+
+        if ndim == 2:
+            return []
+
+        prefix_indices = []
+        for i in range(ndim - 2):
+            r = region.region[i]
+            extent = r.extent
+            if isinstance(extent, tir.IntImm):
+                if extent.value != 1:
+                    raise ValueError(
+                        f"Multi-buffered region dimension {i} has extent {extent.value}, expected 1"
+                    )
+            prefix_indices.append(r.min)
+
+        return prefix_indices
 
 
 class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):

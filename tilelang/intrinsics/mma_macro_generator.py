@@ -245,7 +245,9 @@ class TensorCoreIntrinEmitter:
             thread_binding = self.get_thread_binding()
             # legalize shared buffer to region
             A_region = self._legalize_to_buffer_region(A_shared_buf)
+            assert len(A_region.region) >= 2, f"A_region must have at least 2 dimensions, got {len(A_region.region)}"
             A_buf = A_region.buffer
+            A_prefix = self._extract_nd_buffer_prefix(A_region)
             A_base0 = A_region.region[-2].min
             A_base1 = A_region.region[-1].min
 
@@ -264,9 +266,9 @@ class TensorCoreIntrinEmitter:
                     mi = tx // micro_size_k
                     mk = tx % micro_size_k
                     if a_transposed:
-                        A_local_buf[i * local_size_a] = A_buf[A_base0 + wk + mk, A_base1 + wi + mi]
+                        A_local_buf[i * local_size_a] = A_buf[(*A_prefix, A_base0 + wk + mk, A_base1 + wi + mi)]
                     else:
-                        A_local_buf[i * local_size_a] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
+                        A_local_buf[i * local_size_a] = A_buf[(*A_prefix, A_base0 + wi + mi, A_base1 + wk + mk)]
 
             return _warp_ld_a_fp64(A_local_buf, A_region, ki, thread_binding, rk)
 
@@ -298,7 +300,9 @@ class TensorCoreIntrinEmitter:
 
         # legalize shared buffer to region
         A_region = self._legalize_to_buffer_region(A_shared_buf)
+        assert len(A_region.region) >= 2, f"A_region must have at least 2 dimensions, got {len(A_region.region)}"
         A_buf = A_region.buffer
+        A_prefix = self._extract_nd_buffer_prefix(A_region)
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
         A_stride_last = A_buf.shape[-1]
@@ -318,7 +322,7 @@ class TensorCoreIntrinEmitter:
             for i in T.serial(warp_rows):
                 # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
-                A_shared_buf_elem = A_buf[A_base0 + wk, A_base1 + wi] if a_transposed else A_buf[A_base0 + wi, A_base1 + wk]
+                A_shared_buf_elem = A_buf[(*A_prefix, A_base0 + wk, A_base1 + wi)] if a_transposed else A_buf[(*A_prefix, A_base0 + wi, A_base1 + wk)]
 
                 if ldmatrix_available:
                     T.ptx_ldmatrix(
@@ -335,9 +339,9 @@ class TensorCoreIntrinEmitter:
                     for j in T.serial(local_size_a):
                         mi, mk = mma_load_layout(tx, j)
                         if a_transposed:
-                            A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wk + mk, A_base1 + wi + mi]
+                            A_local_buf[i * local_size_a + j] = A_buf[(*A_prefix, A_base0 + wk + mk, A_base1 + wi + mi)]
                         else:
-                            A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
+                            A_local_buf[i * local_size_a + j] = A_buf[(*A_prefix, A_base0 + wi + mi, A_base1 + wk + mk)]
 
         return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
@@ -355,7 +359,9 @@ class TensorCoreIntrinEmitter:
 
             # legalize shared buffer to region
             B_region = self._legalize_to_buffer_region(B_shared_buf)
+            assert len(B_region.region) >= 2, f"B_region must have at least 2 dimensions, got {len(B_region.region)}"
             B_buf = B_region.buffer
+            B_prefix = self._extract_nd_buffer_prefix(B_region)
             B_base0 = B_region.region[-2].min
             B_base1 = B_region.region[-1].min
 
@@ -374,9 +380,9 @@ class TensorCoreIntrinEmitter:
                     mi = tx // micro_size_k
                     mk = tx % micro_size_k
                     if b_transposed:
-                        B_local_buf[j * local_size_b] = B_buf[B_base0 + wi + mi, B_base1 + wk + mk]
+                        B_local_buf[j * local_size_b] = B_buf[(*B_prefix, B_base0 + wi + mi, B_base1 + wk + mk)]
                     else:
-                        B_local_buf[j * local_size_b] = B_buf[B_base0 + wk + mk, B_base1 + wi + mi]
+                        B_local_buf[j * local_size_b] = B_buf[(*B_prefix, B_base0 + wk + mk, B_base1 + wi + mi)]
 
             return _warp_ld_b_fp64(B_local_buf, B_region, ki, thread_binding, rk)
 
@@ -392,7 +398,9 @@ class TensorCoreIntrinEmitter:
 
         # legalize shared buffer to region
         B_region = self._legalize_to_buffer_region(B_shared_buf)
+        assert len(B_region.region) >= 2, f"B_region must have at least 2 dimensions, got {len(B_region.region)}"
         B_buf = B_region.buffer
+        B_prefix = self._extract_nd_buffer_prefix(B_region)
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
         B_stride_last = B_buf.shape[-1]
@@ -433,7 +441,7 @@ class TensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = B_buf[B_base0 + wi, B_base1 + wk] if b_transposed else B_buf[B_base0 + wk, B_base1 + wi]
+                    B_shared_buf_elem = B_buf[(*B_prefix, B_base0 + wi, B_base1 + wk)] if b_transposed else B_buf[(*B_prefix, B_base0 + wk, B_base1 + wi)]
 
                     T.ptx_ldmatrix(
                         b_dtype,
@@ -452,9 +460,9 @@ class TensorCoreIntrinEmitter:
                     for j in T.serial(local_size_b):
                         mi, mk = mma_load_layout(tx, j)
                         if b_transposed:
-                            B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wi + mi, B_base1 + wk + mk]
+                            B_local_buf[i * local_size_b + j] = B_buf[(*B_prefix, B_base0 + wi + mi, B_base1 + wk + mk)]
                         else:
-                            B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wk + mk, B_base1 + wi + mi]
+                            B_local_buf[i * local_size_b + j] = B_buf[(*B_prefix, B_base0 + wk + mk, B_base1 + wi + mi)]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
@@ -796,6 +804,49 @@ class TensorCoreIntrinEmitter:
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
+
+    @staticmethod
+    def _extract_nd_buffer_prefix(region: BufferRegion) -> list:
+        """
+        Extract prefix indices for multi-dimensional buffers (ndim > 2).
+
+        For a buffer with shape [N, M, K] and region with ranges:
+          [Range(idx, 1), Range(base0, extent0), Range(base1, extent1)]
+
+        This function:
+        1. Asserts that region has >= 2 dimensions
+        2. Verifies that all dimensions before the last 2 have extent=1
+        3. Returns the list of min values for those prefix dimensions
+
+        Returns:
+            List of PrimExpr indices for prefix dimensions (empty if ndim == 2)
+
+        Raises:
+            AssertionError if ndim < 2
+            ValueError if any prefix dimension has extent != 1
+        """
+        ndim = len(region.region)
+        assert ndim >= 2, f"Region must have at least 2 dimensions, got {ndim}"
+
+        if ndim == 2:
+            return []
+
+        prefix_indices = []
+        for i in range(ndim - 2):
+            r = region.region[i]
+            extent = r.extent
+            # Check extent == 1
+            if isinstance(extent, tir.IntImm):
+                if extent.value != 1:
+                    raise ValueError(
+                        f"Multi-buffered region dimension {i} has extent {extent.value}, expected 1"
+                    )
+            else:
+                # For symbolic extents, we trust they are 1 (could add runtime check)
+                pass
+            prefix_indices.append(r.min)
+
+        return prefix_indices
 
 
 class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
