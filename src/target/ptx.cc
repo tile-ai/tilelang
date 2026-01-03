@@ -1341,9 +1341,13 @@ std::string PrintCpAsyncAssembly(const std::string &shared_ptr,
 )";
   Replacer replacer;
   replacer.register_rule("{smem_addr}",
-                         shared_ptr + " + " + shared_elem_offset);
+                         shared_elem_offset.empty()
+                             ? shared_ptr
+                             : shared_ptr + " + " + shared_elem_offset);
   replacer.register_rule("{global_ptr}",
-                         global_ptr + " + " + global_elem_offset);
+                         global_elem_offset.empty()
+                             ? global_ptr
+                             : global_ptr + " + " + global_elem_offset);
   replacer.register_rule("{bytes}", bytes);
   replacer.register_rule("{cg_or_ca}", bytes == "16" ? "cg" : "ca");
   asm_code = replacer.rewrite(asm_code);
@@ -1396,9 +1400,13 @@ std::string PrintPredicatedCpAsyncAssembly(
 
   Replacer replacer;
   replacer.register_rule("{smem_addr}",
-                         shared_ptr + " + " + shared_elem_offset);
+                         shared_elem_offset.empty()
+                             ? shared_ptr
+                             : shared_ptr + " + " + shared_elem_offset);
   replacer.register_rule("{global_ptr}",
-                         global_ptr + " + " + global_elem_offset);
+                         global_elem_offset.empty()
+                             ? global_ptr
+                             : global_ptr + " + " + global_elem_offset);
   replacer.register_rule("{bytes}", bytes);
   replacer.register_rule("{cg_or_ca}", bytes == "16" ? "cg" : "ca");
   replacer.register_rule("{store_shared}", store_shared);
