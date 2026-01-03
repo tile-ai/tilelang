@@ -5,8 +5,6 @@ import tilelang.language as T
 from tilelang.contrib import nvcc
 import argparse
 
-tilelang.disable_cache()
-
 
 @tilelang.jit(
     out_idx=[3, 4],
