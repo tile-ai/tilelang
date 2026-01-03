@@ -29,6 +29,8 @@ from tvm.tir import (
     LetStmt,
     PrimExpr,
     PrimFunc,
+    PyStmtExprMutator,
+    PyStmtExprVisitor,
     SeqStmt,
     Stmt,
     Var,
@@ -39,14 +41,10 @@ from tvm.tir.transform import prim_func_pass
 from tilelang.utils import is_global, is_shared
 
 # Get builtin operations using Op.get
-_OP_CALL_EXTERN = tir.op.Op.get("tir.call_extern")
 _OP_TVM_ACCESS_PTR = tir.op.Op.get("tir.tvm_access_ptr")
 _OP_ADDRESS_OF = tir.op.Op.get("tir.address_of")
 _OP_IF_THEN_ELSE = tir.op.Op.get("tir.if_then_else")
-_OP_MBARRIER_WAIT_PARITY = tir.op.Op.get("tl.mbarrier_wait_parity")
 _OP_TILEOP_REGION = tir.op.Op.get("tl.tileop.region")
-_OP_TILEOP_COPY = tir.op.Op.get("tl.tileop.copy")
-_OP_TILEOP_GEMM = tir.op.Op.get("tl.tileop.gemm")
 
 
 def _full_buffer_region(buf: Buffer) -> BufferRegion:
@@ -176,7 +174,8 @@ class AsyncDependencyChainBuilder:
             post_order_visit(args[2], lambda n: self._visit_call(n) if isinstance(n, Call) else None)
 
 
-class BufferRegionCollector:
+@tir.functor.visitor
+class BufferRegionCollector(PyStmtExprVisitor):
     """
     Detect if a statement follows the global memory copy pattern:
         1. Contains exactly one buffer store operation
@@ -189,6 +188,7 @@ class BufferRegionCollector:
         buffer_data_to_buffer: dict[Var, Buffer],
         chain_builder: AsyncDependencyChainBuilder,
     ):
+        super().__init__()
         self.buffer_data_to_buffer = buffer_data_to_buffer
         self.chain_builder = chain_builder
         self.reads: list[BufferRegion] = []
@@ -197,33 +197,7 @@ class BufferRegionCollector:
         self._is_global_read = False
         self._within_condition_expr = False
 
-    def __call__(self, stmt: Stmt) -> None:
-        self._visit_stmt(stmt)
-
-    def _visit_stmt(self, stmt: Stmt) -> None:
-        if isinstance(stmt, BufferStore):
-            self._visit_buffer_store(stmt)
-        elif isinstance(stmt, IfThenElse):
-            self._visit_if_then_else(stmt)
-        elif isinstance(stmt, SeqStmt):
-            for s in stmt.seq:
-                self._visit_stmt(s)
-        elif isinstance(stmt, (For, Block)):
-            self._visit_stmt(stmt.body)
-        elif isinstance(stmt, BlockRealize):
-            self._visit_stmt(stmt.block.body)
-        elif isinstance(stmt, LetStmt):
-            self._visit_stmt(stmt.body)
-        elif isinstance(stmt, tir.Evaluate):
-            # Handle Evaluate statements containing Call expressions
-            self._visit_expr(stmt.value)
-        elif hasattr(stmt, "body"):
-            self._visit_stmt(stmt.body)
-        # Visit expressions in Evaluate statements (fallback)
-        elif hasattr(stmt, "value"):
-            self._visit_expr(stmt.value)
-
-    def _visit_buffer_store(self, op: BufferStore) -> None:
+    def visit_buffer_store_(self, op: BufferStore) -> None:
         store_buffer = op.buffer
         indices = op.indices
 
@@ -233,23 +207,14 @@ class BufferRegionCollector:
         self.writes.append(store_region)
 
         self._is_global_read = False
-        self._visit_expr(op.value)
+        self.visit_expr(op.value)
 
         if self._is_global_read and is_shared(store_buffer):
             self.is_global_copy_pattern = True
 
         self._is_global_read = False
 
-    def _visit_expr(self, expr: PrimExpr) -> None:
-        def visit(node):
-            if isinstance(node, BufferLoad):
-                self._visit_buffer_load(node)
-            elif isinstance(node, Call):
-                self._visit_call(node)
-
-        post_order_visit(expr, visit)
-
-    def _visit_buffer_load(self, op: BufferLoad) -> None:
+    def visit_buffer_load_(self, op: BufferLoad) -> None:
         load_buffer = op.buffer
         indices = op.indices
 
@@ -261,10 +226,11 @@ class BufferRegionCollector:
         if is_global(load_buffer) and not self._within_condition_expr:
             self._is_global_read = True
 
-    def _visit_call(self, op: Call) -> None:
+    def visit_call_(self, op: Call) -> None:
         args = op.args
 
         if op.op.same_as(_OP_ADDRESS_OF):
+            # T.address_of(buffer_load) - extract buffer from address_of
             buffer_region = None
             if len(args) > 0:
                 if isinstance(args[0], BufferLoad):
@@ -273,33 +239,16 @@ class BufferRegionCollector:
                     buf = self.buffer_data_to_buffer.get(args[0])
                     if buf is not None:
                         buffer_region = _full_buffer_region(buf)
-
             if buffer_region is not None:
                 self.reads.append(buffer_region)
 
         elif op.op.same_as(_OP_TVM_ACCESS_PTR):
+            # tvm_access_ptr(dtype, data, offset, extent, access_mask)
             if len(args) >= 2 and isinstance(args[1], Var):
                 buf = self.buffer_data_to_buffer.get(args[1])
                 if buf is not None:
                     buffer_region = _full_buffer_region(buf)
                     self.reads.append(buffer_region)
-
-        elif op.op.same_as(_OP_IF_THEN_ELSE):
-            # Skip condition expr for global read detection
-            self._within_condition_expr = True
-            if len(args) >= 1:
-                self._visit_expr(args[0])
-            self._within_condition_expr = False
-            for i in range(1, len(args)):
-                self._visit_expr(args[i])
-
-        elif op.op.same_as(_OP_MBARRIER_WAIT_PARITY):
-            if len(args) > 0 and isinstance(args[0], BufferLoad):
-                mbar_buf = args[0].buffer
-                buffer_reads = self.chain_builder.mbar_to_buffer_reads.get(mbar_buf, [])
-                buffer_writes = self.chain_builder.mbar_to_buffer_writes.get(mbar_buf, [])
-                self.reads.extend(buffer_reads)
-                self.writes.extend(buffer_writes)
 
         elif op.op.same_as(_OP_TILEOP_REGION):
             # tl.region(buffer_load, access_type, *extents)
@@ -319,29 +268,20 @@ class BufferRegionCollector:
                         if is_shared(buffer_load.buffer):
                             self.is_global_copy_pattern = self._is_global_read
 
-        elif op.op.same_as(_OP_TILEOP_COPY):
-            # tl.copy(src_region, dst_region, ...)
-            # Recursively visit to extract regions
-            for arg in args[:2]:  # First two args are src and dst regions
-                if isinstance(arg, Call):
-                    self._visit_call(arg)
+        else:
+            # For all other calls, recursively visit arguments
+            for arg in args:
+                self.visit_expr(arg)
 
-        elif op.op.same_as(_OP_TILEOP_GEMM):
-            # tl.gemm(A_region, B_region, C_region, ...)
-            # A, B are read; C is read-write (accumulate)
-            for arg in args[:3]:  # First three args are A, B, C regions
-                if isinstance(arg, Call):
-                    self._visit_call(arg)
-
-    def _visit_if_then_else(self, op: IfThenElse) -> None:
+    def visit_if_then_else_(self, op: IfThenElse) -> None:
         self._within_condition_expr = True
-        self._visit_expr(op.condition)
+        self.visit_expr(op.condition)
         self._within_condition_expr = False
 
-        self._visit_stmt(op.then_case)
+        self.visit_stmt(op.then_case)
         if op.else_case is not None:
             self._within_condition_expr = True
-            self._visit_stmt(op.else_case)
+            self.visit_stmt(op.else_case)
             self._within_condition_expr = False
 
 
@@ -513,66 +453,24 @@ def _get_pipeline_dag_print_mask() -> int:
     return ctx.config.get("tl.print_pipeline_dag", 0)
 
 
-class PipelinePlanner:
+@tir.functor.mutator
+class PipelinePlanner(PyStmtExprMutator):
     """
     Pipeline planner that transforms loop bodies with pipeline annotations.
     """
 
-    def __init__(self, use_async_copy: bool = True):
-        self.buffer_data_to_buffer: dict[Var, Buffer] = {}
-        self.target: ir.Target | None = None
-        self.use_async_copy = use_async_copy
-
-    def substitute(self, f: PrimFunc) -> Stmt:
-        """Apply pipeline planning transformation to a PrimFunc."""
-        # Collect buffer_data -> buffer mapping from buffer_map
-        for _, buffer in f.buffer_map.items():
-            self.buffer_data_to_buffer[buffer.data] = buffer
-
-        # Get target attribute
-        target = f.attrs.get("target", None)
-        if target is None:
-            raise ValueError("Pipeline_Planning: Require the target attribute")
+    def __init__(self, buffer_data_to_buffer: dict[Var, Buffer], target: ir.Target):
+        super().__init__()
+        self.buffer_data_to_buffer = buffer_data_to_buffer
         self.target = target
 
-        return self._visit_stmt(f.body)
-
-    def _visit_stmt(self, stmt: Stmt) -> Stmt:
-        """Recursively visit and transform statements."""
-        if isinstance(stmt, For):
-            return self._visit_for(stmt)
-        elif isinstance(stmt, Block):
-            return self._visit_block(stmt)
-        elif isinstance(stmt, BlockRealize):
-            new_block = self._visit_stmt(stmt.block)
-            if new_block.same_as(stmt.block):
-                return stmt
-            return BlockRealize(stmt.iter_values, stmt.predicate, new_block)
-        elif isinstance(stmt, SeqStmt):
-            new_seq = [self._visit_stmt(s) for s in stmt.seq]
-            return SeqStmt(new_seq)
-        elif isinstance(stmt, IfThenElse):
-            new_then = self._visit_stmt(stmt.then_case)
-            new_else = self._visit_stmt(stmt.else_case) if stmt.else_case else None
-            return IfThenElse(stmt.condition, new_then, new_else)
-        elif isinstance(stmt, LetStmt):
-            new_body = self._visit_stmt(stmt.body)
-            return LetStmt(stmt.var, stmt.value, new_body)
-        elif isinstance(stmt, AttrStmt):
-            new_body = self._visit_stmt(stmt.body)
-            if new_body.same_as(stmt.body):
-                return stmt
-            return AttrStmt(stmt.node, stmt.attr_key, stmt.value, new_body)
-        else:
-            return stmt
-
-    def _visit_block(self, op: Block) -> Block:
+    def visit_block_(self, op: Block) -> Block:
         """Visit a Block node."""
         # Register allocated buffers
         for buffer in op.alloc_buffers:
             self.buffer_data_to_buffer[buffer.data] = buffer
 
-        new_body = self._visit_stmt(op.body)
+        new_body = self.visit_stmt(op.body)
 
         # Unregister allocated buffers
         for buffer in op.alloc_buffers:
@@ -594,13 +492,13 @@ class PipelinePlanner:
             op.annotations,
         )
 
-    def _visit_for(self, loop: For) -> Stmt:
+    def visit_for_(self, loop: For) -> Stmt:
         """Visit a For loop and potentially add pipeline annotations."""
         annotations = dict(loop.annotations)
 
+        num_stages_anno = annotations.get("num_stages")
         order_anno = annotations.get("tl_pipeline_order")
         stage_anno = annotations.get("tl_pipeline_stage")
-        num_stages_anno = annotations.get("num_stages")
 
         # If order and stage annotations already exist
         if order_anno is not None and stage_anno is not None:
@@ -626,7 +524,7 @@ class PipelinePlanner:
 
             if ws_tma_enabled:
                 # Recursively visit body
-                new_body = self._visit_stmt(loop.body)
+                new_body = self.visit_stmt(loop.body)
                 if new_body.same_as(loop.body):
                     return loop
                 return For(
@@ -661,7 +559,7 @@ class PipelinePlanner:
 
         # If no num_stages annotation, just visit recursively
         if num_stages_anno is None:
-            new_body = self._visit_stmt(loop.body)
+            new_body = self.visit_stmt(loop.body)
             if new_body.same_as(loop.body):
                 return loop
             return For(
@@ -900,7 +798,7 @@ class PipelinePlanner:
     def _make_pipeline_stage_info(self, stmt: Stmt, idx: int, chain_builder: AsyncDependencyChainBuilder) -> PipelineStageInfo:
         """Create PipelineStageInfo for a statement."""
         collector = BufferRegionCollector(self.buffer_data_to_buffer, chain_builder)
-        collector(stmt)
+        collector.visit_stmt(stmt)
 
         pinfo = PipelineStageInfo()
         pinfo.reads = collector.reads
@@ -911,7 +809,7 @@ class PipelinePlanner:
         return pinfo
 
 
-def PipelinePlanning(use_async_copy: bool = True):
+def PipelinePlanning():
     """
     Create a pipeline planning pass.
 
@@ -921,8 +819,6 @@ def PipelinePlanning(use_async_copy: bool = True):
 
     Parameters
     ----------
-    use_async_copy : bool
-        Whether to enable async copy for supported targets.
 
     Notes
     -----
@@ -955,8 +851,18 @@ def PipelinePlanning(use_async_copy: bool = True):
     """
 
     def pass_fn(func: PrimFunc, mod, ctx) -> PrimFunc:
-        planner = PipelinePlanner(use_async_copy)
-        new_body = planner.substitute(func)
+        # Collect buffer_data -> buffer mapping from buffer_map
+        buffer_data_to_buffer: dict[Var, Buffer] = {}
+        for _, buffer in func.buffer_map.items():
+            buffer_data_to_buffer[buffer.data] = buffer
+
+        # Get target attribute
+        target = func.attrs.get("target", None)
+        if target is None:
+            raise ValueError("PipelinePlanning: Require the target attribute")
+
+        planner = PipelinePlanner(buffer_data_to_buffer, target)
+        new_body = planner.visit_stmt(func.body)
         return func.with_body(new_body)
 
     return prim_func_pass(pass_fn, opt_level=0, name="tl.PipelinePlanning")

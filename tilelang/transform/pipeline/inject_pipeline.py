@@ -33,12 +33,15 @@ from tvm.tir import (
     LetStmt,
     PrimExpr,
     PrimFunc,
+    PyStmtExprMutator,
+    PyStmtExprVisitor,
     SeqStmt,
     Stmt,
     Var,
 )
-from tvm.tir.stmt_functor import post_order_visit
 from tvm.tir.transform import prim_func_pass
+
+from tilelang.utils import is_shared
 
 
 def _substitute_var(stmt: Stmt, var: Var, value: PrimExpr) -> Stmt:
@@ -47,161 +50,88 @@ def _substitute_var(stmt: Stmt, var: Var, value: PrimExpr) -> Stmt:
     return tir.stmt_functor.substitute(stmt, var_map)
 
 
-def _get_buffer_scope(buf: Buffer) -> str:
-    """Get the storage scope of a buffer."""
-    ptr_type = buf.data.type_annotation
-    if hasattr(ptr_type, "storage_scope"):
-        return ptr_type.storage_scope
-    return ""
+_OP_TILEOP_REGION = tir.op.Op.get("tl.tileop.region")
 
 
-def _is_shared_buffer(buf: Buffer) -> bool:
-    """Check if buffer is in shared memory."""
-    scope = _get_buffer_scope(buf)
-    return scope in ("shared", "shared.dyn")
-
-
-class BufferCollector:
+@tir.functor.visitor
+class BufferCollector(PyStmtExprVisitor):
     """Collect buffers accessed in a statement."""
 
     def __init__(self):
+        super().__init__()
         self.read_buffers: set[Buffer] = set()
         self.write_buffers: set[Buffer] = set()
 
-    def collect(self, stmt: Stmt) -> None:
-        """Collect all buffers accessed in the statement."""
+    def visit_buffer_load_(self, op: BufferLoad) -> None:
+        self.read_buffers.add(op.buffer)
 
-        def visit(node):
-            if isinstance(node, BufferLoad):
-                self.read_buffers.add(node.buffer)
-            elif isinstance(node, BufferStore):
-                self.write_buffers.add(node.buffer)
-            elif isinstance(node, Call):
-                # Handle tl.region calls
-                op_name = str(node.op)
-                if "tl.tileop.region" in op_name and len(node.args) >= 2:
-                    buffer_load = node.args[0]
-                    access_type = node.args[1]
-                    if isinstance(buffer_load, BufferLoad):
-                        access_val = access_type.value if isinstance(access_type, IntImm) else int(access_type)
-                        if access_val & 1:  # read
-                            self.read_buffers.add(buffer_load.buffer)
-                        if access_val & 2:  # write
-                            self.write_buffers.add(buffer_load.buffer)
+    def visit_buffer_store_(self, op: BufferStore) -> None:
+        self.write_buffers.add(op.buffer)
+        self.visit_expr(op.value)
 
-        post_order_visit(stmt, visit)
+    def visit_call_(self, op: Call) -> None:
+        # Handle tl.region calls
+        if op.op.same_as(_OP_TILEOP_REGION) and len(op.args) >= 2:
+            buffer_load = op.args[0]
+            access_type = op.args[1]
+            if isinstance(buffer_load, BufferLoad):
+                access_val = int(access_type)
+                if access_val & 1:  # read
+                    self.read_buffers.add(buffer_load.buffer)
+                if access_val & 2:  # write
+                    self.write_buffers.add(buffer_load.buffer)
+        else:
+            # Visit all arguments
+            for arg in op.args:
+                self.visit_expr(arg)
 
 
-class BufferRewriter:
+@tir.functor.mutator
+class BufferRewriter(PyStmtExprMutator):
     """Rewrite buffer accesses to use expanded buffers with modulo indexing."""
 
     def __init__(self, buf: Buffer, expanded_buf: Buffer, stage_idx: PrimExpr, num_stages: int):
+        super().__init__()
         self.buf = buf
         self.expanded_buf = expanded_buf
         self.modulo_idx = tir.floormod(stage_idx, IntImm("int32", num_stages))
 
-    def rewrite(self, stmt: Stmt) -> Stmt:
-        """Rewrite buffer accesses in the statement."""
-        return self._visit_stmt(stmt)
+    def visit_buffer_store_(self, op: BufferStore) -> Stmt:
+        new_value = self.visit_expr(op.value)
+        if op.buffer.same_as(self.buf):
+            new_indices = [self.modulo_idx] + list(op.indices)
+            return BufferStore(self.expanded_buf, new_value, new_indices)
+        elif not new_value.same_as(op.value):
+            return BufferStore(op.buffer, new_value, op.indices)
+        return op
 
-    def _visit_stmt(self, stmt: Stmt) -> Stmt:
-        if isinstance(stmt, BufferStore):
-            new_value = self._visit_expr(stmt.value)
-            if stmt.buffer.same_as(self.buf):
-                new_indices = [self.modulo_idx] + list(stmt.indices)
-                return BufferStore(self.expanded_buf, new_value, new_indices)
-            elif new_value is not stmt.value:
-                return BufferStore(stmt.buffer, new_value, stmt.indices)
-            return stmt
-        elif isinstance(stmt, SeqStmt):
-            new_seq = [self._visit_stmt(s) for s in stmt.seq]
-            return SeqStmt(new_seq)
-        elif isinstance(stmt, IfThenElse):
-            new_cond = self._visit_expr(stmt.condition)
-            new_then = self._visit_stmt(stmt.then_case)
-            new_else = self._visit_stmt(stmt.else_case) if stmt.else_case else None
-            return IfThenElse(new_cond, new_then, new_else)
-        elif isinstance(stmt, LetStmt):
-            new_value = self._visit_expr(stmt.value)
-            new_body = self._visit_stmt(stmt.body)
-            return LetStmt(stmt.var, new_value, new_body)
-        elif isinstance(stmt, AttrStmt):
-            new_body = self._visit_stmt(stmt.body)
-            return AttrStmt(stmt.node, stmt.attr_key, stmt.value, new_body)
-        elif isinstance(stmt, For):
-            new_body = self._visit_stmt(stmt.body)
-            return For(stmt.loop_var, stmt.min, stmt.extent, stmt.kind, new_body, stmt.thread_binding, stmt.annotations)
-        elif isinstance(stmt, Block):
-            new_body = self._visit_stmt(stmt.body)
-            return Block(
-                stmt.iter_vars,
-                stmt.reads,
-                stmt.writes,
-                stmt.name_hint,
-                new_body,
-                stmt.init,
-                stmt.alloc_buffers,
-                stmt.match_buffers,
-                stmt.annotations,
-            )
-        elif isinstance(stmt, BlockRealize):
-            new_block = self._visit_stmt(stmt.block)
-            return BlockRealize(stmt.iter_values, stmt.predicate, new_block)
-        elif isinstance(stmt, tir.Evaluate):
-            new_value = self._visit_expr(stmt.value)
-            return tir.Evaluate(new_value)
-        else:
-            return stmt
+    def visit_buffer_load_(self, op: BufferLoad) -> PrimExpr:
+        if op.buffer.same_as(self.buf):
+            new_indices = [self.modulo_idx] + list(op.indices)
+            return BufferLoad(self.expanded_buf, new_indices)
+        return op
 
-    def _visit_expr(self, expr: PrimExpr) -> PrimExpr:
-        if isinstance(expr, BufferLoad):
-            if expr.buffer.same_as(self.buf):
-                new_indices = [self.modulo_idx] + list(expr.indices)
-                return BufferLoad(self.expanded_buf, new_indices)
-            return expr
-        elif isinstance(expr, Call):
-            op_name = str(expr.op)
-            if "tl.tileop.region" in op_name and len(expr.args) >= 2:
-                buffer_load = expr.args[0]
-                if isinstance(buffer_load, BufferLoad) and buffer_load.buffer.same_as(self.buf):
-                    # Update BufferLoad indices: [i, j] -> [stage_idx % num_stages, i, j]
-                    new_indices = [self.modulo_idx] + list(buffer_load.indices)
-                    new_load = BufferLoad(self.expanded_buf, new_indices)
-                    # Update region shape: (128, 32) -> (1, 128, 32)
-                    # args format: [buffer_load, access_type, shape...]
-                    access_type = expr.args[1]
-                    old_shape = list(expr.args[2:])
-                    new_shape = [IntImm("int32", 1)] + old_shape
-                    new_args = [new_load, access_type] + new_shape
-                    return Call(expr.dtype, expr.op, new_args)
-            # Visit all arguments
-            new_args = [self._visit_expr(arg) if isinstance(arg, PrimExpr) else arg for arg in expr.args]
-            return Call(expr.dtype, expr.op, new_args)
-        elif isinstance(expr, tir.Cast):
-            return tir.Cast(expr.dtype, self._visit_expr(expr.value))
-        elif isinstance(expr, tir.Add):
-            return tir.Add(self._visit_expr(expr.a), self._visit_expr(expr.b))
-        elif isinstance(expr, tir.Sub):
-            return tir.Sub(self._visit_expr(expr.a), self._visit_expr(expr.b))
-        elif isinstance(expr, tir.Mul):
-            return tir.Mul(self._visit_expr(expr.a), self._visit_expr(expr.b))
-        elif isinstance(expr, tir.Div):
-            return tir.Div(self._visit_expr(expr.a), self._visit_expr(expr.b))
-        elif isinstance(expr, tir.FloorDiv):
-            return tir.FloorDiv(self._visit_expr(expr.a), self._visit_expr(expr.b))
-        elif isinstance(expr, tir.FloorMod):
-            return tir.FloorMod(self._visit_expr(expr.a), self._visit_expr(expr.b))
-        elif isinstance(expr, tir.Max):
-            return tir.Max(self._visit_expr(expr.a), self._visit_expr(expr.b))
-        elif isinstance(expr, tir.Min):
-            return tir.Min(self._visit_expr(expr.a), self._visit_expr(expr.b))
-        elif isinstance(expr, tir.Select):
-            return tir.Select(self._visit_expr(expr.condition), self._visit_expr(expr.true_value), self._visit_expr(expr.false_value))
-        else:
-            return expr
+    def visit_call_(self, op: Call) -> PrimExpr:
+        if op.op.same_as(_OP_TILEOP_REGION) and len(op.args) >= 2:
+            buffer_load = op.args[0]
+            if isinstance(buffer_load, BufferLoad) and buffer_load.buffer.same_as(self.buf):
+                # Update BufferLoad indices: [i, j] -> [stage_idx % num_stages, i, j]
+                new_indices = [self.modulo_idx] + list(buffer_load.indices)
+                new_load = BufferLoad(self.expanded_buf, new_indices)
+                # Update region shape: (128, 32) -> (1, 128, 32)
+                # args format: [buffer_load, access_type, shape...]
+                access_type = op.args[1]
+                old_shape = list(op.args[2:])
+                new_shape = [IntImm("int32", 1)] + old_shape
+                new_args = [new_load, access_type] + new_shape
+                return Call(op.dtype, op.op, new_args)
+        # Visit all arguments
+        new_args = [self.visit_expr(arg) if isinstance(arg, PrimExpr) else arg for arg in op.args]
+        return Call(op.dtype, op.op, new_args)
 
 
-class PipelineInjector:
+@tir.functor.mutator
+class PipelineInjector(PyStmtExprMutator):
     """
     Pipeline injector that transforms loops with pipeline annotations.
 
@@ -231,32 +161,25 @@ class PipelineInjector:
         gemm(A_shared[31 % num_stages], B_shared[31 % num_stages], C)
     """
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, buffer_data_to_buffer: dict[Var, Buffer], verbose: bool = False):
+        super().__init__()
         self.verbose = verbose
-        self.buffer_data_to_buffer: dict[Var, Buffer] = {}
+        self.buffer_data_to_buffer = buffer_data_to_buffer
         # Maps original buffer -> expanded buffer with extra stage dimension
         self.buffer_expansion_map: dict[Buffer, Buffer] = {}
         self.num_stages: int = 0
-
-    def transform(self, func: PrimFunc) -> Stmt:
-        """Apply pipeline injection transformation to a PrimFunc."""
-        # Collect buffer mappings
-        for _, buffer in func.buffer_map.items():
-            self.buffer_data_to_buffer[buffer.data] = buffer
-        return self._visit_stmt(func.body)
 
     def _create_expanded_buffer(self, buf: Buffer, num_stages: int) -> Buffer:
         """Create an expanded buffer with an extra dimension for stage indexing."""
         # Add num_stages as the first dimension
         new_shape = [IntImm("int32", num_stages)] + list(buf.shape)
 
-        # Create new buffer with expanded shape
-        new_name = f"{buf.name}_{num_stages}"
+        # Create new buffer with expanded shape, keep original name
         new_buf = tir.decl_buffer(
             new_shape,
             buf.dtype,
-            new_name,
-            scope=_get_buffer_scope(buf),
+            buf.name,
+            scope=buf.scope(),
         )
         return new_buf
 
@@ -271,7 +194,7 @@ class PipelineInjector:
 
         expanded_buf = self.buffer_expansion_map[buf]
         rewriter = BufferRewriter(buf, expanded_buf, stage_idx, self.num_stages)
-        return rewriter.rewrite(stmt)
+        return rewriter.visit_stmt(stmt)
 
     def _collect_pipeline_buffers(self, body_stmts: list[Stmt], stages: list[int]) -> set[Buffer]:
         """Collect shared memory buffers that need multi-buffering.
@@ -284,7 +207,7 @@ class PipelineInjector:
 
         for stmt, stage in zip(body_stmts, stages):
             collector = BufferCollector()
-            collector.collect(stmt)
+            collector.visit_stmt(stmt)
 
             if stage not in stage_write_bufs:
                 stage_write_bufs[stage] = set()
@@ -292,11 +215,11 @@ class PipelineInjector:
                 stage_read_bufs[stage] = set()
 
             for buf in collector.write_buffers:
-                if _is_shared_buffer(buf):
+                if is_shared(buf):
                     stage_write_bufs[stage].add(buf)
 
             for buf in collector.read_buffers:
-                if _is_shared_buffer(buf):
+                if is_shared(buf):
                     stage_read_bufs[stage].add(buf)
 
         # Find buffers written by early stages and read by later stages
@@ -312,38 +235,9 @@ class PipelineInjector:
 
         return pipeline_buffers
 
-    def _visit_stmt(self, stmt: Stmt) -> Stmt:
-        """Recursively visit and transform statements."""
-        if isinstance(stmt, For):
-            return self._visit_for(stmt)
-        elif isinstance(stmt, Block):
-            return self._visit_block(stmt)
-        elif isinstance(stmt, BlockRealize):
-            new_block = self._visit_stmt(stmt.block)
-            if new_block.same_as(stmt.block):
-                return stmt
-            return BlockRealize(stmt.iter_values, stmt.predicate, new_block)
-        elif isinstance(stmt, SeqStmt):
-            new_seq = [self._visit_stmt(s) for s in stmt.seq]
-            return SeqStmt(new_seq)
-        elif isinstance(stmt, IfThenElse):
-            new_then = self._visit_stmt(stmt.then_case)
-            new_else = self._visit_stmt(stmt.else_case) if stmt.else_case else None
-            return IfThenElse(stmt.condition, new_then, new_else)
-        elif isinstance(stmt, LetStmt):
-            new_body = self._visit_stmt(stmt.body)
-            return LetStmt(stmt.var, stmt.value, new_body)
-        elif isinstance(stmt, AttrStmt):
-            new_body = self._visit_stmt(stmt.body)
-            if new_body.same_as(stmt.body):
-                return stmt
-            return AttrStmt(stmt.node, stmt.attr_key, stmt.value, new_body)
-        else:
-            return stmt
-
-    def _visit_block(self, op: Block) -> Block:
+    def visit_block_(self, op: Block) -> Block:
         """Visit a Block node."""
-        new_body = self._visit_stmt(op.body)
+        new_body = self.visit_stmt(op.body)
 
         # Check if any buffers in alloc_buffers need to be replaced with expanded versions
         new_alloc_buffers = []
@@ -374,7 +268,7 @@ class PipelineInjector:
             op.annotations,
         )
 
-    def _visit_for(self, loop: For) -> Stmt:
+    def visit_for_(self, loop: For) -> Stmt:
         """Visit a For loop and potentially inject pipeline."""
         annotations = dict(loop.annotations)
 
@@ -384,7 +278,7 @@ class PipelineInjector:
 
         if stage_anno is None or order_anno is None:
             # No pipeline annotations, just visit body recursively
-            new_body = self._visit_stmt(loop.body)
+            new_body = self.visit_stmt(loop.body)
             if new_body.same_as(loop.body):
                 return loop
             return For(
@@ -440,28 +334,27 @@ class PipelineInjector:
             return []
         return result
 
-    def _get_body_statements(self, body: Stmt) -> list[Stmt]:
-        """Extract statements from loop body."""
-        # Navigate through BlockRealize/Block to get to SeqStmt
+    def _get_body_statements(self, body: Stmt, max_depth: int = 100) -> list[Stmt]:
+        """Extract statements from loop body by navigating through wrapper nodes."""
         current = body
-        while True:
+        for _ in range(max_depth):
             if isinstance(current, SeqStmt):
                 return list(current.seq)
             elif isinstance(current, BlockRealize):
                 current = current.block.body
             elif isinstance(current, Block):
                 current = current.body
-            elif isinstance(current, IfThenElse):
-                if current.else_case is None:
-                    current = current.then_case
-                else:
-                    # Can't handle if-else in pipeline body
-                    return [body]
+            elif isinstance(current, IfThenElse) and current.else_case is None:
+                current = current.then_case
             elif isinstance(current, LetStmt):
                 current = current.body
             else:
-                # Single statement
                 return [current]
+
+        raise RuntimeError(
+            "InjectPipeline: Exceeded maximum depth while extracting body statements. "
+            "This may indicate malformed IR or an unexpected statement structure."
+        )
 
     def _rewrite_stmt_with_multibuffer(self, stmt: Stmt, loop_iter: PrimExpr, pipeline_buffers: set[Buffer]) -> Stmt:
         """Rewrite a statement to use multi-buffered buffers with modulo indexing."""
@@ -591,7 +484,7 @@ class PipelineInjector:
             new_annotations = {
                 k: v
                 for k, v in loop.annotations.items()
-                if k not in ("software_pipeline_stage", "software_pipeline_order", "software_pipeline_async_stages", "num_stages")
+                if k not in ("software_pipeline_stage", "software_pipeline_order", "num_stages")
             }
 
             steady_loop = For(
@@ -643,13 +536,7 @@ class PipelineInjector:
         if self.verbose:
             print(f"  Total: {len(prologue_stmts)} prologue + 1 steady loop + {len(epilogue_stmts)} epilogue")
 
-        # Wrap with buffer allocations for expanded buffers
         result = SeqStmt(all_stmts) if len(all_stmts) > 1 else all_stmts[0]
-
-        # Note: The expanded buffer allocations should be handled at the Block level
-        # For now, we just return the transformed statements
-        # TODO: Add alloc_buffer for expanded buffers in the enclosing block
-
         return result
 
 
@@ -673,8 +560,13 @@ def InjectPipeline(verbose: bool = False):
     """
 
     def pass_fn(func: PrimFunc, mod, ctx) -> PrimFunc:
-        injector = PipelineInjector(verbose)
-        new_body = injector.transform(func)
+        # Collect buffer mappings
+        buffer_data_to_buffer: dict[Var, Buffer] = {}
+        for _, buffer in func.buffer_map.items():
+            buffer_data_to_buffer[buffer.data] = buffer
+
+        injector = PipelineInjector(buffer_data_to_buffer, verbose)
+        new_body = injector.visit_stmt(func.body)
         return func.with_body(new_body)
 
     return prim_func_pass(pass_fn, opt_level=0, name="tl.InjectPipeline")

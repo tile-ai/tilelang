@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from tilelang import tvm as tvm
 from tilelang.language.tir import op as tl_op
+from tilelang.utils import is_global, is_shared
 from tvm import tir
 from tvm.tir import (
     AttrStmt,
@@ -66,6 +67,8 @@ from tvm.tir import (
     LetStmt,
     PrimExpr,
     PrimFunc,
+    PyStmtExprMutator,
+    PyStmtExprVisitor,
     SeqStmt,
     Stmt,
     Var,
@@ -73,30 +76,10 @@ from tvm.tir import (
 from tvm.tir.stmt_functor import post_order_visit
 from tvm.tir.transform import prim_func_pass
 
-
-# =============================================================================
-# Utility Functions
-# =============================================================================
-
-
-def _get_buffer_scope(buf: Buffer) -> str:
-    """Get the storage scope of a buffer."""
-    ptr_type = buf.data.type_annotation
-    if hasattr(ptr_type, "storage_scope"):
-        return ptr_type.storage_scope
-    return ""
-
-
-def _is_shared_buffer(buf: Buffer) -> bool:
-    """Check if buffer is in shared memory."""
-    scope = _get_buffer_scope(buf)
-    return scope in ("shared", "shared.dyn")
-
-
-def _is_global_buffer(buf: Buffer) -> bool:
-    """Check if buffer is in global memory."""
-    scope = _get_buffer_scope(buf)
-    return scope == "global" or scope == ""
+# Op constants for type-safe comparison
+_OP_PTX_CP_ASYNC = tir.op.Op.get("tl.ptx_cp_async")
+_OP_ADDRESS_OF = tir.op.Op.get("tir.address_of")
+_OP_IF_THEN_ELSE = tir.op.Op.get("tir.if_then_else")
 
 
 def _compute_linear_offset(indices: list, buf: Buffer) -> PrimExpr:
@@ -247,35 +230,31 @@ class StatementClassifier:
 
     def _contains_async_copy(self, stmt: Stmt) -> bool:
         """Check if statement contains ptx_cp_async."""
-        result = [False]
+        result = False
 
         def visitor(node):
-            if isinstance(node, Call) and "ptx_cp_async" in str(node.op):
-                result[0] = True
+            nonlocal result
+            if isinstance(node, Call) and node.op.same_as(_OP_PTX_CP_ASYNC):
+                result = True
 
         post_order_visit(stmt, visitor)
-        return result[0]
+        return result
 
     def _reads_shared_memory(self, stmt: Stmt) -> bool:
         """Check if statement reads from shared memory."""
-        result = [False]
+        result = False
 
         def visitor(node):
-            if (
-                isinstance(node, BufferLoad)
-                and _is_shared_buffer(node.buffer)
-                or (
-                    isinstance(node, Call)
-                    and "address_of" in str(node.op)
-                    and len(node.args) > 0
-                    and isinstance(node.args[0], BufferLoad)
-                    and _is_shared_buffer(node.args[0].buffer)
-                )
-            ):
-                result[0] = True
+            nonlocal result
+            if isinstance(node, BufferLoad) and is_shared(node.buffer):
+                result = True
+            elif isinstance(node, Call) and node.op.same_as(_OP_ADDRESS_OF):
+                if len(node.args) > 0 and isinstance(node.args[0], BufferLoad):
+                    if is_shared(node.args[0].buffer):
+                        result = True
 
         post_order_visit(stmt, visitor)
-        return result[0]
+        return result
 
 
 # =============================================================================
@@ -319,7 +298,7 @@ def _match_vectorized_copy(loop: For) -> AsyncCopyMatch | None:
     store = body
     store_buffer = store.buffer
 
-    if not _is_shared_buffer(store_buffer):
+    if not is_shared(store_buffer):
         return None
 
     load = None
@@ -327,7 +306,7 @@ def _match_vectorized_copy(loop: For) -> AsyncCopyMatch | None:
         load = store.value
     elif isinstance(store.value, Call):
         call = store.value
-        if hasattr(call, "op") and "if_then_else" in str(call.op) and len(call.args) >= 2 and isinstance(call.args[1], BufferLoad):
+        if call.op.same_as(_OP_IF_THEN_ELSE) and len(call.args) >= 2 and isinstance(call.args[1], BufferLoad):
             load = call.args[1]
 
     if load is None:
@@ -335,7 +314,7 @@ def _match_vectorized_copy(loop: For) -> AsyncCopyMatch | None:
 
     load_buffer = load.buffer
 
-    if not _is_global_buffer(load_buffer):
+    if not is_global(load_buffer):
         return None
 
     def compute_offset_at_zero(indices, buf):
@@ -360,54 +339,22 @@ def _match_vectorized_copy(loop: For) -> AsyncCopyMatch | None:
 # =============================================================================
 
 
-class AsyncCopyLowerer:
+@tir.functor.mutator
+class AsyncCopyLowerer(PyStmtExprMutator):
     """Lower vectorized global->shared copy to ptx_cp_async."""
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, buffer_data_to_buffer: dict[Var, Buffer], verbose: bool = False):
+        super().__init__()
         self.verbose = verbose
-        self.buffer_data_to_buffer: dict[Var, Buffer] = {}
+        self.buffer_data_to_buffer = buffer_data_to_buffer
         self.has_async_copy: bool = False
 
-    def transform(self, func: PrimFunc) -> Stmt:
-        """Apply async copy lowering transformation."""
-        for _, buffer in func.buffer_map.items():
-            self.buffer_data_to_buffer[buffer.data] = buffer
-        return self._visit_stmt(func.body)
-
-    def _visit_stmt(self, stmt: Stmt) -> Stmt:
-        if isinstance(stmt, For):
-            return self._visit_for(stmt)
-        elif isinstance(stmt, Block):
-            return self._visit_block(stmt)
-        elif isinstance(stmt, BlockRealize):
-            new_block = self._visit_stmt(stmt.block)
-            if new_block is stmt.block:
-                return stmt
-            return BlockRealize(stmt.iter_values, stmt.predicate, new_block)
-        elif isinstance(stmt, SeqStmt):
-            new_seq = [self._visit_stmt(s) for s in stmt.seq]
-            return SeqStmt(new_seq)
-        elif isinstance(stmt, IfThenElse):
-            new_then = self._visit_stmt(stmt.then_case)
-            new_else = self._visit_stmt(stmt.else_case) if stmt.else_case else None
-            return IfThenElse(stmt.condition, new_then, new_else)
-        elif isinstance(stmt, LetStmt):
-            new_body = self._visit_stmt(stmt.body)
-            return LetStmt(stmt.var, stmt.value, new_body)
-        elif isinstance(stmt, AttrStmt):
-            new_body = self._visit_stmt(stmt.body)
-            if new_body is stmt.body:
-                return stmt
-            return AttrStmt(stmt.node, stmt.attr_key, stmt.value, new_body)
-        else:
-            return stmt
-
-    def _visit_block(self, op: Block) -> Block:
+    def visit_block_(self, op: Block) -> Block:
         for buffer in op.alloc_buffers:
             self.buffer_data_to_buffer[buffer.data] = buffer
 
-        new_body = self._visit_stmt(op.body)
-        if new_body is op.body:
+        new_body = self.visit_stmt(op.body)
+        if new_body.same_as(op.body):
             return op
 
         return Block(
@@ -422,16 +369,16 @@ class AsyncCopyLowerer:
             op.annotations,
         )
 
-    def _visit_for(self, loop: For) -> Stmt:
+    def visit_for_(self, loop: For) -> Stmt:
         match = _match_vectorized_copy(loop)
         if match is not None:
             result = self._create_async_copy(match)
             if result is not None:
                 return result
 
-        new_body = self._visit_stmt(loop.body)
+        new_body = self.visit_stmt(loop.body)
 
-        if new_body is loop.body:
+        if new_body.same_as(loop.body):
             return loop
 
         return For(
@@ -490,7 +437,8 @@ class AsyncCopyLowerer:
 # =============================================================================
 
 
-class PipelineSyncInserter:
+@tir.functor.mutator
+class PipelineSyncInserter(PyStmtExprMutator):
     """
     Insert proper synchronization for software pipelining.
 
@@ -499,85 +447,12 @@ class PipelineSyncInserter:
     """
 
     def __init__(self, num_stages: int, verbose: bool = False):
+        super().__init__()
         self.num_stages = num_stages
         self.verbose = verbose
         self.classifier = StatementClassifier(verbose)
 
-    def transform(self, stmt: Stmt) -> Stmt:
-        return self._visit_stmt(stmt)
-
-    def _visit_stmt(self, stmt: Stmt) -> Stmt:
-        if isinstance(stmt, SeqStmt):
-            return self._visit_seq(stmt)
-        elif isinstance(stmt, Block):
-            if stmt.name_hint and stmt.name_hint.startswith("_"):
-                return stmt
-            new_body = self._visit_stmt(stmt.body)
-            if new_body is stmt.body:
-                return stmt
-            return Block(
-                stmt.iter_vars,
-                stmt.reads,
-                stmt.writes,
-                stmt.name_hint,
-                new_body,
-                stmt.init,
-                stmt.alloc_buffers,
-                stmt.match_buffers,
-                stmt.annotations,
-            )
-        elif isinstance(stmt, BlockRealize):
-            if stmt.block.name_hint and stmt.block.name_hint.startswith("_"):
-                return stmt
-            new_block = self._visit_stmt(stmt.block)
-            if new_block is stmt.block:
-                return stmt
-            return BlockRealize(stmt.iter_values, stmt.predicate, new_block)
-        elif isinstance(stmt, For):
-            classification = self.classifier.classify(stmt)
-            if classification == StmtKind.MIXED:
-                # Process steady state loop body
-                processed_body = self._process_steady_state_body(stmt.body)
-                return For(
-                    stmt.loop_var,
-                    stmt.min,
-                    stmt.extent,
-                    stmt.kind,
-                    processed_body,
-                    stmt.thread_binding,
-                    stmt.annotations,
-                )
-            elif classification in (StmtKind.ASYNC_COPY, StmtKind.SHARED_CONSUMER):
-                return stmt
-
-            new_body = self._visit_stmt(stmt.body)
-            if new_body is stmt.body:
-                return stmt
-            return For(
-                stmt.loop_var,
-                stmt.min,
-                stmt.extent,
-                stmt.kind,
-                new_body,
-                stmt.thread_binding,
-                stmt.annotations,
-            )
-        elif isinstance(stmt, IfThenElse):
-            new_then = self._visit_stmt(stmt.then_case)
-            new_else = self._visit_stmt(stmt.else_case) if stmt.else_case else None
-            return IfThenElse(stmt.condition, new_then, new_else)
-        elif isinstance(stmt, LetStmt):
-            new_body = self._visit_stmt(stmt.body)
-            return LetStmt(stmt.var, stmt.value, new_body)
-        elif isinstance(stmt, AttrStmt):
-            new_body = self._visit_stmt(stmt.body)
-            if new_body is stmt.body:
-                return stmt
-            return AttrStmt(stmt.node, stmt.attr_key, stmt.value, new_body)
-        else:
-            return stmt
-
-    def _visit_seq(self, seq: SeqStmt) -> Stmt:
+    def visit_seq_stmt_(self, seq: SeqStmt) -> Stmt:
         """Process a SeqStmt with proper pipeline synchronization using pipeline_stage attr."""
         new_stmts = []
         pending_producers: list[tuple[Stmt, int | None]] = []  # (stmt, constant_stage)
@@ -586,7 +461,7 @@ class PipelineSyncInserter:
         has_seen_steady_state = False
 
         for s in seq.seq:
-            new_s = self._visit_stmt(s)
+            new_s = self.visit_stmt(s)
 
             # Check for pipeline_stage attr
             stage_attr = _get_pipeline_stage_attr(new_s)
@@ -668,6 +543,54 @@ class PipelineSyncInserter:
             return new_stmts[0]
         return SeqStmt(new_stmts)
 
+    def visit_block_(self, op: Block) -> Block:
+        if op.name_hint and op.name_hint.startswith("_"):
+            return op
+        new_body = self.visit_stmt(op.body)
+        if new_body.same_as(op.body):
+            return op
+        return Block(
+            op.iter_vars,
+            op.reads,
+            op.writes,
+            op.name_hint,
+            new_body,
+            op.init,
+            op.alloc_buffers,
+            op.match_buffers,
+            op.annotations,
+        )
+
+    def visit_for_(self, loop: For) -> Stmt:
+        classification = self.classifier.classify(loop)
+        if classification == StmtKind.MIXED:
+            # Process steady state loop body
+            processed_body = self._process_steady_state_body(loop.body)
+            return For(
+                loop.loop_var,
+                loop.min,
+                loop.extent,
+                loop.kind,
+                processed_body,
+                loop.thread_binding,
+                loop.annotations,
+            )
+        elif classification in (StmtKind.ASYNC_COPY, StmtKind.SHARED_CONSUMER):
+            return loop
+
+        new_body = self.visit_stmt(loop.body)
+        if new_body.same_as(loop.body):
+            return loop
+        return For(
+            loop.loop_var,
+            loop.min,
+            loop.extent,
+            loop.kind,
+            new_body,
+            loop.thread_binding,
+            loop.annotations,
+        )
+
     def _process_steady_state_body(self, body: Stmt) -> Stmt:
         """
         Process steady state loop body.
@@ -713,66 +636,21 @@ class PipelineSyncInserter:
 # =============================================================================
 
 
-class PipelineAttrRemover:
+@tir.functor.mutator
+class PipelineAttrRemover(PyStmtExprMutator):
     """Remove pipeline_stage attributes after synchronization insertion."""
 
-    def transform(self, stmt: Stmt) -> Stmt:
-        return self._visit_stmt(stmt)
+    def __init__(self):
+        super().__init__()
 
-    def _visit_stmt(self, stmt: Stmt) -> Stmt:
-        if isinstance(stmt, AttrStmt):
-            if stmt.attr_key == "pipeline_stage":
-                # Remove this attr, just return the body
-                return self._visit_stmt(stmt.body)
-            new_body = self._visit_stmt(stmt.body)
-            if new_body is stmt.body:
-                return stmt
-            return AttrStmt(stmt.node, stmt.attr_key, stmt.value, new_body)
-        elif isinstance(stmt, SeqStmt):
-            new_seq = [self._visit_stmt(s) for s in stmt.seq]
-            return SeqStmt(new_seq)
-        elif isinstance(stmt, Block):
-            new_body = self._visit_stmt(stmt.body)
-            if new_body is stmt.body:
-                return stmt
-            return Block(
-                stmt.iter_vars,
-                stmt.reads,
-                stmt.writes,
-                stmt.name_hint,
-                new_body,
-                stmt.init,
-                stmt.alloc_buffers,
-                stmt.match_buffers,
-                stmt.annotations,
-            )
-        elif isinstance(stmt, BlockRealize):
-            new_block = self._visit_stmt(stmt.block)
-            if new_block is stmt.block:
-                return stmt
-            return BlockRealize(stmt.iter_values, stmt.predicate, new_block)
-        elif isinstance(stmt, For):
-            new_body = self._visit_stmt(stmt.body)
-            if new_body is stmt.body:
-                return stmt
-            return For(
-                stmt.loop_var,
-                stmt.min,
-                stmt.extent,
-                stmt.kind,
-                new_body,
-                stmt.thread_binding,
-                stmt.annotations,
-            )
-        elif isinstance(stmt, IfThenElse):
-            new_then = self._visit_stmt(stmt.then_case)
-            new_else = self._visit_stmt(stmt.else_case) if stmt.else_case else None
-            return IfThenElse(stmt.condition, new_then, new_else)
-        elif isinstance(stmt, LetStmt):
-            new_body = self._visit_stmt(stmt.body)
-            return LetStmt(stmt.var, stmt.value, new_body)
-        else:
-            return stmt
+    def visit_attr_stmt_(self, op: AttrStmt) -> Stmt:
+        if op.attr_key == "pipeline_stage":
+            # Remove this attr, just return the body
+            return self.visit_stmt(op.body)
+        new_body = self.visit_stmt(op.body)
+        if new_body.same_as(op.body):
+            return op
+        return AttrStmt(op.node, op.attr_key, op.value, new_body)
 
 
 # =============================================================================
@@ -782,21 +660,21 @@ class PipelineAttrRemover:
 
 def _detect_num_stages(stmt: Stmt) -> int:
     """Detect the number of pipeline stages from buffer shapes."""
-    max_stages = 2
+    result = 2
 
     def visitor(node):
-        nonlocal max_stages
+        nonlocal result
         if isinstance(node, Block):
             for buf in node.alloc_buffers:
-                if _is_shared_buffer(buf) and len(buf.shape) >= 2:
+                if is_shared(buf) and len(buf.shape) >= 2:
                     first_dim = buf.shape[0]
                     if isinstance(first_dim, IntImm):
                         n = first_dim.value
                         if 2 <= n <= 8:
-                            max_stages = max(max_stages, n)
+                            result = max(result, n)
 
     post_order_visit(stmt, visitor)
-    return max_stages
+    return result
 
 
 def LowerAsyncCopy(verbose: bool = False):
@@ -829,18 +707,23 @@ def LowerAsyncCopy(verbose: bool = False):
         if verbose:
             print(f"[LowerAsyncCopy] num_stages={stages}")
 
+        # Collect buffer mappings
+        buffer_data_to_buffer: dict[Var, Buffer] = {}
+        for _, buffer in func.buffer_map.items():
+            buffer_data_to_buffer[buffer.data] = buffer
+
         # Step 1: Lower vectorized copies to ptx_cp_async
-        lowerer = AsyncCopyLowerer(verbose)
-        new_body = lowerer.transform(func)
+        lowerer = AsyncCopyLowerer(buffer_data_to_buffer, verbose)
+        new_body = lowerer.visit_stmt(func.body)
 
         # Step 2: Insert synchronization if we have async copies
         if lowerer.has_async_copy:
             inserter = PipelineSyncInserter(stages, verbose)
-            new_body = inserter.transform(new_body)
+            new_body = inserter.visit_stmt(new_body)
 
         # Step 3: Remove pipeline_stage attributes
         remover = PipelineAttrRemover()
-        new_body = remover.transform(new_body)
+        new_body = remover.visit_stmt(new_body)
 
         return func.with_body(new_body)
 
