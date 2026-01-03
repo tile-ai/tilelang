@@ -1387,10 +1387,11 @@ def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
     ...     predicate=guard  # only copy if guard is true
     ... )
     """
+    from tvm import tir
     if predicate is None:
-        return _tvm_op.ptx_cp_async(dst_access_ptr, src_access_ptr, bytes)
+        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, bytes)
     else:
-        return _tvm_op.ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate)
+        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, bytes, predicate)
 
 
 def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id):
