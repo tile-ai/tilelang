@@ -51,6 +51,7 @@ from enum import Enum, auto
 from typing import Dict, List, Optional, Set, Tuple
 
 from tilelang import tvm as tvm
+from tilelang.language.tir import op as tl_op
 from tvm import tir
 from tvm.tir import (
     AttrStmt,
@@ -430,12 +431,28 @@ class AsyncCopyLowerer:
 
         self.has_async_copy = True
 
-        async_copy_call = tir.ptx_cp_async(
-            match.store_buffer.dtype,
+        # Create access_ptr for dst (shared memory, write)
+        dst_access_ptr = tir.tvm_access_ptr(
+            tir.type_annotation(match.store_buffer.dtype),
             match.store_buffer.data,
             match.store_offset,
+            IntImm("int32", match.vec_len),
+            IntImm("int32", 2),  # write access
+        )
+
+        # Create access_ptr for src (global memory, read)
+        src_access_ptr = tir.tvm_access_ptr(
+            tir.type_annotation(match.load_buffer.dtype),
             match.load_buffer.data,
             match.load_offset,
+            IntImm("int32", match.vec_len),
+            IntImm("int32", 1),  # read access
+        )
+
+        # New signature: ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None)
+        async_copy_call = tl_op.ptx_cp_async(
+            dst_access_ptr,
+            src_access_ptr,
             IntImm("int32", copy_bytes),
         )
 
