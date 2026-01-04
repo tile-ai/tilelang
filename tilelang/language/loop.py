@@ -10,7 +10,11 @@ from tilelang import _ffi_api
 from tvm.script.ir_builder.tir import frame
 
 
-def Parallel(*extents: tir.PrimExpr, coalesced_width: int | None = None):
+def Parallel(
+    *extents: tir.PrimExpr,
+    coalesced_width: int | None = None,
+    loop_layout: Any | None = None,
+):
     """Tools to construct nested parallel for loop.
        This can be used to create element-wise tensor expression.
 
@@ -22,6 +26,37 @@ def Parallel(*extents: tir.PrimExpr, coalesced_width: int | None = None):
     coalesced_width : Optional[int]
         The coalesced width of the parallel loop.
 
+    loop_layout : Optional[Fragment]
+        A layout annotation for the parallel loop nest, expressed as a
+        ``T.Fragment``. When provided, it is attached as the
+        ``"parallel_loop_layout"`` annotation on the outermost parallel loop.
+        For a k-dimensional ``T.Parallel(...)`` nest, the fragment's
+        ``InputDim`` must equal ``k``.
+
+    Notes on layout constraints
+    ---------------------------
+    TileLang validates parallel loop layout annotations during
+    ``tl.transform.LayoutInference`` with ``ParallelLoopLayoutValidator``.
+    The key constraints are:
+
+    - Every parallel loop must be covered by a layout annotation after
+      layout inference. For a nested parallel nest, this annotation must live
+      on the outermost loop; inner parallel loops must not carry the layout
+      annotation themselves.
+    - For a nest depth of ``k``, the layout must satisfy
+      ``InputDim == k``.
+    - Violations (missing annotation on the outermost loop, annotations on
+      inner loops, or mismatched ``InputDim``) cause a compilation error.
+
+    Rationale: inner loops cannot control/annotate their outer loops, while the
+    outermost loop can manage its inner nest. Therefore the layout is placed on
+    the outermost loop so lowering passes can rewrite the entire region.
+
+    To make this easy, ``T.Parallel`` attaches any provided ``loop_layout``
+    to the outermost generated loop only. If you omit ``loop_layout``, the
+    compiler will try to infer a valid layout and attach it during the
+    LayoutInference pass.
+
     Returns
     -------
     res : frame.ForFrame
@@ -29,7 +64,11 @@ def Parallel(*extents: tir.PrimExpr, coalesced_width: int | None = None):
     """
     annotations: dict[str, Any] = {}
     if coalesced_width is not None:
-        annotations.update({"coalesced_width": coalesced_width})
+        annotations["coalesced_width"] = coalesced_width
+    if loop_layout is not None:
+        # Pass through to C++ as the standard parallel loop layout key.
+        # The builder will attach it only on the outermost parallel loop.
+        annotations["parallel_loop_layout"] = loop_layout
     return _ffi_api.Parallel(extents, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 

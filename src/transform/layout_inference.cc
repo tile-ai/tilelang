@@ -1222,7 +1222,7 @@ private:
 
     auto loop_layout = result_.for_map[root];
 
-    // Store the loop layout as an annotation on the For node
+    // Store the loop layout as an annotation on the For node (outermost)
     auto for_ptr = for_node.CopyOnWrite();
     for_ptr->annotations.Set(attr::kParallelLoopLayout, loop_layout);
 

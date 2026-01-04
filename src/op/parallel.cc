@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <tvm/tir/op.h>
 
+#include "../layout/layout.h"
+
 #include "../layout/utils.h"
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
@@ -194,6 +196,16 @@ void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
 
 ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
   V.VisitStmt(root);
+  // Cache any annotated layout/predicate on the outermost loop.
+  using namespace attr;
+  if (root_->annotations.count(kParallelLoopLayout)) {
+    annotated_layout_unbound_ =
+        Downcast<Fragment>(root_->annotations.Get(kParallelLoopLayout).value());
+  }
+  if (root_->annotations.count(kParallelLoopPredicate)) {
+    annotated_predicate_ = Downcast<PrimExpr>(
+        root_->annotations.Get(kParallelLoopPredicate).value());
+  }
 }
 
 TileOperator ParallelOpNode::Clone() const {
@@ -244,6 +256,8 @@ Stmt ParallelOpNode::Lower(const LowerArgs &T,
   return root_;
 }
 
+// (annotations parsed in ctor; adoption happens in InferLayout)
+
 bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
   return StructuralEqual()(indice_map_[buffer], common_indice);
@@ -269,7 +283,7 @@ bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
  */
 LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
-  if (loop_layout_.defined())
+  if (loop_layout_inferred_)
     return {};
 
   // Expand let bindings to find fragment buffer accesses
@@ -416,15 +430,23 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   }
   // moved to ComputeLoopLayoutFromBuffer
 
-  // Try to infer loop layout from buffers in order of preference:
-  // 1. Non-replicated write buffer (most reliable)
-  // 2. Non-replicated read buffer
-  // 3. Fully replicated write buffer (backup, may cause issues)
-  // 4. Free inference mode (no source buffer)
-
-  if (source_buffer.defined() && allow_layout_propgate) {
+  // Try to infer loop layout from buffers in order of preference only if we
+  // don't already have a layout (e.g., from annotations):
+  // 1. Annotated loop layout
+  // 2. Non-replicated write buffer (most reliable)
+  // 3. Non-replicated read buffer
+  // 4. Fully replicated write buffer (backup, may cause issues)
+  // 5. Free inference mode (no source buffer)
+  if (!loop_layout_.defined() && annotated_layout_unbound_.defined()) {
+    loop_layout_ =
+        annotated_layout_unbound_.value()->BindThreadRange(T.thread_bounds);
+    if (annotated_predicate_.defined()) {
+      predicate_ = annotated_predicate_.value();
+    }
+  } else if (!loop_layout_.defined() && source_buffer.defined() &&
+             allow_layout_propgate) {
     loop_layout_ = ComputeLoopLayoutFromBuffer(source_buffer, T);
-  } else if (level == InferLevel::kFree) {
+  } else if (!loop_layout_.defined() && level == InferLevel::kFree) {
     // For free layout inference
     // If replication exists and buffer has cross-thread shared memory access,
     // add predicate
@@ -497,9 +519,12 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     BuildReplicationGuardsIfNeeded(
         T, store_shared_global_buffers, store_fragment_buffers,
         has_cross_thread_access, const_index_fragment_buffer);
-  } else {
+  } else if (!loop_layout_.defined()) {
+    // In non-free mode without a source buffer, if we don't have any layout
+    // yet (e.g., no annotation), we have nothing to infer here.
     return {};
   }
+
   // check loop_layout_ is injective
   auto injective_res = loop_layout_->DetectInjective();
   if (!injective_res->errors.empty()) {
@@ -552,6 +577,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       results.Set(buffer, dst_layout);
     }
   }
+  loop_layout_inferred_ = true;
   return results;
 }
 

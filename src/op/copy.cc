@@ -312,12 +312,24 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   if (is_scalar) {
     return For(Var("i"), 0, 1, ForKind::kSerial, body);
   }
+
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> loop_annotations;
-    if (annotations.count(attr::kCoalescedWidth)) {
-      loop_annotations.Set(attr::kCoalescedWidth,
-                           annotations.Get(attr::kCoalescedWidth).value());
+
+    // Only attach the parallel related annotations on the outermost loop (i ==
+    // 0)
+    if (i == 0) {
+      if (annotations.count(attr::kCoalescedWidth)) {
+        loop_annotations.Set(attr::kCoalescedWidth,
+                             annotations.Get(attr::kCoalescedWidth).value());
+      }
+      if (annotations.count(attr::kParallelLoopLayout)) {
+        loop_annotations.Set(
+            attr::kParallelLoopLayout,
+            annotations.Get(attr::kParallelLoopLayout).value());
+      }
     }
+
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
                ForKind::kParallel, body, std::nullopt, loop_annotations);
   }
@@ -354,6 +366,20 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
                                T.layout_map, T.analyzer, T.buffer_oob);
+
+  // If user annotated a loop layout on T.copy, enforce SIMT (normal) copy.
+  // Parallel-loop layout only applies to SIMT-style loops we generate here;
+  // other copy instructions (TMA/LDSM/STSM/TMem) are incompatible.
+  if (annotations.count(attr::kParallelLoopLayout)) {
+    if (copy_inst != CopyInst::kNormal) {
+      std::ostringstream oss;
+      oss << "T.copy loop layout annotation requires SIMT copy; got "
+          << CopyInstToString(copy_inst) << " for src=" << src->name
+          << ", dst=" << dst->name
+          << ". Remove loop_layout or change copy pattern.";
+      LOG(FATAL) << oss.str();
+    }
+  }
 
   // Handle tensor memory (tmem) layout inference
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
