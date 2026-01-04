@@ -65,6 +65,7 @@ public:
                               const PrimFunc &func, std::ostream &os);
 
 protected:
+  void ReserveKeywordsAsUnique_();
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;
   void PrintCallExtern(Type ret_type, ffi::String global_symbol,
