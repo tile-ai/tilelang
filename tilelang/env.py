@@ -50,7 +50,7 @@ def _find_cuda_home() -> str:
     Adapted from https://github.com/pytorch/pytorch/blob/main/torch/utils/cpp_extension.py
     """
     # Guess #1
-    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or None
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if cuda_home is None:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
@@ -72,7 +72,7 @@ def _find_cuda_home() -> str:
         import importlib.util
 
         if importlib.util.find_spec("nvidia") is not None:
-            for submodule in ["cu13", "cu12", "cu11", "cuda_nvcc"]:
+            for submodule in ["cu13"]:
                 spec = importlib.util.find_spec(f"nvidia.{submodule}")
                 if spec is not None and spec.submodule_search_locations:
                     cuda_home = os.path.join(spec.submodule_search_locations[0])
