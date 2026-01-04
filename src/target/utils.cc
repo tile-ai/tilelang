@@ -81,6 +81,16 @@ bool TargetIsCDNA(Target target) {
   return false;
 }
 
+bool TargetIsDCU(Target target) {
+  if (!TargetIsRocm(target))
+    return false;
+  if (target->attrs.count("mcpu")) {
+    // if mcpu start with "gfx936", it is DCU
+    return mcpu.find("gfx936") == 0;
+  }
+  return false;
+}
+
 bool TargetHasAsyncCopy(Target target) {
   if (TargetIsCuda(target)) {
     int arch = GetArchInt(target);

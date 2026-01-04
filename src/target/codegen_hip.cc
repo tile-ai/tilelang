@@ -137,6 +137,7 @@ void CodeGenTileLangHIP::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
 
 std::string CodeGenTileLangHIP::Finish() {
   // hip must need a header file.
+  decl_stream << "#define HIP_ENABLE_WARP_SYNC_BUILTINS\n";
   decl_stream << "#include <hip/hip_runtime.h>\n";
   if (need_mma_h_) {
     decl_stream << "#include <mma.h>\n";
@@ -146,12 +147,12 @@ std::string CodeGenTileLangHIP::Finish() {
     decl_stream << "#include <tl_templates/hip/hip_fp8.h>\n";
   }
 
-  decl_stream << "#include <tl_templates/hip/gemm.h>\n";
-  decl_stream << "#include <tl_templates/hip/copy.h>\n";
-  decl_stream << "#include <tl_templates/hip/reduce.h>\n";
-  decl_stream << "#include <tl_templates/hip/ldsm.h>\n";
-  decl_stream << "#include <tl_templates/hip/threadblock_swizzle.h>\n";
-  decl_stream << "#include <tl_templates/hip/debug.h>\n";
+  decl_stream << "#include <tl_templates/dcu_hip/gemm.h>\n";
+  decl_stream << "#include <tl_templates/dcu_hip/copy.h>\n";
+  decl_stream << "#include <tl_templates/dcu_hip/reduce.h>\n";
+  decl_stream << "#include <tl_templates/dcu_hip/ldsm.h>\n";
+  decl_stream << "#include <tl_templates/dcu_hip/threadblock_swizzle.h>\n";
+  decl_stream << "#include <tl_templates/dcu_hip/debug.h>\n";
   decl_stream << "\n";
   return CodeGenC::Finish();
 }
@@ -962,6 +963,71 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("{c_ref}", c_ref);
     replacer.register_rule("{c_bias}", c_bias);
     os << replacer.rewrite(call_mfma_code);
+  } else if (op->op.same_as(tl::tvm_mmac())) {
+    // arg 0: prefix: {otype}_{intrM}x{intrN}x{intrK}_{itype}
+    // arg 1: A layout: row/col
+    // arg 2: B layout: row/col
+    // arg 3: A precision: float16, float32, ...
+    // arg 4: B precision: float16, float32, ...
+    // arg 5: C precision: float32, float64, ...
+    // arg 6: A multiplicand
+    // arg 7: A multiplicand index
+    // arg 8: B multiplicand
+    // arg 9: B multiplicand index
+    // arg 10: C accumulator
+    // arg 11: C accumulator index
+
+    ICHECK(op->args.size() == 12U)
+        << "Invalid number of arguments for tvm_mmac";
+    std::string prefix = Downcast<StringImm>(op->args[0])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[1])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_ref = this->PrintExpr(op->args[6]);
+    std::string a_bias = this->PrintExpr(op->args[7]);
+    std::string b_ref = this->PrintExpr(op->args[8]);
+    std::string b_bias = this->PrintExpr(op->args[9]);
+    std::string c_ref = this->PrintExpr(op->args[10]);
+    std::string c_bias = this->PrintExpr(op->args[11]);
+    ICHECK(A_layout == "row" || B_layout == "row")
+        << "Matrix core only support row major";
+    // map for dtype -> float32x4 -> float4
+    std::unordered_map<std::string, std::string> dtype_map = {
+        {"int8", "char"},
+        {"int32", "int"},
+        {"int8x4", "int32_t"},
+        {"int8x8", "int64_t"},
+        {"int32x4", "int32x4"},
+        {"float16", "half"},
+        {"float32", "float"},
+        {"float64", "double"},
+        {"float16x4", "float16x4"},
+        {"bfloat16x4", "bfloat16x4"},
+        {"float32x4", "float32x4"},
+        {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
+        {"float8_e4m3fnuzx8", "long"},
+        {"float32x16", "float32x16"}};
+    std::string call_mmac_code = R"({
+    *((({C_dtype}*){c_ref}) + {c_bias}) = {mmac_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),
+                  *((({B_dtype}*){b_ref}) + {b_bias}),
+                  *((({C_dtype}*){c_ref}) + {c_bias}));
+  })";
+    std::string mmac_buildin = "__builtin_amdgcn_mmac_" + prefix;
+    Replacer replacer;
+
+    replacer.register_rule("{mmac_buildin}", mmac_buildin);
+    replacer.register_rule("{A_dtype}", dtype_map[A_dtype]);
+    replacer.register_rule("{B_dtype}", dtype_map[B_dtype]);
+    replacer.register_rule("{C_dtype}", dtype_map[C_dtype]);
+    replacer.register_rule("{a_ref}", a_ref);
+    replacer.register_rule("{a_bias}", a_bias);
+    replacer.register_rule("{b_ref}", b_ref);
+    replacer.register_rule("{b_bias}", b_bias);
+    replacer.register_rule("{c_ref}", c_ref);
+    replacer.register_rule("{c_bias}", c_bias);
+    os << replacer.rewrite(call_mmac_code);
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else if (op->op.same_as(tl::tl_gemm())) {
@@ -1333,7 +1399,6 @@ void CodeGenTileLangHIP::AddFunction(const PrimFunc &f) {
   CodeGenC::PrintType(f->ret_type, stream);
   this->PrintExtraAttrs(f, stream);
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
-
   for (size_t i = 0; i < f->params.size(); ++i) {
     tir::Var v = f->params[i];
     std::string vid = AllocVarID(v.get());

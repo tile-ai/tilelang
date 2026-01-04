@@ -207,6 +207,9 @@ Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
 Fragment makeGemmFragmentCCDNA(const int block_m, const int block_n,
                                const int warp_m, const int warp_n,
                                const int element_size);
+Fragment makeGemmFragmentCDCU(const int block_m, const int block_n,
+                              const int warp_m, const int warp_n,
+                              const int element_size);
 Fragment makeGemmFragmentCHopper(const int block_m, const int block_n,
                                  const int warp_m, const int warp_n,
                                  const int element_size);

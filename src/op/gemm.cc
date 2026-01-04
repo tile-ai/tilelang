@@ -4,8 +4,8 @@
  */
 
 #include "gemm.h"
-
 #include "builtin.h"
+#include <fstream>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -775,10 +775,15 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     ICHECK(IsFragmentBuffer(c_))
         << "CDNA gemm (FMMA) only supports C in local.fragment scope, got "
         << c_.scope();
-    auto fragment = makeGemmFragmentCCDNA(m_, n_, m_ / warp_m, n_ / warp_n,
-                                          c_->dtype.bits());
-    results.Set(c_, fragment->BindThreadRange(thread_range));
-
+    if (TargetIsDCU(T.target)) {
+      auto fragment = makeGemmFragmentCDCU(m_, n_, m_ / warp_m, n_ / warp_n,
+                                           c_->dtype.bits());
+      results.Set(c_, fragment->BindThreadRange(thread_range));
+    } else {
+      auto fragment = makeGemmFragmentCCDNA(m_, n_, m_ / warp_m, n_ / warp_n,
+                                            c_->dtype.bits());
+      results.Set(c_, fragment->BindThreadRange(thread_range));
+    }
     if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
       int dim_A = a_->shape.size();
       auto shared_layout = makeGemmABLayoutCDNA(
