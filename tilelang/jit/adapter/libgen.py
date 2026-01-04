@@ -96,6 +96,19 @@ class LibraryGenerator:
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
             arch = get_rocm_arch(rocm_path)
+
+            # Support fast-math for HIP/clang via pass_configs.
+            # Keep behavior aligned with CUDA: TL_ENABLE_FAST_MATH turns on fast math.
+            if self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH):
+                deprecated_warning(
+                    "TL_DISABLE_FAST_MATH",
+                    "TL_ENABLE_FAST_MATH",
+                    "0.1.7",
+                )
+                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, True)
+            else:
+                enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
+
             command = [
                 "hipcc",
                 "-std=c++17",
@@ -104,6 +117,8 @@ class LibraryGenerator:
                 "--shared",
                 src.name,
             ]
+            if enable_fast_math:
+                command += ["-ffast-math"]
             command += [
                 "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
             ]
