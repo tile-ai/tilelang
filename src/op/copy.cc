@@ -17,7 +17,7 @@
 #include "../transform/loop_vectorize.h"
 #include "utils.h"
 
-#include "../target/cuda.h"
+#include "../target/stubs/cuda.h"
 #include "../target/utils.h"
 #include "builtin.h"
 #include <tvm/tir/builtin.h>

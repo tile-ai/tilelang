@@ -127,8 +127,6 @@ tilelang = "tilelang"
 "tilelang/3rdparty/composable_kernel/include" = "3rdparty/composable_kernel/include"
 "tilelang/3rdparty/composable_kernel/library" = "3rdparty/composable_kernel/library"
 
-
-
 [tool.codespell]
 ignore-words = "docs/spelling_wordlist.txt"
 skip = [
@@ -257,10 +255,11 @@ esac
 
 cudaver="$(echo "${CUDA_VERSION:-$DEFAULT_CUDA_VERSION}" | cut -d '.' -f-2)"
 v="${cudaver//./-}"
-yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}" nvidia-driver-cuda-libs
-yum clean all
+dnf install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}"
+dnf clean all
 """
 repair-wheel-command = [
+    # Do not bundle libtvm_ffi.so and libz3.so because they are shipped by the dependency packages.
     "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --verbose --strict {wheel}",
 ]
