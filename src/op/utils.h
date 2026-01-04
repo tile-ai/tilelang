@@ -47,8 +47,13 @@ inline bool IsGlobalBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "global";
 }
 
-inline bool IsLocalBuffer(const Buffer &buffer) {
-  return buffer.defined() && buffer.scope() == "local";
+inline bool IsLocalBuffer(const Buffer &buffer, bool allow_var = false) {
+  if (allow_var) {
+    return buffer.defined() &&
+           (buffer.scope() == "local" || buffer.scope() == "local.var");
+  } else {
+    return buffer.defined() && buffer.scope() == "local";
+  }
 }
 
 inline bool IsLocalVarBuffer(const Buffer &buffer) {

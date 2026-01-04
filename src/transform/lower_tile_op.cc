@@ -735,7 +735,7 @@ private:
     bool store_into_local = false;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (IsLocalBuffer(store->buffer)) {
+        if (IsLocalBuffer(store->buffer, true)) {
           store_into_local = true;
         }
       }

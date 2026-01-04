@@ -169,7 +169,11 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Visualize the layout
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
+    print(mod)
+    tilelang.analysis.ASTPrinter()(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
+    print(mod)
+    tilelang.analysis.ASTPrinter()(mod)
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)
     # Legalize vectorized loops to ensure they are valid
