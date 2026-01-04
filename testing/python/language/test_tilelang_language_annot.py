@@ -4,13 +4,10 @@ import tilelang.testing
 import torch
 
 
-# TODO: HIP uses the cython execution backend as default(while CUDA uses tvm_ffi as default),
-# but building with the cython backend fails due to a bug.
-# Remove @tilelang.testing.requires_cuda after the bug is fixed.
-# See https://github.com/tile-ai/tilelang/issues/1594 for more details.
-@tilelang.testing.requires_cuda
 def test_tensor_annot_mul():
-    @tilelang.jit
+    # There is a known issue where the cython execution backend fails to build with T.symbolic.
+    # Forcing the TVM FFI execution backend to avoid the issue on HIP.
+    @tilelang.jit(execution_backend="tvm_ffi")
     def example_tensor_annot():
         n = T.symbolic("n")
 
@@ -31,13 +28,10 @@ def test_tensor_annot_mul():
     assert torch.equal(A, expected)
 
 
-# TODO: HIP uses the cython execution backend as default(while CUDA uses tvm_ffi as default),
-# but building with the cython backend fails due to a bug.
-# Remove @tilelang.testing.requires_cuda after the bug is fixed.
-# See https://github.com/tile-ai/tilelang/issues/1594 for more details.
-@tilelang.testing.requires_cuda
 def test_tensor_annot_add():
-    @tilelang.jit
+    # There is a known issue where the cython execution backend fails to build with T.symbolic.
+    # Forcing the TVM FFI execution backend to avoid the issue on HIP.
+    @tilelang.jit(execution_backend="tvm_ffi")
     def example_tensor_annot():
         n = T.symbolic("n")
 
@@ -58,13 +52,10 @@ def test_tensor_annot_add():
     assert torch.equal(A, expected)
 
 
-# TODO: HIP uses the cython execution backend as default(while CUDA uses tvm_ffi as default),
-# but building with the cython backend fails due to a bug.
-# Remove @tilelang.testing.requires_cuda after the bug is fixed.
-# See https://github.com/tile-ai/tilelang/issues/1594 for more details.
-@tilelang.testing.requires_cuda
 def test_tensor_annot_mul_add():
-    @tilelang.jit
+    # There is a known issue where the cython execution backend fails to build with T.symbolic.
+    # Forcing the TVM FFI execution backend to avoid the issue on HIP.
+    @tilelang.jit(execution_backend="tvm_ffi")
     def example_tensor_annot():
         n = T.symbolic("n")
 
