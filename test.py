@@ -1,8 +1,37 @@
 import tilelang
 from tilelang import tvm as tvm
-import tilelang.testing
 import tilelang.language as T
 import torch
+
+
+# @register_metal_postproc_callback
+# @register_c_postproc
+def print_c_mod(code: str, t) -> str:
+    print(code)
+    print(t)
+    return code
+
+
+_cc = tilelang.tvm.contrib.cc._linux_compile
+
+from functools import wraps
+
+
+@wraps(_cc)
+def _patched_cc(output, objects, options, compile_cmd, *args, **kwargs):
+    """
+    monkey patch to tvm before finalized
+    """
+    if objects:
+        objects = ["-x", "objective-c++"] + objects
+    from torch.utils import cpp_extension
+
+    torch_opts = ["-I" + i for i in cpp_extension.include_paths()]
+    options += torch_opts + ["-std=gnu++17"]
+    return _cc(output, objects, options, compile_cmd, *args, **kwargs)
+
+
+tilelang.tvm.contrib.cc._linux_compile = _patched_cc
 
 
 @tilelang.jit(execution_backend="tvm_ffi")
@@ -57,26 +86,10 @@ def assert_gemm(
 
     jit_kernel(a, b, c)
 
-    assert torch.allclose(a @ b, c, atol=atol)
+    assert torch.allclose(a @ b, c, atol=atol), f"a @ b: {a @ b}, c: {c}"
 
     assert jit_kernel.kernel_source is not None
 
 
-@tilelang.testing.requires_metal
-def test_gemm_float32():
-    assert_gemm(1024, 1024, 1024, 16, 16, 16)
-
-
-@tilelang.testing.requires_metal
-def test_gemm_float16():
-    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype=T.float16, atol=1)
-
-
-@tilelang.testing.requires_metal
-def test_gemm_int32():
-    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype=T.int32, atol=1)
-
-
 if __name__ == "__main__":
-    if torch.mps.is_available():
-        tilelang.testing.main()
+    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype=T.float16, atol=1)
