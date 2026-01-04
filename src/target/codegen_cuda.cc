@@ -2666,20 +2666,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::rng_rand())) {
     this->need_curand_kernel_h_ = true;
     os << "curand(&" << this->curand_random_generator_state << ")";
-  } else if (op->op.same_as(tl::rng_rand_uniform())) {
+  } else if (op->op.same_as(tl::rng_rand_float())) {
     this->need_curand_kernel_h_ = true;
-    os << "curand_uniform(&" << this->curand_random_generator_state << ")";
-  } else if (op->op.same_as(tl::rng_rand_uniform_double())) {
-    this->need_curand_kernel_h_ = true;
-    os << "curand_uniform_double(&" << this->curand_random_generator_state
-       << ")";
-  } else if (op->op.same_as(tl::rng_rand_normal())) {
-    this->need_curand_kernel_h_ = true;
-    os << "curand_normal(&" << this->curand_random_generator_state << ")";
-  } else if (op->op.same_as(tl::rng_rand_normal_double())) {
-    this->need_curand_kernel_h_ = true;
-    os << "curand_normal_double(&" << this->curand_random_generator_state
-       << ")";
+    os << "curand_" << op->args[0].as<StringImmNode>()->value;
+    if (op->dtype.bits() == 64) {
+      os << "_double";
+    }
+    os << "(&" << this->curand_random_generator_state << ")";
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
     os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_max())) {
@@ -3136,41 +3129,48 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
         os << "curand4(&" << this->curand_random_generator_state << ")";
         return;
       }
-      if (call->op.same_as(tl::rng_rand_uniform()) && lanes == 4) {
-        os << "curand_uniform4(&" << this->curand_random_generator_state << ")";
-        return;
-      }
-      if (call->op.same_as(tl::rng_rand_uniform_double()) && lanes == 2) {
-        os << "curand_uniform2_double(&" << this->curand_random_generator_state
-           << ")";
-        return;
-      }
-      if (call->op.same_as(tl::rng_rand_normal()) && lanes == 4) {
-        os << "curand_normal4(&" << this->curand_random_generator_state << ")";
-        return;
-      }
-      if (call->op.same_as(tl::rng_rand_normal()) && lanes == 2) {
-        os << "curand_normal2(&" << this->curand_random_generator_state << ")";
-        return;
-      }
-      if (call->op.same_as(tl::rng_rand_normal_double()) && lanes == 2) {
-        os << "curand_normal2_double(&" << this->curand_random_generator_state
-           << ")";
-        return;
-      }
-    } else if (this->curand_random_generator_state_type ==
-               "curandStateMRG32k3a_t") {
-      if (call->op.same_as(tl::rng_rand_normal_double()) && lanes == 2) {
-        os << "curand_normal2_double(&" << this->curand_random_generator_state
-           << ")";
-        return;
+      if (call->op.same_as(tl::rng_rand_float())) {
+        int bits = call->dtype.bits();
+        std::string dist = call->args[0].as<StringImmNode>()->value;
+        if (bits == 32) {
+          if (lanes == 4) {
+            os << "curand_" << dist << "4(&"
+               << this->curand_random_generator_state << ")";
+            return;
+          } else if (lanes == 2 && dist == "normal") {
+            os << "curand_normal2(&" << this->curand_random_generator_state
+               << ")";
+            return;
+          }
+
+        } else {
+          if (lanes == 2) {
+            os << "curand_" << dist << "2_double(&"
+               << this->curand_random_generator_state << ")";
+            return;
+          }
+        }
       }
     } else if (this->curand_random_generator_state_type ==
-               "curandStateXORWOW_t") {
-      if (call->op.same_as(tl::rng_rand_normal_double()) && lanes == 2) {
-        os << "curand_normal2_double(&" << this->curand_random_generator_state
-           << ")";
-        return;
+                   "curandStateMRG32k3a_t" ||
+               this->curand_random_generator_state_type ==
+                   "curandStateXORWOW_t") {
+      if (call->op.same_as(tl::rng_rand_float())) {
+        int bits = call->dtype.bits();
+        std::string dist = call->args[0].as<StringImmNode>()->value;
+        if (bits == 32) {
+          if (lanes == 2 && dist == "normal") {
+            os << "curand_normal2(&" << this->curand_random_generator_state
+               << ")";
+            return;
+          }
+        } else {
+          if (lanes == 2 && dist == "normal") {
+            os << "curand_normal2_double(&"
+               << this->curand_random_generator_state << ")";
+            return;
+          }
+        }
       }
     }
   }

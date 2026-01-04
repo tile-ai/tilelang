@@ -31,22 +31,22 @@ def tilelang_rand_1d(M=1024, seed=42, generator="curandStatePhilox4_32_10_t"):
                 offsets = (bx * threads + i) * num_per_thread
                 idx = offsets + j
                 if idx < M:
-                    B[idx] = T.rng_rand_uniform()
+                    B[idx] = T.rng_rand_float()
             for i, j in T.Parallel(threads, num_per_thread):
                 offsets = (bx * threads + i) * num_per_thread
                 idx = offsets + j
                 if idx < M:
-                    C[idx] = T.rng_rand_uniform_double()
+                    C[idx] = T.rng_rand_float(bit=64)
             for i, j in T.Parallel(threads, num_per_thread):
                 offsets = (bx * threads + i) * num_per_thread
                 idx = offsets + j
                 if idx < M:
-                    D[idx] = T.rng_rand_normal()
+                    D[idx] = T.rng_rand_float(dist="normal")
             for i, j in T.Parallel(threads, num_per_thread):
                 offsets = (bx * threads + i) * num_per_thread
                 idx = offsets + j
                 if idx < M:
-                    E[idx] = T.rng_rand_normal_double()
+                    E[idx] = T.rng_rand_float(bit=64, dist="normal")
 
     return rand_kernel
 
@@ -67,3 +67,4 @@ def test_rand_1d(M, seed, generator):
 
 if __name__ == "__main__":
     tilelang.testing.main()
+    # test_rand_1d(1024, 42, "curandStateMRG32k3a_t")

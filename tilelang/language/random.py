@@ -48,45 +48,21 @@ def rng_rand():
     return tir.call_intrin("uint32", tir.op.Op.get("tl.rng_rand"))
 
 
-def rng_rand_uniform():
-    """Generate a uniformly distributed float
+def rng_rand_float(bit=32, dist="uniform"):
+    """Generate a random float
+
+    Parameters
+    ----------
+    bit : int = [32, 64]
+        Bitwidth of random float.
+    dist : StringImm = ["uniform", "normal"]
+        Random distribution.
 
     Returns
     -------
     random_value : PrimExpr
-        A 32-bit uniformly distributed float.
+        A random float.
     """
-    return tir.call_intrin("float32", tir.op.Op.get("tl.rng_rand_uniform"))
-
-
-def rng_rand_uniform_double():
-    """Generate a uniformly distributed double
-
-    Returns
-    -------
-    random_value : PrimExpr
-        A 64-bit uniformly distributed double.
-    """
-    return tir.call_intrin("float64", tir.op.Op.get("tl.rng_rand_uniform_double"))
-
-
-def rng_rand_normal():
-    """Generate a normally distributed float
-
-    Returns
-    -------
-    random_value : PrimExpr
-        A 32-bit normally distributed float.
-    """
-    return tir.call_intrin("float32", tir.op.Op.get("tl.rng_rand_normal"))
-
-
-def rng_rand_normal_double():
-    """Generate a normally distributed double
-
-    Returns
-    -------
-    random_value : PrimExpr
-        A 64-bit normally distributed double.
-    """
-    return tir.call_intrin("float64", tir.op.Op.get("tl.rng_rand_normal_double"))
+    assert bit in [32, 64]
+    assert dist in ["uniform", "normal"]
+    return tir.call_intrin("float" + str(bit), tir.op.Op.get("tl.rng_rand_float"), dist)
