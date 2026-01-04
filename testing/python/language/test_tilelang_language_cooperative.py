@@ -14,15 +14,12 @@ def grid_sync(N=1024):
             A_local = T.alloc_fragment((block), dtype=T.float32)
             n_idx = bx * block
             for i in T.Parallel(block):
-                if n_idx + i < N:
-                    A[n_idx + i] = n_idx + i
+                A[n_idx + i] = n_idx + i
             T.sync_grid()
             for i in T.Parallel(block):
-                if n_idx + i < N:
-                    A_local[i] = A[N - n_idx - i - 1]
+                A_local[i] = A[N - n_idx - i - 1]
                 T.sync_grid()
-                if n_idx + i < N:
-                    A[n_idx + i] = A[n_idx + i] + A_local[i]
+                A[n_idx + i] = A[n_idx + i] + A_local[i]
 
     return kernel
 
