@@ -156,6 +156,7 @@ def run_gemm_jit_kernel(
     tilelang.testing.torch_assert_close(C, ref_C, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
+@tilelang.testing.requires_cuda
 def test_gemm_jit_kernel():
     run_gemm_jit_kernel(
         512,
@@ -207,6 +208,7 @@ def run_nvrtc_kernel_do_bench(
     assert tvm_latency is not None
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_kernel_do_bench():
     run_nvrtc_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
@@ -249,6 +251,7 @@ def run_nvrtc_kernel_multi_stream(
             matmul_kernel(tensor_a, tensor_b, tensor_c)
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_kernel_multi_stream():
     run_nvrtc_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
@@ -298,6 +301,7 @@ def run_nvrtc_dynamic_shape(
     tilelang.testing.torch_assert_close(tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_dynamic_shape():
     run_nvrtc_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
@@ -369,6 +373,7 @@ def run_nvrtc_im2col_tma_desc(N, C, H, W, F, K, S, D, P, block_M, block_N, block
     tilelang.testing.torch_assert_close(out_c, ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_im2col_tma_desc():
     """Test im2col TMA descriptor with NVRTC backend."""
     if not check_hopper():
@@ -382,6 +387,7 @@ def test_nvrtc_im2col_tma_desc():
     )
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_l2_persistent_map():
     """Test L2 persistent cache annotation with elementwise add."""
     from tilelang.language import annotate_l2_hit_ratio

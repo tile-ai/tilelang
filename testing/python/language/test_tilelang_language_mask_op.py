@@ -29,7 +29,7 @@ def tilelang_copy_mask_parallel(M, N, block_M, block_N, dtype=T.float16):
 def run_tilelang_copy_mask_parallel(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16):
     program = tilelang_copy_mask_parallel(M, N, block_M, block_N, dtype)
     kernel = tilelang.compile(
-        program, out_idx=[1], target="cuda", pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True}
+        program, out_idx=[1], pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True}
     )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
@@ -65,7 +65,7 @@ def tilelang_copy_mask_copy(M, N, block_M, block_N, dtype=T.float16):
 def run_tilelang_copy_mask_copy(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16):
     program = tilelang_copy_mask_copy(M, N, block_M, block_N, dtype)
     kernel = tilelang.compile(
-        program, out_idx=[1], target="cuda", pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True}
+        program, out_idx=[1], pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True}
     )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
@@ -102,7 +102,7 @@ def tilelang_copy_mask_parallel_range(M, N, block_M, block_N, dtype=T.float16):
 def run_tilelang_copy_mask_parallel_range(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16):
     program = tilelang_copy_mask_parallel_range(M, N, block_M, block_N, dtype)
     kernel = tilelang.compile(
-        program, out_idx=[1], target="cuda", pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True}
+        program, out_idx=[1], pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True}
     )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
@@ -138,7 +138,7 @@ def tilelang_copy_mask_copy_range(M, N, block_M, block_N, dtype=T.float16):
 def run_tilelang_copy_mask_copy_range(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16):
     program = tilelang_copy_mask_copy_range(M, N, block_M, block_N, dtype)
     kernel = tilelang.compile(
-        program, out_idx=[1], target="cuda", pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True}
+        program, out_idx=[1], pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True}
     )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)

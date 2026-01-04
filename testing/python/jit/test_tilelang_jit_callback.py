@@ -1,7 +1,7 @@
 from tilelang import language as T
 import tilelang.testing
 import tilelang
-from tilelang.engine.callback import register_cuda_postproc_callback
+from tilelang.engine.callback import register_cuda_postproc_callback, register_hip_postproc_callback
 import torch
 import pytest
 
@@ -90,6 +90,11 @@ def run_gemm(
         code = f"// {stramp}\n" + code
         return code
 
+    @register_hip_postproc_callback
+    def tilelang_callback_hip_postproc(code, _):
+        code = f"// {stramp}\n" + code
+        return code
+
     tilelang.disable_cache()
     matmul_kernel = tilelang.compile(program, out_idx=-1)
     tilelang.enable_cache()
@@ -109,7 +114,7 @@ def test_cuda_postproc_callback():
         False,
         T.float16,
         T.float16,
-        T.float16,
+        T.float32,
         128,
         256,
         32,
@@ -224,7 +229,7 @@ def test_gemm_jit_kernel():
         False,
         T.float16,
         T.float16,
-        T.float16,
+        T.float32,
         128,
         256,
         32,

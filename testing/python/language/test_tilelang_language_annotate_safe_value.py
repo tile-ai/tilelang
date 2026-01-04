@@ -42,6 +42,7 @@ def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16,
     torch.testing.assert_close(b, ref_b, rtol=1e-2, atol=1e-2)
 
 
+@tilelang.testing.requires_cuda
 def test_tilelang_copy():
     run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, pad_value=10)
 

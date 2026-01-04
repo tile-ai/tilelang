@@ -166,7 +166,7 @@ def test_gemm_jit_kernel():
         False,
         T.float16,
         T.float16,
-        T.float16,
+        T.float32,
         128,
         256,
         32,
@@ -208,7 +208,7 @@ def run_cython_kernel_do_bench(
 
 
 def test_cython_kernel_do_bench():
-    run_cython_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_cython_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
 
 def run_cython_kernel_multi_stream(
@@ -252,7 +252,7 @@ def run_cython_kernel_multi_stream(
 
 
 def test_cython_kernel_multi_stream():
-    run_cython_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_cython_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
 
 def run_cython_dynamic_shape(
@@ -301,11 +301,11 @@ def run_cython_dynamic_shape(
 
 
 def test_cython_dynamic_shape():
-    run_cython_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_cython_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
-    run_cython_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_cython_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
-    run_cython_dynamic_shape(T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_cython_dynamic_shape(T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
 
 def run_cython_dynamic_shape_with_out_idx(
@@ -354,7 +354,7 @@ def run_cython_dynamic_shape_with_out_idx(
 
 
 def test_cython_dynamic_shape_with_out_idx():
-    run_cython_dynamic_shape_with_out_idx(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_cython_dynamic_shape_with_out_idx(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
 
 def matmul_int_variable(

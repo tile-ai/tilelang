@@ -1,6 +1,9 @@
 import tilelang
 import tilelang.testing
 from tilelang import language as T
+from tilelang.utils.target import check_hip_availability
+
+_IS_HIP_AVAILABLE = check_hip_availability()
 
 
 @tilelang.jit
@@ -54,8 +57,9 @@ def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)
 
-    assert script_off.count("read = (read * 2);") == 0
-    assert script_on.count("read = (read * 2);") > 0
+    pattern = "read[0] = (read[0] * 2);" if _IS_HIP_AVAILABLE else "read = (read * 2);"
+    assert script_off.count(pattern) == 0
+    assert script_on.count(pattern) > 0
 
 
 if __name__ == "__main__":
