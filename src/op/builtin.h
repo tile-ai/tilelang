@@ -131,6 +131,7 @@ TVM_DLL const Op &ieee_fdiv();
 // random op
 TVM_DLL const Op &rng_init();
 TVM_DLL const Op &rng_rand();
+TVM_DLL const Op &rng_rand_float();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load

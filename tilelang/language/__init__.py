@@ -105,6 +105,7 @@ from .annotations import (  # noqa: F401
 from .random import (
     rng_init,  # noqa: F401
     rng_rand,  # noqa: F401
+    rng_rand_float,  # noqa: F401
 )
 
 from .pdl import (
