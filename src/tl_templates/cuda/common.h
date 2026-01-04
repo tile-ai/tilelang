@@ -556,7 +556,7 @@ struct float_e4m3_t : public cute::float_e4m3_t {
 
   CUTLASS_HOST_DEVICE
   float_e4m3_t(cutlass::float_e4m3_t x)
-      : cute::float_e4m3_t(*reinterpret_cast<cute::float_e4m3_t*>(&x)) {}
+      : cute::float_e4m3_t(*reinterpret_cast<cute::float_e4m3_t *>(&x)) {}
 };
 
 struct float_e5m2_t : public cute::float_e5m2_t {
@@ -570,7 +570,7 @@ struct float_e5m2_t : public cute::float_e5m2_t {
 
   CUTLASS_HOST_DEVICE
   float_e5m2_t(cutlass::float_e5m2_t x)
-      : cute::float_e5m2_t(*reinterpret_cast<cute::float_e5m2_t*>(&x)) {}
+      : cute::float_e5m2_t(*reinterpret_cast<cute::float_e5m2_t *>(&x)) {}
 };
 
 template <typename T> struct to_cute_type {
