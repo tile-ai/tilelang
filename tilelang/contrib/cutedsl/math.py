@@ -8,11 +8,13 @@ from cutlass._mlir.dialects import llvm
 from cutlass.base_dsl.typing import Float32
 from cutlass.cutlass_dsl import T, dsl_user_op
 
+
 def divf(x: Union[TensorSSA, Numeric], y: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
     return cute.math._math_op(arith.divf, fastmath, x, y)
 
+
 @dsl_user_op
-def __tanhf(x: Union[float, Float32], *, fastmath: bool = True, loc=None, ip=None) -> Float32: 
+def __tanhf(x: Union[float, Float32], *, fastmath, loc=None, ip=None) -> Float32:
     return Float32(
         llvm.inline_asm(
             T.f32(),
@@ -26,6 +28,7 @@ def __tanhf(x: Union[float, Float32], *, fastmath: bool = True, loc=None, ip=Non
             ip=ip,
         )
     )
+
 
 def tanh(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
     tanh_op = __tanhf if fastmath else math.tanh
