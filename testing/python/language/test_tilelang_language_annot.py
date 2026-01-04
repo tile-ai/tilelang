@@ -5,7 +5,9 @@ import torch
 
 
 def test_tensor_annot_mul():
-    @tilelang.jit
+    # There is a known issue where the cython execution backend fails to build with T.symbolic.
+    # Forcing the TVM FFI execution backend to avoid the issue on HIP.
+    @tilelang.jit(execution_backend="tvm_ffi")
     def example_tensor_annot():
         n = T.symbolic("n")
 
@@ -27,7 +29,9 @@ def test_tensor_annot_mul():
 
 
 def test_tensor_annot_add():
-    @tilelang.jit
+    # There is a known issue where the cython execution backend fails to build with T.symbolic.
+    # Forcing the TVM FFI execution backend to avoid the issue on HIP.
+    @tilelang.jit(execution_backend="tvm_ffi")
     def example_tensor_annot():
         n = T.symbolic("n")
 
@@ -49,7 +53,9 @@ def test_tensor_annot_add():
 
 
 def test_tensor_annot_mul_add():
-    @tilelang.jit
+    # There is a known issue where the cython execution backend fails to build with T.symbolic.
+    # Forcing the TVM FFI execution backend to avoid the issue on HIP.
+    @tilelang.jit(execution_backend="tvm_ffi")
     def example_tensor_annot():
         n = T.symbolic("n")
 

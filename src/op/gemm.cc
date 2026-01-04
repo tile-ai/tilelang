@@ -153,6 +153,8 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
   int kNPerWarp = 8;            // Columns processed by a single warp
   if (TargetIsVolta(target)) {
     kNPerWarp = 16;
+  } else if (TargetIsCDNA(target)) {
+    kNPerWarp = 16;
   }
   ICHECK(M % kMPerWarp == 0)
       << "M must be divisible by " << kMPerWarp << ", but got " << M;

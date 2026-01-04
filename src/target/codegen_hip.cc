@@ -942,6 +942,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float32x4", "float32x4"},
         {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
         {"float8_e4m3fnuzx8", "long"},
+        {"float8_e5m2fnuzx4", "fp8_e5_4_t"},
+        {"float8_e5m2fnuzx8", "long"},
         {"float32x16", "float32x16"}};
     std::string call_mfma_code = R"({
       *((({C_dtype}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),
@@ -980,6 +982,16 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     // HIP doesn't need explicit register management like CUDA
     // This is a no-op for HIP
     return;
+  } else if (op->op.same_as(tl::warp_reduce_sum())) {
+    os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_max())) {
+    os << "tl::warp_reduce_max(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_min())) {
+    os << "tl::warp_reduce_min(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitand())) {
+    os << "tl::warp_reduce_bitand(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::warp_reduce_bitor())) {
+    os << "tl::warp_reduce_bitor(" << PrintExpr(op->args[0]) << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

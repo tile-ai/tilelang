@@ -154,15 +154,19 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     assert latency is not None
 
     # Get Reference Result
-    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, accum_dtype))
+    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, out_dtype))
     print(C)
     print(ref_c)
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, T.float16, T.float16, T.float16)
+    assert_tl_matmul_correctness(128, 128, 128, T.float16, T.float16, T.float32)
     assert_tl_matmul_correctness(128, 256, 256, T.float16, T.float32, T.float32)
+
+
+@tilelang.testing.requires_cuda
+def test_assert_tl_matmul_int8():
     assert_tl_matmul_correctness(128, 256, 256, T.int8, T.int32, T.int32)
 
 

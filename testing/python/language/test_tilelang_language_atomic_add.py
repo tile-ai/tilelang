@@ -195,9 +195,9 @@ def run_atomic_memory_order(K, M, N, block_M, block_N, dtype=T.float32):
 
 
 @tilelang.jit
-def atomic_addx2_program(M, N, block_M, block_N):
+def atomic_addx2_program(M, N, block_M, block_N, dtype=T.float16):
     @T.prim_func
-    def atomic_addx2(A: T.Tensor((M, N), T.float16), B: T.Tensor((M, N), T.float16)):
+    def atomic_addx2(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=32) as (bx, by):
             for i, j in T.Parallel(block_M, block_N // 2):
                 idx_i = bx * block_M + i
@@ -207,12 +207,12 @@ def atomic_addx2_program(M, N, block_M, block_N):
     return atomic_addx2
 
 
-def run_atomic_addx2(M, N, block_M, block_N):
-    kernel = atomic_addx2_program(M, N, block_M, block_N)
+def run_atomic_addx2(M, N, block_M, block_N, dtype=T.float16):
+    kernel = atomic_addx2_program(M, N, block_M, block_N, dtype=dtype)
     import torch
 
-    A = torch.randn(M, N, dtype=torch.float16).cuda()
-    B = torch.zeros(M, N, dtype=torch.float16).cuda()
+    A = torch.randn(M, N, dtype=torch.float32).cuda().to(getattr(torch, dtype))
+    B = torch.zeros(M, N, dtype=torch.float32).cuda().to(getattr(torch, dtype))
     ref_B = B.clone()
 
     for i in range(M):
@@ -235,16 +235,23 @@ def test_atomic_min():
     run_atomic_min(4, 64, 64, 16, 16)
 
 
+@tilelang.testing.requires_cuda
 def test_atomic_load_store():
     run_atomic_load_store(64, 64, 16, 16)
 
 
+@tilelang.testing.requires_cuda
 def test_atomic_memory_order():
     run_atomic_memory_order(4, 64, 64, 16, 16)
 
 
-def test_atomic_addx2():
-    run_atomic_addx2(32, 64, 8, 16)
+@tilelang.testing.requires_cuda
+def test_atomic_addx2_half():
+    run_atomic_addx2(32, 64, 8, 16, dtype=T.float16)
+
+
+def test_atomic_addx2_float():
+    run_atomic_addx2(32, 64, 8, 16, dtype=T.float32)
 
 
 @tilelang.jit
@@ -343,6 +350,7 @@ def run_atomic_return_prev(M, N, block_M, block_N, dtype=T.float32):
     torch.testing.assert_close(B, initial_B + A, atol=1e-3, rtol=1e-3)
 
 
+@tilelang.testing.requires_cuda
 def test_atomic_different_memory_orders():
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.float32)
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.float16)

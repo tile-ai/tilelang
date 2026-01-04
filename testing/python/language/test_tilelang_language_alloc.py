@@ -33,7 +33,7 @@ def run_alloc_var(
 
     kernel = tilelang.compile(program, out_idx=[1])
     code = kernel.get_kernel_source()
-    assert "tmp =" in code
+    assert "tmp =" in code or "tmp[0] =" in code
 
 
 def test_alloc_var():
@@ -73,7 +73,7 @@ def run_alloc_var_add(
 
     kernel = tilelang.compile(program, out_idx=[1])
     code = kernel.get_kernel_source()
-    assert "tmp =" in code
+    assert "tmp =" in code or "tmp[0] =" in code
 
 
 def test_alloc_var_add():
@@ -115,6 +115,8 @@ def run_alloc_var_with_initializer(
     assert f"= {init_value};" in code
 
 
+# TODO(Gong): ROCm is not supported yet, disable for now
+@tilelang.testing.requires_cuda
 def test_alloc_var_with_initializer():
     run_alloc_var_with_initializer(256, 64, T.int32, 5)
 
@@ -154,6 +156,8 @@ def run_alloc_multi_vars_with_initializer(
     assert code.count("= 2;") == 1
 
 
+# TODO(Gong): ROCm is not supported yet, disable for now
+@tilelang.testing.requires_cuda
 def test_alloc_multi_vars_with_initializer():
     run_alloc_multi_vars_with_initializer(256, 64, T.int32)
 
