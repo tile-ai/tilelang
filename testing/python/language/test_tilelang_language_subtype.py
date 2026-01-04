@@ -86,9 +86,7 @@ def test_subtype_different_strides():
     # Test with different non-contiguous strides
     for stride_multiplier in [1, 2, 4]:
         # Create tensor with specific stride pattern
-        t_large = torch.randint(
-            0, 256, (4 * stride_multiplier, 8), dtype=torch.uint8, device="cuda"
-        )
+        t_large = torch.randint(0, 256, (4 * stride_multiplier, 8), dtype=torch.uint8, device="cuda")
         # Slice to get stride [8 * stride_multiplier, 1]
         t_strided = t_large[::stride_multiplier, :]
         assert t_strided.shape == (4, 8)
