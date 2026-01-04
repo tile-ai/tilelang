@@ -592,140 +592,247 @@ void ArgBinder::BindDLTensors(
     Buffer buf_shape = shape_buffer_map[arg_name];
 
     // Bind symbolic variables from buffer shape
-    for (size_t k = 0; k < buffer->shape.size(); ++k) {
-      // These packed-bit dtype shapes were not bound in the original
-      // implementation, so we just use them as is.
-      if (data_is_subtype) {
-        break;
-      }
+    // For subtype (bits < 8), the runtime tensor has packed shape where
+    // the last dimension is divided by the packing factor k = 8 / bits.
+    // For example, fp4 (4 bits) has k=2, so logical shape [m, 16] becomes
+    // runtime shape [m, 8]. We need to solve for symbolic variables from
+    // this packed shape.
+    if (data_is_subtype) {
+      // For subtype, bind symbolic variables from the packed shape.
+      // The packing factor k = 8 / bits (number of elements packed into one
+      // storage unit)
+      int bits = buffer->dtype.bits();
+      int pack_factor = 8 / bits;
 
-      // The "real" runtime shape value read from DLTensor.
-      // Guard the load with `is_null` to avoid dereferencing NULL handles.
-      PrimExpr raw_shape_val =
-          cast(buffer->shape[k].dtype(),
-               BufferLoad(buf_shape,
-                          {IntImm(DataType::Int(32), static_cast<int>(k))}));
-      PrimExpr shape_val = tvm::if_then_else(
-          Not(is_null), raw_shape_val, make_const(raw_shape_val.dtype(), 0));
+      // Build a mapping from logical shape dimensions to runtime shape
+      // expressions For all dimensions except the last, runtime_shape[k] ==
+      // logical_shape[k] For the last dimension, logical_shape[-1] ==
+      // runtime_shape[-1] * pack_factor
+      for (size_t k = 0; k < buffer->shape.size(); ++k) {
+        // Read the runtime shape value from DLTensor
+        PrimExpr raw_shape_val =
+            cast(buffer->shape[k].dtype(),
+                 BufferLoad(buf_shape,
+                            {IntImm(DataType::Int(32), static_cast<int>(k))}));
+        PrimExpr runtime_shape_val = tvm::if_then_else(
+            Not(is_null), raw_shape_val, make_const(raw_shape_val.dtype(), 0));
 
-      // Check if this dimension is a symbolic variable
-      if (const VarNode *v = buffer->shape[k].as<VarNode>()) {
-        auto it = def_map_->find(v);
-        if (it == def_map_->end()) {
-          // First time binding this symbolic variable
-          auto sources_it = shape_var_sources.find(v);
-          if (sources_it != shape_var_sources.end() &&
-              sources_it->second.size() > 1) {
-            // This variable appears in multiple buffers
-            // Assert that at least one buffer is non-null
-            PrimExpr any_nonnull = const_false();
-            for (const auto &src : sources_it->second) {
-              bool buf_is_used = used_param_buffers.count(src.handle_ptr);
-              if (buf_is_used) {
-                any_nonnull = const_true();
-                break;
-              }
-              Var src_is_null = is_null_map[src.buf_name];
-              any_nonnull = Or(any_nonnull, Not(src_is_null));
-            }
+        // For the last dimension, the logical shape = runtime_shape *
+        // pack_factor
+        PrimExpr logical_shape_val;
+        bool is_last_dim = (k == buffer->shape.size() - 1);
+        if (is_last_dim) {
+          logical_shape_val =
+              runtime_shape_val *
+              make_const(runtime_shape_val.dtype(), pack_factor);
+        } else {
+          logical_shape_val = runtime_shape_val;
+        }
 
-            std::ostringstream err_msg;
-            err_msg << "Symbolic shape variable "
-                    << ffi::GetRef<Var>(v)->name_hint
-                    << " requires at least one non-null buffer among: ";
-            bool first = true;
-            for (const auto &src : sources_it->second) {
-              if (!first)
-                err_msg << ", ";
-              err_msg << src.buf_name;
-              first = false;
-            }
-
-            init_nest_.emplace_back(AssertStmt(
-                any_nonnull, tvm::tir::StringImm(err_msg.str()), nop));
-
-            // Build cascaded if_then_else: if !is_null_a then a.shape[k] else
-            // if !is_null_b then b.shape[k] ... We need to construct this in
-            // reverse order
-            PrimExpr cascaded_value;
-            bool is_first_source = true;
-
-            for (auto rit = sources_it->second.rbegin();
-                 rit != sources_it->second.rend(); ++rit) {
-              const auto &src = *rit;
-
-              // Get the shape buffer for this source
-              auto it_buf = shape_buffer_map.find(src.buf_name);
-              if (it_buf == shape_buffer_map.end()) {
-                LOG(FATAL) << "Shape buffer not found for " << src.buf_name;
-              }
-              Buffer src_shape_buf = it_buf->second;
-
-              // Construct the shape load and guard it if the source may be NULL
-              PrimExpr src_raw_shape_val =
-                  cast(buffer->shape[k].dtype(),
-                       BufferLoad(src_shape_buf,
-                                  {IntImm(DataType::Int(32),
-                                          static_cast<int>(src.dim_idx))}));
-
-              // Check if this buffer is used (non-nullable)
-              bool src_is_used = used_param_buffers.count(src.handle_ptr);
-
-              if (is_first_source) {
-                // Base case: use this shape value directly (we know at least
-                // one is non-null from assert)
-                if (src_is_used) {
-                  cascaded_value = src_raw_shape_val;
-                } else {
-                  Var src_is_null = is_null_map[src.buf_name];
-                  cascaded_value = tvm::if_then_else(
-                      Not(src_is_null), src_raw_shape_val,
-                      make_const(src_raw_shape_val.dtype(), 0));
-                }
-                is_first_source = false;
-              } else {
-                // if !is_null then use this shape, else use previous cascaded
-                // value But if buffer is used (non-nullable), always use its
-                // shape
-                if (src_is_used) {
-                  cascaded_value = src_raw_shape_val;
-                } else {
-                  Var src_is_null = is_null_map[src.buf_name];
-                  cascaded_value = tvm::if_then_else(
-                      Not(src_is_null), src_raw_shape_val, cascaded_value);
-                }
-              }
-            }
-
-            // Bind the variable to the cascaded expression
-            Var v_arg = ffi::GetRef<Var>(v);
-            defs_.emplace_back(v_arg);
-            (*def_map_)[v] = cascaded_value;
-            init_nest_.emplace_back(
-                LetStmt(v_arg, cascaded_value, Evaluate(0)));
+        // Now bind the symbolic variable if present
+        if (const VarNode *v = buffer->shape[k].as<VarNode>()) {
+          auto it = def_map_->find(v);
+          if (it == def_map_->end()) {
+            // First time binding: use BindNullable which can solve equations
+            BindNullable(buffer->shape[k], logical_shape_val,
+                         shape_element_name(k), true, is_null);
           } else {
-            // Single source or no special handling needed, use nullable
-            // binding. When the only source is NULL, bind m to 0 safely.
-            BindNullable(buffer->shape[k], shape_val, shape_element_name(k),
-                         true, is_null);
+            // Variable already bound, add assertion with nullable guard
+            PrimExpr cond = (it->second == logical_shape_val);
+            BinderAddAssert(&analyzer_, cond, shape_element_name(k), &asserts_,
+                            is_null);
           }
         } else {
-          // Variable already bound, add assertion with nullable guard
-          PrimExpr cond = (it->second == shape_val);
-          BinderAddAssert(&analyzer_, cond, shape_element_name(k), &asserts_,
-                          is_null);
+          // Constant or expression dimension, bind/assert via BindNullable
+          BindNullable(buffer->shape[k], logical_shape_val,
+                       shape_element_name(k), true, is_null);
         }
-      } else {
-        // Constant dimension, just add assertion
-        BindNullable(buffer->shape[k], shape_val, shape_element_name(k), true,
-                     is_null);
+      }
+    } else {
+      // Non-subtype: normal shape binding
+      for (size_t k = 0; k < buffer->shape.size(); ++k) {
+        // The "real" runtime shape value read from DLTensor.
+        // Guard the load with `is_null` to avoid dereferencing NULL handles.
+        PrimExpr raw_shape_val =
+            cast(buffer->shape[k].dtype(),
+                 BufferLoad(buf_shape,
+                            {IntImm(DataType::Int(32), static_cast<int>(k))}));
+        PrimExpr shape_val = tvm::if_then_else(
+            Not(is_null), raw_shape_val, make_const(raw_shape_val.dtype(), 0));
+
+        // Check if this dimension is a symbolic variable
+        if (const VarNode *v = buffer->shape[k].as<VarNode>()) {
+          auto it = def_map_->find(v);
+          if (it == def_map_->end()) {
+            // First time binding this symbolic variable
+            auto sources_it = shape_var_sources.find(v);
+            if (sources_it != shape_var_sources.end() &&
+                sources_it->second.size() > 1) {
+              // This variable appears in multiple buffers
+              // Assert that at least one buffer is non-null
+              PrimExpr any_nonnull = const_false();
+              for (const auto &src : sources_it->second) {
+                bool buf_is_used = used_param_buffers.count(src.handle_ptr);
+                if (buf_is_used) {
+                  any_nonnull = const_true();
+                  break;
+                }
+                Var src_is_null = is_null_map[src.buf_name];
+                any_nonnull = Or(any_nonnull, Not(src_is_null));
+              }
+
+              std::ostringstream err_msg;
+              err_msg << "Symbolic shape variable "
+                      << ffi::GetRef<Var>(v)->name_hint
+                      << " requires at least one non-null buffer among: ";
+              bool first = true;
+              for (const auto &src : sources_it->second) {
+                if (!first)
+                  err_msg << ", ";
+                err_msg << src.buf_name;
+                first = false;
+              }
+
+              init_nest_.emplace_back(AssertStmt(
+                  any_nonnull, tvm::tir::StringImm(err_msg.str()), nop));
+
+              // Build cascaded if_then_else: if !is_null_a then a.shape[k] else
+              // if !is_null_b then b.shape[k] ... We need to construct this in
+              // reverse order
+              PrimExpr cascaded_value;
+              bool is_first_source = true;
+
+              for (auto rit = sources_it->second.rbegin();
+                   rit != sources_it->second.rend(); ++rit) {
+                const auto &src = *rit;
+
+                // Get the shape buffer for this source
+                auto it_buf = shape_buffer_map.find(src.buf_name);
+                if (it_buf == shape_buffer_map.end()) {
+                  LOG(FATAL) << "Shape buffer not found for " << src.buf_name;
+                }
+                Buffer src_shape_buf = it_buf->second;
+
+                // Construct the shape load and guard it if the source may be
+                // NULL
+                PrimExpr src_raw_shape_val =
+                    cast(buffer->shape[k].dtype(),
+                         BufferLoad(src_shape_buf,
+                                    {IntImm(DataType::Int(32),
+                                            static_cast<int>(src.dim_idx))}));
+
+                // Check if this buffer is used (non-nullable)
+                bool src_is_used = used_param_buffers.count(src.handle_ptr);
+
+                if (is_first_source) {
+                  // Base case: use this shape value directly (we know at least
+                  // one is non-null from assert)
+                  if (src_is_used) {
+                    cascaded_value = src_raw_shape_val;
+                  } else {
+                    Var src_is_null = is_null_map[src.buf_name];
+                    cascaded_value = tvm::if_then_else(
+                        Not(src_is_null), src_raw_shape_val,
+                        make_const(src_raw_shape_val.dtype(), 0));
+                  }
+                  is_first_source = false;
+                } else {
+                  // if !is_null then use this shape, else use previous cascaded
+                  // value But if buffer is used (non-nullable), always use its
+                  // shape
+                  if (src_is_used) {
+                    cascaded_value = src_raw_shape_val;
+                  } else {
+                    Var src_is_null = is_null_map[src.buf_name];
+                    cascaded_value = tvm::if_then_else(
+                        Not(src_is_null), src_raw_shape_val, cascaded_value);
+                  }
+                }
+              }
+
+              // Bind the variable to the cascaded expression
+              Var v_arg = ffi::GetRef<Var>(v);
+              defs_.emplace_back(v_arg);
+              (*def_map_)[v] = cascaded_value;
+              init_nest_.emplace_back(
+                  LetStmt(v_arg, cascaded_value, Evaluate(0)));
+            } else {
+              // Single source or no special handling needed, use nullable
+              // binding. When the only source is NULL, bind m to 0 safely.
+              BindNullable(buffer->shape[k], shape_val, shape_element_name(k),
+                           true, is_null);
+            }
+          } else {
+            // Variable already bound, add assertion with nullable guard
+            PrimExpr cond = (it->second == shape_val);
+            BinderAddAssert(&analyzer_, cond, shape_element_name(k), &asserts_,
+                            is_null);
+          }
+        } else {
+          // Constant dimension, just add assertion
+          BindNullable(buffer->shape[k], shape_val, shape_element_name(k), true,
+                       is_null);
+        }
       }
     }
 
     // strides field
-    // Skip stride checks for subbyte types (bits < 8), as they use packed
-    // storage and stride semantics don't apply directly.
-    if (!data_is_subtype) {
+    // For subbyte types (bits < 8), stride semantics need special handling
+    // due to packed storage. The relationship is:
+    // - Last dimension: logical_stride = runtime_stride (packing is within
+    // elements)
+    // - Other dimensions: logical_stride = runtime_stride * pack_factor
+    if (data_is_subtype) {
+      // For subtype, only process strides if there are explicit strides
+      // with symbolic variables that need binding
+      if (!buffer->strides.empty()) {
+        int bits = buffer->dtype.bits();
+        int pack_factor = 8 / bits;
+
+        Buffer buf_strides =
+            decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
+                        tvm_shape_type, arg_name + ".strides");
+        def_handle_dtype_.Set(buf_strides->data,
+                              tir::TypeAnnotation(tvm_shape_type));
+        init_nest_.emplace_back(
+            LetStmt(buf_strides->data,
+                    tvm::if_then_else(Not(is_null),
+                                      TVMArrayGet(DataType::Handle(), handle,
+                                                  builtin::kArrStrides),
+                                      make_zero(DataType::Handle())),
+                    nop));
+        init_nest_.emplace_back(DeclBuffer(buf_strides, nop));
+        PrimExpr v_strides_is_null =
+            Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
+
+        for (int k = static_cast<int>(buffer->strides.size()) - 1; k >= 0;
+             --k) {
+          DataType stride_dtype = buffer->strides[k].dtype();
+          PrimExpr runtime_stride =
+              cast(stride_dtype,
+                   BufferLoad(buf_strides, {IntImm(DataType::Int(32), k)}));
+          runtime_stride =
+              tvm::if_then_else(Or(is_null, v_strides_is_null),
+                                make_const(stride_dtype, 0), runtime_stride);
+
+          // For the last dimension, logical stride = runtime stride
+          // For other dimensions, logical stride = runtime stride * pack_factor
+          PrimExpr logical_stride_val;
+          bool is_last_dim =
+              (k == static_cast<int>(buffer->strides.size()) - 1);
+          if (is_last_dim) {
+            logical_stride_val = runtime_stride;
+          } else {
+            logical_stride_val =
+                runtime_stride * make_const(stride_dtype, pack_factor);
+          }
+
+          BindNullable(buffer->strides[k], logical_stride_val,
+                       stride_element_name(k), true, is_null);
+        }
+      }
+    } else {
+      // Non-subtype: normal stride handling
       Buffer buf_strides =
           decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
                       tvm_shape_type, arg_name + ".strides");
@@ -821,7 +928,7 @@ void ArgBinder::BindDLTensors(
                        true, is_null);
         }
       }
-    } // !data_is_subtype
+    }
 
     // Byte_offset field.
     int data_bytes = GetVectorBytes(buffer->dtype);
