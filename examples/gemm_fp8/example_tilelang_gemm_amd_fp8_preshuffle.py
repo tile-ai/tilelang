@@ -50,8 +50,8 @@ def tl_matmul(
     accum_dtype=T.float32,
     a_transposed=False,
     b_transposed=True,
-    b_preshuffle=True,
 ):
+    b_preshuffle = True
     warp_size = 64
     num_warps = num_threads // warp_size
 
@@ -79,7 +79,6 @@ def tl_matmul(
     )
     local_size_a = mfma_emitter.local_size_a
     local_size_b = mfma_emitter.local_size_b
-    local_size_c = mfma_emitter.local_size_out
 
     warp_rows = mfma_emitter.warp_rows
     warp_cols = mfma_emitter.warp_cols
@@ -91,20 +90,11 @@ def tl_matmul(
     A_shape = (K, M) if a_transposed else (M, K)
     A_shared_shape = (block_K, block_M) if a_transposed else (block_M, block_K)
 
-    if b_preshuffle:
-        B_shape = (
-            (N // micro_size_y, K // pack_size_k, micro_size_y, pack_size_k)
-            if b_transposed
-            else (K // pack_size_k, N // micro_size_y, pack_size_k, micro_size_y)
-        )
-        B_shared_shape = (
-            (block_N // micro_size_y, block_K // pack_size_k, micro_size_y, pack_size_k)
-            if b_transposed
-            else (block_K // pack_size_k, block_N // micro_size_y, pack_size_k, micro_size_y)
-        )
-    else:
-        B_shape = (N, K) if b_transposed else (K, N)
-        B_shared_shape = (block_N, block_K) if b_transposed else (block_K, block_N)
+    B_shape = (
+        (N // micro_size_y, K // pack_size_k, micro_size_y, pack_size_k)
+        if b_transposed
+        else (K // pack_size_k, N // micro_size_y, pack_size_k, micro_size_y)
+    )
 
     @T.prim_func
     def main(
@@ -173,7 +163,7 @@ def shuffle_weight(
     return x.contiguous()
 
 
-def assert_tl_matmul_correctness(M, N, K, k_pack=1, a_transposed=False, b_transposed=True, b_preshuffle=True):
+def assert_tl_matmul_correctness(M, N, K, k_pack=1, a_transposed=False, b_transposed=True):
     in_dtype = T.float8_e4m3fnuz
     out_dtype = T.float32
     accum_dtype = T.float32
@@ -187,7 +177,6 @@ def assert_tl_matmul_correctness(M, N, K, k_pack=1, a_transposed=False, b_transp
         accum_dtype=accum_dtype,
         a_transposed=a_transposed,
         b_transposed=b_transposed,
-        b_preshuffle=b_preshuffle,
     )
 
     src_code = kernel.get_kernel_source()
@@ -199,15 +188,8 @@ def assert_tl_matmul_correctness(M, N, K, k_pack=1, a_transposed=False, b_transp
     A = (torch.rand(A_shape, device="cuda", dtype=torch.float16) / 10).to(getattr(torch, in_dtype))
     B = (torch.rand(B_shape, device="cuda", dtype=torch.float16) / 10).to(getattr(torch, in_dtype))
 
-    B_preshuffle = B
-    if b_preshuffle:
-        B_preshuffle = shuffle_weight(B_preshuffle, k_pack=k_pack, is_transpose=b_transposed)
-        C = kernel(A, B_preshuffle)
-    else:
-        C = kernel(
-            A,
-            B,
-        )
+    B_preshuffle = shuffle_weight(B, k_pack=k_pack, is_transpose=b_transposed)
+    C = kernel(A, B_preshuffle)
 
     profiler = kernel.get_profiler()
     latency = profiler.do_bench()
@@ -233,8 +215,7 @@ def assert_tl_matmul_correctness(M, N, K, k_pack=1, a_transposed=False, b_transp
 
 
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(512, 512, 512, k_pack=1, b_transposed=True, b_preshuffle=True)
-    assert_tl_matmul_correctness(512, 512, 512, k_pack=2, b_transposed=True, b_preshuffle=True)
+    assert_tl_matmul_correctness(512, 512, 512, k_pack=2)
 
 
 if __name__ == "__main__":
