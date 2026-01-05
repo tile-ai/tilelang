@@ -748,11 +748,11 @@ private:
     bool local_register_only = true;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (!IsLocalBuffer(store->buffer)) {
+        if (!IsLocalBuffer(store->buffer, true)) {
           local_register_only = false;
         }
       } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (!IsLocalBuffer(load->buffer)) {
+        if (!IsLocalBuffer(load->buffer, true)) {
           local_register_only = false;
         }
       }
@@ -766,11 +766,13 @@ private:
     bool has_non_local = false;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
       if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (!IsLocalBuffer(load->buffer) && !IsFragmentBuffer(load->buffer)) {
+        if (!IsLocalBuffer(load->buffer, true) &&
+            !IsFragmentBuffer(load->buffer)) {
           has_non_local = true;
         }
       } else if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (!IsLocalBuffer(store->buffer) && !IsFragmentBuffer(store->buffer)) {
+        if (!IsLocalBuffer(store->buffer, true) &&
+            !IsFragmentBuffer(store->buffer)) {
           has_non_local = true;
         }
       }
