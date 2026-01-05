@@ -4,18 +4,38 @@ import tilelang.language as T
 import torch
 
 
-from tilelang.engine.callback import register_metal_postproc_callback, register_c_postproc
+from tilelang.engine.callback import register_metal_postproc_callback, register_c_postproc_callback
 
 
 # @register_metal_postproc_callback
-# @register_c_postproc
 def print_c_mod(code: str, t) -> str:
     print(code)
-    print(t)
-    import ipdb
-
-    ipdb.set_trace()
     return code
+
+@register_c_postproc_callback
+def print_c_mod(code: str, t) -> str:
+    print(t)
+    kernel_launch = '''if (TVMFFIFunctionCall(gemm_kernel_packed, (TVMFFIAny*) stack_ffi_any, 8, &result_31) != 0) {
+    return -1;
+  }'''
+    assert kernel_launch in code
+
+    patched = '''
+    __block int ret = 0;
+
+    auto serialQueue = torch::mps::get_dispatch_queue();
+    dispatch_sync(serialQueue, ^() {
+      const id<MTLCommandBuffer> commandBuffer = torch::mps::get_command_buffer();
+      const auto f = tvm::ffi::Function::GetGlobal("metal.SetStream");
+      (*f)(static_cast<TVMStreamHandle>(commandBuffer));
+
+      if (TVMFFIFunctionCall(gemm_kernel_packed, (TVMFFIAny*) stack_ffi_any, 8, const_cast<TVMFFIAny*>(&result_31)) != 0) {
+        ret = -1;
+      }
+    });
+    return ret;'''
+    
+    return code.replace(kernel_launch, patched)
 
 
 _cc = tilelang.tvm.contrib.cc._linux_compile
@@ -33,7 +53,7 @@ def _patched_cc(output, objects, options, compile_cmd, *args, **kwargs):
     from torch.utils import cpp_extension
 
     torch_opts = ["-I" + i for i in cpp_extension.include_paths()]
-    options += torch_opts + ["-std=gnu++17"]
+    options += torch_opts + ["-g", "-std=gnu++17"]
     return _cc(output, objects, options, compile_cmd, *args, **kwargs)
 
 

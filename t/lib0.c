@@ -7,10 +7,13 @@
 #include <stdio.h>
 #include <stdbool.h>
 #ifdef __OBJC__
+#include "tvm/runtime/device_api.h"
+#include "tvm/ffi/function.h"
+
 #include <Metal/Metal.h>
 #include <Foundation/Foundation.h>
-#include <ATen/native/mps/OperationUtils.h>
-#include <ATen/core/TensorBase.h>
+
+#include <torch/mps.h>
 #endif
 void* __tvm_ffi__library_ctx = NULL;
 static void* __tvm_error_ndim_mismatch_packed = NULL;
@@ -1213,10 +1216,22 @@ int32_t gemm(void* self_handle, void* args, int32_t num_args, void* result) {
   result_31.type_index = kTVMFFINone;
   result_31.zero_padding = 0;
   result_31.v_int64 = 0;
-  if (TVMFFIFunctionCall(gemm_kernel_packed, (TVMFFIAny*) stack_ffi_any, 8, &result_31) != 0) {
-    return -1;
-  }
-  return 0;
+
+  __block int ret = 0;
+
+  // @autoreleasepool {
+    auto serialQueue = torch::mps::get_dispatch_queue();
+    dispatch_sync(serialQueue, ^() {
+      const auto commandBuffer = torch::mps::get_command_buffer();
+      const auto f = tvm::ffi::Function::GetGlobal("metal.SetStream");
+      (*f)(static_cast<TVMStreamHandle>(commandBuffer));
+
+      if (TVMFFIFunctionCall(gemm_kernel_packed, (TVMFFIAny*) stack_ffi_any, 8, const_cast<TVMFFIAny*>(&result_31)) != 0) {
+        ret = -1;
+      }
+    });
+  // }
+  return ret;
 }
 
 // CodegenC: NOTE: Auto-generated entry function
