@@ -184,6 +184,55 @@ TL_DEVICE fp8_e4_32_t make_fp8_e4_32_t(
   return result;
 }
 
+// Pack fp8_e4_t values within broadcast.
+TL_DEVICE fp8_e4_2_t make_fp8_e4_2_t_broadcast(fp8_e4_t val) {
+  uint8_t raw_byte = *reinterpret_cast<uint8_t *>(&val);
+  uint16_t vec16 = (static_cast<uint16_t>(raw_byte) << 8) | raw_byte;
+  return *reinterpret_cast<fp8_e4_2_t *>(&vec16);
+}
+
+TL_DEVICE fp8_e4_4_t make_fp8_e4_4_t_broadcast(fp8_e4_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  int vec32 = __byte_perm(raw_byte, 0, 0x0000);
+  return *reinterpret_cast<fp8_e4_4_t *>(&vec32);
+}
+
+TL_DEVICE fp8_e4_8_t make_fp8_e4_8_t_broadcast(fp8_e4_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  int vec32 = __byte_perm(raw_byte, 0, 0x0000);
+  uint64_t vec64 =
+      (static_cast<uint64_t>(vec32) << 32) | static_cast<uint32_t>(vec32);
+  return *reinterpret_cast<fp8_e4_8_t *>(&vec64);
+}
+
+TL_DEVICE fp8_e4_16_t make_fp8_e4_16_t_broadcast(fp8_e4_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  unsigned int pattern =
+      static_cast<unsigned int>(__byte_perm(raw_byte, 0, 0x0000));
+  uint4 vec128;
+  vec128.x = pattern;
+  vec128.y = pattern;
+  vec128.z = pattern;
+  vec128.w = pattern;
+  return *reinterpret_cast<fp8_e4_16_t *>(&vec128);
+}
+
+TL_DEVICE fp8_e4_32_t make_fp8_e4_32_t_broadcast(fp8_e4_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  unsigned int pattern =
+      static_cast<unsigned int>(__byte_perm(raw_byte, 0, 0x0000));
+  fp8_e4_32_t ret;
+  uint4 *vec128_ptr = reinterpret_cast<uint4 *>(&ret);
+  uint4 chunk;
+  chunk.x = pattern;
+  chunk.y = pattern;
+  chunk.z = pattern;
+  chunk.w = pattern;
+  vec128_ptr[0] = chunk;
+  vec128_ptr[1] = chunk;
+  return ret;
+}
+
 // Pack two fp8_e5_t values.
 TL_DEVICE fp8_e5_2_t make_fp8_e5_2_t(fp8_e5_t x, fp8_e5_t y) {
   fp8_e5_2_t result;
@@ -243,6 +292,55 @@ TL_DEVICE fp8_e5_32_t make_fp8_e5_32_t(
   return result;
 }
 
+// Pack fp8_e5_t values within broadcast.
+TL_DEVICE fp8_e5_2_t make_fp8_e5_2_t_broadcast(fp8_e5_t val) {
+  uint8_t raw_byte = *reinterpret_cast<uint8_t *>(&val);
+  uint16_t vec16 = (static_cast<uint16_t>(raw_byte) << 8) | raw_byte;
+  return *reinterpret_cast<fp8_e5_2_t *>(&vec16);
+}
+
+TL_DEVICE fp8_e5_4_t make_fp8_e5_4_t_broadcast(fp8_e5_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  int vec32 = __byte_perm(raw_byte, 0, 0x0000);
+  return *reinterpret_cast<fp8_e5_4_t *>(&vec32);
+}
+
+TL_DEVICE fp8_e5_8_t make_fp8_e5_8_t_broadcast(fp8_e5_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  int vec32 = __byte_perm(raw_byte, 0, 0x0000);
+  uint64_t vec64 =
+      (static_cast<uint64_t>(vec32) << 32) | static_cast<uint32_t>(vec32);
+  return *reinterpret_cast<fp8_e5_8_t *>(&vec64);
+}
+
+TL_DEVICE fp8_e5_16_t make_fp8_e5_16_t_broadcast(fp8_e5_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  unsigned int pattern =
+      static_cast<unsigned int>(__byte_perm(raw_byte, 0, 0x0000));
+  uint4 vec128;
+  vec128.x = pattern;
+  vec128.y = pattern;
+  vec128.z = pattern;
+  vec128.w = pattern;
+  return *reinterpret_cast<fp8_e5_16_t *>(&vec128);
+}
+
+TL_DEVICE fp8_e5_32_t make_fp8_e5_32_t_broadcast(fp8_e4_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  unsigned int pattern =
+      static_cast<unsigned int>(__byte_perm(raw_byte, 0, 0x0000));
+  fp8_e5_32_t ret;
+  uint4 *vec128_ptr = reinterpret_cast<uint4 *>(&ret);
+  uint4 chunk;
+  chunk.x = pattern;
+  chunk.y = pattern;
+  chunk.z = pattern;
+  chunk.w = pattern;
+  vec128_ptr[0] = chunk;
+  vec128_ptr[1] = chunk;
+  return ret;
+}
+
 // Pack two fp8_e8_t values.
 TL_DEVICE fp8_e8_2_t make_fp8_e8_2_t(fp8_e8_t x, fp8_e8_t y) {
   fp8_e8_2_t result;
@@ -300,6 +398,55 @@ TL_DEVICE fp8_e8_32_t make_fp8_e8_32_t(
   result.y = make_fp8_e8_16_t(y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11,
                               y12, y13, y14, y15);
   return result;
+}
+
+// Pack fp8_e8_t values within broadcast.
+TL_DEVICE fp8_e8_2_t make_fp8_e8_2_t_broadcast(fp8_e8_t val) {
+  uint8_t raw_byte = *reinterpret_cast<uint8_t *>(&val);
+  uint16_t vec16 = (static_cast<uint16_t>(raw_byte) << 8) | raw_byte;
+  return *reinterpret_cast<fp8_e8_2_t *>(&vec16);
+}
+
+TL_DEVICE fp8_e8_4_t make_fp8_e8_4_t_broadcast(fp8_e8_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  int vec32 = __byte_perm(raw_byte, 0, 0x0000);
+  return *reinterpret_cast<fp8_e8_4_t *>(&vec32);
+}
+
+TL_DEVICE fp8_e8_8_t make_fp8_e8_8_t_broadcast(fp8_e8_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  int vec32 = __byte_perm(raw_byte, 0, 0x0000);
+  uint64_t vec64 =
+      (static_cast<uint64_t>(vec32) << 32) | static_cast<uint32_t>(vec32);
+  return *reinterpret_cast<fp8_e8_8_t *>(&vec64);
+}
+
+TL_DEVICE fp8_e8_16_t make_fp8_e8_16_t_broadcast(fp8_e8_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  unsigned int pattern =
+      static_cast<unsigned int>(__byte_perm(raw_byte, 0, 0x0000));
+  uint4 vec128;
+  vec128.x = pattern;
+  vec128.y = pattern;
+  vec128.z = pattern;
+  vec128.w = pattern;
+  return *reinterpret_cast<fp8_e8_16_t *>(&vec128);
+}
+
+TL_DEVICE fp8_e8_32_t make_fp8_e8_32_t_broadcast(fp8_e4_t val) {
+  int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
+  unsigned int pattern =
+      static_cast<unsigned int>(__byte_perm(raw_byte, 0, 0x0000));
+  fp8_e8_32_t ret;
+  uint4 *vec128_ptr = reinterpret_cast<uint4 *>(&ret);
+  uint4 chunk;
+  chunk.x = pattern;
+  chunk.y = pattern;
+  chunk.z = pattern;
+  chunk.w = pattern;
+  vec128_ptr[0] = chunk;
+  vec128_ptr[1] = chunk;
+  return ret;
 }
 
 // e4m3x2 -> float2

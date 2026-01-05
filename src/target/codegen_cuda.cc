@@ -3122,6 +3122,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     }
   }
 
+  if (op->dtype.is_float8()) {
+    os << "make_";
+    PrintType(op->dtype, os);
+    os << "_broadcast(" << PrintExpr(op->value) << ")";
+    return;
+  }
   std::string v = PrintExpr(op->value);
   os << "make_";
   PrintType(op->dtype, os);
