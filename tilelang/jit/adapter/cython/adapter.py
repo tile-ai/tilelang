@@ -385,3 +385,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             # Wrapper only has host kernel source
             assert self.host_kernel_source is not None, "Wrapped source is not available"
             return self.host_kernel_source
+
+    def get_host_source(self):
+        """Returns the source code of the host function."""
+        return self.host_kernel_source

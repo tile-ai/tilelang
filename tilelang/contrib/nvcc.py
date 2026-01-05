@@ -586,6 +586,14 @@ def is_hopper(target):
     return major == 9 and minor == 0
 
 
+def have_pdl(target):
+    if target.kind.name != "cuda":
+        return False
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    return major >= 9
+
+
 def get_nvcc_compiler() -> str:
     """Get the path to the nvcc compiler"""
     return os.path.join(find_cuda_path(), "bin", "nvcc")

@@ -107,6 +107,11 @@ from .random import (
     rng_rand,  # noqa: F401
 )
 
+from .pdl import (
+    pdl_trigger,  # noqa: F401
+    pdl_sync,  # noqa: F401
+)
+
 
 def import_source(source: str | None = None):
     # source is the source code to be imported
