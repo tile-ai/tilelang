@@ -295,8 +295,8 @@ void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
   name_supply_->ReserveName("scalblnf");
   name_supply_->ReserveName("scalbnf");
   name_supply_->ReserveName("signbit");
-  name_supply_->ReserveName("voidsincosf");
-  name_supply_->ReserveName("voidsincospif");
+  name_supply_->ReserveName("sincosf");
+  name_supply_->ReserveName("sincospif");
   name_supply_->ReserveName("sinf");
   name_supply_->ReserveName("sinhf");
   name_supply_->ReserveName("sinpif");
