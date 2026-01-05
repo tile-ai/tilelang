@@ -34,6 +34,7 @@ def kernels_with_pdl_sync(N, block_size=256, dtype=T.float32):
     return main
 
 
+@tilelang.testing.requires_cuda
 def test_pdl_trigger():
     N = 64
     program = kernels_with_pdl_trigger(N)
@@ -43,6 +44,7 @@ def test_pdl_trigger():
     assert "cudaTriggerProgrammaticLaunchCompletion" in code
 
 
+@tilelang.testing.requires_cuda
 def test_pdl_sync():
     N = 64
     program = kernels_with_pdl_sync(N)
