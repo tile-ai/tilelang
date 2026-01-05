@@ -220,6 +220,9 @@ void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
   CodeGenC::ReserveKeywordsAsUnique();
   name_supply_->ReserveName("max");
   name_supply_->ReserveName("min");
+  name_supply_->ReserveName("isfinite");
+  name_supply_->ReserveName("isinf");
+  name_supply_->ReserveName("isnan");
 
   // skip single precision mathematical functions
   name_supply_->ReserveName("acosf");
@@ -257,9 +260,6 @@ void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
   name_supply_->ReserveName("frexpf");
   name_supply_->ReserveName("hypotf");
   name_supply_->ReserveName("ilogbf");
-  name_supply_->ReserveName("isfinite");
-  name_supply_->ReserveName("isinf");
-  name_supply_->ReserveName("isnan");
   name_supply_->ReserveName("j0f");
   name_supply_->ReserveName("j1f");
   name_supply_->ReserveName("jnf");
@@ -346,9 +346,6 @@ void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
   name_supply_->ReserveName("frexp");
   name_supply_->ReserveName("hypot");
   name_supply_->ReserveName("ilogb");
-  name_supply_->ReserveName("isfinite");
-  name_supply_->ReserveName("isinf");
-  name_supply_->ReserveName("isnan");
   name_supply_->ReserveName("j0");
   name_supply_->ReserveName("j1");
   name_supply_->ReserveName("jn");
