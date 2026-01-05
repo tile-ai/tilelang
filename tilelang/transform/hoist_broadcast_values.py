@@ -31,7 +31,7 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
 
             # 4. Return a new Broadcast node, using the new variable to replace the original value.
             return Broadcast(new_var, op.lanes)
-        return op
+        return Broadcast(self.visit_expr(op.value), self.visit_expr(op.lanes))
 
     # Must intercept all Statements that might contain Expressions.
     # Examples: BufferStore, LetStmt, Evaluate, IfThenElse, AssertStmt.
@@ -40,10 +40,7 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
         self.pending_defs = []
 
         # 2. Visit child nodes normally (this will trigger visit_broadcast_).
-        new_indices = []
-        for index in op.indices:
-            visited_index = self.visit_expr(index)
-            new_indices.append(visited_index)
+        new_indices = [self.visit_expr(idx) for idx in op.indices]
         new_stmt = BufferStore(op.buffer, self.visit_expr(op.value), new_indices)
 
         # 3. Check if there are variables waiting to be defined.
