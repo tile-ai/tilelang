@@ -45,8 +45,12 @@ ffi::Module BuildMetal(IRModule mod, Target target) {
     smap[func_name] = fsource;
   }
 
-  return runtime::MetalModuleCreate(smap, ExtractFuncInfo(mod), fmt,
-                                    source_maker.str());
+  std::string code = source_maker.str();
+  if (const auto f =
+          ffi::Function::GetGlobal("tilelang_callback_metal_postproc")) {
+    code = (*f)(code, target).cast<std::string>();
+  }
+  return runtime::MetalModuleCreate(smap, ExtractFuncInfo(mod), fmt, code);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
