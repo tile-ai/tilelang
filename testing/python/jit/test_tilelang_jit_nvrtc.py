@@ -4,7 +4,6 @@ import tilelang.testing
 import tilelang
 import torch
 from tilelang.utils.tensor import map_torch_type
-import pytest
 
 
 def matmul(
@@ -439,19 +438,10 @@ def test_nvrtc_l2_persistent_map():
     print("L2 persistent map test passed!")
 
 
-def check_pdl():
-    if not torch.cuda.is_available():
-        return False
-    props = torch.cuda.get_device_properties(0)
-    compute_capability = props.major, props.minor
-    return compute_capability[0] >= 9
-
-
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_nvrtc_pdl():
     """Test pdl."""
-
-    if not check_pdl():
-        pytest.skip("PDL Test requires compute capability >= 9")
 
     N = 64
 
