@@ -18,18 +18,20 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
         self.pending_defs = []
 
     def visit_broadcast_(self, op):
-        # 1. Intercept Broadcast nodes.
-        # Extract the value to be hoisted into a variable.
-        val = self.visit_expr(op.value)
-        # 2. Create a new variable.
-        new_var = Var("broadcast_var", dtype=val.dtype)
+        if isinstance(op.value, (tir.IntImm, tir.FloatImm)):
+            # 1. Intercept Broadcast nodes.
+            # Extract the value to be hoisted into a variable.
+            val = self.visit_expr(op.value)
+            # 2. Create a new variable.
+            new_var = Var("broadcast_var", dtype=val.dtype)
 
-        # 3. Add the (variable, value) pair to the pending queue.
-        # Note: Do not create the LetStmt here; it must wrap the statement.
-        self.pending_defs.append((new_var, val))
+            # 3. Add the (variable, value) pair to the pending queue.
+            # Note: Do not create the LetStmt here; it must wrap the statement.
+            self.pending_defs.append((new_var, val))
 
-        # 4. Return a new Broadcast node, using the new variable to replace the original value.
-        return Broadcast(new_var, op.lanes)
+            # 4. Return a new Broadcast node, using the new variable to replace the original value.
+            return Broadcast(new_var, op.lanes)
+        return op
 
     # Must intercept all Statements that might contain Expressions.
     # Examples: BufferStore, LetStmt, Evaluate, IfThenElse, AssertStmt.
@@ -38,8 +40,11 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
         self.pending_defs = []
 
         # 2. Visit child nodes normally (this will trigger visit_broadcast_).
-        new_expr = self.visit_expr(op.value)
-        new_stmt = BufferStore(op.buffer, new_expr, op.indices)
+        new_indices = []
+        for index in op.indices:
+            visited_index = self.visit_expr(index)
+            new_indices.append(visited_index)
+        new_stmt = BufferStore(op.buffer, self.visit_expr(op.value), new_indices)
 
         # 3. Check if there are variables waiting to be defined.
         if self.pending_defs:
