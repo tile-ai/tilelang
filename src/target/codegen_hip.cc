@@ -767,7 +767,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   };
-  if (op->op.same_as(builtin::ptx_cp_async()) || op->op.same_as(tl::ptx_cp_async())) {
+  if (op->op.same_as(builtin::ptx_cp_async()) ||
+      op->op.same_as(tl::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
