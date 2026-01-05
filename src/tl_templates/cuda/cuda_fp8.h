@@ -325,7 +325,7 @@ TL_DEVICE fp8_e5_16_t make_fp8_e5_16_t_broadcast(fp8_e5_t val) {
   return *reinterpret_cast<fp8_e5_16_t *>(&vec128);
 }
 
-TL_DEVICE fp8_e5_32_t make_fp8_e5_32_t_broadcast(fp8_e4_t val) {
+TL_DEVICE fp8_e5_32_t make_fp8_e5_32_t_broadcast(fp8_e5_t val) {
   int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
   unsigned int pattern =
       static_cast<unsigned int>(__byte_perm(raw_byte, 0, 0x0000));
@@ -433,7 +433,7 @@ TL_DEVICE fp8_e8_16_t make_fp8_e8_16_t_broadcast(fp8_e8_t val) {
   return *reinterpret_cast<fp8_e8_16_t *>(&vec128);
 }
 
-TL_DEVICE fp8_e8_32_t make_fp8_e8_32_t_broadcast(fp8_e4_t val) {
+TL_DEVICE fp8_e8_32_t make_fp8_e8_32_t_broadcast(fp8_e8_t val) {
   int raw_byte = static_cast<int>(*reinterpret_cast<uint8_t *>(&val));
   unsigned int pattern =
       static_cast<unsigned int>(__byte_perm(raw_byte, 0, 0x0000));
