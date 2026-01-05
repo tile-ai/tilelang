@@ -194,13 +194,16 @@ jobs:
 
       - name: Test built wheels
         run: |
+          # Clean uv cache to avoid using compatible but undesired torch versions in cache
+          uv cache clean torch
+
           for WHEEL in wheelhouse/*.whl; do
             echo "Testing wheel: ${WHEEL}"
             (
               set -e
               uv venv --python=3.12 test-venv
               source test-venv/bin/activate
-              uv pip install --refresh -v "${WHEEL}"
+              uv pip install -v "${WHEEL}"
               (
                 set -e
                 cd /
