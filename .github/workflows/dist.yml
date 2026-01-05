@@ -200,7 +200,7 @@ jobs:
               set -e
               uv venv --python=3.12 test-venv
               source test-venv/bin/activate
-              uv pip install -v "${WHEEL}"
+              uv pip install --refresh -v "${WHEEL}"
               (
                 set -e
                 cd /
