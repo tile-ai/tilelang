@@ -157,7 +157,7 @@ jobs:
             CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
             CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
-            if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
               # Use torch nightly builds
               export UV_INDEX="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
             else
