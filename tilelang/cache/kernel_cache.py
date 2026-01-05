@@ -102,6 +102,9 @@ class KernelCache:
             "pass_configs": pass_configs,
             "compile_flags": compile_flags,
         }
+        if isinstance(target, Target) and target.kind == 'metal':
+            import torch
+            key_data['torch'] = torch.__version__
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
         # Use SHA256 to generate hash key
