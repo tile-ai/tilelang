@@ -218,6 +218,9 @@ CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
 
 void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
   CodeGenC::ReserveKeywordsAsUnique();
+  name_supply_->ReserveName("max");
+  name_supply_->ReserveName("min");
+
   // skip single precision mathematical functions
   name_supply_->ReserveName("acosf");
   name_supply_->ReserveName("acoshf");
@@ -271,8 +274,6 @@ void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
   name_supply_->ReserveName("logf");
   name_supply_->ReserveName("lrintf");
   name_supply_->ReserveName("lroundf");
-  name_supply_->ReserveName("max");
-  name_supply_->ReserveName("min");
   name_supply_->ReserveName("modff");
   name_supply_->ReserveName("nanf");
   name_supply_->ReserveName("nearbyintf");
@@ -362,12 +363,6 @@ void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
   name_supply_->ReserveName("logb");
   name_supply_->ReserveName("lrint");
   name_supply_->ReserveName("lround");
-  name_supply_->ReserveName("max");
-  name_supply_->ReserveName("max");
-  name_supply_->ReserveName("max");
-  name_supply_->ReserveName("min");
-  name_supply_->ReserveName("min");
-  name_supply_->ReserveName("min");
   name_supply_->ReserveName("modf");
   name_supply_->ReserveName("nan");
   name_supply_->ReserveName("nearbyint");
