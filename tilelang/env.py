@@ -68,7 +68,8 @@ def _find_cuda_home() -> str:
 
     if cuda_home is None:
         # Guess #3
-        # from pypi package nvidia-cuda-nvcc, nvidia-cuda-nvcc-cu12, etc.
+        # from pypi package nvidia-cuda-nvcc, only nvidia-cuda-nvcc>=13.0 works.
+        # nvidia-cuda-nvcc-cu12, etc. only installs `ptxas`, not `nvcc`
         import importlib.util
 
         if importlib.util.find_spec("nvidia") is not None:
