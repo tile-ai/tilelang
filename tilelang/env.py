@@ -83,7 +83,7 @@ def _find_cuda_home() -> str:
                     cuda_home = str(pathlib.Path(file.locate()).parent.parent)
                     break
             else:
-                assert False, "`nvidia-cuda-nvcc` installed but no `nvcc` found"
+                raise AssertionError("`nvidia-cuda-nvcc` installed but no `nvcc` found")
 
         else:
             # Guess #4
