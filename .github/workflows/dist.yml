@@ -113,8 +113,8 @@ jobs:
         target:
           - { runner: ubuntu-latest, toolkit: "CUDA-12.8" }
           - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
-          - { runner: ubuntu-latest, toolkit: "Nightly-CUDA-13.1" }
-          - { runner: ubuntu-24.04-arm, toolkit: "Nightly-CUDA-13.1" }
+          - { runner: ubuntu-latest, toolkit: "Nightly-CUDA-13.0" }
+          - { runner: ubuntu-24.04-arm, toolkit: "Nightly-CUDA-13.0" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
           # Wheels are built with Python 3.8 Limited API, they should work with all Python >= 3.8.
@@ -157,8 +157,14 @@ jobs:
             CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
             CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
-            echo "UV_INDEX=https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
-            echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+            if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+              # Use torch nightly builds
+              export UV_INDEX="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
+            else
+              export UV_INDEX="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
+              echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+            fi
+            echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           fi
 
           if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]] && [[ "${{ github.event_name }}" == "release" ]]; then
