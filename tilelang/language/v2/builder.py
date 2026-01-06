@@ -1003,11 +1003,13 @@ class LazyJITFunc(Generic[_P, _T]):
             raise ValueError(f"Invalid jit mode: {self.mode}, expected 'lazy' or 'eager'")
 
     def parse_args(self, *args, **kwargs):
+        """Parse arguments and return cache key and tensor args."""
         p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
         if not tensor_args:
             return (p1_key, None), kwargs
         tir_temp = self.p1_cache.get(p1_key, None)
         if tir_temp is None:
+            # mode should be set by JITImpl before calling parse_args
             tir_temp = self._build_tir_template(*args, **kwargs)
             self.p1_cache[p1_key] = tir_temp
         p2_key = tir_temp._parse_phase2_key(**tensor_args)

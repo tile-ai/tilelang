@@ -423,6 +423,12 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             return compile_args
 
         kwargs.update(kwargs.pop("__tune_params", {}))
+
+        # infer mode early, before parse_args needs it
+        if self.mode == "auto":
+            self.mode = self._infer_jit_mode(*args, **kwargs)
+            self.func.set_mode(self.mode)
+
         key, kernel_args = self.func.parse_args(*args, **kwargs)
         kernel = self._kernel_cache.get(key, None)
         if kernel is None:
