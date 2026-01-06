@@ -443,6 +443,14 @@ TVM_DLL const Op &wait_wgmma();
 TVM_DLL const Op &sync_grid();
 
 /*!
+ * \brief Synchronize all threads in a warp
+ *
+ * sync_warp()
+ *
+ */
+TVM_DLL const Op &sync_warp();
+
+/*!
  * \brief tvm intrinsic for loop continue
  *
  * loop_break()

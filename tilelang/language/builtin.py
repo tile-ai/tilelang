@@ -712,8 +712,8 @@ def sync_threads(barrier_id: int = None, arrive_count: int = None):
 def sync_warp(mask: int = None):
     """Synchronize all threads in a warp."""
     if mask is not None:
-        return tir.call_extern("void", "__syncwarp", mask)
-    return tir.call_extern("void", "__syncwarp")
+        return tir.call_intrin("void", tir.op.Op.get("tl.sync_warp"), mask)
+    return tir.call_intrin("void", tir.op.Op.get("tl.sync_warp"))
 
 
 def shfl_sync(mask: int, value: int | PrimExpr, srcLane: int, width: int = None):
