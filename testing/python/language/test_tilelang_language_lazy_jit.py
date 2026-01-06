@@ -6,7 +6,7 @@ import torch
 
 
 def test_jit2_gemm():
-    @tilelang.lazy_jit(verbose=True)
+    @tilelang.jit(verbose=True)
     def gemm(
         A,
         B,
@@ -45,7 +45,7 @@ def test_jit2_gemm():
 
 
 def test_jit2_gemm_ptr():
-    @tilelang.lazy_jit
+    @tilelang.jit
     def gemm_ptr(
         A: T.ptr,
         B: T.ptr,
@@ -102,28 +102,28 @@ def test_jit2_many_annot():
         with T.Kernel(T.ceildiv(M, 128), T.ceildiv(N, 128), threads=128) as (bx, by):
             T.copy(A[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128], B[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128])
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy1(A, B):
         N, M = T.const("N, M")
         A: T.Tensor[[N, M], T.float32]
         B: T.Tensor[[N, M], T.float32]
         copy_impl(A, B)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy2(
         A: T.Tensor[[128, 128], T.float32],
         B: T.Tensor[[128, 128], T.float32],
     ):
         copy_impl(A, B)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy3(A, B):
         N = T.const("N")
         A: T.Tensor[[N, 128], T.float32]
         B: T.Tensor[[N, 128], T.float32]
         copy_impl(A, B)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy4(A, B):
         N = T.dynamic("N")
         M = T.const("M")
@@ -131,14 +131,14 @@ def test_jit2_many_annot():
         B: T.Tensor[[N, M], T.float32]
         copy_impl(A, B)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy5(A, B):
         N, M, N_, M_ = T.const("N, M, N_, M_")
         A: T.StridedTensor[[N, M], [N_, M_], T.float32]
         B: T.StridedTensor[[N, M], [N_, M_], T.float32]
         copy_impl(A, B)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy6(A, B):
         N = T.dynamic("N")
         M, N_, M_ = T.const("M, N_, M_")
@@ -175,37 +175,37 @@ def test_jit2_return():
             T.copy(A[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128], B[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128])
         return B
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy1(A):
         M, N = T.const("M, N")
         A: T.Tensor[[M, N], T.float32]
         return copy_impl(A)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy2(A):
         A: T.Tensor[[128, 128], T.float32]
         return copy_impl(A)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy3(A):
         N = T.const("N")
         A: T.Tensor[[N, 128], T.float32]
         return copy_impl(A)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy4(A):
         N = T.dynamic("N")
         M = T.const("M")
         A: T.Tensor[[N, M], T.float32]
         return copy_impl(A)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy5(A):
         N, M, N_, M_ = T.const("N, M, N_, M_")
         A: T.StridedTensor[[N, M], [N_, M_], T.float32]
         return copy_impl(A)
 
-    @tilelang.lazy_jit
+    @tilelang.jit
     def copy6(A):
         N = T.dynamic("N")
         M, N_, M_ = T.const("M, N_, M_")
