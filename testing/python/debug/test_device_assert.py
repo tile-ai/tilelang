@@ -13,7 +13,7 @@ def _manual_device_assert_triggered():
             tid = T.get_thread_binding()
             T.device_assert(tid > 0, "Assertion Trigger !")
 
-    jit_kernel = tilelang.compile(program, target="cuda")
+    jit_kernel = tilelang.compile(program)
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 
@@ -25,7 +25,7 @@ def test_device_assert_no_trigger():
             tid = T.get_thread_binding()
             T.device_assert(tid == tid)
 
-    jit_kernel = tilelang.compile(program, target="cuda")
+    jit_kernel = tilelang.compile(program)
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 

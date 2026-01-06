@@ -34,6 +34,11 @@ inline int CountNestedParallelLoops(const ForNode *op) {
 /*!
  * \brief Validator that checks parallel loop layout annotations.
  *
+ * Rationale: in TileLang's design, inner loops cannot control their outer
+ * loops, while the outermost loop can manage its inner nested region. Hence
+ * the layout annotation is placed on the outermost parallel loop so passes
+ * can reason about and transform the whole nest from the outside.
+ *
  * This validator checks:
  * 1. All parallel loops must have layout annotations (either directly or via
  *    an outer nested parallel loop).

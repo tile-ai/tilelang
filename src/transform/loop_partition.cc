@@ -277,6 +277,14 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
   auto saved_analyzer = analyzer->Clone();
 
   For result_loop = loop;
+  // Strip parallel-loop layout/predicate annotations on the original loop.
+  // After partitioning/vectorization, keeping them can confuse later passes.
+  // Also, annotations may contain complex expressions; mutators do not visit
+  // inside annotation payloads, so explicit removal here prevents stale state
+  // from leaking into subsequent transforms.
+  // Note: Map::erase(key) is a no-op if key doesn't exist.
+  result_loop.CopyOnWrite()->annotations.erase(attr::kParallelLoopLayout);
+  result_loop.CopyOnWrite()->annotations.erase(attr::kParallelLoopPredicate);
 
   // Step 1: Partition the loop based on the layout (if this is a parallel loop)
   if (parallel_loop) {

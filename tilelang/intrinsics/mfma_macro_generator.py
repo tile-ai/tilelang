@@ -50,6 +50,7 @@ class MatrixCoreIntrinEmitter:
         "float8_e4m3": "e4m3",
         "float8_e5m2": "e5m2",
         "float8_e4m3fnuz": "e4m3fnuz",
+        "float8_e5m2fnuz": "e5m2fnuz",
     }
 
     # k_pack represents the number of elements in a vectorized instruction
@@ -107,7 +108,7 @@ class MatrixCoreIntrinEmitter:
 
     def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
-            if a_dtype in ["float8_e4m3fnuz", T.int8]:
+            if a_dtype in ["float8_e4m3fnuz", "float8_e5m2fnuz", T.int8]:
                 self.k_dim = 32
                 return
             a_dtype = DataType(a_dtype)
@@ -141,6 +142,7 @@ class MatrixCoreIntrinEmitter:
             "int8": "i8",
             "int32": "i32",
             "float8_e4m3fnuz": "fp8",
+            "float8_e5m2fnuz": "fp8",
         }[in_dtype]
 
         if in_dtype_abbrv == "fp8":

@@ -497,15 +497,13 @@ class Builder(BaseBuilder):
         elif isinstance(value, (Buffer, tir.IterVar, tir.Var)):
             IRBuilder.name(name, value)
             return value
-        else:
-            try:
-                value = tvm.runtime.convert(value)
-            except TypeError:
-                return value
+        elif isinstance(value, (PrimExpr, BufferRegion)):
             frame = tir.LetStmt(value)
             var = frame.var
             IRBuilder.name(name, var)
             return self.enter_frame(frame)
+        else:
+            return value
 
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):
         self.check_continue_break()

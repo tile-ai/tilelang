@@ -37,7 +37,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
 
 def run_gemm_pipeline_test(N, block_M=128, block_N=128, block_K=32):
     func = matmul(N, N, N, block_M, block_N, block_K)
-    jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda")
+    jit_kernel = tilelang.compile(func, out_idx=[2])
 
     torch.manual_seed(0)
     a = torch.randn(N, N, device="cuda", dtype=torch.float16)

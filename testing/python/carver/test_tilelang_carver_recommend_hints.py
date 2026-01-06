@@ -133,6 +133,7 @@ def run_fmha_recommend_hints(
     assert len(hints) > 0, "Hints length should be greater than 0"
 
 
+@tilelang.testing.requires_cuda
 def test_fmha_recommend_hints():
     run_fmha_recommend_hints(4, 32, 512, 512, 128, T.float16, T.float16, T.float16)
     run_fmha_recommend_hints(4, 32, 512, 512, 128, T.int8, T.int32, T.int32)

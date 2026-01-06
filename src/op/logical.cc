@@ -42,14 +42,16 @@ TVM_REGISTER_OP("tl.any_of")
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure))
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "any_of")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", any_of_op);
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", any_of_op)
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", any_of_op);
 
 TVM_REGISTER_OP("tl.all_of")
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure))
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "all_of")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", all_of_op);
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", all_of_op)
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", all_of_op);
 
 } // namespace tl
 } // namespace tvm

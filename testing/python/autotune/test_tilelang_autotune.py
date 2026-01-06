@@ -251,7 +251,6 @@ def matmul(M, N, K, with_roller):
         AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller))
         .set_compile_args(
             out_idx=[-1],
-            target="auto",
         )
         .set_profile_args(
             ref_prog=ref_program,
@@ -260,11 +259,13 @@ def matmul(M, N, K, with_roller):
     return autotuner.run(warmup=3, rep=20)
 
 
+@tilelang.testing.requires_cuda
 def test_autotune_get_configs():
     get_configs(1024, 1024, 1024, with_roller=True)
     get_configs(1024, 1024, 1024, with_roller=False)
 
 
+@tilelang.testing.requires_cuda
 def test_autotune_matmul():
     matmul(1024, 1024, 1024, with_roller=True)
     matmul(1024, 1024, 1024, with_roller=False)
