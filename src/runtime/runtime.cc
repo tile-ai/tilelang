@@ -6,7 +6,7 @@
 
 #include "runtime.h"
 
-#include "../target/cuda.h"
+#include "../target/stubs/cuda.h"
 #include <tvm/ffi/function.h>
 #include <tvm/node/node.h>
 

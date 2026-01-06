@@ -45,7 +45,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
 
 def run_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     program = matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
-    kernel = tilelang.compile(program, out_idx=[2], target="cuda")
+    kernel = tilelang.compile(program, out_idx=[2])
     kernel.run_once()
 
 

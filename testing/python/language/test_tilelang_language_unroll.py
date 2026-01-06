@@ -13,10 +13,12 @@ def test_unroll_with_step():
                 for i in T.unroll(0, 16, step=4):
                     A[0, i] = 1.0
 
-    kernel = tilelang.compile(main, target="cuda")
+    kernel = tilelang.compile(main)
     assert "#pragma unroll" in kernel.get_kernel_source()
 
 
+# TODO: unroll factor is not supported on hip, skip.
+@tilelang.testing.requires_cuda
 def test_unroll_with_unroll_factor():
     @T.prim_func
     def main(A_ptr: T.handle):
@@ -27,7 +29,7 @@ def test_unroll_with_unroll_factor():
                 for i in T.unroll(0, 16, unroll_factor=4):
                     A[0, i] = 1.0
 
-    kernel = tilelang.compile(main, target="cuda")
+    kernel = tilelang.compile(main)
     assert "#pragma unroll 4" in kernel.get_kernel_source()
 
 

@@ -118,6 +118,7 @@ def clean_cache_env(tmp_path, request):
     return cache_dir
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_disk_cache_with_postproc(clean_cache_env, backend):
     """Test disk cache for multiple backends using postproc callback.
@@ -195,6 +196,7 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
     torch.testing.assert_close(c1, c2)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_cache_miss_detection(clean_cache_env, backend):
     """Verify cache correctly misses when function changes.
@@ -245,6 +247,7 @@ def test_cache_miss_detection(clean_cache_env, backend):
     assert counter.count == 2, f"Different function should cause cache miss, expected 2 calls, got {counter.count}"
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_cache_isolation_between_tests(clean_cache_env, backend):
     """Verify cache isolation between tests.
