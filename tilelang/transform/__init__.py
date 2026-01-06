@@ -103,6 +103,17 @@ def InjectAssumes():
     return _ffi_api.InjectAssumes()
 
 
+def VerifyParallelLoop():
+    """VerifyParallelLoop
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.VerifyParallelLoop()  # type: ignore
+
+
 def LowerHopperIntrin():
     """LowerHopperIntrin
 
