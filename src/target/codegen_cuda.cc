@@ -1884,6 +1884,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << this->PrintExpr(op->args[0]);
     }
     this->stream << ");\n";
+  } else if (op->op.same_as(tl::pdl_trigger())) {
+    this->PrintIndent();
+    this->stream << "cudaTriggerProgrammaticLaunchCompletion();\n";
+  } else if (op->op.same_as(tl::pdl_sync())) {
+    this->PrintIndent();
+    this->stream << "cudaGridDependencySynchronize();\n";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
