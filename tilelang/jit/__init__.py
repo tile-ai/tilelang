@@ -364,6 +364,14 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         # infer jit mode on first compile
         if self.mode == "auto":
             self.mode = self._infer_jit_mode(*args, **kwargs)
+
+        # out_idx is only supported in lazy mode
+        if self.mode == "eager" and self.out_idx is not None:
+            raise ValueError(
+                "out_idx is only supported in lazy mode. "
+                "In eager mode, use T.empty() to declare output tensors instead."
+            )
+
         self.func.set_mode(self.mode)
         prim_func = self.get_tir(*args, **kwargs)
         kernel_result = compile(
@@ -456,6 +464,7 @@ def jit(
 def jit(
     func: Callable[_P, _T] | PrimFunc | None = None,
     *,  # Indicates subsequent arguments are keyword-only
+    out_idx: list[int] | int | None = None,
     target: str | Target | None = None,
     target_host: str | Target | None = None,
     execution_backend: ExecutionBackend | None = None,
@@ -465,14 +474,34 @@ def jit(
     compile_flags: list[str] | str | None = None,
 ) -> Callable[[Callable[_P, _T]], JITImpl[_KP, _KP, _T, _T]]:
     """
-    Lazy JIT compiler decorator - returns the kernel object on first call, then executes it.
+    JIT compiler decorator for TileLang functions.
 
-    Supports environment variable defaults for target, execution_backend, and verbose.
-    See `jit` documentation for parameter details and environment variables.
+    Supports two execution modes (automatically inferred):
+    - **lazy**: Function returns PrimFunc explicitly. Returns compiled kernel object.
+    - **eager**: Function uses DSL builder pattern. Executes kernel immediately.
+
+    Parameters
+    ----------
+    out_idx : list[int] | int | None
+        Output tensor index(es). Only supported in lazy mode.
+    target : str | Target | None
+        TVM compilation target (e.g., "cuda", "llvm", "auto").
+    target_host : str | Target | None
+        Host target for cross-compilation.
+    execution_backend : ExecutionBackend | None
+        Backend for kernel execution.
+    verbose : bool | None
+        Enable verbose compilation output.
+    pass_configs : dict[str, Any] | None
+        TVM pass configuration options.
+    debug_root_path : str | None
+        Directory to save compiled kernel source for debugging.
+    compile_flags : list[str] | str | None
+        Additional compiler flags.
     """
 
     compile_args = dict(
-        out_idx=None,
+        out_idx=out_idx,
         execution_backend=execution_backend,
         target=target,
         target_host=target_host,
