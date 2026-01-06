@@ -586,7 +586,7 @@ class SpanAttacher(ast.NodeTransformer):
 
     def visit(self, node: ast.AST):
         node = self.generic_visit(node)
-        if isinstance(node, ast.stmt):
+        if isinstance(node, ast.stmt) and hasattr(node, 'lineno'):
             return quote(f"__tb.set_fileline({self.filename_var}, {node.lineno}, {self.func_name_var})") + [node]
         return node
 
