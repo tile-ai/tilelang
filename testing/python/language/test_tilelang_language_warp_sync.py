@@ -24,6 +24,7 @@ def kernel_with_warp_sync():
     return main
 
 
+@tilelang.testing.requires_cuda
 def test_warp_sync():
     a = torch.empty((1), device="cuda", dtype=torch.int32)
     b = torch.empty((1), device="cuda", dtype=torch.int32)
@@ -48,6 +49,7 @@ def kernel_with_shfl_sync():
     return main
 
 
+@tilelang.testing.requires_cuda
 def test_shfl_sync():
     a = torch.empty((32), device="cuda", dtype=torch.int32)
     kernel = kernel_with_shfl_sync()
