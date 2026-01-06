@@ -417,7 +417,6 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             }
             return compile_args
 
-
         kwargs.update(kwargs.pop("__tune_params", {}))
         key, kernel_args = self.func.parse_args(*args, **kwargs)
         kernel = self._kernel_cache.get(key, None)
@@ -434,6 +433,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
 
 ExecutionBackend = Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
+
 
 @overload
 def jit(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]: ...
@@ -482,12 +482,15 @@ def jit(
         compile_flags=compile_flags,
     )
 
-
     def decorator(func: Callable[_P, _T]):
         # Always use lazy mode prim func to wrap the original function
         pf: LazyJITFunc[_P, _T] = prim_func(func, lazy_jit=True)
         return JITImpl(
-            func=pf, **compile_args, func_source=inspect.getsource(pf.orig_func), signature=inspect.signature(pf.orig_func), mode="auto",
+            func=pf,
+            **compile_args,
+            func_source=inspect.getsource(pf.orig_func),
+            signature=inspect.signature(pf.orig_func),
+            mode="auto",
         )
 
     return decorator(func) if func is not None else decorator
