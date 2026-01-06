@@ -85,6 +85,23 @@ static constexpr const char *kDisableThreadStorageSync =
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
 
 /*!
+ * \brief Pipeline DAG printing mask for debugging.
+ *
+ * Bitmask to control which DAG visualization formats to print:
+ *   0: No printing (default)
+ *   1: ASCII list format
+ *   2: ASCII vertical format
+ *   4: DOT format (Graphviz)
+ *   8: Mermaid format
+ *
+ * Values can be combined, e.g., 3 = list + vertical, 15 = all formats.
+ *
+ * kPrintPipelineDAG = "tl.print_pipeline_dag"
+ *
+ */
+static constexpr const char *kPrintPipelineDAG = "tl.print_pipeline_dag";
+
+/*!
  * \brief Get the type of the CUDA tensor map
  *
  * DataType cuTensorMapType()
