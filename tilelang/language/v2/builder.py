@@ -1025,9 +1025,10 @@ class LazyJITFunc(Generic[_P, _T]):
     def __call__(self, *args, **kwargs):
         return self.get_tir(*args, **kwargs)
 
-    def set_mode(self, mode: Literal["lazy", "eager"]):
+    def set_mode(self, mode: Literal["lazy", "eager"]) -> LazyJITFunc[_P, _T]:
         """Set the JIT execution mode (internal use only)."""
         self.mode = mode
+        return self
 
     # Proxy function attributes for compatibility with autotuner and inspect.
     # These attributes are needed by autotuner to extract closure variables

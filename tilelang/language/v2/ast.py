@@ -1,5 +1,6 @@
 from __future__ import annotations
 import ast
+import logging
 from dataclasses import dataclass, field
 from typing import Callable, Generic, Any, Literal, TypeVar
 from contextlib import AbstractContextManager
@@ -15,6 +16,8 @@ import inspect
 # from .utils import get_ast, get_compiled_object
 from . import utils
 from . import dtypes
+
+logger = logging.getLogger(__name__)
 
 _span_attrs = ["lineno", "col_offset", "end_lineno", "end_col_offset"]
 
@@ -584,22 +587,37 @@ class IRGenerator(Generic[_P, _T]):
     is_lazy_style: bool = False  # True if the function returns a PrimFunc (lazy style)
 
 
-def _detect_lazy_style(tree: ast.FunctionDef) -> bool:
+def _has_return_value(tree: ast.FunctionDef) -> bool:
+    """Check if function has any return statement with a non-None value."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and node.value is not None:
+            # Skip explicit "return None"
+            if isinstance(node.value, ast.Constant) and node.value.value is None:
+                continue
+            return True
+    return False
+
+
+def _detect_lazy_style(tree: ast.FunctionDef, func_name: str = "<unknown>") -> bool:
     """
     Detect if a function uses lazy style by analyzing its AST.
 
-    Lazy style: function defines an inner @T.prim_func and returns it.
-    Eager style: function uses DSL builder pattern (T.Kernel, T.const, T.Tensor, etc.)
+    Lazy style: function returns a PrimFunc (must have return value).
+    Eager style: function uses DSL builder pattern (no return needed).
 
     Detection logic:
-    1. If function has an inner @T.prim_func definition -> lazy style
-    2. If function body directly uses eager-mode constructs (T.Kernel, T.const, etc.) -> eager style
-    3. Otherwise -> lazy style (conservative default for external prim_func returns)
+    1. No return value -> eager (lazy must return PrimFunc)
+    2. Has inner @T.prim_func definition -> lazy
+    3. Has eager-mode constructs (T.Kernel, T.const, etc.) -> eager
+    4. Has return value but no eager constructs -> lazy (external prim_func)
 
     Returns True if lazy style is detected.
     """
-    # Check for inner @T.prim_func or @prim_func decorated functions
-    has_inner_prim_func = False
+    # Rule 1: No return value means eager mode (lazy must return PrimFunc)
+    if not _has_return_value(tree):
+        return False
+
+    # Rule 2: Check for inner @T.prim_func or @prim_func decorated functions
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node is not tree:
             for decorator in node.decorator_list:
@@ -609,19 +627,14 @@ def _detect_lazy_style(tree: ast.FunctionDef) -> bool:
                     or isinstance(decorator, ast.Name)
                     and decorator.id == "prim_func"
                 ):
-                    has_inner_prim_func = True
+                    return True  # lazy style
 
-    if has_inner_prim_func:
-        return True
-
-    # Check if the function body directly uses eager-mode DSL constructs
-    # These indicate the function itself is the kernel (eager style)
+    # Rule 3: Check for eager-mode DSL constructs
     eager_mode_attrs = {"Kernel", "const", "dynamic", "Tensor", "StridedTensor", "empty"}
-    # Also check for direct imports: from tilelang.language import const, Kernel, etc.
     eager_mode_names = {"Kernel", "const", "dynamic", "empty"}
 
     for node in ast.walk(tree):
-        # Skip inner function definitions - they might be prim_funcs
+        # Skip inner function definitions
         if isinstance(node, ast.FunctionDef) and node is not tree:
             continue
 
@@ -638,7 +651,6 @@ def _detect_lazy_style(tree: ast.FunctionDef) -> bool:
         if isinstance(node, ast.Subscript):
             if isinstance(node.value, ast.Attribute) and node.value.attr in ("Tensor", "StridedTensor"):
                 return False  # eager style
-            # Direct import: Tensor[[M, N], dtype]
             if isinstance(node.value, ast.Name) and node.value.id in ("Tensor", "StridedTensor"):
                 return False  # eager style
 
@@ -646,15 +658,16 @@ def _detect_lazy_style(tree: ast.FunctionDef) -> bool:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in eager_mode_names:
             return False  # eager style
 
-    # Default: if there's a return with value and no eager constructs detected,
-    # assume lazy style (external prim_func return)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Return) and node.value is not None:
-            if isinstance(node.value, ast.Constant) and node.value.value is None:
-                continue
-            return True
-
-    return False
+    # Rule 4: Has return value but no eager constructs -> lazy (external prim_func)
+    # Warn user since this is inferred without explicit markers
+    logger.warning(
+        "Cannot auto-detect JIT mode for '%s': function has return value but no "
+        "recognizable pattern (inner @T.prim_func or eager constructs like T.Kernel). "
+        "Assuming lazy mode. Consider explicitly setting mode='lazy' or mode='eager' "
+        "in @tilelang.jit() decorator.",
+        func_name,
+    )
+    return True
 
 
 def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
@@ -688,7 +701,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     nonlocals = utils.get_func_nonlocals(func)
 
     # Detect lazy style before AST transformation
-    is_lazy = _detect_lazy_style(tree)
+    is_lazy = _detect_lazy_style(tree, func.__name__)
 
     # DSLMutator generates a function named `make_closure`
     #   it accepts all names inside nonlocal, and returns the mutated function

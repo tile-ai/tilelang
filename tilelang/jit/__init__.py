@@ -528,6 +528,7 @@ def jit(
 
     def decorator(func: Callable[_P, _T]):
         pf: LazyJITFunc[_P, _T] = prim_func(func, lazy_jit=True)
+        pf.set_mode(mode)
         func_source = inspect.getsource(pf.orig_func)
         signature = inspect.signature(pf.orig_func)
 
