@@ -10,6 +10,9 @@ class PassConfigKey(str, Enum):
     TL_SIMPLIFY = "tl.Simplify"
     """Enable/disable TileLang simplification passes. Default: True"""
 
+    TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
+    """Disable data race check in TileLang. Default: False"""
+
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 

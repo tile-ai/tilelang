@@ -39,9 +39,6 @@ def test_trival_pipeline():
         tx = T.launch_thread("threadIdx.x", 16)
         B = T.decl_buffer((2, 16, 1), scope="shared")
         B[0, tx, 0] = A[tx, 0] * T.float32(2.0)
-        for i in range(0):
-            B[i + 1, tx, 0] = A[tx, i + 1] * T.float32(2.0)
-            C[tx, i] = B[i, tx, 0] + T.float32(1.0)
         C[tx, 0] = B[0, tx, 0] + T.float32(1.0)
 
     _check(before, expected)

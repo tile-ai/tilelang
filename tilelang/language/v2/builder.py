@@ -475,12 +475,6 @@ class Builder(BaseBuilder):
         if isinstance(value, tir.meta_var):
             return value.value
         elif isinstance(value, tir.frame.IRBuilderFrame):
-            if isinstance(value, tir.frame.ForFrame):
-                logger.warning(
-                    "Binding a for frame to variable may cause undefined behavior in tilelang.",
-                    stack_info=True,
-                    stacklevel=2,
-                )
             return self.enter_frame(value)
         elif isinstance(value, OutTensor):
             arg = tir.arg(
