@@ -958,9 +958,12 @@ class LazyJITFunc(Generic[_P, _T]):
         p1_key = tuple(sorted(kwargs.items()))
         return p1_key, tensor_args, kwargs
 
-    def _is_lazy_style(self, *args, **kwargs) -> bool:
+    def _is_lazy_style(self) -> bool:
         """
         Check if the function uses lazy style (explicitly returns PrimFunc).
+
+        This uses static AST analysis performed during mutate() to detect
+        if the function defines an inner @T.prim_func and returns it.
 
         Lazy style functions define an inner @T.prim_func and return it:
             @jit
@@ -976,12 +979,7 @@ class LazyJITFunc(Generic[_P, _T]):
                 with T.Kernel(...): ...
                 # no return
         """
-        try:
-            result = self.orig_func(*args, **kwargs)
-            return isinstance(result, PrimFunc)
-        except Exception:
-            logger.debug("Function doesn't return PrimFunc directly, treating as eager style")
-            return False
+        return self.ir_gen.is_lazy_style
 
     def _build_tir_template(self, *args, **kwargs) -> TirTemplate[_P, _T]:
         """Build TIR template based on the execution mode."""
@@ -1030,6 +1028,18 @@ class LazyJITFunc(Generic[_P, _T]):
     def set_mode(self, mode: Literal["lazy", "eager"]):
         """Set the JIT execution mode (internal use only)."""
         self.mode = mode
+
+    # Proxy function attributes for compatibility with autotuner and inspect.
+    # These attributes are needed by autotuner to extract closure variables
+    # and generate cache keys.
+    _PROXIED_ATTRS = frozenset({"__closure__", "__code__", "__name__", "__globals__", "__wrapped__"})
+
+    def __getattr__(self, name):
+        if name in LazyJITFunc._PROXIED_ATTRS:
+            if name == "__wrapped__":
+                return self.orig_func
+            return getattr(self.orig_func, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
 
 def substitute_primfunc(prim_func, vmap):

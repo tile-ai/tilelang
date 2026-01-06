@@ -15,7 +15,7 @@ def get_configs():
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
-@autotune(configs=get_configs(), warmup=500, rep=100)
+@autotune(configs=get_configs())
 @tilelang.jit(
     out_idx=[3],
     pass_configs={

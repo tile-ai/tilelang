@@ -292,6 +292,11 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         """
         Retrieve a TIR (Tensor Intermediate Representation) PrimFunc from the stored callable or object.
         """
+        # Ensure mode is set before calling func
+        if self.mode == "auto" and isinstance(self.func, LazyJITFunc):
+            self.mode = self._infer_jit_mode()
+            self.func.set_mode(self.mode)
+
         if isinstance(self.func, PrimFunc):
             tir = self.func
         elif isinstance(self.func, (LazyJITFunc, Callable)):
@@ -301,19 +306,19 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         assert isinstance(tir, PrimFunc), f"target function must be a PrimFunc but got {type(tir)}"
         return tir
 
-    def _infer_jit_mode(self, *args: _P.args, **kwargs: _P.kwargs) -> Literal["lazy", "eager"]:
+    def _infer_jit_mode(self) -> Literal["lazy", "eager"]:
         """
-        Infer the JIT execution mode based on function behavior.
+        Infer the JIT execution mode based on static AST analysis.
 
         Returns "lazy" if the function explicitly returns a PrimFunc,
         or "eager" if it uses the DSL builder pattern.
         """
         if self.mode in ("lazy", "eager"):
             return self.mode
-        # auto: infer by checking if function returns PrimFunc directly
+        # auto: infer using static AST analysis
         if not isinstance(self.func, LazyJITFunc):
             return "lazy"
-        return "lazy" if self.func._is_lazy_style(*args, **kwargs) else "eager"
+        return "lazy" if self.func._is_lazy_style() else "eager"
 
     def par_compile(
         self, configs: Iterable[dict[str, Any] | tuple[str, Any]], num_workers: int = None, ignore_error: bool = False
@@ -363,7 +368,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         # infer jit mode on first compile
         if self.mode == "auto":
-            self.mode = self._infer_jit_mode(*args, **kwargs)
+            self.mode = self._infer_jit_mode()
 
         # out_idx is only supported in lazy mode
         if self.mode == "eager" and self.out_idx is not None:
@@ -426,7 +431,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
         # infer mode early, before parse_args needs it
         if self.mode == "auto":
-            self.mode = self._infer_jit_mode(*args, **kwargs)
+            self.mode = self._infer_jit_mode()
             self.func.set_mode(self.mode)
 
         key, kernel_args = self.func.parse_args(*args, **kwargs)

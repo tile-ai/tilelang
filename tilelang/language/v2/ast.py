@@ -581,6 +581,76 @@ class IRGenerator(Generic[_P, _T]):
     gen: Callable[[BaseBuilder], Callable[_P, _T]]
     source: str
     extra_type_hints: dict[str, Any] = field(default_factory=dict)
+    is_lazy_style: bool = False  # True if the function returns a PrimFunc (lazy style)
+
+
+def _detect_lazy_style(tree: ast.FunctionDef) -> bool:
+    """
+    Detect if a function uses lazy style by analyzing its AST.
+
+    Lazy style: function defines an inner @T.prim_func and returns it.
+    Eager style: function uses DSL builder pattern (T.Kernel, T.const, T.Tensor, etc.)
+
+    Detection logic:
+    1. If function has an inner @T.prim_func definition -> lazy style
+    2. If function body directly uses eager-mode constructs (T.Kernel, T.const, etc.) -> eager style
+    3. Otherwise -> lazy style (conservative default for external prim_func returns)
+
+    Returns True if lazy style is detected.
+    """
+    # Check for inner @T.prim_func or @prim_func decorated functions
+    has_inner_prim_func = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node is not tree:
+            for decorator in node.decorator_list:
+                if isinstance(decorator, ast.Attribute) and decorator.attr == "prim_func":
+                    has_inner_prim_func = True
+                elif isinstance(decorator, ast.Name) and decorator.id == "prim_func":
+                    has_inner_prim_func = True
+
+    if has_inner_prim_func:
+        return True
+
+    # Check if the function body directly uses eager-mode DSL constructs
+    # These indicate the function itself is the kernel (eager style)
+    eager_mode_attrs = {"Kernel", "const", "dynamic", "Tensor", "StridedTensor", "empty"}
+    # Also check for direct imports: from tilelang.language import const, Kernel, etc.
+    eager_mode_names = {"Kernel", "const", "dynamic", "empty"}
+
+    for node in ast.walk(tree):
+        # Skip inner function definitions - they might be prim_funcs
+        if isinstance(node, ast.FunctionDef) and node is not tree:
+            continue
+
+        # Check for T.Kernel, T.const, T.Tensor, etc.
+        if isinstance(node, ast.Attribute):
+            if node.attr in eager_mode_attrs:
+                # Verify it's accessed from T or similar module
+                if isinstance(node.value, ast.Name) and node.value.id in ("T", "tilelang", "tl"):
+                    return False  # eager style
+
+        # Check for T.Tensor[[...], ...] or Tensor[[...], ...] subscript pattern
+        if isinstance(node, ast.Subscript):
+            if isinstance(node.value, ast.Attribute) and node.value.attr in ("Tensor", "StridedTensor"):
+                return False  # eager style
+            # Direct import: Tensor[[M, N], dtype]
+            if isinstance(node.value, ast.Name) and node.value.id in ("Tensor", "StridedTensor"):
+                return False  # eager style
+
+        # Check for direct function calls: const("M"), Kernel(...), etc.
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in eager_mode_names:
+                return False  # eager style
+
+    # Default: if there's a return with value and no eager constructs detected,
+    # assume lazy style (external prim_func return)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and node.value is not None:
+            if isinstance(node.value, ast.Constant) and node.value.value is None:
+                continue
+            return True
+
+    return False
 
 
 def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
@@ -613,6 +683,9 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
     nonlocals = utils.get_func_nonlocals(func)
 
+    # Detect lazy style before AST transformation
+    is_lazy = _detect_lazy_style(tree)
+
     # DSLMutator generates a function named `make_closure`
     #   it accepts all names inside nonlocal, and returns the mutated function
     #   this is because we must separate the closure namespace form the global namespace
@@ -637,4 +710,4 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
         func.__globals__,  # use the original globalns
     )
     fn = make_closure(**nonlocals)
-    return IRGenerator(gen=fn, source=ast.unparse(tree), extra_type_hints=mut.extra_type_hints)
+    return IRGenerator(gen=fn, source=ast.unparse(tree), extra_type_hints=mut.extra_type_hints, is_lazy_style=is_lazy)
