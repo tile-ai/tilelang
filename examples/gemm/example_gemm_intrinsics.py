@@ -6,7 +6,6 @@ from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
     TensorCoreIntrinEmitter,
 )
-from tilelang.transform import simplify_prim_func
 
 
 def make_swizzle_layout(shared_buf):
