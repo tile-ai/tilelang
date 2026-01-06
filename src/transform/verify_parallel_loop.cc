@@ -169,7 +169,7 @@ public:
   }
   void VisitStmt_(const ForNode *op) override {
     if (op->kind == ForKind::kParallel || op->kind == ForKind::kVectorized) {
-      auto guard_1 = MakeGuard(op->loop_var, Range(op->min, op->extent));
+      auto guard_1 = MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
       auto guard_2 = MakeGuard(op->extent > 0);
       Base::VisitStmt_(op);
     } else {
