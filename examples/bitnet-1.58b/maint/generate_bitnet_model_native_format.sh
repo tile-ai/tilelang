@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # require git lfs
 if ! command -v git-lfs &> /dev/null; then
     echo "Please install git-lfs first by running 'sudo apt install git-lfs'"

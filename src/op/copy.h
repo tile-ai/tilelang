@@ -28,6 +28,32 @@ enum class CopyInst : uint8_t {
   kTMemStore = 8,   // tcgen05.st (register -> tensor memory)
 };
 
+/// Convert CopyInst enum to string for debugging
+inline const char *CopyInstToString(CopyInst inst) {
+  switch (inst) {
+  case CopyInst::kNormal:
+    return "Normal";
+  case CopyInst::kLDSM:
+    return "LDSM";
+  case CopyInst::kSTSM:
+    return "STSM";
+  case CopyInst::kBulkLoad:
+    return "BulkLoad";
+  case CopyInst::kBulkStore:
+    return "BulkStore";
+  case CopyInst::kBulkLoad1D:
+    return "BulkLoad1D";
+  case CopyInst::kBulkStore1D:
+    return "BulkStore1D";
+  case CopyInst::kTMemLoad:
+    return "TMemLoad";
+  case CopyInst::kTMemStore:
+    return "TMemStore";
+  default:
+    return "Unknown";
+  }
+}
+
 /// Descriptor for Tensor Memory Access (TMA) copy operations
 struct TMADesc {
   size_t rank;                   ///< Tensor rank (number of dimensions)
@@ -89,18 +115,18 @@ class CopyNode : public TileOperatorNode {
 public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
-  IntImm coalesced_width; // Width (in elements) for coalesced memory access
-  Bool disable_tma = Bool(false); // Whether to disable TMA acceleration
+  Map<String, ObjectRef> annotations; // Annotations for the copy operation
+  // Supported annotation keys:
+  //   - "coalesced_width": IntImm, width for coalesced memory access
+  //   - "disable_tma": Bool, whether to disable TMA acceleration
+  //   - "eviction_policy": IntImm, cache eviction policy (0=normal, 1=first,
+  //   2=last)
+  //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
+  //     layout hint applied to the outermost generated parallel loop of this
+  //     copy's SIMT loop nest.
 
   mutable ParallelOp par_op_; // Optional associated parallelization operator
 
-  enum class EvictionPolicy : uint8_t {
-    kEvictNormal = 0,
-    kEvictFirst = 1,
-    kEvictLast = 2,
-  };
-
-  uint8_t eviction_policy; // Policy for cache eviction
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Copy", CopyNode, TileOperatorNode);
 
   static void RegisterReflection() {
@@ -110,7 +136,26 @@ public:
         .def_ro("dst", &CopyNode::dst)
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
-        .def_ro("coalesced_width", &CopyNode::coalesced_width);
+        .def_ro("annotations", &CopyNode::annotations);
+  }
+
+  // Helper methods to get annotation values
+  bool GetDisableTMA() const {
+    if (auto val = annotations.Get("disable_tma")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
+  int GetEvictionPolicy() const {
+    if (auto val = annotations.Get("eviction_policy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 0; // default: evict_normal
   }
 
   /*!
@@ -269,6 +314,28 @@ protected:
    * @return Reference to the singleton TVM Op representing this operator.
    */
   TileOperator Clone() const;
+
+private:
+  /*!
+   * \brief Collect fragment buffers from expression and create fully replicated
+   * layouts.
+   *
+   * Recursively searches the expression for BufferLoad nodes with
+   * "local.fragment" scope, following let bindings. For each found fragment
+   * buffer, creates a fully replicated layout and adds it to result_map.
+   *
+   * \param expr            Expression to search.
+   * \param let_var_to_expr Map from let variables to their bound expressions.
+   * \param existing_layouts Existing layout map to check for already-inferred
+   * layouts. \param thread_extent   Number of threads for replication. \param
+   * thread_bounds   Thread bounds for binding the layout. \param result_map
+   * Output map to store collected fragment layouts.
+   */
+  void CollectFragmentLayouts(const PrimExpr &expr,
+                              const Map<Var, PrimExpr> &let_var_to_expr,
+                              const LayoutMap &existing_layouts,
+                              PrimExpr thread_extent, Range thread_bounds,
+                              Map<Buffer, Layout> &result_map) const;
 };
 
 class Copy : public TileOperator {
@@ -278,9 +345,10 @@ public:
   /*!
    * \brief Constructor.
    * \param args  Expression arguments for the copy.
-   * \param vmap  Buffer variable mapping.
+   * \param annotations  Annotations map from the Call node.
    */
-  TVM_DLL Copy(Array<PrimExpr> args);
+  TVM_DLL Copy(Array<PrimExpr> args,
+               Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
 
   /*!
    * \brief Get the TVM Op handle corresponding to this Copy op.
@@ -346,7 +414,9 @@ class Conv2DIm2ColOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Conv2DIm2ColOp, TileOperator,
                                              Conv2DIm2ColOpNode);
-  TVM_DLL Conv2DIm2ColOp(Array<PrimExpr> args);
+  TVM_DLL
+  Conv2DIm2ColOp(Array<PrimExpr> args,
+                 Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

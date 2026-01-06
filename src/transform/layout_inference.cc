@@ -20,6 +20,7 @@
 #include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
+#include "../op/utils.h"
 #include "../target/utils.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
@@ -28,9 +29,7 @@
 #include "common/loop_parallel_transform_utils.h"
 #include "common/union_find.h"
 #include "layout_reducer.h"
-#include "loop_partition.h"
-#include "loop_vectorize.h"
-#include "runtime/thread_storage_scope.h"
+#include "parallel_loop_layout_validator.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -110,10 +109,14 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    auto updates =
-        next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
-                                          cur_analyzer, buffer_oob},
-                          level);
+    auto updates = next->InferLayout(LayoutInferArgs{target_,
+                                                     thread_bounds,
+                                                     layout_map,
+                                                     cur_analyzer,
+                                                     buffer_oob,
+                                                     {},
+                                                     let_var_to_expr_},
+                                     level);
 
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
@@ -166,8 +169,8 @@ public:
 
       if (layout_map.count(buffer)) {
         // If new layout contains the old one, update map
-        if (buffer.scope() == "local.fragment" &&
-            level != InferLevel::kStrict && !strict_layout_map.count(buffer)) {
+        if (IsFragmentBuffer(buffer) && level != InferLevel::kStrict &&
+            !strict_layout_map.count(buffer)) {
           // Actually this test has been done in ParallelOp::InferLayout
           // already. Just do it again to avoid missing implementations in other
           // `TileOperator`s.
@@ -304,6 +307,17 @@ public:
       q.push_back(i);
     }
 
+    // step 0: set fully replicated layout for floating fragment buffers
+    // Floating buffers are accessed outside TileOps (e.g., in if conditions),
+    // so they must be replicated across all threads.
+    for (const auto &[buffer, thread_bounds] : floating_fragment_buffers_) {
+      if (layout_map.count(buffer))
+        continue;
+      auto frag =
+          Fragment::FullyReplicated(buffer->shape, thread_bounds->extent);
+      layout_map.Set(buffer, frag);
+    }
+
     // step 1: infer strict layout
     for (int i = 0; i < num_infer; i++) {
       RunInferStep(i, InferLevel::kStrict, false, layout_map, strict_layout_map,
@@ -317,10 +331,8 @@ public:
     // step 2: infer common layout with BFS
     FinishInferQueue(InferLevel::kCommon, layout_map, strict_layout_map, q,
                      in_queue);
-
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
-
     // step 4: finalize alias layouts by Var
     // For each storage var, if any buffer in the group has a layout,
     // propagate (reshape if needed) to the rest to ensure completeness.
@@ -365,7 +377,7 @@ public:
 
     // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
-      if (buffer.scope() == "local.fragment") {
+      if (IsFragmentBuffer(buffer)) {
         ICHECK_NE(layout_map.count(buffer), 0)
             << "The layout for fragment " << buffer
             << " can not be inferred correctly.";
@@ -418,6 +430,8 @@ public:
         << "Layout_Inference: Require the target attribute";
     target_ = target.value();
     this->operator()(f->body);
+    // Compute floating fragment buffers after collection
+    ComputeFloatingFragmentBuffers(f->body);
   }
 
 private:
@@ -433,17 +447,17 @@ private:
     return buffer_map;
   }
 
-  // Return true if all buffers that this op (idx) touches already have
-  // inferred layouts in layout_map. Used to prioritize enqueue order.
-  bool ShouldPrioritize(int idx, const LayoutMap &layout_map) const {
+  // Return true if any buffer that this op (idx) touches already has
+  // an inferred layout in layout_map. Used to prioritize enqueue order.
+  bool HasKnownLayoutAnchor(int idx, const LayoutMap &layout_map) const {
     auto it = op_touched_buffers_.find(idx);
     if (it == op_touched_buffers_.end() || it->second.empty())
       return false;
     for (const auto &buf : it->second) {
-      if (!layout_map.count(buf))
-        return false;
+      if (layout_map.count(buf))
+        return true;
     }
-    return true;
+    return false;
   }
 
   // Enqueue idx to q with priority if all its buffers already
@@ -458,7 +472,7 @@ private:
     if (in_queue[idx])
       return;
     in_queue[idx] = true;
-    if (ShouldPrioritize(idx, layout_map)) {
+    if (HasKnownLayoutAnchor(idx, layout_map)) {
       q.push_front(idx);
     } else {
       q.push_back(idx);
@@ -479,6 +493,10 @@ private:
         } else if (auto buffer = getBufferFromRegion(arg)) {
           addToUseList(buffer.value());
         }
+        // Check if the argument uses any LetStmt variables that reference
+        // fragment buffers. If so, add those buffers to the use list.
+        // This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0], ...)
+        CollectFragmentBuffersFromExpr(arg);
       }
       // Compute thread_var_ and thread_bounds_
       thread_var_vec_.push_back(thread_var_);
@@ -571,7 +589,7 @@ private:
 
   void addToUseList(const Buffer &buffer) {
     // buffer scope must be local.fragment
-    if (buffer.scope() != "local.fragment") {
+    if (!IsFragmentBuffer(buffer)) {
       return;
     }
     int infer_idx = infer_list_.size();
@@ -583,15 +601,10 @@ private:
     // Track which buffers this op (infer_idx) touches for prioritization.
     // Avoid duplicates.
     auto &vec = op_touched_buffers_[infer_idx];
-    bool exists = false;
-    for (const auto &b : vec) {
-      if (b.same_as(buffer)) {
-        exists = true;
-        break;
-      }
-    }
-    if (!exists)
+    if (std::none_of(vec.begin(), vec.end(),
+                     [&](const Buffer &b) { return b.same_as(buffer); })) {
       vec.push_back(buffer);
+    }
   }
 
   void VisitStmt_(const ForNode *op) final {
@@ -754,6 +767,30 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
+  void VisitStmt_(const LetStmtNode *op) final {
+    // Record Let variable to its bound expression.
+    // This enables tracking fragment buffer accesses through let bindings.
+    let_var_to_expr_.Set(op->var, op->value);
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  // Helper: recursively collect fragment buffers from an expression,
+  // following let bindings chain.
+  void CollectFragmentBuffersFromExpr(const PrimExpr &expr) {
+    PostOrderVisit(expr, [this](const ObjectRef &node) {
+      if (auto bl = node.as<BufferLoadNode>()) {
+        if (IsFragmentBuffer(bl->buffer)) {
+          addToUseList(bl->buffer);
+        }
+      } else if (auto var_node = node.as<VarNode>()) {
+        auto var = tvm::ffi::GetRef<Var>(var_node);
+        if (let_var_to_expr_.count(var)) {
+          CollectFragmentBuffersFromExpr(let_var_to_expr_[var]);
+        }
+      }
+    });
+  }
+
   void VisitExpr_(const BufferLoadNode *op) final {
     // Collect buffer from BufferLoad
     if (op->buffer.defined() && op->buffer->data.defined()) {
@@ -814,9 +851,122 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
+  // Compute floating fragment buffers after collection is done.
+  //
+  // A "floating" fragment buffer is one that has accesses outside of any
+  // TileOp (Copy, Gemm, Reduce, Parallel, etc.). For example:
+  //
+  //   T.copy(BlockMask[by, :], block_mask_f)  // block_mask_f accessed IN
+  //   TileOp for i in T.Pipelined(N_S):
+  //       if block_mask_f[i] >= 0:           // block_mask_f accessed OUTSIDE
+  //       TileOp (floating!)
+  //           T.copy(A[...], A_shared)
+  //
+  // In this example, `block_mask_f[i]` in the if-condition is a "floating"
+  // access because it's not inside any TileOp. Such buffers need special
+  // handling: they must be fully replicated across all threads since the
+  // access pattern cannot be inferred from TileOp semantics.
+  //
+  // This function identifies these buffers by:
+  // 1. Collecting all IR nodes that are inside TileOps (from infer_list_stmt_)
+  // 2. Scanning the entire function body for fragment buffer accesses
+  // 3. Any access not inside a TileOp means the buffer is "floating"
+  // 4. Recording the thread_bounds at the point of each floating access
+  void ComputeFloatingFragmentBuffers(const Stmt &func_body) {
+    // Step 1: Collect all nodes that are inside TileOps
+    std::unordered_set<const Object *> nodes_in_tileops;
+    for (const auto &stmt : infer_list_stmt_) {
+      PostOrderVisit(stmt, [&](const ObjectRef &node) {
+        nodes_in_tileops.insert(node.get());
+      });
+    }
+
+    // Step 2: Use a visitor to scan for floating accesses while tracking thread
+    // context
+    class FloatingBufferCollector : public IRVisitorWithAnalyzer {
+    public:
+      FloatingBufferCollector(
+          const std::unordered_set<const Object *> &nodes_in_tileops,
+          std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
+              &floating_buffers)
+          : nodes_in_tileops_(nodes_in_tileops),
+            floating_buffers_(floating_buffers) {}
+
+      void VisitStmt_(const AttrStmtNode *op) final {
+        if (op->attr_key == tir::attr::thread_extent) {
+          IterVar iv = Downcast<IterVar>(op->node);
+          if (iv->thread_tag == "threadIdx.x") {
+            thread_var_ = iv;
+          }
+        }
+        IRVisitorWithAnalyzer::VisitStmt_(op);
+      }
+
+      void VisitExpr_(const BufferLoadNode *op) final {
+        CheckFloatingAccess(op->buffer, op);
+        IRVisitorWithAnalyzer::VisitExpr_(op);
+      }
+
+      void VisitStmt_(const BufferStoreNode *op) final {
+        CheckFloatingAccess(op->buffer, op);
+        IRVisitorWithAnalyzer::VisitStmt_(op);
+      }
+
+    private:
+      void CheckFloatingAccess(const Buffer &buffer, const Object *node) {
+        if (!IsFragmentBuffer(buffer))
+          return;
+        if (nodes_in_tileops_.find(node) != nodes_in_tileops_.end())
+          return;
+        // This is a floating access - record buffer with current thread_bounds
+        if (floating_buffers_.find(buffer) != floating_buffers_.end())
+          return; // Already recorded
+        Range thread_bounds = Range::FromMinExtent(0, 1);
+        if (thread_var_.defined() &&
+            analyzer_.const_int_bound.IsBound(thread_var_->var)) {
+          auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+          auto dtype = thread_var_->var.dtype();
+          auto extent =
+              const_int_bound->max_value - const_int_bound->min_value + 1;
+          thread_bounds = Range::FromMinExtent(
+              IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent));
+        }
+        floating_buffers_[buffer] = thread_bounds;
+      }
+
+      const std::unordered_set<const Object *> &nodes_in_tileops_;
+      std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
+          &floating_buffers_;
+      IterVar thread_var_;
+    };
+
+    FloatingBufferCollector collector(nodes_in_tileops,
+                                      floating_fragment_buffers_);
+    collector(func_body);
+
+    // Debug log floating fragment buffers
+    if (!floating_fragment_buffers_.empty()) {
+      DLOG(INFO)
+          << "Floating fragment buffers (have accesses outside TileOps):";
+      for (const auto &[buffer, thread_bounds] : floating_fragment_buffers_) {
+        DLOG(INFO) << "    " << buffer
+                   << " with thread_bounds: " << thread_bounds;
+      }
+    }
+  }
+
   Map<Var, Array<Buffer>> buffer_data_to_buffers_;
+  // Map from LetStmt variable to its bound expression
+  Map<Var, PrimExpr> let_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
+  // Fragment buffers that have accesses outside of TileOps.
+  // These "floating" buffers need fully replicated layouts since their
+  // access patterns cannot be inferred from TileOp semantics.
+  // Maps buffer -> thread_bounds at the point of floating access.
+  // See ComputeFloatingFragmentBuffers() for detailed explanation.
+  std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
+      floating_fragment_buffers_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
       use_list_;
   // Per-op list of buffers it touches (fragment scope), used for prioritization
@@ -1008,16 +1158,15 @@ public:
     BufferUseDefCollector collector(skip_thread_partition);
     collector.Collect(f);
     auto result = collector.Run();
-    LayoutInferencer substituter(result, skip_thread_partition, &analyzer);
+    LayoutInferencer substituter(result, &analyzer);
     fptr->body = substituter.VisitStmt(f->body);
     return f;
   }
 
 private:
   LayoutInferencer(const LayoutInferenceResult &result,
-                   bool skip_thread_partition, arith::Analyzer *analyzer)
-      : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
-        skip_thread_partition_(skip_thread_partition) {};
+                   arith::Analyzer *analyzer)
+      : arith::IRMutatorWithAnalyzer(analyzer), result_(result) {};
 
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
@@ -1050,173 +1199,55 @@ private:
   }
 
   /**
-   * @brief Visit and transform For nodes according to inferred layout
-   * information.
+   * @brief Visit and transform For nodes by storing inferred layout information
+   *        as annotations instead of expanding the loop.
    *
-   * If the For node is present in result_.for_map, this method applies
-   * loop-level layout-driven transformations: it optionally partitions the loop
-   * across the thread index, vectorizes the loop body, and wraps the loop with
-   * a predicate if one was inferred for the loop root.
+   * If the For node is present in result_.for_map, this method stores the
+   * inferred loop layout and predicate as annotations on the For node, rather
+   * than performing loop partition and vectorization.
    *
-   * Detailed behavior:
-   * - Reads reducer information from the For node's attr::kReducerInfo
-   * annotation (if present) to detect reduction targets.
-   * - Detects register-local buffer stores (buffers with scope "local") in the
-   *   original loop body; if only register-local stores are present the loop is
-   *   treated as a register-local scenario and is not partitioned across
-   * threads.
-   * - Obtains the loop layout from result_.for_map[root] and, unless the loop
-   * is register-local or skip_thread_partition_ is set, partitions the loop via
-   *   PartitionLoop using thread_var_ and analyzer_.
-   * - Scans the transformed loop body to determine whether it accesses any
-   *   non-local buffers (scopes other than "local" or "local.fragment").
-   * - Scans the transformed loop body to detect reducers (based on
-   * reducer_info). If a reducer is present the loop is NOT vectorized
-   * (reduction axes are excluded from vectorization as a conservative
-   * workaround).
-   * - If the loop has non-local accesses and no reducer, the loop is vectorized
-   *   via VectorizeLoop.
-   * - If a predicate exists in result_.predicate_map for the loop root and the
-   *   loop was partitioned, the method returns an IfThenElse surrounding the
-   *   (possibly partitioned/vectorized) loop with that predicate; otherwise it
-   *   returns the transformed For.
+   * The stored annotations are:
+   * - attr::kParallelLoopLayout: The Fragment layout for the parallel loop
+   * - attr::kParallelLoopPredicate: The predicate expression (if any)
    *
-   * @return The possibly transformed For statement (or an IfThenElse wrapping
-   * it)
+   * @return The For statement with layout annotations attached
    */
   Stmt VisitStmt_(const ForNode *op) final {
-    Map<Var, ReducerInfo> reducer_info;
-    if (op->annotations.count(attr::kReducerInfo))
-      reducer_info = op->annotations.Get(attr::kReducerInfo)
-                         ->as<Map<Var, ReducerInfo>>()
-                         .value();
     if (!result_.for_map.count(tvm::ffi::GetRef<For>(op))) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
-    // the analyzer will be modified in PartitionLoop and VectorizeLoop
-    // we need to save its state to prevent conflicted bindings
-    auto saved_analyzer = analyzer_->Clone();
+
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto root = tvm::ffi::GetRef<For>(op);
-    // This check is a workaround to support T.Parallel for local buffers.
-    // For example:
-    //   for i in T.Parallel(1024):
-    //     A_local[i] = A_global[i]
-    // Here, A_local is a register-local buffer held independently by each
-    // thread, so explicit thread binding is not required.
-    bool store_into_local = false;
-    PostOrderVisit(root, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (store->buffer.scope() == "local") {
-          store_into_local = true;
-        }
-        // if the case is like:
-        // for i in T.Parallel(1024):
-        //     A_local[i] = B_global[i]
-        //     A_frag[i] = A_global[i]
-        // exception will be raise in Parallel::LayoutInference
-      }
-    });
-    // This check if for the loop that only manuplates "local" buffers,
-    // for i in T.Parallel(1024):
-    //     A_local[i] = B_local[i]
-    // Though this might be illegal
-    // We use PostOrderVisit to detect whether the loop only manuplates
-    // "local" buffers, which indicates register usage and justifies skipping
-    // thread binding.
-    bool local_register_only = true;
-    PostOrderVisit(root, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (store->buffer.scope() != "local") {
-          local_register_only = false;
-        }
-      } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (load->buffer.scope() != "local") {
-          local_register_only = false;
-        }
-      }
-    });
 
     auto loop_layout = result_.for_map[root];
-    // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
-    // NOTE(lei): a bit ugly, we should rethink about this part in future.
-    bool parallel_loop =
-        !skip_thread_partition_ && !local_register_only && !store_into_local;
 
-    if (parallel_loop) {
-      for_node =
-          PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);
-    }
-    // If none thread bindings are provided, partition the loop
-    bool has_non_local = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *load = obj.as<BufferLoadNode>()) {
-        String scope = load->buffer.scope();
-        if (scope != "local" && scope != "local.fragment") {
-          has_non_local = true;
-        }
-      } else if (const auto *store = obj.as<BufferStoreNode>()) {
-        String scope = store->buffer.scope();
-        if (scope != "local" && scope != "local.fragment") {
-          has_non_local = true;
-        }
+    // Store the loop layout as an annotation on the For node (outermost)
+    auto for_ptr = for_node.CopyOnWrite();
+    for_ptr->annotations.Set(attr::kParallelLoopLayout, loop_layout);
+
+    // Store the predicate as an annotation if it exists and is not trivially
+    // true
+    if (result_.predicate_map.count(root)) {
+      PrimExpr predicate = analyzer_->Simplify(result_.predicate_map[root]);
+      // Only store predicate if it's not trivially true
+      if (!is_const_int(predicate, 1)) {
+        for_ptr->annotations.Set(attr::kParallelLoopPredicate, predicate);
       }
-    });
-    // Workaround: if reducer is presented, don't vectorize loop
-    // Best solution should be isolate reduction axis out of vectorization
-    bool has_reducer = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (!has_reducer)
-        if (const auto *store = obj.as<BufferStoreNode>()) {
-          has_reducer = reducer_info.count(store->buffer->data) != 0;
-        }
-    });
-
-    // If a cast operation exists, vectorization may still be required
-    bool has_cast_operations = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *cast = obj.as<CastNode>()) {
-        // Check if this is a non-reducer store with Cast operation
-        DataType src_type = cast->value.dtype();
-        DataType dst_type = cast->dtype;
-        bool src_ok =
-            src_type.is_float() || src_type.is_bfloat() || src_type.is_float8();
-        bool dst_ok =
-            dst_type.is_float() || dst_type.is_bfloat() || dst_type.is_float8();
-        if (src_ok && dst_ok && TargetIsCuda(Target::Current())) {
-          has_cast_operations = true;
-        }
-      }
-    });
-
-    if ((has_non_local || has_cast_operations) && !has_reducer) {
-      DLOG(INFO) << "Try to vectorize loop";
-      for_node = VectorizeLoop(for_node, saved_analyzer.get());
     }
 
-    if (result_.predicate_map.count(root) && parallel_loop) {
-      return IfThenElse(result_.predicate_map[root], for_node);
-    } else {
-      return for_node;
-    }
+    return for_node;
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
-      ICHECK_NE(iv->thread_tag.length(), 0U);
-      if (iv->thread_tag == "threadIdx.x") {
-        thread_var_ = iv;
-      }
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
 private:
   const LayoutInferenceResult result_;
-  IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
-                                IterVarType::kDataPar);
-  bool skip_thread_partition_{false};
 };
 
 tvm::transform::Pass LayoutInference() {
@@ -1227,7 +1258,10 @@ tvm::transform::Pass LayoutInference() {
     collector(f->body);
     bool has_thread_binding = !collector.thread_binding_.empty();
     bool skip_thread_partition = !has_thread_binding;
-    return LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+    f = LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+    // Validate parallel loop layout annotations
+    ParallelLoopLayoutValidator::Validate(f->body);
+    return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
 }

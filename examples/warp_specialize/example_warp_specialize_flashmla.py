@@ -17,12 +17,14 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     assert kv_head_num == 1, "kv_head_num must be 1"
     h_dim = dim // 2
 
-    @T.macro
-    def flash_attn(
+    @T.prim_func
+    def main_no_split(
         Q: T.Tensor([batch, heads, dim], dtype),
         Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
         KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
         K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        glse: T.Tensor([batch, heads, num_split], dtype),
+        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
         Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=256) as (hid, bid):
@@ -80,13 +82,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             logsum_1 = T.alloc_fragment([block_H], accum_dtype)
 
             cur_kv_head = hid // (kv_group_num // block_H)
-
-            T.annotate_layout(
-                {
-                    O_shared_l: tilelang.layout.make_swizzled_layout(O_shared_l),
-                    O_shared_r: tilelang.layout.make_swizzled_layout(O_shared_r),
-                }
-            )
 
             # barriers_Q
             q_shared_ready_barrier = T.alloc_barrier(arrive_count=256)
@@ -291,18 +286,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.copy(acc_o_r, O_shared_r)
                 T.copy(O_shared_r, Output[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, h_dim:])
 
-    @T.prim_func
-    def main_no_split(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
-    ):
-        flash_attn(Q, Q_pe, KV, K_pe, Output)
-
     return main_no_split
 
 
@@ -361,7 +344,7 @@ def main(batch=1, heads=64, kv_heads=1, kv_ctx=1024, dim=512, pe_dim=64):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch", type=int, default=1, help="batch size")
+    parser.add_argument("--batch", type=int, default=132, help="batch size")
     parser.add_argument("--heads", type=int, default=128, help="q heads number")
     parser.add_argument("--kv_heads", type=int, default=1, help="kv heads number")
     parser.add_argument("--kv_ctx", type=int, default=8192, help="kv context length")

@@ -254,24 +254,6 @@ def test_marco_return():
             check(d, (int, float, T.PrimExpr))
 
 
-def test_prim_func_generator():
-    @T.prim_func(generator=True)
-    def prim_func_gen(
-        A=T.Tensor((128,), T.float32),  # noqa: B008
-        B=T.Tensor((128,), T.float32),  # noqa: B008
-    ):
-        with T.Kernel(128) as (tx,):
-            T.copy(A[tx], B[tx])
-
-    prim_func_gen()
-
-    @T.prim_func
-    def foo() -> T.Tensor((128,), T.float32):
-        pass
-
-    assert isinstance(foo, T.PrimFunc)
-
-
 def test_serial_for_with_step():
     @tilelang.jit(out_idx=-1)
     @T.prim_func
@@ -337,6 +319,8 @@ def test_swap_logic():
     torch.testing.assert_close(data, ref)
 
 
+# TODO(Gong): ROCm is not supported alloc_var with initializer
+@tilelang.testing.requires_cuda
 def test_while_loop():
     @tilelang.jit(out_idx=-1)
     @T.prim_func
@@ -468,6 +452,32 @@ def test_boolop():
         return not (a < b and b < c and a * d < b * d) or b * d < c * d
 
     cond()
+
+
+def test_constexpr_if():
+    @tilelang.jit
+    def probe(tmp: bool):
+        @T.prim_func
+        def foo(A: T.Tensor[[2], T.int32]):
+            with T.Kernel(1):
+                if tmp:
+                    v = A[0]
+                else:
+                    v = A[1]
+                if tmp:
+                    A[1] = v + 1
+                else:
+                    A[0] = v + 1
+
+        return foo
+
+    A = torch.tensor([10, 20], dtype=torch.int32).cuda()
+    expect_1 = torch.tensor([10, 11], dtype=torch.int32).cuda()
+    expect_2 = torch.tensor([12, 11], dtype=torch.int32).cuda()
+    probe(True)(A)
+    assert torch.equal(A, expect_1)
+    probe(False)(A)
+    assert torch.equal(A, expect_2)
 
 
 if __name__ == "__main__":

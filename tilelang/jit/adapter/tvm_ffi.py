@@ -19,6 +19,7 @@ from tilelang.utils.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
+from tilelang.language.v2.dtypes import dtype
 
 
 class TVMFFIKernelAdapter(BaseKernelAdapter):
@@ -96,6 +97,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.pass_configs = pass_configs
         self.compile_flags = compile_flags
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
+        self.kernel_global_source = self.device_kernel_source
 
         self._post_init()
 
@@ -149,6 +151,11 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     native_shape.append(dim)  # Keep tir.Var for dynamic dimensions
                 else:
                     native_shape.append(dim)
+            tl_dtype = param.dtype
+            if tl_dtype.bits < 8:
+                stroage_dtype: dtype = dtype(param.torch_dtype())
+                # last dim divide by bits to get the actual shape
+                native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (stroage_dtype.bits * stroage_dtype.lanes)
             param_shapes.append(native_shape)
 
         if self.executable is None:

@@ -148,12 +148,10 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                 B_dequantize_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
                 B_dequantize_prev_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
                 Ct_local = T.alloc_fragment((block_N, block_M), accum_dtype)
-                Ct_shared = T.alloc_shared((block_N, block_M), out_dtype)
 
                 T.annotate_layout(
                     {
                         B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                        Ct_shared: tilelang.layout.make_swizzled_layout(Ct_shared),
                     }
                 )
 
@@ -198,7 +196,6 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                 T.annotate_layout(
                     {
                         B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                        Ct_shared: tilelang.layout.make_swizzled_layout(Ct_shared),
                     }
                 )
 
@@ -271,6 +268,14 @@ def main(m=256, n=256, k=256, tune=False):
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")
+
+
+def run_regression_perf(m=4096, n=4096, k=4096):
+    kernel = matmul(m, n, k, "float16", "float16", "float32", num_bits=4, tune=False)(
+        block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1
+    )
+    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

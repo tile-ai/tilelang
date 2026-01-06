@@ -1,4 +1,4 @@
-"""The language interface for tl programs."""
+"""Kernel launching language interface in TileLang."""
 
 from __future__ import annotations
 from collections import deque
@@ -226,7 +226,7 @@ class KernelLaunchFrame(TIRFrame):
 
 
 def Kernel(
-    *blocks: list[tir.PrimExpr],
+    *blocks: tir.PrimExpr,
     threads: int | list[int] | tuple | None = None,
     is_cpu: bool = False,
     prelude: str | None = None,
@@ -235,7 +235,7 @@ def Kernel(
 
     Parameters
     ----------
-    blocks : List[int]
+    blocks : int
         A list of extent, can be 1-3 dimension, representing gridDim.(x|y|z)
     threads : int
         A integer representing blockDim.x

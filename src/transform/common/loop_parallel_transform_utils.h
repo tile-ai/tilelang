@@ -17,6 +17,8 @@
 #include "arith/ir_visitor_with_analyzer.h"
 #include <queue>
 
+#include "../../op/utils.h"
+
 namespace tvm {
 namespace tl {
 
@@ -134,7 +136,7 @@ public:
   class BufferAccessCollector : public StmtExprVisitor {
   public:
     void VisitExpr_(const BufferLoadNode *op) final {
-      if (op->buffer.scope() == "local.fragment") {
+      if (IsFragmentBuffer(op->buffer)) {
         if (buffer_indices.find(op->buffer) == buffer_indices.end()) {
           buffer_indices[op->buffer] = op->indices;
         } else {
@@ -147,7 +149,7 @@ public:
     }
 
     void VisitStmt_(const BufferStoreNode *op) final {
-      if (op->buffer.scope() == "local.fragment") {
+      if (IsFragmentBuffer(op->buffer)) {
         if (buffer_indices.find(op->buffer) == buffer_indices.end()) {
           buffer_indices[op->buffer] = op->indices;
         } else {

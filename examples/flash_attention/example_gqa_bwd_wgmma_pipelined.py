@@ -41,7 +41,6 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -162,15 +161,6 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             dk_shared = T.alloc_shared([block_M, dim_qk], accum_dtype)
             dv_shared = T.alloc_shared([block_M, dim_v], accum_dtype)
             dq_shared = T.alloc_shared([block_N, dim_qk], accum_dtype)
-
-            T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dq_shared: tilelang.layout.make_swizzled_layout(dq_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                }
-            )
 
             T.copy(K[bz, by * block_M : (by + 1) * block_M, bx // groups, :], K_shared)
             T.copy(V[bz, by * block_M : (by + 1) * block_M, bx // groups, :], V_shared)
@@ -337,6 +327,25 @@ def main(BATCH: int = 1, H: int = 32, N_CTX: int = 256, D_HEAD_QK: int = 192, D_
     latency = do_bench(run1, warmup=500)
     print("tilelang: {:.2f} ms".format(latency))
     print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+
+
+def run_regression_perf(
+    BATCH: int = 1, H: int = 32, N_CTX: int = 256, D_HEAD_QK: int = 192, D_HEAD_V: int = 128, groups: int = 16, causal: bool = False
+):
+    Q = torch.empty(BATCH, N_CTX, H, D_HEAD_QK, dtype=torch.half, device="cuda").normal_().requires_grad_()
+
+    head_kv = H // groups
+    K = torch.empty(BATCH, N_CTX, head_kv, D_HEAD_QK, dtype=torch.half, device="cuda").normal_().requires_grad_()
+    V = torch.empty(BATCH, N_CTX, head_kv, D_HEAD_V, dtype=torch.half, device="cuda").normal_().requires_grad_()
+    dO = torch.empty(BATCH, N_CTX, H, D_HEAD_V, dtype=torch.half, device="cuda").normal_().requires_grad_()
+    O = attention(Q, K, V, causal, groups)
+
+    def run1():
+        O.backward(dO, retain_graph=True)
+
+    from tilelang.profiler import do_bench
+
+    return do_bench(run1, warmup=500, backend="cupti")
 
 
 if __name__ == "__main__":

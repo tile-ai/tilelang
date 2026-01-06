@@ -32,6 +32,20 @@ enum class InferLevel : uint8_t {
   kStrict = 2,
 };
 
+/// Convert InferLevel enum to string for debugging
+inline const char *InferLevelToString(InferLevel level) {
+  switch (level) {
+  case InferLevel::kFree:
+    return "Free";
+  case InferLevel::kCommon:
+    return "Common";
+  case InferLevel::kStrict:
+    return "Strict";
+  default:
+    return "Unknown";
+  }
+}
+
 struct LowerArgs {
   Target target;
   Range thread_bounds;
@@ -39,6 +53,9 @@ struct LowerArgs {
   AddWorkspaceCallback AddWorkspace;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
+  // Map from LetStmt variable to its bound expression, for resolving
+  // fragment buffer accesses through let bindings
+  Map<Var, PrimExpr> let_var_to_expr;
 };
 
 struct LayoutInferArgs {
@@ -48,6 +65,9 @@ struct LayoutInferArgs {
   arith::Analyzer *analyzer;
   bool buffer_oob = false;
   Map<Buffer, Buffer> buffer_remap;
+  // Map from LetStmt variable to its bound expression, for resolving
+  // fragment buffer accesses through let bindings
+  Map<Var, PrimExpr> let_var_to_expr;
 };
 
 class TileOperator;
@@ -75,7 +95,8 @@ Var GetVarFromAccessPtr(const PrimExpr &expr);
 TileOperator ParseOperator(Call call);
 TileOperator ParseOperator(Stmt stmt);
 
-using OpBuilderFunc = ffi::TypedFunction<TileOperator(Array<PrimExpr>)>;
+using OpBuilderFunc =
+    ffi::TypedFunction<TileOperator(Array<PrimExpr>, Map<String, ObjectRef>)>;
 
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \
@@ -85,7 +106,10 @@ using OpBuilderFunc = ffi::TypedFunction<TileOperator(Array<PrimExpr>)>;
   TVM_REGISTER_OP("tl.tileop." #OpName)                                        \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)             \
       .set_attr<OpBuilderFunc>(                                                \
-          "TLOpBuilder", [](Array<PrimExpr> args) { return Entry(args); })
+          "TLOpBuilder",                                                       \
+          [](Array<PrimExpr> args, Map<String, ObjectRef> annotations) {       \
+            return Entry(args, annotations);                                   \
+          })
 
 } // namespace tl
 } // namespace tvm

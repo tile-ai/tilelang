@@ -112,20 +112,20 @@ def chunk_scan_fwd(
         ):
             acc_o = T.alloc_fragment((block_M, block_N), accum_dtype)
             acc_o_shared = T.alloc_shared((block_M, block_N), dtype)
-            cb_shared = T.alloc_shared((block_M, block_K), dtype, scope="shared.dyn")
+            cb_shared = T.alloc_shared((block_M, block_K), dtype)
             cb_local = T.alloc_fragment((block_M, block_K), dtype)
-            dA_cs_k_shared = T.alloc_shared((block_K), dtype, scope="shared")
+            dA_cs_k_shared = T.alloc_shared((block_K), dtype)
             dA_cs_k_local = T.alloc_fragment((block_K), accum_dtype)
             dA_cs_m_local = T.alloc_fragment((block_M), accum_dtype)
-            dt_shared = T.alloc_shared((block_K), dtype, scope="shared")
+            dt_shared = T.alloc_shared((block_K), dtype)
             dt_local = T.alloc_fragment((block_K), accum_dtype)
             x_shared = T.alloc_shared((block_K, block_N), dtype, scope="shared.dyn")
-            dA_cs_m_shared = T.alloc_shared((block_M), dtype, scope="shared")
+            dA_cs_m_shared = T.alloc_shared((block_M), dtype)
             scale_m_local = T.alloc_fragment((block_M), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_Dstate), dtype)
             prev_state_shared = T.alloc_shared((block_N, block_Dstate), dtype)
             D_local = T.alloc_fragment((1), accum_dtype)
-            x_residual_shared = T.alloc_shared((block_M, block_N), dtype, scope="shared.dyn")
+            x_residual_shared = T.alloc_shared((block_M, block_N), dtype)
             x_residual_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             batch_idx = by % batch
@@ -137,7 +137,6 @@ def chunk_scan_fwd(
 
             T.annotate_layout(
                 {
-                    acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared),
                     cb_shared: tilelang.layout.make_swizzled_layout(cb_shared),
                     x_residual_shared: tilelang.layout.make_swizzled_layout(x_residual_shared),
                 }

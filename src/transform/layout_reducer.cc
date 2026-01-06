@@ -213,8 +213,7 @@ private:
         const auto &buffer = opt_buffer.value();
         Fragment f;
         if (info->rep == ReducerRepType::ALL) {
-          f = Fragment(buffer->shape, {}, ReplicationPlaceholder(),
-                       thread_extent, std::nullopt);
+          f = Fragment::FullyReplicated(buffer->shape, thread_extent);
         } else if (info->rep == ReducerRepType::NONE) {
           PrimExpr flatten_idx = InputPlaceholder(0);
           for (int i = 1; i < buffer->shape.size(); ++i)

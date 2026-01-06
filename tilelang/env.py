@@ -245,6 +245,12 @@ class Environment:
     TILELANG_AUTO_TUNING_CPU_COUNTS = EnvVar("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1")  # -1 means auto
     TILELANG_AUTO_TUNING_MAX_CPU_COUNT = EnvVar("TILELANG_AUTO_TUNING_MAX_CPU_COUNT", "-1")  # -1 means no limit
 
+    # Compilation defaults (for jit, autotune, compile)
+    # These allow overriding default compilation parameters via environment variables
+    TILELANG_DEFAULT_TARGET = EnvVar("TILELANG_TARGET", "auto")
+    TILELANG_DEFAULT_EXECUTION_BACKEND = EnvVar("TILELANG_EXECUTION_BACKEND", "auto")
+    TILELANG_DEFAULT_VERBOSE = EnvVar("TILELANG_VERBOSE", "0")
+
     # TVM integration
     SKIP_LOADING_TILELANG_SO = EnvVar("SKIP_LOADING_TILELANG_SO", "0")
     TVM_IMPORT_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
@@ -288,6 +294,18 @@ class Environment:
         {"1", "true", "yes", "on"} (case-insensitive).
         """
         return str(self.TILELANG_USE_GEMM_V1).lower() in ("1", "true", "yes", "on")
+
+    def get_default_target(self) -> str:
+        """Get default compilation target from environment."""
+        return self.TILELANG_DEFAULT_TARGET
+
+    def get_default_execution_backend(self) -> str:
+        """Get default execution backend from environment."""
+        return self.TILELANG_DEFAULT_EXECUTION_BACKEND
+
+    def get_default_verbose(self) -> bool:
+        """Get default verbose flag from environment."""
+        return self.TILELANG_DEFAULT_VERBOSE.lower() in ("1", "true", "yes", "on")
 
 
 # Instantiate as a global configuration object

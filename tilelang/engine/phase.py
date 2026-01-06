@@ -3,7 +3,7 @@ from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
-from tilelang.contrib.nvcc import have_tma, is_hopper
+from tilelang.contrib.nvcc import have_tma, is_hopper, have_pdl
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
@@ -63,6 +63,12 @@ def should_force_let_inline(pass_ctx: PassContext | None = None) -> bool:
     return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
 
 
+def should_enable_ast_print(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_AST_PRINT_ENABLE, False))
+
+
 def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -112,8 +118,9 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     Note: This is a validation-only pipeline of passes and does not modify or return the module.
     """
 
-    # Debug
-    # tilelang.analysis.ASTPrinter()(mod)
+    # Print AST for debugging purpose
+    if should_enable_ast_print():
+        tilelang.analysis.ASTPrinter()(mod)
     # Check if there are any invalid nested loops.
     tilelang.analysis.NestedLoopChecker()(mod)
     # Check if there are any invalid symbolic T.Parallel + fragment access.
@@ -252,6 +259,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.ThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
+
+    # Mark the function contains pdl_sync or pdl_trigger
+    mod = tilelang.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
+
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function

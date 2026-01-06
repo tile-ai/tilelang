@@ -57,5 +57,11 @@ def main():
     print(f"tilelang Latency: {latency}ms")
 
 
+def run_regression_perf():
+    kernel = matmul(1024, 1024, 1024, 128, 128, 32)
+    profiler = kernel.get_profiler()
+    return profiler.do_bench(backend="cupti")
+
+
 if __name__ == "__main__":
     main()

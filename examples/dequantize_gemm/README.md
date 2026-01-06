@@ -19,7 +19,7 @@ def dequant_matmul(
 
         T.clear(Ct_local)
         for k in T.Pipelined(
-            T.ceildiv(K, block_K), 
+            T.ceildiv(K, block_K),
             num_stages=num_stages
         ):
             T.copy(A[by * block_M, k * block_K], A_shared)

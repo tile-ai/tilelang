@@ -5,10 +5,10 @@ from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
-
 import time
 import math
 from heuristic import num_splits_heuristic
+from tilelang.profiler import do_bench
 
 
 def flashattn(batch, heads, heads_kv, dim, dim_v):
@@ -32,8 +32,8 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
         part_shape = [batch, heads, num_split, dim_v]
         valid_block_H = min(block_H, kv_group_num)
 
-        @T.macro
-        def flash_attn_split(
+        @T.prim_func
+        def main(
             Q: T.Tensor(shape_q, dtype),
             K: T.Tensor(shape_k, dtype),
             V: T.Tensor(shape_v, dtype),
@@ -41,12 +41,12 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
             cache_seqlens: T.Tensor([batch], T.int32),
             glse: T.Tensor([batch, heads, num_split], accum_dtype),
             Output_partial: T.Tensor(part_shape, accum_dtype),
+            Output: T.Tensor(shape_o, dtype),
         ):
             with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_H, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim_v], dtype)
-                # O_shared = T.alloc_shared([valid_block_H, dim_v], dtype)
                 acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
                 acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
                 acc_o = T.alloc_fragment([block_H, dim_v], accum_dtype)
@@ -112,58 +112,32 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                     if i < valid_block_H:
                         Output_partial[bid, hid * valid_block_H + i, sid, j] = acc_o[i, j]
 
-        @T.macro
-        def combine(
-            glse: T.Tensor([batch, heads, num_split], accum_dtype),
-            Output_partial: T.Tensor(part_shape, accum_dtype),
-            Output: T.Tensor(shape_o, dtype),
-        ):
             with T.Kernel(heads, batch, threads=128) as (by, bz):
                 po_local = T.alloc_fragment([dim_v], accum_dtype)
                 o_accum_local = T.alloc_fragment([dim_v], accum_dtype)
-                lse_local_split = T.alloc_local([1], accum_dtype)
-                lse_logsum_local = T.alloc_local([1], accum_dtype)
-                lse_max_local = T.alloc_local([1], accum_dtype)
-                scale_local = T.alloc_local([1], accum_dtype)
-
-                T.annotate_layout(
-                    {
-                        lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-                    }
-                )
+                lse_local_split = T.alloc_var(accum_dtype)
+                lse_logsum_local = T.alloc_var(accum_dtype)
+                lse_max_local = T.alloc_var(accum_dtype)
+                scale_local = T.alloc_var(accum_dtype)
 
                 T.clear(lse_logsum_local)
                 T.clear(o_accum_local)
-                lse_max_local[0] = -T.infinity(accum_dtype)
+                lse_max_local = -T.infinity(accum_dtype)
                 for k in T.serial(num_split):
-                    lse_max_local[0] = T.max(lse_max_local[0], glse[bz, by, k])
+                    lse_max_local = T.max(lse_max_local, glse[bz, by, k])
                 for k in T.Pipelined(num_split, num_stages=1):
-                    lse_local_split[0] = glse[bz, by, k]
-                    lse_logsum_local[0] += T.exp2(lse_local_split[0] - lse_max_local[0])
-                lse_logsum_local[0] = T.log2(lse_logsum_local[0]) + lse_max_local[0]
+                    lse_local_split = glse[bz, by, k]
+                    lse_logsum_local += T.exp2(lse_local_split - lse_max_local)
+                lse_logsum_local = T.log2(lse_logsum_local) + lse_max_local
                 for k in T.serial(num_split):
                     for i in T.Parallel(dim_v):
                         po_local[i] = Output_partial[bz, by, k, i]
-                    lse_local_split[0] = glse[bz, by, k]
-                    scale_local[0] = T.exp2(lse_local_split[0] - lse_logsum_local[0])
+                    lse_local_split = glse[bz, by, k]
+                    scale_local = T.exp2(lse_local_split - lse_logsum_local)
                     for i in T.Parallel(dim_v):
-                        o_accum_local[i] += po_local[i] * scale_local[0]
+                        o_accum_local[i] += po_local[i] * scale_local
                 for i in T.Parallel(dim_v):
                     Output[bz, by, i] = o_accum_local[i]
-
-        @T.prim_func
-        def main(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            block_mask: T.Tensor(shape_mask, T.bool),
-            cache_seqlens: T.Tensor([batch], T.int32),
-            glse: T.Tensor([batch, heads, num_split], accum_dtype),
-            Output_partial: T.Tensor(part_shape, accum_dtype),
-            Output: T.Tensor(shape_o, dtype),
-        ):
-            flash_attn_split(Q, K, V, block_mask, cache_seqlens, glse, Output_partial)
-            combine(glse, Output_partial, Output)
 
         return main
 
@@ -404,6 +378,63 @@ def main(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=12
         out = model(Q, K, V, block_mask, cache_seqlens)
     torch.cuda.synchronize()
     print("sparse time: ", (time.time() - start) / 100 * 1000)
+
+
+def run_regression_perf(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=128, sparse_ratio=0.8, block_size=32):
+    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
+    sparse_ratio = sparse_ratio
+    block_size = block_size
+    max_selected_blocks = int(math.ceil(max_cache_seqlen * (1 - sparse_ratio) / block_size))
+    dtype = torch.float16
+
+    Q = torch.randn((batch, heads, dim), dtype=dtype, device="cuda")
+    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device="cuda")
+    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device="cuda")
+    cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device="cuda")
+    random_index = torch.randint(0, batch, (1,), device="cuda").item()
+    cache_seqlens[random_index] = max_cache_seqlen
+
+    num_blocks = (max_cache_seqlen + block_size - 1) // block_size
+
+    valid_num_blocks = torch.ceil(cache_seqlens * (1 - sparse_ratio) / block_size).int()
+    max_valid_num_blocks = torch.ceil(cache_seqlens / block_size).int()
+    block_mask = torch.zeros((batch, heads_kv, num_blocks), dtype=torch.bool, device="cuda")
+
+    for b in range(batch):
+        max_valid_block = max_valid_num_blocks[b].item()
+        valid_num_block = valid_num_blocks[b].item()
+        if valid_num_block > 0:
+            for h in range(heads_kv):
+                perm = torch.randperm(max_valid_block, device="cuda")[:valid_num_block]
+                block_mask[b, h, perm] = True
+
+    model = SparseFlashAttn(batch, heads, heads_kv, dim, dim_v, block_size)
+    batch = model.batch
+    heads = model.heads
+    heads_kv = model.heads_kv
+    dim_v = model.dim_v
+    dim = model.dim
+    block_size = model.block_size
+    block_H = model.block_H
+    max_cache_seqlen = K.shape[1]
+    max_selected_blocks = (max_cache_seqlen + block_size - 1) // block_size
+    num_m_blocks = 1 * (heads // heads_kv + block_H - 1) // block_H
+    num_n_blocks = max_selected_blocks
+
+    size_one_kv_head = max_selected_blocks * block_size * (dim + dim_v) * 2
+    total_mblocks = batch * heads_kv * num_m_blocks
+    num_sm = model.num_sm
+    num_split = num_splits_heuristic(
+        total_mblocks, num_sm, num_n_blocks, num_m_blocks, size_one_kv_head, is_causal_or_local=True, max_splits=128
+    )
+    glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device="cuda")
+    Output_partial = torch.empty((batch, heads, num_split, dim_v), dtype=torch.float32, device="cuda")
+    kernel = model.kernel
+
+    def run_kernel_only():
+        kernel(Q, K, V, block_mask, cache_seqlens, glse, Output_partial)
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

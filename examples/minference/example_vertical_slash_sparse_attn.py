@@ -130,21 +130,15 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                 scores_scale = T.alloc_fragment([block_M], accum_dtype)
                 scores_sum = T.alloc_fragment([block_M], accum_dtype)
                 logsum = T.alloc_fragment([block_M], accum_dtype)
-                block_count = T.alloc_local([1], int_dtype)
+                block_count = T.alloc_var(dtype=int_dtype)
                 block_offset = T.alloc_shared([slash_size_round], int_dtype, scope="shared")
-                column_count = T.alloc_local([1], int_dtype)
+                column_count = T.alloc_var(dtype=int_dtype)
                 column_index = T.alloc_shared([vertical_size_round], int_dtype, scope="shared")
 
                 T.create_list_of_mbarrier([128] * 9)
 
-                T.annotate_layout(
-                    {
-                        O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                    }
-                )
-
-                block_count[0] = BlockCount[bz, by, bx]
-                column_count[0] = ColumnCount[bz, by, bx]
+                block_count = BlockCount[bz, by, bx]
+                column_count = ColumnCount[bz, by, bx]
 
                 for vi in T.Parallel(slash_size_round):
                     if vi < slash_size:
@@ -160,7 +154,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                     T.annotate_producer_reg_dealloc()
                     T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
                     T.mbarrier_arrive(mbarrier=8)
-                    for bi in T.serial(block_count[0]):
+                    for bi in T.serial(block_count):
                         k = block_offset[bi]
                         T.mbarrier_wait_parity(mbarrier=bi % 2 + 4, parity=(((bi & 3) >> 1) ^ 1))
                         T.copy(K[bz, by, k : k + block_N, :], K_shared[bi % 2, :, :])
@@ -174,7 +168,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                     T.fill(logsum, 0)
                     T.fill(scores_max, -T.infinity(accum_dtype))
                     T.mbarrier_wait_parity(mbarrier=8, parity=0)
-                    for bi in T.serial(block_count[0]):
+                    for bi in T.serial(block_count):
                         k = block_offset[bi]
                         for i, j in T.Parallel(block_M, block_N):
                             acc_s[i, j] = T.if_then_else(bx * block_M + i >= k + j, 0, -T.infinity(acc_s.dtype))
@@ -207,12 +201,12 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                         for i in T.Parallel(block_M):
                             logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
 
-                    if column_count[0] != 0:
-                        Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count[0], 0, bz, by)
-                        for bi in T.serial(T.ceildiv(column_count[0], block_N) - 1):
+                    if column_count != 0:
+                        Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, 0, bz, by)
+                        for bi in T.serial(T.ceildiv(column_count, block_N) - 1):
                             k = bi * block_N
                             if bi % 2 == 0:
-                                Prefetch(K, V, K_shared_2, V_shared_2, column_index, column_count[0], k + block_N, bz, by)
+                                Prefetch(K, V, K_shared_2, V_shared_2, column_index, column_count, k + block_N, bz, by)
 
                                 Compute(
                                     acc_s,
@@ -221,7 +215,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                     scores_max,
                                     scores_max_prev,
                                     k,
-                                    column_count[0],
+                                    column_count,
                                     Q_shared,
                                     K_shared_1,
                                     V_shared_1,
@@ -231,7 +225,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                     1,
                                 )
                             else:
-                                Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count[0], k + block_N, bz, by)
+                                Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, k + block_N, bz, by)
 
                                 Compute(
                                     acc_s,
@@ -240,7 +234,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                     scores_max,
                                     scores_max_prev,
                                     k,
-                                    column_count[0],
+                                    column_count,
                                     Q_shared,
                                     K_shared_2,
                                     V_shared_2,
@@ -249,15 +243,15 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                     logsum,
                                     1,
                                 )
-                        if T.ceildiv(column_count[0], block_N) % 2 == 0:
+                        if T.ceildiv(column_count, block_N) % 2 == 0:
                             Compute(
                                 acc_s,
                                 acc_s_cast,
                                 acc_o,
                                 scores_max,
                                 scores_max_prev,
-                                T.ceildiv(column_count[0], block_N) * block_N - block_N,
-                                column_count[0],
+                                T.ceildiv(column_count, block_N) * block_N - block_N,
+                                column_count,
                                 Q_shared,
                                 K_shared_2,
                                 V_shared_2,
@@ -273,8 +267,8 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                                 acc_o,
                                 scores_max,
                                 scores_max_prev,
-                                T.ceildiv(column_count[0], block_N) * block_N - block_N,
-                                column_count[0],
+                                T.ceildiv(column_count, block_N) * block_N - block_N,
+                                column_count,
                                 Q_shared,
                                 K_shared_1,
                                 V_shared_1,
@@ -617,6 +611,79 @@ def main(argv=None):
     print(f"triton_time: {triton_time:.3f}ms")
     print(f"tilelang_time: {tilelang_time:.3f}ms")
     print(f"speedup: {triton_time / tilelang_time:.2f}x")
+
+
+def run_regression_perf(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--heads", type=int, default=1)
+    parser.add_argument("--seq_len", type=int, default=16384)
+    parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument("--vertical_size", type=int, default=1000)
+    parser.add_argument("--slash_size", type=int, default=200)
+    args = parser.parse_args(argv)
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = args.batch, args.heads, args.seq_len, args.head_dim
+    vertical_size, slash_size = args.vertical_size, args.slash_size
+    torch.manual_seed(0)
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    q_len = SEQ_LEN
+    vertical_size, slash_size = min(q_len, vertical_size), min(q_len, slash_size)
+    last_q = 64
+    qk = torch.einsum("bhmk, bhnk -> bhmn", q[:, :, -last_q:, :], k)
+    arange = torch.arange(last_q, device="cuda")
+    qk[:, :, :, -last_q:] = torch.where(arange[None, None, :, None] >= arange[None, None, None, :], qk[:, :, :, -last_q:], -torch.inf)
+    qk = torch.nn.functional.softmax(qk, dim=-1, dtype=torch.float32)
+    vertical = qk.sum(-2, keepdim=True)
+    vertical[..., :30] = torch.inf
+    vertical_topk = torch.topk(vertical, vertical_size, -1).indices
+    slash = sum_all_diagonal_matrix(qk)[..., : -last_q + 1]
+    slash[..., -30:] = torch.inf
+    slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
+    block_size_M = 64
+    block_size_N = 64
+    query, key, value = q, k, v
+    v_idx, s_idx = vertical_topk, slash
+    batch_size, num_heads, context_size, head_dim = query.shape
+    v_idx = v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=False)[0]
+    s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
+    from torch.utils.cpp_extension import load
+    import os
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sources = [os.path.join(current_dir, "ops", "kernels.cpp"), os.path.join(current_dir, "ops", "vertical_slash_index.cu")]
+    ops = load(name="convert", sources=sources, verbose=False)
+    convert_vertical_slash_indexes = ops.convert_vertical_slash_indexes
+    batch_size, num_heads, context_size, head_dim = query.shape
+    pad = (block_size_M - context_size) & (block_size_M - 1)
+    if pad == block_size_M:
+        pad = 0
+    query = torch.nn.functional.pad(query, [0, 0, 0, pad, 0, 0, 0, 0])
+    key = torch.nn.functional.pad(key, [0, 0, 0, pad, 0, 0, 0, 0])
+    value = torch.nn.functional.pad(value, [0, 0, 0, pad, 0, 0, 0, 0])
+    if head_dim not in [16, 32, 64, 128, 256, 512]:
+        target_dim = 2 ** math.ceil(math.log2(head_dim)) - head_dim
+        query = torch.nn.functional.pad(query, [0, target_dim, 0, 0, 0, 0, 0, 0])
+        key = torch.nn.functional.pad(key, [0, target_dim, 0, 0, 0, 0, 0, 0])
+        value = torch.nn.functional.pad(value, [0, target_dim, 0, 0, 0, 0, 0, 0])
+    v_idx = v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=False)[0]
+    s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
+    seqlens = torch.tensor([context_size] * query.shape[0], dtype=torch.int32, device=query.device)
+    block_count, block_offset, column_count, column_index = convert_vertical_slash_indexes(
+        seqlens,
+        v_idx,
+        s_idx,
+        context_size,
+        block_size_M,
+        block_size_N,
+    )
+    tl_kernel = _tl_vs_sparse_flashattn(batch_size, num_heads, context_size, head_dim, vertical_topk.shape[-1], slash.shape[-1])
+
+    def run_kernel_only():
+        tl_kernel(query, key, value, block_count, block_offset, column_count, column_index)
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

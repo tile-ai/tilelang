@@ -55,19 +55,12 @@ static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
+static constexpr const char *kASTPrintEnable = "tl.ast_print_enable";
 static constexpr const char *kLayoutVisualizationEnable =
     "tl.layout_visualization_enable";
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
-/*!
- * \brief Whether to disable dynamic tail split
- *
- * kDisableDynamicTailSplit = "tl.disable_dynamic_tail_split"
- *
- */
-static constexpr const char *kDisableDynamicTailSplit =
-    "tl.disable_dynamic_tail_split";
 
 /*!
  * \brief Whether to disable thread storage synchronization
@@ -90,18 +83,6 @@ static constexpr const char *kDisableThreadStorageSync =
  *
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
-
-/*!
- * \brief The size of the vectorized dimension in buffer, designed by user
- *
- * For example, if the vectorized dimension is 128 bits and the dtype of buffer
- * A[m, k] is float16, the size of the vectorized dimension (i.e. k) in buffer A
- * should be divisible by 8 (8 = 128 / 16).
- *
- * kDynamicAlignment = "tl.dynamic_alignment"
- *
- */
-static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
 
 /*!
  * \brief Get the type of the CUDA tensor map
@@ -150,6 +131,7 @@ TVM_DLL const Op &ieee_fdiv();
 // random op
 TVM_DLL const Op &rng_init();
 TVM_DLL const Op &rng_rand();
+TVM_DLL const Op &rng_rand_float();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
@@ -322,6 +304,15 @@ TVM_DLL const Op &ptx_stmatrix();
  *  This op is used to represent a ptx async copy barrier operation in tilelang.
  */
 TVM_DLL const Op &ptx_cp_async_barrier_noinc();
+
+/*!
+ * \brief TileLang intrinsic for PTX async copy from global to shared memory
+ *
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate)
+ *
+ */
+TVM_DLL const Op &ptx_cp_async();
 
 /*!
  * \brief Pack two b16 value into a b32 value

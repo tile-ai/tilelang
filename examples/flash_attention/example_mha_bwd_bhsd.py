@@ -40,7 +40,6 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -200,9 +199,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
             T.copy(K[bz, bx, by * block_M : (by + 1) * block_M, :], K_shared)
@@ -350,6 +346,37 @@ def main(
     latency = do_bench(run1, warmup=500)
     print("tilelang: {:.2f} ms".format(latency))
     print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+
+
+def run_regression_perf():
+    BATCH = 1
+    H = 16
+    N_CTX = 512
+    D_HEAD = 64
+    causal = False
+    device = "cuda"
+    torch.manual_seed(0)
+    block_M = 64
+    block_N = 64 if D_HEAD <= 64 else 32
+    Q = torch.randn(BATCH, H, N_CTX, D_HEAD, device=device, dtype=torch.half)
+    K = torch.randn_like(Q)
+    V = torch.randn_like(Q)
+    O = torch.randn_like(Q)
+    dO = torch.randn_like(Q)
+    lse = torch.zeros(BATCH, H, N_CTX, device=device, dtype=torch.float32)
+    with torch.no_grad():
+        mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
+        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N)
+    dQ = torch.zeros(BATCH, H, N_CTX, D_HEAD, device=device, dtype=torch.float32)
+    dK = torch.zeros(BATCH, H, N_CTX, D_HEAD, device=device, dtype=torch.float16)
+    dV = torch.zeros(BATCH, H, N_CTX, D_HEAD, device=device, dtype=torch.float16)
+    Delta = mod_prep(O, dO)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(Q, K, V, dO, lse, Delta, dQ, dK, dV)
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

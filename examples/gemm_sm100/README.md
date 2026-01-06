@@ -103,4 +103,3 @@ latency = profiler.do_bench()
 print(f"Latency: {latency} ms")
 print(f"Performance: {2 * M * N * K / (latency/1e3) / 1e12:.2f} TFLOPS")
 ```
-

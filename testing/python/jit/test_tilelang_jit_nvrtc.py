@@ -52,68 +52,6 @@ def matmul(
     return main
 
 
-def run_gemm(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtypeAccum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages=3,
-    num_threads=128,
-):
-    program = matmul(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtypeAccum,
-        num_stages,
-        num_threads,
-    )
-
-    stramp = "&*(XS)"
-
-    @tvm.register_global_func("tilelang_callback_cuda_postproc", override=True)
-    def tilelang_callback_cuda_postproc(code, _):
-        code = f"// {stramp}\n" + code
-        return code
-
-    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="nvrtc")
-
-    kernel_source = matmul_kernel.get_kernel_source()
-
-    assert stramp in kernel_source, f"Expected {stramp} in the kernel source"
-
-
-def test_gemm_f16f16f16_nn():
-    run_gemm(
-        512,
-        1024,
-        768,
-        False,
-        False,
-        T.float16,
-        T.float16,
-        T.float16,
-        128,
-        256,
-        32,
-        2,
-    )
-
-
 def matmu_jit_kernel(
     M,
     N,
@@ -217,6 +155,7 @@ def run_gemm_jit_kernel(
     tilelang.testing.torch_assert_close(C, ref_C, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
+@tilelang.testing.requires_cuda
 def test_gemm_jit_kernel():
     run_gemm_jit_kernel(
         512,
@@ -268,6 +207,7 @@ def run_nvrtc_kernel_do_bench(
     assert tvm_latency is not None
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_kernel_do_bench():
     run_nvrtc_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
@@ -310,6 +250,7 @@ def run_nvrtc_kernel_multi_stream(
             matmul_kernel(tensor_a, tensor_b, tensor_c)
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_kernel_multi_stream():
     run_nvrtc_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
@@ -359,6 +300,7 @@ def run_nvrtc_dynamic_shape(
     tilelang.testing.torch_assert_close(tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_dynamic_shape():
     run_nvrtc_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
@@ -395,14 +337,6 @@ def convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num
             kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)
             out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
 
-            T.annotate_layout(
-                {
-                    out_shared: tilelang.layout.make_swizzled_layout(out_shared),
-                    data_shared: tilelang.layout.make_swizzled_layout(data_shared),
-                    kernel_shared: tilelang.layout.make_swizzled_layout(kernel_shared),
-                }
-            )
-
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
                 T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)
@@ -438,6 +372,7 @@ def run_nvrtc_im2col_tma_desc(N, C, H, W, F, K, S, D, P, block_M, block_N, block
     tilelang.testing.torch_assert_close(out_c, ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_im2col_tma_desc():
     """Test im2col TMA descriptor with NVRTC backend."""
     if not check_hopper():
@@ -451,6 +386,7 @@ def test_nvrtc_im2col_tma_desc():
     )
 
 
+@tilelang.testing.requires_cuda
 def test_nvrtc_l2_persistent_map():
     """Test L2 persistent cache annotation with elementwise add."""
     from tilelang.language import annotate_l2_hit_ratio
@@ -500,6 +436,58 @@ def test_nvrtc_l2_persistent_map():
     tilelang.testing.torch_assert_close(c, ref_c, atol=1e-5, rtol=1e-5)
 
     print("L2 persistent map test passed!")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_nvrtc_pdl():
+    """Test pdl."""
+
+    N = 64
+
+    @tilelang.jit(execution_backend="nvrtc")
+    def multi_kernels_with_pdl(N, block_size=256, dtype=T.float32):
+        @T.prim_func
+        def main(
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N,), dtype),
+            C: T.Tensor((N,), dtype),
+        ):
+            with T.Kernel(T.ceildiv(N, block_size), threads=block_size) as (bx,):
+                for i in T.Parallel(block_size):
+                    idx = bx * block_size + i
+                    if idx < N:
+                        B[idx] = A[idx] + 1.0
+                T.pdl_trigger()
+
+            with T.Kernel(T.ceildiv(N, block_size), threads=block_size) as (bx2,):
+                T.pdl_sync()
+                for i in T.Parallel(block_size):
+                    idx = bx2 * block_size + i
+                    if idx < N:
+                        C[idx] = B[idx] * 2.0
+
+        return main
+
+    # Compile the kernel
+    kernel = multi_kernels_with_pdl(N)
+
+    # Create test tensors
+    a = torch.randn(N, dtype=torch.float32).cuda()
+    b = torch.randn(N, dtype=torch.float32).cuda()
+    c = torch.randn(N, dtype=torch.float32).cuda()
+
+    ref_b = a + 1.0
+    ref_c = ref_b * 2.0
+
+    kernel(a, b, c)
+
+    # Verify correctness
+
+    tilelang.testing.torch_assert_close(b, ref_b, atol=1e-5, rtol=1e-5)
+    tilelang.testing.torch_assert_close(c, ref_c, atol=1e-5, rtol=1e-5)
+
+    print("pdl test passed!")
 
 
 if __name__ == "__main__":

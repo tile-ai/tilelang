@@ -240,5 +240,22 @@ def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
     print(f"Average torch.topk time: {elapsed_time_ms / n_iters:.3f} ms")
 
 
+def run_regression_perf(batch=64, seq_len=32 * 1024, topk=2048):
+    batch = 64
+    seq_len = 32 * 1024
+    topk = 2048
+    torch.manual_seed(1)
+    input = torch.randn(batch, seq_len, dtype=torch.float32).cuda()
+    starts = torch.zeros(batch, dtype=torch.int32).cuda()
+    ends = torch.ones(batch, dtype=torch.int32).cuda() * seq_len
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        tl_topk(input, starts, ends, topk)
+
+    return do_bench(run_kernel_only, backend="cupti")
+
+
 if __name__ == "__main__":
     test_topk_selector()

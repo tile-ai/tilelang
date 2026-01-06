@@ -17,5 +17,6 @@ from .language import (
     to_buffer_region,  # noqa: F401
     get_buffer_region_from_load,  # noqa: F401
     get_prim_func_name,  # noqa: F401
+    side_effect,  # noqa: F401
 )
 from .deprecated import deprecated  # noqa: F401

@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # retrieve the native model input and saved model directory
 MODEL_DIR=$1
 SAVED_MODEL_DIR=$2

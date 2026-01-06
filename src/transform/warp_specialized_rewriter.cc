@@ -50,6 +50,7 @@ class ProducerUsedBufferFinder : public StmtExprVisitor {
 public:
   auto FindProducerusedBuffer(const Stmt &stmt) {
     producer_buffers_.clear();
+    let_var_to_expr_.clear();
     std::unordered_set<const BufferNode *> last_producer_buffers_;
     for (;;) {
       VisitStmt(stmt);
@@ -68,6 +69,28 @@ public:
     for (const auto &buffer : usage.buffer_use_count_) {
       producer_buffers_.insert(buffer.first);
     }
+    // Also collect buffers through let bindings
+    CollectBuffersFromExpr(expr);
+  }
+
+  // Collect buffers from expression, following let bindings
+  void CollectBuffersFromExpr(const PrimExpr &expr) {
+    PostOrderVisit(expr, [this](const ObjectRef &node) {
+      if (auto bl = node.as<BufferLoadNode>()) {
+        producer_buffers_.insert(bl->buffer.get());
+      } else if (auto var_node = node.as<VarNode>()) {
+        auto var = tvm::ffi::GetRef<Var>(var_node);
+        auto it = let_var_to_expr_.find(var.get());
+        if (it != let_var_to_expr_.end()) {
+          CollectBuffersFromExpr(it->second);
+        }
+      }
+    });
+  }
+
+  void VisitStmt_(const LetStmtNode *op) final {
+    let_var_to_expr_[op->var.get()] = op->value;
+    StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
@@ -102,15 +125,15 @@ public:
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
       for (auto arg : op->args) {
-        if (auto buffer_load = arg.as<BufferLoadNode>()) {
-          producer_buffers_.insert(buffer_load->buffer.get());
-        }
+        // Collect buffers from args, including through let bindings
+        CollectBuffersFromExpr(arg);
       }
     }
   }
 
 private:
   std::unordered_set<const BufferNode *> producer_buffers_;
+  std::unordered_map<const VarNode *, PrimExpr> let_var_to_expr_;
 };
 
 class WarpSpecializedRoleMarker : public StmtVisitor {
@@ -140,6 +163,18 @@ public:
       }
       if (call->op.same_as(loop_break())) {
         role = Role::kBoth;
+      }
+      if (call->op.same_as(builtin::call_extern())) {
+        if (!call->args.empty()) {
+          if (const auto *str_node =
+                  call->args[0].as<tvm::tir::StringImmNode>()) {
+            std::string func_name = str_node->value;
+            if (func_name == "cudaGridDependencySynchronize" ||
+                func_name == "cudaTriggerProgrammaticLaunchCompletion") {
+              role = Role::kBoth;
+            }
+          }
+        }
       }
     }
     SetRole(op, role);

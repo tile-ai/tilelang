@@ -8,6 +8,7 @@ from tilelang.contrib import nvcc
 from tvm.testing.utils import requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
+from .perf_regression import process_func, regression
 
 __all__ = [
     "requires_package",
@@ -17,6 +18,8 @@ __all__ = [
     "requires_llvm",
     "main",
     "requires_cuda_compute_version",
+    "process_func",
+    "regression",
 ] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
 
 

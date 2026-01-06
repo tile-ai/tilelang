@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import os.path as osp
 from typing import Callable
 import tilelang.transform
 from tilelang import tvm as tvm
@@ -12,8 +10,8 @@ import tvm_ffi
 from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
+from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.transform import PassConfigKey
-from tilelang.utils.deprecated import deprecated_warning
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
@@ -58,17 +56,6 @@ def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
 
 @tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
-    project_root = osp.join(osp.dirname(__file__), "../..")
-    if "TL_TEMPLATE_PATH" in os.environ:
-        tl_template_path = os.environ["TL_TEMPLATE_PATH"]
-    else:
-        tl_template_path = osp.abspath(osp.join(project_root, "src"))
-    # TODO(lei): this indeed should be renamed into
-    # TL_CUTLASS_INCLUDE_PATH in the future
-    if "TL_CUTLASS_PATH" in os.environ:
-        cutlass_path = os.environ["TL_CUTLASS_PATH"]
-    else:
-        cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
     target_arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
 
     arch = [f"-arch=sm_{target_arch}"]
@@ -76,20 +63,15 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
     # Read pass-config keys (string-valued) like in jit.adapter.libgen.compile_lib
     cfg = pass_config or {}
-    if cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH, False):
-        deprecated_warning("TL_DISABLE_FAST_MATH", "TL_ENABLE_FAST_MATH", "0.1.7")
-        disable_fast_math = bool(cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH, True))
-        enable_fast_math = not disable_fast_math
-    else:
-        enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
+    enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
 
     ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
     verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))
 
     options = [
         "-std=c++17",
-        "-I" + tl_template_path,
-        "-I" + cutlass_path,
+        "-I" + TILELANG_TEMPLATE_PATH,
+        "-I" + CUTLASS_INCLUDE_DIR,
     ]
     # Merge extra device compiler flags from pass config, if provided
     extra_flags = cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS, None)
@@ -107,58 +89,37 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
                     tokens.append(str(flag))
         options += tokens
 
+    verbose = False
     if enable_fast_math:
         options.append("--use_fast_math")
     if ptxas_usage_level is not None:
         options.append(f"--ptxas-options=--register-usage-level={ptxas_usage_level}")
     if verbose_ptxas_output:
         options.append("--ptxas-options=--verbose")
+        options.append("-w")  # Suppress warnings to make ptxas output more readable
+        verbose = True
 
     ptx = nvcc.compile_cuda(
         code,
         compile_format,
         arch,
         options=options,
-        verbose=False,
+        verbose=verbose,
     )
 
     return ptx
 
 
 @tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
-def tilelang_callback_hip_compile(code, target, pass_config=None):
-    project_root = osp.join(osp.dirname(__file__), "../..")
-    tl_template_path = osp.abspath(osp.join(project_root, "src"))
-
-    # TODO(lei): actually this indeed should be renamed into
-    # TL_COMPOSABLE_KERNEL_INCLUDE_PATH in the future
-    if "TL_COMPOSABLE_KERNEL_PATH" in os.environ:
-        ck_path = os.environ["TL_COMPOSABLE_KERNEL_PATH"]
-    else:
-        ck_path = osp.abspath(osp.join(project_root, "3rdparty/composable_kernel/include"))
-
-    # Read pass-config keys (string-valued) like in cuda compile callback.
-    cfg = pass_config or {}
-    if cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH.value, False):
-        deprecated_warning("TL_DISABLE_FAST_MATH", "TL_ENABLE_FAST_MATH", "0.1.7")
-        disable_fast_math = bool(cfg.get(PassConfigKey.TL_DISABLE_FAST_MATH.value, True))
-        enable_fast_math = not disable_fast_math
-    else:
-        enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH.value, False))
-
-    options = [
-        "-std=c++17",
-        "-I" + tl_template_path,
-        "-I" + ck_path,
-    ]
-    # hipcc/clang fast-math (ROCm). Roughly analogous to nvcc --use_fast_math.
-    if enable_fast_math:
-        options.append("-ffast-math")
-
+def tilelang_callback_hip_compile(code, target):
     hsaco = hipcc.compile_hip(
         code,
         target_format="hsaco",
-        options=options,
+        options=[
+            "-std=c++17",
+            "-I" + TILELANG_TEMPLATE_PATH,
+            "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
+        ],
         verbose=False,
     )
 

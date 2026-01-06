@@ -13,7 +13,7 @@ level, how they map to hardware concepts, and how to use them correctly.
 
 ## Data Movement
 
-Use `T.copy(src, dst, coalesced_width=None, disable_tma=False, eviction_policy=None)`
+Use `T.copy(src, dst, *, coalesced_width=None, disable_tma=False, eviction_policy=None, loop_layout=None)`
 to move tiles between memory scopes. It accepts `tir.Buffer`, `BufferLoad`, or
 `BufferRegion`; extents are inferred or broadcast when possible.
 
@@ -138,6 +138,10 @@ Annotation helpers
 - `T.annotate_safe_value(var, ...)`: Safety/const hints.
 - `T.annotate_l2_hit_ratio(buf, ratio)`: Cache behavior hint.
 
+Synchronization helpers
+- `T.pdl_trigger()`: Signal programmatic launch completion for the current kernel.
+- `T.pdl_sync()`: Wait until kernel dependencies are satisfied.
+
 Atomics
 - `T.atomic_add(dst, value, memory_order=None, return_prev=False, use_tma=False)`.
 - `T.atomic_addx2(dst, value, return_prev=False)`; `T.atomic_addx4(...)`.
@@ -170,8 +174,6 @@ Register control
 - `T.set_max_nreg(reg_count, is_inc)`, `T.inc_max_nreg(n)`, `T.dec_max_nreg(n)`.
 - `T.annotate_producer_reg_dealloc(n=24)`, `T.annotate_consumer_reg_alloc(n=240)`.
 - `T.no_set_max_nreg()`, `T.disable_warp_group_reg_alloc()`.
-
- 
 
 ## Notes on Dtypes
 

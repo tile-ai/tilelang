@@ -8,6 +8,7 @@ from einops import rearrange, einsum
 import argparse
 import time
 import math
+from tilelang.profiler import do_bench
 
 from heuristic import num_splits_heuristic
 
@@ -38,8 +39,8 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
         assert block_N <= page_block_size and page_block_size % block_N == 0
         block_ratio = page_block_size // block_N
 
-        @T.macro
-        def flash_attn_split(
+        @T.prim_func
+        def main(
             Q: T.Tensor(shape_q, dtype),
             K: T.Tensor(shape_k, dtype),
             V: T.Tensor(shape_v, dtype),
@@ -48,7 +49,9 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
             block_table: T.Tensor(shape_block_table, T.int32),
             glse: T.Tensor([batch, heads, num_split], accum_dtype),
             Output_partial: T.Tensor(part_shape, accum_dtype),
+            Output: T.Tensor(shape_o, dtype),
         ):
+            # flash_attn_split
             with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_H, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
@@ -126,66 +129,40 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                     if i < valid_block_H:
                         Output_partial[bid, hid * valid_block_H + i, sid, j] = acc_o[i, j]
 
-        @T.macro
-        def combine(
-            glse: T.Tensor([batch, heads, num_split], accum_dtype),
-            Output_partial: T.Tensor(part_shape, accum_dtype),
-            Output: T.Tensor(shape_o, dtype),
-        ):
+            # combine
             with T.Kernel(heads, batch, threads=128) as (by, bz):
                 po_local = T.alloc_fragment([dim_v], accum_dtype)
                 o_accum_local = T.alloc_fragment([dim_v], accum_dtype)
-                lse_local_split = T.alloc_local([1], accum_dtype)
-                lse_logsum_local = T.alloc_local([1], accum_dtype)
-                lse_max_local = T.alloc_local([1], accum_dtype)
-                scale_local = T.alloc_local([1], accum_dtype)
-                max_split = T.alloc_local([1], T.int32)
-
-                T.annotate_layout(
-                    {
-                        lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-                    }
-                )
+                lse_local_split = T.alloc_var(accum_dtype)
+                lse_logsum_local = T.alloc_var(accum_dtype)
+                lse_max_local = T.alloc_var(accum_dtype)
+                scale_local = T.alloc_var(accum_dtype)
+                max_split = T.alloc_var(T.int32)
 
                 T.clear(lse_logsum_local)
                 T.clear(o_accum_local)
-                lse_max_local[0] = -T.infinity(accum_dtype)
+                lse_max_local = -T.infinity(accum_dtype)
                 for k in T.serial(num_split):
-                    lse_local_split[0] = glse[bz, by, k]
-                    if lse_local_split[0] != 0:
-                        max_split[0] = k
-                        lse_max_local[0] = T.max(lse_max_local[0], glse[bz, by, k])
+                    lse_local_split = glse[bz, by, k]
+                    if lse_local_split != 0:
+                        max_split = k
+                        lse_max_local = T.max(lse_max_local, glse[bz, by, k])
 
                 for k in T.Pipelined(num_split, num_stages=1):
-                    if k <= max_split[0]:
-                        lse_local_split[0] = glse[bz, by, k]
-                        lse_logsum_local[0] += T.exp2(lse_local_split[0] - lse_max_local[0])
-                lse_logsum_local[0] = T.log2(lse_logsum_local[0]) + lse_max_local[0]
+                    if k <= max_split:
+                        lse_local_split = glse[bz, by, k]
+                        lse_logsum_local += T.exp2(lse_local_split - lse_max_local)
+                lse_logsum_local = T.log2(lse_logsum_local) + lse_max_local
                 for k in T.serial(num_split):
-                    if k <= max_split[0]:
+                    if k <= max_split:
                         for i in T.Parallel(dim_v):
                             po_local[i] = Output_partial[bz, by, k, i]
-                        lse_local_split[0] = glse[bz, by, k]
-                        scale_local[0] = T.exp2(lse_local_split[0] - lse_logsum_local[0])
+                        lse_local_split = glse[bz, by, k]
+                        scale_local = T.exp2(lse_local_split - lse_logsum_local)
                         for i in T.Parallel(dim_v):
-                            o_accum_local[i] += po_local[i] * scale_local[0]
+                            o_accum_local[i] += po_local[i] * scale_local
                 for i in T.Parallel(dim_v):
                     Output[bz, by, i] = o_accum_local[i]
-
-        @T.prim_func
-        def main(
-            Q: T.Tensor(shape_q, dtype),
-            K: T.Tensor(shape_k, dtype),
-            V: T.Tensor(shape_v, dtype),
-            block_indices: T.Tensor(shape_indices, T.int32),
-            cache_seqlens: T.Tensor([batch], T.int32),
-            block_table: T.Tensor(shape_block_table, T.int32),
-            glse: T.Tensor([batch, heads, num_split], accum_dtype),
-            Output_partial: T.Tensor(part_shape, accum_dtype),
-            Output: T.Tensor(shape_o, dtype),
-        ):
-            flash_attn_split(Q, K, V, block_indices, cache_seqlens, block_table, glse, Output_partial)
-            combine(glse, Output_partial, Output)
 
         return main
 
@@ -533,6 +510,129 @@ def main(args):
     print(f"FA kernel execution time: {kernel_time_fa:.2f} ms")
 
     print(f"Speedup: {kernel_time_fa / kernel_time:.2f}x")
+
+
+def run_regression_perf(args):
+    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = (
+        args.batch,
+        args.heads,
+        args.heads_kv,
+        args.max_cache_seqlen,
+        args.dim,
+        args.dim_v,
+    )
+    sparse_ratio = args.sparse_ratio
+    block_N = args.block_N
+    page_block_size = args.page_block_size
+    num_blocks = args.num_pages
+    max_selected_blocks = int(math.ceil(max_cache_seqlen / block_N))
+    dtype = torch.float16
+    Q = torch.randn((batch, heads, dim), dtype=dtype, device="cuda")
+    cache_seqlens = torch.randint(max_cache_seqlen // 2, max_cache_seqlen + 1, (batch,), dtype=torch.int32, device="cuda")
+    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device="cuda")
+    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device="cuda")
+    K_cache = torch.zeros((num_blocks, page_block_size, heads_kv, dim), dtype=dtype, device="cuda")
+    V_cache = torch.zeros((num_blocks, page_block_size, heads_kv, dim_v), dtype=dtype, device="cuda")
+    max_num_blocks_per_seq = int(math.ceil(max_cache_seqlen / page_block_size))
+    block_table = torch.zeros((batch, max_num_blocks_per_seq), dtype=torch.int32, device="cuda")
+    block_indices = torch.zeros((batch, heads_kv, max_selected_blocks), dtype=torch.int32, device="cuda")
+    total_blocks_needed = sum(int(math.ceil(cache_seqlens[seq_idx].item() / page_block_size)) for seq_idx in range(batch))
+    available_blocks = list(range(total_blocks_needed))
+    import random
+
+    random.seed(42)
+    random.shuffle(available_blocks)
+    block_assignment = {}
+    block_idx_counter = 0
+    for seq_idx in range(batch):
+        seq_len = cache_seqlens[seq_idx].item()
+        num_blocks_needed = int(math.ceil(seq_len / page_block_size))
+        for block_idx in range(num_blocks_needed):
+            physical_block_idx = available_blocks[block_idx_counter]
+            block_table[seq_idx, block_idx] = physical_block_idx
+            block_assignment[(seq_idx, block_idx)] = physical_block_idx
+            block_idx_counter += 1
+    for seq_idx in range(batch):
+        seq_len = cache_seqlens[seq_idx].item()
+        num_blocks_needed = int(math.ceil(seq_len / page_block_size))
+        for block_idx in range(num_blocks_needed):
+            physical_block_idx = block_assignment[(seq_idx, block_idx)]
+            start_token = block_idx * page_block_size
+            end_token = min(start_token + page_block_size, seq_len)
+            actual_block_size = end_token - start_token
+            K_cache[physical_block_idx, :actual_block_size, :, :] = K[seq_idx, start_token:end_token, :, :]
+            V_cache[physical_block_idx, :actual_block_size, :, :] = V[seq_idx, start_token:end_token, :, :]
+    for seq_idx in range(batch):
+        seq_len = cache_seqlens[seq_idx].item()
+        num_tile = int(math.ceil(seq_len / block_N))
+        if sparse_ratio == 0.0:
+            selected_blocks = min(num_tile, max_selected_blocks)
+            for head_idx in range(heads_kv):
+                for i in range(selected_blocks):
+                    block_indices[seq_idx, head_idx, i] = num_tile - 1 - i
+                for i in range(selected_blocks, max_selected_blocks):
+                    block_indices[seq_idx, head_idx, i] = -1
+        else:
+            num_selected = int(num_tile * (1.0 - sparse_ratio))
+            num_selected = max(1, min(num_selected, max_selected_blocks))
+            all_blocks = list(range(num_tile))
+            for head_idx in range(heads_kv):
+                selected_blocks = []
+                recent_blocks = 1
+                selected_blocks.append(num_tile - 1)
+                if num_selected > recent_blocks:
+                    remaining_blocks = [b for b in all_blocks if b not in selected_blocks]
+                    if remaining_blocks:
+                        import random
+
+                        random.seed(42)
+                        additional_blocks = random.sample(remaining_blocks, min(num_selected - recent_blocks, len(remaining_blocks)))
+                        selected_blocks.extend(additional_blocks)
+
+                selected_blocks.sort(reverse=True)
+
+                for i in range(len(selected_blocks)):
+                    block_indices[seq_idx, head_idx, i] = selected_blocks[i]
+                for i in range(len(selected_blocks), max_selected_blocks):
+                    block_indices[seq_idx, head_idx, i] = -1
+
+    sparse_attn = SparseFlashAttn(batch, heads, heads_kv, dim, dim_v, page_block_size, block_N, num_blocks)
+    kernel = sparse_attn.kernel
+    batch = sparse_attn.batch
+    heads = sparse_attn.heads
+    heads_kv = sparse_attn.heads_kv
+    dim_v = sparse_attn.dim_v
+    dim = sparse_attn.dim
+    block_size = sparse_attn.block_N
+    max_selected_blocks = block_indices.shape[-1]
+
+    num_m_blocks = 1 * (heads // heads_kv + sparse_attn.block_H - 1) // sparse_attn.block_H
+    num_n_blocks = max_selected_blocks
+    size_one_kv_head = max_selected_blocks * block_size * (dim + dim_v) * 2
+    total_mblocks = batch * heads_kv * num_m_blocks
+
+    num_sm = sparse_attn.num_sm
+
+    num_split = num_splits_heuristic(
+        total_mblocks, num_sm, num_n_blocks, num_m_blocks, size_one_kv_head, is_causal_or_local=True, max_splits=128
+    )
+
+    glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device="cuda")
+    output_partial = torch.empty((batch, heads, num_split, dim_v), dtype=torch.float32, device="cuda")
+
+    def run_kernel_only():
+        kernel(
+            Q,
+            K_cache,
+            V_cache,
+            block_indices,
+            cache_seqlens,
+            block_table,
+            glse,
+            output_partial,
+        )
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

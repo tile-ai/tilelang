@@ -66,8 +66,6 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
-
             for i, d in T.Parallel(block_M, dim_qk):
                 if bx * block_M + i < q_current_seqlen:
                     Q_shared[i, d] = Q[q_start_idx + bx * block_M + i, by, d]
@@ -293,7 +291,6 @@ def flashattn_bwd_atomic_add(
                     dQ: make_dq_layout(dQ),
                     dK: make_dq_layout(dK),
                     dV: make_dq_layout(dV),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                 }
             )
 
@@ -431,9 +428,6 @@ def flashattn_bwd_split(
             T.annotate_layout(
                 {
                     dQ: make_dq_layout(dQ),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
                 }
             )
 
@@ -514,8 +508,8 @@ class _attention(torch.autograd.Function):
         total_q = q_unpad.shape[0]
         total_kv = k_unpad.shape[0]
 
-        mod = flashattn_fwd(BATCH, total_q, total_kv, N_CTX, H, max_seqlen_q, D_HEAD_QK, D_HEAD_V, causal, block_M, block_N, groups)
-        o_unpad, lse = mod(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k)
+        kernel = flashattn_fwd(BATCH, total_q, total_kv, N_CTX, H, max_seqlen_q, D_HEAD_QK, D_HEAD_V, causal, block_M, block_N, groups)
+        o_unpad, lse = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k)
         o = pad_input(o_unpad, indices_q, BATCH, N_CTX)
         ctx.save_for_backward(q_unpad, k_unpad, v_unpad, o_unpad, lse, seqlens_q, seqlens_k, cu_seqlens_q, cu_seqlens_k)
         ctx.batch = BATCH
@@ -698,6 +692,58 @@ def main(
     print(
         "Note: this varlen kernel performance is as good as the non-varlen kernel shown in Nsight-Compute. As you may observe that the TFLOPS is a bit lower, that's because the unpad operation is included in the above benchmark."
     )
+
+
+def run_regression_perf():
+    BATCH = 1
+    H = 32
+    N_CTX = 256
+    D_HEAD_QK = 192
+    D_HEAD_V = 128
+    groups = 16
+    causal = False
+    device = "cuda"
+    torch.manual_seed(42)
+    total_q = BATCH * N_CTX
+    total_kv = BATCH * N_CTX
+    head_kv = H // groups
+    Q = torch.randn(total_q, H, D_HEAD_QK, device=device, dtype=torch.half)
+    K = torch.randn(total_kv, head_kv, D_HEAD_QK, device=device, dtype=torch.half)
+    V = torch.randn(total_kv, head_kv, D_HEAD_V, device=device, dtype=torch.half)
+    O = torch.randn(total_q, H, D_HEAD_V, device=device, dtype=torch.half)
+    dO = torch.randn(total_q, H, D_HEAD_V, device=device, dtype=torch.half)
+    cu_seqlens_q = torch.arange(0, (BATCH + 1) * N_CTX, N_CTX, device=device, dtype=torch.int32)
+    cu_seqlens_k = cu_seqlens_q
+    max_seqlen_q = N_CTX
+    lse = torch.zeros(BATCH, H, N_CTX, device=device, dtype=torch.float32)
+    with torch.no_grad():
+        mod_prep = flashattn_bwd_preprocess(BATCH, H, total_q, N_CTX, max_seqlen_q, D_HEAD_V)
+        kernel = flashattn_bwd_split(
+            BATCH,
+            total_q,
+            total_kv,
+            N_CTX,
+            H,
+            max_seqlen_q,
+            D_HEAD_QK,
+            D_HEAD_V,
+            causal,
+            block_M=128,
+            block_N=32,
+            threads=256,
+            num_stages=2,
+            groups=groups,
+        )
+    dQ = torch.zeros_like(Q, dtype=torch.float32)
+    dK = torch.zeros(groups, total_kv, head_kv, D_HEAD_QK, device=device, dtype=torch.float16)
+    dV = torch.zeros(groups, total_kv, head_kv, D_HEAD_V, device=device, dtype=torch.float16)
+    Delta = mod_prep(O, dO, cu_seqlens_q)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(Q, K, V, dO, lse, Delta, cu_seqlens_q, cu_seqlens_k, dQ, dK, dV)
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

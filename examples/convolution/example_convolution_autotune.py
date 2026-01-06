@@ -99,13 +99,6 @@ def convolution(
             kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)
             out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
 
-            if is_hopper:
-                T.annotate_layout(
-                    {
-                        out_shared: tilelang.layout.make_swizzled_layout(out_shared),
-                    }
-                )
-
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
                 if is_hopper:
@@ -158,6 +151,26 @@ def main(
     profiler.assert_allclose(ref_prog, atol=1e-2, rtol=1e-2)
     print(f"TileLang latency: {tilelang_latency}")
     print(f"Ref latency: {ref_latency}")
+
+
+def run_regression_perf(
+    n: int = 128,
+    c: int = 128,
+    h: int = 64,
+    w: int = 64,
+    f: int = 128,
+    k: int = 3,
+    s: int = 1,
+    d: int = 1,
+    p: int = 1,
+    use_autotune: bool = False,
+    with_roller: bool = True,
+):
+    N, C, H, W, F, K, S, D, P = n, c, h, w, f, k, s, d, p
+    config = get_heuristic_config()
+    kernel = convolution(N, C, H, W, F, K, S, D, P, **config)
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

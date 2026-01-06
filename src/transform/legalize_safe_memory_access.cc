@@ -262,21 +262,6 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  bool IsLocalBuffer(const Buffer &buffer) {
-    String scope = buffer.scope();
-    return scope == "local" || scope == "local.fragment" ||
-           scope == "local.var";
-  }
-
-  bool isSharedBuffer(const Buffer &buffer) {
-    String scope = buffer.scope();
-    return scope == "shared" || scope == "shared.dyn";
-  }
-
-  bool IsGlobalBuffer(const Buffer &buffer) {
-    String scope = buffer.scope();
-    return scope == "global";
-  }
   // Get the safe value of the buffer
   PrimExpr GetSafeValue(const Buffer &buffer) {
     if (annotated_safe_value_map_.count(buffer)) {

@@ -156,17 +156,13 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
             V_new_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             V_new_shared = T.alloc_shared((block_S, block_DV), dtype=output_dtype)
             K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
-            G_last_local = T.alloc_local((1), dtype=gate_dtype)
+            G_last_local = T.alloc_var(T.float32)
             G_shared = T.alloc_shared((block_S, block_DV), dtype=gate_dtype)
             G_fragment = T.alloc_fragment((block_S, block_DV), dtype=gate_dtype)
 
             T.annotate_layout(
                 {
-                    b_h_shared: tilelang.layout.make_swizzled_layout(b_h_shared),
                     U_shared: tilelang.layout.make_swizzled_layout(U_shared),
-                    W_shared: tilelang.layout.make_swizzled_layout(W_shared),
-                    V_new_shared: tilelang.layout.make_swizzled_layout(V_new_shared),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                     G_shared: tilelang.layout.make_swizzled_layout(G_shared),
                 }
             )
@@ -201,21 +197,19 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
                 T.copy(K[bb, i_s * block_S : (i_s + 1) * block_S, bh, 0:DK], K_shared)
                 # use_g
                 if use_g:
-                    G_last_local[0] = G[bb, (i_s + 1) * block_S - 1, bh]
+                    G_last_local = G[bb, (i_s + 1) * block_S - 1, bh]
                     for i_s2, i_v in T.Parallel(block_S, block_DV):
                         G_shared[i_s2, i_v] = G[bb, i_s * block_S + i_s2, bh]
                     T.copy(G_shared, G_fragment)
                     for i_s2, i_v in T.Parallel(block_S, block_DV):
-                        with T.If(G_last_local[0] - G_fragment[i_s2, i_v] <= 0):
-                            with T.Then():
-                                V_new_fragment[i_s2, i_v] = V_new_fragment[i_s2, i_v] * T.exp2(
-                                    (G_last_local[0] - G_fragment[i_s2, i_v]) * 1.442695
-                                )
-                            with T.Else():
-                                V_new_fragment[i_s2, i_v] = 0
-                    G_last_local[0] = T.exp2(G_last_local[0] * 1.442695)
+                        V_new_fragment[i_s2, i_v] = (
+                            V_new_fragment[i_s2, i_v] * T.exp2((G_last_local - G_fragment[i_s2, i_v]) * 1.442695)
+                            if G_last_local - G_fragment[i_s2, i_v] <= 0
+                            else 0
+                        )
+                    G_last_local = T.exp2(G_last_local * 1.442695)
                     for i_k, i_v in T.Parallel(DK, block_DV):
-                        b_h_fragment[i_k, i_v] *= G_last_local[0]
+                        b_h_fragment[i_k, i_v] *= G_last_local
 
                 # Update intermediate results
                 T.copy(V_new_fragment, V_new_shared)

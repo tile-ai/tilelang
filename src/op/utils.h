@@ -29,6 +29,32 @@ TVM_DLL BufferRegion NormalizeToBufferRegion(const PrimExpr &arg);
 TVM_DLL PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
                                          int rw_mask, bool require_2d = false);
 
+// Check if a buffer is a fragment buffer (scope == "local.fragment")
+inline bool IsFragmentBuffer(const Buffer &buffer) {
+  return buffer.defined() && buffer.scope() == "local.fragment";
+}
+
+inline bool IsSharedBuffer(const Buffer &buffer, bool allow_dynamic = true) {
+  if (allow_dynamic) {
+    return buffer.defined() &&
+           (buffer.scope() == "shared" || buffer.scope() == "shared.dyn");
+  } else {
+    return buffer.defined() && buffer.scope() == "shared";
+  }
+}
+
+inline bool IsGlobalBuffer(const Buffer &buffer) {
+  return buffer.defined() && buffer.scope() == "global";
+}
+
+inline bool IsLocalBuffer(const Buffer &buffer) {
+  return buffer.defined() && buffer.scope() == "local";
+}
+
+inline bool IsLocalVarBuffer(const Buffer &buffer) {
+  return buffer.defined() && buffer.scope() == "local.var";
+}
+
 } // namespace tl
 } // namespace tvm
 
