@@ -603,9 +603,12 @@ def _detect_lazy_style(tree: ast.FunctionDef) -> bool:
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node is not tree:
             for decorator in node.decorator_list:
-                if isinstance(decorator, ast.Attribute) and decorator.attr == "prim_func":
-                    has_inner_prim_func = True
-                elif isinstance(decorator, ast.Name) and decorator.id == "prim_func":
+                if (
+                    isinstance(decorator, ast.Attribute)
+                    and decorator.attr == "prim_func"
+                    or isinstance(decorator, ast.Name)
+                    and decorator.id == "prim_func"
+                ):
                     has_inner_prim_func = True
 
     if has_inner_prim_func:
@@ -623,11 +626,13 @@ def _detect_lazy_style(tree: ast.FunctionDef) -> bool:
             continue
 
         # Check for T.Kernel, T.const, T.Tensor, etc.
-        if isinstance(node, ast.Attribute):
-            if node.attr in eager_mode_attrs:
-                # Verify it's accessed from T or similar module
-                if isinstance(node.value, ast.Name) and node.value.id in ("T", "tilelang", "tl"):
-                    return False  # eager style
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in eager_mode_attrs
+            and isinstance(node.value, ast.Name)
+            and node.value.id in ("T", "tilelang", "tl")
+        ):
+            return False  # eager style
 
         # Check for T.Tensor[[...], ...] or Tensor[[...], ...] subscript pattern
         if isinstance(node, ast.Subscript):
@@ -638,9 +643,8 @@ def _detect_lazy_style(tree: ast.FunctionDef) -> bool:
                 return False  # eager style
 
         # Check for direct function calls: const("M"), Kernel(...), etc.
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in eager_mode_names:
-                return False  # eager style
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in eager_mode_names:
+            return False  # eager style
 
     # Default: if there's a return with value and no eager constructs detected,
     # assume lazy style (external prim_func return)
