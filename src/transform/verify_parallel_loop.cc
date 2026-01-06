@@ -212,7 +212,7 @@ struct ParallelLoopVerifier : public ConstrVisitor {
     arith::Analyzer analyzer;
     cset.Populate(analyzer);
     // If we can prove the values are the same, then no data race can happen.
-    if(analyzer.CanProve(op->value == tir::Substitute(op->value, subs))) {
+    if (analyzer.CanProve(op->value == tir::Substitute(op->value, subs))) {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }
