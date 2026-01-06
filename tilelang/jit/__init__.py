@@ -451,6 +451,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 ExecutionBackend = Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
 
 
+JITMode = Literal["auto", "lazy", "eager"]
+
+
 @overload
 def jit(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]: ...
 
@@ -466,6 +469,7 @@ def jit(
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
+    mode: JITMode = "auto",
 ) -> Callable[[Callable[_KP, _T]], JITImpl[_KP, _KP, _T, _T]]: ...
 
 
@@ -480,11 +484,12 @@ def jit(
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
+    mode: JITMode = "auto",
 ) -> Callable[[Callable[_P, _T]], JITImpl[_KP, _KP, _T, _T]]:
     """
     JIT compiler decorator for TileLang functions.
 
-    Supports two execution modes (automatically inferred):
+    Supports two execution modes:
     - **lazy**: Function returns PrimFunc explicitly. Returns compiled kernel object.
     - **eager**: Function uses DSL builder pattern. Executes kernel immediately.
 
@@ -506,6 +511,8 @@ def jit(
         Directory to save compiled kernel source for debugging.
     compile_flags : list[str] | str | None
         Additional compiler flags.
+    mode : "auto" | "lazy" | "eager"
+        Execution mode. Default "auto" infers from function structure.
     """
 
     compile_args = dict(
@@ -520,7 +527,6 @@ def jit(
     )
 
     def decorator(func: Callable[_P, _T]):
-        mode = "auto"
         pf: LazyJITFunc[_P, _T] = prim_func(func, lazy_jit=True)
         func_source = inspect.getsource(pf.orig_func)
         signature = inspect.signature(pf.orig_func)
