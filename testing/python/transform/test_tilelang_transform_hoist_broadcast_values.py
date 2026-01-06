@@ -4,6 +4,9 @@ import torch
 import re
 import pytest
 import tilelang.testing
+from tilelang import tvm as tvm
+import tilelang as tl
+from tilelang.utils.target import determine_target
 
 
 @tilelang.jit
@@ -34,7 +37,7 @@ def qwq(dtype=torch.float8_e4m3fn):
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e8m0fnu, torch.float16])
-def test_broadcast(dtype):
+def test_hoist_broadcast(dtype):
     kernel = qwq(dtype)
     print(kernel.get_kernel_source())
     matches = re.findall(r"(\w+) broadcast_var(_[0-9]+)? = \1", kernel.get_kernel_source())
@@ -45,6 +48,38 @@ def test_broadcast(dtype):
     d = torch.empty((4,), device="cuda", dtype=dtype)
     e = torch.empty((2,), device="cuda", dtype=dtype)
     kernel(a, b, c, d, e)
+
+
+auto_target = tvm.target.Target(determine_target("auto"))
+
+
+def _check(original, transformed):
+    mod = tvm.IRModule.from_expr(original.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.HoistBroadcastValues()(mod)
+
+    transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
+    transformed = tvm.tir.transform.BindTarget(auto_target)(transformed)
+
+    tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
+
+
+def test_transform_hoist():
+    @T.prim_func
+    def before():
+        with T.Kernel(8):
+            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            A_shared[0:8] = T.Broadcast(T.float8_e4m3fn(1.2), 8) + T.Broadcast(T.float8_e4m3fn(3.4), 8)
+
+    @T.prim_func
+    def after():
+        with T.Kernel(8):
+            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            broadcast_var: T.float8_e4m3fn = T.float8_e4m3fn(1.2)
+            broadcast_var_1: T.float8_e4m3fn = T.float8_e4m3fn(3.4)
+            A_shared[0:8] = T.Broadcast(broadcast_var, 8) + T.Broadcast(broadcast_var_1, 8)
+
+    _check(before, after)
 
 
 if __name__ == "__main__":
