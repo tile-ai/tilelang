@@ -172,6 +172,11 @@ class Builder(BaseBuilder):
         self.out_tensor_cnt = 0
         self.constexpr_var = set()
         self.lazy_jit = False
+        self.current_file = "<unknown>"
+        self.current_line = 0
+        self.current_macro_name = "<unknown-macro>"
+        # stack to record caller fileline, not callee fileline
+        self.macro_fileline_stack: list[tuple[str, int, str]] = []
 
     @classmethod
     def current(cls) -> Self:
@@ -211,9 +216,11 @@ class Builder(BaseBuilder):
         # def bar():
         #    c = foo(1) # macro generates let y = x + 1
         #    d = c # d = c should lay inside frame of `let y = x + 1`
+        self.macro_fileline_stack.append((self.current_file, self.current_line, self.current_macro_name))
         self.frames.append(MacroFrame())
         yield
         self.frames[pos] = ExitedMacroFrame()
+        self.macro_fileline_stack.pop()
         self.name_inside_frame, self.macro_arg_annot = save
 
     def get(self) -> PrimFunc:
@@ -679,6 +686,22 @@ class Builder(BaseBuilder):
         var = tir.Var(name, dtype)
         self.constexpr_var.add(var)
         return var
+
+    def set_fileline(self, filename: str, lineno: int, name: str):
+        self.current_file = filename
+        self.current_line = lineno
+        self.current_macro_name = name
+
+    def get_fileline_stack(self, stacklevel=1):
+        stack = self.macro_fileline_stack + [(self.current_file, self.current_line, self.current_macro_name)]
+        return stack[: len(stack) - stacklevel + 1]
+
+    # def get_fileline_stack_msg(self, stacklevel=1):
+    #     stack = self.get_fileline_stack(stacklevel)
+    #     msg = ''
+    #     for filename, lineno, macro_name in stack:
+    #         msg += f'{filename}:{lineno} {macro_name}\n'
+    #     return msg
 
 
 _P = ParamSpec("_P")
