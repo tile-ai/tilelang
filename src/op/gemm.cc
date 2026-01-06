@@ -50,7 +50,7 @@ using namespace tir;
 
 // MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
 
-Gemm::Gemm(Array<PrimExpr> args) {
+Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
 
   node->aRegion_ = NormalizeToBufferRegion(args[0]);
@@ -152,6 +152,8 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
   int kNPerWarp = 8;            // Columns processed by a single warp
   if (TargetIsVolta(target)) {
+    kNPerWarp = 16;
+  } else if (TargetIsCDNA(target)) {
     kNPerWarp = 16;
   }
   ICHECK(M % kMPerWarp == 0)

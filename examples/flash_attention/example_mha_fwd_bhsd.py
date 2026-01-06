@@ -157,7 +157,7 @@ def main(
 
 def run_regression_perf(
     batch: int = 1,
-    heads: int = 1,
+    heads: int = 32,
     seq_q: int = 256,
     seq_kv: int = 256,
     dim: int = 64,

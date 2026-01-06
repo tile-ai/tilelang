@@ -1,5 +1,7 @@
+#include "../transform/common/attr.h"
 #include "codegen_cuda.h"
 #include "runtime/cuda/cuda_module.h"
+#include "runtime/meta_data.h"
 #include "runtime/pack_args.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
@@ -30,6 +32,14 @@ ExtractFuncInfo(const IRModule &mod) {
       if (dtype.is_bool())
         dtype = DataType::Int(32);
       info.arg_types.push_back(dtype);
+    }
+    if (f->HasNonzeroAttr(tl::attr::kHasGridSync)) {
+      info.launch_param_tags.push_back(
+          runtime::launch_param::kUseProgramaticDependentLaunch);
+    }
+    if (f->HasNonzeroAttr("use_cooperative_groups")) {
+      info.launch_param_tags.push_back(
+          runtime::launch_param::kUseCooperativeLaunch);
     }
     if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(
             tir::attr::kKernelLaunchParams)) {

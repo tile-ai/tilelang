@@ -270,12 +270,12 @@ def main(m=256, n=256, k=256, tune=False):
         print(f"Best config: {best_config}")
 
 
-def run_regression_perf(m=256, n=256, k=256):
+def run_regression_perf(m=4096, n=4096, k=4096):
     kernel = matmul(m, n, k, "float16", "float16", "float32", num_bits=4, tune=False)(
         block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1
     )
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
-    return profiler.do_bench(warmup=10, rep=100, backend="cupti")
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

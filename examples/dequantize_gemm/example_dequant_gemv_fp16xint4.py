@@ -219,8 +219,8 @@ def main() -> None:
 
 def run_regression_perf():
     M = 1
-    N = 1024
-    K = 1024
+    N = 8192
+    K = 8192
     in_dtype = "float16"
     out_dtype = "float16"
     accum_dtype = "float16"
@@ -271,7 +271,7 @@ def run_regression_perf():
     def run_kernel_only():
         kernel(A, qB, C)
 
-    return do_bench(run_kernel_only, warmup=100, rep=1000, backend="cupti")
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

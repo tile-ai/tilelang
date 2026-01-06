@@ -508,8 +508,8 @@ class _attention(torch.autograd.Function):
         total_q = q_unpad.shape[0]
         total_kv = k_unpad.shape[0]
 
-        mod = flashattn_fwd(BATCH, total_q, total_kv, N_CTX, H, max_seqlen_q, D_HEAD_QK, D_HEAD_V, causal, block_M, block_N, groups)
-        o_unpad, lse = mod(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k)
+        kernel = flashattn_fwd(BATCH, total_q, total_kv, N_CTX, H, max_seqlen_q, D_HEAD_QK, D_HEAD_V, causal, block_M, block_N, groups)
+        o_unpad, lse = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k)
         o = pad_input(o_unpad, indices_q, BATCH, N_CTX)
         ctx.save_for_backward(q_unpad, k_unpad, v_unpad, o_unpad, lse, seqlens_q, seqlens_k, cu_seqlens_q, cu_seqlens_k)
         ctx.batch = BATCH
@@ -743,7 +743,7 @@ def run_regression_perf():
     def run_kernel_only():
         kernel(Q, K, V, dO, lse, Delta, cu_seqlens_q, cu_seqlens_k, dQ, dK, dV)
 
-    return do_bench(run_kernel_only, warmup=10, rep=100, backend="cupti")
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

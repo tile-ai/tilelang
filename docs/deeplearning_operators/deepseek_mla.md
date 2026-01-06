@@ -38,7 +38,7 @@ Notably, **TileLang accomplishes this with just around 80 lines of Python code**
 
 First, let's review the core computation logic of traditional FlashAttention:
 
-```python   
+```python
 # acc_s: [block_M, block_N]
 # scores_max: [block_M]
 # scores_scale: [block_M]
@@ -160,7 +160,7 @@ Key implementation differences between Hopper and MI300X architectures include:
    # Original shared memory allocation
    Q_shared = T.alloc_shared([block_H, dim], dtype)
    Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
-   
+
    # Optimized register allocation
    Q_local = T.alloc_fragment([block_H, dim], dtype)
    Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)

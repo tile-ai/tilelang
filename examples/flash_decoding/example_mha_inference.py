@@ -262,7 +262,7 @@ def run_regression_perf(BATCH=1, H=32, Q_CTX=128, KV_CTX=8192, D_HEAD=128, causa
     BLOCK_N = 64
     kernel = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
-    return profiler.do_bench(n_warmup=10, n_repeat=10, backend="cupti")
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

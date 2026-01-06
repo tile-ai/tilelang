@@ -305,11 +305,7 @@ def run_regression_perf(
 
     from tilelang.profiler import do_bench
 
-    return do_bench(
-        run_kernel_only,
-        rep=100,
-        warmup=250,
-    )
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
       {"logf", "tl.log"},    {"log2", "tl.log2"},  {"log2f", "tl.log2"},
       {"log10", "tl.log10"}, {"tan", "tl.tan"},    {"cos", "tl.cos"},
       {"sin", "tl.sin"},     {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
+      {"tanh", "tl.tanh"},   {"tanhf", "tl.tanh"},
   };
 
   auto it = kFastMathMap.find(func_name);

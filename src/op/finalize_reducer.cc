@@ -31,7 +31,8 @@ using namespace tir;
  *             `args[0]` is an access pointer identifying the reducer variable
  * and `args[1]` is an integer encoding a `ReducerOpType` (e.g., Sum/Max/Min).
  */
-FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args) {
+FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
+                                     Map<String, ObjectRef> annotations) {
   auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
   // Normalize any supported region expression
   // (BufferRegion/BufferLoad/tl.region) to a BufferRegion, then take the
@@ -98,7 +99,8 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
   int reducing_threads = extent;
   std::stringstream ss;
   auto thread_offset = T.thread_bounds->min;
-  if (TargetIsHopper(T.target) || TargetIsSm100(T.target)) {
+  if (TargetIsHopper(T.target) || TargetIsSm100(T.target) ||
+      TargetIsSM120(T.target)) {
     auto all_threads = T.thread_bounds->extent;
     ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
        << ", " << thread_offset << ", " << all_threads << ">::run_hopper";

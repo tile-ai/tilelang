@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "../transform/common/attr.h"
 #include "./ptx.h"
 #include "./utils.h"
 #include "arith/pattern_match.h"
@@ -213,6 +214,188 @@ CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
   vid_global_barrier_expect_ = name_supply_->FreshName("__barrier_expect");
   ICHECK_EQ(vid_global_barrier_state_,
             runtime::symbol::tvm_global_barrier_state);
+}
+
+void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
+  CodeGenC::ReserveKeywordsAsUnique();
+  name_supply_->ReserveName("max");
+  name_supply_->ReserveName("min");
+  name_supply_->ReserveName("isfinite");
+  name_supply_->ReserveName("isinf");
+  name_supply_->ReserveName("isnan");
+
+  // skip single precision mathematical functions
+  name_supply_->ReserveName("acosf");
+  name_supply_->ReserveName("acoshf");
+  name_supply_->ReserveName("asinf");
+  name_supply_->ReserveName("asinhf");
+  name_supply_->ReserveName("atan2f");
+  name_supply_->ReserveName("atanf");
+  name_supply_->ReserveName("atanhf");
+  name_supply_->ReserveName("cbrtf");
+  name_supply_->ReserveName("ceilf");
+  name_supply_->ReserveName("copysignf");
+  name_supply_->ReserveName("cosf");
+  name_supply_->ReserveName("coshf");
+  name_supply_->ReserveName("cospif");
+  name_supply_->ReserveName("cyl_bessel_i0f");
+  name_supply_->ReserveName("cyl_bessel_i1f");
+  name_supply_->ReserveName("erfcf");
+  name_supply_->ReserveName("erfcinvf");
+  name_supply_->ReserveName("erfcxf");
+  name_supply_->ReserveName("erff");
+  name_supply_->ReserveName("erfinvf");
+  name_supply_->ReserveName("exp10f");
+  name_supply_->ReserveName("exp2f");
+  name_supply_->ReserveName("expf");
+  name_supply_->ReserveName("expm1f");
+  name_supply_->ReserveName("fabsf");
+  name_supply_->ReserveName("fdimf");
+  name_supply_->ReserveName("fdividef");
+  name_supply_->ReserveName("floorf");
+  name_supply_->ReserveName("fmaf");
+  name_supply_->ReserveName("fmaxf");
+  name_supply_->ReserveName("fminf");
+  name_supply_->ReserveName("fmodf");
+  name_supply_->ReserveName("frexpf");
+  name_supply_->ReserveName("hypotf");
+  name_supply_->ReserveName("ilogbf");
+  name_supply_->ReserveName("j0f");
+  name_supply_->ReserveName("j1f");
+  name_supply_->ReserveName("jnf");
+  name_supply_->ReserveName("ldexpf");
+  name_supply_->ReserveName("lgammaf");
+  name_supply_->ReserveName("llrintf");
+  name_supply_->ReserveName("llroundf");
+  name_supply_->ReserveName("log10f");
+  name_supply_->ReserveName("log1pf");
+  name_supply_->ReserveName("log2f");
+  name_supply_->ReserveName("logbf");
+  name_supply_->ReserveName("logf");
+  name_supply_->ReserveName("lrintf");
+  name_supply_->ReserveName("lroundf");
+  name_supply_->ReserveName("modff");
+  name_supply_->ReserveName("nanf");
+  name_supply_->ReserveName("nearbyintf");
+  name_supply_->ReserveName("nextafterf");
+  name_supply_->ReserveName("norm3df");
+  name_supply_->ReserveName("norm4df");
+  name_supply_->ReserveName("normcdff");
+  name_supply_->ReserveName("normcdfinvf");
+  name_supply_->ReserveName("normf");
+  name_supply_->ReserveName("powf");
+  name_supply_->ReserveName("rcbrtf");
+  name_supply_->ReserveName("remainderf");
+  name_supply_->ReserveName("remquof");
+  name_supply_->ReserveName("rhypotf");
+  name_supply_->ReserveName("rintf");
+  name_supply_->ReserveName("rnorm3df");
+  name_supply_->ReserveName("rnorm4df");
+  name_supply_->ReserveName("rnormf");
+  name_supply_->ReserveName("roundf");
+  name_supply_->ReserveName("rsqrtf");
+  name_supply_->ReserveName("scalblnf");
+  name_supply_->ReserveName("scalbnf");
+  name_supply_->ReserveName("signbit");
+  name_supply_->ReserveName("sincosf");
+  name_supply_->ReserveName("sincospif");
+  name_supply_->ReserveName("sinf");
+  name_supply_->ReserveName("sinhf");
+  name_supply_->ReserveName("sinpif");
+  name_supply_->ReserveName("sqrtf");
+  name_supply_->ReserveName("tanf");
+  name_supply_->ReserveName("tanhf");
+  name_supply_->ReserveName("tgammaf");
+  name_supply_->ReserveName("truncf");
+  name_supply_->ReserveName("y0f");
+  name_supply_->ReserveName("y1f");
+  name_supply_->ReserveName("ynf");
+
+  // skip double precision mathematical functions
+  name_supply_->ReserveName("acos");
+  name_supply_->ReserveName("acosh");
+  name_supply_->ReserveName("asin");
+  name_supply_->ReserveName("asinh");
+  name_supply_->ReserveName("atan");
+  name_supply_->ReserveName("atan2");
+  name_supply_->ReserveName("atanh");
+  name_supply_->ReserveName("cbrt");
+  name_supply_->ReserveName("ceil");
+  name_supply_->ReserveName("copysign");
+  name_supply_->ReserveName("cos");
+  name_supply_->ReserveName("cosh");
+  name_supply_->ReserveName("cospi");
+  name_supply_->ReserveName("cyl_bessel_i0");
+  name_supply_->ReserveName("cyl_bessel_i1");
+  name_supply_->ReserveName("erf");
+  name_supply_->ReserveName("erfc");
+  name_supply_->ReserveName("erfcinv");
+  name_supply_->ReserveName("erfcx");
+  name_supply_->ReserveName("erfinv");
+  name_supply_->ReserveName("exp");
+  name_supply_->ReserveName("exp10");
+  name_supply_->ReserveName("exp2");
+  name_supply_->ReserveName("expm1");
+  name_supply_->ReserveName("fabs");
+  name_supply_->ReserveName("fdim");
+  name_supply_->ReserveName("floor");
+  name_supply_->ReserveName("fma");
+  name_supply_->ReserveName("fmax");
+  name_supply_->ReserveName("fmin");
+  name_supply_->ReserveName("fmod");
+  name_supply_->ReserveName("frexp");
+  name_supply_->ReserveName("hypot");
+  name_supply_->ReserveName("ilogb");
+  name_supply_->ReserveName("j0");
+  name_supply_->ReserveName("j1");
+  name_supply_->ReserveName("jn");
+  name_supply_->ReserveName("ldexp");
+  name_supply_->ReserveName("lgamma");
+  name_supply_->ReserveName("llrint");
+  name_supply_->ReserveName("llround");
+  name_supply_->ReserveName("log");
+  name_supply_->ReserveName("log10");
+  name_supply_->ReserveName("log1p");
+  name_supply_->ReserveName("log2");
+  name_supply_->ReserveName("logb");
+  name_supply_->ReserveName("lrint");
+  name_supply_->ReserveName("lround");
+  name_supply_->ReserveName("modf");
+  name_supply_->ReserveName("nan");
+  name_supply_->ReserveName("nearbyint");
+  name_supply_->ReserveName("nextafter");
+  name_supply_->ReserveName("norm");
+  name_supply_->ReserveName("norm3d");
+  name_supply_->ReserveName("norm4d");
+  name_supply_->ReserveName("normcdf");
+  name_supply_->ReserveName("normcdfinv");
+  name_supply_->ReserveName("pow");
+  name_supply_->ReserveName("rcbrt");
+  name_supply_->ReserveName("remainder");
+  name_supply_->ReserveName("remquo");
+  name_supply_->ReserveName("rhypot");
+  name_supply_->ReserveName("rint");
+  name_supply_->ReserveName("rnorm");
+  name_supply_->ReserveName("rnorm3d");
+  name_supply_->ReserveName("rnorm4d");
+  name_supply_->ReserveName("round");
+  name_supply_->ReserveName("rsqrt");
+  name_supply_->ReserveName("scalbln");
+  name_supply_->ReserveName("scalbn");
+  name_supply_->ReserveName("signbit");
+  name_supply_->ReserveName("sin");
+  name_supply_->ReserveName("sincos");
+  name_supply_->ReserveName("sincospi");
+  name_supply_->ReserveName("sinh");
+  name_supply_->ReserveName("sinpi");
+  name_supply_->ReserveName("sqrt");
+  name_supply_->ReserveName("tan");
+  name_supply_->ReserveName("tanh");
+  name_supply_->ReserveName("tgamma");
+  name_supply_->ReserveName("trunc");
+  name_supply_->ReserveName("y0");
+  name_supply_->ReserveName("y1");
+  name_supply_->ReserveName("yn");
 }
 
 void CodeGenTileLangCUDA::PrintFuncPrefix(std::ostream &os) {
@@ -1452,23 +1635,48 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     return ss.str();
   };
   if (op->op.same_as(builtin::ptx_cp_async())) {
+    // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
+    // args[3] = predicate (optional)
+    ICHECK(op->args.size() == 3 || op->args.size() == 4)
+        << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+           "src_access_ptr, bytes, [predicate])";
+
     std::string dst = this->PrintExpr(op->args[0]);
-    std::string dst_offset = this->PrintExpr(op->args[1]);
-    std::string src = this->PrintExpr(op->args[2]);
-    std::string src_offset = this->PrintExpr(op->args[3]);
-    std::string size = this->PrintExpr(op->args[4]);
-    // use size of argument list to indicate whether or not to use predicated
-    // cp.async
-    if (op->args.size() == 5) {
-      this->PrintIndent();
-      this->stream << "tl::cp_async_gs<" << size << ">(" << dst << "+"
-                   << dst_offset << ", " << src << "+" << src_offset << ");\n";
+    std::string src = this->PrintExpr(op->args[1]);
+    std::string size = this->PrintExpr(op->args[2]);
+
+    this->PrintIndent();
+    if (op->args.size() == 3) {
+      // Non-predicated version
+      this->stream << "tl::cp_async_gs<" << size << ">(" << dst << ", " << src
+                   << ");\n";
     } else {
-      std::string condition = this->PrintExpr(op->args[5]);
-      this->PrintIndent();
+      // Predicated version
+      std::string condition = this->PrintExpr(op->args[3]);
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
-                   << "+" << dst_offset << ", " << src << "+" << src_offset
-                   << ", " << condition << ");\n";
+                   << ", " << src << ", " << condition << ");\n";
+    }
+  } else if (op->op.same_as(tl::ptx_cp_async())) {
+    // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr,
+    // args[2] = bytes, args[3] = predicate (optional)
+    ICHECK(op->args.size() == 3 || op->args.size() == 4)
+        << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+           "src_access_ptr, bytes, [predicate])";
+
+    std::string dst = this->PrintExpr(op->args[0]);
+    std::string src = this->PrintExpr(op->args[1]);
+    std::string size = this->PrintExpr(op->args[2]);
+
+    this->PrintIndent();
+    if (op->args.size() == 3) {
+      // Non-predicated version
+      this->stream << "tl::cp_async_gs<" << size << ">(" << dst << ", " << src
+                   << ");\n";
+    } else {
+      // Predicated version
+      std::string condition = this->PrintExpr(op->args[3]);
+      this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
+                   << ", " << src << ", " << condition << ");\n";
     }
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
     print_extern_call_stmt("tl::cp_async_commit");
@@ -2276,22 +2484,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << "for (int i = 0; i < " << num_elem << "; ++i) {\n";
     os << dst << "[" << dst_offset << " + i] = 0.0;";
     os << "}\n";
-  } else if (op->op.same_as(builtin::ptx_cp_async())) {
-    std::string dst = this->PrintExpr(op->args[0]);
-    std::string dst_offset = this->PrintExpr(op->args[1]);
-    std::string src = this->PrintExpr(op->args[2]);
-    std::string src_offset = this->PrintExpr(op->args[3]);
-    std::string size = this->PrintExpr(op->args[4]);
-    need_cast_smem_ptr_to_int_ = true;
-    // use size of argument list to indicate whether or not to use predicated
-    // cp.async
-    if (op->args.size() == 5) {
-      this->stream << PrintCpAsyncAssembly(dst, dst_offset, src, src_offset,
-                                           size);
-    } else {
-      this->stream << PrintPredicatedCpAsyncAssembly(
-          dst, dst_offset, src, src_offset, size, this->PrintExpr(op->args[5]));
-    }
   } else if (op->op.same_as(builtin::ptx_cp_async_bulk())) {
     need_cast_smem_ptr_to_int_ = true;
     std::string dst = this->PrintExpr(op->args[0]);
@@ -2651,18 +2843,28 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << PrintExpr(op->args[1]) << ")";
   } else if (op->op.same_as(tl::rng_init())) {
     this->need_curand_kernel_h_ = true;
-    this->curand_philox_state = name_supply_->FreshName("__philox_state");
+    this->curand_random_generator_state =
+        name_supply_->FreshName("__random_generator_state");
+    this->curand_random_generator_state_type =
+        op->args[3].as<StringImmNode>()->value;
     this->PrintIndent();
-    this->stream << "curandStatePhilox4_32_10_t " << this->curand_philox_state
-                 << ";\n";
+    this->stream << op->args[3].as<StringImmNode>()->value << " "
+                 << this->curand_random_generator_state << ";\n";
     this->PrintIndent();
     this->stream << "curand_init(" << PrintExpr(op->args[0]) << ", "
                  << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2])
-                 << ", &" << this->curand_philox_state << ");\n";
+                 << ", &" << this->curand_random_generator_state << ");\n";
     // Store state_var for later use by rng_rand
   } else if (op->op.same_as(tl::rng_rand())) {
     this->need_curand_kernel_h_ = true;
-    os << "curand(&" << this->curand_philox_state << ")";
+    os << "curand(&" << this->curand_random_generator_state << ")";
+  } else if (op->op.same_as(tl::rng_rand_float())) {
+    this->need_curand_kernel_h_ = true;
+    os << "curand_" << op->args[0].as<StringImmNode>()->value;
+    if (op->dtype.bits() == 64) {
+      os << "_double";
+    }
+    os << "(&" << this->curand_random_generator_state << ")";
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
     os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_max())) {
@@ -2830,8 +3032,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
 
 void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-  CHECK_LE(lanes, 4) << "Translate Ramp Node " << tvm::ffi::GetRef<Ramp>(op)
-                     << " with " << lanes << " lanes is not allowed.";
+  // TODO(chaofan): Comment the ramp lanes limit for now since we have
+  // LegalizeVectorizedLoop to automatically legalize vectorized loop whose
+  // width exceeds the limit. But we should add check here for safety in the
+  // future. The check should be aligned to certain bit width like 128bits or
+  // 256bits.
+
+  // CHECK_LE(lanes, 8) << "Translate Ramp Node " << tvm::ffi::GetRef<Ramp>(op)
+  //                    << "error: " << lanes << " exceeds max ramp lanes 8.";
   os << "(make_";
   PrintType(op->dtype, os);
   os << "(";
@@ -3106,6 +3314,59 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     }
   }
 
+  if (auto call = op->value.as<CallNode>()) {
+    if (this->curand_random_generator_state_type ==
+        "curandStatePhilox4_32_10_t") {
+      if (call->op.same_as(tl::rng_rand()) && lanes == 4) {
+        os << "curand4(&" << this->curand_random_generator_state << ")";
+        return;
+      }
+      if (call->op.same_as(tl::rng_rand_float())) {
+        int bits = call->dtype.bits();
+        std::string dist = call->args[0].as<StringImmNode>()->value;
+        if (bits == 32) {
+          if (lanes == 4) {
+            os << "curand_" << dist << "4(&"
+               << this->curand_random_generator_state << ")";
+            return;
+          } else if (lanes == 2 && dist == "normal") {
+            os << "curand_normal2(&" << this->curand_random_generator_state
+               << ")";
+            return;
+          }
+
+        } else {
+          if (lanes == 2) {
+            os << "curand_" << dist << "2_double(&"
+               << this->curand_random_generator_state << ")";
+            return;
+          }
+        }
+      }
+    } else if (this->curand_random_generator_state_type ==
+                   "curandStateMRG32k3a_t" ||
+               this->curand_random_generator_state_type ==
+                   "curandStateXORWOW_t") {
+      if (call->op.same_as(tl::rng_rand_float())) {
+        int bits = call->dtype.bits();
+        std::string dist = call->args[0].as<StringImmNode>()->value;
+        if (bits == 32) {
+          if (lanes == 2 && dist == "normal") {
+            os << "curand_normal2(&" << this->curand_random_generator_state
+               << ")";
+            return;
+          }
+        } else {
+          if (lanes == 2 && dist == "normal") {
+            os << "curand_normal2_double(&"
+               << this->curand_random_generator_state << ")";
+            return;
+          }
+        }
+      }
+    }
+  }
+
   std::string v = PrintExpr(op->value);
   os << "make_";
   PrintType(op->dtype, os);
@@ -3332,6 +3593,10 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   CodeGenC::PrintType(func->ret_type, os);
   CodeGenC::PrintExtraAttrs(func, os);
   bool no_alias = func->HasNonzeroAttr(tir::attr::kNoAlias);
+  // NVCC has issues with __restrict__ on kernel parameters when using PDL
+  // (Programmatic Dependent Launch) synchronization. Suppress the annotation
+  // when kHasGridSync is set.
+  bool has_cuda_pdl_sync = func->HasNonzeroAttr(tl::attr::kHasGridSync);
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
           func->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
@@ -3381,7 +3646,7 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
         }
       }
 
-      if (no_alias && !non_restrict.count(v.get())) {
+      if (!has_cuda_pdl_sync && no_alias && !non_restrict.count(v.get())) {
         PrintRestrict(v, os);
       }
     } else {
@@ -3411,12 +3676,16 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   // clear previous generated state.
   this->InitFuncState(f);
   // reserve keywords
-  ReserveKeywordsAsUnique();
+  ReserveKeywordsAsUnique_();
 
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol)
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
   bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
+  // NVCC has issues with __restrict__ on kernel parameters when using PDL
+  // (Programmatic Dependent Launch) synchronization. Suppress the annotation
+  // when kHasGridSync is set.
+  bool has_cuda_pdl_sync = f->HasNonzeroAttr(tl::attr::kHasGridSync);
   std::unordered_set<const VarNode *> non_restrict;
   if (auto opt =
           f->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
@@ -3468,7 +3737,7 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
         }
       }
 
-      if (no_alias && !non_restrict.count(v.get())) {
+      if (!has_cuda_pdl_sync && no_alias && !non_restrict.count(v.get())) {
         PrintRestrict(v, stream);
       }
     } else {

@@ -1,7 +1,6 @@
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm as tvm
 
 
 @tilelang.jit
@@ -17,9 +16,9 @@ def matmul_dynamic_mnk(
     num_stages,
     threads,
 ):
-    M = tvm.te.var("m")
-    N = tvm.te.var("n")
-    K = tvm.te.var("k")
+    M = T.dynamic("m")
+    N = T.dynamic("n")
+    K = T.dynamic("k")
 
     A_shape = (K, M) if trans_A else (M, K)
     B_shape = (N, K) if trans_B else (K, N)
@@ -105,7 +104,7 @@ def main(M=16384, N=16384, K=16384):
     matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, num_stages, threads)
 
 
-def run_regression_perf(M, N, K):
+def run_regression_perf(M=4096, N=4096, K=4096):
     block_M, block_N, block_K = 128, 128, 32
     trans_A, trans_B = False, False
     in_dtype, out_dtype = "float16", "float16"

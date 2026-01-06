@@ -13,6 +13,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/script/ir_builder/tir/ir.h>
+#include <tvm/tir/analysis.h>
 
 #include <utility>
 
@@ -79,8 +80,20 @@ ForFrame ParallelFor(const Array<PrimExpr> &extents,
       Var var = vars[i];
       Optional<PrimExpr> step =
           i < steps.size() ? steps[i] : Optional<PrimExpr>(std::nullopt);
+      // Only attach annotations to the outermost parallel loop.
+      // Rationale: In TileLang's design, inner loops cannot govern or annotate
+      // their outer loops, while the outermost loop can manage and transform
+      // the entire nested region. Placing the layout on the outermost loop
+      // lets lowering/validators reason about and rewrite the whole nest.
+      // Layout annotations (like parallel_loop_layout) and other hints are
+      // read from the outermost loop.
+      Map<String, tvm::ffi::Any> loop_annotations;
+      if (i == 0) {
+        loop_annotations = annotations;
+      }
       body = For(var, dom->min, dom->extent, ForKind::kParallel, body,
-                 /*thread_binding=*/std::nullopt, /*annotations=*/annotations,
+                 /*thread_binding=*/std::nullopt,
+                 /*annotations=*/loop_annotations,
                  /*step=*/step);
     }
     return body;
@@ -111,8 +124,6 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
       anno.Set("tl_pipeline_order", order);
     if (!stages.empty())
       anno.Set("tl_pipeline_stage", stages);
-    if (!sync.empty())
-      anno.Set("tl_pipeline_sync", sync);
     if (!groups.empty())
       anno.Set("tl_pipeline_group", groups);
     Optional<PrimExpr> step =
@@ -407,7 +418,9 @@ WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.WarpSpecialize", WarpSpecialize);
+  refl::GlobalDef()
+      .def("tl.WarpSpecialize", WarpSpecialize)
+      .def("tl.SideEffect", SideEffect);
   KernelLaunchFrameNode::RegisterReflection();
   WarpSpecializeFrameNode::RegisterReflection();
 }

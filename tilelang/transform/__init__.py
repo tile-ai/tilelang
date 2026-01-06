@@ -400,6 +400,11 @@ def LowerL2Persistent():
     return _ffi_api.LowerL2Persistent()  # type: ignore
 
 
+def MarkCudaSyncCalls(have_pdl: bool = False):
+    """MarkCudaSyncCalls"""
+    return _ffi_api.MarkCudaSyncCalls(have_pdl)  # type: ignore
+
+
 def PersistThreadblock():
     """PersistThreadblock"""
     return _ffi_api.PersistThreadblock()  # type: ignore

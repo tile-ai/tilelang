@@ -2,26 +2,13 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import os
-import subprocess
-import sys
+import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable
 from collections.abc import Sequence
 import warnings
-
-try:
-    from tabulate import tabulate
-except Exception:  # pragma: no cover
-    tabulate = None  # type: ignore
-
-try:
-    from tqdm import tqdm
-except ImportError:
-
-    def tqdm(iterable, **kwargs):  # type: ignore
-        return iterable
 
 
 @dataclass(frozen=True)
@@ -81,7 +68,7 @@ def process_func(func: Callable[..., float], name: str | None = None, /, **kwarg
     _RESULTS.append(PerfResult(name=result_name, latency=latency))
 
 
-def regression(prefixes: Sequence[str] = ("regression_",)) -> None:
+def regression(prefixes: Sequence[str] = ("regression_",), verbose: bool = True) -> None:
     """Run entrypoints in the caller module and print a markdown table.
 
     This is invoked by many example scripts.
@@ -97,122 +84,27 @@ def regression(prefixes: Sequence[str] = ("regression_",)) -> None:
         if any(k.startswith(p) for p in prefixes):
             functions.append((k, v))
 
-    for _, fn in sorted(functions, key=lambda kv: kv[0]):
-        fn()
+    sorted_functions = sorted(functions, key=lambda kv: kv[0])
+    total = len(sorted_functions)
+
+    for idx, (name, fn) in enumerate(sorted_functions, 1):
+        if verbose:
+            # Strip 'regression_' prefix for cleaner display
+            display_name = name[len("regression_") :] if name.startswith("regression_") else name
+            print(f"  ├─ [{idx}/{total}] {display_name}", end="", flush=True)
+        start_time = time.perf_counter()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # Suppress logging warnings during benchmark execution
+            prev_level = logging.root.level
+            logging.disable(logging.WARNING)
+            try:
+                fn()
+            finally:
+                logging.disable(logging.NOTSET)
+                logging.root.setLevel(prev_level)
+        elapsed = time.perf_counter() - start_time
+        if verbose:
+            print(f" ({elapsed:.2f}s)", flush=True)
 
     _emit_results()
-
-
-def _parse_table(output: str) -> dict[str, float]:
-    # Prefer a single JSON marker line if present.
-    for line in reversed(output.splitlines()):
-        if line.startswith(_RESULTS_JSON_PREFIX):
-            payload = line[len(_RESULTS_JSON_PREFIX) :].strip()
-            items = json.loads(payload)
-            data: dict[str, float] = {}
-            for item in items:
-                name = str(item["name"]).strip()
-                latency = float(item["latency"])
-                data[name] = latency
-            return data
-
-    # Backward-compatible text parsing (best-effort).
-    data = {}
-    for line in output.splitlines():
-        line = line.strip()
-        if not line or ":" not in line:
-            continue
-        name, _, val = line.partition(":")
-        name = name.strip()
-        val = val.strip()
-        if not name:
-            continue
-        try:
-            data[name] = float(val)
-        except ValueError:
-            # Ignore unrelated prints/logs.
-            continue
-    return data
-
-
-def _examples_root() -> Path:
-    # repo_root/tilelang/testing/perf_regression.py -> repo_root
-    return Path(__file__).resolve().parents[2] / "examples"
-
-
-def _discover_bench_files(examples_root: Path) -> list[Path]:
-    patterns = ("regression_*.py",)
-    files: list[Path] = []
-    for pat in patterns:
-        files.extend(examples_root.rglob(pat))
-    # Avoid picking up things like __pycache__ etc.
-    return sorted({p for p in files if p.is_file() and p.name != "__init__.py"})
-
-
-def regression_all(examples_root: str | os.PathLike[str] | None = None) -> None:
-    """Run all example benchmark drivers and print a consolidated table.
-
-    Intended usage (CI): `python -c "import tilelang.testing.perf_regression as pr; pr.regression_all()"`
-    """
-
-    root = Path(examples_root) if examples_root is not None else _examples_root()
-    if not root.exists():
-        raise FileNotFoundError(f"Examples root not found: {root}")
-
-    bench_files = _discover_bench_files(root)
-    if not bench_files:
-        raise RuntimeError(f"No drivers found under: {root}")
-
-    _reset_results()
-    merged: dict[str, float] = {}
-    failures: list[str] = []
-
-    for bench_file in tqdm(bench_files, desc="Running regression tests ..."):
-        proc = subprocess.run(
-            [sys.executable, str(bench_file)],
-            cwd=str(bench_file.parent),
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                # Keep child processes from picking up user-site or random paths.
-                "PYTHONNOUSERSITE": "1",
-                # Ask child to emit a single JSON marker line for robust parsing.
-                "TL_PERF_REGRESSION_FORMAT": "json",
-            },
-        )
-        if proc.returncode != 0:
-            failures.append(f"{bench_file.relative_to(root)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
-            continue
-
-        parsed = _parse_table(proc.stdout)
-        for k, v in parsed.items():
-            # First writer wins to keep stable behavior if duplicates happen.
-            if k not in merged:
-                merged[k] = v
-                _RESULTS.append(PerfResult(name=k, latency=v))
-
-    if failures and not merged:
-        raise RuntimeError("All benchmark drivers failed:\n\n" + "\n\n".join(failures))
-    if failures:
-        # Don't hard-fail if we have some results; surface the errors for debugging.
-        print("# Some benchmark drivers failed (partial results)")
-        for msg in failures:
-            print("# ---")
-            for line in msg.splitlines():
-                print(f"# {line}")
-
-    fmt = os.environ.get("TL_PERF_REGRESSION_FORMAT", "text").strip().lower()
-    if fmt == "json":
-        print(_RESULTS_JSON_PREFIX + json.dumps(merged, separators=(",", ":")))
-        return
-
-    rows = [[k, merged[k]] for k in sorted(merged.keys())]
-    headers = ["File", "Latency"]
-    if tabulate is None:
-        print(f"| {headers[0]} | {headers[1]} |")
-        print("|---|---|")
-        for name, latency in rows:
-            print(f"| {name} | {latency} |")
-    else:
-        print(tabulate(rows, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
