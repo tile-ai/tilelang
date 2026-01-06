@@ -515,14 +515,17 @@ def jit(
     )
 
     def decorator(func: Callable[_P, _T]):
-        # Always use lazy mode prim func to wrap the original function
+        mode = "auto"
         pf: LazyJITFunc[_P, _T] = prim_func(func, lazy_jit=True)
+        func_source = inspect.getsource(pf.orig_func)
+        signature = inspect.signature(pf.orig_func)
+
         return JITImpl(
             func=pf,
             **compile_args,
-            func_source=inspect.getsource(pf.orig_func),
-            signature=inspect.signature(pf.orig_func),
-            mode="auto",
+            func_source=func_source,
+            signature=signature,
+            mode=mode,
         )
 
     return decorator(func) if func is not None else decorator

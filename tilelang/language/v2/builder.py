@@ -17,7 +17,7 @@ from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 
 from tvm.tir.expr import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
-from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union, Literal
+from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union, Literal, get_origin
 from collections.abc import Hashable
 from collections.abc import Sequence
 
@@ -1068,7 +1068,10 @@ def prim_func(func: Callable[_P, _T] = None, *, lazy_jit: bool = False) -> PrimF
             elif param.name in func_annot:
                 annot[param.name] = func_annot[param.name]
         for k in annot:
-            if not isinstance(annot[k], type) and callable(annot[k]):
+            # Call callable annotations (e.g., factory functions) to get the actual type.
+            # Skip typing generics like Optional[int], Union[...], List[...] which are
+            # callable but cannot be instantiated.
+            if not isinstance(annot[k], type) and callable(annot[k]) and get_origin(annot[k]) is None:
                 annot[k] = annot[k]()
 
         if lazy_jit:
