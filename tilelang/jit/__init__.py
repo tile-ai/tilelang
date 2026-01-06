@@ -367,10 +367,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
         # out_idx is only supported in lazy mode
         if self.mode == "eager" and self.out_idx is not None:
-            raise ValueError(
-                "out_idx is only supported in lazy mode. "
-                "In eager mode, use T.empty() to declare output tensors instead."
-            )
+            raise ValueError("out_idx is only supported in lazy mode. In eager mode, use T.empty() to declare output tensors instead.")
 
         self.func.set_mode(self.mode)
         prim_func = self.get_tir(*args, **kwargs)
