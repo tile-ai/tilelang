@@ -30,7 +30,6 @@ def run_tilelang_composable_copy(M=1024, N=1024, block_M=128, block_N=128, dtype
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,

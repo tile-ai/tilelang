@@ -131,6 +131,7 @@ TVM_DLL const Op &ieee_fdiv();
 // random op
 TVM_DLL const Op &rng_init();
 TVM_DLL const Op &rng_rand();
+TVM_DLL const Op &rng_rand_float();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
@@ -303,6 +304,15 @@ TVM_DLL const Op &ptx_stmatrix();
  *  This op is used to represent a ptx async copy barrier operation in tilelang.
  */
 TVM_DLL const Op &ptx_cp_async_barrier_noinc();
+
+/*!
+ * \brief TileLang intrinsic for PTX async copy from global to shared memory
+ *
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate)
+ *
+ */
+TVM_DLL const Op &ptx_cp_async();
 
 /*!
  * \brief Pack two b16 value into a b32 value

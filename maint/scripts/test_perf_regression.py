@@ -44,11 +44,26 @@ def run_cmd(cmd, env=None):
     full_env = os.environ.copy()
     if env:
         full_env.update(env)
-    # Don't capture stderr so that tqdm progress bar is visible
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True, env=full_env)
+    # Stream output in real-time while capturing it
+    p = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        text=True,
+        env=full_env,
+    )
+    stdout_lines = []
+    assert p.stdout is not None
+    for line in p.stdout:
+        stdout_lines.append(line)
+        # Don't print the JSON result line
+        if not line.startswith(_RESULTS_JSON_PREFIX):
+            print(line, end="", flush=True)
+    p.wait()
     if p.returncode != 0:
-        raise RuntimeError(f"Command failed: {' '.join(cmd)}\nSTDOUT:\n{p.stdout}")
-    return p.stdout
+        stdout_content = "".join(stdout_lines)
+        raise RuntimeError(f"Command failed: {' '.join(cmd)}\nSTDOUT:\n{stdout_content}")
+    return "".join(stdout_lines)
 
 
 def draw(df: pd.DataFrame) -> None:

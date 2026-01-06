@@ -283,27 +283,15 @@ def run_regression_perf(S=4096, SKV=8192, H=32, HKV=1, D=64, kv_stride=1):
     q = torch.randn(S, H, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
     kv = torch.randn(SKV, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
     weights = torch.randn(S, H, device="cuda", dtype=torch.float32)
-    p = (torch.randn(S, SKV, device="cuda", dtype=torch.float32) * 4).softmax(dim=-1)
-
     ks, ke = generate_random_cu_seqlens(per_cp_seqlen=S, cp_size=4, cp_rank=3, kv_stride=kv_stride, average_q_len=2048)
-
-    logits_ref, cost_ref = ref_fp8_mqa_logits(q=q, kv=kv, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
 
     q_fp8 = q.to(torch.float8_e4m3fn)
     kv_fp8, kv_scales = per_custom_dims_cast_to_fp8(kv, (0,), False)
-
-    logits_tl = mqa_attn_return_logits_interface(q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
-    diff = validate_tensor_match(logits_ref, logits_tl, tolerance=1e-14, tensor_name="logits", should_raise=False)
 
     from tilelang.profiler import do_bench
 
     def logits_fn():
         return mqa_attn_return_logits_interface(q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
-
-    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
-        logits_fn()
-
-    print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=50))
 
     return do_bench(logits_fn, backend="cupti")
 

@@ -164,7 +164,7 @@ def test_gemm_jit_kernel():
         False,
         T.float16,
         T.float16,
-        T.float16,
+        T.float32,
         128,
         256,
         32,
@@ -207,7 +207,7 @@ def run_tvm_ffi_kernel_do_bench(
 
 
 def test_tvm_ffi_kernel_do_bench():
-    run_tvm_ffi_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_tvm_ffi_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
 
 def run_tvm_ffi_kernel_multi_stream(
@@ -249,7 +249,7 @@ def run_tvm_ffi_kernel_multi_stream(
 
 
 def test_tvm_ffi_kernel_multi_stream():
-    run_tvm_ffi_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_tvm_ffi_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
 
 def run_tvm_ffi_dynamic_shape(
@@ -298,12 +298,12 @@ def run_tvm_ffi_dynamic_shape(
 
 
 def test_tvm_ffi_dynamic_shape():
-    run_tvm_ffi_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_tvm_ffi_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
-    run_tvm_ffi_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
+    run_tvm_ffi_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 
     run_tvm_ffi_dynamic_shape(
-        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2
+        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2
     )
 
 
@@ -383,6 +383,7 @@ def test_tvm_ffi_im2col_tma_desc():
     )
 
 
+@tilelang.testing.requires_cuda
 def test_tvm_ffi_l2_persistent_map():
     """Test L2 persistent cache annotation with elementwise add."""
     from tilelang.language import annotate_l2_hit_ratio
@@ -440,6 +441,58 @@ def test_tvm_ffi_l2_persistent_map():
     tilelang.testing.torch_assert_close(c, ref_c, atol=1e-5, rtol=1e-5)
 
     print("L2 persistent map test passed!")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tvm_ffi_pdl():
+    """Test pdl."""
+
+    N = 64
+
+    @tilelang.jit(execution_backend="tvm_ffi")
+    def multi_kernels_with_pdl(N, block_size=256, dtype=T.float32):
+        @T.prim_func
+        def main(
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N,), dtype),
+            C: T.Tensor((N,), dtype),
+        ):
+            with T.Kernel(T.ceildiv(N, block_size), threads=block_size) as (bx,):
+                for i in T.Parallel(block_size):
+                    idx = bx * block_size + i
+                    if idx < N:
+                        B[idx] = A[idx] + 1.0
+                T.pdl_trigger()
+
+            with T.Kernel(T.ceildiv(N, block_size), threads=block_size) as (bx2,):
+                T.pdl_sync()
+                for i in T.Parallel(block_size):
+                    idx = bx2 * block_size + i
+                    if idx < N:
+                        C[idx] = B[idx] * 2.0
+
+        return main
+
+    # Compile the kernel
+    kernel = multi_kernels_with_pdl(N)
+
+    # Create test tensors
+    a = torch.randn(N, dtype=torch.float32).cuda()
+    b = torch.randn(N, dtype=torch.float32).cuda()
+    c = torch.randn(N, dtype=torch.float32).cuda()
+
+    ref_b = a + 1.0
+    ref_c = ref_b * 2.0
+
+    kernel(a, b, c)
+
+    # Verify correctness
+
+    tilelang.testing.torch_assert_close(b, ref_b, atol=1e-5, rtol=1e-5)
+    tilelang.testing.torch_assert_close(c, ref_c, atol=1e-5, rtol=1e-5)
+
+    print("pdl test passed!")
 
 
 if __name__ == "__main__":

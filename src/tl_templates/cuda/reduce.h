@@ -175,15 +175,15 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
                 threads == 128 or threads == 64 or threads == 32);
   template <typename T, int SEG = 32>
-  static TL_DEVICE T run(const T *__restrict__ src, T *__restrict__ dst, int H,
-                         int W) {
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int H, int W) {
 
     constexpr int TILE_H = threads / SEG;
     constexpr unsigned MASK = 0xffffffff;
     const int num_blocks = (H + TILE_H - 1) / TILE_H;
     const int tid = threadIdx.x;
-    const int lane = tid % 32;
-    const int row = tid / 32;
+    const int lane = tid % SEG;
+    const int row = tid / SEG;
 
     for (int b = 0; b < num_blocks; ++b) {
       const int gRow = b * TILE_H + row;

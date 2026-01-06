@@ -1,8 +1,6 @@
 import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
@@ -47,7 +45,6 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
 
 
 def main(M=16384, N=16384, K=16384):
-    tilelang.disable_cache()
     block_M = 128
     block_N = 128
     block_K = 64
@@ -83,7 +80,6 @@ def main(M=16384, N=16384, K=16384):
 
 
 def run_regression_perf(M=16384, N=16384, K=16384):
-    tilelang.disable_cache()
     block_M = 128
     block_N = 128
     block_K = 64

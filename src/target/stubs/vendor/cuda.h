@@ -47,6 +47,12 @@
  * Users Notice.
  */
 
+// Guard to ensure this header is only included by the stub library
+#ifndef _TILELANG_CUDA_STUB_INCLUDE_GUARD
+#error "vendor/cuda.h should only be included by target/stubs/cuda.h. " \
+       "Do not include this file directly and use target/stubs/cuda.h instead."
+#endif
+
 #ifndef __cuda_cuda_h__
 #define __cuda_cuda_h__
 

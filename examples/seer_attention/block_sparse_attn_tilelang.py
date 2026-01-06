@@ -273,7 +273,6 @@ def run_regression_perf():
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
 
     kernel = blocksparse_flashattn(BATCH, N_HEADS, Q_LEN, K_LEN, D_HEAD, downsample_len, is_causal=True)
-    print(kernel.get_kernel_source())
 
     def run_kernel_only2():
         kernel(q, k, v, block_mask.to(torch.int8))

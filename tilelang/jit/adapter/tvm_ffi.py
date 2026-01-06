@@ -97,6 +97,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.pass_configs = pass_configs
         self.compile_flags = compile_flags
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
+        self.kernel_global_source = self.device_kernel_source
 
         self._post_init()
 

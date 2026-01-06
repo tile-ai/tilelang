@@ -373,6 +373,7 @@ jobs:
             ./python
 
       # AMD ROCm tests
+      # runtime and transform tests needs to repair, then rm it from ignore list
       - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: rocm-tests
         if: contains(matrix.runner.toolkit, 'ROCm')
@@ -383,7 +384,8 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
-            ./python/amd
+            --ignore=./python/runtime --ignore=./python/transform \
+            ./python
 
       # Apple Metal tests
       - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})

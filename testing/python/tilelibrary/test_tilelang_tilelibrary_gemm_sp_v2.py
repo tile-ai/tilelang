@@ -153,6 +153,7 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
     return A, B
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
     [
@@ -269,7 +270,6 @@ def run_gemm_rs(
         num_stages,
         num_threads,
     )
-
     kernel = tilelang.compile(
         program,
         out_idx=[3],
@@ -304,6 +304,7 @@ def run_gemm_rs(
     print("pass")
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
     [
@@ -454,6 +455,7 @@ def run_gemm_sr(
     print("pass")
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
     [
@@ -608,6 +610,7 @@ def run_gemm_rr(
     print("pass")
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads",
     [
