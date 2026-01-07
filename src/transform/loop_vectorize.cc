@@ -129,7 +129,7 @@ private:
         return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
       }
     }
-    UpdateVectorSize(node->indices, node->buffer);
+    UpdateVectorSize(node->indices, node->buffer, false);
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
@@ -137,7 +137,7 @@ private:
     if (node->buffer.scope() == "shared" || node->buffer.scope() == "global" ||
         node->buffer.scope() == "shared.dyn")
       has_nonlocal_memory_access_ = true;
-    UpdateVectorSize(node->indices, node->buffer);
+    UpdateVectorSize(node->indices, node->buffer, true);
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
@@ -169,7 +169,8 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
-  void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer) {
+  void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer,
+                        bool is_store) {
     if (!inner_for_)
       return;
     // 1. Compute raw element offset
@@ -186,8 +187,12 @@ private:
     for (int i = 0; i < indices.size(); ++i) {
       elem_offset += indices[i] * strides[i];
     }
-    // 2. If element offset is independent with loop_var, ignore it
+    // 2. If element offset is independent with loop_var, ignore it.
     if (CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_)) {
+      // Specially, if it's a BufferStore, we should not vectorize it.
+      if (is_store) {
+        vector_size_ = 1;
+      }
       return;
     }
     // 3. Check if current vector_size_ works with invariant boundary check
@@ -197,6 +202,10 @@ private:
       vector_size_ = arith::ZeroAwareGCD(
           vector_size_, vector_load_bits_max_ /
                             (buffer->dtype.bits() * buffer->dtype.lanes()));
+    } else if (is_store) {
+      // If the indices is invariant for BufferStore, we should also not
+      // vectorize it.
+      vector_size_ = 1;
     }
     // 4. Try to vectorize buffer load
     while (!IndiceCanVectorize(elem_offset, inner_for_->loop_var,
