@@ -28,6 +28,7 @@ except ImportError:  # Python < 3.11 for Self, < 3.10 for ParamSpec
     from typing_extensions import ParamSpec, Self
 from . import dtypes as dt
 from . import utils
+from tilelang.jit.exceptions import JITNoBuilderError, EagerJITBuildError
 import threading
 import logging
 
@@ -838,8 +839,11 @@ def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
             ...
     """
     builder = Builder.current()
-    assert builder is not None, "T.const() can only be used inside @tilelang.jit (eager mode)"
-    assert builder.lazy_jit, "T.const() can only be used inside @tilelang.jit (eager mode)"
+    # assert builder is not None, "T.const() can only be used inside @tilelang.jit (eager mode)"
+    # assert builder.lazy_jit, "T.const() can only be used inside @tilelang.jit (eager mode)"
+    if builder is None or not builder.lazy_jit:
+        raise JITNoBuilderError("T.const() can only be used inside @tilelang.jit (eager mode)")
+
     if "," in name:
         names = re.split(r"\s*,\s*", name)
         return tuple(builder.constexpr(n, dtype) for n in names)
@@ -978,9 +982,14 @@ class LazyJITFunc(Generic[_P, _T]):
         """
         try:
             result = self.orig_func(*args, **kwargs)
+            # lazy jit must return PrimFunc
             return isinstance(result, PrimFunc)
-        except Exception:
-            logger.debug("Function doesn't return PrimFunc directly, treating as eager style")
+        except (JITNoBuilderError, EagerJITBuildError):
+            # In eager mode, we construct AST directly without prim_func,
+            # so there's no Builder available when the function is called.
+            # When eager-only features like T.const() or T.Kernel() are used,
+            # they raise JITNoBuilderError because no Builder exists yet.
+            # This indicates the function is eager-style, not lazy-style.
             return False
 
     def _build_tir_template(self, *args, **kwargs) -> TirTemplate[_P, _T]:
