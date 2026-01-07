@@ -1040,6 +1040,17 @@ class LazyJITFunc(Generic[_P, _T]):
         """Set the JIT execution mode (internal use only)."""
         self.mode = mode
 
+    # Proxy function attributes for compatibility with autotuner and inspect.
+    # These attributes are needed by autotuner to extract closure variables
+    # and generate cache keys.
+    _PROXIED_ATTRS = frozenset({"__closure__", "__code__", "__name__", "__globals__", "__wrapped__"})
+
+    def __getattr__(self, name):
+        if name in LazyJITFunc._PROXIED_ATTRS:
+            if name == "__wrapped__":
+                return self.orig_func
+            return getattr(self.orig_func, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
 def substitute_primfunc(prim_func, vmap):
     analyzer = tvm.arith.Analyzer()
