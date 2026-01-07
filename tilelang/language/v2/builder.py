@@ -1052,6 +1052,7 @@ class LazyJITFunc(Generic[_P, _T]):
             return getattr(self.orig_func, name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
+
 def substitute_primfunc(prim_func, vmap):
     analyzer = tvm.arith.Analyzer()
 
