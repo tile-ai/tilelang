@@ -429,9 +429,8 @@ def run_gemm_sr(
         (512, 1024, 768, True, False, T.float16, T.float16, T.float32, 128, 256, 32, 2, 128),
         (512, 1024, 768, True, True, T.float16, T.float16, T.float32, 128, 256, 32, 2, 128),
         (128, 16, 32, False, True, T.float16, T.float16, T.float32, 128, 16, 32, 0, 128),
-        # TODO: There is precision problem when num_stages=2 on ROCm
-        # (128, 128, 32, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
-        # (128, 128, 32, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 32, False, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
+        (128, 128, 32, False, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
         (128, 128, 32, True, False, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
         (128, 128, 32, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
         (128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
