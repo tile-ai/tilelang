@@ -204,9 +204,9 @@ def test_dtype_str_repr():
 
 
 def test_var_assign():
-    @tilelang.jit(out_idx=-1)
-    @T.prim_func
-    def test_var_assign(A: T.Tensor((2,), T.int32)):
+    @tilelang.jit
+    def test_var_assign():
+        A = T.empty((2,), T.int32)
         with T.Kernel(1) as _:
             a: T.int32 = 1
             b: T.int32 = a
@@ -214,8 +214,9 @@ def test_var_assign():
             d: T.int32 = a
             A[0] = b
             A[1] = d
+        return A
 
-    res = test_var_assign()()
+    res = test_var_assign()
     assert res[0] == 1
     assert res[1] == 2
 
@@ -255,9 +256,9 @@ def test_marco_return():
 
 
 def test_serial_for_with_step():
-    @tilelang.jit(out_idx=-1)
-    @T.prim_func
-    def test_stepped_serial(A: T.Tensor((10,), T.int32)):
+    @tilelang.jit
+    def stepped_serial():
+        A = T.empty((10,), T.int32)
         with T.Kernel(1) as _:
             for i in range(0, 10, 2):
                 T.device_assert(0 <= i < 10 and i % 2 == 0, "i out of range")
@@ -265,22 +266,22 @@ def test_serial_for_with_step():
             for i in range(1, 10, 2):
                 T.device_assert(1 <= i < 10 and i % 2 == 1, "i out of range")
                 A[i] = 2.0
+        return A
 
-    ker = test_stepped_serial()
-    res = ker()
+    res = stepped_serial()
     ref = torch.tensor([1, 2, 1, 2, 1, 2, 1, 2, 1, 2], dtype=torch.int32, device="cuda")
     assert torch.all(res == ref), f"Expected {ref}, but got {res}"
 
-    @tilelang.jit(out_idx=-1)
-    @T.prim_func
-    def test_serial_step_neg(A: T.Tensor((10,), T.int32)):
+    @tilelang.jit
+    def stepped_serial_neg():
+        A = T.empty((10,), T.int32)
         with T.Kernel(1) as _:
             for i in range(10, 0, -1):
                 T.device_assert(0 < i <= 10, "i out of range")
                 A[10 - i] = i
+        return A
 
-    ker = test_serial_step_neg()
-    res = ker()
+    res = stepped_serial_neg()
     ref = torch.tensor([10, 9, 8, 7, 6, 5, 4, 3, 2, 1], dtype=torch.int32, device="cuda")
     assert torch.all(res == ref), f"Expected {ref}, but got {res}"
 
@@ -292,8 +293,8 @@ def test_serial_for_with_step():
 
 def test_swap_logic():
     @tilelang.jit
-    @T.prim_func
-    def swap_var(A: T.Tensor[(2,), T.float32]):
+    def swap_var(A):
+        A: T.Tensor[(2,), T.float32]
         with T.Kernel(1, threads=1) as _:
             a = T.alloc_var(T.float32, A[0])
             b = T.alloc_var(T.float32, A[1])
@@ -301,20 +302,19 @@ def test_swap_logic():
             A[0], A[1] = a, b
 
     @tilelang.jit
-    @T.prim_func
-    def swap_idx(A: T.Tensor[(2,), T.float32]):
+    def swap_idx(A):
+        A: T.Tensor[(2,), T.float32]
         with T.Kernel(1, threads=1) as _:
             A[0], A[1] = A[1], A[0]
 
-    k_swap_var = swap_var()
     data = torch.tensor([1.0, 2.0], dtype=torch.float32).cuda()
-    k_swap_var(data)
+    swap_var(data)
     ref = torch.tensor([2.0, 1.0], dtype=torch.float32).cuda()
+
     torch.testing.assert_close(data, ref)
 
-    k_swap_idx = swap_idx()
     data = torch.tensor([1.0, 2.0], dtype=torch.float32).cuda()
-    k_swap_idx(data)
+    swap_idx(data)
     ref = torch.tensor([2.0, 1.0], dtype=torch.float32).cuda()
     torch.testing.assert_close(data, ref)
 
@@ -322,9 +322,9 @@ def test_swap_logic():
 # TODO(Gong): ROCm is not supported alloc_var with initializer
 @tilelang.testing.requires_cuda
 def test_while_loop():
-    @tilelang.jit(out_idx=-1)
-    @T.prim_func
-    def test_while_loop(A: T.Tensor((1,), T.int32)):
+    @tilelang.jit
+    def while_loop():
+        A = T.empty((1,), T.int32)
         with T.Kernel(1) as _:
             i = T.alloc_var(T.int32, 0)
             sum = T.alloc_var(T.int32)
@@ -332,10 +332,10 @@ def test_while_loop():
                 sum += i
                 i += 1
             A[0] = sum
+        return A
 
-    ker = test_while_loop()
-    A = ker()
-    assert A[0].item() == sum(range(10)), f"Expected {sum(range(10))}, but got {A[0].item()}"
+    res = while_loop()
+    assert res[0].item() == sum(range(10)), f"Expected {sum(range(10))}, but got {res[0].item()}"
 
 
 def test_var_macro():
@@ -456,27 +456,24 @@ def test_boolop():
 
 def test_constexpr_if():
     @tilelang.jit
-    def probe(tmp: bool):
-        @T.prim_func
-        def foo(A: T.Tensor[[2], T.int32]):
-            with T.Kernel(1):
-                if tmp:
-                    v = A[0]
-                else:
-                    v = A[1]
-                if tmp:
-                    A[1] = v + 1
-                else:
-                    A[0] = v + 1
-
-        return foo
+    def probe(A, tmp: bool):
+        A: T.Tensor[(2,), T.int32]
+        with T.Kernel(1):
+            if tmp:
+                v = A[0]
+            else:
+                v = A[1]
+            if tmp:
+                A[1] = v + 1
+            else:
+                A[0] = v + 1
 
     A = torch.tensor([10, 20], dtype=torch.int32).cuda()
     expect_1 = torch.tensor([10, 11], dtype=torch.int32).cuda()
     expect_2 = torch.tensor([12, 11], dtype=torch.int32).cuda()
-    probe(True)(A)
+    probe(A, True)
     assert torch.equal(A, expect_1)
-    probe(False)(A)
+    probe(A, False)
     assert torch.equal(A, expect_2)
 
 

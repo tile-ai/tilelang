@@ -182,12 +182,14 @@ class Builder(BaseBuilder):
     @contextmanager
     def prim_func(self, name):
         thread_local_storage.builder = self
-        with self.ir_builder, self.with_frame(tir.prim_func()):
-            tir.func_name(name)
-            yield
-        if len(self.out_idx) != self.out_tensor_cnt:
-            raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
-        del thread_local_storage.builder
+        try:
+            with self.ir_builder, self.with_frame(tir.prim_func()):
+                tir.func_name(name)
+                yield
+            if len(self.out_idx) != self.out_tensor_cnt:
+                raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
+        finally:
+            del thread_local_storage.builder
 
     @contextmanager
     def macro(self, name=None, annotations=None):
