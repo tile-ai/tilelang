@@ -49,6 +49,11 @@ dependencies = [
 fp4 = ["ml-dtypes>=0.5.1"]
 # if you want to enable layout inference visualization
 vis = ["matplotlib"]
+# if you want to build with CUDA NVCC support
+nvcc = [
+    "nvidia-cuda-nvcc>=13.0.48",
+    "nvidia-cuda-cccl>=13.0.50",
+]
 
 [build-system]
 requires = [
@@ -126,6 +131,8 @@ tilelang = "tilelang"
 # Composable Kernel
 "tilelang/3rdparty/composable_kernel/include" = "3rdparty/composable_kernel/include"
 "tilelang/3rdparty/composable_kernel/library" = "3rdparty/composable_kernel/library"
+
+
 
 [tool.codespell]
 ignore-words = "docs/spelling_wordlist.txt"

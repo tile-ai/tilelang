@@ -709,6 +709,20 @@ def sync_threads(barrier_id: int = None, arrive_count: int = None):
     return tir.call_intrin("int32", "tir.tvm_storage_sync", "shared", *args)
 
 
+def sync_warp(mask: int = None):
+    """Synchronize all threads in a warp."""
+    if mask is not None:
+        return tir.call_intrin("void", tir.op.Op.get("tl.sync_warp"), mask)
+    return tir.call_intrin("void", tir.op.Op.get("tl.sync_warp"))
+
+
+def shfl_sync(mask: int, value: int | PrimExpr, srcLane: int, width: int = None):
+    """Receives data from a thread in the same warp."""
+    if width is None:
+        return tir.call_extern(value.dtype, "__shfl_sync", mask, value, srcLane)
+    return tir.call_extern(value.dtype, "__shfl_sync", mask, value, srcLane, width)
+
+
 def sync_global():
     """Synchronize all threads in the entire grid."""
     tx, ty, tz = get_thread_bindings()

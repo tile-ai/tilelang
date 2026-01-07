@@ -36,6 +36,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kASTPrintEnable, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutVisualizationEnable, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutVisualizationFormats, String);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDeviceCompileFlags, ffi::Array<ffi::String>);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableDataRaceCheck, Bool);
 
 DataType cuTensorMapType() { return DataType::UInt(8, 128); }
 
@@ -286,6 +287,17 @@ TIR_DEFINE_TL_BUILTIN(pack_b16).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_TL_BUILTIN(sync_grid).set_num_inputs(0).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(sync_warp).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(pdl_trigger)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(pdl_sync).set_num_inputs(0).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(loop_break)

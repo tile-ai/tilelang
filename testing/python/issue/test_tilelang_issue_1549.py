@@ -28,6 +28,15 @@ def test_issue_1549_strange_var_vectorization():
     kernel = get_wrong_kernel(M)
     data = torch.randint(0, 100, (M,), dtype=torch.int32, device="cuda")
     kernel(data)
+    code = kernel.get_kernel_source()
+    print(code)
+    assert (
+        """for (int i = 0; i < 32; ++i) {
+    idx = ((i * 64) + ((int)threadIdx.x));
+    Data[((i * 64) + ((int)threadIdx.x))] = idx;
+  }"""
+        in code
+    )
 
 
 if __name__ == "__main__":

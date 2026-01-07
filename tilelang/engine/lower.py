@@ -170,6 +170,7 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
+    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
 
     if target.kind.name == "cuda":
         global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda")
@@ -186,6 +187,8 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
+    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
+
     if target.kind.name == "cuda":
         global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda") + "_without_compile"
         device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)

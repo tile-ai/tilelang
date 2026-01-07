@@ -1,4 +1,5 @@
 from __future__ import annotations
+import importlib.metadata
 import sys
 import os
 import pathlib
@@ -44,6 +45,13 @@ for lib in TL_LIBS:
         sys.path.insert(0, lib)
 
 
+def _get_package_version(pkg: str) -> str | None:
+    try:
+        return importlib.metadata.version(pkg)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def _find_cuda_home() -> str:
     """Find the CUDA install path.
 
@@ -66,8 +74,19 @@ def _find_cuda_home() -> str:
             else:
                 cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
 
-        else:
+        elif _get_package_version("nvidia-cuda-nvcc") is not None:
             # Guess #3
+            # from pypi package nvidia-cuda-nvcc, only nvidia-cuda-nvcc>=13.0 works.
+            # nvidia-cuda-nvcc-cu12, etc. only installs `ptxas`, not `nvcc`
+            for file in importlib.metadata.files("nvidia-cuda-nvcc") or []:
+                if file.name == "nvcc" or file.name == "nvcc.exe":
+                    cuda_home = str(pathlib.Path(file.locate()).parent.parent)
+                    break
+            else:
+                raise AssertionError("`nvidia-cuda-nvcc` installed but no `nvcc` found")
+
+        else:
+            # Guess #4
             if sys.platform == "win32":
                 cuda_homes = glob.glob("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*.*")
                 cuda_home = "" if len(cuda_homes) == 0 else cuda_homes[0]
@@ -78,9 +97,9 @@ def _find_cuda_home() -> str:
                 elif os.path.exists("/opt/nvidia/hpc_sdk/Linux_x86_64"):
                     cuda_home = "/opt/nvidia/hpc_sdk/Linux_x86_64"
 
-            # Validate found path
-            if cuda_home is None or not os.path.exists(cuda_home):
-                cuda_home = None
+        # Validate found path
+        if cuda_home is None or not os.path.exists(cuda_home):
+            cuda_home = None
 
     return cuda_home if cuda_home is not None else ""
 
