@@ -3,6 +3,7 @@ import tilelang.testing
 import tilelang.language as T
 import torch
 
+
 @tilelang.testing.requires_cuda
 def test_issue_1549_strange_var_vectorization():
     @tl.jit
