@@ -1127,7 +1127,6 @@ private:
     if (!prev.buffer.same_as(curr.buffer)) {
       return false;
     }
-    return true;
 
     // Assumes no race between threads
     // Same index value means no conflicts
