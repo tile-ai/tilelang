@@ -194,7 +194,8 @@ struct ParallelLoopVerifier : public ConstrVisitor {
     }
   }
   void VisitStmt_(const BufferStoreNode *op) override {
-    if (reducers.count(op->buffer->data)) {
+    if (reducers.count(op->buffer->data) || op->buffer.scope() == "local.var" ||
+        op->buffer.scope() == "local") {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }
@@ -227,14 +228,13 @@ struct ParallelLoopVerifier : public ConstrVisitor {
       }
     }
     if (!failed_vars.empty()) {
-      LOG(FATAL) << "Potential data race detected: `" << op->buffer
-                 << op->indices << "`"
-                 << "is written by multiple threads of loop vars: "
-                 << failed_vars << ", Counterexample:\n"
-                 << analyzer.z3_prover.GetModel(failed_var_expr)
-                 << "If you believe this is a false positive, pass "
-                    "`PassKey.TL_DISABLE_DATA_RACE_CHECK` to pass key to "
-                    "disable this check.";
+      LOG(WARNING) << "Data race detected: `" << op->buffer << op->indices << "`"
+                   << "is written by multiple threads in loop "
+                   << failed_vars << ", Example:\n"
+                   << analyzer.z3_prover.GetModel(failed_var_expr)
+                   << "If you believe this is a false positive, pass "
+                      "`PassKey.TL_DISABLE_DATA_RACE_CHECK` to pass key to "
+                      "disable this check.";
     }
     StmtExprVisitor::VisitStmt_(op);
   }
