@@ -176,4 +176,4 @@ public:
   }
   std::vector<Constr> constr_stack_;
 };
-}
+} // namespace tvm::tl
