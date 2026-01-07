@@ -123,7 +123,25 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
         }
       }
     } else {
-      ret.Set(i, ist.max());
+      // Simplify ist.max() to ensure it's a constant integer.
+      // This is necessary because in multi-threaded compilation,
+      // the int_set analysis may return unsimplified symbolic expressions.
+      PrimExpr max_val = analyzer.Simplify(ist.max());
+      if (auto* int_imm = max_val.as<IntImmNode>()) {
+        ret.Set(i, Integer(int_imm->value));
+      } else {
+        // Fallback to ConstIntBound if Simplify didn't produce a constant
+        auto cib = analyzer.const_int_bound(forward_index_[i]);
+        if (cib->min_value != arith::ConstIntBound::kNegInf &&
+            cib->max_value != arith::ConstIntBound::kPosInf &&
+            cib->min_value >= 0) {
+          ret.Set(i, Integer(cib->max_value - cib->min_value + 1));
+        } else if (i < input_size_.size()) {
+          ret.Set(i, input_size_[i]);
+        } else {
+          ret.Set(i, Integer(1));
+        }
+      }
     }
   }
   return ret;

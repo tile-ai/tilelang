@@ -11,12 +11,10 @@ from tilelang.intrinsics.mma_macro_generator import (
     INT4TensorCoreIntrinEmitter,
     INT4TensorCoreIntrinEmitterWithLadderTransform,
 )
-from tilelang.transform import simplify_prim_func
 
 tilelang.testing.set_random_seed(42)
 
 
-# @simplify_prim_func
 def tl_matmul(
     M,
     N,

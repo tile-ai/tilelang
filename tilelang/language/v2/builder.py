@@ -174,7 +174,7 @@ class Builder(BaseBuilder):
         self.out_tensor_cnt = 0
         self.constexpr_var = set()
         self.lazy_jit = False
-
+        
     @classmethod
     def current(cls) -> Self:
         builder = getattr(thread_local_storage, "builder", None)
@@ -712,7 +712,10 @@ class Macro(Generic[_P, _T]):
         return self.ir_gen.source
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _T:
-        builder = Builder.current() or Builder()
+        builder = Builder.current()
+        if builder is None:
+            raise JITNoBuilderError("T.macro can only be used inside @tilelang.jit")
+
         with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res
