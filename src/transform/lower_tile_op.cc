@@ -67,7 +67,7 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
     for (size_t i = 0; i < layout_shape.size(); i++) {
       auto shape = layout_shape[i].as<IntImmNode>();
       ICHECK(shape) << "Layout output shape must be constant integer, but got: "
-                   << layout_shape[i];
+                    << layout_shape[i];
       layout_extent *= shape->value;
     }
     replicate_extent = buffer_extent / layout_extent;

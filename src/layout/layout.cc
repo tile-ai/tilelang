@@ -127,7 +127,7 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
       // This is necessary because in multi-threaded compilation,
       // the int_set analysis may return unsimplified symbolic expressions.
       PrimExpr max_val = analyzer.Simplify(ist.max());
-      if (auto* int_imm = max_val.as<IntImmNode>()) {
+      if (auto *int_imm = max_val.as<IntImmNode>()) {
         ret.Set(i, Integer(int_imm->value));
       } else {
         // Fallback to ConstIntBound if Simplify didn't produce a constant

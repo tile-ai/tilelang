@@ -174,7 +174,7 @@ class Builder(BaseBuilder):
         self.out_tensor_cnt = 0
         self.constexpr_var = set()
         self.lazy_jit = False
-        
+
     @classmethod
     def current(cls) -> Self:
         builder = getattr(thread_local_storage, "builder", None)

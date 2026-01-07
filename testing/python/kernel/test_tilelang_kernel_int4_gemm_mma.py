@@ -6,7 +6,7 @@ import tilelang.language as T
 from tilelang.intrinsics import (
     make_mma_swizzle_layout as make_swizzle_layout,
 )
-
+from tilelang.transform import simplify_prim_func
 from tilelang.intrinsics.mma_macro_generator import (
     INT4TensorCoreIntrinEmitter,
     INT4TensorCoreIntrinEmitterWithLadderTransform,
