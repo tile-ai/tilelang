@@ -104,6 +104,7 @@ struct ConstrSet {
 struct ConstrVisitor : public tir::StmtExprVisitor {
 private:
   using Base = tir::StmtExprVisitor;
+
   struct Guard {
     std::vector<Constr> &constrs;
     ~Guard() { constrs.pop_back(); }
@@ -114,6 +115,8 @@ private:
   }
 
 public:
+  using StmtExprVisitor::VisitExpr_;
+  using StmtExprVisitor::VisitStmt_;
   void VisitIfThenElseExpr(const PrimExpr cond, const PrimExpr true_value,
                            const PrimExpr false_value) {
     {
