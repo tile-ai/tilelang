@@ -436,9 +436,8 @@ def run_gemm_sr(
         (128, 128, 32, True, True, T.int8, T.int8, T.int32, 128, 128, 32, 2, 128),
         (128, 128, 128, False, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
         (128, 128, 128, False, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
-        # TODO: There is precision problem needs to repair on ROCm
-        # (128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
-        # (128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, False, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
+        (128, 128, 128, True, True, T.float, T.float, T.float32, 128, 128, 32, 2, 128),
     ],
 )
 def test_gemm_sr(M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages, num_threads):
