@@ -228,9 +228,10 @@ struct ParallelLoopVerifier : public ConstrVisitor {
       }
     }
     if (!failed_vars.empty()) {
-      LOG(WARNING) << "Data race detected: `" << op->buffer << op->indices << "`"
-                   << "is written by multiple threads in loop "
-                   << failed_vars << ", Example:\n"
+      LOG(WARNING) << "Data race detected: `" << op->buffer << op->indices
+                   << "`"
+                   << "is written by multiple threads in loop " << failed_vars
+                   << ", Example:\n"
                    << analyzer.z3_prover.GetModel(failed_var_expr)
                    << "If you believe this is a false positive, pass "
                       "`PassKey.TL_DISABLE_DATA_RACE_CHECK` to pass key to "
