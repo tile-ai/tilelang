@@ -67,18 +67,6 @@ using arith::IRVisitorWithAnalyzer;
 using runtime::StorageRank;
 using runtime::StorageScope;
 
-bool IsThreadInvariant_(const PrimExpr &cond) {
-  if (auto call = cond.as<CallNode>()) {
-    if (auto opt_call_op = call->op.as<Op>()) {
-      const auto &call_op = opt_call_op.value();
-      if (call_op.same_as(builtin::tvm_thread_invariant())) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 using namespace tir;
 using arith::IRMutatorWithAnalyzer;
 
@@ -445,7 +433,9 @@ private:
 
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
   explicit TileLangThreadSyncPlanner(StorageScope sync_scope)
-      : sync_scope_(std::move(sync_scope)) {}
+      : sync_scope_(std::move(sync_scope)) {
+    scope_.push_back(std::vector<StmtEntry>());
+  }
   /*! \brief Storage access type */
   enum AccessType : uint8_t {
     kRead,
@@ -662,6 +652,18 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       scope_.back().emplace_back(std::move(s));
     }
   }
+  bool IsThreadInvariant_(const PrimExpr &cond) {
+    if (auto call = cond.as<CallNode>()) {
+      if (auto opt_call_op = call->op.as<Op>()) {
+        const auto &call_op = opt_call_op.value();
+        if (call_op.same_as(builtin::tvm_thread_invariant())) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /**
    * @brief Visit an IfThenElse statement and collect storage access summaries
    * for its branches.
@@ -1030,7 +1032,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     // head are before first sync, tail are after last sync
     std::vector<AccessEntry> head, tail;
     AccessEntry esync{.cset = constr_stack_};
-    ;
+    esync.threads = this->env_threads();
     esync.type = kSync;
     esync.scope = sync_scope_;
 
@@ -1125,6 +1127,7 @@ private:
     if (!prev.buffer.same_as(curr.buffer)) {
       return false;
     }
+    return true;
 
     // Assumes no race between threads
     // Same index value means no conflicts
@@ -1191,10 +1194,10 @@ private:
           Var curr_var(info.name_curr, info.iv->var.dtype());
           prev_indice_bytes =
               Substitute(prev_indice_bytes, {{info.iv->var, prev_var}});
-          prev_cset.Substitute({{info.iv->var, prev_var}});
+          prev_cset = prev_cset.Substitute({{info.iv->var, prev_var}});
           curr_indice_bytes =
               Substitute(curr_indice_bytes, {{info.iv->var, curr_var}});
-          curr_cset.Substitute({{info.iv->var, curr_var}});
+          curr_cset = curr_cset.Substitute({{info.iv->var, curr_var}});
         }
         prev_cset.Populate(analyzer);
         curr_cset.Populate(analyzer);
