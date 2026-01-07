@@ -691,13 +691,6 @@ class Builder(BaseBuilder):
         stack = self.macro_fileline_stack + [(self.current_file, self.current_line, self.current_macro_name)]
         return stack[: len(stack) - stacklevel + 1]
 
-    # def get_fileline_stack_msg(self, stacklevel=1):
-    #     stack = self.get_fileline_stack(stacklevel)
-    #     msg = ''
-    #     for filename, lineno, macro_name in stack:
-    #         msg += f'{filename}:{lineno} {macro_name}\n'
-    #     return msg
-
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
