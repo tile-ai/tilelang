@@ -2,6 +2,7 @@ from __future__ import annotations
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
+import sys
 
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm_ffi.container import Map
@@ -475,12 +476,6 @@ class Builder(BaseBuilder):
         if isinstance(value, tir.meta_var):
             return value.value
         elif isinstance(value, tir.frame.IRBuilderFrame):
-            if isinstance(value, tir.frame.ForFrame):
-                logger.warning(
-                    "Binding a for frame to variable may cause undefined behavior in tilelang.",
-                    stack_info=True,
-                    stacklevel=2,
-                )
             return self.enter_frame(value)
         elif isinstance(value, OutTensor):
             arg = tir.arg(
@@ -821,7 +816,10 @@ def get_type_hints(func):
                     continue
                 except Exception:
                     pass
-            value = ForwardRef(value, is_argument=True, is_class=False)
+            if sys.version_info >= (3, 10):
+                value = ForwardRef(value, module=func.__module__)
+            else:
+                value = ForwardRef(value, is_argument=True)
             hints[name] = _eval_type(value, globalns=globalns, localns=localns)
         else:
             hints[name] = value

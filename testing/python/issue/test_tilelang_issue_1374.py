@@ -18,7 +18,7 @@ def test_issue_1374_non_var_itermark():
                 T.copy(A, A_local)
                 T.copy(B, B_local)
                 for i, j in T.Parallel(16, 448):
-                    A_local[i, j // 32] += B[i, j]
+                    B[i, j] += A_local[i, j // 32]
 
         return main
 
