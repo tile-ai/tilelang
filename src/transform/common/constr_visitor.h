@@ -1,3 +1,6 @@
+#ifndef TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
+#define TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
+
 #include "tvm/arith/analyzer.h"
 #include "tvm/ffi/base_details.h"
 #include "tvm/ffi/object.h"
@@ -179,3 +182,5 @@ public:
   std::vector<Constr> constr_stack_;
 };
 } // namespace tvm::tl
+
+#endif // TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
