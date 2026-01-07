@@ -66,6 +66,8 @@ struct Constr {
     case kBindRange:
       analyzer.Bind(var, range);
       break;
+    default:
+      LOG(FATAL) << "Unreachable";
     }
   }
 };
