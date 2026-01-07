@@ -283,7 +283,7 @@ class TLCUDASourceWrapper:
             index = match_declare_kernel(code, function_name + "(")
 
             # Analyze the function declaration to prepare for argument extraction
-            declaration = code[index:].split(";")[0]
+            declaration = self.get_declaration(code[index:])
 
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)
@@ -346,6 +346,9 @@ class TLCUDASourceWrapper:
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC.format(def_args, kernel_launch_code)
         return host_func
+
+    def get_declaration(self, declare_kernel_code: str) -> str:
+        return declare_kernel_code.split(";")[0]
 
     def generate_l2_persistent_map(self, function_name: str) -> str:
         if function_name not in self.l2_persistent_map:
@@ -620,12 +623,14 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         "float8_e4m3": "fp8_e4_t",
         "float8_e4m3fn": "fp8_e4_t",
         "float8_e5m2": "fp8_e5_t",
+        "float8_e5m2fnuz": "fp8_e5_t",
         "float8_e4m3fnuz": "fp8_e4_t",
         "e4m3fnuz_float8": "fp8_e4_t",
         "float64": "double",
         "int64": "int64_t",
         "int32": "int",
         "uint32": "unsigned int",
+        "uint64": "uint64_t",
         "bool": "int8_t",
         "int8": "int8_t",
         "uint8": "uint8_t",
@@ -644,6 +649,11 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         pass_configs: dict[str, Any] | None = None,
     ):
         super().__init__(scheduled_ir_module, source, target, device_mod, host_mod, pass_configs)
+
+    def get_declaration(self, declare_kernel_code: str) -> str:
+        # HIP code dont have function declaration, so we use '{\n' to split
+        # __global__ void __launch_bounds__(128) kernel_kernel(float* __restrict__ A) {\n
+        return declare_kernel_code.split("{")[0]
 
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call

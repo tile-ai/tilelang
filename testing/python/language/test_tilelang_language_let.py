@@ -3,6 +3,7 @@ from tilelang import tvm as tvm
 from tilelang import language as T
 
 
+@tilelang.testing.requires_cuda
 def test_let_vectorize_load():
     @T.prim_func
     def main(A_ptr: T.handle):

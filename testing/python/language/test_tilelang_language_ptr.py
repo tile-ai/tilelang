@@ -41,7 +41,7 @@ def matmul_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype
 
 def run_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     program = matmul_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
-    jit_kernel = tl.compile(program, target="cuda", execution_backend="cython")
+    jit_kernel = tl.compile(program, execution_backend="cython")
 
     def ref_program(a, b):
         return (a @ b.T).to(torch.float32)

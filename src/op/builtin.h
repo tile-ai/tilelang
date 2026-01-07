@@ -61,6 +61,8 @@ static constexpr const char *kLayoutVisualizationEnable =
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
+static constexpr const char *kDisableDataRaceCheck =
+    "tl.disable_data_race_check";
 
 /*!
  * \brief Whether to disable thread storage synchronization
@@ -131,6 +133,7 @@ TVM_DLL const Op &ieee_fdiv();
 // random op
 TVM_DLL const Op &rng_init();
 TVM_DLL const Op &rng_rand();
+TVM_DLL const Op &rng_rand_float();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
@@ -440,6 +443,30 @@ TVM_DLL const Op &wait_wgmma();
  *
  */
 TVM_DLL const Op &sync_grid();
+
+/*!
+ * \brief Synchronize all threads in a warp
+ *
+ * sync_warp()
+ *
+ */
+TVM_DLL const Op &sync_warp();
+
+/*!
+ * \brief Programmatic dependency trigger.
+ *
+ * pdl_trigger()
+ *
+ */
+TVM_DLL const Op &pdl_trigger();
+
+/*!
+ * \brief Programmatic grid dependency synchronization.
+ *
+ * pdl_sync()
+ *
+ */
+TVM_DLL const Op &pdl_sync();
 
 /*!
  * \brief tvm intrinsic for loop continue
