@@ -285,11 +285,9 @@ def Kernel(
     # is being called outside of a JIT/prim_func context.
     # lazy import to avoid circular import
     from tilelang.language.v2.builder import Builder
+
     if Builder.current() is None:
-        raise JITNoBuilderError(
-            "T.Kernel() can only be used inside @tilelang.jit or @T.prim_func context. "
-            "No Builder is available."
-        )
+        raise JITNoBuilderError("T.Kernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
 
     attrs: dict = {}
 
