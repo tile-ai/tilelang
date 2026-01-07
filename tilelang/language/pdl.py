@@ -8,14 +8,14 @@ __all__ = [
 
 
 def pdl_trigger():
-    return tir.call_extern(
-        "int32",  # cudaError_t
-        "cudaTriggerProgrammaticLaunchCompletion",
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.pdl_trigger"),
     )
 
 
 def pdl_sync():
-    return tir.call_extern(
-        "int32",  # cudaError_t
-        "cudaGridDependencySynchronize",
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.pdl_sync"),
     )

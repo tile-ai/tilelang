@@ -99,28 +99,28 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
   }
 }
 
-PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &lhs,
+PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc,
                                   const PrimExpr &b) const {
   PrimExpr rhs = b;
-  if (lhs->dtype != rhs->dtype) {
-    rhs = Cast(lhs->dtype, rhs);
+  if (acc->dtype != rhs->dtype) {
+    rhs = Cast(acc->dtype, rhs);
   }
   if (type->isSum()) {
-    return lhs + rhs;
+    return acc + rhs;
   } else if (type->isAbsSum()) {
-    return lhs + Max(rhs, -rhs);
+    return acc + Max(rhs, -rhs);
   } else if (type->isMax()) {
-    return Max(lhs, rhs);
+    return Max(acc, rhs);
   } else if (type->isMin()) {
-    return Min(lhs, rhs);
+    return Min(acc, rhs);
   } else if (type->isAbsMax()) {
-    return Max(tvm::abs(lhs), tvm::abs(rhs));
+    return Max(acc, tvm::abs(rhs));
   } else if (type->isBitAnd()) {
-    return lhs & rhs;
+    return acc & rhs;
   } else if (type->isBitOr()) {
-    return lhs | rhs;
+    return acc | rhs;
   } else if (type->isBitXor()) {
-    return lhs ^ rhs;
+    return acc ^ rhs;
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
   }
