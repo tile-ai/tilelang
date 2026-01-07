@@ -41,21 +41,21 @@ def matmul_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype
 
 def run_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     program = matmul_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
-    jit_kernel = tl.compile(program, execution_backend="cython")
+    cython_jit_kernel = tl.compile(program, execution_backend="cython")
+    ffi_jit_kernel = tl.compile(program, execution_backend="tvm_ffi")
 
     def ref_program(a, b):
         return (a @ b.T).to(torch.float32)
 
     a = torch.randn(M, K, device="cuda", dtype=map_torch_type(dtype))
     b = torch.randn(N, K, device="cuda", dtype=map_torch_type(dtype))
+    ffi_c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))
+    cython_c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))
 
-    c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))
-
-    jit_kernel(a.data_ptr(), b.data_ptr(), c.data_ptr(), M, N, K)
-
-    ref_c = (a @ b.T).to(map_torch_type(accum_dtype))
-
-    torch.testing.assert_close(c, ref_c, atol=1e-2, rtol=1e-2)
+    ffi_jit_kernel(a, b, ffi_c, M, N, K)
+    cython_jit_kernel(a.data_ptr(), b.data_ptr(), cython_c.data_ptr(), M, N, K)
+    torch.testing.assert_close(ffi_c, ref_program(a, b), atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(cython_c, ffi_c, atol=1e-2, rtol=1e-2)
 
 
 def test_matmul():
