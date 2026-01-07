@@ -494,7 +494,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     if (Enabled(buf.get(), scope)) {
       ICHECK(allow_append_)
           << tvm::ffi::GetRef<BufferLoad>(op) << " " << scope.to_string();
-      AccessEntry e{.cset = constr_stack_};
+      AccessEntry e{.cset = {constr_stack_}};
       e.threads = env_threads();
       e.buffer = buf;
       e.buffer_indices = op->indices;
@@ -518,7 +518,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     buffer_data_to_buffer_.Set(tvm::ffi::GetRef<Var>(buf.get()), op->buffer);
     StorageScope scope = GetScope(buf);
     if (Enabled(buf.get(), scope)) {
-      AccessEntry e{.cset = constr_stack_};
+      AccessEntry e{.cset = {constr_stack_}};
       e.threads = env_threads();
       e.buffer = buf;
       e.buffer_indices = op->indices;
@@ -790,7 +790,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         }
         if (Enabled(buffer_var, scope)) {
           ICHECK(allow_append_);
-          AccessEntry e{.cset = constr_stack_};
+          AccessEntry e{.cset = {constr_stack_}};
           e.threads = env_threads();
           e.dtype = dtype;
           e.buffer = Downcast<Var>(buffer->data);
@@ -852,7 +852,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                 start_indices[i], end_indices[i] - start_indices[i]));
           }
         }
-        AccessEntry e{.cset = constr_stack_};
+        AccessEntry e{.cset = {constr_stack_}};
         e.threads = env_threads();
         e.dtype = dtype;
         e.buffer = tvm::ffi::GetRef<Var>(buffer_var);
@@ -878,7 +878,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       const std::string &s = op->args[0].as<StringImmNode>()->value;
       if (s != "warp") {
         StorageScope scope = StorageScope::Create(s);
-        AccessEntry e{.cset = constr_stack_};
+        AccessEntry e{.cset = {constr_stack_}};
         e.threads = env_threads();
         e.type = kSync;
         e.scope = StorageScope::Create(s);
@@ -1031,7 +1031,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     int sync_count = 0;
     // head are before first sync, tail are after last sync
     std::vector<AccessEntry> head, tail;
-    AccessEntry esync{.cset = constr_stack_};
+    AccessEntry esync{.cset = {constr_stack_}};
     esync.threads = this->env_threads();
     esync.type = kSync;
     esync.scope = sync_scope_;
