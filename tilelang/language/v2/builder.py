@@ -990,9 +990,13 @@ class LazyJITFunc(Generic[_P, _T]):
                 # no return
         """
         try:
-            result = self.orig_func(*args, **kwargs)
+            prim_func = self.orig_func(*args, **kwargs)
             # lazy jit must return PrimFunc
-            return isinstance(result, PrimFunc)
+            if isinstance(prim_func, PrimFunc):
+                p1_key, _, _ = self._parse_phase1_key(*args, **kwargs)
+                self.p1_cache[p1_key] = TirTemplate.from_lazy_style(prim_func)
+                return True
+            return False
         except (JITNoBuilderError, EagerJITBuildError):
             # In eager mode, we construct AST directly without prim_func,
             # so there's no Builder available when the function is called.
