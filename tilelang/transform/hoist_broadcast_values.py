@@ -59,7 +59,6 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
 
             # Clear the queue for the next statement.
             self.pending_defs = []
-        print(f"new_stmt: {new_stmt}")
         return new_stmt
 
     def visit_let_stmt_(self, op: LetStmt):
@@ -87,7 +86,6 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
 
             # Clear the queue for the next statement.
             self.pending_defs = []
-        print(f"new_stmt: {new_stmt}")
         return new_stmt
 
 
