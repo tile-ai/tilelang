@@ -109,6 +109,8 @@ private:
     std::vector<Constr> &constrs;
     ~Guard() { constrs.pop_back(); }
   };
+
+protected:
   template <typename... Args> Guard MakeGuard(const Args... args) {
     constr_stack_.push_back(Constr(args...));
     return Guard{constr_stack_};
@@ -182,6 +184,12 @@ public:
       Base::VisitStmt_(op);
     } else {
       Base::VisitStmt_(op);
+    }
+  }
+  void VisitStmt_(const tir::WhileNode *op) override {
+    {
+      auto guard = MakeGuard(op->condition);
+      Base::VisitStmt(op->body);
     }
   }
   std::vector<Constr> constr_stack_;
