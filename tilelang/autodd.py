@@ -156,25 +156,6 @@ class BinOpFwdArg(ASTRewrite):
             return node.right
 
 
-class DictCanonicalize(ASTRewrite):
-    @override
-    def get_name(self) -> str:
-        return "dict-canonicalize"
-
-    @override
-    def match(self, node: ast.AST, parent: ast.AST, field: str, inside_list: bool) -> bool:
-        return isinstance(node, ast.Dict)
-
-    @override
-    def rewrite(self, node: ast.AST, parent: ast.AST, field: str, inside_list: bool) -> ast.AST:
-        assert isinstance(node, ast.Dict)
-        return ast.Call(
-            func=ast.Name("dict", ctx=ast.Load()),
-            args=[ast.List(elts=[ast.Tuple([k, v], ctx=ast.Load()) for k, v in zip(node.keys, node.values)], ctx=ast.Load())],
-            keywords=[],
-        )
-
-
 def _as_expr_placeholder(temp: ast.AST) -> "str | None":
     if isinstance(temp, ast.Name):
         return temp.id
@@ -610,6 +591,7 @@ def ruff_fix_code(code_string: str, fix_lint: bool = True, format_code: bool = T
 class LinePDD(TaskManager, PDD):
     def __init__(self, source: str, init_proba: float = 0.93):
         lines = [line for line in source.splitlines() if line.strip() != ""]
+        self.lines = lines
         all_labels = [i for i in range(len(lines))]
         super().__init__(all_labels, init_proba)
 
@@ -621,8 +603,7 @@ class LinePDD(TaskManager, PDD):
     @override
     def task_generator(self) -> Iterable[Task]:
         for task in self.generator():
-            lines = [line for line in self.source.splitlines() if line.strip() != ""]
-            new_lines = [line for idx, line in enumerate(lines) if idx not in task.applied]
+            new_lines = [line for idx, line in enumerate(self.lines) if idx not in task.applied]
             source = "\n".join(new_lines)
             try:
                 ast.parse(source)
@@ -1160,16 +1141,11 @@ def cli_main(argv: "Sequence[str] | None" = None) -> None:
     parser.add_argument("-j", "--jobs", type=int, default=1, help="Number of parallel jobs (default: 1)")
     ns = parser.parse_args(argv)
 
-    if ns.backend == "runner":
-        backend = JobBackend(AsyncPythonRunner, "runner")
-    else:
-        backend = JobBackend(SubProcRunner, "subproc")
-
     args = Args(
         source=ns.source,
         err_msg=ns.err_msg,
         output=ns.output,
-        backend=backend,
+        backend=ns.backend,
         timeout=ns.timeout,
         jobs=ns.jobs,
     )
