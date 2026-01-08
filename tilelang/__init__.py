@@ -7,6 +7,24 @@ import warnings
 from pathlib import Path
 
 
+def _is_running_autodd() -> bool:
+    orig_argv = getattr(sys, "orig_argv", None)
+    if orig_argv is None:
+        return False
+    if "-mtilelang.autodd" in orig_argv:
+        return True
+    pos = orig_argv.index("-m") if "-m" in orig_argv else -1
+    if pos != -1 and pos + 1 < len(orig_argv):
+        module_name = orig_argv[pos + 1]
+        if module_name == "tilelang.autodd" or module_name.startswith("tilelang.autodd."):
+            return True
+    return False
+
+
+# check if we are running under AutoDD
+_RUNNING_AUTODD = _is_running_autodd()
+
+
 def _compute_version() -> str:
     """Return the package version without being polluted by unrelated installs.
 
@@ -65,7 +83,10 @@ def set_log_level(level):
 
 def _init_logger():
     """Initialize the logger specific for this module with custom settings and a Tqdm-based handler."""
-    from tqdm.auto import tqdm
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        tqdm = None
 
     class TqdmLoggingHandler(logging.Handler):
         """Custom logging handler that directs log output to tqdm progress bar to avoid interference."""
@@ -78,7 +99,8 @@ def _init_logger():
             """Emit a log record. Messages are written to tqdm to ensure output in progress bars isn't corrupted."""
             try:
                 msg = self.format(record)
-                tqdm.write(msg)
+                if tqdm is not None:
+                    tqdm.write(msg)
             except Exception:
                 self.handleError(record)
 
@@ -93,7 +115,10 @@ def _init_logger():
     set_log_level("INFO")
 
 
-_init_logger()
+# Skip logger initialization when running under AutoDD
+if not _RUNNING_AUTODD:
+    _init_logger()
+
 del _init_logger
 
 
@@ -116,56 +141,58 @@ def _lazy_load_lib():
         ctypes.CDLL.__init__ = old_init
 
 
-with _lazy_load_lib():
-    from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
-    from .env import env as env  # noqa: F401
+# Skip import when running under AutoDD
+if not _RUNNING_AUTODD:
+    with _lazy_load_lib():
+        from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
+        from .env import env as env  # noqa: F401
 
-    import tvm
-    import tvm.base  # noqa: F401
-    from tvm import DataType  # noqa: F401
+        import tvm
+        import tvm.base  # noqa: F401
+        from tvm import DataType  # noqa: F401
 
-    # Setup tvm search path before importing tvm
-    from . import libinfo
+        # Setup tvm search path before importing tvm
+        from . import libinfo
 
-    def _load_tile_lang_lib():
-        """Load Tile Lang lib"""
-        if sys.platform.startswith("win32") and sys.version_info >= (3, 8):
-            for path in libinfo.get_dll_directories():
-                os.add_dll_directory(path)
-        # pylint: disable=protected-access
-        lib_name = "tilelang" if tvm.base._RUNTIME_ONLY else "tilelang_module"
-        # pylint: enable=protected-access
-        lib_path = libinfo.find_lib_path(lib_name)
-        return ctypes.CDLL(lib_path), lib_path
+        def _load_tile_lang_lib():
+            """Load Tile Lang lib"""
+            if sys.platform.startswith("win32") and sys.version_info >= (3, 8):
+                for path in libinfo.get_dll_directories():
+                    os.add_dll_directory(path)
+            # pylint: disable=protected-access
+            lib_name = "tilelang" if tvm.base._RUNTIME_ONLY else "tilelang_module"
+            # pylint: enable=protected-access
+            lib_path = libinfo.find_lib_path(lib_name)
+            return ctypes.CDLL(lib_path), lib_path
 
-    # only load once here
-    if env.SKIP_LOADING_TILELANG_SO == "0":
-        _LIB, _LIB_PATH = _load_tile_lang_lib()
+        # only load once here
+        if env.SKIP_LOADING_TILELANG_SO == "0":
+            _LIB, _LIB_PATH = _load_tile_lang_lib()
 
-    from .jit import jit, lazy_jit, JITKernel, compile, par_compile  # noqa: F401
-    from .profiler import Profiler  # noqa: F401
-    from .cache import clear_cache  # noqa: F401
-    from .utils import (
-        TensorSupplyType,  # noqa: F401
-        deprecated,  # noqa: F401
-    )
-    from .layout import (
-        Layout,  # noqa: F401
-        Fragment,  # noqa: F401
-    )
-    from . import (
-        analysis,  # noqa: F401
-        transform,  # noqa: F401
-        language,  # noqa: F401
-        engine,  # noqa: F401
-        tools,  # noqa: F401
-    )
-    from .language.v2 import dtypes  # noqa: F401
-    from .autotuner import autotune  # noqa: F401
-    from .transform import PassConfigKey  # noqa: F401
-    from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
-    from .math import *  # noqa: F403
-    from . import ir  # noqa: F401
-    from . import tileop  # noqa: F401
+        from .jit import jit, lazy_jit, JITKernel, compile, par_compile  # noqa: F401
+        from .profiler import Profiler  # noqa: F401
+        from .cache import clear_cache  # noqa: F401
+        from .utils import (
+            TensorSupplyType,  # noqa: F401
+            deprecated,  # noqa: F401
+        )
+        from .layout import (
+            Layout,  # noqa: F401
+            Fragment,  # noqa: F401
+        )
+        from . import (
+            analysis,  # noqa: F401
+            transform,  # noqa: F401
+            language,  # noqa: F401
+            engine,  # noqa: F401
+            tools,  # noqa: F401
+        )
+        from .language.v2 import dtypes  # noqa: F401
+        from .autotuner import autotune  # noqa: F401
+        from .transform import PassConfigKey  # noqa: F401
+        from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
+        from .math import *  # noqa: F403
+        from . import ir  # noqa: F401
+        from . import tileop  # noqa: F401
 
 del _lazy_load_lib
