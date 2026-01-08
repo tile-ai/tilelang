@@ -783,7 +783,7 @@ class SubProcRunner:
                         check=False,  # Do not raise exception for non-zero exit codes
                     )
                     return proc.stdout, proc.stderr, proc.returncode == 0
-                except subprocess.TimeoutExpired as e:
+                except subprocess.TimeoutExpired:
                     return "", f"TimeoutError: Exceeded {timeout}s", False
 
             return await asyncio.get_running_loop().run_in_executor(None, run_subprocess, ["python3", f.name])
