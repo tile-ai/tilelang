@@ -35,19 +35,20 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
             return Broadcast(new_var, op.lanes)
         return Broadcast(self.visit_expr(op.value), self.visit_expr(op.lanes))
 
-    # Must intercept all Statements that might contain Expressions.
-    # Examples: BufferStore, LetStmt, Evaluate, IfThenElse, AssertStmt.
+    # Intercept statement types that might contain expressions with broadcasts.
+    # Currently handled: BufferStore, LetStmt.
     def visit_buffer_store_(self, op: BufferStore):
-        # 1. Enable hoist flag and clear the pending queue for the current statement context.
+        # 1. Save the current state to handle nested statements correctly.
+        saved_hoist_enabled = self.hoist_enabled
+        saved_pending_defs = self.pending_defs
+
+        # 2. Enable hoist flag and clear the pending queue for the current statement context.
         self.hoist_enabled = True
         self.pending_defs = []
 
-        # 2. Visit child nodes normally (this will trigger visit_broadcast_).
+        # 3. Visit child nodes normally (this will trigger visit_broadcast_).
         new_indices = [self.visit_expr(idx) for idx in op.indices]
         new_stmt = BufferStore(op.buffer, self.visit_expr(op.value), new_indices)
-
-        # 3. Disable hoist flag after visiting.
-        self.hoist_enabled = False
 
         # 4. Check if there are variables waiting to be defined.
         if self.pending_defs:
@@ -57,35 +58,47 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
             for var, val in reversed(self.pending_defs):
                 new_stmt = LetStmt(var, val, new_stmt)
 
-            # Clear the queue for the next statement.
-            self.pending_defs = []
+        # 6. Restore the saved state.
+        self.hoist_enabled = saved_hoist_enabled
+        self.pending_defs = saved_pending_defs
+
         return new_stmt
 
     def visit_let_stmt_(self, op: LetStmt):
-        # 1. Enable hoist flag and clear the pending queue for the current statement context.
+        # 1. Save the current state to handle nested statements correctly.
+        saved_hoist_enabled = self.hoist_enabled
+        saved_pending_defs = self.pending_defs
+
+        # 2. Enable hoist flag and clear the pending queue for the current statement context.
         self.hoist_enabled = True
         self.pending_defs = []
 
-        # 2. Visit the value expression (this will trigger visit_broadcast_).
+        # 3. Visit the value expression (this will trigger visit_broadcast_).
         new_value = self.visit_expr(op.value)
 
-        # 3. Disable hoist flag after visiting value.
-        self.hoist_enabled = False
+        # 4. Capture the pending defs from the value expression before visiting body.
+        value_pending_defs = self.pending_defs
 
-        # 4. Recursively visit the body.
+        # 5. Disable hoist flag and clear pending defs before visiting body.
+        self.hoist_enabled = False
+        self.pending_defs = []
+
+        # 6. Recursively visit the body.
         new_body = self.visit_stmt(op.body)
 
-        # 5. Create the new LetStmt.
+        # 7. Create the new LetStmt.
         new_stmt = LetStmt(op.var, new_value, new_body)
 
-        # 6. Check if there are variables waiting to be defined.
-        if self.pending_defs:
-            # 7. Wrap the current statement with LetStmt.
-            for var, val in reversed(self.pending_defs):
+        # 8. Check if there are variables waiting to be defined from the value expression.
+        if value_pending_defs:
+            # 9. Wrap the current statement with LetStmt.
+            for var, val in reversed(value_pending_defs):
                 new_stmt = LetStmt(var, val, new_stmt)
 
-            # Clear the queue for the next statement.
-            self.pending_defs = []
+        # 10. Restore the saved state.
+        self.hoist_enabled = saved_hoist_enabled
+        self.pending_defs = saved_pending_defs
+
         return new_stmt
 
 
