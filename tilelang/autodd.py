@@ -769,24 +769,26 @@ class SubProcRunner:
         pass
 
     async def run(self, code: str, timeout: float = 5.0):
-        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=True) as f:
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
             f.write(code)
-            f.flush()
 
-            def run_subprocess(args):
-                try:
-                    proc = subprocess.run(
-                        args,
-                        capture_output=True,
-                        text=True,  # Decodes output as strings (Python 3.5+)
-                        timeout=timeout,  # Timeout after 5 seconds
-                        check=False,  # Do not raise exception for non-zero exit codes
-                    )
-                    return proc.stdout, proc.stderr, proc.returncode == 0
-                except subprocess.TimeoutExpired:
-                    return "", f"TimeoutError: Exceeded {timeout}s", False
+        def run_subprocess(args):
+            try:
+                proc = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,  # Decodes output as strings (Python 3.5+)
+                    timeout=timeout,  # Timeout after 5 seconds
+                    check=False,  # Do not raise exception for non-zero exit codes
+                )
+                return proc.stdout, proc.stderr, proc.returncode == 0
+            except subprocess.TimeoutExpired:
+                return "", f"TimeoutError: Exceeded {timeout}s", False
 
-            return await asyncio.get_running_loop().run_in_executor(None, run_subprocess, ["python3", f.name])
+        result = await asyncio.get_running_loop().run_in_executor(None, run_subprocess, ["python3", f.name])
+        with contextlib.suppress(OSError):
+            os.remove(f.name)
+        return result
 
 
 def clean_empty_pass(code: str) -> str:
@@ -794,6 +796,8 @@ def clean_empty_pass(code: str) -> str:
 
     class PassRemover(ast.NodeTransformer):
         def clean_body(self, body: list[ast.stmt], keep_one=True) -> list[ast.stmt]:
+            if body is None:
+                return None
             res = [stmt for stmt in body if not isinstance(stmt, ast.Pass)]
             if not res and keep_one:
                 return [ast.Pass()]
