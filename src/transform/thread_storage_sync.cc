@@ -652,17 +652,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       scope_.back().emplace_back(std::move(s));
     }
   }
-  bool IsThreadInvariant_(const PrimExpr &cond) {
-    if (auto call = cond.as<CallNode>()) {
-      if (auto opt_call_op = call->op.as<Op>()) {
-        const auto &call_op = opt_call_op.value();
-        if (call_op.same_as(builtin::tvm_thread_invariant())) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
 
   /**
    * @brief Visit an IfThenElse statement and collect storage access summaries
@@ -689,36 +678,36 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
    * condition is not thread-invariant).
    */
   void VisitStmt_(const IfThenElseNode *op) final {
-    bool is_thread_invariant = IsThreadInvariant_(op->condition);
-    if (!is_thread_invariant) {
-      ++condition_counter_;
-    }
-
-    allow_append_ = true;
-    this->VisitExpr(op->condition);
-
-    // Preserve accesses collected from the condition expression so they
-    // participate in dependency analysis. Otherwise, a write to shared memory
-    // immediately followed by an if-condition reading that memory would not
-    // trigger a sync before the if-statement.
-    std::vector<AccessEntry> cond_access = std::move(curr_stmt_.access);
-    allow_append_ = false;
-
-    scope_.push_back(std::vector<StmtEntry>());
-    {
-      this->VisitStmt(op->then_case);
-    }
-
     StmtEntry s;
-    s.stmt = op;
-    s.access = Summarize(std::move(scope_.back()), nullptr);
-    scope_.pop_back();
-    // Merge the condition's access summary into the if-statement's access list
-    // so the planner can insert a sync before the if when necessary.
-    if (!cond_access.empty()) {
-      s.access.insert(s.access.begin(), cond_access.begin(), cond_access.end());
+    {
+      auto guard = MakeGuard(op->condition);
+      allow_append_ = true;
+      this->VisitExpr(op->condition);
+
+      // Preserve accesses collected from the condition expression so they
+      // participate in dependency analysis. Otherwise, a write to shared memory
+      // immediately followed by an if-condition reading that memory would not
+      // trigger a sync before the if-statement.
+      std::vector<AccessEntry> cond_access = std::move(curr_stmt_.access);
+      allow_append_ = false;
+
+      scope_.push_back(std::vector<StmtEntry>());
+      {
+        this->VisitStmt(op->then_case);
+      }
+
+      s.stmt = op;
+      s.access = Summarize(std::move(scope_.back()), nullptr);
+      scope_.pop_back();
+      // Merge the condition's access summary into the if-statement's access
+      // list so the planner can insert a sync before the if when necessary.
+      if (!cond_access.empty()) {
+        s.access.insert(s.access.begin(), cond_access.begin(),
+                        cond_access.end());
+      }
     }
     if (op->else_case) {
+      auto guard = MakeGuard(tir::Not(op->condition));
       scope_.push_back(std::vector<StmtEntry>());
       {
         this->VisitStmt(op->else_case.value());
@@ -727,17 +716,11 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       scope_.pop_back();
       s.access.insert(s.access.end(), v.begin(), v.end());
     }
+
     scope_.back().emplace_back(std::move(s));
-    if (!is_thread_invariant) {
-      --condition_counter_;
-    }
   }
 
   void VisitStmt_(const WhileNode *op) final {
-    bool is_thread_invariant = IsThreadInvariant_(op->condition);
-    if (!is_thread_invariant) {
-      ++condition_counter_;
-    }
     this->VisitExpr(op->condition);
     scope_.push_back(std::vector<StmtEntry>());
     this->VisitStmt(op->body);
@@ -746,9 +729,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     s.access = Summarize(std::move(scope_.back()), nullptr);
     scope_.pop_back();
     scope_.back().emplace_back(std::move(s));
-    if (!is_thread_invariant) {
-      --condition_counter_;
-    }
   }
 
   void VisitExpr_(const CallNode *op) final {
@@ -1087,8 +1067,6 @@ private:
   bool in_device_env_{false};
   // Nesting depth of tma_load/tma_load_im2col calls
   int tma_depth_{0};
-  // Whether we are inside condition.
-  int condition_counter_{0};
   // The current double buffer write scope.
   const VarNode *double_buffer_write_{nullptr};
   // the current free stmt entry.
@@ -1097,13 +1075,6 @@ private:
   Array<IterVar> env_threads_;
   // The buffer map
   Map<Var, Buffer> buffer_data_to_buffer_;
-  // Member variables
-  IterVar tx_ =
-      IterVar(Range::FromMinExtent(0, 1), Var("tx"), IterVarType::kDataPar);
-  IterVar ty_ =
-      IterVar(Range::FromMinExtent(0, 1), Var("ty"), IterVarType::kDataPar);
-  IterVar tz_ =
-      IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   // synchronization scope
   StorageScope sync_scope_;
   void insert_syncs(const Object *obj) {
@@ -1111,14 +1082,98 @@ private:
       return;
     syncs_inserted_.insert(obj);
   }
+  void print_access_tentry(const AccessEntry &access) {
+    std::ostringstream output;
+
+    output << "Access Entry Information:\n";
+    output << "  Buffer: " << access.buffer << "\n";
+    output << "  Data Type: " << access.dtype << "\n";
+
+    std::string type_str;
+    switch (access.type) {
+    case kRead:
+      type_str = "Read";
+      break;
+    case kWrite:
+      type_str = "Write";
+      break;
+    case kSync:
+      type_str = "Sync";
+      break;
+    case kAlloc:
+      type_str = "Alloc";
+      break;
+    case kReadAcquire:
+      type_str = "ReadAcquire";
+      break;
+    default:
+      type_str = "Unknown";
+      break;
+    }
+    output << "  Access Type: " << type_str << "\n";
+
+    output << "  Storage Scope: " << access.scope.to_string() << "\n";
+
+    output << "  Threads: [";
+    for (size_t i = 0; i < access.threads.size(); ++i) {
+      if (i > 0)
+        output << ", ";
+      output << access.threads[i]->thread_tag;
+    }
+    output << "]\n";
+
+    {
+      output << "  Constraint: {";
+      arith::Analyzer analyzer_;
+      access.cset.Populate(analyzer_);
+      output << analyzer_.z3_prover.GetSMTLIB2(std::nullopt);
+      output << "}\n";
+    }
+
+    output << "  Buffer Indices: [";
+    for (size_t i = 0; i < access.buffer_indices.size(); ++i) {
+      if (i > 0)
+        output << ", ";
+      output << access.buffer_indices[i];
+    }
+    output << "]\n";
+
+    if (!access.buffer_ranges.empty()) {
+      output << "  Buffer Ranges: [";
+      for (size_t i = 0; i < access.buffer_ranges.size(); ++i) {
+        if (i > 0)
+          output << ", ";
+        output << "[" << access.buffer_ranges[i]->min << ", "
+               << access.buffer_ranges[i]->extent << "]";
+      }
+      output << "]\n";
+    }
+
+    if (!access.touched.empty()) {
+      output << "  Touched Ranges: [";
+      for (size_t i = 0; i < access.touched.size(); ++i) {
+        if (i > 0)
+          output << ", ";
+        output << access.touched[i];
+      }
+      output << "]\n";
+    }
+
+    output << "  Flags: ";
+    output << "double_buffer_write="
+           << (access.double_buffer_write ? "true" : "false");
+    output << ", is_pointer_access="
+           << (access.is_pointer_access ? "true" : "false");
+    output << ", is_async_copy=" << (access.is_async_copy ? "true" : "false");
+
+    LOG(WARNING) << output.str();
+  }
   bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
                     bool loop_carry) {
     // Special case: ignore conflicts between async-copy writes (e.g., TMA
     // loads into shared memory). Multiple async writes do not require
     // interspersed barriers among themselves. We still respect conflicts with
     // reads to ensure visibility before consumption.
-    // print_access_tentry(prev);
-    // print_access_tentry(curr);
     if (prev.type == kWrite && curr.type == kWrite && prev.is_async_copy &&
         curr.is_async_copy) {
       return false;
@@ -1132,15 +1187,7 @@ private:
     // Same index value means no conflicts
     // TODO(tqchen) more standard set based testing.
     bool has_same_index = true;
-    bool range_is_equal = true;
     bool range_is_overlap = true;
-
-    // for (const auto &kv : prev.thread_range) {
-    //   if (!StructuralEqual()(kv.second, curr.thread_range[kv.first])) {
-    //     range_is_equal = false;
-    //     break;
-    //   }
-    // }
 
     if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
       // They are not the same indices, should be conflict.
@@ -1181,28 +1228,43 @@ private:
         struct ThreadVarInfo {
           const char *name_prev;
           const char *name_curr;
-          IterVar iv;
         } thread_vars[] = {
-            {"tx1", "tx2", tx_},
-            {"ty1", "ty2", ty_},
-            {"tz1", "tz2", tz_},
+            {"tx1", "tx2"},
+            {"ty1", "ty2"},
+            {"tz1", "tz2"},
         };
 
-        for (const auto &info : thread_vars) {
-          Var prev_var(info.name_prev, info.iv->var.dtype());
-          Var curr_var(info.name_curr, info.iv->var.dtype());
+        for (unsigned idx = 0; idx != 3; ++idx) {
+          auto &info = thread_vars[idx];
+          Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
+          Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
+          Var prev_var(info.name_prev, old_prev_var.dtype());
+          Var curr_var(info.name_curr, old_curr_var.dtype());
           prev_indice_bytes =
-              Substitute(prev_indice_bytes, {{info.iv->var, prev_var}});
-          prev_cset = prev_cset.Substitute({{info.iv->var, prev_var}});
+              Substitute(prev_indice_bytes, {{old_prev_var, prev_var}});
+          prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
           curr_indice_bytes =
-              Substitute(curr_indice_bytes, {{info.iv->var, curr_var}});
-          curr_cset = curr_cset.Substitute({{info.iv->var, curr_var}});
+              Substitute(curr_indice_bytes, {{old_curr_var, curr_var}});
+          curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
         }
         prev_cset.Populate(analyzer);
         curr_cset.Populate(analyzer);
-
-        bool provably_disjoint =
-            analyzer.CanProve(prev_indice_bytes != curr_indice_bytes);
+        bool provably_disjoint = false;
+        if (prev_indice_bytes.dtype().is_scalar() &&
+            curr_indice_bytes.dtype().is_scalar()) {
+          provably_disjoint =
+              analyzer.CanProve(prev_indice_bytes != curr_indice_bytes);
+        } else {
+          auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
+          auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
+          if (prev_bound.defined() && curr_bound.defined()) {
+            if ((prev_bound->min_value) > (curr_bound->max_value) ||
+                (curr_bound->min_value) > (prev_bound->max_value)) {
+              range_is_overlap = false;
+              break;
+            }
+          }
+        }
 
         if (provably_disjoint) {
           range_is_overlap = false;
@@ -1214,6 +1276,16 @@ private:
         break;
       }
     }
+
+    // TODO(silent-coder): check whether range is equal
+    bool range_is_equal = false;
+
+    // for (const auto &kv : prev.thread_range) {
+    //   if (!StructuralEqual()(kv.second, curr.thread_range[kv.first])) {
+    //     range_is_equal = false;
+    //     break;
+    //   }
+    // }
 
     if (has_same_index && range_is_equal) {
       return false;
@@ -1230,14 +1302,10 @@ private:
     // if range_is_overlap is true, then they are in conflict, we should return
     // true. if range_is_overlap is false, then they are not in conflict, we
     // should return false.
-    // LOG(WARNING) << range_is_overlap;
     return range_is_overlap;
   }
   bool FindConflict(const std::vector<AccessEntry> &prev,
                     const AccessEntry &curr, bool loop_carry) {
-    // LOG(WARNING) << "FIND: ";
-    // print_access_tentry(curr);
-    // LOG(WARNING) << prev.size() << " " << loop_carry;
     for (const AccessEntry &x : prev) {
       if (FindConflict(x, curr, loop_carry)) {
         return true;
