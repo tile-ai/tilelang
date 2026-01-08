@@ -770,7 +770,7 @@ class SubProcRunner:
 
     async def run(self, code: str, timeout: float = 5.0):
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=True) as f:
-            f.writelines(code)
+            f.write(code)
             f.flush()
 
             def run_subprocess(args):
@@ -783,8 +783,8 @@ class SubProcRunner:
                         check=False,  # Do not raise exception for non-zero exit codes
                     )
                     return proc.stdout, proc.stderr, proc.returncode == 0
-                except subprocess.CalledProcessError as e:
-                    return e.stdout, e.stderr, False
+                except subprocess.TimeoutExpired as e:
+                    return "", f"TimeoutError: Exceeded {timeout}s", False
 
             return await asyncio.get_running_loop().run_in_executor(None, run_subprocess, ["python3", f.name])
 
@@ -890,6 +890,7 @@ class ParTaskManager:
         self.waiting_workers = 0
         self.finished = True
         self.task_counter = 0
+        self.updated = False
 
     @property
     def text_len(self):
