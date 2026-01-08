@@ -125,6 +125,7 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     Note: This is a validation-only pipeline of passes and does not modify or return the module.
     """
 
+    print(mod)
     # Print AST for debugging purpose
     if should_enable_ast_print():
         tilelang.analysis.ASTPrinter()(mod)
