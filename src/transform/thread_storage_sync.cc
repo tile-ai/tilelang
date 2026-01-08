@@ -1215,80 +1215,67 @@ private:
       const auto &prev_indice = prev.buffer_indices[i];
       const auto &curr_indice = curr.buffer_indices[i];
 
-      if (!ExprDeepEqual()(prev_indice, curr_indice)) {
-        PrimExpr prev_indice_bytes = prev_indice * prev_dtype.bytes();
-        PrimExpr curr_indice_bytes = curr_indice * curr_dtype.bytes();
+      PrimExpr prev_indice_bytes = prev_indice * prev_dtype.bytes();
+      PrimExpr curr_indice_bytes = curr_indice * curr_dtype.bytes();
 
-        has_same_index = false;
+      has_same_index = false;
 
-        ConstrSet prev_cset{prev.cset};
-        ConstrSet curr_cset{curr.cset};
-        arith::Analyzer analyzer;
+      ConstrSet prev_cset{prev.cset};
+      ConstrSet curr_cset{curr.cset};
+      arith::Analyzer analyzer;
 
-        struct ThreadVarInfo {
-          const char *name_prev;
-          const char *name_curr;
-        } thread_vars[] = {
-            {"tx1", "tx2"},
-            {"ty1", "ty2"},
-            {"tz1", "tz2"},
-        };
-
-        for (unsigned idx = 0; idx != 3; ++idx) {
-          auto &info = thread_vars[idx];
-          Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
-          Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
-          Var prev_var(info.name_prev, old_prev_var.dtype());
-          Var curr_var(info.name_curr, old_curr_var.dtype());
-          prev_indice_bytes =
-              Substitute(prev_indice_bytes, {{old_prev_var, prev_var}});
-          prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
-          curr_indice_bytes =
-              Substitute(curr_indice_bytes, {{old_curr_var, curr_var}});
-          curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
-        }
-        prev_cset.Populate(analyzer);
-        curr_cset.Populate(analyzer);
-        bool provably_disjoint = false;
-        if (prev_indice_bytes.dtype().is_scalar() &&
-            curr_indice_bytes.dtype().is_scalar()) {
-          provably_disjoint =
-              analyzer.CanProve(prev_indice_bytes != curr_indice_bytes);
-        } else {
-          auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
-          auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
-          if (prev_bound.defined() && curr_bound.defined()) {
-            if ((prev_bound->min_value) > (curr_bound->max_value) ||
-                (curr_bound->min_value) > (prev_bound->max_value)) {
-              range_is_overlap = false;
-              break;
-            }
+      struct ThreadVarInfo {
+        const char *name_prev;
+        const char *name_curr;
+      } thread_vars[] = {
+          {"tx1", "tx2"},
+          {"ty1", "ty2"},
+          {"tz1", "tz2"},
+      };
+      PrimExpr thread_condition = Bool(false);
+      for (unsigned idx = 0; idx != 3; ++idx) {
+        auto &info = thread_vars[idx];
+        Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
+        Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
+        Var prev_var(info.name_prev, old_prev_var.dtype());
+        Var curr_var(info.name_curr, old_curr_var.dtype());
+        thread_condition =
+            tir::Or(thread_condition, tir::Not(tir::EQ(prev_var, curr_var)));
+        prev_indice_bytes =
+            Substitute(prev_indice_bytes, {{old_prev_var, prev_var}});
+        prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
+        curr_indice_bytes =
+            Substitute(curr_indice_bytes, {{old_curr_var, curr_var}});
+        curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
+      }
+      analyzer.EnterConstraint(thread_condition);
+      prev_cset.Populate(analyzer);
+      curr_cset.Populate(analyzer);
+      bool provably_disjoint = false;
+      if (prev_indice_bytes.dtype().is_scalar() &&
+          curr_indice_bytes.dtype().is_scalar()) {
+        provably_disjoint = analyzer.CanProve(
+            tir::Not(tir::EQ(prev_indice_bytes, curr_indice_bytes)));
+      } else {
+        auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
+        auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
+        if (prev_bound.defined() && curr_bound.defined()) {
+          if ((prev_bound->min_value) > (curr_bound->max_value) ||
+              (curr_bound->min_value) > (prev_bound->max_value)) {
+            range_is_overlap = false;
+            break;
           }
         }
+      }
 
-        if (provably_disjoint) {
-          range_is_overlap = false;
-          break;
-        }
+      if (provably_disjoint) {
+        range_is_overlap = false;
+        break;
       }
 
       if (!has_same_index) {
         break;
       }
-    }
-
-    // TODO(silent-coder): check whether range is equal
-    bool range_is_equal = false;
-
-    // for (const auto &kv : prev.thread_range) {
-    //   if (!StructuralEqual()(kv.second, curr.thread_range[kv.first])) {
-    //     range_is_equal = false;
-    //     break;
-    //   }
-    // }
-
-    if (has_same_index && range_is_equal) {
-      return false;
     }
 
     // If this is a read into a double buffer that was previously
