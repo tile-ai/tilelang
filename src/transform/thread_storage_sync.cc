@@ -1082,7 +1082,54 @@ private:
       return;
     syncs_inserted_.insert(obj);
   }
-  void print_access_tentry(const AccessEntry &access) {
+  bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
+    if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
+      return false;
+    }
+    ConstrSet prev_cset{lhs.cset};
+    ConstrSet curr_cset{rhs.cset};
+    arith::Analyzer analyzer;
+
+    struct ThreadVarInfo {
+      const char *name_prev;
+      const char *name_curr;
+    } thread_vars[] = {
+        {"tx1", "tx2"},
+        {"ty1", "ty2"},
+        {"tz1", "tz2"},
+    };
+    PrimExpr lhs_min = analyzer.Simplify(lhs.touched[0].min());
+    PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
+    PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
+    PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
+    for (unsigned idx = 0; idx != 3; ++idx) {
+      auto &info = thread_vars[idx];
+      Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
+      Var old_curr_var = rhs.threads[rhs.threads.size() + idx - 3]->var;
+      Var prev_var(info.name_prev, old_prev_var.dtype());
+      Var curr_var(info.name_curr, old_curr_var.dtype());
+      lhs_min = Substitute(lhs_min, {{old_prev_var, prev_var}});
+      lhs_max = Substitute(lhs_max, {{old_prev_var, prev_var}});
+      prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
+      rhs_min = Substitute(rhs_min, {{old_curr_var, curr_var}});
+      rhs_max = Substitute(rhs_max, {{old_curr_var, curr_var}});
+      curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
+    }
+    prev_cset.Populate(analyzer);
+    curr_cset.Populate(analyzer);
+
+    if (analyzer.CanProve(lhs_max < rhs_min,
+                          arith::ProofStrength::kSymbolicBound)) {
+      return true;
+    }
+    if (analyzer.CanProve(rhs_max < lhs_min,
+                          arith::ProofStrength::kSymbolicBound)) {
+      return true;
+    }
+    return false;
+  }
+  void print_access_tentry(const AccessEntry &access,
+                           bool print_constr = false) {
     std::ostringstream output;
 
     output << "Access Entry Information:\n";
@@ -1122,7 +1169,7 @@ private:
     }
     output << "]\n";
 
-    {
+    if (print_constr) {
       output << "  Constraint: {";
       arith::Analyzer analyzer_;
       access.cset.Populate(analyzer_);
@@ -1193,20 +1240,18 @@ private:
       // They are not the same indices, should be conflict.
       return true;
     }
-    // if (prev.is_pointer_access || curr.is_pointer_access) {
-    //   // For accesses created via tvm_access_ptr we may still be able to
-    //   prove
-    //   // disjointness using their byte ranges.  If both sides expose a
-    //   touched
-    //   // interval and we can show they don't overlap, skip the conflict.
-    //   if (prev.is_pointer_access && curr.is_pointer_access &&
-    //       PointerAccessIsDisjoint(prev, curr)) {
-    //     return false;
-    //   }
-    //   // Otherwise fall back to the conservative answer: treat them as
-    //   // overlapping.
-    //   return true;
-    // }
+    if (prev.is_pointer_access || curr.is_pointer_access) {
+      // For accesses created via tvm_access_ptr we may still be able to prove
+      // disjointness using their byte ranges.  If both sides expose a touched
+      // interval and we can show they don't overlap, skip the conflict.
+      if (prev.is_pointer_access && curr.is_pointer_access &&
+          PointerAccessIsDisjoint(prev, curr)) {
+        return false;
+      }
+      // Otherwise fall back to the conservative answer: treat them as
+      // overlapping.
+      return true;
+    }
 
     for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
       auto prev_dtype = prev.dtype;
@@ -1240,7 +1285,7 @@ private:
         Var prev_var(info.name_prev, old_prev_var.dtype());
         Var curr_var(info.name_curr, old_curr_var.dtype());
         thread_condition =
-            tir::Or(thread_condition, tir::Not(tir::EQ(prev_var, curr_var)));
+            tir::Or(thread_condition, tir::NE(prev_var, curr_var));
         prev_indice_bytes =
             Substitute(prev_indice_bytes, {{old_prev_var, prev_var}});
         prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
@@ -1249,13 +1294,26 @@ private:
         curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
       }
       analyzer.EnterConstraint(thread_condition);
+      prev_indice_bytes = analyzer.Simplify(prev_indice_bytes);
+      curr_indice_bytes = analyzer.Simplify(curr_indice_bytes);
       prev_cset.Populate(analyzer);
       curr_cset.Populate(analyzer);
       bool provably_disjoint = false;
       if (prev_indice_bytes.dtype().is_scalar() &&
           curr_indice_bytes.dtype().is_scalar()) {
-        provably_disjoint = analyzer.CanProve(
-            tir::Not(tir::EQ(prev_indice_bytes, curr_indice_bytes)));
+        if (prev_indice_bytes.dtype() != curr_indice_bytes.dtype()) {
+          if (prev_indice_bytes.dtype().bits() <
+              curr_indice_bytes.dtype().bits()) {
+            prev_indice_bytes =
+                tir::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
+          } else {
+            curr_indice_bytes =
+                tir::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
+          }
+        }
+        ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
+        provably_disjoint =
+            analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
       } else {
         auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
         auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
