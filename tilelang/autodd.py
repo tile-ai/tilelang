@@ -704,7 +704,11 @@ class AsyncPythonRunner:
                 self.process.terminate()
         self.process = None
 
-    def __del__(self):
+    def __enter__(self):
+        self.start_proc()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         self.stop_proc()
 
     async def run(self, code: str, timeout: float = 5.0):
@@ -762,10 +766,10 @@ class SubProcRunner:
     def __init__(self):
         pass
 
-    def start_proc(self):
+    def __enter__(self):
         pass
 
-    def stop_proc(self):
+    def __exit__(self, exc_type, exc_value, traceback):
         pass
 
     async def run(self, code: str, timeout: float = 5.0):
@@ -778,7 +782,7 @@ class SubProcRunner:
                     args,
                     capture_output=True,
                     text=True,  # Decodes output as strings (Python 3.5+)
-                    timeout=timeout,  # Timeout after 5 seconds
+                    timeout=timeout,  # Timeout
                     check=False,  # Do not raise exception for non-zero exit codes
                 )
                 return proc.stdout, proc.stderr, proc.returncode == 0
@@ -946,7 +950,7 @@ class ParTaskManager:
 
     async def worker(self, wid: int):
         runner = AsyncPythonRunner() if self.backend == "runner" else SubProcRunner()
-        try:
+        with runner:
             while True:
                 task = await self.get_next_task()
                 if task is None:
@@ -954,9 +958,6 @@ class ParTaskManager:
                 out, err, ok = await runner.run(task.source, timeout=self.timeout)
                 is_interested = self.err_msg in out or self.err_msg in err
                 await self.submit_result(task, is_interested)
-        finally:
-            if hasattr(runner, "stop_proc"):
-                runner.stop_proc()
 
     async def start_workers(self):
         if self.worker_tasks:
