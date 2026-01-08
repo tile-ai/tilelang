@@ -1,6 +1,7 @@
 from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Generic, Any, Literal, TypeVar
 from contextlib import AbstractContextManager
 from collections.abc import Iterable
@@ -249,11 +250,12 @@ class BaseBuilder:
 
 
 class DSLMutator(ast.NodeTransformer):
-    def __init__(self, nonlocals: dict[str, Any], globals: dict[str, Any]):
+    def __init__(self, nonlocals: dict[str, Any], globals: dict[str, Any], filename: str):
         self.tmp_counter = 0
         self.nonlocals = nonlocals
         self.globals = globals
         self.extra_type_hints: dict[str, Any] = {}
+        self.filename = filename
 
     def get_tmp(self) -> str:
         name = f"__{self.tmp_counter}"
@@ -469,13 +471,17 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         node.body = stmts + node.body
         node.decorator_list.clear()
+        name = node.name
+        node = SpanAttacher("__tb_fl", "__tb_fn").visit(node)
         return quote1(
             f"def make_closure({', '.join(self.nonlocals.keys())}):\n"
-            f"  def {node.name}(__tb):\n"
+            f"  def {name}(__tb):\n"
+            f"    __tb_fl = '{self.filename}'\n"
+            f"    __tb_fn = '{name}'\n"
             "    range = __tb.override('range')\n"
             "    pass\n"
-            f"    return {node.name}\n"
-            f"  return {node.name}",
+            f"    return {name}\n"
+            f"  return {name}",
             passes=[node],
         )
 
@@ -573,6 +579,18 @@ class DSLMutator(ast.NodeTransformer):
         return node
 
 
+class SpanAttacher(ast.NodeTransformer):
+    def __init__(self, filename_var: str, func_name_var: str):
+        self.filename_var = filename_var
+        self.func_name_var = func_name_var
+
+    def visit(self, node: ast.AST):
+        node = self.generic_visit(node)
+        if isinstance(node, ast.stmt) and hasattr(node, "lineno"):
+            return quote(f"__tb.set_fileline({self.filename_var}, {node.lineno}, {self.func_name_var})") + [node]
+        return node
+
+
 _P = ParamSpec("_P")
 
 
@@ -627,9 +645,8 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     #       def bar(): x
     #       return bar
     #     ```
-    mut = DSLMutator(nonlocals, func.__globals__)
+    mut = DSLMutator(nonlocals, func.__globals__, Path(filename).name)
     tree = mut.visit(tree)
-
     make_closure = utils.get_compiled_object(
         tree,
         "make_closure",

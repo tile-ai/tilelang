@@ -3,6 +3,7 @@ This module provides macros and utilities for debugging TileLang (tl) programs.
 It includes functionality to print variables, print values in buffers, conditionally execute debug prints and assert.
 """
 
+from tilelang.language.v2.builder import Builder
 from tvm import tir
 from typing import Any
 import tilelang.language as T
@@ -123,19 +124,30 @@ import warnings
 _IS_CUDA_AVAILABLE = check_cuda_availability()
 
 
+def get_stack_str(msg, stacklevel=1):
+    stack = Builder.current().get_fileline_stack(stacklevel)
+    msg = msg + "\n"
+    for fileline, lineno, macro_name in stack:
+        msg += f"  at {fileline}:{lineno} in {macro_name}\n"
+    return msg
+
+
 @macro
-def device_assert(condition: tir.PrimExpr, msg: str = ""):
+def device_assert(condition: tir.PrimExpr, msg: str = "", no_stack_info=False):
     """
     Device-side assert emulation.
     Emits a device-side assert call on CUDA targets when CUDA is available.
     The assert is always enabled and cannot be disabled at runtime.
     """
     if _IS_CUDA_AVAILABLE:
-        if msg == "":
-            T.call_intrin("void", tir.op.Op.get("tl.device_assert"), condition)
+        if no_stack_info:
+            if msg == "":
+                T.call_intrin("void", tir.op.Op.get("tl.device_assert"), condition)
+            else:
+                warnings.warn("Non-empty msg may slightly slow down the kernel", stacklevel=2)
+                T.call_intrin("void", tir.op.Op.get("tl.device_assert_with_msg"), condition, msg)
         else:
-            warnings.warn("Non-empty msg may slightly slow down the kernel", stacklevel=2)
-            T.call_intrin("void", tir.op.Op.get("tl.device_assert_with_msg"), condition, msg)
+            T.call_intrin("void", tir.op.Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))
 
 
 def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:
