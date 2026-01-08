@@ -82,5 +82,25 @@ def test_transform_hoist():
     _check(before, after)
 
 
+def test_transform_hoist_let_stmt():
+    @T.prim_func
+    def before():
+        with T.Kernel(8):
+            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            val: T.float8x8 = T.Broadcast(T.float8_e4m3fn(1.2), 8) + T.Broadcast(T.float8_e4m3fn(3.4), 8)
+            A_shared[0:8] = val
+
+    @T.prim_func
+    def after():
+        with T.Kernel(8):
+            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            broadcast_var: T.float8_e4m3fn = T.float8_e4m3fn(1.2)
+            broadcast_var_1: T.float8_e4m3fn = T.float8_e4m3fn(3.4)
+            val: T.float8x8 = T.Broadcast(broadcast_var, 8) + T.Broadcast(broadcast_var_1, 8)
+            A_shared[0:8] = val
+
+    _check(before, after)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

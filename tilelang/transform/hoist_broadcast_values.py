@@ -16,9 +16,11 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
         super().__init__()
         # Temporary queue: used to store variables that need to be defined within the current statement.
         self.pending_defs = []
+        # Flag to indicate if hoist should be enabled.
+        self.hoist_enabled = False
 
     def visit_broadcast_(self, op):
-        if isinstance(op.value, (tir.IntImm, tir.FloatImm)):
+        if self.hoist_enabled and isinstance(op.value, (tir.IntImm, tir.FloatImm)):
             # 1. Intercept Broadcast nodes.
             # Extract the value to be hoisted into a variable.
             val = self.visit_expr(op.value)
@@ -36,16 +38,20 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
     # Must intercept all Statements that might contain Expressions.
     # Examples: BufferStore, LetStmt, Evaluate, IfThenElse, AssertStmt.
     def visit_buffer_store_(self, op: BufferStore):
-        # 1. Clear the pending queue for the current statement context.
+        # 1. Enable hoist flag and clear the pending queue for the current statement context.
+        self.hoist_enabled = True
         self.pending_defs = []
 
         # 2. Visit child nodes normally (this will trigger visit_broadcast_).
         new_indices = [self.visit_expr(idx) for idx in op.indices]
         new_stmt = BufferStore(op.buffer, self.visit_expr(op.value), new_indices)
 
-        # 3. Check if there are variables waiting to be defined.
+        # 3. Disable hoist flag after visiting.
+        self.hoist_enabled = False
+
+        # 4. Check if there are variables waiting to be defined.
         if self.pending_defs:
-            # 4. Wrap the current statement with LetStmt.
+            # 5. Wrap the current statement with LetStmt.
             # Order: Traverse in reverse to ensure the first definition wraps the outermost layer.
             # Structure generated: Let my_var = val In BufferStore(...)
             for var, val in reversed(self.pending_defs):
@@ -53,6 +59,35 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
 
             # Clear the queue for the next statement.
             self.pending_defs = []
+        print(f"new_stmt: {new_stmt}")
+        return new_stmt
+
+    def visit_let_stmt_(self, op: LetStmt):
+        # 1. Enable hoist flag and clear the pending queue for the current statement context.
+        self.hoist_enabled = True
+        self.pending_defs = []
+
+        # 2. Visit the value expression (this will trigger visit_broadcast_).
+        new_value = self.visit_expr(op.value)
+
+        # 3. Disable hoist flag after visiting value.
+        self.hoist_enabled = False
+
+        # 4. Recursively visit the body.
+        new_body = self.visit_stmt(op.body)
+
+        # 5. Create the new LetStmt.
+        new_stmt = LetStmt(op.var, new_value, new_body)
+
+        # 6. Check if there are variables waiting to be defined.
+        if self.pending_defs:
+            # 7. Wrap the current statement with LetStmt.
+            for var, val in reversed(self.pending_defs):
+                new_stmt = LetStmt(var, val, new_stmt)
+
+            # Clear the queue for the next statement.
+            self.pending_defs = []
+        print(f"new_stmt: {new_stmt}")
         return new_stmt
 
 
