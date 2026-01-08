@@ -148,6 +148,4 @@ def test_valid_loop():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    tilelang.disable_cache()
-    test_valid_loop()
+    tilelang.testing.main()

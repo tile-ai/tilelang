@@ -295,7 +295,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         self.initialize_jit_mode(*args, **kwargs)
         if isinstance(self.func, PrimFunc):
             tir = self.func
-        elif isinstance(self.func, (LazyJITFunc, Callable)):
+        elif callable(self.func):
             tir = self.func(*args, **kwargs)
         else:
             raise ValueError(f"Invalid function type: {type(self.func)}")

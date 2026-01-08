@@ -907,6 +907,8 @@ class TirTemplate(Generic[_P, _T]):
         return cls(prim_func=prim_func, is_lazy_style=True)
 
     def _parse_phase2_key(self, **kwargs):
+        if self.matcher is None:
+            return ()
         result = []
         for k, ty, i in self.matcher.values():
             if ty == "shape":
