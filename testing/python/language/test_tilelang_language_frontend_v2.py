@@ -4,7 +4,8 @@ import torch
 import tilelang.testing
 import tvm
 from tvm.script.ir_builder.base import IRBuilderFrame
-from tvm.tir.expr import IntImm, Var
+from tvm.tir.expr import IntImm, Var, Not, Or
+from tvm.tir import all as tir_all
 
 
 def test_argument():
@@ -447,9 +448,8 @@ def test_boolop():
     c = Var("c", T.int32)
     d = Var("d", T.int32)
 
-    @T.macro
     def cond():
-        return not (a < b and b < c and a * d < b * d) or b * d < c * d
+        return Or(Not(tir_all(a < b, b < c, a * d < b * d)), b * d < c * d)
 
     cond()
 
