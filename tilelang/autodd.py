@@ -422,7 +422,9 @@ class RewriteApplier(ASTMutator):
         if node is None:
             return None
         elif isinstance(node, ast.AST):
-            return self.visit(node, parent, field, inside_list)
+            # After rewriting this node, traverse its children without
+            # re-applying rewrite selection logic to the node itself.
+            return self.generic_visit(node)
         else:
             new_items = []
             for item in node:
@@ -493,20 +495,20 @@ class PDD:
         while True:
             choices = sorted(probas.items(), key=lambda x: (x[1], x[0]), reverse=True)
             selected = []
-            sum, prod = 0.0, 1.0
+            selected_count, prod = 0.0, 1.0
             for label, p in choices:
                 if p >= 1.0:
                     selected.append(label)
                     continue
-                if (sum + 1) * prod * p > sum * prod:
+                if (selected_count + 1) * prod * p > selected_count * prod:
                     selected.append(label)
-                    sum, prod = sum + 1, prod * p
+                    selected_count, prod = selected_count + 1, prod * p
                 else:
                     break
             applied = self.apply(set(selected))
             masked = set(selected).difference(applied)
             task = Task(source=None, applied=list(applied), masked=list(masked))
-            if sum * prod == 0 or all(probas[label] >= 1.0 for label in applied):
+            if selected_count * prod == 0 or all(probas[label] >= 1.0 for label in applied):
                 break
             yield deepcopy(task)
             self._update_probas(probas, task, is_interesting=False)
@@ -1007,7 +1009,14 @@ class Args(NamedTuple):
 
 
 async def main(args: Args):
-    source = args.source.read_text()
+    if not args.source.exists() or not args.source.is_file():
+        raise FileNotFoundError(f"Source file '{args.source}' does not exist or is not a regular file.")
+    if not os.access(args.source, os.R_OK):
+        raise OSError(f"Source file '{args.source}' is not readable.")
+    try:
+        source = args.source.read_text()
+    except OSError as e:
+        raise OSError(f"Failed to read source file '{args.source}': {e}") from e
 
     manager = ParTaskManager(
         err_msg=args.err_msg,
@@ -1132,7 +1141,7 @@ def cli_main(argv: "Sequence[str] | None" = None) -> None:
     from argparse import ArgumentParser
 
     parser = ArgumentParser(
-        usage="python autodd.py source --err-msg MSG -o OUTPUT [--backend {runner,subproc}] [--timeout SEC] [-j N]",
+        usage="python -m tilelang.autodd source --err-msg MSG -o OUTPUT [--backend {runner,subproc}] [--timeout SEC] [-j N]",
         description="Delta-debug the provided Python source until the target error message remains reproducible.",
         epilog="Author: Kexing Zhou <zhoukexing@pku.edu.cn>",
     )
