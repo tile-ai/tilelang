@@ -24,7 +24,7 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
-from tilelang.language.v2 import PrimFunc, prim_func, JITFunc
+from tilelang.language.eager import PrimFunc, prim_func, JITFunc
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel

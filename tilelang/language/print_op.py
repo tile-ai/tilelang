@@ -3,7 +3,7 @@ This module provides macros and utilities for debugging TileLang (tl) programs.
 It includes functionality to print variables, print values in buffers, conditionally execute debug prints and assert.
 """
 
-from tilelang.language.v2.builder import Builder
+from tilelang.language.eager.builder import Builder
 from tvm import tir
 from typing import Any
 import tilelang.language as T

@@ -276,7 +276,7 @@ def ptr(dtype: str | None = None, storage_scope: str = "global", *, is_size_var:
 
 
 def make_tensor(ptr: Var, shape: tuple[PrimExpr, ...], dtype: str = "float32", strides: tuple[PrimExpr, ...] = None) -> tir.Buffer:
-    from tilelang.language.v2.builder import Builder
+    from tilelang.language.eager.builder import Builder
 
     if Builder.current() is None:
         raise JITNoBuilderError("T.make_tensor() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
