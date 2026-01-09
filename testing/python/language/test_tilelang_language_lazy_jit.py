@@ -146,7 +146,7 @@ def test_jit2_many_annot():
         B: T.StridedTensor[[N, M], [N_, M_], T.float32]
         copy_impl(A, B)
 
-    tilelang.par_compile([copy.get_tir(T.Tensor((128, 128))) for copy in [copy1, copy2, copy3, copy4]])
+    tilelang.par_compile([copy.get_tir(T.Tensor((128, 128)), T.Tensor((128, 128))) for copy in [copy1, copy2, copy3, copy4]])
 
     for copy in [copy1, copy2, copy3, copy4]:
         A = torch.randn(128, 128, device="cuda")
@@ -226,4 +226,5 @@ def test_jit2_return():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_jit2_return()

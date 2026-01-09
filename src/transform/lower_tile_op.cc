@@ -54,7 +54,6 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   }
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
-
   if (ptr_type->storage_scope == "shared" ||
       ptr_type->storage_scope == "shared.dyn") {
     int replicate_extent = 1;
@@ -67,6 +66,8 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
     }
     for (size_t i = 0; i < layout_shape.size(); i++) {
       auto shape = layout_shape[i].as<IntImmNode>();
+      ICHECK(shape) << "Layout output shape must be constant integer, but got: "
+                    << layout_shape[i];
       layout_extent *= shape->value;
     }
     replicate_extent = buffer_extent / layout_extent;

@@ -291,6 +291,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         """
         Retrieve a TIR (Tensor Intermediate Representation) PrimFunc from the stored callable or object.
         """
+        self.initialize_jit_mode(*args, **kwargs)
         if isinstance(self.func, PrimFunc):
             tir = self.func
         elif callable(self.func):
@@ -313,6 +314,14 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         if not isinstance(self.func, JITFunc):
             return "lazy"
         return "lazy" if self.func._is_lazy_style(*args, **kwargs) else "eager"
+
+    def initialize_jit_mode(self, *args: _P.args, **kwargs: _P.kwargs) -> Literal["lazy", "eager"]:
+        if self.mode == "auto":
+            self.mode = self._infer_jit_mode(*args, **kwargs)
+        self.func.set_mode(self.mode)
+        if self.mode == "eager" and self.out_idx is not None:
+            raise ValueError("out_idx is only supported in lazy mode. In eager mode, use T.empty() to declare output tensors instead.")
+        return self.mode
 
     def par_compile(
         self, configs: Iterable[dict[str, Any] | tuple[str, Any]], num_workers: int = None, ignore_error: bool = False
@@ -337,6 +346,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         List[JITKernel]
             A list of compiled JITKernel objects corresponding to the provided configs.
         """
+
         configs = list(configs)
         funcs = []
         for cfg in tqdm(configs, desc="Elaborating"):
@@ -360,15 +370,6 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         )
 
     def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
-        # infer jit mode on first compile
-        if self.mode == "auto":
-            self.mode = self._infer_jit_mode(*args, **kwargs)
-
-        # out_idx is only supported in lazy mode
-        if self.mode == "eager" and self.out_idx is not None:
-            raise ValueError("out_idx is only supported in lazy mode. In eager mode, use T.empty() to declare output tensors instead.")
-
-        self.func.set_mode(self.mode)
         prim_func = self.get_tir(*args, **kwargs)
         kernel_result = compile(
             prim_func,

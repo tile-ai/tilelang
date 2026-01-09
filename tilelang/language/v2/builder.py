@@ -188,12 +188,14 @@ class Builder(BaseBuilder):
     @contextmanager
     def prim_func(self, name):
         thread_local_storage.builder = self
-        with self.ir_builder, self.with_frame(tir.prim_func()):
-            tir.func_name(name)
-            yield
-        if len(self.out_idx) != self.out_tensor_cnt:
-            raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
-        del thread_local_storage.builder
+        try:
+            with self.ir_builder, self.with_frame(tir.prim_func()):
+                tir.func_name(name)
+                yield
+            if len(self.out_idx) != self.out_tensor_cnt:
+                raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
+        finally:
+            del thread_local_storage.builder
 
     @contextmanager
     def macro(self, name=None, annotations=None):
@@ -726,7 +728,10 @@ class Macro(Generic[_P, _T]):
         return self.ir_gen.source
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _T:
-        builder = Builder.current() or Builder()
+        builder = Builder.current()
+        if builder is None:
+            raise JITNoBuilderError("T.macro can only be used inside @tilelang.jit")
+
         with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res
@@ -918,6 +923,8 @@ class TirTemplate(Generic[_P, _T]):
         return cls(prim_func=prim_func, is_lazy_style=True)
 
     def _parse_phase2_key(self, **kwargs):
+        if self.matcher is None:
+            return ()
         result = []
         for k, ty, i in self.matcher.values():
             if ty == "shape":
@@ -1001,9 +1008,13 @@ class JITFunc(Generic[_P, _T]):
                 # no return
         """
         try:
-            result = self.orig_func(*args, **kwargs)
+            prim_func = self.orig_func(*args, **kwargs)
             # lazy jit must return PrimFunc
-            return isinstance(result, PrimFunc)
+            if isinstance(prim_func, PrimFunc):
+                p1_key, _, _ = self._parse_phase1_key(*args, **kwargs)
+                self.p1_cache[p1_key] = TirTemplate.from_lazy_style(prim_func)
+                return True
+            return False
         except (JITNoBuilderError, EagerJITBuildError):
             # In eager mode, we construct AST directly without prim_func,
             # so there's no Builder available when the function is called.
