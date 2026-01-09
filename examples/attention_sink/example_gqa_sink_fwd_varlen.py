@@ -10,6 +10,7 @@ from tilelang.profiler import do_bench
 from typing import Optional
 import sys
 import os
+
 sys.path.append(os.path.join(os.path.dirname(__file__), "../flash_attention"))
 from varlen_utils import generate_random_padding_mask, generate_qkv
 
@@ -228,56 +229,56 @@ def ref_program(
     # v_unpad: [total_kv, head_kv, dim]
     total_q, num_heads, head_dim = q_unpad.shape
     _, num_key_value_heads, _ = k_unpad.shape
-    
+
     sm_scale = 1.0 / head_dim**0.5
-    
+
     output = torch.zeros_like(q_unpad)
-    
+
     for b in range(batch_size):
         q_start = cu_seqlens_q[b].item()
         q_end = cu_seqlens_q[b + 1].item()
         k_start = cu_seqlens_k[b].item()
         k_end = cu_seqlens_k[b + 1].item()
-        
+
         q_len = q_end - q_start
         k_len = k_end - k_start
-        
+
         if q_len == 0:
             continue
-            
+
         # Extract sequences for this batch
         q_seq = q_unpad[q_start:q_end]  # [q_len, heads, dim]
         k_seq = k_unpad[k_start:k_end]  # [k_len, head_kv, dim]
         v_seq = v_unpad[k_start:k_end]  # [k_len, head_kv, dim]
-        
+
         # Reshape for GQA
         q_seq = q_seq.view(q_len, num_key_value_heads, groups, head_dim)  # [q_len, head_kv, groups, dim]
         sinks_expanded = sinks.view(num_key_value_heads, groups, 1, 1).float()  # [head_kv, groups, 1, 1]
-        
+
         k_seq = k_seq.unsqueeze(2)  # [k_len, head_kv, 1, dim]
         v_seq = v_seq.unsqueeze(2)  # [k_len, head_kv, 1, dim]
-        
+
         # Compute attention
         # q_seq: [q_len, head_kv, groups, dim], k_seq: [k_len, head_kv, 1, dim]
         logits = torch.einsum("qhgd,khgd->hgqk", q_seq.float(), k_seq.float()) * sm_scale
-        
+
         # Build mask
         start_q = k_len - q_len  # offset for causal alignment
         pos_keys = torch.arange(k_len, device=q_unpad.device)
         pos_queries = torch.arange(q_len, device=q_unpad.device) + start_q
-        
+
         if is_causal:
             mask = pos_keys[None, :] > pos_queries[:, None]
             mask = mask.float().masked_fill(mask, float("-inf"))
         else:
             mask = torch.zeros(q_len, k_len, device=q_unpad.device)
-        
+
         if sliding_window is not None:
             too_old = pos_keys[None, :] < (pos_queries[:, None] - sliding_window + 1)
             mask.masked_fill_(too_old, float("-inf"))
-        
+
         logits = logits + mask[None, None, :, :]  # [head_kv, groups, q_len, k_len]
-        
+
         # Apply sink-adjusted softmax
         logits_max = torch.max(logits, dim=-1, keepdim=True).values
         logits_or_sinks_max = torch.maximum(sinks_expanded, logits_max)
@@ -285,13 +286,13 @@ def ref_program(
         unnormalized_scores = torch.exp(logits - logits_or_sinks_max)
         normalizer = unnormalized_scores.sum(dim=-1, keepdim=True) + sinks_exp
         scores = unnormalized_scores / normalizer
-        
+
         # Compute output
         out = torch.einsum("hgqk,khgd->qhgd", scores, v_seq.float())
         out = out.reshape(q_len, num_heads, head_dim).to(q_unpad.dtype)
-        
+
         output[q_start:q_end] = out
-    
+
     return output
 
 
@@ -314,7 +315,7 @@ def main(
 
     if is_causal:
         total_flops *= 0.5
-    
+
     if window_size is not None:
         print(f"Using sliding window attention with window_size={window_size}")
         flops_per_matmul = 2.0 * batch * heads * min(window_size, k_seqlen // 2) * q_seqlen * dim
@@ -352,9 +353,7 @@ def main(
     UKV = k_unpad.shape[0]
 
     kernel = flashattn_sink(
-        batch, groups, UQ, UKV, heads, dim, is_causal,
-        window_size=window_size,
-        block_M=128, block_N=128, num_stages=2, threads=256
+        batch, groups, UQ, UKV, heads, dim, is_causal, window_size=window_size, block_M=128, block_N=128, num_stages=2, threads=256
     )
 
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, sinks)
@@ -362,10 +361,16 @@ def main(
 
     # Reference implementation
     ref_out_unpad = ref_program(
-        q_unpad, k_unpad, v_unpad,
-        cu_seqlens_q, cu_seqlens_k,
-        max_seqlen_q, max_seqlen_k,
-        sinks, batch, is_causal,
+        q_unpad,
+        k_unpad,
+        v_unpad,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        sinks,
+        batch,
+        is_causal,
         sliding_window=window_size,
         groups=groups,
     )

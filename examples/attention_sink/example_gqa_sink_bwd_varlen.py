@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 import tilelang
 from tilelang.profiler import do_bench
 import tilelang.language as T
@@ -7,6 +6,7 @@ import argparse
 from typing import Optional
 import sys
 import os
+
 sys.path.append(os.path.join(os.path.dirname(__file__), "../flash_attention"))
 from varlen_utils import generate_random_padding_mask, generate_qkv
 
@@ -42,6 +42,7 @@ def flashattn_fwd(
     block_N=64,
     num_stages=1,
     threads=128,
+    dtype=T.float16,
 ):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -54,7 +55,6 @@ def flashattn_fwd(
     q_shape = [UQ, heads, dim]
     kv_shape = [UKV, head_kv, dim]
     o_shape = [UQ, heads, dim]
-    dtype = T.float16
     accum_dtype = T.float32
 
     @T.prim_func
@@ -134,7 +134,8 @@ def flashattn_fwd(
                             q_idx = bx * block_M + i + offset
                             k_idx = actual_k * block_N + j
                             acc_s[i, j] = T.if_then_else(
-                                (q_idx < k_idx) or (q_idx >= k_idx + window_size)
+                                (q_idx < k_idx)
+                                or (q_idx >= k_idx + window_size)
                                 or (bx * block_M + i >= q_current_seqlen or actual_k * block_N + j >= kv_current_seqlen),
                                 -T.infinity(acc_s.dtype),
                                 0,
@@ -499,7 +500,9 @@ def flashattn_bwd_dsink(batch_size, heads, N_CTX, max_seq_len, block=256, dtype:
 
 class _attention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q_unpad, k_unpad, v_unpad, sinks, cu_seqlens_q, cu_seqlens_k, N_CTX, max_seqlen_q, max_seqlen_k, window_size, groups, is_causal):
+    def forward(
+        ctx, q_unpad, k_unpad, v_unpad, sinks, cu_seqlens_q, cu_seqlens_k, N_CTX, max_seqlen_q, max_seqlen_k, window_size, groups, is_causal
+    ):
         def maybe_contiguous(x):
             if x.stride(-1) != 1:
                 return x.contiguous()
@@ -512,9 +515,21 @@ class _attention(torch.autograd.Function):
         dtype = T.float16 if q_unpad.dtype == torch.float16 else T.bfloat16
 
         kernel = flashattn_fwd(
-            batch_size, groups, UQ, UKV, N_CTX, H, max_seqlen_q, D_HEAD, is_causal,
+            batch_size,
+            groups,
+            UQ,
+            UKV,
+            N_CTX,
+            H,
+            max_seqlen_q,
+            D_HEAD,
+            is_causal,
             window_size=window_size,
-            block_M=64, block_N=64, num_stages=1, threads=128,
+            block_M=64,
+            block_N=64,
+            num_stages=1,
+            threads=128,
+            dtype=dtype,
         )
         o_unpad, lse = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, sinks)
 
@@ -542,8 +557,17 @@ class _attention(torch.autograd.Function):
         delta = kernel_prep(o_unpad, do, cu_seqlens_q)
 
         kernel = flashattn_bwd(
-            batch_size, groups, UQ, UKV, ctx.N_CTX, H, ctx.max_seqlen_q, D_HEAD, ctx.is_causal,
-            window_size=ctx.window_size, dtype=dtype,
+            batch_size,
+            groups,
+            UQ,
+            UKV,
+            ctx.N_CTX,
+            H,
+            ctx.max_seqlen_q,
+            D_HEAD,
+            ctx.is_causal,
+            window_size=ctx.window_size,
+            dtype=dtype,
         )
 
         head_kv = H // groups
@@ -582,64 +606,64 @@ def ref_program(
     """Reference implementation for varlen attention with sinks."""
     total_q, num_heads, head_dim = q_unpad.shape
     _, num_key_value_heads, _ = k_unpad.shape
-    
+
     sm_scale = 1.0 / head_dim**0.5
-    
+
     output = torch.zeros_like(q_unpad)
-    
+
     for b in range(batch_size):
         q_start = cu_seqlens_q[b].item()
         q_end = cu_seqlens_q[b + 1].item()
         k_start = cu_seqlens_k[b].item()
         k_end = cu_seqlens_k[b + 1].item()
-        
+
         q_len = q_end - q_start
         k_len = k_end - k_start
-        
+
         if q_len == 0:
             continue
-            
+
         q_seq = q_unpad[q_start:q_end]  # [q_len, heads, dim]
         k_seq = k_unpad[k_start:k_end]  # [k_len, head_kv, dim]
         v_seq = v_unpad[k_start:k_end]  # [k_len, head_kv, dim]
-        
+
         # Reshape for GQA
         q_seq = q_seq.view(q_len, num_key_value_heads, groups, head_dim)
         sinks_expanded = sinks.view(num_key_value_heads, groups, 1, 1).float()
-        
+
         k_seq = k_seq.unsqueeze(2)  # [k_len, head_kv, 1, dim]
         v_seq = v_seq.unsqueeze(2)  # [k_len, head_kv, 1, dim]
-        
+
         logits = torch.einsum("qhgd,khgd->hgqk", q_seq.float(), k_seq.float()) * sm_scale
-        
+
         start_q = k_len - q_len
         pos_keys = torch.arange(k_len, device=q_unpad.device)
         pos_queries = torch.arange(q_len, device=q_unpad.device) + start_q
-        
+
         if is_causal:
             mask = pos_keys[None, :] > pos_queries[:, None]
             mask = mask.float().masked_fill(mask, float("-inf"))
         else:
             mask = torch.zeros(q_len, k_len, device=q_unpad.device)
-        
+
         if sliding_window is not None:
             too_old = pos_keys[None, :] < (pos_queries[:, None] - sliding_window + 1)
             mask.masked_fill_(too_old, float("-inf"))
-        
+
         logits = logits + mask[None, None, :, :]
-        
+
         logits_max = torch.max(logits, dim=-1, keepdim=True).values
         logits_or_sinks_max = torch.maximum(sinks_expanded, logits_max)
         sinks_exp = torch.exp(sinks_expanded - logits_or_sinks_max)
         unnormalized_scores = torch.exp(logits - logits_or_sinks_max)
         normalizer = unnormalized_scores.sum(dim=-1, keepdim=True) + sinks_exp
         scores = unnormalized_scores / normalizer
-        
+
         out = torch.einsum("hgqk,khgd->qhgd", scores, v_seq.float())
         out = out.reshape(q_len, num_heads, head_dim).to(q_unpad.dtype)
-        
+
         output[q_start:q_end] = out
-    
+
     return output
 
 
@@ -660,7 +684,7 @@ def main(
 
     if is_causal:
         total_flops *= 0.5
-    
+
     if window_size is not None:
         print(f"Using sliding window attention with window_size={window_size}")
         flops_per_matmul = 2.0 * batch * heads * min(window_size, k_seqlen // 2) * q_seqlen * dim
@@ -705,10 +729,7 @@ def main(
     # N_CTX is the padded sequence length used for tensor allocation
     N_CTX = q_seqlen
     O_unpad = attention(
-        q_unpad, k_unpad, v_unpad, sinks,
-        cu_seqlens_q, cu_seqlens_k,
-        N_CTX, max_seqlen_q, max_seqlen_k,
-        window_size, groups, is_causal
+        q_unpad, k_unpad, v_unpad, sinks, cu_seqlens_q, cu_seqlens_k, N_CTX, max_seqlen_q, max_seqlen_k, window_size, groups, is_causal
     )
     O_unpad.backward(dO_unpad, retain_graph=True)
     dQ, q_unpad.grad = q_unpad.grad.clone(), None
@@ -718,10 +739,16 @@ def main(
 
     # Reference forward + backward
     O_ref_unpad = ref_program(
-        q_unpad, k_unpad, v_unpad,
-        cu_seqlens_q, cu_seqlens_k,
-        max_seqlen_q, max_seqlen_k,
-        sinks, batch, is_causal,
+        q_unpad,
+        k_unpad,
+        v_unpad,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        sinks,
+        batch,
+        is_causal,
         sliding_window=window_size,
         groups=groups,
     )
@@ -769,4 +796,3 @@ if __name__ == "__main__":
     parser.add_argument("--window_size", type=int, default=None, help="sliding window size (default: None for full attention)")
     args = parser.parse_args()
     main(args.batch, args.heads, args.q_seqlen, args.k_seqlen, args.dim, args.groups, args.is_causal, args.window_size)
-
