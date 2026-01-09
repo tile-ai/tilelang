@@ -174,9 +174,10 @@ def flashattn_fwd(
                 for i in T.Parallel(block_M):
                     scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
 
-                if window_size is not None:
-                    for i in T.Parallel(block_M):
-                        scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
+                # Handle case where scores_max is -inf (query sees no keys due to causal mask or sliding window)
+                # This can happen when q_len > k_len (offset < 0) in causal attention, or with sliding window
+                for i in T.Parallel(block_M):
+                    scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
 
                 for i in T.Parallel(block_M):
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)

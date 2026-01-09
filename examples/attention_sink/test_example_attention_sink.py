@@ -66,8 +66,8 @@ def test_example_gqa_sink_bwd_bhsd_sliding_window():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_example_gqa_sink_varlen():
-    example_gqa_sink_fwd_varlen.main()
-    example_gqa_sink_bwd_varlen.main()
+    example_gqa_sink_fwd_varlen.main()  # non-causal
+    example_gqa_sink_bwd_varlen.main()  # causal
 
 
 if __name__ == "__main__":
