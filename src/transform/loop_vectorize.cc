@@ -214,11 +214,12 @@ private:
     }
   }
 
-  // NOTE(wt): The base class IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*) binds
-  // let variables, but this causes issues when the same variable name appears
-  // multiple times with different values (e.g., in pipelined loops where the
-  // body is duplicated). For this case, we allow the analyzer to override the binding.
-  // Check the impl of IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*) in:
+  // NOTE(wt): The base class IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*)
+  // binds let variables, but this causes issues when the same variable name
+  // appears multiple times with different values (e.g., in pipelined loops
+  // where the body is duplicated). For this case, we allow the analyzer to
+  // override the binding. Check the impl of
+  // IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*) in:
   // tvm/src/arith/ir_mutator_with_analyzer.cc
   Stmt VisitStmt_(const LetStmtNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
