@@ -24,7 +24,7 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
-from tilelang.language.v2 import PrimFunc, prim_func, LazyJITFunc
+from tilelang.language.v2 import PrimFunc, prim_func, JITFunc
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
@@ -260,7 +260,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         Function signature of the original function.
     mode : Literal["auto", "lazy", "eager"]
         Execution mode. "auto" infers from function behavior.
-    func : LazyJITFunc
+    func : JITFunc
         The wrapped function object.
     """
 
@@ -276,7 +276,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     signature: inspect.Signature
     mode: Literal["auto", "lazy", "eager"]
     # place func at the last element for better __repr__
-    func: LazyJITFunc[_KP, _T]
+    func: JITFunc[_KP, _T]
 
     def __post_init__(self):
         if self.debug_root_path is not None and not path.isabs(self.debug_root_path):
@@ -294,7 +294,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         """
         if isinstance(self.func, PrimFunc):
             tir = self.func
-        elif isinstance(self.func, (LazyJITFunc, Callable)):
+        elif callable(self.func):
             tir = self.func(*args, **kwargs)
         else:
             raise ValueError(f"Invalid function type: {type(self.func)}")
@@ -311,7 +311,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         if self.mode in ("lazy", "eager"):
             return self.mode
         # auto: infer by checking if function returns PrimFunc directly
-        if not isinstance(self.func, LazyJITFunc):
+        if not isinstance(self.func, JITFunc):
             return "lazy"
         return "lazy" if self.func._is_lazy_style(*args, **kwargs) else "eager"
 
@@ -516,7 +516,7 @@ def jit(
 
     def decorator(func: Callable[_P, _T]):
         mode = "auto"
-        pf: LazyJITFunc[_P, _T] = prim_func(func, lazy_jit=True)
+        pf: JITFunc[_P, _T] = prim_func(func, eager_jit=True)
         func_source = inspect.getsource(pf.orig_func)
         signature = inspect.signature(pf.orig_func)
 

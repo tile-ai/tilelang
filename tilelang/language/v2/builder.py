@@ -173,7 +173,7 @@ class Builder(BaseBuilder):
         self.out_idx = []
         self.out_tensor_cnt = 0
         self.constexpr_var = set()
-        self.lazy_jit = False
+        self.eager_jit = False
 
     @classmethod
     def current(cls) -> Self:
@@ -844,8 +844,8 @@ def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
     """
     builder = Builder.current()
     # assert builder is not None, "T.const() can only be used inside @tilelang.jit (eager mode)"
-    # assert builder.lazy_jit, "T.const() can only be used inside @tilelang.jit (eager mode)"
-    if builder is None or not builder.lazy_jit:
+    # assert builder.eager_jit, "T.const() can only be used inside @tilelang.jit (eager mode)"
+    if builder is None or not builder.eager_jit:
         raise JITNoBuilderError("T.const() can only be used inside @tilelang.jit (eager mode)")
 
     if "," in name:
@@ -927,7 +927,7 @@ class TirTemplate(Generic[_P, _T]):
 
 
 @dataclass
-class LazyJITFunc(Generic[_P, _T]):
+class JITFunc(Generic[_P, _T]):
     """
     Internal wrapper for JIT-compiled functions.
 
@@ -1004,7 +1004,7 @@ class LazyJITFunc(Generic[_P, _T]):
         elif self.mode == "eager":
             # eager: trace function body through Builder to construct TIR
             builder = Builder()
-            builder.lazy_jit = True
+            builder.eager_jit = True
             with builder.prim_func(self.orig_func.__name__):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
@@ -1050,7 +1050,7 @@ class LazyJITFunc(Generic[_P, _T]):
     _PROXIED_ATTRS = frozenset({"__closure__", "__code__", "__name__", "__globals__", "__wrapped__"})
 
     def __getattr__(self, name):
-        if name in LazyJITFunc._PROXIED_ATTRS:
+        if name in JITFunc._PROXIED_ATTRS:
             if name == "__wrapped__":
                 return self.orig_func
             return getattr(self.orig_func, name)
@@ -1079,7 +1079,7 @@ def substitute_primfunc(prim_func, vmap):
     )
 
 
-def prim_func(func: Callable[_P, _T] = None, *, lazy_jit: bool = False) -> PrimFunc[_P, _T] | LazyJITFunc[_P, _T]:
+def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> PrimFunc[_P, _T] | JITFunc[_P, _T]:
     def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
         sig = inspect.signature(func)
         ir_gen = mutate(func)
@@ -1099,13 +1099,13 @@ def prim_func(func: Callable[_P, _T] = None, *, lazy_jit: bool = False) -> PrimF
             if not isinstance(annot[k], type) and callable(annot[k]) and get_origin(annot[k]) is None:
                 annot[k] = annot[k]()
 
-        if lazy_jit:
+        if eager_jit:
             arg_names = list(sig.parameters.keys())
             tensor_args = {k: v for k, v in annot.items() if isinstance(v, (Buffer, Var))}
             tensor_args_defaults = {
                 k: sig.parameters[k].default for k in tensor_args if sig.parameters[k].default is not sig.parameters[k].empty
             }
-            return LazyJITFunc(func, arg_names, tensor_args, tensor_args_defaults, ir_gen)
+            return JITFunc(func, arg_names, tensor_args, tensor_args_defaults, ir_gen)
         else:
             try:
                 builder = Builder()
