@@ -251,8 +251,7 @@ public:
     }
 
     if (verbose) {
-      std::cerr << "=== Final vector_size: " << vector_size_
-                << " ===" << "\n";
+      std::cerr << "=== Final vector_size: " << vector_size_ << " ===" << "\n";
     }
     return vector_size_;
   }
