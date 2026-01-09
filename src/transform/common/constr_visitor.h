@@ -8,6 +8,7 @@
 #include "tvm/tir/op.h"
 #include "tvm/tir/stmt.h"
 #include "tvm/tir/var.h"
+#include <ostream>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -39,6 +40,31 @@ struct Constr {
   Constr(const Constr &other) = default;
   Constr(Constr &&other) = default;
   Constr &operator=(const Constr &other) = default;
+
+  void format(std::ostream &os) const {
+    os << "Constr(kind=";
+    switch (kind) {
+    case kConstr:
+      os << "kConstr";
+      os << ", is_assume=" << (is_assume ? "true" : "false");
+      os << ", value=" << value;
+      break;
+    case kBindValue:
+      os << "kBindValue";
+      os << ", var=" << var->name_hint;
+      os << ", value=" << value;
+      break;
+    case kBindRange:
+      os << "kBindRange";
+      os << ", var=" << var->name_hint;
+      os << ", range=Range(min=" << range->min;
+      os << ", extent=" << range->extent << ")";
+      break;
+    default:
+      os << "Unknown";
+    }
+    os << ")";
+  }
 
   PrimExpr ToGenericConstr() const {
     switch (kind) {
@@ -98,6 +124,17 @@ struct ConstrSet {
       constrs_.push_back(c);
     }
   }
+
+  void format(std::ostream &os) const {
+    os << "ConstrSet(size=" << constrs_.size() << ") {\n";
+    for (size_t i = 0; i < constrs_.size(); ++i) {
+      os << "  [" << i << "] ";
+      constrs_[i].format(os);
+      os << "\n";
+    }
+    os << "}";
+  }
+
   std::vector<Constr> constrs_;
 };
 
@@ -183,6 +220,9 @@ public:
       auto guard_2 = MakeGuard(op->extent > 0);
       Base::VisitStmt_(op);
     } else {
+      auto guard_1 =
+          MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+      auto guard_2 = MakeGuard(op->extent > 0);
       Base::VisitStmt_(op);
     }
   }

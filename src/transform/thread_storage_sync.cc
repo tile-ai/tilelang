@@ -52,6 +52,7 @@
 #include <tvm/target/target_info.h>
 #include <tvm/tir/op.h>
 
+#include <fstream>
 #include <string>
 #include <utility>
 
@@ -455,6 +456,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     /*! \brief The buffer ranges for pointer access */
     Array<Range> buffer_ranges;
     Var buffer = NullValue<Var>();
+    Buffer buffer_name;
     /*! \brief The access data type */
     DataType dtype;
     /*! \brief The touched access range
@@ -497,6 +499,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       AccessEntry e{.cset = {constr_stack_}};
       e.threads = env_threads();
       e.buffer = buf;
+      e.buffer_name = op->buffer;
       e.buffer_indices = op->indices;
       e.dtype = op->dtype.element_of();
       for (const auto &index : op->indices) {
@@ -521,6 +524,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       AccessEntry e{.cset = {constr_stack_}};
       e.threads = env_threads();
       e.buffer = buf;
+      e.buffer_name = op->buffer;
       e.buffer_indices = op->indices;
       e.dtype = op->value.dtype().element_of();
       for (const auto &index : op->indices) {
@@ -774,6 +778,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           e.threads = env_threads();
           e.dtype = dtype;
           e.buffer = Downcast<Var>(buffer->data);
+          e.buffer_name = buffer;
           e.buffer_ranges = buffer_ranges;
           for (const auto &index : load->indices) {
             e.touched.push_back(arith::IntSet::Vector(index));
@@ -1134,6 +1139,7 @@ private:
 
     output << "Access Entry Information:\n";
     output << "  Buffer: " << access.buffer << "\n";
+    output << "  Buffer Name: " << access.buffer_name << "\n";
     output << "  Data Type: " << access.dtype << "\n";
 
     std::string type_str;
@@ -1240,6 +1246,7 @@ private:
       // They are not the same indices, should be conflict.
       return true;
     }
+
     if (prev.is_pointer_access || curr.is_pointer_access) {
       // For accesses created via tvm_access_ptr we may still be able to prove
       // disjointness using their byte ranges.  If both sides expose a touched
@@ -1260,80 +1267,119 @@ private:
       const auto &prev_indice = prev.buffer_indices[i];
       const auto &curr_indice = curr.buffer_indices[i];
 
-      PrimExpr prev_indice_bytes = prev_indice * prev_dtype.bytes();
-      PrimExpr curr_indice_bytes = curr_indice * curr_dtype.bytes();
+      if (!ExprDeepEqual()(prev_indice, curr_indice)) {
 
-      has_same_index = false;
+        PrimExpr prev_indice_bytes = prev_indice * prev_dtype.bytes();
+        PrimExpr curr_indice_bytes = curr_indice * curr_dtype.bytes();
 
-      ConstrSet prev_cset{prev.cset};
-      ConstrSet curr_cset{curr.cset};
-      arith::Analyzer analyzer;
+        has_same_index = false;
 
-      struct ThreadVarInfo {
-        const char *name_prev;
-        const char *name_curr;
-      } thread_vars[] = {
-          {"tx1", "tx2"},
-          {"ty1", "ty2"},
-          {"tz1", "tz2"},
-      };
-      PrimExpr thread_condition = Bool(false);
+        ConstrSet prev_cset{prev.cset};
+        ConstrSet curr_cset{curr.cset};
+        arith::Analyzer analyzer;
+
+        struct ThreadVarInfo {
+          const char *name_prev;
+          const char *name_curr;
+        } thread_vars[] = {
+            {"tx1", "tx2"},
+            {"ty1", "ty2"},
+            {"tz1", "tz2"},
+        };
+        PrimExpr thread_condition = Bool(false);
+        ffi::Map<Var, PrimExpr> prev_sub, curr_sub;
+        for (unsigned idx = 0; idx != 3; ++idx) {
+          auto &info = thread_vars[idx];
+          Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
+          Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
+          Var prev_var(info.name_prev, old_prev_var.dtype());
+          Var curr_var(info.name_curr, old_curr_var.dtype());
+          thread_condition =
+              tir::Or(thread_condition, tir::NE(prev_var, curr_var));
+          prev_sub.Set(old_prev_var, prev_var);
+          curr_sub.Set(old_curr_var, curr_var);
+        }
+        analyzer.EnterConstraint(thread_condition);
+        prev_cset.Substitute(prev_sub).Populate(analyzer);
+        curr_cset.Substitute(curr_sub).Populate(analyzer);
+        bool provably_disjoint = false;
+        if (prev_indice_bytes.dtype().is_scalar() &&
+            curr_indice_bytes.dtype().is_scalar()) {
+          prev_indice_bytes =
+              analyzer.Simplify(Substitute(prev_indice_bytes, prev_sub));
+          curr_indice_bytes =
+              analyzer.Simplify(Substitute(curr_indice_bytes, curr_sub));
+          if (prev_indice_bytes.dtype() != curr_indice_bytes.dtype()) {
+            if (prev_indice_bytes.dtype().bits() <
+                curr_indice_bytes.dtype().bits()) {
+              prev_indice_bytes =
+                  tir::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
+            } else {
+              curr_indice_bytes =
+                  tir::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
+            }
+          }
+          ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
+          provably_disjoint =
+              analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
+        } else {
+          auto prev_min = analyzer.Simplify(
+              Substitute(prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
+          auto prev_max = analyzer.Simplify(
+              Substitute(prev.touched[i].max() * prev_dtype.bytes(), prev_sub));
+          auto curr_min = analyzer.Simplify(
+              Substitute(curr.touched[i].min() * curr_dtype.bytes(), curr_sub));
+          auto curr_max = analyzer.Simplify(
+              Substitute(curr.touched[i].max() * curr_dtype.bytes(), curr_sub));
+          // analyzer.z3_prover.SetRLimit(100000000);
+          provably_disjoint = analyzer.CanProve(analyzer.Simplify(
+              tir::Or(prev_min > curr_max, curr_min > prev_max)));
+          // if (!provably_disjoint) {
+          //   LOG(WARNING) << analyzer.z3_prover.GetStats();
+          //   LOG(WARNING) <<
+          //   analyzer.z3_prover.GetSMTLIB2(tir::Not(tir::Or(prev_min >
+          //   curr_max, curr_min > prev_max)));
+          // }
+          // auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
+          // auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
+          // if (prev_bound.defined() && curr_bound.defined()) {
+          //   if ((prev_bound->min_value) > (curr_bound->max_value) ||
+          //       (curr_bound->min_value) > (prev_bound->max_value)) {
+          //     range_is_overlap = false;
+          //     break;
+          //   }
+          // }
+        }
+
+        if (provably_disjoint) {
+          range_is_overlap = false;
+          break;
+        }
+
+        if (!has_same_index) {
+          break;
+        }
+      }
+    }
+
+    if (has_same_index) {
+      bool range_is_equal = true;
+      arith::Analyzer prev_analyzer, curr_analyer;
+      prev.cset.Populate(prev_analyzer);
+      curr.cset.Populate(curr_analyer);
       for (unsigned idx = 0; idx != 3; ++idx) {
-        auto &info = thread_vars[idx];
-        Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
-        Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
-        Var prev_var(info.name_prev, old_prev_var.dtype());
-        Var curr_var(info.name_curr, old_curr_var.dtype());
-        thread_condition =
-            tir::Or(thread_condition, tir::NE(prev_var, curr_var));
-        prev_indice_bytes =
-            Substitute(prev_indice_bytes, {{old_prev_var, prev_var}});
-        prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
-        curr_indice_bytes =
-            Substitute(curr_indice_bytes, {{old_curr_var, curr_var}});
-        curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
-      }
-      analyzer.EnterConstraint(thread_condition);
-      prev_indice_bytes = analyzer.Simplify(prev_indice_bytes);
-      curr_indice_bytes = analyzer.Simplify(curr_indice_bytes);
-      prev_cset.Populate(analyzer);
-      curr_cset.Populate(analyzer);
-      bool provably_disjoint = false;
-      if (prev_indice_bytes.dtype().is_scalar() &&
-          curr_indice_bytes.dtype().is_scalar()) {
-        if (prev_indice_bytes.dtype() != curr_indice_bytes.dtype()) {
-          if (prev_indice_bytes.dtype().bits() <
-              curr_indice_bytes.dtype().bits()) {
-            prev_indice_bytes =
-                tir::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
-          } else {
-            curr_indice_bytes =
-                tir::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
-          }
-        }
-        ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
-        provably_disjoint =
-            analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
-      } else {
-        auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
-        auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
-        if (prev_bound.defined() && curr_bound.defined()) {
-          if ((prev_bound->min_value) > (curr_bound->max_value) ||
-              (curr_bound->min_value) > (prev_bound->max_value)) {
-            range_is_overlap = false;
-            break;
-          }
+        Var prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
+        Var curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
+        auto prev_bound = prev_analyzer.const_int_bound(prev_var);
+        auto curr_bound = curr_analyer.const_int_bound(curr_var);
+        if (prev_bound->min_value != curr_bound->min_value ||
+            prev_bound->max_value != curr_bound->max_value) {
+          range_is_equal = false;
+          break;
         }
       }
-
-      if (provably_disjoint) {
-        range_is_overlap = false;
-        break;
-      }
-
-      if (!has_same_index) {
-        break;
-      }
+      if (range_is_equal)
+        return false;
     }
 
     // If this is a read into a double buffer that was previously
@@ -1372,7 +1418,6 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
     planner.SetBufferDataToBuffer(buffer->data, buffer);
   }
   planner(stmt);
-
   stmt =
       ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
   n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
