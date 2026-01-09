@@ -29,7 +29,6 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "storage_access.h"
 #include "tir/ir/buffer_common.h"
 #include "tvm/tir/stmt.h"
 
