@@ -112,6 +112,7 @@ def test_codegen_local_to_memory():
             for i in T.vectorized(16):
                 b[i] = b_frag[i]
         return b
+
     kernel = kernel_fn.compile()
     source = kernel.get_kernel_source()
 
@@ -139,6 +140,7 @@ def test_codegen_memory_to_local():
 
     # Should have local cast buffer
     assert "b_local_cast" in source, "Expected local cast buffer in generated code"
+
 
 @tilelang.testing.requires_cuda
 def test_codegen_fp8_local_to_memory():
