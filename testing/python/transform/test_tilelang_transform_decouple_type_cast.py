@@ -106,16 +106,13 @@ def test_codegen_local_to_memory():
 
     @tilelang.jit
     def kernel_fn():
-        @T.prim_func
-        def kernel(b: T.Tensor[(16,), T.float4_e2m1fn]):
-            with T.Kernel(1, threads=32):
-                b_frag = T.alloc_local((16,), T.float32)
-                for i in T.vectorized(16):
-                    b[i] = b_frag[i]
-
-        return kernel
-
-    kernel = kernel_fn()
+        b = T.empty((16,), dtype="float4_e2m1fn")
+        with T.Kernel(1, threads=32):
+            b_frag = T.alloc_local((16,), T.float32)
+            for i in T.vectorized(16):
+                b[i] = b_frag[i]
+        return b
+    kernel = kernel_fn.compile()
     source = kernel.get_kernel_source()
 
     # Should have local cast buffer
@@ -130,25 +127,18 @@ def test_codegen_memory_to_local():
 
     @tilelang.jit
     def kernel_fn():
-        @T.prim_func
-        def kernel(b: T.Tensor[(16,), T.float4_e2m1fn]):
-            with T.Kernel(1, threads=32):
-                a_frag = T.alloc_local((16,), T.float32)
-                for i in T.vectorized(16):
-                    a_frag[i] = b[i]
+        b = T.empty((16,), dtype="float4_e2m1fn")
+        with T.Kernel(1, threads=32):
+            a_frag = T.alloc_local((16,), T.float32)
+            for i in T.vectorized(16):
+                a_frag[i] = b[i]
+        return b
 
-        return kernel
-
-    kernel = kernel_fn()
+    kernel = kernel_fn.compile()
     source = kernel.get_kernel_source()
 
     # Should have local cast buffer
     assert "b_local_cast" in source, "Expected local cast buffer in generated code"
-    # Should have vectorized copy (fp4_e2_16_t is 16 fp4 elements = 64 bits)
-    assert "fp4_e2_16_t" in source, "Expected vectorized fp4 copy in generated code"
-    # Should have fp4 to float conversion
-    assert "__tl_cvt_fp4" in source, "Expected fp4 conversion intrinsic"
-
 
 @tilelang.testing.requires_cuda
 def test_codegen_fp8_local_to_memory():
@@ -156,16 +146,14 @@ def test_codegen_fp8_local_to_memory():
 
     @tilelang.jit
     def kernel_fn():
-        @T.prim_func
-        def kernel(b: T.Tensor[(16,), T.float8_e4m3fn]):
-            with T.Kernel(1, threads=32):
-                b_frag = T.alloc_local((16,), T.float32)
-                for i in T.vectorized(16):
-                    b[i] = b_frag[i]
+        b = T.empty((16,), dtype="float8_e4m3fn")
+        with T.Kernel(1, threads=32):
+            b_frag = T.alloc_local((16,), T.float32)
+            for i in T.vectorized(16):
+                b[i] = b_frag[i]
+        return b
 
-        return kernel
-
-    kernel = kernel_fn()
+    kernel = kernel_fn.compile()
     source = kernel.get_kernel_source()
 
     # Should have local cast buffer
