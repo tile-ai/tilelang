@@ -21,8 +21,10 @@ from .loop import (
     Pipelined,  # noqa: F401
     serial,  # noqa: F401
     unroll,  # noqa: F401
+    vectorized,  # noqa: F401
     Serial,  # noqa: F401
     Unroll,  # noqa: F401
+    Vectorized,  # noqa: F401
 )
 from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401

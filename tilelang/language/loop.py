@@ -263,3 +263,41 @@ def Unroll(
     """Alias of T.unroll."""
 
     return unroll(start, stop, step, explicit=explicit, unroll_factor=unroll_factor, annotations=annotations)
+
+
+def vectorized(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
+) -> frame.ForFrame:
+    """The vectorized For statement.
+
+    Parameters
+    ----------
+    start : PrimExpr
+        The minimum value of iteration.
+
+    stop : PrimExpr
+        The maximum value of iteration.
+
+    annotations : Dict[str, Any]
+        The optional annotations of the For statement.
+
+    Returns
+    -------
+    res : frame.ForFrame
+        The ForFrame.
+    """
+    return tb_tir.vectorized(start, stop, annotations=annotations)
+
+
+def Vectorized(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
+):
+    """Alias of T.vectorized."""
+
+    return vectorized(start, stop, annotations=annotations)
