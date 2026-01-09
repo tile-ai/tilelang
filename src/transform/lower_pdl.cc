@@ -57,17 +57,10 @@ public:
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
-    if (op && op->op.same_as(builtin::call_extern())) {
-      if (!op->args.empty()) {
-        if (const auto *str_node = op->args[0].as<tvm::tir::StringImmNode>()) {
-          std::string func_name = str_node->value;
-          if (func_name == "cudaTriggerProgrammaticLaunchCompletion") {
-            has_trigger_launch_ = true;
-          } else if (func_name == "cudaGridDependencySynchronize") {
-            has_grid_sync_ = true;
-          }
-        }
-      }
+    if (op->op.same_as(tl::pdl_trigger())) {
+      has_trigger_launch_ = true;
+    } else if (op->op.same_as(tl::pdl_sync())) {
+      has_grid_sync_ = true;
     }
     return StmtExprMutator::VisitExpr_(op);
   }
