@@ -5,7 +5,7 @@ from typing import Any
 from tvm import tir
 from tvm.tir import IntImm
 import tvm.script.ir_builder.tir as tb_tir
-from .v2.builder import SerialForWithStep, UnrollForWithStep
+from .eager.builder import SerialForWithStep, UnrollForWithStep
 from tilelang import _ffi_api
 from tvm.script.ir_builder.tir import frame
 

@@ -18,7 +18,7 @@ from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 
 from tvm.tir.expr import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
-from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union
+from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union, Literal, get_origin
 from collections.abc import Hashable
 from collections.abc import Sequence
 
@@ -29,6 +29,7 @@ except ImportError:  # Python < 3.11 for Self, < 3.10 for ParamSpec
     from typing_extensions import ParamSpec, Self
 from . import dtypes as dt
 from . import utils
+from tilelang.jit.exceptions import JITNoBuilderError, EagerJITBuildError
 import threading
 import logging
 
@@ -172,7 +173,7 @@ class Builder(BaseBuilder):
         self.out_idx = []
         self.out_tensor_cnt = 0
         self.constexpr_var = set()
-        self.lazy_jit = False
+        self.eager_jit = False
         self.current_file = "<unknown>"
         self.current_line = 0
         self.current_macro_name = "<unknown-macro>"
@@ -187,12 +188,14 @@ class Builder(BaseBuilder):
     @contextmanager
     def prim_func(self, name):
         thread_local_storage.builder = self
-        with self.ir_builder, self.with_frame(tir.prim_func()):
-            tir.func_name(name)
-            yield
-        if len(self.out_idx) != self.out_tensor_cnt:
-            raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
-        del thread_local_storage.builder
+        try:
+            with self.ir_builder, self.with_frame(tir.prim_func()):
+                tir.func_name(name)
+                yield
+            if len(self.out_idx) != self.out_tensor_cnt:
+                raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
+        finally:
+            del thread_local_storage.builder
 
     @contextmanager
     def macro(self, name=None, annotations=None):
@@ -725,7 +728,10 @@ class Macro(Generic[_P, _T]):
         return self.ir_gen.source
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _T:
-        builder = Builder.current() or Builder()
+        builder = Builder.current()
+        if builder is None:
+            raise JITNoBuilderError("T.macro can only be used inside @tilelang.jit")
+
         with builder.macro(self.name, self.annotations):
             res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res
@@ -843,9 +849,26 @@ def get_type_hints(func):
 
 
 def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
+    """
+    Declare constexpr variables for dynamic tensor dimensions (eager mode only).
+
+    In eager mode, use T.const() to declare shape dimensions that will be
+    inferred from actual tensor arguments at runtime.
+
+    Example::
+
+        @tilelang.jit
+        def kernel(A, B):
+            M, N = T.const("M, N")
+            A: T.Tensor[[M, N], T.float32]
+            ...
+    """
     builder = Builder.current()
-    assert builder is not None, "const can only be used inside `tilelang.lazy_jit` function"
-    assert builder.lazy_jit, "const can only be used inside `tilelang.lazy_jit` function"
+    # assert builder is not None, "T.const() can only be used inside @tilelang.jit (eager mode)"
+    # assert builder.eager_jit, "T.const() can only be used inside @tilelang.jit (eager mode)"
+    if builder is None or not builder.eager_jit:
+        raise JITNoBuilderError("T.const() can only be used inside @tilelang.jit (eager mode)")
+
     if "," in name:
         names = re.split(r"\s*,\s*", name)
         return tuple(builder.constexpr(n, dtype) for n in names)
@@ -858,8 +881,17 @@ def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
 
 @dataclass
 class TirTemplate(Generic[_P, _T]):
+    """
+    Template for generating TIR PrimFunc with dynamic shape substitution.
+
+    For lazy-style functions, the PrimFunc is used directly without substitution.
+    For eager-style functions, constexpr variables are substituted based on
+    actual tensor shapes at runtime.
+    """
+
     prim_func: PrimFunc[_P, _T]
-    matcher: dict[Var, tuple[tvm.tir.Var, str, int]]
+    matcher: dict[Var, tuple[tvm.tir.Var, str, int]] | None = None
+    is_lazy_style: bool = False  # True if from lazy-style (returns PrimFunc directly)
 
     @classmethod
     def create(cls, prim_func: PrimFunc[_P, _T], constexpr: set[Var]) -> TirTemplate[_P, _T]:
@@ -883,9 +915,16 @@ class TirTemplate(Generic[_P, _T]):
                     f"Buffer shapes: {shapes}\n"
                     f"Buffer strides: {strides}"
                 )
-        return cls(prim_func=prim_func, matcher=matcher)
+        return cls(prim_func=prim_func, matcher=matcher, is_lazy_style=False)
+
+    @classmethod
+    def from_lazy_style(cls, prim_func: PrimFunc[_P, _T]) -> TirTemplate[_P, _T]:
+        """Create template from lazy-style function that returns PrimFunc directly."""
+        return cls(prim_func=prim_func, is_lazy_style=True)
 
     def _parse_phase2_key(self, **kwargs):
+        if self.matcher is None:
+            return ()
         result = []
         for k, ty, i in self.matcher.values():
             if ty == "shape":
@@ -899,6 +938,8 @@ class TirTemplate(Generic[_P, _T]):
         return tuple(result)
 
     def get_tir(self, **kwargs):
+        if self.is_lazy_style:
+            return self.prim_func
         values = self._parse_phase2_key(**kwargs)
         subs = {name: value for name, value in zip(self.matcher, values)}
         result = substitute_primfunc(self.prim_func, subs)
@@ -909,12 +950,29 @@ class TirTemplate(Generic[_P, _T]):
 
 
 @dataclass
-class LazyJITFunc(Generic[_P, _T]):
+class JITFunc(Generic[_P, _T]):
+    """
+    Internal wrapper for JIT-compiled functions.
+
+    This class handles both lazy and eager execution styles:
+
+    - **lazy style**: Function explicitly returns a PrimFunc. The original function
+      is called directly to obtain the TIR.
+
+    - **eager style**: Function uses the DSL builder pattern with tensor type
+      annotations. The TIR is constructed by tracing the function body through
+      the Builder.
+
+    The style is determined by `_is_lazy_style()` which checks if calling the
+    original function returns a PrimFunc directly.
+    """
+
     orig_func: Callable[_P, _T]
     arg_names: list[str]
     tensor_args: dict[str, Buffer | Var]
     tensor_args_defaults: dict[str, Any]
     ir_gen: IRGenerator[_P, _T]
+    mode: Literal["auto", "lazy", "eager"] = "auto"
 
     def __post_init__(self):
         # we don't want it to show up in the constructor
@@ -931,29 +989,99 @@ class LazyJITFunc(Generic[_P, _T]):
         p1_key = tuple(sorted(kwargs.items()))
         return p1_key, tensor_args, kwargs
 
-    def parse_args(self, *args, **kwargs):
-        p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
-        tir_temp = self.p1_cache.get(p1_key, None)
-        if tir_temp is None:
+    def _is_lazy_style(self, *args, **kwargs) -> bool:
+        """
+        Check if the function uses lazy style (explicitly returns PrimFunc).
+
+        Lazy style functions define an inner @T.prim_func and return it:
+            @jit
+            def foo(M, N):
+                @T.prim_func
+                def kernel(...): ...
+                return kernel  # <- returns PrimFunc
+
+        Eager style functions use the builder pattern with type annotations:
+            @jit
+            def foo(A, B):
+                A: T.Tensor[...]
+                with T.Kernel(...): ...
+                # no return
+        """
+        try:
+            prim_func = self.orig_func(*args, **kwargs)
+            # lazy jit must return PrimFunc
+            if isinstance(prim_func, PrimFunc):
+                p1_key, _, _ = self._parse_phase1_key(*args, **kwargs)
+                self.p1_cache[p1_key] = TirTemplate.from_lazy_style(prim_func)
+                return True
+            return False
+        except (JITNoBuilderError, EagerJITBuildError):
+            # In eager mode, we construct AST directly without prim_func,
+            # so there's no Builder available when the function is called.
+            # When eager-only features like T.const() or T.Kernel() are used,
+            # they raise JITNoBuilderError because no Builder exists yet.
+            # This indicates the function is eager-style, not lazy-style.
+            return False
+
+    def _build_tir_template(self, *args, **kwargs) -> TirTemplate[_P, _T]:
+        """Build TIR template based on the execution mode."""
+        if self.mode == "lazy":
+            # lazy: function returns PrimFunc directly
+            return TirTemplate.from_lazy_style(self.orig_func(*args, **kwargs))
+        elif self.mode == "eager":
+            # eager: trace function body through Builder to construct TIR
             builder = Builder()
-            builder.lazy_jit = True
+            builder.eager_jit = True
             with builder.prim_func(self.orig_func.__name__):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
             pf.orig_func = self.orig_func
             if builder.out_idx:
                 pf.out_idx_override = builder.out_idx
-            tir_temp = TirTemplate.create(pf, builder.constexpr_var)
+            return TirTemplate.create(pf, builder.constexpr_var)
+        else:
+            raise ValueError(f"Invalid jit mode: {self.mode}, expected 'lazy' or 'eager'")
+
+    def parse_args(self, *args, **kwargs):
+        """Parse arguments and return cache key and tensor args."""
+        p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
+        if not tensor_args:
+            return (p1_key, None), kwargs
+        tir_temp = self.p1_cache.get(p1_key, None)
+        if tir_temp is None:
+            # mode should be set by JITImpl before calling parse_args
+            tir_temp = self._build_tir_template(*args, **kwargs)
             self.p1_cache[p1_key] = tir_temp
         p2_key = tir_temp._parse_phase2_key(**tensor_args)
         return (p1_key, p2_key), tensor_args
 
     def get_tir(self, *args, **kwargs):
         (p1_key, _), tensor_args = self.parse_args(*args, **kwargs)
+        if p1_key not in self.p1_cache:
+            # in legacy gemm, we use lazy tir template to build the tir
+            tir_temp = self._build_tir_template(*args, **kwargs)
+            self.p1_cache[p1_key] = tir_temp
+            return tir_temp.get_tir(**tensor_args)
         return self.p1_cache[p1_key].get_tir(**tensor_args)
 
     def __call__(self, *args, **kwargs):
         return self.get_tir(*args, **kwargs)
+
+    def set_mode(self, mode: Literal["lazy", "eager"]):
+        """Set the JIT execution mode (internal use only)."""
+        self.mode = mode
+
+    # Proxy function attributes for compatibility with autotuner and inspect.
+    # These attributes are needed by autotuner to extract closure variables
+    # and generate cache keys.
+    _PROXIED_ATTRS = frozenset({"__closure__", "__code__", "__name__", "__globals__", "__wrapped__"})
+
+    def __getattr__(self, name):
+        if name in JITFunc._PROXIED_ATTRS:
+            if name == "__wrapped__":
+                return self.orig_func
+            return getattr(self.orig_func, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
 
 def substitute_primfunc(prim_func, vmap):
@@ -978,7 +1106,7 @@ def substitute_primfunc(prim_func, vmap):
     )
 
 
-def prim_func(func: Callable[_P, _T] = None, *, lazy_jit=False) -> PrimFunc[_P, _T] | LazyJITFunc[_P, _T]:
+def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> PrimFunc[_P, _T] | JITFunc[_P, _T]:
     def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
         sig = inspect.signature(func)
         ir_gen = mutate(func)
@@ -992,15 +1120,19 @@ def prim_func(func: Callable[_P, _T] = None, *, lazy_jit=False) -> PrimFunc[_P, 
             elif param.name in func_annot:
                 annot[param.name] = func_annot[param.name]
         for k in annot:
-            if not isinstance(annot[k], type) and callable(annot[k]):
+            # Call callable annotations (e.g., factory functions) to get the actual type.
+            # Skip typing generics like Optional[int], Union[...], List[...] which are
+            # callable but cannot be instantiated.
+            if not isinstance(annot[k], type) and callable(annot[k]) and get_origin(annot[k]) is None:
                 annot[k] = annot[k]()
-        if lazy_jit:
+
+        if eager_jit:
             arg_names = list(sig.parameters.keys())
             tensor_args = {k: v for k, v in annot.items() if isinstance(v, (Buffer, Var))}
             tensor_args_defaults = {
                 k: sig.parameters[k].default for k in tensor_args if sig.parameters[k].default is not sig.parameters[k].empty
             }
-            return LazyJITFunc(func, arg_names, tensor_args, tensor_args_defaults, ir_gen)
+            return JITFunc(func, arg_names, tensor_args, tensor_args_defaults, ir_gen)
         else:
             try:
                 builder = Builder()
