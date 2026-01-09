@@ -150,11 +150,11 @@ public:
 
     if (verbose) {
       std::cerr << "=== VectorizePlanner: Collected buffer vector sizes ==="
-                << std::endl;
+                << "\n";
       std::cerr << "  initial_vector_size=" << initial_vector_size_
                 << ", loop_extent_vector_size=" << loop_extent_vector_size_
                 << ", has_seq_stmt=" << (has_seq_stmt ? "true" : "false")
-                << std::endl;
+                << "\n";
     }
 
     // Separate buffers into local/fragment vs memory (global/shared)
@@ -174,10 +174,10 @@ public:
           std::cerr << "  Buffer: " << info.buffer->name
                     << " (scope=" << info.buffer.scope() << ")"
                     << " -> vector_size=" << info.vector_size
-                    << (info.is_store ? " [store]" : " [load]") << std::endl;
+                    << (info.is_store ? " [store]" : " [load]") << "\n";
         } else {
           std::cerr << "  [cast/extern/rng] -> vector_size=" << info.vector_size
-                    << std::endl;
+                    << "\n";
         }
       }
 
@@ -203,7 +203,7 @@ public:
         std::cerr << "  [Strategy] Has SeqStmt, using conservative GCD of all: "
                   << "local_fragment_min=" << local_fragment_min
                   << ", memory_min=" << memory_min
-                  << " -> vector_size=" << vector_size_ << std::endl;
+                  << " -> vector_size=" << vector_size_ << "\n";
       }
     } else if (has_global_or_shared_buffer) {
       // Has memory buffers and simple case (no SeqStmt):
@@ -214,7 +214,7 @@ public:
                      "memory_min="
                   << memory_min
                   << " (ignoring local/fragment_min=" << local_fragment_min
-                  << ")" << std::endl;
+                  << ")" << "\n";
       }
       // vector_size may be greater than local/fragment buffers' vector_size.
       // In such case, we need to re-validate if the indices are invariant
@@ -235,7 +235,7 @@ public:
               std::cerr << "  [Re-validate] Local buffer '" << info.buffer->name
                         << "' not invariant at vector_size=" << old_vector_size
                         << ", GCD with " << info.vector_size
-                        << " -> vector_size=" << vector_size_ << std::endl;
+                        << " -> vector_size=" << vector_size_ << "\n";
             }
           }
         }
@@ -246,13 +246,13 @@ public:
       if (verbose) {
         std::cerr << "  [Strategy] Only local/fragment buffers, using "
                      "local_fragment_min="
-                  << local_fragment_min << std::endl;
+                  << local_fragment_min << "\n";
       }
     }
 
     if (verbose) {
       std::cerr << "=== Final vector_size: " << vector_size_
-                << " ===" << std::endl;
+                << " ===" << "\n";
     }
     return vector_size_;
   }
