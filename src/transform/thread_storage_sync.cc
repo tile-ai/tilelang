@@ -1268,107 +1268,10 @@ private:
       const auto &curr_indice = curr.buffer_indices[i];
 
       if (!ExprDeepEqual()(prev_indice, curr_indice)) {
-
-        PrimExpr prev_indice_bytes = prev_indice * prev_dtype.bytes();
-        PrimExpr curr_indice_bytes = curr_indice * curr_dtype.bytes();
-
         has_same_index = false;
-
-        ConstrSet prev_cset{prev.cset};
-        ConstrSet curr_cset{curr.cset};
-        arith::Analyzer analyzer;
-
-        struct ThreadVarInfo {
-          const char *name_prev;
-          const char *name_curr;
-        } thread_vars[] = {
-            {"tx1", "tx2"},
-            {"ty1", "ty2"},
-            {"tz1", "tz2"},
-        };
-        PrimExpr thread_condition = Bool(false);
-        ffi::Map<Var, PrimExpr> prev_sub, curr_sub;
-        for (unsigned idx = 0; idx != 3; ++idx) {
-          auto &info = thread_vars[idx];
-          Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
-          Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
-          Var prev_var(info.name_prev, old_prev_var.dtype());
-          Var curr_var(info.name_curr, old_curr_var.dtype());
-          thread_condition =
-              tir::Or(thread_condition, tir::NE(prev_var, curr_var));
-          prev_sub.Set(old_prev_var, prev_var);
-          curr_sub.Set(old_curr_var, curr_var);
-        }
-        analyzer.EnterConstraint(thread_condition);
-        prev_cset.Substitute(prev_sub).Populate(analyzer);
-        curr_cset.Substitute(curr_sub).Populate(analyzer);
-        bool provably_disjoint = false;
-        if (prev_indice_bytes.dtype().is_scalar() &&
-            curr_indice_bytes.dtype().is_scalar()) {
-          prev_indice_bytes =
-              analyzer.Simplify(Substitute(prev_indice_bytes, prev_sub));
-          curr_indice_bytes =
-              analyzer.Simplify(Substitute(curr_indice_bytes, curr_sub));
-          if (prev_indice_bytes.dtype() != curr_indice_bytes.dtype()) {
-            if (prev_indice_bytes.dtype().bits() <
-                curr_indice_bytes.dtype().bits()) {
-              prev_indice_bytes =
-                  tir::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
-            } else {
-              curr_indice_bytes =
-                  tir::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
-            }
-          }
-          ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
-          provably_disjoint =
-              analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
-          // if (!provably_disjoint) {
-          //   LOG(WARNING) << analyzer.z3_prover.GetModel(
-          //       tir::EQ(prev_indice_bytes, curr_indice_bytes));
-          // }
-        } else {
-          try {
-            auto prev_min = analyzer.Simplify(Substitute(
-                prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
-            auto prev_max = analyzer.Simplify(Substitute(
-                prev.touched[i].max() * prev_dtype.bytes(), prev_sub));
-            auto curr_min = analyzer.Simplify(Substitute(
-                curr.touched[i].min() * curr_dtype.bytes(), curr_sub));
-            auto curr_max = analyzer.Simplify(Substitute(
-                curr.touched[i].max() * curr_dtype.bytes(), curr_sub));
-            // analyzer.z3_prover.SetRLimit(100000000);
-            provably_disjoint = analyzer.CanProve(analyzer.Simplify(
-                tir::Or(prev_min > curr_max, curr_min > prev_max)));
-          } catch (...) {
-            auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
-            auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
-            if (prev_bound.defined() && curr_bound.defined()) {
-              if ((prev_bound->min_value) > (curr_bound->max_value) ||
-                  (curr_bound->min_value) > (prev_bound->max_value)) {
-                range_is_overlap = false;
-                break;
-              }
-            }
-          }
-          // if (!provably_disjoint) {
-          //   LOG(WARNING) << analyzer.z3_prover.GetStats();
-          //   LOG(WARNING) <<
-          //   analyzer.z3_prover.GetSMTLIB2(tir::Not(tir::Or(prev_min >
-          //   curr_max, curr_min > prev_max)));
-          // }
-        }
-
-        if (provably_disjoint) {
-          range_is_overlap = false;
-          break;
-        }
-
-        if (!has_same_index) {
-          break;
-        }
+        break;
       }
     }
-
     if (has_same_index) {
       bool range_is_equal = true;
       arith::Analyzer prev_analyzer, curr_analyer;
@@ -1387,6 +1290,108 @@ private:
       }
       if (range_is_equal)
         return false;
+    }
+
+    for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
+      auto prev_dtype = prev.dtype;
+      auto curr_dtype = curr.dtype;
+
+      const auto &prev_indice = prev.buffer_indices[i];
+      const auto &curr_indice = curr.buffer_indices[i];
+
+      PrimExpr prev_indice_bytes = prev_indice * prev_dtype.bytes();
+      PrimExpr curr_indice_bytes = curr_indice * curr_dtype.bytes();
+
+      has_same_index = false;
+
+      ConstrSet prev_cset{prev.cset};
+      ConstrSet curr_cset{curr.cset};
+      arith::Analyzer analyzer;
+
+      struct ThreadVarInfo {
+        const char *name_prev;
+        const char *name_curr;
+      } thread_vars[] = {
+          {"tx1", "tx2"},
+          {"ty1", "ty2"},
+          {"tz1", "tz2"},
+      };
+      PrimExpr thread_condition = Bool(false);
+      ffi::Map<Var, PrimExpr> prev_sub, curr_sub;
+      for (unsigned idx = 0; idx != 3; ++idx) {
+        auto &info = thread_vars[idx];
+        Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
+        Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
+        Var prev_var(info.name_prev, old_prev_var.dtype());
+        Var curr_var(info.name_curr, old_curr_var.dtype());
+        thread_condition =
+            tir::Or(thread_condition, tir::NE(prev_var, curr_var));
+        prev_sub.Set(old_prev_var, prev_var);
+        curr_sub.Set(old_curr_var, curr_var);
+      }
+      analyzer.EnterConstraint(thread_condition);
+      prev_cset.Substitute(prev_sub).Populate(analyzer);
+      curr_cset.Substitute(curr_sub).Populate(analyzer);
+      bool provably_disjoint = false;
+      if (prev_indice_bytes.dtype().is_scalar() &&
+          curr_indice_bytes.dtype().is_scalar()) {
+        prev_indice_bytes =
+            analyzer.Simplify(Substitute(prev_indice_bytes, prev_sub));
+        curr_indice_bytes =
+            analyzer.Simplify(Substitute(curr_indice_bytes, curr_sub));
+        if (prev_indice_bytes.dtype() != curr_indice_bytes.dtype()) {
+          if (prev_indice_bytes.dtype().bits() <
+              curr_indice_bytes.dtype().bits()) {
+            prev_indice_bytes =
+                tir::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
+          } else {
+            curr_indice_bytes =
+                tir::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
+          }
+        }
+        ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
+        provably_disjoint =
+            analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
+        if (!provably_disjoint) {
+          LOG(WARNING) << analyzer.z3_prover.GetModel(
+              tir::EQ(prev_indice_bytes, curr_indice_bytes));
+        }
+      } else {
+        try {
+          auto prev_min = analyzer.Simplify(
+              Substitute(prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
+          auto prev_max = analyzer.Simplify(
+              Substitute(prev.touched[i].max() * prev_dtype.bytes(), prev_sub));
+          auto curr_min = analyzer.Simplify(
+              Substitute(curr.touched[i].min() * curr_dtype.bytes(), curr_sub));
+          auto curr_max = analyzer.Simplify(
+              Substitute(curr.touched[i].max() * curr_dtype.bytes(), curr_sub));
+          // analyzer.z3_prover.SetRLimit(100000000);
+          provably_disjoint = analyzer.CanProve(analyzer.Simplify(
+              tir::Or(prev_min > curr_max, curr_min > prev_max)));
+        } catch (...) {
+          auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
+          auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
+          if (prev_bound.defined() && curr_bound.defined()) {
+            if ((prev_bound->min_value) > (curr_bound->max_value) ||
+                (curr_bound->min_value) > (prev_bound->max_value)) {
+              range_is_overlap = false;
+              break;
+            }
+          }
+        }
+        // if (!provably_disjoint) {
+        //   LOG(WARNING) << analyzer.z3_prover.GetStats();
+        //   LOG(WARNING) <<
+        //   analyzer.z3_prover.GetSMTLIB2(tir::Not(tir::Or(prev_min >
+        //   curr_max, curr_min > prev_max)));
+        // }
+      }
+
+      if (provably_disjoint) {
+        range_is_overlap = false;
+        break;
+      }
     }
 
     // If this is a read into a double buffer that was previously
