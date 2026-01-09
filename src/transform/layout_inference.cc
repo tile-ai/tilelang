@@ -222,7 +222,7 @@ public:
           continue;
 
         // Check if buffer exists in use_list_
-        if (!use_list_.count(buffer)) {
+        if (!use_list_.count(buffer) && IsFragmentBuffer(buffer)) {
           LOG(WARNING) << "Layout inference failed for buffer " << buffer
                        << ". "
                        << "The buffer cannot be inferred with current layout "

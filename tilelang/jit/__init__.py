@@ -24,7 +24,7 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
-from tilelang.language.v2 import PrimFunc, prim_func, LazyJITFunc
+from tilelang.language.eager import PrimFunc, prim_func, JITFunc
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
@@ -192,72 +192,75 @@ def par_compile(
 @dataclass
 class JITImpl(Generic[_P, _KP, _T, _Ret]):
     """
-    Detailed Just-In-Time wrapper for TileLang programs.
+    Just-In-Time compilation wrapper for TileLang programs.
 
-    This dataclass encapsulates the configuration and runtime helpers used by the
-    top-level `jit` and `jit2` decorators. It represents a configured JIT
-    "factory" that can (a) elaborate TileLang/PrimFunc creators into concrete
-    TIR (PrimFunc), (b) compile those TIR functions into runnable kernels via
-    the TVM bridge, (c) cache compiled kernels keyed by call-site arguments
-    (and optional tuning parameters), and (d) provide parallel compilation
-    helpers for batch autotuning workflows.
+    This class provides a unified interface for compiling and executing TileLang
+    kernels. It supports two execution modes that are automatically inferred:
+
+    Execution Modes
+    ---------------
+    - **lazy**: The decorated function returns a PrimFunc explicitly. Calling the
+      JIT wrapper returns a compiled kernel object, which can be invoked separately.
+      This mode is useful when you want to inspect or reuse the kernel object.
+
+      Example (lazy mode)::
+
+          @tilelang.jit(out_idx=[-1])
+          def matmul(M, N, K, block_M, block_N, block_K):
+              @T.prim_func
+              def kernel(A: T.Tensor((M, K), dtype), ...):
+                  ...
+              return kernel  # explicitly return PrimFunc
+
+          kernel = matmul(1024, 1024, 1024, 128, 128, 32)  # returns kernel
+          result = kernel(a, b)  # execute separately
+
+    - **eager**: The decorated function uses the DSL builder pattern with tensor
+      type annotations. Calling the JIT wrapper compiles and immediately executes
+      the kernel, returning the result directly.
+
+      Example (eager mode)::
+
+          @tilelang.jit
+          def gemm(A, B, C, block_M: int = 64):
+              M, N, K = T.const("M N K")
+              A: T.Tensor[[M, K], dtype]  # tensor shape via annotation
+              B: T.Tensor[[K, N], dtype]
+              C: T.Tensor[[M, N], dtype]
+              with T.Kernel(...):
+                  ...
+
+          gemm(A, B, C)  # compiles and executes immediately
+
+    The mode is automatically inferred based on whether the function returns a
+    PrimFunc (lazy) or uses the builder pattern (eager).
 
     Attributes
     ----------
     out_idx : list[int] | int | None
-        Which output tensor(s) of the compiled kernel should be returned to the
-        caller. Accepts a single index, a list of indices, or None to return all.
-    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
-        Backend used for exchanging arguments and executing the generated kernel.
-    target : str | tvm.target.Target
-        TVM compilation target (e.g. "cuda", "llvm", or "auto").
-    target_host : str | tvm.target.Target | None
-        Host target used for cross-compilation, or None to infer/default.
-    verbose : bool
-        Enable verbose messages during compilation/build.
+        Index(es) of output tensor(s) to return (lazy mode only).
+    execution_backend : str | None
+        Backend for kernel execution ("auto", "dlpack", "tvm_ffi", etc.).
+    target : str | Target | None
+        TVM compilation target (e.g., "cuda", "llvm", "auto").
+    target_host : str | Target | None
+        Host target for cross-compilation.
+    verbose : bool | None
+        Enable verbose compilation output.
     pass_configs : dict[str, Any] | None
-        Extra TVM pass configuration options forwarded to the compiler's
-        PassContext.
+        TVM pass configuration options.
     debug_root_path : str | None
-        If provided, compiled kernel source and the elaborated Python program
-        are written to this directory to ease debugging and inspection.
+        Directory to save compiled kernel source for debugging.
     compile_flags : list[str] | str | None
-        Additional flags passed to the compiler. A single string will be converted
-        to a single-element list.
+        Additional compiler flags.
     func_source : str
-        Original Python source string from which the PrimFunc or creator was
-        derived. Used for diagnostics and debug dumps.
+        Original Python source code of the decorated function.
     signature : inspect.Signature
-        Function signature of the original Python function (useful for tooling).
-    v2 : bool
-        Indicates whether the object wraps a "v2" PrimFunc creator (True) or a
-        plain callable / PrimFunc (False). v2-mode enables argument conversion
-        hooks and a distinct cache keying strategy.
-    func : Callable | PrimFunc | PrimFuncCreater
-        The underlying object: either a user function that returns a PrimFunc
-        (creator), a PrimFuncCreater, or an already-constructed PrimFunc.
-        For presentation/readability the function is stored last in the dataclass.
-
-    Behavioral summary
-    ------------------
-    - get_tir(*args, **kwargs)
-        Converts provided call-site arguments into a concrete PrimFunc. If the
-        wrapped object is a PrimFuncCreater or a user callable, it is invoked
-        with the given arguments. If the wrapped object is already a PrimFunc,
-        it is returned as-is.
-
-    - compile(...)
-        A convenience wrapper that elaborates and immediately compiles a single
-        PrimFunc into a JITKernel using the module-level `compile` function.
-        When `debug_root_path` is set, the compiled C kernel and the source
-        Python program are saved for inspection.
-
-    - par_compile(configs, ...)
-        Accepts an iterable of configs (either dicts mapping keyword args or
-        tuples mapping to positional args). Each config is elaborated to a
-        PrimFunc and the resulting set is compiled in parallel via the
-        module-level `par_compile` helper. Returns a list of JITKernel objects
-        in the same order as the provided configs.
+        Function signature of the original function.
+    mode : Literal["auto", "lazy", "eager"]
+        Execution mode. "auto" infers from function behavior.
+    func : JITFunc
+        The wrapped function object.
     """
 
     out_idx: list[int] | int | None
@@ -270,9 +273,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     compile_flags: list[str] | str | None
     func_source: str
     signature: inspect.Signature
-    lazy_jit: bool
+    mode: Literal["auto", "lazy", "eager"]
     # place func at the last element for better __repr__
-    func: Callable[_P, _T] | PrimFunc[_KP, _T] | LazyJITFunc[_KP, _T]
+    func: JITFunc[_KP, _T]
 
     def __post_init__(self):
         if self.debug_root_path is not None and not path.isabs(self.debug_root_path):
@@ -288,9 +291,8 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         """
         Retrieve a TIR (Tensor Intermediate Representation) PrimFunc from the stored callable or object.
         """
-        if isinstance(self.func, LazyJITFunc):
-            tir = self.func.get_tir(*args, **kwargs)
-        elif isinstance(self.func, PrimFunc):
+        self.initialize_jit_mode(*args, **kwargs)
+        if isinstance(self.func, PrimFunc):
             tir = self.func
         elif callable(self.func):
             tir = self.func(*args, **kwargs)
@@ -298,6 +300,28 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             raise ValueError(f"Invalid function type: {type(self.func)}")
         assert isinstance(tir, PrimFunc), f"target function must be a PrimFunc but got {type(tir)}"
         return tir
+
+    def _infer_jit_mode(self, *args: _P.args, **kwargs: _P.kwargs) -> Literal["lazy", "eager"]:
+        """
+        Infer the JIT execution mode based on function behavior.
+
+        Returns "lazy" if the function explicitly returns a PrimFunc,
+        or "eager" if it uses the DSL builder pattern.
+        """
+        if self.mode in ("lazy", "eager"):
+            return self.mode
+        # auto: infer by checking if function returns PrimFunc directly
+        if not isinstance(self.func, JITFunc):
+            return "lazy"
+        return "lazy" if self.func._is_lazy_style(*args, **kwargs) else "eager"
+
+    def initialize_jit_mode(self, *args: _P.args, **kwargs: _P.kwargs) -> Literal["lazy", "eager"]:
+        if self.mode == "auto":
+            self.mode = self._infer_jit_mode(*args, **kwargs)
+        self.func.set_mode(self.mode)
+        if self.mode == "eager" and self.out_idx is not None:
+            raise ValueError("out_idx is only supported in lazy mode. In eager mode, use T.empty() to declare output tensors instead.")
+        return self.mode
 
     def par_compile(
         self, configs: Iterable[dict[str, Any] | tuple[str, Any]], num_workers: int = None, ignore_error: bool = False
@@ -322,6 +346,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         List[JITKernel]
             A list of compiled JITKernel objects corresponding to the provided configs.
         """
+
         configs = list(configs)
         funcs = []
         for cfg in tqdm(configs, desc="Elaborating"):
@@ -345,9 +370,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         )
 
     def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
-        func = self.get_tir(*args, **kwargs)
+        prim_func = self.get_tir(*args, **kwargs)
         kernel_result = compile(
-            func,
+            prim_func,
             out_idx=self.out_idx,
             execution_backend=self.execution_backend,
             target=self.target,
@@ -368,7 +393,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             with open(path.join(self.debug_root_path, kernel_file), "w") as f:
                 print(kernel_result.get_kernel_source(), file=f)
             with open(path.join(self.debug_root_path, program_file), "w") as f:
-                print(func.script(), file=f)
+                print(prim_func.script(), file=f)
 
         return kernel_result
 
@@ -397,22 +422,24 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             }
             return compile_args
 
-        if self.lazy_jit:
-            kwargs.update(kwargs.pop("__tune_params", {}))
-            key, kernel_args = self.func.parse_args(*args, **kwargs)
-            kernel = self._kernel_cache.get(key, None)
-            if kernel is None:
-                kernel = self.compile(*args, **kwargs)
-                self._kernel_cache[key] = kernel
-            return kernel(*kernel_args.values())
+        kwargs.update(kwargs.pop("__tune_params", {}))
 
+        # infer mode early, before parse_args needs it
+        if self.mode == "auto":
+            self.mode = self._infer_jit_mode(*args, **kwargs)
+            self.func.set_mode(self.mode)
+
+        key, kernel_args = self.func.parse_args(*args, **kwargs)
+        kernel = self._kernel_cache.get(key, None)
+        if kernel is None:
+            kernel = self.compile(*args, **kwargs)
+            self._kernel_cache[key] = kernel
+
+        # eager mode: execute kernel immediately and return result
+        # lazy mode: return kernel object for manual invocation
+        if self.mode == "eager":
+            return kernel(*kernel_args.values())
         else:
-            key = self.parse_cache_key(*args, **kwargs)
-            tune_params = kwargs.pop("__tune_params", {})
-            kernel = self._kernel_cache.get(key, None)
-            if kernel is None:
-                kernel = self.compile(*args, **kwargs, **tune_params)
-                self._kernel_cache[key] = kernel
             return kernel
 
 
@@ -420,111 +447,11 @@ ExecutionBackend = Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torc
 
 
 @overload
-def jit(func: Callable[_P, PrimFunc[_KP, _T]]) -> JITImpl[_P, _KP, _T, JITKernel[_KP, _T]]: ...
+def jit(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]: ...
 
 
 @overload
 def jit(
-    *,  # Indicates subsequent arguments are keyword-only
-    out_idx: Any = None,
-    target: str | Target | None = None,
-    target_host: str | Target | None = None,
-    execution_backend: ExecutionBackend | None = None,
-    verbose: bool | None = None,
-    pass_configs: dict[str, Any] | None = None,
-    debug_root_path: str | None = None,
-    compile_flags: list[str] | str | None = None,
-) -> Callable[[Callable[_P, PrimFunc[_KP, _T]]], JITImpl[_P, _KP, _T, JITKernel[_KP, _T]]]: ...
-
-
-def jit(  # This is the new public interface
-    func: Callable[_P, _T] | PrimFunc | None = None,
-    *,  # Indicates subsequent arguments are keyword-only
-    out_idx: Any = None,
-    target: str | Target | None = None,
-    target_host: str | Target | None = None,
-    execution_backend: ExecutionBackend | None = None,
-    verbose: bool | None = None,
-    pass_configs: dict[str, Any] | None = None,
-    debug_root_path: str | None = None,
-    compile_flags: list[str] | str | None = None,
-):
-    """
-    Just-In-Time (JIT) compiler decorator for TileLang functions.
-
-    This decorator can be used without arguments (e.g., `@tilelang.jit`):
-       Applies JIT compilation with default settings.
-
-    Parameters
-    ----------
-    func_or_out_idx : Any, optional
-        If using `@tilelang.jit(...)` to configure, this is the `out_idx` parameter.
-        If using `@tilelang.jit` directly on a function, this argument is implicitly
-        the function to be decorated (and `out_idx` will be `None`).
-    target : Union[str, Target], optional
-        Compilation target for TVM (e.g., "cuda", "llvm"). If None, reads from
-        TILELANG_TARGET environment variable (defaults to "auto").
-    target_host : Union[str, Target], optional
-        Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
-        Backend for kernel execution and argument passing. If None, reads from
-        TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
-    verbose : bool, optional
-        Enables verbose logging during compilation. If None, reads from
-        TILELANG_VERBOSE environment variable (defaults to False).
-    pass_configs : Optional[Dict[str, Any]], optional
-        Configurations for TVM's pass context. Defaults to None.
-    debug_root_path : Optional[str], optional
-        Directory to save compiled kernel source for debugging. Defaults to None.
-
-    Environment Variables
-    ---------------------
-    TILELANG_TARGET : str
-        Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
-    TILELANG_EXECUTION_BACKEND : str
-        Default execution backend. Defaults to "auto".
-    TILELANG_VERBOSE : str
-        Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
-
-    Returns
-    -------
-    Callable
-        Either a JIT-compiled wrapper around the input function, or a configured decorator
-        instance that can then be applied to a function.
-    """
-
-    def decorator(func: Callable[_P, _T]) -> JITImpl[_P, _T]:
-        if isinstance(func, PrimFunc):
-            orig_func = func.orig_func
-        else:
-            orig_func = func
-        return JITImpl(
-            func=func,
-            out_idx=out_idx,
-            execution_backend=execution_backend,
-            target=target,
-            target_host=target_host,
-            verbose=verbose,
-            pass_configs=pass_configs,
-            debug_root_path=debug_root_path,
-            compile_flags=compile_flags,
-            func_source=inspect.getsource(orig_func),
-            signature=inspect.signature(orig_func),
-            lazy_jit=False,
-        )
-
-    if func is not None:
-        return decorator(func)
-    else:
-        return decorator
-
-
-@overload
-def lazy_jit(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]: ...
-
-
-@overload
-def lazy_jit(
     *,
     out_idx: Any = None,
     target: str | Target | None = None,
@@ -537,9 +464,10 @@ def lazy_jit(
 ) -> Callable[[Callable[_KP, _T]], JITImpl[_KP, _KP, _T, _T]]: ...
 
 
-def lazy_jit(
+def jit(
     func: Callable[_P, _T] | PrimFunc | None = None,
     *,  # Indicates subsequent arguments are keyword-only
+    out_idx: list[int] | int | None = None,
     target: str | Target | None = None,
     target_host: str | Target | None = None,
     execution_backend: ExecutionBackend | None = None,
@@ -547,16 +475,36 @@ def lazy_jit(
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
-):
+) -> Callable[[Callable[_P, _T]], JITImpl[_KP, _KP, _T, _T]]:
     """
-    Lazy JIT compiler decorator - returns the kernel object on first call, then executes it.
+    JIT compiler decorator for TileLang functions.
 
-    Supports environment variable defaults for target, execution_backend, and verbose.
-    See `jit` documentation for parameter details and environment variables.
+    Supports two execution modes (automatically inferred):
+    - **lazy**: Function returns PrimFunc explicitly. Returns compiled kernel object.
+    - **eager**: Function uses DSL builder pattern. Executes kernel immediately.
+
+    Parameters
+    ----------
+    out_idx : list[int] | int | None
+        Output tensor index(es). Only supported in lazy mode.
+    target : str | Target | None
+        TVM compilation target (e.g., "cuda", "llvm", "auto").
+    target_host : str | Target | None
+        Host target for cross-compilation.
+    execution_backend : ExecutionBackend | None
+        Backend for kernel execution.
+    verbose : bool | None
+        Enable verbose compilation output.
+    pass_configs : dict[str, Any] | None
+        TVM pass configuration options.
+    debug_root_path : str | None
+        Directory to save compiled kernel source for debugging.
+    compile_flags : list[str] | str | None
+        Additional compiler flags.
     """
 
     compile_args = dict(
-        out_idx=None,
+        out_idx=out_idx,
         execution_backend=execution_backend,
         target=target,
         target_host=target_host,
@@ -567,9 +515,17 @@ def lazy_jit(
     )
 
     def decorator(func: Callable[_P, _T]):
-        pf: LazyJITFunc[_P, _T] = prim_func(func, lazy_jit=True)
+        mode = "auto"
+        pf: JITFunc[_P, _T] = prim_func(func, eager_jit=True)
+        func_source = inspect.getsource(pf.orig_func)
+        signature = inspect.signature(pf.orig_func)
+
         return JITImpl(
-            func=pf, **compile_args, func_source=inspect.getsource(pf.orig_func), signature=inspect.signature(pf.orig_func), lazy_jit=True
+            func=pf,
+            **compile_args,
+            func_source=func_source,
+            signature=signature,
+            mode=mode,
         )
 
     return decorator(func) if func is not None else decorator

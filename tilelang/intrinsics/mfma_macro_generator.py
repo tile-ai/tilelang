@@ -176,8 +176,10 @@ class MatrixCoreIntrinEmitter:
         k_dim = self.k_dim * self.k_pack
         transposed = self.a_transposed if not is_b else self.b_transposed
         if k_dim == 4:
-            index_map = shared_16x4_to_local_64x1_layout_A
-            reverse_index_map = thread_id_shared_access_64x1_to_16x4_layout_A
+            index_map = shared_4x16_to_local_64x1_layout_B if transposed else shared_16x4_to_local_64x1_layout_A
+            reverse_index_map = (
+                thread_id_shared_access_64x1_to_4x16_layout_B if transposed else thread_id_shared_access_64x1_to_16x4_layout_A
+            )
             if is_b:
                 index_map = shared_16x4_to_local_64x1_layout_A if transposed else shared_4x16_to_local_64x1_layout_B
                 reverse_index_map = (

@@ -4,7 +4,7 @@ import tilelang.language as T
 
 
 # TODO(lei): replicate loop layout and more complicated layout cases
-@tilelang.lazy_jit
+@tilelang.jit
 def loop_layout_kernel(A, B, loop_layout):
     M, N = T.const("M, N")
     A: T.Tensor[(M, N), T.float32]
@@ -51,7 +51,7 @@ def test_loop_layout_identity():
     assert "*(float4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(float4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));" in code
 
 
-@tilelang.lazy_jit
+@tilelang.jit
 def copy_with_layout_kernel(A, B, loop_layout):
     M, N = T.const("M, N")
     A: T.Tensor[(M, N), T.float32]
@@ -79,7 +79,7 @@ def test_copy_loop_layout_annotated_replicate_vec4():
     assert "*(float4*)(B + ((i * 512) + (((int)threadIdx.x) * 4))) = *(float4*)(A + ((i * 512) + (((int)threadIdx.x) * 4)));" in code
 
 
-@tilelang.lazy_jit
+@tilelang.jit
 def replicate_loop_layout_kernel(A, B, loop_layout):
     M, N = T.const("M, N")
     A: T.Tensor[(M, N), T.float32]

@@ -10,6 +10,7 @@ from tvm import tir
 from tvm.tir import Var, PrimExpr
 from tvm.script.ir_builder.tir import buffer, handle, match_buffer
 from tilelang.utils import deprecated
+from tilelang.jit.exceptions import JITNoBuilderError
 
 
 class BufferProxy:
@@ -275,4 +276,8 @@ def ptr(dtype: str | None = None, storage_scope: str = "global", *, is_size_var:
 
 
 def make_tensor(ptr: Var, shape: tuple[PrimExpr, ...], dtype: str = "float32", strides: tuple[PrimExpr, ...] = None) -> tir.Buffer:
+    from tilelang.language.eager.builder import Builder
+
+    if Builder.current() is None:
+        raise JITNoBuilderError("T.make_tensor() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
     return Tensor.from_ptr(ptr, shape, dtype, strides)

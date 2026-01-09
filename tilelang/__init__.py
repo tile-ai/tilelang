@@ -142,7 +142,7 @@ with _lazy_load_lib():
     if env.SKIP_LOADING_TILELANG_SO == "0":
         _LIB, _LIB_PATH = _load_tile_lang_lib()
 
-    from .jit import jit, lazy_jit, JITKernel, compile, par_compile  # noqa: F401
+    from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
     from .profiler import Profiler  # noqa: F401
     from .cache import clear_cache  # noqa: F401
     from .utils import (
@@ -160,7 +160,7 @@ with _lazy_load_lib():
         engine,  # noqa: F401
         tools,  # noqa: F401
     )
-    from .language.v2 import dtypes  # noqa: F401
+    from .language.eager import dtypes  # noqa: F401
     from .autotuner import autotune  # noqa: F401
     from .transform import PassConfigKey  # noqa: F401
     from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
