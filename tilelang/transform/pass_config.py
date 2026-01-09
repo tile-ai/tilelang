@@ -54,6 +54,13 @@ class PassConfigKey(str, Enum):
 
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
+
+    TL_ENABLE_VECTORIZE_PLANNER_VERBOSE = "tl.enable_vectorize_planner_verbose"
+    """Enable verbose output for vectorize planner. When enabled, prints detailed
+    information about each buffer's inferred vector size and which buffer determines
+    the final vectorization factor. Useful for debugging vectorization issues.
+    Default: False"""
+
     TL_DISABLE_WGMMA = "tl.disable_wgmma"
     """Disable usage of Hopper WGMMA. Default: False"""
 

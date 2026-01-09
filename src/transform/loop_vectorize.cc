@@ -24,15 +24,18 @@
 
 #include "loop_vectorize.h"
 #include "../op/builtin.h"
+#include "../op/utils.h"
 #include "../target/utils.h"
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_vectorization_utils.h"
 #include "tvm/tir/analysis.h"
 #include "tvm/tir/var.h"
+#include <iostream>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
+#include <vector>
 
 namespace tvm {
 namespace tl {
@@ -43,6 +46,14 @@ struct VectorizePlanResult {
   int vector_size;
   bool dynamic;
   PrimExpr condition;
+};
+
+struct BufferVectorInfo {
+  Buffer buffer;
+  int vector_size;
+  bool is_store;
+  Array<PrimExpr> indices;
+  Array<PrimExpr> strides;
 };
 
 class VectorizeFindGlobalAccess : public StmtExprVisitor {
@@ -70,6 +81,26 @@ private:
   }
 };
 
+/*!
+ * \brief Check if a For loop body contains SeqStmt (multiple statements).
+ *
+ * When the For body has SeqStmt, the vectorization analysis is more complex
+ * and we should be conservative - treating local buffers the same as memory
+ * buffers instead of ignoring their constraints.
+ *
+ * Currently we only handle simple single BufferStore cases specially for
+ * local buffer optimization.
+ */
+bool ForBodyContainsSeqStmt(const For &loop) {
+  bool has_seq_stmt = false;
+  PostOrderVisit(loop->body, [&](const ObjectRef &obj) {
+    if (obj.as<SeqStmtNode>()) {
+      has_seq_stmt = true;
+    }
+  });
+  return has_seq_stmt;
+}
+
 class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
   explicit VectorizePlanner(arith::Analyzer *analyzer)
@@ -81,14 +112,148 @@ public:
         ctxt->GetConfig(kDisableVectorize256, Optional<Bool>());
     bool disable_vectorize_256 =
         opt_disable_vectorize_256.value_or(Bool(false));
+
+    Optional<Bool> opt_verbose =
+        ctxt->GetConfig(kEnableVectorizePlannerVerbose, Optional<Bool>());
+    bool verbose = opt_verbose.value_or(Bool(false));
+
     if (tvm::tl::TargetIsSm100(Target::Current(false)) &&
         !disable_vectorize_256 &&
         VectorizeFindGlobalAccess().HasGlobalAccess(node)) {
-      vector_load_bits_max_ = vector_size_ = 256;
+      vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
+          256;
     } else {
-      vector_load_bits_max_ = vector_size_ = 128;
+      vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
+          128;
     }
+
+    // Check if For body contains SeqStmt (multiple statements).
+    // When there's SeqStmt, we use conservative strategy - treating local
+    // buffers the same as memory buffers. The special local buffer optimization
+    // (ignoring local buffer constraints) only applies to simple single
+    // BufferStore cases.
+    bool has_seq_stmt = ForBodyContainsSeqStmt(node);
+
+    // Clear previous buffer info and collect new ones
+    buffer_vector_infos_.clear();
     this->operator()(node);
+
+    // Compute final vector size from collected buffer infos
+    // Strategy:
+    // - If For body contains SeqStmt: take min of all buffers (conservative)
+    // - Else if all buffers are local/fragment: take min of all
+    // - Else if there are global/shared buffers: ignore local/fragment
+    //   constraints and only take min of global/shared buffers
+    // Rationale: local/fragment are register-level, no memory alignment
+    // constraints. But for complex cases (SeqStmt), we stay conservative.
+    vector_size_ = initial_vector_size_;
+
+    if (verbose) {
+      std::cerr << "=== VectorizePlanner: Collected buffer vector sizes ==="
+                << std::endl;
+      std::cerr << "  initial_vector_size=" << initial_vector_size_
+                << ", loop_extent_vector_size=" << loop_extent_vector_size_
+                << ", has_seq_stmt=" << (has_seq_stmt ? "true" : "false")
+                << std::endl;
+    }
+
+    // Separate buffers into local/fragment vs memory (global/shared)
+    int local_fragment_min = initial_vector_size_;
+    int memory_min = initial_vector_size_;
+    bool has_global_or_shared_buffer = false;
+
+    auto is_local_or_fragment = [](const Buffer &buf) {
+      return IsLocalBuffer(buf, /*allow_var=*/true) || IsFragmentBuffer(buf);
+    };
+
+    std::vector<BufferVectorInfo> local_fragment_buffers;
+
+    for (const auto &info : buffer_vector_infos_) {
+      if (verbose) {
+        if (info.buffer.defined()) {
+          std::cerr << "  Buffer: " << info.buffer->name
+                    << " (scope=" << info.buffer.scope() << ")"
+                    << " -> vector_size=" << info.vector_size
+                    << (info.is_store ? " [store]" : " [load]") << std::endl;
+        } else {
+          std::cerr << "  [cast/extern/rng] -> vector_size=" << info.vector_size
+                    << std::endl;
+        }
+      }
+
+      if (is_local_or_fragment(info.buffer)) {
+        local_fragment_min =
+            arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
+        local_fragment_buffers.push_back(info);
+      } else {
+        // global, shared, shared.dyn, or non-buffer constraints
+        // (cast/extern/rng)
+        memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
+        has_global_or_shared_buffer = true;
+      }
+    }
+
+    if (has_seq_stmt) {
+      // For body contains SeqStmt (multiple statements).
+      // Use conservative strategy: take GCD of all buffers including local.
+      // The special local buffer optimization only applies to simple single
+      // BufferStore cases where we can be confident about the access pattern.
+      vector_size_ = arith::ZeroAwareGCD(local_fragment_min, memory_min);
+      if (verbose) {
+        std::cerr << "  [Strategy] Has SeqStmt, using conservative GCD of all: "
+                  << "local_fragment_min=" << local_fragment_min
+                  << ", memory_min=" << memory_min
+                  << " -> vector_size=" << vector_size_ << std::endl;
+      }
+    } else if (has_global_or_shared_buffer) {
+      // Has memory buffers and simple case (no SeqStmt):
+      // ignore local/fragment constraints
+      vector_size_ = memory_min;
+      if (verbose) {
+        std::cerr << "  [Strategy] Has memory buffers (simple case), using "
+                     "memory_min="
+                  << memory_min
+                  << " (ignoring local/fragment_min=" << local_fragment_min
+                  << ")" << std::endl;
+      }
+      // vector_size may be greater than local/fragment buffers' vector_size.
+      // In such case, we need to re-validate if the indices are invariant
+      // at the new vector_size boundary. If not invariant, take GCD.
+      for (const auto &info : local_fragment_buffers) {
+        if (vector_size_ > info.vector_size && !info.indices.empty()) {
+          // Compute elem_offset from indices and strides
+          PrimExpr elem_offset = 0;
+          for (size_t i = 0; i < info.indices.size(); ++i) {
+            elem_offset += info.indices[i] * info.strides[i];
+          }
+          if (!IsExprInvariantInVectorBoundary(
+                  elem_offset, inner_for_->loop_var, vector_size_, analyzer_)) {
+            // Not invariant at this vector_size, need to take GCD
+            int old_vector_size = vector_size_;
+            vector_size_ = arith::ZeroAwareGCD(vector_size_, info.vector_size);
+            if (verbose) {
+              std::cerr << "  [Re-validate] Local buffer '" << info.buffer->name
+                        << "' not invariant at vector_size=" << old_vector_size
+                        << ", GCD with " << info.vector_size
+                        << " -> vector_size=" << vector_size_ << std::endl;
+            }
+          }
+        }
+      }
+    } else {
+      // Only local/fragment buffers: use their min
+      vector_size_ = local_fragment_min;
+      if (verbose) {
+        std::cerr << "  [Strategy] Only local/fragment buffers, using "
+                     "local_fragment_min="
+                  << local_fragment_min << std::endl;
+      }
+    }
+
+    if (verbose) {
+      std::cerr << "=== Final vector_size: " << vector_size_
+                << " ===" << std::endl;
+    }
     return vector_size_;
   }
 
@@ -109,10 +274,11 @@ private:
       //   In order to do it, the Planner should accept an analyzer with
       //   arithmetic info outside to prove the dividiblity of vector size
       if (!extent_ptr) {
-        vector_size_ = 1;
+        loop_extent_vector_size_ = 1;
         return ffi::GetRef<Stmt>(node);
       }
-      vector_size_ = arith::ZeroAwareGCD(vector_size_, *extent_ptr);
+      loop_extent_vector_size_ =
+          arith::ZeroAwareGCD(initial_vector_size_, *extent_ptr);
     }
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
@@ -150,11 +316,11 @@ private:
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
     } else if (node->op == builtin::call_extern()) {
-      // do not vectorize extern calls
-      vector_size_ = 1;
+      // do not vectorize extern calls, record as vector_size=1
+      buffer_vector_infos_.push_back({Buffer(), 1, false, {}, {}});
     } else if (node->op.same_as(tl::rng_init())) {
-      // do not vectorize random operation
-      vector_size_ = 1;
+      // do not vectorize random operation, record as vector_size=1
+      buffer_vector_infos_.push_back({Buffer(), 1, false, {}, {}});
     }
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
@@ -164,17 +330,23 @@ private:
   }
 
   PrimExpr VisitExpr_(const CastNode *node) final {
-    vector_size_ = arith::ZeroAwareGCD(
-        vector_load_bits_max_ / node->dtype.bits(), vector_size_);
+    int cast_vector_size = arith::ZeroAwareGCD(
+        vector_load_bits_max_ / node->dtype.bits(), initial_vector_size_);
+    // Record cast constraint (use empty buffer to indicate cast)
+    buffer_vector_infos_.push_back({Buffer(), cast_vector_size, false, {}, {}});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
-  void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer,
-                        bool is_store) {
+  int ComputeBufferVectorSize(const Array<PrimExpr> &indices,
+                              const Buffer &buffer, bool is_store,
+                              Array<PrimExpr> *out_strides) {
     if (!inner_for_)
-      return;
+      return initial_vector_size_;
+
+    int buffer_vec_size = loop_extent_vector_size_;
+
     // 1. Compute raw element offset
-    auto strides = buffer->strides;
+    Array<PrimExpr> strides = buffer->strides;
     if (buffer->strides.empty()) {
       PrimExpr stride = 1;
       for (int i = indices.size() - 1; i >= 0; --i) {
@@ -183,42 +355,62 @@ private:
       }
       strides = Array<PrimExpr>{strides.rbegin(), strides.rend()};
     }
+    *out_strides = strides;
+
     PrimExpr elem_offset = 0;
-    for (int i = 0; i < indices.size(); ++i) {
+    for (size_t i = 0; i < indices.size(); ++i) {
       elem_offset += indices[i] * strides[i];
     }
+
     // 2. If element offset is independent with loop_var, ignore it.
     if (CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_)) {
       // Specially, if it's a BufferStore, we should not vectorize it.
       if (is_store) {
-        vector_size_ = 1;
+        return 1;
       }
-      return;
+      return initial_vector_size_; // No constraint from this buffer
     }
-    // 3. Check if current vector_size_ works with invariant boundary check
+
+    // 3. Check if current buffer_vec_size works with invariant boundary check
     if (!IsExprInvariantInVectorBoundary(elem_offset, inner_for_->loop_var,
-                                         vector_size_, analyzer_)) {
+                                         buffer_vec_size, analyzer_)) {
       // If not, tight vectorize bound with buffer dtype constraint
-      vector_size_ = arith::ZeroAwareGCD(
-          vector_size_, vector_load_bits_max_ /
-                            (buffer->dtype.bits() * buffer->dtype.lanes()));
+      buffer_vec_size = arith::ZeroAwareGCD(
+          buffer_vec_size, vector_load_bits_max_ /
+                               (buffer->dtype.bits() * buffer->dtype.lanes()));
     } else if (is_store) {
       // If the indices is invariant for BufferStore, we should also not
       // vectorize it.
-      vector_size_ = 1;
+      return 1;
     }
-    // 4. Try to vectorize buffer load
-    while (!IndiceCanVectorize(elem_offset, inner_for_->loop_var,
-                               inner_for_->extent, vector_size_, analyzer_)) {
-      vector_size_ /= 2;
+
+    // 4. Try to find max vectorize size for this buffer
+    while (buffer_vec_size > 1 &&
+           !IndiceCanVectorize(elem_offset, inner_for_->loop_var,
+                               inner_for_->extent, buffer_vec_size,
+                               analyzer_)) {
+      buffer_vec_size /= 2;
     }
+    return buffer_vec_size;
+  }
+
+  void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer,
+                        bool is_store) {
+    Array<PrimExpr> strides;
+    int buffer_vec_size =
+        ComputeBufferVectorSize(indices, buffer, is_store, &strides);
+    buffer_vector_infos_.push_back(
+        {buffer, buffer_vec_size, is_store, indices, strides});
   }
 
   int vector_load_bits_max_;
+  int initial_vector_size_ = 128;
+  int loop_extent_vector_size_ = 128;
 
   const ForNode *inner_for_{};
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
+  std::vector<BufferVectorInfo> buffer_vector_infos_;
 };
 
 class VectorizeRewriter : public StmtExprMutator {
