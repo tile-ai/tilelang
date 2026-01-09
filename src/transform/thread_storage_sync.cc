@@ -1322,32 +1322,39 @@ private:
           ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
           provably_disjoint =
               analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
+          // if (!provably_disjoint) {
+          //   LOG(WARNING) << analyzer.z3_prover.GetModel(
+          //       tir::EQ(prev_indice_bytes, curr_indice_bytes));
+          // }
         } else {
-          auto prev_min = analyzer.Simplify(
-              Substitute(prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
-          auto prev_max = analyzer.Simplify(
-              Substitute(prev.touched[i].max() * prev_dtype.bytes(), prev_sub));
-          auto curr_min = analyzer.Simplify(
-              Substitute(curr.touched[i].min() * curr_dtype.bytes(), curr_sub));
-          auto curr_max = analyzer.Simplify(
-              Substitute(curr.touched[i].max() * curr_dtype.bytes(), curr_sub));
-          // analyzer.z3_prover.SetRLimit(100000000);
-          provably_disjoint = analyzer.CanProve(analyzer.Simplify(
-              tir::Or(prev_min > curr_max, curr_min > prev_max)));
+          try {
+            auto prev_min = analyzer.Simplify(Substitute(
+                prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
+            auto prev_max = analyzer.Simplify(Substitute(
+                prev.touched[i].max() * prev_dtype.bytes(), prev_sub));
+            auto curr_min = analyzer.Simplify(Substitute(
+                curr.touched[i].min() * curr_dtype.bytes(), curr_sub));
+            auto curr_max = analyzer.Simplify(Substitute(
+                curr.touched[i].max() * curr_dtype.bytes(), curr_sub));
+            // analyzer.z3_prover.SetRLimit(100000000);
+            provably_disjoint = analyzer.CanProve(analyzer.Simplify(
+                tir::Or(prev_min > curr_max, curr_min > prev_max)));
+          } catch (...) {
+            auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
+            auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
+            if (prev_bound.defined() && curr_bound.defined()) {
+              if ((prev_bound->min_value) > (curr_bound->max_value) ||
+                  (curr_bound->min_value) > (prev_bound->max_value)) {
+                range_is_overlap = false;
+                break;
+              }
+            }
+          }
           // if (!provably_disjoint) {
           //   LOG(WARNING) << analyzer.z3_prover.GetStats();
           //   LOG(WARNING) <<
           //   analyzer.z3_prover.GetSMTLIB2(tir::Not(tir::Or(prev_min >
           //   curr_max, curr_min > prev_max)));
-          // }
-          // auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
-          // auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
-          // if (prev_bound.defined() && curr_bound.defined()) {
-          //   if ((prev_bound->min_value) > (curr_bound->max_value) ||
-          //       (curr_bound->min_value) > (prev_bound->max_value)) {
-          //     range_is_overlap = false;
-          //     break;
-          //   }
           // }
         }
 
