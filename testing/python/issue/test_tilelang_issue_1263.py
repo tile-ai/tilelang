@@ -1,10 +1,12 @@
 import tilelang.testing
 import tilelang.language as T
 
+
 def test_issue_1263_pipeline_no_consumer():
     @tilelang.jit()
     def test_kernel(M, N):
         dtype = "bfloat16"
+
         @T.prim_func
         def fwd_main(
             KV: T.Tensor((M, N), dtype),
@@ -22,6 +24,7 @@ def test_issue_1263_pipeline_no_consumer():
                     T.clear(B)
 
         return fwd_main
+
     test_kernel(1024, 128)
 
 
