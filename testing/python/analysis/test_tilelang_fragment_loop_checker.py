@@ -142,9 +142,9 @@ def test_invalid_loop():
 
 
 def test_valid_loop():
-    # valid_loop_not_use_loop_var()
+    valid_loop_not_use_loop_var()
     valid_loop_not_frag()
-    # valid_loop_serial()
+    valid_loop_serial()
 
 
 if __name__ == "__main__":
