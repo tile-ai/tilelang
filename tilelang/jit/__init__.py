@@ -229,7 +229,6 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
               C: T.Tensor[[M, N], dtype]
               with T.Kernel(...):
                   ...
-              # no return, builder constructs TIR implicitly
 
           gemm(A, B, C)  # compiles and executes immediately
 
@@ -239,7 +238,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     Attributes
     ----------
     out_idx : list[int] | int | None
-        Index(es) of output tensor(s) to return. Accepts single index, list, or None.
+        Index(es) of output tensor(s) to return (lazy mode only).
     execution_backend : str | None
         Backend for kernel execution ("auto", "dlpack", "tvm_ffi", etc.).
     target : str | Target | None
