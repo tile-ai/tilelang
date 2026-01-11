@@ -49,13 +49,11 @@ def _patched_cc(output, objects, options, compile_cmd, *args, **kwargs):
     """
     monkey patch to tvm before finalized
     """
-    if objects:
-        # language arg needs to be in front of sources
-        objects = ["-x", "objective-c++"] + objects
-    from torch.utils import cpp_extension
+    # from torch.utils import cpp_extension
 
-    torch_opts = ["-I" + i for i in cpp_extension.include_paths()]
-    options += torch_opts + ["-g", "-std=gnu++17"]
+    # torch_opts = ["-I" + i for i in cpp_extension.include_paths()]
+    import ipdb; ipdb.set_trace()
+    # options += torch_opts + ["-x", "objective-c++"] + ["-g", "-std=gnu++17"]
     return _cc(output, objects, options, compile_cmd, *args, **kwargs)
 
 
