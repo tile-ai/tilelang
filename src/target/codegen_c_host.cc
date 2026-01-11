@@ -58,6 +58,17 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   // snprintf for richer assert messages with actual values
   decl_stream << "#include <stdio.h>\n";
   decl_stream << "#include <stdbool.h>\n";
+
+  decl_stream << "#ifdef __OBJC__\n";
+  decl_stream << "#include \"tvm/runtime/device_api.h\"\n";
+  decl_stream << "#include \"tvm/ffi/function.h\"\n";
+
+  decl_stream << "#include <Metal/Metal.h>\n";
+  decl_stream << "#include <Foundation/Foundation.h>\n";
+
+  decl_stream << "#include <torch/mps.h>\n";
+  decl_stream << "#endif\n";
+
   CodeGenCHost::InitGlobalContext();
   tvm::codegen::CodeGenC::Init(output_ssa);
 }

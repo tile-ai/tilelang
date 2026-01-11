@@ -8,6 +8,7 @@ import os
 import shutil
 import threading
 import uuid
+import sys
 from hashlib import sha256
 from typing import Callable, Literal
 
@@ -20,6 +21,13 @@ from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang import __version__
+
+
+COMPILE_ARGS = {}
+
+if sys.platform == "darwin":
+    from torch.utils import cpp_extension
+    COMPILE_ARGS['options'] = ["-x", "objective-c++", "-g", "-std=gnu++17"] + ["-I" + i for i in cpp_extension.include_paths()]
 
 
 class KernelCache:
@@ -102,6 +110,9 @@ class KernelCache:
             "pass_configs": pass_configs,
             "compile_flags": compile_flags,
         }
+        if isinstance(target, Target) and target.kind == 'metal':
+            import torch
+            key_data['torch'] = torch.__version__
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
         # Use SHA256 to generate hash key
@@ -261,7 +272,7 @@ class KernelCache:
     @staticmethod
     def _safe_write_executable(executable: Executable, path: str):
         temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.so")
-        executable.export_library(temp_path)
+        executable.export_library(temp_path, **COMPILE_ARGS)
         os.replace(temp_path, path)
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False):
