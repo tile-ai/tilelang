@@ -101,7 +101,7 @@ Or install locally:
 ```bash
 # install required system dependencies
 sudo apt-get update
-sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
+sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev libz3-dev
 
 pip install -e . -v # remove -e option if you don't want to install in editable mode, -v for verbose output
 ```
