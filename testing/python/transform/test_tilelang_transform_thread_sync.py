@@ -124,8 +124,8 @@ def test_sync_let_stmt():
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
         A_shared_1 = T.Buffer((512,), data=A_shared, scope="shared")
-        ax0 = threadIdx_x
-        A_shared_1[ax0] = A[blockIdx_x * 512 + ax0]
+        for ax0 in range(512):
+            A_shared_1[ax0] = A[blockIdx_x * 512 + ax0]
         in_thread_A_temp_1 = T.Buffer((1,), data=in_thread_A_temp, scope="local")
         in_thread_A_temp_1[0] = T.float32(0)
         with T.LetStmt(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x]) as A_temp:
@@ -160,8 +160,8 @@ def test_sync_let_stmt():
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
         A_shared_1_1 = T.Buffer((512,), data=A_shared_1, scope="shared")
-        ax0 = threadIdx_x
-        A_shared_1_1[ax0] = A[blockIdx_x * 512 + ax0]
+        for ax0 in range(512):
+            A_shared_1_1[ax0] = A[blockIdx_x * 512 + ax0]
         in_thread_A_temp_1_1 = T.Buffer((1,), data=in_thread_A_temp_1, scope="local")
         in_thread_A_temp_1_1[0] = T.float32(0)
         T.tvm_storage_sync("shared")
@@ -232,7 +232,6 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
     assert 'T.tvm_storage_sync("shared.dyn")' in s
     # Ensure the sync appears before the unrolled loop
     assert s.index('T.tvm_storage_sync("shared.dyn")') < s.index("for i in T.unroll(8)")
-
 
 if __name__ == "__main__":
     tilelang.testing.main()
