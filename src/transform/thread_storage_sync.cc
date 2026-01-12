@@ -1353,8 +1353,8 @@ private:
         provably_disjoint =
             analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
         if (!provably_disjoint) {
-          LOG(WARNING) << analyzer.z3_prover.GetModel(
-              tir::EQ(prev_indice_bytes, curr_indice_bytes));
+          // LOG(WARNING) << analyzer.z3_prover.GetModel(
+          //     tir::EQ(prev_indice_bytes, curr_indice_bytes));
         }
       } else {
         try {
