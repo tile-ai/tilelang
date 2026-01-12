@@ -566,7 +566,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     curr_stmt_.access.clear();
     allow_append_ = false;
     // traverse body block
-    ConstrVisitor::VisitStmt_(op);
+    {
+      auto guard = MakeGuard(op->var, op->value);
+      this->VisitStmt(op->body);
+    }
   }
   void VisitStmt_(const BlockNode *op) final {
     auto block = Downcast<Block>(op);
@@ -725,13 +728,26 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   }
 
   void VisitStmt_(const WhileNode *op) final {
-    this->VisitExpr(op->condition);
-    scope_.push_back(std::vector<StmtEntry>());
-    this->VisitStmt(op->body);
     StmtEntry s;
-    s.stmt = op;
-    s.access = Summarize(std::move(scope_.back()), nullptr);
-    scope_.pop_back();
+    {
+      auto guard = MakeGuard(op->condition);
+      allow_append_ = true;
+      this->VisitExpr(op->condition);
+      std::vector<AccessEntry> cond_access = std::move(curr_stmt_.access);
+      allow_append_ = false;
+
+      scope_.push_back(std::vector<StmtEntry>());
+      {
+        this->VisitStmt(op->body);
+      }
+      s.stmt = op;
+      s.access = Summarize(std::move(scope_.back()), nullptr);
+      scope_.pop_back();
+      if (!cond_access.empty()) {
+        s.access.insert(s.access.begin(), cond_access.begin(),
+                        cond_access.end());
+      }
+    }
     scope_.back().emplace_back(std::move(s));
   }
 
