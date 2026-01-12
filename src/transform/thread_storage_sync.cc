@@ -1369,7 +1369,7 @@ private:
           // analyzer.z3_prover.SetRLimit(100000000);
           provably_disjoint = analyzer.CanProve(analyzer.Simplify(
               tir::Or(prev_min > curr_max, curr_min > prev_max)));
-        } catch (const std::exception& e) {
+        } catch (const std::exception &e) {
           // Log for debugging; fall back to conservative bound check
           LOG(WARNING) << "Exception in conflict detection: " << e.what();
           auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
