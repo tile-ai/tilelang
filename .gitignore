@@ -123,6 +123,3 @@ maint/host_checks/logs/*
 
 # perf regression test
 .perf_regression/
-
-AGENTS.md
-uv.lock
