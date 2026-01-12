@@ -16,14 +16,14 @@ class MarkHostMetalContextMutator(PyStmtExprMutator):
         old_value = False
         if switch:
             old_value, self.is_in_compute_scope = self.is_in_compute_scope, True
-        super().visit_attr_stmt_(stmt)
+        s = self.visit_stmt(stmt.body)
         if switch:
             self.is_in_compute_scope = old_value
-        return stmt
+        return s
 
     def visit_evaluate_(self, op: Evaluate):
         if self.is_in_compute_scope and op.value.op.name == "tir.tvm_call_packed_lowered":
-            return AttrStmt(0, "metal_context", None, op)
+            return AttrStmt(0, "metal_context", "", op)
         return op
 
 
