@@ -83,7 +83,7 @@ def resolve_execution_backend(requested: str | None, target: Target) -> str:
         if kind == "cuda":
             choice = "tvm_ffi"
         elif kind == "metal":
-            choice = "torch"
+            choice = "tvm_ffi"
         else:
             choice = "cython"
         # If the chosen default is not available (very rare), fall back to first available
