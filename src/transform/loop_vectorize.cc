@@ -53,8 +53,20 @@ struct BufferVectorInfo {
   int vector_size;
   bool is_store;
   Array<PrimExpr> indices;
-  Array<PrimExpr> strides;
 };
+
+Array<PrimExpr> GetBufferStrides(const Buffer &buffer) {
+  if (!buffer->strides.empty()) {
+    return buffer->strides;
+  }
+  Array<PrimExpr> strides;
+  PrimExpr stride = 1;
+  for (int i = buffer->shape.size() - 1; i >= 0; --i) {
+    strides.push_back(stride);
+    stride = stride * buffer->shape[i];
+  }
+  return Array<PrimExpr>{strides.rbegin(), strides.rend()};
+}
 
 class VectorizeFindGlobalAccess : public StmtExprVisitor {
 public:
@@ -169,10 +181,11 @@ public:
     std::vector<BufferVectorInfo> local_fragment_buffers;
 
     for (const auto &info : buffer_vector_infos_) {
+      auto buffer = info.buffer;
       if (verbose) {
-        if (info.buffer.defined()) {
-          std::cerr << "  Buffer: " << info.buffer->name
-                    << " (scope=" << info.buffer.scope() << ")"
+        if (buffer.defined()) {
+          std::cerr << "  Buffer: " << buffer->name
+                    << " (scope=" << buffer.scope() << ")"
                     << " -> vector_size=" << info.vector_size
                     << (info.is_store ? " [store]" : " [load]") << "\n";
         } else {
@@ -180,8 +193,14 @@ public:
                     << "\n";
         }
       }
+      std::cerr << "info.buffer: " << buffer << "\n";
+      std::cerr << "is_local_or_fragment: " << is_local_or_fragment(buffer) << "\n";
 
-      if (is_local_or_fragment(info.buffer)) {
+      if (!buffer.defined()) {
+        // CastNode, CallNode do not have buffer defined.
+        local_fragment_min = arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
+        memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
+      } else if (is_local_or_fragment(buffer)) {
         local_fragment_min =
             arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
         local_fragment_buffers.push_back(info);
@@ -222,9 +241,10 @@ public:
       for (const auto &info : local_fragment_buffers) {
         if (vector_size_ > info.vector_size && !info.indices.empty()) {
           // Compute elem_offset from indices and strides
+          Array<PrimExpr> strides = GetBufferStrides(info.buffer);
           PrimExpr elem_offset = 0;
           for (size_t i = 0; i < info.indices.size(); ++i) {
-            elem_offset += info.indices[i] * info.strides[i];
+            elem_offset += info.indices[i] * strides[i];
           }
           if (!IsExprInvariantInVectorBoundary(
                   elem_offset, inner_for_->loop_var, vector_size_, analyzer_)) {
@@ -316,10 +336,10 @@ private:
       CheckConditionVectorized(node->args[0]);
     } else if (node->op == builtin::call_extern()) {
       // do not vectorize extern calls, record as vector_size=1
-      buffer_vector_infos_.push_back({Buffer(), 1, false, {}, {}});
+      buffer_vector_infos_.push_back({Buffer(), 1, false, {}});
     } else if (node->op.same_as(tl::rng_init())) {
       // do not vectorize random operation, record as vector_size=1
-      buffer_vector_infos_.push_back({Buffer(), 1, false, {}, {}});
+      buffer_vector_infos_.push_back({Buffer(), 1, false, {}});
     }
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
@@ -332,29 +352,19 @@ private:
     int cast_vector_size = arith::ZeroAwareGCD(
         vector_load_bits_max_ / node->dtype.bits(), initial_vector_size_);
     // Record cast constraint (use empty buffer to indicate cast)
-    buffer_vector_infos_.push_back({Buffer(), cast_vector_size, false, {}, {}});
+    buffer_vector_infos_.push_back({Buffer(), cast_vector_size, false, {}});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
   int ComputeBufferVectorSize(const Array<PrimExpr> &indices,
-                              const Buffer &buffer, bool is_store,
-                              Array<PrimExpr> *out_strides) {
+                              const Buffer &buffer, bool is_store) {
     if (!inner_for_)
       return initial_vector_size_;
 
     int buffer_vec_size = loop_extent_vector_size_;
 
     // 1. Compute raw element offset
-    Array<PrimExpr> strides = buffer->strides;
-    if (buffer->strides.empty()) {
-      PrimExpr stride = 1;
-      for (int i = indices.size() - 1; i >= 0; --i) {
-        strides.push_back(stride);
-        stride = stride * buffer->shape[i];
-      }
-      strides = Array<PrimExpr>{strides.rbegin(), strides.rend()};
-    }
-    *out_strides = strides;
+    Array<PrimExpr> strides = GetBufferStrides(buffer);
 
     PrimExpr elem_offset = 0;
     for (size_t i = 0; i < indices.size(); ++i) {
@@ -364,6 +374,12 @@ private:
     // 2. If element offset is independent with loop_var, ignore it.
     if (CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_)) {
       // Specially, if it's a BufferStore, we should not vectorize it.
+      LOG(INFO) << "CanProveIndependent: " << elem_offset << " " << inner_for_->loop_var;
+      LOG(INFO) << "initial_vector_size_" << initial_vector_size_;
+      LOG(INFO) << "buffer name: " << buffer->name;
+      LOG(INFO) << "indices: " << indices;
+      LOG(INFO) << "is_store: " << is_store;
+
       if (is_store) {
         return 1;
       }
@@ -395,11 +411,10 @@ private:
 
   void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer,
                         bool is_store) {
-    Array<PrimExpr> strides;
-    int buffer_vec_size =
-        ComputeBufferVectorSize(indices, buffer, is_store, &strides);
-    buffer_vector_infos_.push_back(
-        {buffer, buffer_vec_size, is_store, indices, strides});
+    LOG(INFO) << "UpdateVectorSize: " << indices << " " << buffer->name << " " << is_store;
+    int buffer_vec_size = ComputeBufferVectorSize(indices, buffer, is_store);
+    LOG(INFO) << "buffer_vec_size: " << buffer_vec_size;
+    buffer_vector_infos_.push_back({buffer, buffer_vec_size, is_store, indices});
   }
 
   int vector_load_bits_max_;
@@ -427,7 +442,7 @@ private:
       ICHECK(extent_ptr) << fnode->extent;
       int extent = *extent_ptr;
       ICHECK(extent % vector_size_ == 0)
-          << "extent: " << extent << " vector_size_: " << vector_size_;
+          << "extent: " << extent << " vector_size_: " << vector_size_ << " for loop: " << fnode;
       ICHECK(is_zero(fnode->min));
       if (extent == vector_size_) {
         fnode.CopyOnWrite()->kind = ForKind::kVectorized;

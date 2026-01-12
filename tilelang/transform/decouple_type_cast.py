@@ -39,22 +39,28 @@ After:
 from __future__ import annotations
 
 from tvm import tir
+from tvm.ir import Op
 from tvm.tir import (
     Allocate,
     Buffer,
     BufferLoad,
     BufferStore,
+    Call,
     DeclBuffer,
     For,
     ForKind,
     IntImm,
     PrimFunc,
+    PyStmtExprVisitor,
     SeqStmt,
     Stmt,
     Var,
 )
 from tvm.tir.stmt_functor import post_order_visit, substitute
 from tvm.tir.transform import prim_func_pass
+
+# Cache the Op for if_then_else to avoid repeated lookups
+_IF_THEN_ELSE_OP = Op.get("tir.if_then_else")
 
 from tilelang.utils.language import is_fragment, is_global, is_local, is_local_var, is_shared
 
@@ -106,25 +112,60 @@ def has_mixed_types(expr: tir.PrimExpr, target_dtype: str) -> bool:
     return found_different
 
 
-def get_global_or_shared_buffer_loads(expr: tir.PrimExpr) -> list[BufferLoad]:
-    """Get all BufferLoads from global/shared buffers in the expression."""
-    result: list[BufferLoad] = []
+@tir.functor.visitor
+class GlobalSharedBufferLoadCollector(PyStmtExprVisitor):
+    """Collect BufferLoads from global/shared buffers, skipping if_then_else conditions.
 
-    def visitor(node) -> None:
-        if isinstance(node, BufferLoad) and is_global_or_shared_buffer(node.buffer):
-            result.append(node)
+    The condition part of if_then_else doesn't participate in type casting,
+    so we skip collecting BufferLoads from there.
+    """
 
-    post_order_visit(expr, visitor)
-    return result
+    def __init__(self, skip_if_then_else_cond: bool = False):
+        super().__init__()
+        self.result: list[BufferLoad] = []
+        self.skip_if_then_else_cond = skip_if_then_else_cond
+
+    def visit_buffer_load_(self, op: BufferLoad) -> None:
+        if is_global_or_shared_buffer(op.buffer):
+            self.result.append(op)
+
+    def visit_call_(self, op: Call) -> None:
+        if self.skip_if_then_else_cond and op.op.same_as(_IF_THEN_ELSE_OP):
+            # Skip condition (args[0]), only visit true/false values (args[1], args[2])
+            self.visit_expr(op.args[1])
+            self.visit_expr(op.args[2])
+        else:
+            # Visit all arguments normally
+            for arg in op.args:
+                self.visit_expr(arg)
+
+
+def get_global_or_shared_buffer_loads(
+    expr: tir.PrimExpr, skip_if_then_else_cond: bool = False
+) -> list[BufferLoad]:
+    """Get BufferLoads from global/shared buffers in the expression.
+
+    Args:
+        expr: The expression to search.
+        skip_if_then_else_cond: If True, skip BufferLoads in if_then_else conditions,
+            since they don't participate in type casting.
+    """
+    collector = GlobalSharedBufferLoadCollector(skip_if_then_else_cond)
+    collector.visit_expr(expr)
+    return collector.result
 
 
 def has_global_or_shared_load_with_different_dtype(expr: tir.PrimExpr, target_dtype: str) -> bool:
     """Check if expression has global/shared BufferLoad with different dtype than target.
 
     Used to detect memory→local cases where we need to insert cast buffer.
+    Skips if_then_else condition since it doesn't participate in type casting.
     """
     target_dtype = str(target_dtype)
-    return any(str(load.buffer.dtype) != target_dtype for load in get_global_or_shared_buffer_loads(expr))
+    return any(
+        str(load.buffer.dtype) != target_dtype
+        for load in get_global_or_shared_buffer_loads(expr, skip_if_then_else_cond=True)
+    )
 
 
 def contains_seq_stmt(stmt: Stmt) -> bool:
@@ -310,7 +351,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         result: list[BufferLoad] = []
         seen_buffers = set()
         for store in stores:
-            for load in get_global_or_shared_buffer_loads(store.value):
+            for load in get_global_or_shared_buffer_loads(store.value, skip_if_then_else_cond=True):
                 if load.buffer not in seen_buffers:
                     result.append(load)
                     seen_buffers.add(load.buffer)

@@ -95,6 +95,31 @@ def test_no_transform_local_to_local():
     _check(before, after)
 
 
+def test_no_transform_if_then_else_condition():
+    """Test no transformation when different dtype is only in if_then_else condition.
+
+    The condition part of if_then_else doesn't participate in type casting,
+    so a global/shared buffer load with different dtype in condition should
+    not trigger cast buffer insertion.
+    """
+
+    @T.prim_func
+    def before(cond_buf: T.Tensor[(1,), T.int32]):
+        acc = T.alloc_local((8,), T.float32)
+        for i in T.vectorized(8):
+            # cond_buf is int32, acc is float32, but cond_buf is only in condition
+            acc[i] = T.if_then_else(cond_buf[0] > 0, acc[i] * 2.0, acc[i])
+
+    @T.prim_func
+    def after(cond_buf: T.Tensor[(1,), T.int32]):
+        acc = T.alloc_local((8,), T.float32)
+        for i in T.vectorized(8):
+            # Should remain unchanged - no cast buffer needed
+            acc[i] = T.if_then_else(cond_buf[0] > 0, acc[i] * T.float32(2), acc[i])
+
+    _check(before, after)
+
+
 # =============================================================================
 # CUDA Codegen Tests
 # =============================================================================
@@ -187,4 +212,4 @@ def test_codegen_no_cast_buffer_same_dtype():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    test_no_transform_if_then_else_condition()
