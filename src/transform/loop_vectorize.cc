@@ -214,6 +214,31 @@ private:
     }
   }
 
+  // NOTE(wt): The base class IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*)
+  // binds let variables, but this causes issues when the same variable name
+  // appears multiple times with different values (e.g., in pipelined loops
+  // where the body is duplicated). For this case, we allow the analyzer to
+  // override the binding. Check the impl of
+  // IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*) in:
+  // tvm/src/arith/ir_mutator_with_analyzer.cc
+  Stmt VisitStmt_(const LetStmtNode *op) final {
+    PrimExpr value = this->VisitExpr(op->value);
+    if (SideEffect(value) <= CallEffectKind::kPure) {
+      // Allow override to handle duplicated loop bodies in pipelined loops
+      analyzer_->Bind(op->var, value, /*allow_override=*/true);
+    }
+    // Continue visiting the body to collect vectorization info
+    Stmt body = this->VisitStmt(op->body);
+    if (value.same_as(op->value) && body.same_as(op->body)) {
+      return ffi::GetRef<Stmt>(op);
+    } else {
+      auto n = this->CopyOnWrite(op);
+      n->value = std::move(value);
+      n->body = std::move(body);
+      return Stmt(n);
+    }
+  }
+
   int vector_load_bits_max_;
 
   const ForNode *inner_for_{};

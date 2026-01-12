@@ -560,21 +560,10 @@ def sum_all_diagonal_matrix(mat: torch.tensor):
     return sum_diags[:, :, 1:]
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser()
+def main(batch=1, heads=1, seq_len=4096, head_dim=64, vertical_size=1000, slash_size=200):
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = batch, heads, seq_len, head_dim
 
-    parser.add_argument("--batch", type=int, default=1)
-    parser.add_argument("--heads", type=int, default=1)
-    parser.add_argument("--seq_len", type=int, default=16384)
-    parser.add_argument("--head_dim", type=int, default=64)
-    parser.add_argument("--vertical_size", type=int, default=1000)
-    parser.add_argument("--slash_size", type=int, default=200)
-
-    args = parser.parse_args(argv)
-
-    BATCH, N_HEADS, SEQ_LEN, D_HEAD = args.batch, args.heads, args.seq_len, args.head_dim
-
-    vertical_size, slash_size = args.vertical_size, args.slash_size
+    vertical_size, slash_size = vertical_size, slash_size
 
     torch.manual_seed(0)
     q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
@@ -613,17 +602,8 @@ def main(argv=None):
     print(f"speedup: {triton_time / tilelang_time:.2f}x")
 
 
-def run_regression_perf(argv=None):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--batch", type=int, default=1)
-    parser.add_argument("--heads", type=int, default=1)
-    parser.add_argument("--seq_len", type=int, default=16384)
-    parser.add_argument("--head_dim", type=int, default=64)
-    parser.add_argument("--vertical_size", type=int, default=1000)
-    parser.add_argument("--slash_size", type=int, default=200)
-    args = parser.parse_args(argv)
-    BATCH, N_HEADS, SEQ_LEN, D_HEAD = args.batch, args.heads, args.seq_len, args.head_dim
-    vertical_size, slash_size = args.vertical_size, args.slash_size
+def run_regression_perf(batch=1, heads=1, seq_len=16384, head_dim=64, vertical_size=1000, slash_size=200):
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = batch, heads, seq_len, head_dim
     torch.manual_seed(0)
     q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
     k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
@@ -687,4 +667,19 @@ def run_regression_perf(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--heads", type=int, default=1)
+    parser.add_argument("--seq_len", type=int, default=16384)
+    parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument("--vertical_size", type=int, default=1000)
+    parser.add_argument("--slash_size", type=int, default=200)
+    args = parser.parse_args()
+    main(
+        batch=args.batch,
+        heads=args.heads,
+        seq_len=args.seq_len,
+        head_dim=args.head_dim,
+        vertical_size=args.vertical_size,
+        slash_size=args.slash_size,
+    )
