@@ -140,9 +140,7 @@ class GlobalSharedBufferLoadCollector(PyStmtExprVisitor):
                 self.visit_expr(arg)
 
 
-def get_global_or_shared_buffer_loads(
-    expr: tir.PrimExpr, skip_if_then_else_cond: bool = False
-) -> list[BufferLoad]:
+def get_global_or_shared_buffer_loads(expr: tir.PrimExpr, skip_if_then_else_cond: bool = False) -> list[BufferLoad]:
     """Get BufferLoads from global/shared buffers in the expression.
 
     Args:
@@ -162,10 +160,7 @@ def has_global_or_shared_load_with_different_dtype(expr: tir.PrimExpr, target_dt
     Skips if_then_else condition since it doesn't participate in type casting.
     """
     target_dtype = str(target_dtype)
-    return any(
-        str(load.buffer.dtype) != target_dtype
-        for load in get_global_or_shared_buffer_loads(expr, skip_if_then_else_cond=True)
-    )
+    return any(str(load.buffer.dtype) != target_dtype for load in get_global_or_shared_buffer_loads(expr, skip_if_then_else_cond=True))
 
 
 def contains_seq_stmt(stmt: Stmt) -> bool:

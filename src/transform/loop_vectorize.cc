@@ -68,27 +68,43 @@ Array<PrimExpr> GetBufferStrides(const Buffer &buffer) {
   return Array<PrimExpr>{strides.rbegin(), strides.rend()};
 }
 
-class VectorizeFindGlobalAccess : public StmtExprVisitor {
+class VectorizeFindMemoryAccess : public StmtExprVisitor {
 public:
-  VectorizeFindGlobalAccess() = default;
+  VectorizeFindMemoryAccess() = default;
 
   bool HasGlobalAccess(const Stmt &stmt) {
     this->operator()(stmt);
     return has_global_access_;
   }
 
+  bool HasSharedAccess(const Stmt &stmt) {
+    this->operator()(stmt);
+    return has_shared_access_;
+  }
+
+  static bool MaySupportVectorize256(const Stmt &stmt) {
+    VectorizeFindMemoryAccess visitor;
+    visitor(stmt);
+    return visitor.has_global_access_ && !visitor.has_shared_access_;
+  }
+
 private:
   bool has_global_access_ = false;
+  bool has_shared_access_ = false;
 
   void VisitStmt_(const BufferStoreNode *node) final {
-    if (node->buffer.scope() == "global")
+    if (IsGlobalBuffer(node->buffer))
       has_global_access_ = true;
+    if (IsSharedBuffer(node->buffer))
+      has_shared_access_ = true;
     return StmtExprVisitor::VisitStmt_(node);
   }
 
   void VisitExpr_(const BufferLoadNode *node) final {
-    if (node->buffer.scope() == "global")
+    if (IsGlobalBuffer(node->buffer))
       has_global_access_ = true;
+    if (IsSharedBuffer(node->buffer))
+      has_shared_access_ = true;
     return StmtExprVisitor::VisitExpr_(node);
   }
 };
@@ -129,9 +145,9 @@ public:
         ctxt->GetConfig(kEnableVectorizePlannerVerbose, Optional<Bool>());
     bool verbose = opt_verbose.value_or(Bool(false));
 
-    if (tvm::tl::TargetIsSm100(Target::Current(false)) &&
+    if (TargetSupportVectorize256(Target::Current(false)) &&
         !disable_vectorize_256 &&
-        VectorizeFindGlobalAccess().HasGlobalAccess(node)) {
+        VectorizeFindMemoryAccess::MaySupportVectorize256(node)) {
       vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
           256;
     } else {
@@ -193,12 +209,10 @@ public:
                     << "\n";
         }
       }
-      std::cerr << "info.buffer: " << buffer << "\n";
-      std::cerr << "is_local_or_fragment: " << is_local_or_fragment(buffer) << "\n";
-
       if (!buffer.defined()) {
         // CastNode, CallNode do not have buffer defined.
-        local_fragment_min = arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
+        local_fragment_min =
+            arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
         memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
       } else if (is_local_or_fragment(buffer)) {
         local_fragment_min =
@@ -303,8 +317,7 @@ private:
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *node) final {
-    if (node->buffer.scope() == "shared" || node->buffer.scope() == "global" ||
-        node->buffer.scope() == "shared.dyn")
+    if (IsSharedBuffer(node->buffer) || IsGlobalBuffer(node->buffer))
       has_nonlocal_memory_access_ = true;
     if (node->buffer->shape.size() == 1) {
       // TODO(lei): This should be improved as
@@ -319,8 +332,7 @@ private:
   }
 
   Stmt VisitStmt_(const BufferStoreNode *node) final {
-    if (node->buffer.scope() == "shared" || node->buffer.scope() == "global" ||
-        node->buffer.scope() == "shared.dyn")
+    if (IsSharedBuffer(node->buffer) || IsGlobalBuffer(node->buffer))
       has_nonlocal_memory_access_ = true;
     UpdateVectorSize(node->indices, node->buffer, true);
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
@@ -374,12 +386,6 @@ private:
     // 2. If element offset is independent with loop_var, ignore it.
     if (CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_)) {
       // Specially, if it's a BufferStore, we should not vectorize it.
-      LOG(INFO) << "CanProveIndependent: " << elem_offset << " " << inner_for_->loop_var;
-      LOG(INFO) << "initial_vector_size_" << initial_vector_size_;
-      LOG(INFO) << "buffer name: " << buffer->name;
-      LOG(INFO) << "indices: " << indices;
-      LOG(INFO) << "is_store: " << is_store;
-
       if (is_store) {
         return 1;
       }
@@ -411,10 +417,9 @@ private:
 
   void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer,
                         bool is_store) {
-    LOG(INFO) << "UpdateVectorSize: " << indices << " " << buffer->name << " " << is_store;
     int buffer_vec_size = ComputeBufferVectorSize(indices, buffer, is_store);
-    LOG(INFO) << "buffer_vec_size: " << buffer_vec_size;
-    buffer_vector_infos_.push_back({buffer, buffer_vec_size, is_store, indices});
+    buffer_vector_infos_.push_back(
+        {buffer, buffer_vec_size, is_store, indices});
   }
 
   int vector_load_bits_max_;
@@ -442,7 +447,8 @@ private:
       ICHECK(extent_ptr) << fnode->extent;
       int extent = *extent_ptr;
       ICHECK(extent % vector_size_ == 0)
-          << "extent: " << extent << " vector_size_: " << vector_size_ << " for loop: " << fnode;
+          << "extent: " << extent << " vector_size_: " << vector_size_
+          << " for loop: " << fnode;
       ICHECK(is_zero(fnode->min));
       if (extent == vector_size_) {
         fnode.CopyOnWrite()->kind = ForKind::kVectorized;
