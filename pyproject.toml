@@ -284,5 +284,5 @@ select = "*linux*x86_64*"
 # x86_64 runners in GitHub Actions have limited storage,
 # pre-install torch without caching to reduce disk usage during install tilelang.
 before-test = [
-    "pip install torch --no-cache-dir",
+    "pip install torch<2.8 --no-cache-dir",
 ]
