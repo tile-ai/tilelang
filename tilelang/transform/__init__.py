@@ -510,3 +510,21 @@ def LayoutReducer():
         The transform pass object produced by the FFI backend.
     """
     return _ffi_api.LayoutReducer()  # type: ignore
+
+
+def UnrollLoop():
+    """Unroll loops as in Halide pipeline.
+
+    This pass unrolls loops based on configuration options including:
+    - auto_max_step: Threshold of number of steps to be automatically unrolled
+    - auto_max_depth: Maximum nested level of loops that can be automatically unrolled
+    - auto_max_extent: Maximum extent of loop that will be unrolled
+    - explicit_unroll: Whether to explicitly unroll instead of setting a pragma
+    - unroll_local_access: Whether to always unroll local access
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.UnrollLoop()  # type: ignore
