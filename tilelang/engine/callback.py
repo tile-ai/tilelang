@@ -4,17 +4,6 @@ import tvm_ffi
 from tvm.target import Target
 
 
-def register_metal_postproc(func: Callable[[str, Target], str], override: bool = True):
-    """Register a post-processing function for CUDA code generation.
-
-    Args:
-        func: A callable that takes generated code (str) and target (Target) as input,
-             and returns the processed code (str).
-        override: Whether to override existing registered function. Defaults to True.
-    """
-    tvm_ffi.register_global_func("tilelang_callback_metal_postproc", f=func, override=override)
-
-
 def register_cuda_postproc(func: Callable[[str, Target], str], override: bool = True):
     """Register a post-processing function for CUDA code generation.
 
@@ -50,6 +39,17 @@ def register_c_postproc(func: Callable[[str, Target], str], override: bool = Tru
         override: Whether to override existing registered function. Defaults to True.
     """
     tvm_ffi.register_global_func("tilelang_callback_c_host_postproc", f=func, override=override)
+
+
+def register_metal_postproc(func: Callable[[str, Target], str], override: bool = True):
+    """Register a post-processing function for Metal code generation.
+
+    Args:
+        func: A callable that takes generated code (str) and target (Target) as input,
+             and returns the processed code (str).
+        override: Whether to override existing registered function. Defaults to True.
+    """
+    tvm_ffi.register_global_func("tilelang_callback_metal_postproc", f=func, override=override)
 
 
 def register_cuda_postproc_callback(func: Callable | bool = None, override: bool = True):
@@ -152,16 +152,16 @@ def register_c_postproc_callback(func: Callable | bool = None, override: bool = 
 
 
 def register_metal_postproc_callback(func: Callable | bool = None, override: bool = True):
-    """Decorator for registering C host post-processing callback function.
+    """Decorator for registering Metal post-processing callback function.
 
     Can be used with or without parentheses:
-        @register_c_postproc_callback
+        @register_metal_postproc_callback
         def func(code, target): ...
 
-        @register_c_postproc_callback()
+        @register_metal_postproc_callback()
         def func(code, target): ...
 
-        @register_c_postproc_callback(override=False)
+        @register_metal_postproc_callback(override=False)
         def func(code, target): ...
 
     Args:
