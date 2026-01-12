@@ -131,7 +131,7 @@ bool TargetSupportVectorize256(Target target) {
   if (!TargetIsCuda(target))
     return false;
   int arch = GetArchInt(target);
-  return arch >= 100 && arch <= 110;
+  return arch >= 100;
 }
 
 int TargetGetWarpSize(Target target) {
