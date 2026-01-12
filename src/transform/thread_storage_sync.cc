@@ -566,7 +566,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     curr_stmt_.access.clear();
     allow_append_ = false;
     // traverse body block
-    this->VisitStmt(op->body);
+    ConstrVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const BlockNode *op) final {
     auto block = Downcast<Block>(op);
