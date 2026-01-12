@@ -169,12 +169,12 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         if self.executable is None:
             self.executable = runtime.Executable(self.rt_mod)
+            if COMPILE_ARGS:
+                # Precompile jit module with extra arguments
+                self.executable.jit(**COMPILE_ARGS)
 
         dynamic_symbolic_map = self._process_dynamic_symbolic()
         executable = self.executable
-        if COMPILE_ARGS:
-            # Precompile jit module with extra arguments
-            executable.jit(**COMPILE_ARGS)
 
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func

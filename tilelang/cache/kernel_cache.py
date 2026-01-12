@@ -24,10 +24,16 @@ from tilelang import __version__
 
 
 COMPILE_ARGS = {}
+BASE_KEY = {
+    "version": __version__,
+}
 
 if sys.platform == "darwin":
+    import torch
     from torch.utils import cpp_extension
-    COMPILE_ARGS['options'] = ["-x", "objective-c++", "-g", "-std=gnu++17"] + ["-I" + i for i in cpp_extension.include_paths()]
+
+    BASE_KEY["torch"] = torch.__version__
+    COMPILE_ARGS["options"] = ["-x", "objective-c++", "-g", "-std=gnu++17"] + ["-I" + i for i in cpp_extension.include_paths()]
 
 
 class KernelCache:
@@ -100,7 +106,6 @@ class KernelCache:
         self.execution_backend = execution_backend
         func_binary = func.script(show_meta=True).encode()
         key_data = {
-            "version": __version__,
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),
             "args_repr": tuple(repr(arg) for arg in args),  # Use repr to serialize arguments, may need more robust serialization
@@ -109,10 +114,8 @@ class KernelCache:
             "execution_backend": execution_backend,
             "pass_configs": pass_configs,
             "compile_flags": compile_flags,
+            **BASE_KEY,
         }
-        if isinstance(target, Target) and target.kind == 'metal':
-            import torch
-            key_data['torch'] = torch.__version__
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
         # Use SHA256 to generate hash key
