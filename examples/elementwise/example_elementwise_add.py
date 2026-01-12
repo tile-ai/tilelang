@@ -1,5 +1,4 @@
 import argparse
-import itertools
 import torch
 import tilelang
 import tilelang.language as T
@@ -9,15 +8,6 @@ def ref_program(x, y):
     return x + y
 
 
-def get_configs():
-    block_M = [64, 128, 256]
-    block_N = [64, 128, 256]
-    threads = [64, 128, 256]
-    configs = list(itertools.product(block_M, block_N, threads))
-    return [{"block_M": bm, "block_N": bn, "threads": th} for bm, bn, th in configs]
-
-
-@tilelang.autotune(configs=get_configs())
 @tilelang.jit(out_idx=[-1])
 def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
     @T.prim_func
@@ -72,6 +62,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--m", type=int, default=1024)
     parser.add_argument("--n", type=int, default=1024)
-    parser.add_argument("--use_autotune", action="store_true", default=False)
     args, _ = parser.parse_known_args()
-    main(args.m, args.n, args.use_autotune)
+    main(args.m, args.n)
