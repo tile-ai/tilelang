@@ -233,5 +233,6 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
     # Ensure the sync appears before the unrolled loop
     assert s.index('T.tvm_storage_sync("shared.dyn")') < s.index("for i in T.unroll(8)")
 
+
 if __name__ == "__main__":
     tilelang.testing.main()
