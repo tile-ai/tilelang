@@ -1274,14 +1274,14 @@ private:
     }
     if (has_same_index) {
       bool range_is_equal = true;
-      arith::Analyzer prev_analyzer, curr_analyer;
+      arith::Analyzer prev_analyzer, curr_analyzer;
       prev.cset.Populate(prev_analyzer);
-      curr.cset.Populate(curr_analyer);
+      curr.cset.Populate(curr_analyzer);
       for (unsigned idx = 0; idx != 3; ++idx) {
         Var prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
         Var curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
         auto prev_bound = prev_analyzer.const_int_bound(prev_var);
-        auto curr_bound = curr_analyer.const_int_bound(curr_var);
+        auto curr_bound = curr_analyzer.const_int_bound(curr_var);
         if (prev_bound->min_value != curr_bound->min_value ||
             prev_bound->max_value != curr_bound->max_value) {
           range_is_equal = false;
