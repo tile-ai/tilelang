@@ -4,24 +4,18 @@ import tilelang.language as T
 import torch
 
 
-from tilelang.engine.callback import register_metal_postproc_callback, register_c_postproc_callback
+from tilelang.engine.callback import register_c_postproc_callback
 
-
-# @register_metal_postproc_callback
-def print_c_mod(code: str, t) -> str:
-    print(code)
-    print(t)
-    return code
 
 @register_c_postproc_callback
 def print_c_mod(code: str, t) -> str:
-    print(t)
-    kernel_launch = '''if (TVMFFIFunctionCall(gemm_kernel_packed, (TVMFFIAny*) stack_ffi_any, 8, &result_31) != 0) {
+    print(code)
+    kernel_launch = """if (TVMFFIFunctionCall(gemm_kernel_packed, (TVMFFIAny*) stack_ffi_any, 8, &result_31) != 0) {
     return -1;
-  }'''
+  }"""
     assert kernel_launch in code
 
-    patched = '''
+    patched = """
     __block int ret = 0;
 
     auto serialQueue = torch::mps::get_dispatch_queue();
@@ -34,8 +28,8 @@ def print_c_mod(code: str, t) -> str:
         ret = -1;
       }
     });
-    return ret;'''
-    
+    return ret;"""
+
     return code.replace(kernel_launch, patched)
 
 
@@ -52,7 +46,7 @@ def _patched_cc(output, objects, options, compile_cmd, *args, **kwargs):
     # from torch.utils import cpp_extension
 
     # torch_opts = ["-I" + i for i in cpp_extension.include_paths()]
-    import ipdb; ipdb.set_trace()
+    # import ipdb; ipdb.set_trace()
     # options += torch_opts + ["-x", "objective-c++"] + ["-g", "-std=gnu++17"]
     return _cc(output, objects, options, compile_cmd, *args, **kwargs)
 
