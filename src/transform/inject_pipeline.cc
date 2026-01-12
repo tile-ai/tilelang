@@ -1100,9 +1100,8 @@ private:
           for (const auto &lw : loop_var_let_wrappers) {
             dependent_vars.insert(lw.var.get());
           }
-          bool depends_on_loop = UsesVar(
-              let_stmt->value,
-              [&dependent_vars](const VarNode *vn) {
+          bool depends_on_loop =
+              UsesVar(let_stmt->value, [&dependent_vars](const VarNode *vn) {
                 return dependent_vars.count(vn) > 0;
               });
           if (depends_on_loop) {

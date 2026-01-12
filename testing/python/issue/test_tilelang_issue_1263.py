@@ -23,11 +23,15 @@ def test_issue_1263_pipeline_no_consumer():
                     T.clear(B)
 
         return fwd_main
+
     tilelang.compile(test_kernel(1024, 1024))
-    tilelang.compile(test_kernel(1024, 1024), pass_configs={
-      tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-      tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    })
+    tilelang.compile(
+        test_kernel(1024, 1024),
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        },
+    )
 
 
 if __name__ == "__main__":
