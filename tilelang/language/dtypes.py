@@ -12,6 +12,10 @@ _T = TypeVar("_T")
 if TYPE_CHECKING:
 
     class dtype(Generic[_T]):
+        @property
+        def bits(self) -> int: ...
+        @property
+        def bytes(self) -> int: ...
         def as_torch(self) -> torch.dtype: ...
 else:
     dtype = tvm.DataType
@@ -218,9 +222,15 @@ def __dtype_new__(cls, value: AnyDType) -> dtype:
         raise TypeError(f"Invalid DataType {value}({type(value)}), expect one of {expected}")
 
 
+def __dtype_bytes__(self: dtype) -> int:
+    """Return the number of bytes for this dtype."""
+    return self.itemsize
+
+
 dtype.__call__ = __dtype_call__
 dtype.__new__ = __dtype_new__
 dtype.as_torch = __dtype_as_torch__
+dtype.bytes = property(__dtype_bytes__)
 
 
 def get_tvm_dtype(value: AnyDType) -> dtype:

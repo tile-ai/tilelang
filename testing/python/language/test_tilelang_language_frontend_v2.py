@@ -40,7 +40,7 @@ def test_argument():
 
 
 def test_expr():
-    from tilelang.language.eager.dtypes import _all_dtypes
+    from tilelang.language.dtypes import _all_dtypes
 
     errors = []
     for name in _all_dtypes:

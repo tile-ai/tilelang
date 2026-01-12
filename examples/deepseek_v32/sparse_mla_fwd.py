@@ -161,9 +161,7 @@ def sparse_mla_fwd(
             for h_i in T.Parallel(H_per_block):
                 sumexp[h_i] = T.log2(sumexp[h_i]) + m_i[h_i] * sm_scale
 
-            T.copy(acc_o, O_shared)
             T.copy(acc_o, Output[b_i, s_i, H0:H1, :])
-            T.copy(sumexp, Lse_shared)
             T.copy(sumexp, Lse[b_i, s_i, H0:H1])
 
     return main

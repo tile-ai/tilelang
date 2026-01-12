@@ -15,7 +15,7 @@ import inspect
 
 # from .utils import get_ast, get_compiled_object
 from . import utils
-from . import dtypes
+from .. import dtypes
 
 _span_attrs = ["lineno", "col_offset", "end_lineno", "end_col_offset"]
 
