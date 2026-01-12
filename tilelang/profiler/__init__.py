@@ -211,10 +211,10 @@ class Profiler:
         func: Callable | None = None,
         warmup: int = 25,
         rep: int = 100,
-        n_warmup: int = 1,
-        n_repeat: int = 1,
+        n_warmup: int = 0,
+        n_repeat: int = 0,
         input_tensors: list[torch.Tensor] = None,
-        backend: Literal["event", "cupti"] = "event",
+        backend: Literal["event", "cupti", "cudagraph"] = "event",
         quantiles: list[float] | None = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
     ) -> float:
@@ -226,7 +226,7 @@ class Profiler:
             rep: Number of repetitions for timing
             n_warmup: Number of warmup iterations
             n_repeat: Number of timing iterations
-            profiler: Which profiling backend to use
+            backend: Which profiling backend to use - "event", "cupti", or "cudagraph"
             input_tensors: Optional pre-generated input tensors
 
         Returns:
