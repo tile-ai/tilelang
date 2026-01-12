@@ -308,7 +308,7 @@ Pass UnrollLoop() {
     if (!cfg.defined()) {
       cfg = AttrsWithDefaultValues<UnrollLoopConfig>();
     }
-    n->body = tl::UnrollLoop(std::move(f->body), cfg.value());
+    n->body = tl::UnrollLoop(f->body, cfg.value());
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.UnrollLoop", {});
