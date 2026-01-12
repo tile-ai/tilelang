@@ -49,7 +49,7 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
         return
     if warning or ((error_rate < 0.01 or abs_atol <= 0.3)):
         if error_rate > ratio:
-            warnings.warn(msg)
+            warnings.warn(msg, stacklevel=2)
     else:
         assert error_rate < ratio, msg
 
@@ -80,11 +80,11 @@ def tensor_cache(
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         nonlocal last_args, last_kwargs, last_result
 
-        if last_args is not None and last_kwargs is not None:
-            if len(args) == len(last_args) and len(kwargs) == len(last_kwargs):
-                if all(a is b for a, b in zip(args, last_args)) and \
-                        all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()):
-                    return last_result
+        if (last_args is not None and last_kwargs is not None
+            and len(args) == len(last_args) and len(kwargs) == len(last_kwargs)
+            and all(a is b for a, b in zip(args, last_args))
+            and all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items())):
+                return last_result
 
         result = fn(*args, **kwargs)
         last_args, last_kwargs, last_result = args, kwargs, result
