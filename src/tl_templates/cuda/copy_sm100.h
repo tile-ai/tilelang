@@ -8,13 +8,13 @@ namespace tl {
 // 256-bit load for longlong4
 __device__ __forceinline__ longlong4 ld_global_256(const longlong4 *ptr) {
   longlong4 ret;
-#if (__CUDACC_VER_MAJOR__ > 12) || \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
   asm volatile("ld.global.v4.s64 {%0, %1, %2, %3}, [%4];"
                : "=l"(ret.x), "=l"(ret.y), "=l"(ret.z), "=l"(ret.w)
                : "l"(ptr));
 #else
-  // CUDA < 12.9: two 128-bit loads
+  // CUDA < 12.9 fallback: two 128-bit loads (may have performance regression)
   const char *base = reinterpret_cast<const char *>(ptr);
   asm volatile("ld.global.v2.s64 {%0, %1}, [%2];"
                : "=l"(ret.x), "=l"(ret.y)
@@ -29,13 +29,13 @@ __device__ __forceinline__ longlong4 ld_global_256(const longlong4 *ptr) {
 // 256-bit load for ulonglong4
 __device__ __forceinline__ ulonglong4 ld_global_256(const ulonglong4 *ptr) {
   ulonglong4 ret;
-#if (__CUDACC_VER_MAJOR__ > 12) || \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
   asm volatile("ld.global.v4.u64 {%0, %1, %2, %3}, [%4];"
                : "=l"(ret.x), "=l"(ret.y), "=l"(ret.z), "=l"(ret.w)
                : "l"(ptr));
 #else
-  // CUDA < 12.9: two 128-bit loads
+  // CUDA < 12.9 fallback: two 128-bit loads (may have performance regression)
   const char *base = reinterpret_cast<const char *>(ptr);
   asm volatile("ld.global.v2.u64 {%0, %1}, [%2];"
                : "=l"(ret.x), "=l"(ret.y)
@@ -51,13 +51,13 @@ __device__ __forceinline__ ulonglong4 ld_global_256(const ulonglong4 *ptr) {
 template <typename T>
 __device__ __forceinline__ ulonglong4 ld_global_256(const T *ptr) {
   ulonglong4 ret;
-#if (__CUDACC_VER_MAJOR__ > 12) || \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
   asm volatile("ld.global.v4.u64 {%0, %1, %2, %3}, [%4];"
                : "=l"(ret.x), "=l"(ret.y), "=l"(ret.z), "=l"(ret.w)
                : "l"(ptr));
 #else
-  // CUDA < 12.9: two 128-bit loads
+  // CUDA < 12.9 fallback: two 128-bit loads (may have performance regression)
   const char *base = reinterpret_cast<const char *>(ptr);
   asm volatile("ld.global.v2.u64 {%0, %1}, [%2];"
                : "=l"(ret.x), "=l"(ret.y)
@@ -71,13 +71,13 @@ __device__ __forceinline__ ulonglong4 ld_global_256(const T *ptr) {
 
 // 256-bit store for longlong4
 __device__ __forceinline__ void st_global_256(longlong4 *ptr, longlong4 &val) {
-#if (__CUDACC_VER_MAJOR__ > 12) || \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
   asm volatile("st.global.v4.s64 [%0], {%1, %2, %3, %4};"
                :
                : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
 #else
-  // CUDA < 12.9: two 128-bit stores
+  // CUDA < 12.9 fallback: two 128-bit stores (may have performance regression)
   char *base = reinterpret_cast<char *>(ptr);
   asm volatile("st.global.v2.s64 [%0], {%1, %2};"
                :
@@ -91,13 +91,13 @@ __device__ __forceinline__ void st_global_256(longlong4 *ptr, longlong4 &val) {
 // 256-bit store for ulonglong4 with non-const reference
 __device__ __forceinline__ void st_global_256(ulonglong4 *ptr,
                                               ulonglong4 &val) {
-#if (__CUDACC_VER_MAJOR__ > 12) || \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
   asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
                :
                : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
 #else
-  // CUDA < 12.9: two 128-bit stores
+  // CUDA < 12.9 fallback: two 128-bit stores (may have performance regression)
   char *base = reinterpret_cast<char *>(ptr);
   asm volatile("st.global.v2.u64 [%0], {%1, %2};"
                :
@@ -113,13 +113,13 @@ __device__ __forceinline__ void st_global_256(ulonglong4 *ptr,
 // and compilation will fail if we have st_global_256(ptr, ld_global_256(ptr))
 __device__ __forceinline__ void st_global_256(ulonglong4 *ptr,
                                               const ulonglong4 &val) {
-#if (__CUDACC_VER_MAJOR__ > 12) || \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
   asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
                :
                : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
 #else
-  // CUDA < 12.9: two 128-bit stores
+  // CUDA < 12.9 fallback: two 128-bit stores (may have performance regression)
   char *base = reinterpret_cast<char *>(ptr);
   asm volatile("st.global.v2.u64 [%0], {%1, %2};"
                :
@@ -133,13 +133,13 @@ __device__ __forceinline__ void st_global_256(ulonglong4 *ptr,
 // Generic 256-bit store for FP8 types
 template <typename T>
 __device__ __forceinline__ void st_global_256(T *ptr, const ulonglong4 &val) {
-#if (__CUDACC_VER_MAJOR__ > 12) || \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
   asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
                :
                : "l"(ptr), "l"(val.x), "l"(val.y), "l"(val.z), "l"(val.w));
 #else
-  // CUDA < 12.9: two 128-bit stores
+  // CUDA < 12.9 fallback: two 128-bit stores (may have performance regression)
   char *base = reinterpret_cast<char *>(ptr);
   asm volatile("st.global.v2.u64 [%0], {%1, %2};"
                :
@@ -154,14 +154,14 @@ __device__ __forceinline__ void st_global_256(T *ptr, const ulonglong4 &val) {
 template <typename T>
 __device__ __forceinline__ void st_global_256(T *ptr, T &val) {
   ulonglong4 &val_u64 = *((ulonglong4 *)&val);
-#if (__CUDACC_VER_MAJOR__ > 12) || \
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
   asm volatile("st.global.v4.u64 [%0], {%1, %2, %3, %4};"
                :
                : "l"(ptr), "l"(val_u64.x), "l"(val_u64.y), "l"(val_u64.z),
                  "l"(val_u64.w));
 #else
-  // CUDA < 12.9: two 128-bit stores
+  // CUDA < 12.9 fallback: two 128-bit stores (may have performance regression)
   char *base = reinterpret_cast<char *>(ptr);
   asm volatile("st.global.v2.u64 [%0], {%1, %2};"
                :
