@@ -38,6 +38,8 @@ dependencies = [
     "psutil",
     "torch",
     "torch>=2.4; platform_system == 'Darwin'",
+    # jit-compiling a torch extension needs setuptools
+    "setuptools; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
     "z3-solver>=4.13.0",
