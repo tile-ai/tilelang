@@ -344,7 +344,6 @@ TL_DEVICE void tma_store_add(const CUtensorMap &descriptor,
   );
 }
 
-
 TL_DEVICE void prefetch_tma_descriptor(const CUtensorMap &descriptor) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   asm volatile("prefetch.tensormap [%0];" : : "l"(gmem_int_desc) : "memory");
