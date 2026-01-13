@@ -503,22 +503,27 @@ class DSLMutator(ast.NodeTransformer):
         if name not in arg_names:
             return
         annot = stmt.annotation
-        # case 1: subscript(attribute(T, Tensor), ...)
-        # case 2: attribute(T, float32)
+
+        # case 1: attribute(T, float32)
         if isinstance(annot, ast.Attribute) and annot.attr in dtypes._all_dtypes:
             eval_res = self._try_eval(annot)
             if isinstance(eval_res, dtypes.dtype):
                 self.extra_type_hints[name] = eval_res
                 return
+
+        # case 2: subscript(attribute(T, Tensor), ...) or call(attribute(T, Tensor), ...)
+        inner = None
+        if isinstance(annot, ast.Call) and isinstance(annot.func, ast.Attribute):
+            inner = annot.func
         if isinstance(annot, ast.Subscript) and isinstance(annot.value, ast.Attribute):
             inner = annot.value
-            if inner.attr in ["Tensor", "StridedTensor", "ptr"]:
-                eval_res = self._try_eval(inner)
-                from tilelang.language.proxy import TensorProxy, StridedTensorProxy, ptr
+        if inner is not None and inner.attr in ["Tensor", "StridedTensor", "ptr"]:
+            eval_res = self._try_eval(inner)
+            from tilelang.language.proxy import TensorProxy, StridedTensorProxy, ptr
 
-                if isinstance(eval_res, (TensorProxy, StridedTensorProxy)) or eval_res is ptr:
-                    self.extra_type_hints[name] = ptr
-                    return
+            if isinstance(eval_res, (TensorProxy, StridedTensorProxy)) or eval_res is ptr:
+                self.extra_type_hints[name] = ptr
+                return
 
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
