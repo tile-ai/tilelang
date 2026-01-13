@@ -118,7 +118,6 @@ public:
       return ret;
     } else if (op->attr_key == "pragma_unroll_explicit") {
       bool explicit_unroll = Downcast<Integer>(op->value)->value;
-      LOG(INFO) << "explicit_unroll: " << explicit_unroll;
       std::swap(explicit_unroll, explicit_unroll_);
       Stmt ret = this->VisitStmt(op->body);
       std::swap(explicit_unroll, explicit_unroll_);
