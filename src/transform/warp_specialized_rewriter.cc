@@ -164,17 +164,8 @@ public:
       if (call->op.same_as(loop_break())) {
         role = Role::kBoth;
       }
-      if (call->op.same_as(builtin::call_extern())) {
-        if (!call->args.empty()) {
-          if (const auto *str_node =
-                  call->args[0].as<tvm::tir::StringImmNode>()) {
-            std::string func_name = str_node->value;
-            if (func_name == "cudaGridDependencySynchronize" ||
-                func_name == "cudaTriggerProgrammaticLaunchCompletion") {
-              role = Role::kBoth;
-            }
-          }
-        }
+      if (call->op.same_as(pdl_sync()) || call->op.same_as(pdl_trigger())) {
+        role = Role::kBoth;
       }
     }
     SetRole(op, role);
@@ -751,7 +742,23 @@ private:
                                 : parity_;
           block_stmt.push_back(makeParityWait(acquire_barrier_id, parity));
         }
-        ICHECK(!map.release[i].empty());
+        // It is possible that a producer does not participate in any
+        // producer-consumer dependency that requires synchronization.
+        // In that case, there will be no associated release pattern.
+        // We should still emit the (optionally guarded) statement without
+        // inserting any mbarrier for it instead of failing.
+        if (map.release[i].empty()) {
+          LOG(WARNING) << "Producer doesn't have corresponding consumer: "
+                       << seq_transformed[i];
+          block_stmt.push_back(seq_transformed[i]);
+          new_body.push_back(
+              MakeGroupBlock(block_stmt.size() == 1
+                                 ? block_stmt[0]
+                                 // NOLINTNEXTLINE(performance-move-const-arg)
+                                 : SeqStmt(std::move(block_stmt)),
+                             annotations));
+          continue;
+        }
         for (size_t j = 0; j < map.release[i].size(); j++) {
           int pattern_idx = map.release[i][j];
           PrimExpr release_barrier_id =

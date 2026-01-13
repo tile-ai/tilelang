@@ -19,7 +19,7 @@ from tilelang.utils.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
-from tilelang.language.eager.dtypes import dtype
+from tilelang.language.dtypes import dtype
 
 
 class TVMFFIKernelAdapter(BaseKernelAdapter):

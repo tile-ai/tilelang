@@ -27,7 +27,7 @@ try:
     from typing import ParamSpec, Self
 except ImportError:  # Python < 3.11 for Self, < 3.10 for ParamSpec
     from typing_extensions import ParamSpec, Self
-from . import dtypes as dt
+from .. import dtypes as dt
 from . import utils
 from tilelang.jit.exceptions import JITNoBuilderError, EagerJITBuildError
 import threading

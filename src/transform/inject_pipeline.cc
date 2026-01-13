@@ -838,10 +838,21 @@ private:
       // If there were Let-wrappers outside the original pipeline body that
       // depended on the pipeline loop var, push them into each rewritten
       // block with the correct per-block substitution.
+      // We iterate in reverse order so that earlier definitions scope over
+      // later ones. For example, if we have:
+      //   id = ids[i]       # depends on loop var
+      //   id2 = ids2[id]    # depends on id
+      // We want to produce:
+      //   LetStmt(id, ids[...],
+      //     LetStmt(id2, ids2[id],
+      //       body))
+      // So that id2's definition can reference id.
       if (!loop_var_let_wrappers_.empty()) {
         BlockNode *n = new_block.CopyOnWrite();
         Stmt inner = n->body;
-        for (const auto &lw : loop_var_let_wrappers_) {
+        for (auto it = loop_var_let_wrappers_.rbegin();
+             it != loop_var_let_wrappers_.rend(); ++it) {
+          const auto &lw = *it;
           PrimExpr substituted = Substitute(
               lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
           inner = LetStmt(lw.var, substituted, inner);
@@ -1076,14 +1087,24 @@ private:
           continue;
         }
         if (const auto *let_stmt = current.as<LetStmtNode>()) {
-          // If this Let value uses the pipeline loop var, record it and push
-          // inside each rewritten block later so the loop var can be
-          // substituted with the correct per-iteration index. Otherwise, keep
-          // it as a normal wrapper.
-          bool uses_loop_var = UsesVar(
-              let_stmt->value,
-              [v = op->loop_var.get()](const VarNode *vn) { return vn == v; });
-          if (uses_loop_var) {
+          // If this Let value uses the pipeline loop var OR any variable
+          // defined by a previously recorded loop-var-dependent LetStmt,
+          // record it and push inside each rewritten block later so the
+          // loop var can be substituted with the correct per-iteration index.
+          // Otherwise, keep it as a normal wrapper.
+          // This handles transitive dependencies like:
+          //   id = ids[i]      # depends on loop var
+          //   id2 = ids2[id]   # depends on id, so transitively on loop var
+          std::unordered_set<const VarNode *> dependent_vars;
+          dependent_vars.insert(op->loop_var.get());
+          for (const auto &lw : loop_var_let_wrappers) {
+            dependent_vars.insert(lw.var.get());
+          }
+          bool depends_on_loop =
+              UsesVar(let_stmt->value, [&dependent_vars](const VarNode *vn) {
+                return dependent_vars.count(vn) > 0;
+              });
+          if (depends_on_loop) {
             loop_var_let_wrappers.push_back({let_stmt->var, let_stmt->value});
           } else {
             Var var = let_stmt->var;

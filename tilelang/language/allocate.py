@@ -28,8 +28,8 @@ from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
 from tvm.tir.buffer import Buffer
 from tvm.tir.expr import FloatImm, IntImm
-from .eager import dtypes as _dtypes
-from .eager.dtypes import dtype as tl_dtype
+from . import dtypes as _dtypes
+from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
 
 _Shapes = TypeVarTuple("_Shapes")
