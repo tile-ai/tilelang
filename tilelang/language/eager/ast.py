@@ -472,6 +472,7 @@ class DSLMutator(ast.NodeTransformer):
         node.body = stmts + node.body
         node.decorator_list.clear()
         name = node.name
+        node.args.kwarg = ast.arg(arg="__kwargs")
         node = SpanAttacher("__tb_fl", "__tb_fn").visit(node)
         return quote1(
             f"def make_closure({', '.join(self.nonlocals.keys())}):\n"
