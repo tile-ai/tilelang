@@ -52,6 +52,21 @@ def _get_package_version(pkg: str) -> str | None:
         return None
 
 
+def _is_running_autodd() -> bool:
+    """Detect if we are running under `python -m tilelang.autodd`."""
+    orig_argv = getattr(sys, "orig_argv", None)
+    if orig_argv is None:
+        return False
+    if "-mtilelang.autodd" in orig_argv:
+        return True
+    pos = orig_argv.index("-m") if "-m" in orig_argv else -1
+    if pos != -1 and pos + 1 < len(orig_argv):
+        module_name = orig_argv[pos + 1]
+        if module_name == "tilelang.autodd" or module_name.startswith("tilelang.autodd."):
+            return True
+    return False
+
+
 def _find_cuda_home() -> str:
     """Find the CUDA install path.
 
@@ -325,6 +340,17 @@ class Environment:
     def get_default_verbose(self) -> bool:
         """Get default verbose flag from environment."""
         return self.TILELANG_DEFAULT_VERBOSE.lower() in ("1", "true", "yes", "on")
+
+    def is_running_autodd(self) -> bool:
+        """Return True if we are running under `python -m tilelang.autodd`."""
+        # means we are running under `python -m tilelang.autodd`
+        return _is_running_autodd()
+
+    def is_light_import(self) -> bool:
+        """Return True if we are running in light import mode."""
+        # means we are running under `python -m tilelang.autodd` or some
+        # other scripts that only require the minimal environment variables.
+        return self.is_running_autodd()
 
 
 # Instantiate as a global configuration object

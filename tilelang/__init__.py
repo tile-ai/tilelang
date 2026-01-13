@@ -7,24 +7,6 @@ import warnings
 from pathlib import Path
 
 
-def _is_running_autodd() -> bool:
-    orig_argv = getattr(sys, "orig_argv", None)
-    if orig_argv is None:
-        return False
-    if "-mtilelang.autodd" in orig_argv:
-        return True
-    pos = orig_argv.index("-m") if "-m" in orig_argv else -1
-    if pos != -1 and pos + 1 < len(orig_argv):
-        module_name = orig_argv[pos + 1]
-        if module_name == "tilelang.autodd" or module_name.startswith("tilelang.autodd."):
-            return True
-    return False
-
-
-# check if we are running under AutoDD
-_RUNNING_AUTODD = _is_running_autodd()
-
-
 def _compute_version() -> str:
     """Return the package version without being polluted by unrelated installs.
 
@@ -115,8 +97,10 @@ def _init_logger():
     set_log_level("INFO")
 
 
-# Skip logger initialization when running under AutoDD
-if not _RUNNING_AUTODD:
+from .env import env as env  # noqa: F401
+
+# Skip logger initialization in light import mode
+if not env.is_light_import():
     _init_logger()
 
 del _init_logger
@@ -141,11 +125,10 @@ def _lazy_load_lib():
         ctypes.CDLL.__init__ = old_init
 
 
-# Skip import when running under AutoDD
-if not _RUNNING_AUTODD:
+# Skip heavy imports in light import mode
+if not env.is_light_import():
     with _lazy_load_lib():
         from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
-        from .env import env as env  # noqa: F401
 
         import tvm
         import tvm.base  # noqa: F401
