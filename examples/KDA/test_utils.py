@@ -81,3 +81,28 @@ def compare_tensors(name, x, y, atol=1e-5, rtol=1e-5):
     print(f"  absolute error   : {rel_pos_abs_err:.6e}")
 
     print("=====================================\n")
+
+
+def do_bench(fn, *args, warmup=20, rep=10, **kwargs):
+    """
+    Do benchmark for a function.
+    """
+    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
+    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
+    for _ in range(warmup):
+        fn(*args, **kwargs)
+
+    torch.cuda.synchronize()
+    for i in range(rep):
+        start_event[i].record()
+        fn(*args, **kwargs)
+        end_event[i].record()
+    torch.cuda.synchronize()
+
+    # Record clocks
+    times = torch.tensor(
+        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
+        dtype=torch.float,
+    )
+    print(times)
+    return times.mean().item()

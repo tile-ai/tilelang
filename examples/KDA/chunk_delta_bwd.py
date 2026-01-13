@@ -6,11 +6,9 @@ import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 
-print(tilelang.__file__, flush=True)
-
-
 from FLA_KDA.fla_chunk_delta import chunk_gated_delta_rule_bwd_dhu
 from FLA_KDA.cumsum import chunk_local_cumsum
+from test_utils import do_bench
 
 import torch
 import torch.nn.functional as F
@@ -123,18 +121,18 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
     @T.prim_func
     def kernel(
         # Input
-        Q: T.Tensor(Q_shape, dtype=input_dtype),  # type: ignore
-        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        W: T.Tensor(W_shape, dtype=input_dtype),  # type: ignore
-        GK: T.Tensor(G_shape, dtype=gate_dtype),  # type: ignore
-        h0: T.Tensor(h0_shape, dtype=input_dtype),  # type: ignore
-        dht: T.Tensor(dht_shape, dtype=input_dtype),  # type: ignore
-        dO: T.Tensor(dO_shape, dtype=input_dtype),  # type: ignore
-        dv: T.Tensor(dv_shape, dtype=input_dtype),  # type: ignore
+        Q: T.Tensor(Q_shape, dtype=input_dtype),
+        K: T.Tensor(K_shape, dtype=input_dtype),
+        W: T.Tensor(W_shape, dtype=input_dtype),
+        GK: T.Tensor(G_shape, dtype=gate_dtype),
+        h0: T.Tensor(h0_shape, dtype=input_dtype),
+        dht: T.Tensor(dht_shape, dtype=input_dtype),
+        dO: T.Tensor(dO_shape, dtype=input_dtype),
+        dv: T.Tensor(dv_shape, dtype=input_dtype),
         # Output
-        dh: T.Tensor(dh_shape, dtype=output_dtype),  # type: ignore
-        dh0: T.Tensor(dh0_shape, dtype=state_dtype),  # type: ignore
-        dv2: T.Tensor(dv2_shape, dtype=output_dtype),  # type: ignore
+        dh: T.Tensor(dh_shape, dtype=output_dtype),
+        dh0: T.Tensor(dh0_shape, dtype=state_dtype),
+        dv2: T.Tensor(dv2_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(DV, block_DV), B * H, threads=threads) as (bv, bbh):
             bb, bh = bbh // H, bbh % H
@@ -290,8 +288,6 @@ def run_test(
         use_initial_state,
         use_final_state_gradient,
     )
-    # kernel = tilelang.compile(program)
-    # print(kernel.get_kernel_source())
     dh_tilelang, dh0_tilelang, dv2_tilelang = kernel(Q, K, W, G, h0, dht, dO, dv)
 
     fla_time = do_bench(
@@ -305,31 +301,6 @@ def run_test(
     # compare_tensors("dh", dh_ref, dh_tilelang)
     # compare_tensors("dh0", dh0_ref, dh0_tilelang)
     # compare_tensors("dv2", dv2_ref, dv2_tilelang)
-
-
-def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-
-    return times.mean().item()
 
 
 def main():

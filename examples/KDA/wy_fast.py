@@ -5,12 +5,9 @@ import tilelang.language as T
 from tilelang.autotuner import autotune
 import sys  # noqa: F401
 import torch
-import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 from FLA_KDA.fla_wy_fast import recompute_w_u_fwd
-from test_utils import compare_tensors
+from test_utils import compare_tensors, do_bench
 
 torch.random.manual_seed(1)
 
@@ -87,15 +84,15 @@ def tilelang_recompute_w_u_fwd(
 
     @T.prim_func
     def kernel(
-        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        V: T.Tensor(V_shape, dtype=input_dtype),  # type: ignore
-        Beta: T.Tensor(Beta_shape, dtype=input_dtype),  # type: ignore
-        G: T.Tensor(G_shape, dtype=gate_dtype),  # type: ignore
-        A: T.Tensor(A_shape, dtype=output_dtype),  # type: ignore
-        W: T.Tensor(K_shape, dtype=output_dtype),  # type: ignore
-        U: T.Tensor(V_shape, dtype=output_dtype),  # type: ignore
-        QG: T.Tensor(K_shape, dtype=output_dtype),  # type: ignore
-        KG: T.Tensor(K_shape, dtype=output_dtype),  # type: ignore
+        K: T.Tensor(K_shape, dtype=input_dtype),
+        V: T.Tensor(V_shape, dtype=input_dtype),
+        Beta: T.Tensor(Beta_shape, dtype=input_dtype),
+        G: T.Tensor(G_shape, dtype=gate_dtype),
+        A: T.Tensor(A_shape, dtype=output_dtype),
+        W: T.Tensor(K_shape, dtype=output_dtype),
+        U: T.Tensor(V_shape, dtype=output_dtype),
+        QG: T.Tensor(K_shape, dtype=output_dtype),
+        KG: T.Tensor(K_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -125,7 +122,7 @@ def tilelang_recompute_w_u_fwd(
                 }
             )
 
-            T.disable_warp_group_reg_alloc()  # TMA 需要传输数据的最后一维是16的倍数
+            T.disable_warp_group_reg_alloc()  # TMA to transfer the last dimension of the data should be 16 times
             for i_s in T.Parallel(block_S):
                 Beta_shared[i_s] = Beta[bb, bs * block_S + i_s, bh]
 
@@ -161,31 +158,6 @@ def tilelang_recompute_w_u_fwd(
                     T.copy(KG_shared, KG[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK])
 
     return kernel
-
-
-def do_bench(fn, *args, warmup=50, rep=50, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-        torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-    print(times)
-    return times.mean().item()
 
 
 def run_test(
@@ -242,7 +214,6 @@ def run_test(
         use_kg,
         block_S=block_S,
     )
-    # print(kernel.get_kernel_source())
     W_tilelang, U_tilelang, _, KG_tilelang = kernel(K, V, Beta, G, A)
 
     tilelang_time = do_bench(kernel, K, V, Beta, G, A)

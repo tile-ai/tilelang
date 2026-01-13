@@ -4,12 +4,9 @@ from tilelang.autotuner import autotune
 import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_o import chunk_bwd_dv_local
-from test_utils import compare_tensors
+from test_utils import compare_tensors, do_bench
 
 import torch
-import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 torch.random.manual_seed(1)
 
@@ -75,9 +72,9 @@ def tilelang_chunk_bwd_kernel_dv_local(
 
     @T.prim_func
     def kernel(
-        DO: T.Tensor(DO_shape, dtype=do_dtype),  # type: ignore
-        A: T.Tensor(A_shape, dtype=input_dtype),  # type: ignore
-        dv: T.Tensor(DO_shape, dtype=output_dtype),  # type: ignore
+        DO: T.Tensor(DO_shape, dtype=do_dtype),
+        A: T.Tensor(A_shape, dtype=input_dtype),
+        dv: T.Tensor(DO_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -98,36 +95,11 @@ def tilelang_chunk_bwd_kernel_dv_local(
                 A_shared[i_s1, i_s2] = T.if_then_else(i_s1 >= i_s2, A_shared[i_s1, i_s2], 0.0)
             for i_v in T.Pipelined(T.ceildiv(DV, block_DV), num_stages=num_stages):
                 T.copy(DO[bb, bs * BS : (bs + 1) * BS, bh, i_v * block_DV : (i_v + 1) * block_DV], DO_shared)
-                T.gemm(A_shared, DO_shared, dv_fragment, transpose_A=True, clear_accum=True)  # transpose_A即AT
+                T.gemm(A_shared, DO_shared, dv_fragment, transpose_A=True, clear_accum=True)  # transpose_A: A^T
                 T.copy(dv_fragment, dv_shared)
                 T.copy(dv_shared, dv[bb, bs * BS : (bs + 1) * BS, bh, i_v * block_DV : (i_v + 1) * block_DV])
 
     return kernel
-
-
-def do_bench(fn, *args, warmup=20, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-    print(times)
-    return times.mean().item()
 
 
 def run_test(

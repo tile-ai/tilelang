@@ -3,14 +3,11 @@ import tilelang.language as T
 import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_intra import chunk_kda_fwd_inter_solve_fused
-from test_utils import compare_tensors
 from FLA_KDA.cumsum import chunk_local_cumsum
+from test_utils import compare_tensors, do_bench
 
 import torch
 import torch.nn.functional as F
-import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 
 torch.random.manual_seed(1)
@@ -104,13 +101,13 @@ def tilelang_chunk_kda_fwd_inter_fused(
 
     @T.prim_func
     def kernel(
-        Q: T.Tensor(Q_shape, dtype=input_dtype),  # type: ignore
-        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        GK: T.Tensor(GK_shape, dtype=gate_dtype),  # type: ignore
-        Beta: T.Tensor(Beta_shape, dtype=input_dtype),  # type: ignore
-        Akk_diag: T.Tensor(Akk_diag_shape, dtype=T.float32),  # type: ignore
-        Aqk: T.Tensor(Aqk_shape, dtype=output_dtype),  # type: ignore
-        Akk: T.Tensor(Aqk_shape, dtype=output_dtype),  # type: ignore
+        Q: T.Tensor(Q_shape, dtype=input_dtype),
+        K: T.Tensor(K_shape, dtype=input_dtype),
+        GK: T.Tensor(GK_shape, dtype=gate_dtype),
+        Beta: T.Tensor(Beta_shape, dtype=input_dtype),
+        Akk_diag: T.Tensor(Akk_diag_shape, dtype=T.float32),
+        Aqk: T.Tensor(Aqk_shape, dtype=output_dtype),
+        Akk: T.Tensor(Aqk_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -205,9 +202,11 @@ def tilelang_chunk_kda_fwd_inter_fused(
             i_tc1 = bs * BS + BC
             i_tc2 = bs * BS + 2 * BC
             i_tc3 = bs * BS + 3 * BC
+
             ################################################################################
             # 1. off-diagonal blocks
             ################################################################################
+
             for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
                 T.copy(K[bb, bs * BS : bs * BS + BC, bh, i_k * block_DK : (i_k + 1) * block_DK], K0_shared)
                 T.copy(GK[bb, bs * BS : bs * BS + BC, bh, i_k * block_DK : (i_k + 1) * block_DK], GK0_shared)
@@ -317,6 +316,7 @@ def tilelang_chunk_kda_fwd_inter_fused(
                 Ai_11_shared[i_c1, i_c2] = T.if_then_else(i_c1 > i_c2, -Ai_11_shared[i_c1, i_c2], 0)
                 Ai_22_shared[i_c1, i_c2] = T.if_then_else(i_c1 > i_c2, -Ai_22_shared[i_c1, i_c2], 0)
                 Ai_33_shared[i_c1, i_c2] = T.if_then_else(i_c1 > i_c2, -Ai_33_shared[i_c1, i_c2], 0)
+
             ################################################################################
             # 4. forward substitution on diagonals
             ################################################################################
@@ -406,6 +406,7 @@ def tilelang_chunk_kda_fwd_inter_fused(
             ################################################################################
             # 5. compute merged inverse using off-diagonals
             ################################################################################
+
             Ai_10_inv_frag = T.alloc_fragment((BC, BC), dtype=T.float32)
             Ai_10_final_frag = T.alloc_fragment((BC, BC), dtype=T.float32)
             Ai_21_inv_frag = T.alloc_fragment((BC, BC), dtype=T.float32)
@@ -504,31 +505,6 @@ def tilelang_chunk_kda_fwd_inter_fused(
     return kernel
 
 
-def do_bench(fn, *args, warmup=20, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-    print(times)
-    return times.mean().item()
-
-
 def run_test(
     B,
     S,
@@ -581,8 +557,6 @@ def run_test(
 
     compare_tensors("Aqk", Aqk_ref, Aqk_tilelang)
     compare_tensors("Akk", Akk_ref, Akk_tilelang)
-    # print(Akk_ref[0, 4528:4544, 39, 16:32])
-    # print(Akk_tilelang[0, 4528:4544, 39, 16:32])
     fla_time = do_bench(
         chunk_kda_fwd_inter_solve_fused,
         q=q,

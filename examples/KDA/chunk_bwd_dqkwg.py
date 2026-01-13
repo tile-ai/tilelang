@@ -4,11 +4,9 @@ from tilelang.autotuner import autotune
 import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_inter import chunk_kda_bwd_dqkwg
+from test_utils import do_bench
 
 import torch
-import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 torch.random.manual_seed(1)
 
@@ -29,8 +27,6 @@ def prepare_input(
     v_new = torch.randn(B, S, H, DV, dtype=input_dtype).cuda()
     w = torch.randn(B, S, H, DK, dtype=gate_dtype).cuda()
     g = torch.randn(B, S, H, DK, dtype=gate_dtype).cuda()
-    # g = F.logsigmoid(g)
-    # g = chunk_local_cumsum(g, chunk_size)
     h = torch.randn(B, BS, H, DK, DV, dtype=input_dtype).cuda()
     dv = torch.randn(B, S, H, DV, dtype=input_dtype).cuda()
     do = torch.randn(B, S, H, DV, dtype=input_dtype).cuda()
@@ -94,18 +90,18 @@ def chunk_bwd_dqkwg(
 
     @T.prim_func
     def kernel(
-        Q: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        V: T.Tensor(V_shape, dtype=input_dtype),  # type: ignore
-        G: T.Tensor(K_shape, dtype=gate_dtype),  # type: ignore
-        h: T.Tensor(H_shape, dtype=input_dtype),  # type: ignore
-        dv: T.Tensor(V_shape, dtype=input_dtype),  # type: ignore
-        DO: T.Tensor(V_shape, dtype=input_dtype),  # type: ignore
-        Dh: T.Tensor(H_shape, dtype=input_dtype),  # type: ignore
-        dq: T.Tensor(K_shape, dtype=T.float32),  # type: ignore
-        dk: T.Tensor(K_shape, dtype=T.float32),  # type: ignore
-        dw: T.Tensor(K_shape, dtype=gate_dtype),  # type: ignore
-        dg: T.Tensor(K_shape, dtype=gate_dtype),  # type: ignore
+        Q: T.Tensor(K_shape, dtype=input_dtype),
+        K: T.Tensor(K_shape, dtype=input_dtype),
+        V: T.Tensor(V_shape, dtype=input_dtype),
+        G: T.Tensor(K_shape, dtype=gate_dtype),
+        h: T.Tensor(H_shape, dtype=input_dtype),
+        dv: T.Tensor(V_shape, dtype=input_dtype),
+        DO: T.Tensor(V_shape, dtype=input_dtype),
+        Dh: T.Tensor(H_shape, dtype=input_dtype),
+        dq: T.Tensor(K_shape, dtype=T.float32),
+        dk: T.Tensor(K_shape, dtype=T.float32),
+        dw: T.Tensor(K_shape, dtype=gate_dtype),
+        dg: T.Tensor(K_shape, dtype=gate_dtype),
     ):
         with T.Kernel(T.ceildiv(DK, block_DK), T.ceildiv(S, block_S), B * H, threads=threads) as (bk, bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -200,31 +196,6 @@ def chunk_bwd_dqkwg(
             T.copy(dgk_shared, dg[bb, bs * block_S : (bs + 1) * block_S, bh, bk * block_DK : (bk + 1) * block_DK])
 
     return kernel
-
-
-def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-
-    return times.mean().item()
 
 
 def run_test(

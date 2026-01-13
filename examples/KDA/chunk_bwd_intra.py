@@ -4,12 +4,11 @@ import sys  # noqa: F401
 
 import tilelang
 import tilelang.language as T
-import tilelang.math as TM
 from tilelang.autotuner import autotune
 
 from FLA_KDA.fla_chunk_intra import chunk_kda_bwd_intra
 from FLA_KDA.cumsum import chunk_local_cumsum
-from test_utils import compare_tensors
+from test_utils import compare_tensors, do_bench
 
 import torch
 
@@ -122,21 +121,21 @@ def tilelang_chunk_bwd_intra(
     @T.prim_func
     def kernel(
         # input
-        q: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        k: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        g: T.Tensor(G_shape, dtype=gate_dtype),  # type: ignore
-        beta: T.Tensor(Beta_shape, dtype=input_dtype),  # type: ignore
-        dAqk: T.Tensor(BT_shape, dtype=input_dtype),  # type: ignore
-        dAkk: T.Tensor(BT_shape, dtype=input_dtype),  # type: ignore
-        dq: T.Tensor(dq_shape, dtype=input_dtype),  # type: ignore
-        dk: T.Tensor(dk_shape, dtype=input_dtype),  # type: ignore
-        db: T.Tensor(db_shape, dtype=input_dtype),  # type: ignore
-        dg: T.Tensor(dg_shape, dtype=gate_dtype),  # type: ignore
+        q: T.Tensor(K_shape, dtype=input_dtype),
+        k: T.Tensor(K_shape, dtype=input_dtype),
+        g: T.Tensor(G_shape, dtype=gate_dtype),
+        beta: T.Tensor(Beta_shape, dtype=input_dtype),
+        dAqk: T.Tensor(BT_shape, dtype=input_dtype),
+        dAkk: T.Tensor(BT_shape, dtype=input_dtype),
+        dq: T.Tensor(dq_shape, dtype=input_dtype),
+        dk: T.Tensor(dk_shape, dtype=input_dtype),
+        db: T.Tensor(db_shape, dtype=input_dtype),
+        dg: T.Tensor(dg_shape, dtype=gate_dtype),
         # output
-        dq2: T.Tensor(dq_shape, dtype=output_dtype),  # type: ignore
-        dk2: T.Tensor(dk_shape, dtype=output_dtype),  # type: ignore
-        db2: T.Tensor(db2_shape, dtype=output_dtype),  # type: ignore
-        dg2: T.Tensor(dg_shape, dtype=gate_dtype),  # type: ignore
+        dq2: T.Tensor(dq_shape, dtype=output_dtype),
+        dk2: T.Tensor(dk_shape, dtype=output_dtype),
+        db2: T.Tensor(db2_shape, dtype=output_dtype),
+        dg2: T.Tensor(dg_shape, dtype=gate_dtype),
     ):
         with T.Kernel(T.ceildiv(DK, block_DK) * NC, NT, B * H, threads=threads) as (i_kc, i_t, i_bh):
             i_k, i_i = i_kc // NC, i_kc % NC
@@ -383,28 +382,6 @@ def tilelang_chunk_bwd_intra(
     return kernel
 
 
-def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-
-    return times.mean().item()
-
-
 def run_test(
     B,
     S,
@@ -447,7 +424,7 @@ def run_test(
         db=db,
         dg=dg,
     )
-    block_DK = min(64, TM.next_power_of_2(DK))
+    block_DK = min(64, tilelang.math.next_power_of_2(DK))
     NK = (DK + block_DK - 1) // block_DK
     # TileLang implementation
     kernel = tilelang_chunk_bwd_intra(
@@ -467,7 +444,6 @@ def run_test(
     dq_tilelang, dk_tilelang, db_tilelang, dg_tilelang = prepare_output(
         B, S, H, DK, chunk_size, NK, getattr(torch, output_dtype), getattr(torch, gate_dtype), getattr(torch, state_dtype)
     )
-    print(db_tilelang.shape)
     dq_tilelang, dk_tilelang, db_tilelang, dg_tilelang = kernel(q, k, g, beta, dAqk, dAkk, dq, dk, db, dg)
     db_tilelang = db_tilelang.sum(0).add_(db)
     dg_tilelang = chunk_local_cumsum(
@@ -495,7 +471,8 @@ def run_test(
         dg=dg,
     )
     tilelang_time = do_bench(kernel, q, k, g, beta, dAqk, dAkk, dq, dk, db, dg)
-    print(f"Fla time: {fla_time}, Tilelang time: {tilelang_time}")
+    print(f"Fla time: {fla_time}")
+    print(f"Tilelang time: {tilelang_time}")
 
 
 def main():

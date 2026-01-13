@@ -4,12 +4,9 @@ from tilelang.autotuner import autotune
 import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_o import chunk_gla_bwd_dA
-from test_utils import compare_tensors
+from test_utils import compare_tensors, do_bench
 
 import torch
-import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 torch.random.manual_seed(1)
 
@@ -74,9 +71,9 @@ def tilelang_chunk_bwd_kernel_dv_local(
 
     @T.prim_func
     def kernel(
-        DO: T.Tensor(DO_shape, dtype=do_dtype),  # type: ignore
-        V: T.Tensor(V_shape, dtype=input_dtype),  # type: ignore
-        dA: T.Tensor(dA_shape, dtype=da_dtype),  # type: ignore
+        DO: T.Tensor(DO_shape, dtype=do_dtype),
+        V: T.Tensor(V_shape, dtype=input_dtype),
+        dA: T.Tensor(dA_shape, dtype=da_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -104,31 +101,6 @@ def tilelang_chunk_bwd_kernel_dv_local(
             T.copy(dA_fragment, dA[bb, bs * block_S : (bs + 1) * block_S, bh, 0:block_S])
 
     return kernel
-
-
-def do_bench(fn, *args, warmup=20, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-    print(times)
-    return times.mean().item()
 
 
 def run_test(

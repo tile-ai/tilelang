@@ -14,18 +14,8 @@ from FLA_KDA.cumsum import chunk_local_cumsum
 
 import torch
 import torch.nn.functional as F
-from tilelang.engine.callback import register_cuda_postproc_callback  # noqa: F401
 
-from test_utils import compare_tensors
-
-# (zhengju) We can slightly modify the generated cuda code from tilelang lowering
-# in the debug folder to make the performance better. To enable this callback,
-# you can comment out the following function.
-# @register_cuda_postproc_callback
-# def tilelang_callback_cuda_postproc(code, _):
-#     cuda_code = open("../debug/chunk_delta_h_fuse.cu", "r").read()
-#     code = cuda_code
-#     return code
+from test_utils import compare_tensors, do_bench
 
 torch.random.manual_seed(0)
 
@@ -124,14 +114,14 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
 
     @T.prim_func
     def kernel(
-        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        W: T.Tensor(W_shape, dtype=input_dtype),  # type: ignore
-        U: T.Tensor(U_shape, dtype=input_dtype),  # type: ignore
-        GK: T.Tensor(GK_shape, dtype=gate_dtype),  # type: ignore
-        initial_state: T.Tensor(initial_state_shape, dtype=input_dtype),  # type: ignore
-        h: T.Tensor(h_shape, dtype=output_dtype),  # type: ignore
-        final_state: T.Tensor(final_state_shape, dtype=state_dtype),  # type: ignore
-        V_new: T.Tensor(V_shape, dtype=output_dtype),  # type: ignore
+        K: T.Tensor(K_shape, dtype=input_dtype),
+        W: T.Tensor(W_shape, dtype=input_dtype),
+        U: T.Tensor(U_shape, dtype=input_dtype),
+        GK: T.Tensor(GK_shape, dtype=gate_dtype),
+        initial_state: T.Tensor(initial_state_shape, dtype=input_dtype),
+        h: T.Tensor(h_shape, dtype=output_dtype),
+        final_state: T.Tensor(final_state_shape, dtype=state_dtype),
+        V_new: T.Tensor(V_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(DV, block_DV), B * H, threads=threads) as (bv, bbh):
             bb, bh = bbh // H, bbh % H
@@ -202,31 +192,6 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
                 T.copy(b_h_fragment, final_state[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
 
     return kernel
-
-
-def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-
-    return times.mean().item()
 
 
 def run_test(

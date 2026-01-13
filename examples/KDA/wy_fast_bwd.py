@@ -6,6 +6,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from FLA_KDA.fla_wy_fast import prepare_wy_repr_bwd
+from test_utils import do_bench
 
 import torch
 
@@ -116,21 +117,21 @@ def tilelang_wy_fast_bwd(
     @T.prim_func
     def kernel(
         # input
-        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        V: T.Tensor(V_shape, dtype=input_dtype),  # type: ignore
-        Beta: T.Tensor(Beta_shape, dtype=input_dtype),  # type: ignore
-        GK: T.Tensor(G_shape, dtype=gate_dtype),  # type: ignore
-        A: T.Tensor(A_shape, dtype=input_dtype),  # type: ignore
-        dw: T.Tensor(dw_shape, dtype=input_dtype),  # type: ignore
-        du: T.Tensor(du_shape, dtype=input_dtype),  # type: ignore
-        dk: T.Tensor(dk_shape, dtype=input_dtype),  # type: ignore
-        dg: T.Tensor(dg_shape, dtype=gate_dtype),  # type: ignore
+        K: T.Tensor(K_shape, dtype=input_dtype),
+        V: T.Tensor(V_shape, dtype=input_dtype),
+        Beta: T.Tensor(Beta_shape, dtype=input_dtype),
+        GK: T.Tensor(G_shape, dtype=gate_dtype),
+        A: T.Tensor(A_shape, dtype=input_dtype),
+        dw: T.Tensor(dw_shape, dtype=input_dtype),
+        du: T.Tensor(du_shape, dtype=input_dtype),
+        dk: T.Tensor(dk_shape, dtype=input_dtype),
+        dg: T.Tensor(dg_shape, dtype=gate_dtype),
         # output
-        dA: T.Tensor(dA_shape, dtype=input_dtype),  # type: ignore
-        dk2: T.Tensor(dk_shape, dtype=output_dtype),  # type: ignore
-        dv: T.Tensor(dv_shape, dtype=output_dtype),  # type: ignore
-        dbeta: T.Tensor(dbeta_shape, dtype=output_dtype),  # type: ignore
-        dg2: T.Tensor(dg_shape, dtype=gate_dtype),  # type: ignore
+        dA: T.Tensor(dA_shape, dtype=input_dtype),
+        dk2: T.Tensor(dk_shape, dtype=output_dtype),
+        dv: T.Tensor(dv_shape, dtype=output_dtype),
+        dbeta: T.Tensor(dbeta_shape, dtype=output_dtype),
+        dg2: T.Tensor(dg_shape, dtype=gate_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -242,31 +243,6 @@ def tilelang_wy_fast_bwd(
     return kernel
 
 
-def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-
-    return times.mean().item()
-
-
 def run_test(
     B,
     S,
@@ -349,7 +325,8 @@ def run_test(
         dg=dg,
     )
     tilelang_time = do_bench(kernel, K, V, Beta, GK, A, dw, dv, dk, dg)
-    print(f"fla_time: {fla_time}, tilelang_time: {tilelang_time}")
+    print(f"FLA_time: {fla_time}")
+    print(f"TileLang_time: {tilelang_time}")
 
 
 def main():

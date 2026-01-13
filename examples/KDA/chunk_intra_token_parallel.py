@@ -3,11 +3,9 @@ import tilelang.language as T
 from tilelang.autotuner import autotune
 import torch
 import torch.nn.functional as F
-import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 from FLA_KDA.fla_chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from FLA_KDA.cumsum import chunk_local_cumsum
+from test_utils import do_bench
 
 torch.random.manual_seed(0)
 
@@ -26,7 +24,7 @@ def prepare_input(
     q = torch.randn(B, S, H, DK, dtype=input_dtype).cuda()
     k = torch.randn(B, S, H, DK, dtype=input_dtype).cuda()
     beta = torch.randn(B, S, H, dtype=input_dtype).cuda()
-    gk = torch.randn(B, S, H, DK, dtype=gate_dtype).cuda()  # 需要是cumsum
+    gk = torch.randn(B, S, H, DK, dtype=gate_dtype).cuda()  # should be cumsumed already
     gk = F.logsigmoid(gk)
     gk = chunk_local_cumsum(gk, chunk_size)
     return q, k, gk, beta
@@ -85,12 +83,12 @@ def tilelang_chunk_kda_fwd_intra_token_parallel(
 
     @T.prim_func
     def kernel(
-        Q: T.Tensor(Q_shape, dtype=input_dtype),  # type: ignore
-        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
-        GK: T.Tensor(GK_shape, dtype=gate_dtype),  # type: ignore
-        Beta: T.Tensor(Beta_shape, dtype=input_dtype),  # type: ignore
-        Aqk: T.Tensor(Aqk_shape, dtype=output_dtype),  # type: ignore
-        Akk: T.Tensor(Akk_shape, dtype=output_dtype),  # type: ignore
+        Q: T.Tensor(Q_shape, dtype=input_dtype),
+        K: T.Tensor(K_shape, dtype=input_dtype),
+        GK: T.Tensor(GK_shape, dtype=gate_dtype),
+        Beta: T.Tensor(Beta_shape, dtype=input_dtype),
+        Aqk: T.Tensor(Aqk_shape, dtype=output_dtype),
+        Akk: T.Tensor(Akk_shape, dtype=output_dtype),
     ):
         with T.Kernel(B * S, T.ceildiv(H, block_H), threads=threads) as (bbs, bh):  # block_index_bs, block_index_dh
             bb, bs = bbs // S, bbs % S
@@ -150,7 +148,7 @@ def tilelang_chunk_kda_fwd_intra_token_parallel(
             T.copy(GK[bb, bs, bh * block_H : (bh + 1) * block_H, :], GK_i_shared)  # TMA
 
             T.disable_warp_group_reg_alloc()
-            for i_h in T.Parallel(block_H):  # 不满足用TMA
+            for i_h in T.Parallel(block_H):  # cannot use TMA
                 Beta_shared[i_h] = Beta[bb, bs, bh * block_H + i_h]
 
             for i_h, i_k in T.Parallel(block_H, DK):
@@ -182,31 +180,6 @@ def tilelang_chunk_kda_fwd_intra_token_parallel(
             T.copy(Sum_Akk_shared, Akk[bb, bs, bh * block_H : (bh + 1) * block_H, :])
 
     return kernel
-
-
-def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-    print(times)
-    return times.mean().item()
 
 
 def run_test(
