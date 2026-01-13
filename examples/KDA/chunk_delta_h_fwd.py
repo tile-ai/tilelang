@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from tilelang.engine.callback import register_cuda_postproc_callback  # noqa: F401
 
-from test_utils import assert_similar, compare_tensors
+from test_utils import compare_tensors
 
 # (zhengju) We can slightly modify the generated cuda code from tilelang lowering
 # in the debug folder to make the performance better. To enable this callback,
@@ -124,14 +124,14 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
 
     @T.prim_func
     def kernel(
-        K: T.Tensor(K_shape, dtype=input_dtype), # type: ignore
-        W: T.Tensor(W_shape, dtype=input_dtype), # type: ignore
-        U: T.Tensor(U_shape, dtype=input_dtype), # type: ignore
-        GK: T.Tensor(GK_shape, dtype=gate_dtype), # type: ignore
-        initial_state: T.Tensor(initial_state_shape, dtype=input_dtype), # type: ignore
-        h: T.Tensor(h_shape, dtype=output_dtype), # type: ignore
-        final_state: T.Tensor(final_state_shape, dtype=state_dtype), # type: ignore
-        V_new: T.Tensor(V_shape, dtype=output_dtype), # type: ignore
+        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
+        W: T.Tensor(W_shape, dtype=input_dtype),  # type: ignore
+        U: T.Tensor(U_shape, dtype=input_dtype),  # type: ignore
+        GK: T.Tensor(GK_shape, dtype=gate_dtype),  # type: ignore
+        initial_state: T.Tensor(initial_state_shape, dtype=input_dtype),  # type: ignore
+        h: T.Tensor(h_shape, dtype=output_dtype),  # type: ignore
+        final_state: T.Tensor(final_state_shape, dtype=state_dtype),  # type: ignore
+        V_new: T.Tensor(V_shape, dtype=output_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(DV, block_DV), B * H, threads=threads) as (bv, bbh):
             bb, bh = bbh // H, bbh % H
@@ -156,7 +156,7 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
                     K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                 }
             )
-            
+
             T.use_swizzle(10)
 
             if use_initial_state:
@@ -187,10 +187,9 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
                 T.copy(K[bb, i_s * block_S : (i_s + 1) * block_S, bh, 0:DK], K_shared)
                 # use_gk
                 if use_gk:
-                    T.copy(GK[bb, (i_s + 1) * block_S - 1, bh, :], GK_last_shared) # block last token
+                    T.copy(GK[bb, (i_s + 1) * block_S - 1, bh, :], GK_last_shared)  # block last token
                     for i_k, i_v in T.Parallel(DK, block_DV):
                         b_h_fragment[i_k, i_v] *= T.exp2(GK_last_shared[i_k])
-
 
                 # Update intermediate results
                 T.copy(V_new_fragment, V_new_shared)
@@ -322,8 +321,6 @@ def run_test(
     compare_tensors("h", h_ref, h_tilelang)
     compare_tensors("final_state", final_state_ref, final_state_tilelang)
     compare_tensors("V_new", V_new_ref, V_new_tilelang)
-
-
 
     print(f"tilelang time: {tilelang_time} ms")
     print(f"fla time: {fla_time} ms")

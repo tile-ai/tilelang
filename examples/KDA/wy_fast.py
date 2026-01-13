@@ -6,10 +6,11 @@ from tilelang.autotuner import autotune
 import sys  # noqa: F401
 import torch
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '7'
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 from FLA_KDA.fla_wy_fast import recompute_w_u_fwd
-from test_utils import assert_similar, compare_tensors
+from test_utils import compare_tensors
 
 torch.random.manual_seed(1)
 
@@ -30,7 +31,7 @@ def prepare_output(
     H,
     DK,
     DV,
-    use_qg, 
+    use_qg,
     use_kg,
     output_dtype,
 ):
@@ -40,15 +41,18 @@ def prepare_output(
     KG = torch.empty(B, S, H, DK, dtype=output_dtype).cuda() if use_kg else None
     return W, U, QG, KG
 
+
 def get_configs():
     import itertools
+
     block_DK = [32, 64]
     block_DV = [32, 64]
     threads = [64, 128, 256]
     num_stages = [0, 1, 2, 3, 4]
     _configs = list(itertools.product(block_DK, block_DV, threads, num_stages))
-    configs = [{"block_DK":c[0], "block_DV":c[1], "threads":c[2], "num_stages": c[3]} for c in _configs]
+    configs = [{"block_DK": c[0], "block_DV": c[1], "threads": c[2], "num_stages": c[3]} for c in _configs]
     return configs
+
 
 @autotune(configs=get_configs(), warmup=3, rep=5)
 @tilelang.jit(out_idx=[-4, -3, -2, -1], pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
@@ -64,7 +68,7 @@ def tilelang_recompute_w_u_fwd(
     gate_dtype,
     accum_dtype,
     chunk_size,
-    use_qg, 
+    use_qg,
     use_kg,
     # kernel config
     block_S=64,
@@ -83,15 +87,15 @@ def tilelang_recompute_w_u_fwd(
 
     @T.prim_func
     def kernel(
-        K: T.Tensor(K_shape, dtype=input_dtype), # type: ignore
-        V: T.Tensor(V_shape, dtype=input_dtype), # type: ignore
-        Beta: T.Tensor(Beta_shape, dtype=input_dtype), # type: ignore
-        G: T.Tensor(G_shape, dtype=gate_dtype), # type: ignore
-        A: T.Tensor(A_shape, dtype=output_dtype), # type: ignore
-        W: T.Tensor(K_shape, dtype=output_dtype), # type: ignore
-        U: T.Tensor(V_shape, dtype=output_dtype), # type: ignore
-        QG: T.Tensor(K_shape, dtype=output_dtype), # type: ignore
-        KG: T.Tensor(K_shape, dtype=output_dtype), # type: ignore
+        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
+        V: T.Tensor(V_shape, dtype=input_dtype),  # type: ignore
+        Beta: T.Tensor(Beta_shape, dtype=input_dtype),  # type: ignore
+        G: T.Tensor(G_shape, dtype=gate_dtype),  # type: ignore
+        A: T.Tensor(A_shape, dtype=output_dtype),  # type: ignore
+        W: T.Tensor(K_shape, dtype=output_dtype),  # type: ignore
+        U: T.Tensor(V_shape, dtype=output_dtype),  # type: ignore
+        QG: T.Tensor(K_shape, dtype=output_dtype),  # type: ignore
+        KG: T.Tensor(K_shape, dtype=output_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -121,11 +125,9 @@ def tilelang_recompute_w_u_fwd(
                 }
             )
 
-            T.disable_warp_group_reg_alloc() # TMA 需要传输数据的最后一维是16的倍数
+            T.disable_warp_group_reg_alloc()  # TMA 需要传输数据的最后一维是16的倍数
             for i_s in T.Parallel(block_S):
                 Beta_shared[i_s] = Beta[bb, bs * block_S + i_s, bh]
-            
-                
 
             # for i_s, i_k in T.Parallel(block_S, block_DK):
             #     G_shared[i_s, i_k] = T.exp(G[bb, bs * block_S + i_s, bh, i_k])
@@ -150,15 +152,16 @@ def tilelang_recompute_w_u_fwd(
                 # First copy to smem, then copy to gmem to reduce U2RU instructions
                 T.copy(W_fragment, W_shared)
                 T.copy(W_shared, W[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK])
-                
+
                 if use_kg:
                     T.copy(G[bb, (bs + 1) * block_S - 1, bh, i_k * block_DK : (i_k + 1) * block_DK], G_n_shared)
-                        
+
                     for i_s3, i_k3 in T.Parallel(block_S, block_DK):
-                        KG_shared[i_s3, i_k3] = K_shared[i_s3, i_k3] * T.exp2(G_n_shared[i_k3] -  G_shared[i_s3, i_k3])
+                        KG_shared[i_s3, i_k3] = K_shared[i_s3, i_k3] * T.exp2(G_n_shared[i_k3] - G_shared[i_s3, i_k3])
                     T.copy(KG_shared, KG[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK])
 
     return kernel
+
 
 def do_bench(fn, *args, warmup=50, rep=50, **kwargs):
     """
@@ -175,7 +178,6 @@ def do_bench(fn, *args, warmup=50, rep=50, **kwargs):
         fn(*args, **kwargs)
         end_event[i].record()
         torch.cuda.synchronize()
-    
 
     # Record clocks
     times = torch.tensor(
@@ -184,6 +186,7 @@ def do_bench(fn, *args, warmup=50, rep=50, **kwargs):
     )
     print(times)
     return times.mean().item()
+
 
 def run_test(
     B,
@@ -201,7 +204,7 @@ def run_test(
     threads,
     num_stages,
 ):
-    use_qg = False,
+    use_qg = (False,)
     use_kg = True
     K, V, Beta, G, A = prepare_input(
         B, S, H, DK, DV, chunk_size, getattr(torch, input_dtype), getattr(torch, output_dtype), gate_dtype=getattr(torch, gate_dtype)
@@ -210,8 +213,19 @@ def run_test(
     W_tilelang, U_tilelang, QG_tilelang, KG_tilelang = prepare_output(B, S, H, DK, DV, use_qg, use_kg, getattr(torch, output_dtype))
 
     # reference
-    W_ref, U_ref, _, KG_ref, = recompute_w_u_fwd(k=K, v=V, beta=Beta, gk=G, A=A,)
-    
+    (
+        W_ref,
+        U_ref,
+        _,
+        KG_ref,
+    ) = recompute_w_u_fwd(
+        k=K,
+        v=V,
+        beta=Beta,
+        gk=G,
+        A=A,
+    )
+
     block_S = chunk_size
     kernel = tilelang_recompute_w_u_fwd(
         B,
@@ -224,7 +238,8 @@ def run_test(
         gate_dtype,
         accum_dtype,
         chunk_size,
-        use_qg, use_kg,
+        use_qg,
+        use_kg,
         block_S=block_S,
     )
     # print(kernel.get_kernel_source())
@@ -238,7 +253,6 @@ def run_test(
     compare_tensors("W", W_ref, W_tilelang)
     compare_tensors("U", U_ref, U_tilelang)
     compare_tensors("KG", KG_ref, KG_tilelang)
-
 
 
 def main():

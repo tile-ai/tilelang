@@ -8,19 +8,17 @@ import triton.language as tl
 from .fla_utils import exp2, autotune_cache_kwargs
 
 
-@triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-})
+@triton.heuristics(
+    {
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    }
+)
 @triton.autotune(
-    configs=[
-        triton.Config({'BH': BH}, num_warps=num_warps)
-        for BH in [1, 2, 4, 8]
-        for num_warps in [1, 2, 4, 8]
-    ],
+    configs=[triton.Config({"BH": BH}, num_warps=num_warps) for BH in [1, 2, 4, 8] for num_warps in [1, 2, 4, 8]],
     key=["K", "H"],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T', 'N'])
+@triton.jit(do_not_specialize=["T", "N"])
 def chunk_kda_fwd_kernel_intra_token_parallel(
     q,
     k,
@@ -67,16 +65,16 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     if i_t >= T:
         return
 
-    i_c = i_t // BT # chunk indices
-    i_s = (i_t % BT) // BC # sub_chunk indices
-    i_tc = i_c * BT # chunk 首坐标
-    i_ts = i_tc + i_s * BC # subchunk 首坐标
+    i_c = i_t // BT  # chunk indices
+    i_s = (i_t % BT) // BC  # sub_chunk indices
+    i_tc = i_c * BT  # chunk 首坐标
+    i_ts = i_tc + i_s * BC  # subchunk 首坐标
 
-    q += bos * H*K
-    k += bos * H*K
-    g += bos * H*K
-    Aqk += bos * H*BT
-    Akk += bos * H*BC
+    q += bos * H * K
+    k += bos * H * K
+    g += bos * H * K
+    Aqk += bos * H * BT
+    Akk += bos * H * BC
     beta += bos * H
 
     BK: tl.constexpr = triton.next_power_of_2(K)
@@ -85,9 +83,9 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     m_h = (i_hg * BH + o_h) < H
     m_k = o_k < K
 
-    p_q = tl.make_block_ptr(q + i_t * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + i_t * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-    p_g = tl.make_block_ptr(g + i_t * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+    p_q = tl.make_block_ptr(q + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+    p_k = tl.make_block_ptr(k + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+    p_g = tl.make_block_ptr(g + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
     p_beta = tl.make_block_ptr(beta + i_t * H, (H,), (1,), (i_hg * BH,), (BH,), (0,))
     # [BH, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
@@ -96,8 +94,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     b_k = b_k * tl.load(p_beta, boundary_check=(0,)).to(tl.float32)[:, None]
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
-        p_kj = tl.make_block_ptr(k + j * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-        p_gj = tl.make_block_ptr(g + j * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+        p_kj = tl.make_block_ptr(k + j * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+        p_gj = tl.make_block_ptr(g + j * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
         # [BH, BK]
         b_kj = tl.load(p_kj, boundary_check=(0, 1)).to(tl.float32)
         b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
@@ -109,8 +107,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
         b_Akk = tl.sum(b_k * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)
 
-        tl.store(Aqk + i_t * H*BT + (i_hg * BH + o_h) * BT + j % BT, b_Aqk.to(Aqk.dtype.element_ty), mask=m_h)
-        tl.store(Akk + i_t * H*BC + (i_hg * BH + o_h) * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_h)
+        tl.store(Aqk + i_t * H * BT + (i_hg * BH + o_h) * BT + j % BT, b_Aqk.to(Aqk.dtype.element_ty), mask=m_h)
+        tl.store(Akk + i_t * H * BC + (i_hg * BH + o_h) * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_h)
 
 
 def chunk_kda_fwd_intra_token_parallel(
@@ -148,7 +146,9 @@ def chunk_kda_fwd_intra_token_parallel(
     BT = chunk_size
     BC = sub_chunk_size
 
-    def grid(meta): return (B * T, triton.cdiv(H, meta['BH']))
+    def grid(meta):
+        return (B * T, triton.cdiv(H, meta["BH"]))
+
     chunk_kda_fwd_kernel_intra_token_parallel[grid](
         q=q,
         k=k,

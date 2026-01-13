@@ -1,4 +1,3 @@
-
 import contextlib
 import functools
 import inspect
@@ -14,7 +13,7 @@ import triton
 import triton.language.extra.libdevice as tldevice
 
 
-device = 'cuda'
+device = "cuda"
 device_torch_lib = getattr(torch, device)
 
 exp = tldevice.fast_expf
@@ -22,23 +21,25 @@ exp2 = tldevice.exp2
 log = tldevice.fast_logf
 log2 = tldevice.fast_log2f
 
-IS_NVIDIA_HOPPER = (True and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] >= 9))
-USE_CUDA_GRAPH = (True and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
+IS_NVIDIA_HOPPER = True and ("NVIDIA H" in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] >= 9)
+USE_CUDA_GRAPH = True and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
 
 
-FLA_CACHE_RESULTS = os.getenv('FLA_CACHE_RESULTS', '1') == '1'
+FLA_CACHE_RESULTS = os.getenv("FLA_CACHE_RESULTS", "1") == "1"
 SUPPORTS_AUTOTUNE_CACHE = "cache_results" in inspect.signature(triton.autotune).parameters
 autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if SUPPORTS_AUTOTUNE_CACHE else {}
 
 
 # error check，copy from
 def get_abs_err(x, y):
-    return (x.detach()-y.detach()).flatten().abs().max().item()
+    return (x.detach() - y.detach()).flatten().abs().max().item()
+
 
 def get_err_ratio(x, y):
-    err = (x.detach()-y.detach()).flatten().square().mean().sqrt().item()
+    err = (x.detach() - y.detach()).flatten().square().mean().sqrt().item()
     base = (x.detach()).flatten().square().mean().sqrt().item()
     return err / (base + 1e-8)
+
 
 def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
     abs_atol = get_abs_err(ref, tri)
@@ -47,7 +48,7 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
     error_rate = get_err_ratio(ref, tri)
     if abs_atol <= err_atol:
         return
-    if warning or ((error_rate < 0.01 or abs_atol <= 0.3)):
+    if warning or (error_rate < 0.01 or abs_atol <= 0.3):
         if error_rate > ratio:
             warnings.warn(msg, stacklevel=2)
     else:
@@ -80,11 +81,15 @@ def tensor_cache(
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         nonlocal last_args, last_kwargs, last_result
 
-        if (last_args is not None and last_kwargs is not None
-            and len(args) == len(last_args) and len(kwargs) == len(last_kwargs)
+        if (
+            last_args is not None
+            and last_kwargs is not None
+            and len(args) == len(last_args)
+            and len(kwargs) == len(last_kwargs)
             and all(a is b for a, b in zip(args, last_args))
-            and all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items())):
-                return last_result
+            and all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items())
+        ):
+            return last_result
 
         result = fn(*args, **kwargs)
         last_args, last_kwargs, last_result = args, kwargs, result
@@ -92,9 +97,11 @@ def tensor_cache(
 
     return wrapper
 
+
 @tensor_cache
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return torch.diff(cu_seqlens)
+
 
 @tensor_cache
 def prepare_chunk_indices(
@@ -144,6 +151,7 @@ def get_multiprocessor_count(tensor_idx: int = 0) -> int:
 
     return 1
 
+
 def input_guard(
     fn: Callable[..., torch.Tensor],
 ) -> Callable[..., torch.Tensor]:
@@ -179,29 +187,31 @@ def input_guard(
 
 
 @functools.cache
-def check_pytorch_version(version_s: str = '2.4') -> bool:
+def check_pytorch_version(version_s: str = "2.4") -> bool:
     return version.parse(torch.__version__) >= version.parse(version_s)
 
-if check_pytorch_version('2.4'):
-    device = 'cuda'
+
+if check_pytorch_version("2.4"):
+    device = "cuda"
     autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)
     autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=device)
 
     def custom_device_ctx(index: int):
         return device_torch_lib.device(index)
 else:
-    assert device == 'cuda', 'Only cuda device is supported for PyTorch version < 2.4.0.'
+    assert device == "cuda", "Only cuda device is supported for PyTorch version < 2.4.0."
     autocast_custom_fwd = device_torch_lib.amp.custom_fwd
     autocast_custom_bwd = device_torch_lib.amp.custom_bwd
 
     def custom_device_ctx(index: int):
         return torch.cuda.device(index)
-    
+
+
 class Backend(Enum):
-    ADA = 101376       # RTX 4090
-    AMPERE = 166912    # A100
-    HOPPER = 232448    # H100
-    DEFAULT = 102400   # Default
+    ADA = 101376  # RTX 4090
+    AMPERE = 166912  # A100
+    HOPPER = 232448  # H100
+    DEFAULT = 102400  # Default
 
     @classmethod
     def get_shared_memory(cls, arch: str) -> int:
@@ -209,13 +219,12 @@ class Backend(Enum):
             return cls[arch.upper()].value
         except KeyError:
             return cls.DEFAULT.value
-        
+
 
 def get_all_max_shared_mem():
     try:
         return [
-            triton.runtime.driver.active.utils.get_device_properties(i)['max_shared_mem']
-            for i in range(device_torch_lib.device_count())
+            triton.runtime.driver.active.utils.get_device_properties(i)["max_shared_mem"] for i in range(device_torch_lib.device_count())
         ]
     except BaseException:
         return [-1]

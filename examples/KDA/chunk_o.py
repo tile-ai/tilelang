@@ -4,11 +4,12 @@ from tilelang.autotuner import autotune
 import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_o import chunk_gla_fwd_o_gk
-from test_utils import  compare_tensors
+from test_utils import compare_tensors
 
 import torch
 
 torch.random.manual_seed(1)
+
 
 def prepare_input(
     B,
@@ -30,6 +31,7 @@ def prepare_input(
     G = torch.randn(B, S, H, DK, dtype=gate_dtype).cuda()
     return Q, V, G, A, HIDDEN
 
+
 def prepare_output(
     B,
     S,
@@ -41,8 +43,6 @@ def prepare_output(
 ):
     O = torch.empty(B, S, H, DV, dtype=output_dtype).cuda()
     return O
-
-
 
 
 def get_configs():
@@ -91,12 +91,12 @@ def tilelang_chunk_fwd_o(
 
     @T.prim_func
     def kernel(
-        Q: T.Tensor(Q_shape, dtype=input_dtype), # type: ignore
-        V: T.Tensor(V_shape, dtype=input_dtype), # type: ignore
-        GK: T.Tensor(GK_shape, dtype=gate_dtype), # type: ignore
-        A: T.Tensor(A_shape, dtype=input_dtype), # type: ignore
-        HIDDEN: T.Tensor(H_shape, dtype=input_dtype), # type: ignore
-        O: T.Tensor(O_shape, dtype=output_dtype), # type: ignore
+        Q: T.Tensor(Q_shape, dtype=input_dtype),  # type: ignore
+        V: T.Tensor(V_shape, dtype=input_dtype),  # type: ignore
+        GK: T.Tensor(GK_shape, dtype=gate_dtype),  # type: ignore
+        A: T.Tensor(A_shape, dtype=input_dtype),  # type: ignore
+        HIDDEN: T.Tensor(H_shape, dtype=input_dtype),  # type: ignore
+        O: T.Tensor(O_shape, dtype=output_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(DV, block_DV), T.ceildiv(S, block_S), B * H, threads=threads) as (bv, bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -120,38 +120,43 @@ def tilelang_chunk_fwd_o(
             )
 
             T.clear(O_fragment)
-            
-            
+
             for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
-                T.copy(Q[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], Q_shared) #[block_S, block_DK]
-                T.copy(GK[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], GK_shared) #[block_S, block_DK]
-                T.copy(HIDDEN[bb, bs, bh, i_k * block_DK : (i_k + 1) * block_DK, bv * block_DV : (bv + 1) * block_DV], HIDDEN_shared) #[block_DK, block_DV]
+                T.copy(Q[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], Q_shared)  # [block_S, block_DK]
+                T.copy(
+                    GK[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], GK_shared
+                )  # [block_S, block_DK]
+                T.copy(
+                    HIDDEN[bb, bs, bh, i_k * block_DK : (i_k + 1) * block_DK, bv * block_DV : (bv + 1) * block_DV], HIDDEN_shared
+                )  # [block_DK, block_DV]
                 for i_s, i_v in T.Parallel(block_S, block_DV):
-                    Q_shared[i_s, i_v] =  Q_shared[i_s, i_v] * scale
-                    GQ_shared[i_s, i_v] = Q_shared[i_s, i_v] * T.exp2(GK_shared[i_s, i_v]) 
-                T.gemm(GQ_shared, HIDDEN_shared, O_fragment) # O_fragment作为累加器
-                
-            T.copy(V[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], V_shared) #[block_S, block_DV]
-            T.copy(A[bb, bs * block_S : (bs + 1) * block_S, bh, 0:block_S], A_shared) #[block_S, block_S]
-            
+                    Q_shared[i_s, i_v] = Q_shared[i_s, i_v] * scale
+                    GQ_shared[i_s, i_v] = Q_shared[i_s, i_v] * T.exp2(GK_shared[i_s, i_v])
+                T.gemm(GQ_shared, HIDDEN_shared, O_fragment)  # O_fragment作为累加器
+
+            T.copy(V[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], V_shared)  # [block_S, block_DV]
+            T.copy(A[bb, bs * block_S : (bs + 1) * block_S, bh, 0:block_S], A_shared)  # [block_S, block_S]
+
             for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                A_shared[i_s1, i_s2] = T.if_then_else(i_s1<i_s2, 0, A_shared[i_s1, i_s2])
+                A_shared[i_s1, i_s2] = T.if_then_else(i_s1 < i_s2, 0, A_shared[i_s1, i_s2])
 
             # 改成下面的代码为什么就错了
             # for i_s1, i_s2 in T.Parallel(block_S, block_S):
-            #     with T.If(i_s1 < i_s2): 
+            #     with T.If(i_s1 < i_s2):
             #         with T.Then():
             #             A_shared[i_s1, i_s2] = 0
-            
-            T.gemm(A_shared, V_shared, O_fragment,)
+
+            T.gemm(
+                A_shared,
+                V_shared,
+                O_fragment,
+            )
 
             T.copy(O_fragment, O_shared)
-            
 
             T.copy(O_shared, O[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV])
 
     return kernel
-
 
 
 def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
@@ -177,7 +182,6 @@ def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
     )
 
     return times.mean().item()
-
 
 
 def run_test(
@@ -227,14 +231,9 @@ def run_test(
     )
     O_tilelang = kernel(Q, V, G, A, HIDDEN)
     compare_tensors("O", O_ref, O_tilelang)
-    fla_time = do_bench(
-        chunk_gla_fwd_o_gk,
-        Q, V, G, A, HIDDEN, scale, chunk_size=chunk_size, use_exp2=True
-    )
-    tilelang_time = do_bench(
-        kernel, Q, V, G, A, HIDDEN
-    )
-    print("fla_time:",fla_time)
+    fla_time = do_bench(chunk_gla_fwd_o_gk, Q, V, G, A, HIDDEN, scale, chunk_size=chunk_size, use_exp2=True)
+    tilelang_time = do_bench(kernel, Q, V, G, A, HIDDEN)
+    print("fla_time:", fla_time)
     print("tilelang_time:", tilelang_time)
 
 

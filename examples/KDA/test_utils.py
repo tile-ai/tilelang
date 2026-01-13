@@ -2,6 +2,7 @@ import torch
 
 RCP_LN2 = 1.4426950216
 
+
 def print_red_warning(message):
     print(f"\033[31mWARNING: {message}\033[0m")
 

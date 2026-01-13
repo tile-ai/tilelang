@@ -5,6 +5,7 @@ import sys  # noqa: F401
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
+
 print(tilelang.__file__, flush=True)
 
 
@@ -16,8 +17,6 @@ import torch.nn.functional as F
 
 torch.random.manual_seed(0)
 # torch.set_printoptions(profile="full")
-
-from test_utils import assert_similar, compare_tensors
 
 
 def prepare_input(
@@ -33,15 +32,14 @@ def prepare_input(
     gate_dtype,
     state_dtype,
 ):
-    Q = torch.randn(B, S, H, DK, dtype=input_dtype).cuda()*0.01
+    Q = torch.randn(B, S, H, DK, dtype=input_dtype).cuda() * 0.01
     K = torch.randn(B, S, H, DK, dtype=input_dtype).cuda()
     K = F.normalize(K, dim=-1, p=2)
     W = torch.randn(B, S, H, DK, dtype=input_dtype).cuda()
     # Note: G should be in logspace and do chunkwise cumsum
     G = torch.randn(B, S, H, DK, dtype=gate_dtype).cuda()
-    G = F.logsigmoid(G)   
+    G = F.logsigmoid(G)
     G = chunk_local_cumsum(G, chunk_size)
-
 
     h0 = torch.randn(B, H, DK, DV, dtype=input_dtype).cuda()
     dht = torch.randn(B, H, DK, DV, dtype=input_dtype).cuda()
@@ -49,7 +47,6 @@ def prepare_input(
 
     dv = torch.randn(B, S, H, DV, dtype=input_dtype).cuda()
     return Q, K, W, G, h0, dht, dO, dv
-
 
 
 def prepare_output(
@@ -70,7 +67,6 @@ def prepare_output(
     return dh, dh0, dv2
 
 
-
 def get_configs():
     import itertools
 
@@ -81,6 +77,8 @@ def get_configs():
 
     configs = [{"block_DV": c[0], "threads": c[1], "num_stages": c[2]} for c in _configs]
     return configs
+
+
 @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(out_idx=[-3, -2, -1])
 def tilelang_chunk_gated_delta_rule_bwd_dhu(
@@ -125,18 +123,18 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
     @T.prim_func
     def kernel(
         # Input
-        Q: T.Tensor(Q_shape, dtype=input_dtype), # type: ignore
-        K: T.Tensor(K_shape, dtype=input_dtype),# type: ignore
-        W: T.Tensor(W_shape, dtype=input_dtype),# type: ignore
-        GK: T.Tensor(G_shape, dtype=gate_dtype),# type: ignore
-        h0: T.Tensor(h0_shape, dtype=input_dtype),# type: ignore
-        dht: T.Tensor(dht_shape, dtype=input_dtype),# type: ignore
-        dO: T.Tensor(dO_shape, dtype=input_dtype),# type: ignore
-        dv: T.Tensor(dv_shape, dtype=input_dtype),# type: ignore
+        Q: T.Tensor(Q_shape, dtype=input_dtype),  # type: ignore
+        K: T.Tensor(K_shape, dtype=input_dtype),  # type: ignore
+        W: T.Tensor(W_shape, dtype=input_dtype),  # type: ignore
+        GK: T.Tensor(G_shape, dtype=gate_dtype),  # type: ignore
+        h0: T.Tensor(h0_shape, dtype=input_dtype),  # type: ignore
+        dht: T.Tensor(dht_shape, dtype=input_dtype),  # type: ignore
+        dO: T.Tensor(dO_shape, dtype=input_dtype),  # type: ignore
+        dv: T.Tensor(dv_shape, dtype=input_dtype),  # type: ignore
         # Output
-        dh: T.Tensor(dh_shape, dtype=output_dtype),# type: ignore
-        dh0: T.Tensor(dh0_shape, dtype=state_dtype),# type: ignore
-        dv2: T.Tensor(dv2_shape, dtype=output_dtype),# type: ignore
+        dh: T.Tensor(dh_shape, dtype=output_dtype),  # type: ignore
+        dh0: T.Tensor(dh0_shape, dtype=state_dtype),  # type: ignore
+        dv2: T.Tensor(dv2_shape, dtype=output_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(DV, block_DV), B * H, threads=threads) as (bv, bbh):
             bb, bh = bbh // H, bbh % H
@@ -157,8 +155,7 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             Q_shared_fp32 = T.alloc_shared((block_S, DK), dtype=T.float32)
             W_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
-            GK_last_shared = T.alloc_shared((DK, ), dtype=gate_dtype)
-
+            GK_last_shared = T.alloc_shared((DK,), dtype=gate_dtype)
 
             T.use_swizzle(10)
 
@@ -184,7 +181,7 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
 
             for i_s in T.Pipelined(T.ceildiv(S, block_S), num_stages=num_stages):
                 # The gradient should be stored in the reverse order
-                i_s_inv = T.ceildiv(S, block_S) - i_s - 1 # reverse indices
+                i_s_inv = T.ceildiv(S, block_S) - i_s - 1  # reverse indices
                 # Store the updated dh
                 T.copy(b_dh_fragment, b_dh_shared)
                 T.copy(b_dh_shared, dh[bb, i_s_inv, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
@@ -192,7 +189,9 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
                 # Update dv
                 T.copy(K[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, 0:DK], K_shared)
                 T.gemm(K_shared, b_dh_shared, dv_fragment, clear_accum=True)
-                T.copy(dv[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], dv_shared) # copy old dv
+                T.copy(
+                    dv[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], dv_shared
+                )  # copy old dv
                 T.copy(dv_shared, dv_fragment_2)
                 for i_s2, i_v in T.Parallel(block_S, block_DV):
                     dv_fragment[i_s2, i_v] = dv_fragment[i_s2, i_v] + dv_fragment_2[i_s2, i_v]
@@ -201,28 +200,29 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
                 T.copy(dv_shared, dv2[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV])
 
                 # Update dh
-                T.copy(Q[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, 0:DK], Q_shared) #[block_S, DK]
-                T.copy(W[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, 0:DK], W_shared) #[block_S, DK]
-                T.copy(dO[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], dO_shared) #[block_S, block_DV]
+                T.copy(Q[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, 0:DK], Q_shared)  # [block_S, DK]
+                T.copy(W[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, 0:DK], W_shared)  # [block_S, DK]
+                T.copy(
+                    dO[bb, i_s_inv * block_S : (i_s_inv + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], dO_shared
+                )  # [block_S, block_DV]
 
                 if use_gk:
-                    last_idx = T.min((i_s_inv + 1) * block_S, S) - 1 # chunk last token gk
-                    T.copy( GK[bb, last_idx, bh, :], GK_last_shared)
+                    last_idx = T.min((i_s_inv + 1) * block_S, S) - 1  # chunk last token gk
+                    T.copy(GK[bb, last_idx, bh, :], GK_last_shared)
                     for i_k, i_v in T.Parallel(DK, block_DV):
                         b_dh_fragment[i_k, i_v] *= T.exp2(GK_last_shared[i_k])
-                    
-                T.gemm(Q_shared, dO_shared, b_dh_fragment_1, transpose_A=True, clear_accum=True) # [DK, block_DV]
-              
+
+                T.gemm(Q_shared, dO_shared, b_dh_fragment_1, transpose_A=True, clear_accum=True)  # [DK, block_DV]
+
                 # dv_shared: [block_S, block_DV]
-                T.gemm(W_shared, dv_shared, b_dh_fragment_2, transpose_A=True, clear_accum=True) # [DK, block_DV]
+                T.gemm(W_shared, dv_shared, b_dh_fragment_2, transpose_A=True, clear_accum=True)  # [DK, block_DV]
                 for i_k, i_v in T.Parallel(DK, block_DV):
-                    b_dh_fragment[i_k, i_v] += b_dh_fragment_1[i_k, i_v]*scale - b_dh_fragment_2[i_k, i_v]
+                    b_dh_fragment[i_k, i_v] += b_dh_fragment_1[i_k, i_v] * scale - b_dh_fragment_2[i_k, i_v]
 
             if use_initial_state:
                 T.copy(b_dh_fragment, dh0[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
 
     return kernel
-
 
 
 def run_test(
@@ -246,7 +246,6 @@ def run_test(
     num_stages=0,
     use_torch=False,
 ):
-
     Q, K, W, G, h0, dht, dO, dv = prepare_input(
         B,
         S,
@@ -268,8 +267,9 @@ def run_test(
     # fla ref
     print("fla running...", flush=True)
     if use_gk:
-        dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu(q=Q, k=K, w=W, do=dO, dv=dv, gk=G, h0=h0, dht=dht, scale=scale, use_exp2=True)
-    
+        dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu(
+            q=Q, k=K, w=W, do=dO, dv=dv, gk=G, h0=h0, dht=dht, scale=scale, use_exp2=True
+        )
 
     # tilelang
     print("tilelang running...", flush=True)
@@ -294,18 +294,18 @@ def run_test(
     # print(kernel.get_kernel_source())
     dh_tilelang, dh0_tilelang, dv2_tilelang = kernel(Q, K, W, G, h0, dht, dO, dv)
 
-    fla_time = do_bench(chunk_gated_delta_rule_bwd_dhu, q=Q, k=K, w=W, do=dO, dv=dv, gk=G, h0=h0, dht=dht, scale=scale, chunk_size=chunk_size)
+    fla_time = do_bench(
+        chunk_gated_delta_rule_bwd_dhu, q=Q, k=K, w=W, do=dO, dv=dv, gk=G, h0=h0, dht=dht, scale=scale, chunk_size=chunk_size
+    )
     tilelang_time = do_bench(kernel, Q, K, W, G, h0, dht, dO, dv)
 
     print(f"fla time: {fla_time} ms")
     print(f"tilelang time: {tilelang_time} ms")
 
-
     # compare_tensors("dh", dh_ref, dh_tilelang)
     # compare_tensors("dh0", dh0_ref, dh0_tilelang)
     # compare_tensors("dv2", dv2_ref, dv2_tilelang)
 
-    
 
 def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
     """
@@ -336,7 +336,7 @@ def main():
     DK = 128
     run_test(
         B=1,
-        S=1024*8,
+        S=1024 * 8,
         H=64,
         DK=DK,
         DV=128,
