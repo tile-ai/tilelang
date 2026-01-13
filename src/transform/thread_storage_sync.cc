@@ -20,30 +20,27 @@
 /*!
  * \file thread_storage_sync.cc
  */
+#include "../op/builtin.h"
+#include "./common/constr_visitor.h"
+#include "./common/thread_sync_types.h"
+#include "arith/ir_mutator_with_analyzer.h"
+#include "runtime/thread_storage_scope.h"
+#include "tir/transforms/ir_utils.h"
+#include <string>
+#include <tvm/arith/analyzer.h>
+#include <tvm/arith/int_set.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/attrs.h>
+#include <tvm/target/target_info.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include "./common/thread_sync_types.h"
-#include "arith/ir_mutator_with_analyzer.h"
-
 #include <unordered_map>
 #include <unordered_set>
-
-#include "../op/builtin.h"
-#include "./common/constr_visitor.h"
-#include "runtime/thread_storage_scope.h"
-#include "tir/transforms/ir_utils.h"
-#include <tvm/arith/int_set.h>
-#include <tvm/ir/attrs.h>
-
-#include <string>
-#include <tvm/arith/analyzer.h>
-#include <tvm/target/target_info.h>
-#include <tvm/tir/op.h>
 #include <vector>
 
 namespace tvm {
