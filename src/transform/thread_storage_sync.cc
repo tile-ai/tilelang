@@ -1349,12 +1349,32 @@ private:
       prev_cset.Substitute(prev_sub).Populate(analyzer);
       curr_cset.Substitute(curr_sub).Populate(analyzer);
       bool provably_disjoint = false;
+
+      prev_indice_bytes =
+          analyzer.Simplify(Substitute(prev_indice_bytes, prev_sub));
+      curr_indice_bytes =
+          analyzer.Simplify(Substitute(curr_indice_bytes, curr_sub));
+
+      // Handle Ramp expressions by creating a new index variable
+      // Check if prev_indice_bytes is a Ramp expression
+      if (const RampNode *prev_ramp = prev_indice_bytes.as<RampNode>()) {
+        // Create index variable for prev Ramp
+        Var prev_idx("prev_idx", DataType::Int(32));
+        analyzer.Bind(prev_idx, Range::FromMinExtent(0, prev_ramp->lanes));
+        prev_indice_bytes = prev_ramp->base + prev_idx * prev_ramp->stride;
+      }
+
+      // Check if curr_indice_bytes is a Ramp expression
+      if (const RampNode *curr_ramp = curr_indice_bytes.as<RampNode>()) {
+        // Create index variable for curr Ramp
+        Var curr_idx("curr_idx", DataType::Int(32));
+        analyzer.Bind(curr_idx, Range::FromMinExtent(0, curr_ramp->lanes));
+        curr_indice_bytes = curr_ramp->base + curr_idx * curr_ramp->stride;
+      }
+
+      // Now handle the simplified expressions
       if (prev_indice_bytes.dtype().is_scalar() &&
           curr_indice_bytes.dtype().is_scalar()) {
-        prev_indice_bytes =
-            analyzer.Simplify(Substitute(prev_indice_bytes, prev_sub));
-        curr_indice_bytes =
-            analyzer.Simplify(Substitute(curr_indice_bytes, curr_sub));
         if (prev_indice_bytes.dtype() != curr_indice_bytes.dtype()) {
           if (prev_indice_bytes.dtype().bits() <
               curr_indice_bytes.dtype().bits()) {
@@ -1373,6 +1393,8 @@ private:
           //     tir::EQ(prev_indice_bytes, curr_indice_bytes));
         }
       } else {
+        LOG(WARNING) << "Unscalar: " << prev_indice_bytes << "; "
+                     << curr_indice_bytes;
         try {
           auto prev_min = analyzer.Simplify(
               Substitute(prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
