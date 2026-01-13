@@ -399,7 +399,8 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto body = Evaluate(Call(DataType::Handle(), tma_store(),
                               {address_of_src, address_of_dst,
                                ceildiv(src_size * src->dtype.bits(), 8),
-                               need_reduce, eviction_policy}, annotations));
+                               need_reduce, eviction_policy},
+                              annotations));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);
   }
   auto simt_loop = MakeSIMTLoop(analyzer);
