@@ -324,7 +324,11 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
                << "&" << result << ") != 0) {\n";
   int func_call_scope = this->BeginScope();
   this->PrintIndent();
-  this->stream << (is_in_metal_context ? "ret = -1;\n" : "return -1;\n");
+  if (is_in_metal_context) {
+    this->stream << metal_result << "= -1;\n";
+  } else {
+    this->stream << "return -1;\n";
+  }
   this->EndScope(func_call_scope);
 
   this->PrintIndent();
