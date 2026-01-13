@@ -421,9 +421,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             original.step,
         )
 
-    def _create_copy_loops_to_memory(
-        self, op: For, cast_buffers: CastBufferMap, condition: tir.PrimExpr | None = None
-    ) -> list[For]:
+    def _create_copy_loops_to_memory(self, op: For, cast_buffers: CastBufferMap, condition: tir.PrimExpr | None = None) -> list[For]:
         """Create copy loops to transfer data from cast buffers to memory buffers."""
         copy_loops: list[For] = []
 
@@ -460,9 +458,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
 
         return copy_loops
 
-    def _create_copy_loops_from_memory(
-        self, op: For, cast_buffers: CastBufferMap, condition: tir.PrimExpr | None = None
-    ) -> list[For]:
+    def _create_copy_loops_from_memory(self, op: For, cast_buffers: CastBufferMap, condition: tir.PrimExpr | None = None) -> list[For]:
         """Create copy loops to transfer data from memory buffers to cast buffers."""
         copy_loops: list[For] = []
 
