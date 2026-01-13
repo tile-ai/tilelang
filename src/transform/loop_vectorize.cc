@@ -284,6 +284,9 @@ public:
       }
     }
 
+    // GCD with loop extent to ensure vector_size divides the loop extent
+    vector_size_ = arith::ZeroAwareGCD(loop_extent_vector_size_, vector_size_);
+
     if (verbose) {
       std::cerr << "=== Final vector_size: " << vector_size_ << " ===" << "\n";
     }
