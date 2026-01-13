@@ -890,7 +890,7 @@ class TirTemplate(Generic[_P, _T]):
     """
 
     prim_func: PrimFunc[_P, _T]
-    matcher: dict[Var, tuple[tvm.tir.Var, str, int]] | None = None
+    matcher: dict[Var, tuple[tvm.tir.Var, str, int, str]] | None = None
     is_lazy_style: bool = False  # True if from lazy-style (returns PrimFunc directly)
 
     @classmethod
@@ -899,10 +899,10 @@ class TirTemplate(Generic[_P, _T]):
         for k, v in prim_func.buffer_map.items():
             for i, s in enumerate(v.shape):
                 if s in constexpr and s not in matcher:
-                    matcher[s] = (k.name, "shape", i)
+                    matcher[s] = (k.name, "shape", i, s.name)
             for i, s in enumerate(v.strides):
                 if s in constexpr and s not in matcher:
-                    matcher[s] = (k.name, "stride", i)
+                    matcher[s] = (k.name, "stride", i, s.name)
         for s in constexpr:
             if s not in matcher:
                 shapes = {k: v.shape for k, v in prim_func.buffer_map.items()}
@@ -926,15 +926,24 @@ class TirTemplate(Generic[_P, _T]):
         if self.matcher is None:
             return ()
         result = []
-        for k, ty, i in self.matcher.values():
-            if ty == "shape":
-                result.append(kwargs[k].shape[i])
-            if ty == "stride":
-                v = kwargs[k]
-                if isinstance(v, Buffer):
-                    result.append(v.strides[i])
-                else:
-                    result.append(kwargs[k].stride()[i])
+        for k, ty, i, name in self.matcher.values():
+            if name in kwargs:
+                result.append(kwargs.get(name))
+            elif k in kwargs:
+                if ty == "shape":
+                    result.append(kwargs[k].shape[i])
+                elif ty == "stride":
+                    v = kwargs[k]
+                    if isinstance(v, Buffer):
+                        result.append(v.strides[i])
+                    else:
+                        result.append(kwargs[k].stride()[i])
+            else:
+                raise ValueError(
+                    f"Cannot find value for constexpr variable `{name}`\n"
+                    f"Please provide it as a keyword argument, e.g. `{name}=<value>`\n"
+                    f"Or provide the corresponding tensor argument `{k}`."
+                )
         return tuple(result)
 
     def get_tir(self, **kwargs):
@@ -1015,7 +1024,7 @@ class JITFunc(Generic[_P, _T]):
                 self.p1_cache[p1_key] = TirTemplate.from_lazy_style(prim_func)
                 return True
             return False
-        except (JITNoBuilderError, EagerJITBuildError):
+        except (JITNoBuilderError, EagerJITBuildError, TypeError):
             # In eager mode, we construct AST directly without prim_func,
             # so there's no Builder available when the function is called.
             # When eager-only features like T.const() or T.Kernel() are used,
