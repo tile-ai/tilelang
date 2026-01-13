@@ -27,49 +27,33 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include "./common/thread_sync_types.h"
+#include "arith/ir_mutator_with_analyzer.h"
 
 #include <unordered_map>
 #include <unordered_set>
-#include <utility>
 
 #include "../op/builtin.h"
 #include "./common/constr_visitor.h"
-#include "./common/thread_sync_types.h"
-#include "arith/ir_mutator_with_analyzer.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/int_set.h>
 #include <tvm/ir/attrs.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/stmt_functor.h>
 
-#include <unordered_map>
-#include <vector>
-
-#include "arith/ir_visitor_with_analyzer.h"
-#include "runtime/thread_storage_scope.h"
+#include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/target/target_info.h>
 #include <tvm/tir/op.h>
-
-#include <fstream>
-#include <string>
-#include <utility>
-
-#include "../op/builtin.h"
-#include "tir/transforms/ir_utils.h"
+#include <vector>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 using namespace ffi;
-using arith::IRVisitorWithAnalyzer;
+using arith::IRMutatorWithAnalyzer;
 using runtime::StorageRank;
 using runtime::StorageScope;
-
-using namespace tir;
-using arith::IRMutatorWithAnalyzer;
 
 // There are cases where necessary syncthreads is not inserted by
 // ThreadSyncInserter. For example, syncthreads is needed after async_wait_queue
