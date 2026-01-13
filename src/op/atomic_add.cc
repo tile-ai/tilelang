@@ -5,12 +5,14 @@
  */
 
 #include "./atomic_add.h"
+#include "./copy.h"
 #include "utils.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
 #include "../layout/layout.h"
+#include "../target/stubs/cuda.h"
 #include "../target/utils.h"
 #include "../transform/atomicadd_vectorize.h"
 #include "../transform/common/loop_fusion_utils.h"
@@ -22,6 +24,75 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+// Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
+static int to_CUtensorMapDataType(DataType dtype) {
+  CUtensorMapDataType tp;
+  if (dtype.is_float()) {
+    switch (dtype.bits()) {
+    case 64:
+      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT64;
+      break;
+    case 32:
+      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
+      break;
+    case 16:
+      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
+      break;
+    case 8:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      break;
+    default:
+      ICHECK(0) << dtype;
+    }
+  } else if (dtype.is_bfloat16()) {
+    tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+  } else if (dtype.is_float8()) {
+    tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+  } else if (dtype.is_int()) {
+    switch (dtype.bits()) {
+    case 64:
+      tp = CU_TENSOR_MAP_DATA_TYPE_INT64;
+      break;
+    case 32:
+      tp = CU_TENSOR_MAP_DATA_TYPE_INT32;
+      break;
+    case 16:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
+      break;
+    case 8:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      break;
+    default:
+      ICHECK(0) << dtype;
+    }
+  } else if (dtype.is_uint()) {
+    switch (dtype.bits()) {
+    case 64:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT64;
+      break;
+    case 32:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT32;
+      break;
+    case 16:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
+      break;
+    case 8:
+      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+      break;
+    default:
+      ICHECK(0) << dtype;
+    }
+  } else {
+    ICHECK(0) << dtype;
+  }
+  return static_cast<int>(tp);
+}
+
+// Reverses an array (used for row-major/column-major layout conversion).
+template <typename T> static Array<T> ReverseArray(Array<T> array) {
+  return Array<T>{array.rbegin(), array.rend()};
+}
 
 /**
  * @brief Construct an AtomicAdd operator from call arguments and annotations.
@@ -378,29 +449,108 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
 Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
   if (GetUseTMA()) {
-    Array<PrimExpr> src_indices, dst_indices;
-    PrimExpr src_size, dst_size;
-    std::tie(src_indices, src_size) = ReturnIndicesAndSize(0);
-    std::tie(dst_indices, dst_size) = ReturnIndicesAndSize(1);
-    ICHECK(analyzer->CanProveEqual(src_size, dst_size))
-        << "src_size = " << src_size << ", dst_size = " << dst_size;
-    BufferLoad src_node = BufferLoad(src, src_indices);
-    BufferLoad dst_node = BufferLoad(dst, dst_indices);
-    Call address_of_src =
-        Call(DataType::Handle(), builtin::address_of(), {src_node});
-    Call address_of_dst =
-        Call(DataType::Handle(), builtin::address_of(), {dst_node});
+    LOG(INFO) << "Lowering AtomicAdd with TMA";
 
+    // For AtomicAdd with TMA: src is shared memory, dst is global memory
+    // Use cp.reduce.async.bulk.tensor instruction with tensor descriptor
+    Buffer shared_tensor = src;
+    Buffer global_tensor = dst;
+    Array<Range> shared_range = src_range;
+    Array<Range> global_range = dst_range;
+
+    // Build TMADesc for the global tensor
+    TMADesc desc;
+    desc.rank = global_tensor->shape.size();
+    ICHECK(desc.rank >= 1 && desc.rank <= 5)
+        << "TMA reduce only supports 1-5 dimensions, got " << desc.rank;
+
+    // Data type must match
+    ICHECK(global_tensor->dtype == shared_tensor->dtype)
+        << "AtomicAdd between buffer " << shared_tensor->name << " and "
+        << global_tensor->name << " with different data type "
+        << shared_tensor->dtype << " and " << global_tensor->dtype;
+
+    desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
+
+    // Global tensor shape and stride
+    desc.global_addr = global_tensor->data;
+    desc.global_shape = ReverseArray(global_tensor->shape);
+    Array<PrimExpr> global_coords =
+        ReverseArray(global_range.Map([](Range r) { return r->min; }));
+
+    if (!global_tensor->strides.empty()) {
+      desc.global_stride = ReverseArray(global_tensor->strides);
+    } else {
+      // Create stride from shape (row-major)
+      PrimExpr stride = 1;
+      desc.global_stride.reserve(desc.rank);
+      for (size_t i = 0; i < desc.rank; i++) {
+        desc.global_stride.push_back(stride);
+        stride *= desc.global_shape[i];
+      }
+    }
+    // Make global stride in bytes
+    desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
+      return cast(DataType::Int(64), e) * global_tensor->dtype.bytes();
+    });
+
+    // Shared memory box (copy extent)
+    desc.smem_box =
+        ReverseArray(global_range.Map([](Range r) { return r->extent; }));
+    desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
+
+    // L2 & OOB settings
+    desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
+    desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+
+    // No swizzle and no interleave for atomic add
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+    desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
+
+    // Compute shared memory offset
+    Array<PrimExpr> shared_indices;
+    for (auto r : shared_range)
+      shared_indices.push_back(r->min);
+    std::vector<PrimExpr> shared_strides;
+    PrimExpr shared_stride = 1;
+    for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
+      auto s = shared_tensor->shape[shared_tensor->shape.size() - i - 1];
+      shared_strides.insert(shared_strides.begin(), shared_stride);
+      shared_stride *= s;
+    }
+    PrimExpr shared_offset = 0;
+    for (size_t i = 0; i < shared_indices.size(); i++) {
+      shared_offset += shared_indices[i] * shared_strides[i];
+    }
+
+    // Create TMA descriptor
+    Call create_descriptor =
+        Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
+
+    // Compute total elements for access_ptr
+    PrimExpr total_elements = 1;
+    for (auto e : desc.smem_box)
+      total_elements *= e;
+
+    // Build tma_store call args
+    Array<PrimExpr> args;
+    args.reserve(desc.rank + 4);
+    args.push_back(create_descriptor);
+    PrimExpr shared_addr = shared_tensor.access_ptr(
+        1, DataType::Handle(), 1, shared_offset, total_elements);
+    args.push_back(shared_addr);
+    for (auto coord : global_coords)
+      args.push_back(coord);
     int need_reduce = 1;
+    args.push_back(need_reduce);
     int eviction_policy = 0;
+    args.push_back(eviction_policy);
+
     // erase use_tma from annotations
-    auto annotations = this->annotations;
-    annotations.erase("use_tma");
-    auto body = Evaluate(Call(DataType::Handle(), tma_store(),
-                              {address_of_src, address_of_dst,
-                               ceildiv(src_size * src->dtype.bits(), 8),
-                               need_reduce, eviction_policy},
-                              annotations));
+    auto op_annotations = this->annotations;
+    op_annotations.erase("use_tma");
+
+    auto body = Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);
   }
   auto simt_loop = MakeSIMTLoop(analyzer);
