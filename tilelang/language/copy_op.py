@@ -10,6 +10,42 @@ from tilelang.utils.language import (
 )
 from tvm import ir, tir
 
+@T.macro
+
+def clone_buffer(buffer: tir.Buffer):
+
+    """Clone a buffer to a new buffer with the same shape, dtype and scope.
+    Args:
+        buffer (tir.Buffer): The source buffer to be cloned.
+
+    Returns:
+        tir.Buffer: The newly allocated buffer containing a copy of the original data.
+    """
+    cloned = T.alloc_buffer(
+        buffer.shape,
+        dtype=buffer.dtype,
+        scope=buffer.scope()
+    )
+    T.copy(buffer, cloned)
+    return cloned
+
+@T.macro
+def load_buffer(buffer: tir.Buffer, offsets: tuple, shape: tuple, target: str = "shared"):
+    """Load a sub-region of a buffer into a new buffer in the target scope.
+    Args:
+        buffer (Union[tir.Buffer, tir.BufferRegion]): The source buffer or region.
+        offsets (tuple[tir.PrimExpr, ...]): The starting offsets for the sub-region.
+        shape (tuple[tir.PrimExpr, ...]): The shape/extents of the sub-region to load.
+        target (str): The target memory scope (e.g., "shared", "local"). Defaults to "shared".
+    Returns:
+        tir.Buffer: A new buffer in the target scope containing the loaded data.
+    """
+    buffer = T.alloc_buffer(shape, scope=target)
+    T.copy(buffer[offsets], buffer)
+    return buffer
+
+tir.Buffer.clone = clone_buffer
+tir.Buffer.load = load_buffer
 
 def copy(
     src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,

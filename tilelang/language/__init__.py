@@ -24,7 +24,7 @@ from .loop import (
     Serial,  # noqa: F401
     Unroll,  # noqa: F401
 )
-from .frame import has_let_value, get_let_value  # noqa: F401
+from .frame import has_let_value, get_let_value, clone_buffer, load_buffer  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401

@@ -148,7 +148,24 @@ T.copy(C_local, C[by * BM, bx * BN])
 
 `T.copy` performs coalescing and scope‑specific lowering during compilation.
 
-## 6. A Minimal End‑to‑End Example (Vector Add)
+## 6. Buffer Cloning and Loading
+
+TileLang provides a sugar macro `T.clone_buffer` to simplify the pattern of duplicating data within the same or different memory scopes.
+
+```python
+# Manually allocate and then copy
+A_shared = T.alloc_shared((128, 128), "float16")
+# ... some operations on A_shared ...
+A_backup = T.alloc_buffer(A_shared.shape, dtype=A_shared.dtype, scope=A_shared.scope())
+T.copy(A_shared, A_backup)
+
+# One-liner using T.clone_buffer
+A_shared = T.alloc_shared((128, 128), "float16")
+# ... some operations on A_shared ...
+A_backup = T.clone_buffer(A_shared)
+```
+
+## 7. A Minimal End‑to‑End Example (Vector Add)
 
 ```python
 import tilelang
@@ -189,7 +206,7 @@ Notes
 - You can pass compile‑time tunables (tile sizes, dtypes) through the outer
   Python function and bake them into the generated TIR.
 
-## 7. Tiled GEMM Skeleton
+## 8. Tiled GEMM Skeleton
 
 Below is a minimal pattern for a tiled GEMM using shared memory staging and a
 fragment accumulator. It mirrors the quickstart style found in the repository.
@@ -215,7 +232,7 @@ def gemm(
         T.copy(C_f, C[by * BM, bx * BN])
 ```
 
-## 8. Debugging and Printing
+## 9. Debugging and Printing
 
 Use `T.print` inside a kernel for quick introspection. TileLang emits printing
 from a single thread for shared/fragment scopes to avoid floods.
