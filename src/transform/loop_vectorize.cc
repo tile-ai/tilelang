@@ -306,6 +306,8 @@ private:
       // Here I disable dynamic shape completely,
       //   In order to do it, the Planner should accept an analyzer with
       //   arithmetic info outside to prove the dividiblity of vector size
+      // Note(lei): This is somehow make sense because we should assume the
+      // tiling size is always static.
       if (!extent_ptr) {
         loop_extent_vector_size_ = 1;
         return ffi::GetRef<Stmt>(node);
@@ -383,26 +385,28 @@ private:
       elem_offset += indices[i] * strides[i];
     }
 
-    // 2. If element offset is independent with loop_var, ignore it.
-    if (CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_)) {
-      // Specially, if it's a BufferStore, we should not vectorize it.
-      if (is_store) {
-        return 1;
-      }
-      return initial_vector_size_; // No constraint from this buffer
-    }
-
-    // 3. Check if current buffer_vec_size works with invariant boundary check
-    if (!IsExprInvariantInVectorBoundary(elem_offset, inner_for_->loop_var,
-                                         buffer_vec_size, analyzer_)) {
-      // If not, tight vectorize bound with buffer dtype constraint
+    // 2. Check if current buffer_vec_size works with invariant boundary check
+    bool is_invariant = IsExprInvariantInVectorBoundary(
+        elem_offset, inner_for_->loop_var, buffer_vec_size, analyzer_);
+    if (!is_invariant) {
+      // If not, tighten vectorize bound with buffer dtype constraint
       buffer_vec_size = arith::ZeroAwareGCD(
           buffer_vec_size, vector_load_bits_max_ /
                                (buffer->dtype.bits() * buffer->dtype.lanes()));
-    } else if (is_store) {
-      // If the indices is invariant for BufferStore, we should also not
-      // vectorize it.
+    }
+
+    // 3. If element offset is independent with loop_var, ignore it.
+    bool is_independent =
+        CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_);
+
+    // For BufferStore, if indices is invariant or independent with loop_var,
+    // we should not vectorize it (broadcasting store is not supported).
+    if (is_store && (is_invariant || is_independent)) {
       return 1;
+    }
+
+    if (is_independent) {
+      return buffer_vec_size; // only limited constraint from this buffer
     }
 
     // 4. Try to find max vectorize size for this buffer
