@@ -40,6 +40,9 @@ env:
   XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
   PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
   UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
+  # x86_64 runners in GitHub Actions have limited storage,
+  # do not run import test on those machines.
+  CIBW_TEST_SKIP: "*linux*x86_64*"
 
 jobs:
   build-sdist:

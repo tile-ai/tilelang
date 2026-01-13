@@ -233,9 +233,6 @@ windows.before-build = "set"
 test-command = [
     "python -c 'import tilelang; print(tilelang.__version__)'",
 ]
-# x86_64 runners in GitHub Actions have limited storage,
-# do not run import test on those machines.
-test-skip = "*linux*x86_64*"
 
 [tool.cibuildwheel.linux]
 environment.PYTHONDEVMODE = "1"

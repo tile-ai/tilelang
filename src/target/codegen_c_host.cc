@@ -335,7 +335,8 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
     this->PrintIndent();
     this->stream << "});\n";
     this->PrintIndent();
-    this->stream << "if (" << metal_result << " != 0) return ret;\n";
+    this->stream << "if (" << metal_result << " != 0) return " << metal_result
+                 << ";\n";
   }
 }
 
