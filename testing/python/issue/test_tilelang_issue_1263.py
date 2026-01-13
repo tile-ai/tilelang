@@ -3,7 +3,6 @@ import tilelang.language as T
 
 
 def test_issue_1263_pipeline_no_consumer():
-    @tilelang.jit()
     def test_kernel(M, N):
         dtype = "bfloat16"
 
@@ -25,7 +24,14 @@ def test_issue_1263_pipeline_no_consumer():
 
         return fwd_main
 
-    test_kernel(1024, 128)
+    tilelang.compile(test_kernel(1024, 1024))
+    tilelang.compile(
+        test_kernel(1024, 1024),
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        },
+    )
 
 
 if __name__ == "__main__":
