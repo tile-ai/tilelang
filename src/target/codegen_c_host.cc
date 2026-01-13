@@ -295,23 +295,17 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   int metal_scope;
   std::string metal_result;
   if (is_in_metal_context) {
-    this->PrintIndent();
     metal_result = name_supply_->FreshName("metal_ret");
-    this->stream << "__block int " << metal_result << " = 0;\n";
-    this->PrintIndent();
-    this->stream << "auto serialQueue = torch::mps::get_dispatch_queue();\n";
-    this->PrintIndent();
-    this->stream << "dispatch_sync(serialQueue, ^() {\n";
+    this->PrintLine("__block int ", metal_result, " = 0;");
+    this->PrintLine("auto serialQueue = torch::mps::get_dispatch_queue();");
+    this->PrintLine("dispatch_sync(serialQueue, ^() {");
     metal_scope = this->BeginScope();
 
-    this->PrintIndent();
-    this->stream << "const id<MTLCommandBuffer> commandBuffer = "
-                    "torch::mps::get_command_buffer();\n";
-    this->PrintIndent();
-    this->stream << "const auto f = "
-                    "tvm::ffi::Function::GetGlobal(\"metal.SetStream\");\n";
-    this->PrintIndent();
-    this->stream << "(*f)(static_cast<TVMStreamHandle>(commandBuffer));\n";
+    this->PrintLine("const id<MTLCommandBuffer> commandBuffer = "
+                    "torch::mps::get_command_buffer();");
+    this->PrintLine(
+        "const auto f = tvm::ffi::Function::GetGlobal(\"metal.SetStream\");");
+    this->PrintLine("(*f)(static_cast<TVMStreamHandle>(commandBuffer));");
   }
 
   this->PrintIndent();
@@ -323,24 +317,19 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   this->stream << "(TVMFFIAny*) " << args_stack << ", " << num_args << ", "
                << "&" << result << ") != 0) {\n";
   int func_call_scope = this->BeginScope();
-  this->PrintIndent();
   if (is_in_metal_context) {
-    this->stream << metal_result << " = -1;\n";
+    this->PrintLine(metal_result, " = -1;");
   } else {
-    this->stream << "return -1;\n";
+    this->PrintLine("return -1;");
   }
   this->EndScope(func_call_scope);
 
-  this->PrintIndent();
-  this->stream << "}\n";
+  this->PrintLine("}");
 
   if (is_in_metal_context) {
     this->EndScope(metal_scope);
-    this->PrintIndent();
-    this->stream << "});\n";
-    this->PrintIndent();
-    this->stream << "if (" << metal_result << " != 0) return " << metal_result
-                 << ";\n";
+    this->PrintLine("});");
+    this->PrintLine("if (", metal_result, " != 0) return ", metal_result, ";");
   }
 }
 

@@ -120,6 +120,11 @@ private:
   template <typename T>
   inline void PrintTernaryCondExpr(const T *op, const char *compare,
                                    std::ostream &os); // NOLINT(*)
+
+  template <typename... Args> void PrintLine(Args &&...args) {
+    this->PrintIndent();
+    (this->stream << ... << args) << '\n';
+  }
 };
 
 } // namespace tl
