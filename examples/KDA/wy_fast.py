@@ -109,18 +109,18 @@ def tilelang_recompute_w_u_fwd(
             U_Beta_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
             G_n_shared = T.alloc_shared(block_DK, dtype=gate_dtype)
             KG_shared = T.alloc_shared((block_S, block_DK), dtype=output_dtype)
-            T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    W_shared: tilelang.layout.make_swizzled_layout(W_shared),
-                    U_shared: tilelang.layout.make_swizzled_layout(U_shared),
-                    W_Beta_shared: tilelang.layout.make_swizzled_layout(W_Beta_shared),
-                    U_Beta_shared: tilelang.layout.make_swizzled_layout(U_Beta_shared),
-                    KG_shared: tilelang.layout.make_swizzled_layout(KG_shared),
-                }
-            )
+            # T.annotate_layout(
+            #     {
+            #         K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+            #         V_shared: tilelang.layout.make_swizzled_layout(V_shared),
+            #         A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+            #         W_shared: tilelang.layout.make_swizzled_layout(W_shared),
+            #         U_shared: tilelang.layout.make_swizzled_layout(U_shared),
+            #         W_Beta_shared: tilelang.layout.make_swizzled_layout(W_Beta_shared),
+            #         U_Beta_shared: tilelang.layout.make_swizzled_layout(U_Beta_shared),
+            #         KG_shared: tilelang.layout.make_swizzled_layout(KG_shared),
+            #     }
+            # )
 
             T.disable_warp_group_reg_alloc()  # TMA to transfer the last dimension of the data should be 16 times
             for i_s in T.Parallel(block_S):

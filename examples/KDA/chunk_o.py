@@ -108,16 +108,16 @@ def tilelang_chunk_fwd_o(
             O_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             GK_shared = T.alloc_shared((block_S, block_DK), dtype=gate_dtype)
             GQ_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
-            T.annotate_layout(
-                {
-                    Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    HIDDEN_shared: tilelang.layout.make_swizzled_layout(HIDDEN_shared),
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                    GQ_shared: tilelang.layout.make_swizzled_layout(GQ_shared),
-                }
-            )
+            # T.annotate_layout(
+            #     {
+            #         Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
+            #         V_shared: tilelang.layout.make_swizzled_layout(V_shared),
+            #         HIDDEN_shared: tilelang.layout.make_swizzled_layout(HIDDEN_shared),
+            #         A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+            #         O_shared: tilelang.layout.make_swizzled_layout(O_shared),
+            #         GQ_shared: tilelang.layout.make_swizzled_layout(GQ_shared),
+            #     }
+            # )
 
             T.clear(O_fragment)
 
@@ -132,8 +132,7 @@ def tilelang_chunk_fwd_o(
                 for i_s, i_v in T.Parallel(block_S, block_DV):
                     Q_shared[i_s, i_v] = Q_shared[i_s, i_v] * scale
                     GQ_shared[i_s, i_v] = Q_shared[i_s, i_v] * T.exp2(GK_shared[i_s, i_v])
-                T.gemm(GQ_shared, HIDDEN_shared, O_fragment)  # O_fragment作为累加器
-
+                T.gemm(GQ_shared, HIDDEN_shared, O_fragment)  # O_fragment as accumulator
             T.copy(V[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], V_shared)  # [block_S, block_DV]
             T.copy(A[bb, bs * block_S : (bs + 1) * block_S, bh, 0:block_S], A_shared)  # [block_S, block_S]
 

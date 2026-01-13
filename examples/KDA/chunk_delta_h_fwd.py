@@ -137,17 +137,17 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
             K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
             GK_last_shared = T.alloc_shared((DK), dtype=gate_dtype)
 
-            T.annotate_layout(
-                {
-                    b_h_shared: tilelang.layout.make_swizzled_layout(b_h_shared),
-                    U_shared: tilelang.layout.make_swizzled_layout(U_shared),
-                    W_shared: tilelang.layout.make_swizzled_layout(W_shared),
-                    V_new_shared: tilelang.layout.make_swizzled_layout(V_new_shared),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                }
-            )
+            # T.annotate_layout(
+            #     {
+            #         b_h_shared: tilelang.layout.make_swizzled_layout(b_h_shared),
+            #         U_shared: tilelang.layout.make_swizzled_layout(U_shared),
+            #         W_shared: tilelang.layout.make_swizzled_layout(W_shared),
+            #         V_new_shared: tilelang.layout.make_swizzled_layout(V_new_shared),
+            #         K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+            #     }
+            # )
 
-            T.use_swizzle(10)
+            # T.use_swizzle(10)
 
             if use_initial_state:
                 T.copy(initial_state[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV], b_h_shared)

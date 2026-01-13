@@ -128,17 +128,17 @@ def chunk_bwd_dqkwg(
             dkkn_shared = T.alloc_shared((block_S, block_DK), dtype=T.float32)
             pp_shared = T.alloc_shared((block_DK), dtype=T.float32)
 
-            T.annotate_layout(
-                {
-                    h_shared: tilelang.layout.make_swizzled_layout(h_shared),
-                    dh_shared: tilelang.layout.make_swizzled_layout(dh_shared),
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    DO_shared: tilelang.layout.make_swizzled_layout(DO_shared),
-                    DV_shared: tilelang.layout.make_swizzled_layout(DV_shared),
-                    G_shared: tilelang.layout.make_swizzled_layout(G_shared),
-                }
-            )
-            T.use_swizzle(10)
+            # T.annotate_layout(
+            #     {
+            #         h_shared: tilelang.layout.make_swizzled_layout(h_shared),
+            #         dh_shared: tilelang.layout.make_swizzled_layout(dh_shared),
+            #         V_shared: tilelang.layout.make_swizzled_layout(V_shared),
+            #         DO_shared: tilelang.layout.make_swizzled_layout(DO_shared),
+            #         DV_shared: tilelang.layout.make_swizzled_layout(DV_shared),
+            #         G_shared: tilelang.layout.make_swizzled_layout(G_shared),
+            #     }
+            # )
+            # T.use_swizzle(10)
 
             T.clear(dgkn_fragment)
             T.clear(dq_fragment)

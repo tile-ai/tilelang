@@ -82,13 +82,13 @@ def tilelang_chunk_bwd_kernel_dv_local(
             dA_fragment = T.alloc_fragment((block_S, block_S), dtype=T.float32)
             # dA_shared = T.alloc_shared((block_S, block_S), dtype=da_dtype)
 
-            T.annotate_layout(
-                {
-                    do_shared: tilelang.layout.make_swizzled_layout(do_shared),
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                }
-            )
-            T.use_swizzle(10)
+            # T.annotate_layout(
+            #     {
+            #         do_shared: tilelang.layout.make_swizzled_layout(do_shared),
+            #         V_shared: tilelang.layout.make_swizzled_layout(V_shared),
+            #     }
+            # )
+            # T.use_swizzle(10)
 
             T.clear(dA_fragment)
             for i_v in T.Pipelined(T.ceildiv(DV, block_DV), num_stages=num_stages):

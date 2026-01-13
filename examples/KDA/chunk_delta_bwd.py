@@ -138,7 +138,6 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             bb, bh = bbh // H, bbh % H
 
             b_dh_shared = T.alloc_shared((DK, block_DV), dtype=output_dtype)
-            b_dh_shared_fp32 = T.alloc_shared((DK, block_DV), dtype=state_dtype)
             b_dh_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
             b_dh_fragment_1 = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
             b_dh_fragment_2 = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
@@ -146,30 +145,28 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             dv_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dv_fragment_2 = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dO_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
-            dO_shared_t = T.alloc_shared((block_DV, block_S), dtype=T.float32)
             K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
             Q_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
-            Q_shared_fp32 = T.alloc_shared((block_S, DK), dtype=T.float32)
             W_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
             GK_last_shared = T.alloc_shared((DK,), dtype=gate_dtype)
 
-            T.use_swizzle(10)
+            # T.use_swizzle(10)
 
-            T.annotate_layout(
-                {
-                    b_dh_shared: tilelang.layout.make_swizzled_layout(b_dh_shared),
-                    b_dh_shared_fp32: tilelang.layout.make_swizzled_layout(b_dh_shared_fp32),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
-                    dO_shared_t: tilelang.layout.make_swizzled_layout(dO_shared_t),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-                    Q_shared_fp32: tilelang.layout.make_swizzled_layout(Q_shared_fp32),
-                    W_shared: tilelang.layout.make_swizzled_layout(W_shared),
-                }
-            )
+            # T.annotate_layout(
+            #     {
+            #         b_dh_shared: tilelang.layout.make_swizzled_layout(b_dh_shared),
+            #         b_dh_shared_fp32: tilelang.layout.make_swizzled_layout(b_dh_shared_fp32),
+            #         dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
+            #         dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
+            #         dO_shared_t: tilelang.layout.make_swizzled_layout(dO_shared_t),
+            #         K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+            #         Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
+            #         Q_shared_fp32: tilelang.layout.make_swizzled_layout(Q_shared_fp32),
+            #         W_shared: tilelang.layout.make_swizzled_layout(W_shared),
+            #     }
+            # )
 
             if use_final_state_gradient:
                 T.copy(dht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV], b_dh_shared)
