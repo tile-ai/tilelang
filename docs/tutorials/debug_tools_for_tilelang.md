@@ -194,8 +194,113 @@ C_local inferenced layout:
   Index:  [_j % 16 // 8 * 4 + _i % 16 // 8 * 2 + _j % 2]
 ```
 
+## AutoDD: Automatic Delta Debugging
+
+When dealing with complex TileLang programs that produce errors, manually isolating the bug can be tedious. **AutoDD** (Automatic Delta Debugging) is a built-in tool that automatically simplifies your program to the minimal code needed to reproduce a specific error.
+
+### What is Delta Debugging?
+
+Delta Debugging is an automated debugging technique that:
+1. Takes a program that triggers a bug
+2. Systematically removes code fragments
+3. Checks if the simplified program still triggers the same bug
+4. Produces the minimal code that reproduces the bug
+
+AutoDD uses a Probability Distribution Driven Delta Debugging (PDD) algorithm for efficient minimization.
+
+### Why Use AutoDD?
+
+- **Large codebases**: Real projects often have hundreds of lines of configuration, helper functions, and logging
+- **Hard-to-locate errors**: Error messages may point to TVM/CUDA internals rather than your TileLang code
+- **Time-saving**: Manually deleting code to isolate bugs is very time-consuming
+
+AutoDD can reduce a 200+ line program to just 30 lines, directly exposing the root cause.
+
+### Basic Usage
+
+```bash
+python -m tilelang.autodd <source_file> --err-msg "<error_message>" -o <output_file>
+```
+
+### Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `source` | Path to the input Python source file |
+| `--err-msg` | Error message to match (searched in stdout or stderr) |
+| `-o, --output` | Path to the minimized output file |
+| `--backend` | Execution backend: `runner` (faster) or `subproc` (more stable), default `runner` |
+| `--timeout` | Timeout for each task in seconds, default 60 |
+| `-j, --jobs` | Number of parallel jobs, default 1 |
+
+### Example
+
+Suppose you have a complex TileLang program with a GEMM shape mismatch bug:
+
+```python
+# buggy_matmul.py (200+ lines)
+@tilelang.jit
+def buggy_matmul(M, N, K, block_M, block_N, block_K, ...):
+    @T.prim_func
+    def matmul_kernel(...):
+        with T.Kernel(...) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_M, block_N), dtype)  # Bug: should be (block_K, block_N)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            # ... lots of other code ...
+            T.gemm(A_shared, B_shared, C_local)  # Error here
+    return matmul_kernel
+```
+
+Run AutoDD to minimize:
+
+```bash
+python -m tilelang.autodd buggy_matmul.py --err-msg "Dimension mismatch" -o minimized.py -j 4
+```
+
+AutoDD will produce a minimal reproduction:
+
+```python
+# minimized.py (~30 lines)
+import tilelang.language as T
+
+def buggy_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32, *args, **kwargs):
+    @T.prim_func
+    def matmul_kernel():
+        with T.Kernel():
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_M, block_N), dtype)  # Bug exposed!
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            T.gemm(A_shared, B_shared, C_local)
+```
+
+### How AutoDD Works
+
+AutoDD uses AST (Abstract Syntax Tree) analysis with multiple rewrite rules:
+
+1. **Fast Reducers**: Remove statements, simplify if/for constructs
+2. **Canonicalizers**: Expand with statements, add `*args, **kwargs` for compatibility
+3. **Simplifiers**: Replace expressions with constants, simplify function calls
+4. **Slow Reducers**: Remove arbitrary expressions, reduce integer constants
+
+### Tips
+
+- **Error message matching**: Use a unique substring from the error output
+- **Timeout**: Increase `--timeout` for programs with long compilation times
+- **Parallel jobs**: Use `-j 4` or higher to speed up minimization
+- **Backend**: Try `--backend subproc` if `runner` is unstable
+
+### Complete Example
+
+A complete example is available in `examples/autodd/`:
+- `tilelang_buggy.py`: A complex program with a bug (~200 lines)
+- `tilelang_minimized_expected.py`: Expected output after AutoDD (~30 lines)
+- `README.md`: Detailed documentation
+
 ## Conclusion
 
 By carefully examining intermediate representations (IR) before final code generation—and by leveraging runtime printing through `T.print`—one can quickly diagnose where index calculations, copy logic, or other kernel operations deviate from the intended behavior. This two-pronged approach (inspecting IR transformations and using runtime prints) is often sufficient for resolving generation and correctness issues in TileLang programs.
+
+For complex programs where manual debugging is tedious, **AutoDD** provides automated delta debugging to quickly isolate the minimal code that reproduces a bug.
 
 For advanced performance tuning (e.g., analyzing memory bandwidth or occupancy), more specialized profiling tools such as **Nsight Compute**, **rocProf**, or vendor-specific profilers may be required. Those aspects will be covered in future documents.
