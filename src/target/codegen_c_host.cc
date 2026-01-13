@@ -60,7 +60,6 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   decl_stream << "#include <stdbool.h>\n";
 
   decl_stream << "#ifdef __OBJC__\n";
-  decl_stream << "#define DMLC_USE_LOGGING_LIBRARY <tvm/runtime/logging.h>\n";
   decl_stream << "#include \"tvm/runtime/device_api.h\"\n";
   decl_stream << "#include \"tvm/ffi/function.h\"\n";
 
