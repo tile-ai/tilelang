@@ -49,6 +49,7 @@ from tvm.tir import (
     DeclBuffer,
     For,
     ForKind,
+    IfThenElse,
     IntImm,
     PrimFunc,
     PyStmtExprVisitor,
@@ -180,6 +181,17 @@ def contains_seq_stmt(stmt: Stmt) -> bool:
     return found
 
 
+def extract_if_condition(stmt: Stmt) -> tuple[tir.PrimExpr | None, Stmt]:
+    """Extract IfThenElse condition from statement if present.
+
+    Returns:
+        A tuple of (condition, inner_body). If no IfThenElse, returns (None, stmt).
+    """
+    if isinstance(stmt, IfThenElse) and stmt.else_case is None:
+        return stmt.condition, stmt.then_case
+    return None, stmt
+
+
 # Type alias for cast buffer mapping
 # Maps original buffer -> (cast buffer, original indices)
 CastBufferMap = dict[Buffer, tuple[Buffer, list[tir.PrimExpr]]]
@@ -284,6 +296,9 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         if not isinstance(op.extent, IntImm):
             return op
 
+        # Extract condition if the body is wrapped in IfThenElse
+        condition, _ = extract_if_condition(op.body)
+
         # Create cast buffers for each unique target buffer (memory buffer)
         cast_buffers = self._create_cast_buffers_for_stores(stores_to_transform, op.extent.value)
 
@@ -291,8 +306,8 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         compute_body = self._replace_stores_with_cast(op.body, cast_buffers, op.loop_var)
         compute_loop = self._make_vectorized_loop(op, compute_body)
 
-        # Build copy loops (transfer from cast buffer to memory)
-        copy_loops = self._create_copy_loops_to_memory(op, cast_buffers)
+        # Build copy loops (transfer from cast buffer to memory, with condition if present)
+        copy_loops = self._create_copy_loops_to_memory(op, cast_buffers, condition)
 
         # Combine: compute → copy
         all_stmts = [compute_loop] + copy_loops
@@ -317,6 +332,9 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         if not isinstance(op.extent, IntImm):
             return op
 
+        # Extract condition if the body is wrapped in IfThenElse
+        condition, _ = extract_if_condition(op.body)
+
         # Collect memory buffer loads that need cast buffering
         memory_loads = self._collect_memory_loads_to_cast(stores_to_transform)
         if not memory_loads:
@@ -325,8 +343,8 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         # Create cast buffers for each unique source buffer (memory buffer)
         cast_buffers = self._create_cast_buffers_for_loads(memory_loads, op.extent.value)
 
-        # Build copy loops (transfer from memory to cast buffer)
-        copy_loops = self._create_copy_loops_from_memory(op, cast_buffers)
+        # Build copy loops (transfer from memory to cast buffer, with condition if present)
+        copy_loops = self._create_copy_loops_from_memory(op, cast_buffers, condition)
 
         # Build compute loop (replace memory loads with cast buffer loads)
         compute_body = self._replace_loads_with_cast(op.body, cast_buffers, op.loop_var)
@@ -403,7 +421,9 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             original.step,
         )
 
-    def _create_copy_loops_to_memory(self, op: For, cast_buffers: CastBufferMap) -> list[For]:
+    def _create_copy_loops_to_memory(
+        self, op: For, cast_buffers: CastBufferMap, condition: tir.PrimExpr | None = None
+    ) -> list[For]:
         """Create copy loops to transfer data from cast buffers to memory buffers."""
         copy_loops: list[For] = []
 
@@ -415,11 +435,16 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             new_indices = [substitute(idx, {op.loop_var: copy_var}) for idx in orig_indices]
 
             # cast buffer → memory
-            copy_store = BufferStore(
+            copy_store: Stmt = BufferStore(
                 orig_buffer,
                 BufferLoad(cast_buffer, [copy_var]),
                 new_indices,
             )
+
+            # Wrap with condition if present (substitute loop_var with copy_var)
+            if condition is not None:
+                new_condition = substitute(condition, {op.loop_var: copy_var})
+                copy_store = IfThenElse(new_condition, copy_store, None)
 
             copy_loop = For(
                 copy_var,
@@ -435,7 +460,9 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
 
         return copy_loops
 
-    def _create_copy_loops_from_memory(self, op: For, cast_buffers: CastBufferMap) -> list[For]:
+    def _create_copy_loops_from_memory(
+        self, op: For, cast_buffers: CastBufferMap, condition: tir.PrimExpr | None = None
+    ) -> list[For]:
         """Create copy loops to transfer data from memory buffers to cast buffers."""
         copy_loops: list[For] = []
 
@@ -447,11 +474,16 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             new_indices = [substitute(idx, {op.loop_var: copy_var}) for idx in orig_indices]
 
             # memory → cast buffer
-            copy_store = BufferStore(
+            copy_store: Stmt = BufferStore(
                 cast_buffer,
                 BufferLoad(orig_buffer, new_indices),
                 [copy_var],
             )
+
+            # Wrap with condition if present (substitute loop_var with copy_var)
+            if condition is not None:
+                new_condition = substitute(condition, {op.loop_var: copy_var})
+                copy_store = IfThenElse(new_condition, copy_store, None)
 
             copy_loop = For(
                 copy_var,
