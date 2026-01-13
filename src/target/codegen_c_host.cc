@@ -293,9 +293,11 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   this->stream << result << ".v_int64 = 0;\n";
 
   int metal_scope;
+  std::string metal_result;
   if (is_in_metal_context) {
     this->PrintIndent();
-    this->stream << "__block int ret = 0;\n";
+    metal_result = name_supply_->FreshName("metal_ret");
+    this->stream << "__block int " << metal_result << " = 0;\n";
     this->PrintIndent();
     this->stream << "auto serialQueue = torch::mps::get_dispatch_queue();\n";
     this->PrintIndent();
@@ -333,7 +335,7 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
     this->PrintIndent();
     this->stream << "});\n";
     this->PrintIndent();
-    this->stream << "return ret;\n";
+    this->stream << "if (" << metal_result << " != 0) return ret;\n";
   }
 }
 
