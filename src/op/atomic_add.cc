@@ -280,8 +280,11 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   new_args.push_back(src_value);
   new_args.push_back(GetMemoryOrder());
 
+  // erase use_tma from annotations
+  auto annotations = this->annotations;
+  annotations.erase("use_tma");
   Call atomicadd_call =
-      tvm::tir::Call(dst->dtype, atomicadd_elem_op(), new_args);
+      tvm::tir::Call(dst->dtype, atomicadd_elem_op(), new_args, annotations);
 
   Stmt body = tvm::tir::Evaluate(atomicadd_call);
 
@@ -390,10 +393,14 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
     int need_reduce = 1;
     int eviction_policy = 0;
+    // erase use_tma from annotations
+    auto annotations = this->annotations;
+    annotations.erase("use_tma");
     auto body = Evaluate(Call(DataType::Handle(), tma_store(),
                               {address_of_src, address_of_dst,
                                ceildiv(src_size * src->dtype.bits(), 8),
-                               need_reduce, eviction_policy}));
+                               need_reduce, eviction_policy},
+                              annotations));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);
   }
   auto simt_loop = MakeSIMTLoop(analyzer);
