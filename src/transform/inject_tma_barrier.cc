@@ -173,7 +173,7 @@ private:
       new_args.Set(is_1d_tma_load ? 2 : 1,
                    Call(DataType::Handle(), get_mbarrier(),
                         {IntImm(DataType::Int(32), 0)}));
-      return Call(op->dtype, op->op, new_args);
+      return Call(op->dtype, op->op, new_args, op->annotations);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
@@ -382,7 +382,7 @@ public:
         }
       }
 
-      return Call(op->dtype, op->op, new_args);
+      return Call(op->dtype, op->op, new_args, op->annotations);
     } else {
       return StmtExprMutator::VisitExpr_(op);
     }
@@ -521,7 +521,7 @@ private:
             new_args.Set(2, Call(DataType::Handle(), get_mbarrier(),
                                  {IntImm(DataType::Int(32),
                                          static_cast<int>(imm->value))}));
-            return Call(op->dtype, op->op, new_args);
+            return Call(op->dtype, op->op, new_args, op->annotations);
           }
         }
         return IRMutatorWithAnalyzer::VisitExpr_(op);
@@ -537,7 +537,7 @@ private:
       } else {
         new_args.Set(1, barrier_id);
       }
-      return Call(op->dtype, op->op, new_args);
+      return Call(op->dtype, op->op, new_args, op->annotations);
     } else if (op->op.same_as(mbarrier_expect_tx())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (!tma_op_to_barrier_id_.count(call_ref)) {
@@ -552,9 +552,9 @@ private:
         clear_arrive_ = clear_expect_list_[cur_expect_idx_++];
       if (clear_arrive_) {
         return Call(op->dtype, builtin::ptx_arrive_barrier_expect_tx(),
-                    new_args);
+                    new_args, op->annotations);
       }
-      return Call(op->dtype, op->op, new_args);
+      return Call(op->dtype, op->op, new_args, op->annotations);
     } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
       if (clear_arrive_) {
         clear_arrive_ = false;
@@ -562,7 +562,7 @@ private:
       }
       // by default, all threads must wait.
       auto new_args = op->args;
-      return Call(op->dtype, op->op, new_args);
+      return Call(op->dtype, op->op, new_args, op->annotations);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
