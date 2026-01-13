@@ -389,29 +389,40 @@ private:
     }
 
     // 2. Check if current buffer_vec_size works with invariant boundary check
-    bool is_invariant = IsExprInvariantInVectorBoundary(
-        elem_offset, inner_for_->loop_var, buffer_vec_size, analyzer_);
+    // In some cases, buffer_vec_size is max (e.g. 128), but
+    // IsExprInvariantInVectorBoundary may only be true at a smaller size (e.g.
+    // 64). Recursively halve buffer_vec_size until we find a size where
+    // is_invariant is true. Fallback: minimum vector size based on buffer dtype
+    int min_vec_size = arith::ZeroAwareGCD(
+        buffer_vec_size,
+        vector_load_bits_max_ / (buffer->dtype.bits() * buffer->dtype.lanes()));
+    bool is_invariant = false;
+    int try_vec_size = buffer_vec_size;
+    while (try_vec_size >= min_vec_size) {
+      is_invariant = IsExprInvariantInVectorBoundary(
+          elem_offset, inner_for_->loop_var, try_vec_size, analyzer_);
+      if (is_invariant) {
+        buffer_vec_size = try_vec_size;
+        break;
+      }
+      try_vec_size /= 2;
+    }
+    // If is_invariant is still false, use the fallback min_vec_size
     if (!is_invariant) {
-      // If not, tighten vectorize bound with buffer dtype constraint
-      buffer_vec_size = arith::ZeroAwareGCD(
-          buffer_vec_size, vector_load_bits_max_ /
-                               (buffer->dtype.bits() * buffer->dtype.lanes()));
+      buffer_vec_size = min_vec_size;
     }
 
     // 3. If element offset is independent with loop_var, ignore it.
     bool is_independent =
         CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_);
-
     // For BufferStore, if indices is invariant or independent with loop_var,
     // we should not vectorize it (broadcasting store is not supported).
     if (is_store && (is_invariant || is_independent)) {
       return 1;
     }
-
     if (is_independent) {
       return buffer_vec_size; // only limited constraint from this buffer
     }
-
     // 4. Try to find max vectorize size for this buffer
     while (buffer_vec_size > 1 &&
            !IndiceCanVectorize(elem_offset, inner_for_->loop_var,

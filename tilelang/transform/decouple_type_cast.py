@@ -95,22 +95,30 @@ def validate_buffer_scope(buffer: Buffer) -> None:
         )
 
 
+@tir.functor.visitor
+class MixedTypeChecker(PyStmtExprVisitor):
+    """Check if expression contains BufferLoads with different dtypes, skipping indices."""
+
+    def __init__(self, target_dtype: str):
+        super().__init__()
+        self.target_dtype = str(target_dtype)
+        self.found_different = False
+
+    def visit_buffer_load_(self, op: BufferLoad) -> None:
+        if str(op.buffer.dtype) != self.target_dtype:
+            self.found_different = True
+        # Skip indices traversal
+
+
 def has_mixed_types(expr: tir.PrimExpr, target_dtype: str) -> bool:
     """Check if expression contains BufferLoads with different dtypes than target.
 
     If any BufferLoad in the expression has a different dtype than the target
     (store buffer's dtype), vectorization may be constrained by GCD of all dtypes.
     """
-    target_dtype = str(target_dtype)
-    found_different = False
-
-    def visitor(node) -> None:
-        nonlocal found_different
-        if isinstance(node, BufferLoad) and str(node.buffer.dtype) != target_dtype:
-            found_different = True
-
-    post_order_visit(expr, visitor)
-    return found_different
+    checker = MixedTypeChecker(target_dtype)
+    checker.visit_expr(expr)
+    return checker.found_different
 
 
 @tir.functor.visitor
@@ -162,6 +170,35 @@ def has_global_or_shared_load_with_different_dtype(expr: tir.PrimExpr, target_dt
     """
     target_dtype = str(target_dtype)
     return any(str(load.buffer.dtype) != target_dtype for load in get_global_or_shared_buffer_loads(expr, skip_if_then_else_cond=True))
+
+
+@tir.functor.visitor
+class StoreCollector(PyStmtExprVisitor):
+    """Collect BufferStore nodes that need transformation, skipping indices traversal.
+
+    This avoids visiting BufferLoad/BufferStore nodes inside indices, which don't
+    participate in the type casting transformation.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.local_to_memory: list[BufferStore] = []
+        self.memory_to_local: list[BufferStore] = []
+
+    def visit_buffer_store_(self, op: BufferStore) -> None:
+        validate_buffer_scope(op.buffer)
+        # Case 1: store to memory with mixed types
+        if is_global_or_shared_buffer(op.buffer) and has_mixed_types(op.value, op.buffer.dtype):
+            self.local_to_memory.append(op)
+        # Case 2: store to local with memory load of different dtype
+        elif is_local_buffer(op.buffer) and has_global_or_shared_load_with_different_dtype(op.value, op.buffer.dtype):
+            self.memory_to_local.append(op)
+        # Only visit value, skip indices
+        self.visit_expr(op.value)
+
+    def visit_buffer_load_(self, op: BufferLoad) -> None:
+        # Skip indices traversal for BufferLoad as well
+        pass
 
 
 def contains_seq_stmt(stmt: Stmt) -> bool:
@@ -247,7 +284,6 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
 
         # Collect stores that need transformation
         local_to_memory, memory_to_local = self._collect_stores_to_transform(new_body)
-
         if local_to_memory:
             return self._transform_local_to_memory(op, local_to_memory)
         elif memory_to_local:
@@ -266,21 +302,9 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
 
         Note: Vectorized for is always the innermost loop, so no nested For handling needed.
         """
-        local_to_memory: list[BufferStore] = []
-        memory_to_local: list[BufferStore] = []
-
-        def visitor(node) -> None:
-            if isinstance(node, BufferStore):
-                validate_buffer_scope(node.buffer)
-                # Case 1: store to memory with mixed types
-                if is_global_or_shared_buffer(node.buffer) and has_mixed_types(node.value, node.buffer.dtype):
-                    local_to_memory.append(node)
-                # Case 2: store to local with memory load of different dtype
-                elif is_local_buffer(node.buffer) and has_global_or_shared_load_with_different_dtype(node.value, node.buffer.dtype):
-                    memory_to_local.append(node)
-
-        post_order_visit(stmt, visitor)
-        return local_to_memory, memory_to_local
+        collector = StoreCollector()
+        collector.visit_stmt(stmt)
+        return collector.local_to_memory, collector.memory_to_local
 
     def _transform_local_to_memory(self, op: For, stores_to_transform: list[BufferStore]) -> Stmt:
         """Transform local→memory: compute to cast buffer, then copy to memory.
