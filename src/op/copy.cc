@@ -12,7 +12,6 @@
 #include "../layout/tcgen05_layout.h"
 #include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
-#include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "utils.h"
@@ -787,11 +786,8 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
-  auto transformed_loop =
-      Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
-
   For vectorized_thread_loop;
-  auto par_op = ParallelOp(transformed_loop);
+  auto par_op = ParallelOp(fused_loop);
 
   if (is_cpu_target || IsLocalBuffer(src) || IsLocalBuffer(dst)) {
     if (IsLocalBuffer(src) && !IsLocalBuffer(dst)) {
@@ -799,7 +795,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                    << dst.scope() << " buffer `" << dst->name
                    << "` may cause conflicted write.";
     }
-    vectorized_thread_loop = VectorizeLoop(transformed_loop);
+    vectorized_thread_loop = VectorizeLoop(fused_loop);
     return vectorized_thread_loop;
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,

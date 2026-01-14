@@ -14,7 +14,6 @@
 #include "../target/utils.h"
 #include "../transform/atomicadd_vectorize.h"
 #include "../transform/common/loop_fusion_utils.h"
-#include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "builtin.h"
 
@@ -398,8 +397,6 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-  auto transformed_loop =
-      Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
 
   auto GetArchInt = [&](const Target &tgt) -> int {
     int arch_int = 0;
@@ -525,12 +522,12 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return {loop_layout, pred};
   };
 
-  auto ret = AtomicAddInferLayout(transformed_loop,
+  auto ret = AtomicAddInferLayout(fused_loop,
                                   {T.target, T.thread_bounds, T.layout_map,
                                    analyzer, false, T.buffer_remap});
   Fragment loop_layout = ret.loop_layout;
   auto thread_loop =
-      PartitionLoop(transformed_loop, T.thread_var, analyzer, loop_layout);
+      PartitionLoop(fused_loop, T.thread_var, analyzer, loop_layout);
   auto vectorized_thread_loop =
       VectorizeAtomicAdd(thread_loop, GetArchInt(target));
   return vectorized_thread_loop;
