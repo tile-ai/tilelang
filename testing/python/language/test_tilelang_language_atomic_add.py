@@ -386,6 +386,7 @@ def test_tile_atomic_add():
     run_tile_atomic_add(8, 128, 128, 32, 32)
 
 
+@tilelang.testing.requires_cuda
 def test_tma_atomic_add():
     out = torch.zeros((16, 16), dtype=torch.float32, device="cuda")
     tma_atomic_add_program(out)
