@@ -225,6 +225,25 @@ def test_jit2_return():
         assert torch.equal(A[:, 0, :, 0], B)
 
 
+def test_jit2_compile_with_consts():
+    @tilelang.jit
+    def transpose(X, Y, block_M, block_N):
+        M, N = T.const("M N")
+        X: T.Tensor[[M, N], T.float32]
+        Y: T.Tensor[[N, M], T.float32]
+
+        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128) as (bx, by):
+            X_tile = T.alloc_shared((block_M, block_N), T.float32)
+            Y_tile = T.alloc_shared((block_N, block_M), T.float32)
+
+            T.copy(X[bx * block_M, by * block_N], X_tile)
+            for i, j in T.Parallel(block_M, block_N):
+                Y_tile[j, i] = X_tile[i, j]
+            T.copy(Y_tile, Y[by * block_N, bx * block_M])
+
+    transpose.compile(M=1024, N=1024, block_M=64, block_N=64)
+
+
 if __name__ == "__main__":
     # tilelang.testing.main()
     test_jit2_return()

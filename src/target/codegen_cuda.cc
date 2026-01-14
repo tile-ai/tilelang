@@ -3193,32 +3193,34 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
-    if (lanes == 4) {
-      // make_int8x4
-      const int64_t *p = as_const_int(op->value);
-      ICHECK(p);
-      int64_t v = *p & 0xFF;
-      v = (v << 24) | (v << 16) | (v << 8) | v;
-      if (op->dtype.is_uint()) {
-        os << "(uint)" << v;
-      } else {
-        os << "(int)" << v;
+    const int64_t *p = as_const_int(op->value);
+    if (p) {
+      if (lanes == 4) {
+        // make_int8x4
+        ICHECK(p);
+        int64_t v = *p & 0xFF;
+        v = (v << 24) | (v << 16) | (v << 8) | v;
+        if (op->dtype.is_uint()) {
+          os << "(uint)" << v;
+        } else {
+          os << "(int)" << v;
+        }
+        return;
+      } else if (lanes == 32) {
+        // make_int8x32
+        const int64_t *p = as_const_int(op->value);
+        ICHECK(p);
+        int64_t v = *p & 0xFF;
+        v = (v << 24) | (v << 16) | (v << 8) | v;
+        if (op->dtype.is_uint()) {
+          os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
+             << ")";
+        } else {
+          os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
+             << ")";
+        }
+        return;
       }
-      return;
-    } else if (lanes == 32) {
-      // make_int8x32
-      const int64_t *p = as_const_int(op->value);
-      ICHECK(p);
-      int64_t v = *p & 0xFF;
-      v = (v << 24) | (v << 16) | (v << 8) | v;
-      if (op->dtype.is_uint()) {
-        os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
-           << ")";
-      } else {
-        os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
-           << ")";
-      }
-      return;
     }
   }
 
@@ -3284,7 +3286,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4) {
     bool fail = false;
     const int64_t *p = as_const_int(op->value);
-    ICHECK(p);
+    ICHECK(p) << "BroadcastNode " << op << " value: " << op->value
+              << " is not a constant";
     int64_t v = *p & 0xF;
 
     if (lanes == 4) {

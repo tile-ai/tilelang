@@ -24,10 +24,8 @@ def test_loop_layout_fragment_vec4():
         return forward_thread, forward_local
 
     M, N = 128, 32
-    A = T.Tensor((M, N), T.float32)
-    B = T.Tensor((M, N), T.float32)
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn)
-    kernel = loop_layout_kernel.compile(A=A, B=B, loop_layout=loop_layout)
+    kernel = loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
 
     # Expect vectorized copy along innermost dimension (float4)
@@ -42,10 +40,8 @@ def test_loop_layout_identity():
         return forward_thread, forward_local
 
     M, N = 128, 32
-    A = T.Tensor((M, N), T.float32)
-    B = T.Tensor((M, N), T.float32)
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn)
-    kernel = loop_layout_kernel.compile(A=A, B=B, loop_layout=loop_layout)
+    kernel = loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
 
     assert "*(float4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(float4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));" in code
@@ -70,13 +66,14 @@ def test_copy_loop_layout_annotated_replicate_vec4():
         return fth, floc
 
     M, N = 128, 32
-    A = T.Tensor((M, N), T.float32)
-    B = T.Tensor((M, N), T.float32)
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn, replicate=2)
-    kernel = copy_with_layout_kernel.compile(A=A, B=B, loop_layout=loop_layout)
+    kernel = copy_with_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
 
-    assert "*(float4*)(B + ((i * 512) + (((int)threadIdx.x) * 4))) = *(float4*)(A + ((i * 512) + (((int)threadIdx.x) * 4)));" in code
+    assert (
+        "*(float4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(float4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
+        in code
+    )
 
 
 @tilelang.jit
@@ -93,8 +90,6 @@ def replicate_loop_layout_kernel(A, B, loop_layout):
 @tilelang.testing.requires_cuda
 def test_annotate_replicate_loop_layout_vec4():
     M, N = 128, 32
-    A = T.Tensor((M, N), T.float32)
-    B = T.Tensor((M, N), T.float32)
 
     def loop_layout_fn(i, j, rep):
         elems = i * 32 + j
@@ -104,7 +99,7 @@ def test_annotate_replicate_loop_layout_vec4():
 
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn, replicate=2)
 
-    kernel = replicate_loop_layout_kernel.compile(A, B, loop_layout=loop_layout)
+    kernel = replicate_loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
 
     assert (

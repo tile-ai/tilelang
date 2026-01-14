@@ -170,7 +170,7 @@ if not env.is_light_import():
         engine,  # noqa: F401
         tools,  # noqa: F401
     )
-    from .language.eager import dtypes  # noqa: F401
+    from .language import dtypes  # noqa: F401
     from .autotuner import autotune  # noqa: F401
     from .transform import PassConfigKey  # noqa: F401
     from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401

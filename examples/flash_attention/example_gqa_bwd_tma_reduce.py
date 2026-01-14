@@ -209,14 +209,6 @@ def flashattn_bwd_atomic_add(batch, heads, seq_len, dim_qk, dim_v, is_causal, bl
             dv_shared = T.alloc_shared([block_M, dim_v], accum_dtype)
             dq_shared = T.alloc_shared([block_N, dim_qk], accum_dtype)
 
-            T.annotate_layout(
-                {
-                    dQ: make_dq_layout(dQ),
-                    dK: make_dq_layout(dK),
-                    dV: make_dq_layout(dV),
-                }
-            )
-
             T.copy(K[bz, by * block_M : (by + 1) * block_M, bx // groups, :], K_shared)
             T.copy(V[bz, by * block_M : (by + 1) * block_M, bx // groups, :], V_shared)
             T.clear(dv)
@@ -387,7 +379,6 @@ class _attention(torch.autograd.Function):
         block_M = 128
         block_N = 32
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
-        mod_post = flashattn_bwd_postprocess(BATCH, H, HEAD_KV, N_CTX, D_HEAD_QK, D_HEAD_V)
         delta = mod_prep(o, do)
 
         if ctx.use_atomic:
@@ -401,11 +392,11 @@ class _attention(torch.autograd.Function):
             dk = torch.zeros(shape_k, dtype=torch.float32, device=q.device)
             dv = torch.zeros(shape_v, dtype=torch.float32, device=q.device)
             kernel(q, k, v, do, lse, delta, dq, dk, dv)
-            dq, dk, dv = mod_post(dq, dk, dv)
         else:
             kernel = flashattn_bwd_split_novarlen(
                 BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=256, num_stages=2, groups=groups
             )
+            mod_post = flashattn_bwd_postprocess(BATCH, H, HEAD_KV, N_CTX, D_HEAD_QK, D_HEAD_V)
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_QK]  # sum after kernel
             shape_v = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_V]  # sum after kernel

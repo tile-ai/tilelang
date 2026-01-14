@@ -1,3 +1,4 @@
+import tilelang
 import tilelang.testing
 from tilelang import tvm as tvm
 from tilelang import language as T
@@ -31,6 +32,23 @@ def test_unroll_with_unroll_factor():
 
     kernel = tilelang.compile(main)
     assert "#pragma unroll 4" in kernel.get_kernel_source()
+
+
+def test_unroll_with_extent_only():
+    """Test T.unroll with only extent parameter."""
+
+    @tilelang.jit
+    def unroll_kernel():
+        out = T.empty((512,), dtype=T.float32)
+        with T.Kernel(1, threads=512):
+            tid = T.get_thread_binding()
+            for i in T.unroll(tid % 32):
+                out[i] = i
+        return out
+
+    kernel = unroll_kernel.compile()
+    source = kernel.get_kernel_source()
+    assert "#pragma unroll" in source
 
 
 if __name__ == "__main__":
