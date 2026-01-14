@@ -13,7 +13,6 @@ import tilelang.language as T
 
 
 class MatmulConfig:
-
     def __init__(self, *args, **kwargs):
         self.M = 1
         self.N = 1
@@ -24,7 +23,6 @@ class MatmulConfig:
 
 
 def buggy_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32, *args, **kwargs):
-
     @T.prim_func
     def matmul_kernel():
         with T.Kernel():
@@ -45,7 +43,7 @@ def main(*args, **kwargs):
     try:
         run_kernel(config)
     except Exception as e:
-        print(f'{e}')
+        print(f"{e}")
 
 
 main()

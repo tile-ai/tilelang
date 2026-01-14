@@ -5,6 +5,7 @@ import tilelang.language as T
 from tilelang.contrib import nvcc
 import argparse
 
+
 @tilelang.jit(
     out_idx=[3, 4],
     pass_configs={

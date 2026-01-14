@@ -377,8 +377,9 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 /**
  * @brief Compute linear layout for shared tensor (used in TMA atomic add).
  *
- * Creates a tiled layout that splits each dimension into blocks of 256 elements.
- * The layout maps [i, j, ...] to [i // 256, j // 256, ..., i % 256, j % 256, ...].
+ * Creates a tiled layout that splits each dimension into blocks of 256
+ * elements. The layout maps [i, j, ...] to [i // 256, j // 256, ..., i % 256, j
+ * % 256, ...].
  *
  * @param shared_tensor The shared memory buffer to compute layout for.
  * @return Layout A tiled linear layout for the buffer.
@@ -437,14 +438,15 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
 
     // For non-1D TMA atomic add, apply swizzle layout if possible
     if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
-      // TMA atomic add is similar to TMA Store - we should perform swizzle if possible
-      // Use the last two dimensions to analyze swizzling
+      // TMA atomic add is similar to TMA Store - we should perform swizzle if
+      // possible Use the last two dimensions to analyze swizzling
       int dim = shared_tensor->shape.size();
       const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
-      const int64_t mat_continuous = *as_const_int(shared_tensor->shape[dim - 1]);
-      Layout swizzle_layout = makeGemmABLayoutHopper(
-          mat_stride, mat_continuous, mat_continuous,
-          shared_tensor->dtype.bits(), /*k_inner=*/true);
+      const int64_t mat_continuous =
+          *as_const_int(shared_tensor->shape[dim - 1]);
+      Layout swizzle_layout =
+          makeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
+                                 shared_tensor->dtype.bits(), /*k_inner=*/true);
       // If makeGemmABLayoutHopper returns a linear layout, fallback to
       // ComputeLinearLayout which handles arbitrary tensor shapes correctly.
       if (StructuralEqual()(swizzle_layout, makeLinearLayout(Array<PrimExpr>{
@@ -459,7 +461,8 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
     return result_map;
   }
 
-  // For non-TMA atomic add, check that src and dst have the same layout if both are fragments
+  // For non-TMA atomic add, check that src and dst have the same layout if both
+  // are fragments
   if (IsFragmentBuffer(src) && IsFragmentBuffer(dst)) {
     if (T.layout_map.count(src) && T.layout_map.count(dst)) {
       Layout src_layout = T.layout_map.at(src);
@@ -668,8 +671,8 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
 
     // Create TMA descriptor
-    Call create_descriptor =
-        Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
+    Call create_descriptor = Call(DataType::Handle(), create_tma_descriptor(),
+                                  desc.EncodeCallArgs());
 
     // Compute total elements for access_ptr
     PrimExpr total_elements = 1;
@@ -690,8 +693,8 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       args.reserve(desc.rank + 4);
       args.push_back(create_descriptor);
       PrimExpr shared_addr = shared_tensor.access_ptr(
-          1, DataType::Handle(), 1,
-          shared_offset + total_elements * loop_var, total_elements);
+          1, DataType::Handle(), 1, shared_offset + total_elements * loop_var,
+          total_elements);
       args.push_back(shared_addr);
       Array<PrimExpr> loop_global_coords = global_coords;
       loop_global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
@@ -702,7 +705,8 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       int eviction_policy = 0;
       args.push_back(eviction_policy);
       tma_reduce = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
-                       Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations)));
+                       Evaluate(Call(DataType::Handle(), tma_store(), args,
+                                     op_annotations)));
     } else {
       Array<PrimExpr> args;
       args.reserve(desc.rank + 4);
@@ -716,7 +720,8 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       args.push_back(need_reduce);
       int eviction_policy = 0;
       args.push_back(eviction_policy);
-      tma_reduce = Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations));
+      tma_reduce =
+          Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations));
     }
 
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_reduce);
