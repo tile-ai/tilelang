@@ -375,37 +375,99 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 }
 
 /**
+ * @brief Compute linear layout for shared tensor (used in TMA atomic add).
+ *
+ * Creates a tiled layout that splits each dimension into blocks of 256 elements.
+ * The layout maps [i, j, ...] to [i // 256, j // 256, ..., i % 256, j % 256, ...].
+ *
+ * @param shared_tensor The shared memory buffer to compute layout for.
+ * @return Layout A tiled linear layout for the buffer.
+ */
+Layout AtomicAddNode::ComputeLinearLayout(const Buffer &shared_tensor) const {
+  Array<PrimExpr> input_size = shared_tensor->shape;
+  Array<PrimExpr> forward_vars;
+  for (size_t i = 0; i < input_size.size(); i++) {
+    forward_vars.push_back(InputPlaceholder(i));
+  }
+  // [i, j] -> [i // 256, j // 256, i % 256, j % 256]
+  Array<PrimExpr> forward_index;
+  for (size_t i = 0; i < input_size.size(); i++) {
+    forward_index.push_back(FloorDiv(forward_vars[i], 256));
+  }
+  for (size_t i = 0; i < input_size.size(); i++) {
+    forward_index.push_back(FloorMod(forward_vars[i], 256));
+  }
+  return Layout(input_size, forward_index);
+}
+
+/**
  * @brief Infer and return the layout map for the atomic add operator.
  *
- * Constructs a cached ParallelOp (by building the SIMT loop) if not already
- * present, validates that local.fragment layouts for src and dst match when
- * both are provided, and then delegates layout inference to the underlying
- * ParallelOp.
+ * For TMA atomic add operations (when use_tma=True):
+ *   - src is always shared memory, dst is always global memory
+ *   - Automatically applies swizzle layout to the shared memory buffer when
+ *     the operation is not 1D, improving memory access efficiency
+ *
+ * For non-TMA atomic add operations:
+ *   - Returns empty layout map (no layout inference needed)
  *
  * @param T Layout inference inputs, including an optional mapping of buffers to
  * layouts.
  * @param level Inference strictness level.
  * @return LayoutMap The inferred layout mapping for buffers used by this
  * operator.
- *
- * @note This method mutates the AtomicAddNode by creating and storing a
- * ParallelOp on first invocation.
- * @throws If both src and dst have layouts in `local.fragment` and their
- * fragment layouts differ, an ICHECK failure is raised with diagnostic output.
  */
 LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
                                      InferLevel level) const {
-  if (T.layout_map.count(src) && T.layout_map.count(dst)) {
-    if (IsFragmentBuffer(src) && IsFragmentBuffer(dst)) {
-      const FragmentNode *src_layout = T.layout_map[src].as<FragmentNode>();
-      const FragmentNode *dst_layout = T.layout_map[dst].as<FragmentNode>();
-      if (src_layout && dst_layout) {
-        ICHECK(src_layout->IsEqual(dst_layout, true))
-            << "Get different layout for " << src << " and " << dst
-            << "\nLHS = " << src_layout->DebugOutput()
-            << "\nRHS = " << dst_layout->DebugOutput()
-            << "\nYou may need to use a shared memory to transform the layout";
+  // Handle TMA atomic add layout inference
+  if (GetUseTMA()) {
+    Map<Buffer, Layout> result_map;
+
+    // For TMA atomic add: src is shared memory, dst is global memory
+    Buffer shared_tensor = src;
+    Array<Range> shared_range = src_range;
+
+    // Check if this is 1D TMA
+    bool is_tma_1d = shared_range.size() == 1;
+
+    if (is_tma_1d) {
+      // 1D TMA atomic add with single dimension cannot be swizzled
+      return result_map;
+    }
+
+    // For non-1D TMA atomic add, apply swizzle layout if possible
+    if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
+      // TMA atomic add is similar to TMA Store - we should perform swizzle if possible
+      // Use the last two dimensions to analyze swizzling
+      int dim = shared_tensor->shape.size();
+      const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
+      const int64_t mat_continuous = *as_const_int(shared_tensor->shape[dim - 1]);
+      Layout swizzle_layout = makeGemmABLayoutHopper(
+          mat_stride, mat_continuous, mat_continuous,
+          shared_tensor->dtype.bits(), /*k_inner=*/true);
+      // If makeGemmABLayoutHopper returns a linear layout, fallback to
+      // ComputeLinearLayout which handles arbitrary tensor shapes correctly.
+      if (StructuralEqual()(swizzle_layout, makeLinearLayout(Array<PrimExpr>{
+                                                Integer(mat_stride),
+                                                Integer(mat_continuous)}))) {
+        result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
+      } else {
+        result_map.Set(shared_tensor, swizzle_layout);
       }
+    }
+
+    return result_map;
+  }
+
+  // For non-TMA atomic add, check that src and dst have the same layout if both are fragments
+  if (IsFragmentBuffer(src) && IsFragmentBuffer(dst)) {
+    if (T.layout_map.count(src) && T.layout_map.count(dst)) {
+      Layout src_layout = T.layout_map.at(src);
+      Layout dst_layout = T.layout_map.at(dst);
+      ICHECK(StructuralEqual()(src_layout, dst_layout))
+          << "AtomicAdd requires src and dst to have the same layout, but got "
+          << "src layout: " << src_layout << ", dst layout: " << dst_layout
+          << " for src buffer: " << src->name << ", dst buffer: " << dst->name;
     }
   }
   return {};
