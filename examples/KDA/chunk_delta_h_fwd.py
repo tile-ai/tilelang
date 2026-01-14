@@ -55,7 +55,7 @@ def prepare_output(
     output_dtype,
     state_dtype,
 ):
-    BS = S // chunk_size
+    BS = (S + chunk_size - 1) // chunk_size  # ceildiv to match kernel iteration
     h = torch.empty(B, BS, H, DK, DV, dtype=output_dtype).cuda()
     final_state = torch.empty(B, H, DK, DV, dtype=state_dtype).cuda()
     V_new = torch.empty(B, S, H, DV, dtype=output_dtype).cuda()
@@ -101,7 +101,7 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
     num_stages=1,
 ):
     block_S = chunk_size
-    BS = S // block_S
+    BS = (S + chunk_size - 1) // chunk_size  # ceildiv to match kernel iteration
 
     K_shape = (B, S, H, DK)
     V_shape = (B, S, H, DV)
@@ -274,11 +274,12 @@ def run_test(
         k=K,
         w=W,
         u=U,
-        g=G,
+        gk=G,
         initial_state=initial_state,
         output_final_state=store_final_state,
         chunk_size=chunk_size,
         save_new_value=save_new_value,
+        use_exp2=True,
     )
     tilelang_time = do_bench(kernel, K, W, U, G, initial_state)
 
@@ -298,11 +299,11 @@ def main():
         H=64,
         DK=128,
         DV=128,
-        input_dtype=T.float16,
-        output_dtype=T.float16,
-        accum_dtype=T.float32,
-        gate_dtype=T.float32,
-        state_dtype=T.float32,
+        input_dtype="float16",
+        output_dtype="float16",
+        accum_dtype="float32",
+        gate_dtype="float32",
+        state_dtype="float32",
         chunk_size=64,
         use_gk=True,
         use_initial_state=True,

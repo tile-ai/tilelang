@@ -6,7 +6,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from FLA_KDA.fla_wy_fast import prepare_wy_repr_bwd
-from test_utils import do_bench
+from test_utils import do_bench, compare_tensors
 
 import torch
 
@@ -307,11 +307,11 @@ def run_test(
     )
     dA_tilelang, dk_tilelang, dv_tilelang, dbeta_tilelang, dg_tilelang = kernel(K, V, Beta, GK, A, dw, dv, dk, dg)
 
-    # compare_tensors("dA", dA_tilelang, dA_ref)
-    # compare_tensors("dk", dk_tilelang, dk_ref)
-    # compare_tensors("dv", dv_tilelang, dv_ref)
-    # compare_tensors("dbeta", dbeta_tilelang, dbeta_ref)
-    # compare_tensors("dg", dg_tilelang, dg_ref)
+    compare_tensors("dA", dA_tilelang, dA_ref)
+    compare_tensors("dk", dk_tilelang, dk_ref)
+    compare_tensors("dv", dv_tilelang, dv_ref)
+    compare_tensors("dbeta", dbeta_tilelang, dbeta_ref)
+    compare_tensors("dg", dg_tilelang, dg_ref)
     fla_time = do_bench(
         prepare_wy_repr_bwd,
         k=K,

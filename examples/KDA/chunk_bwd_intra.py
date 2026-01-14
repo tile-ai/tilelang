@@ -271,6 +271,7 @@ def tilelang_chunk_bwd_intra(
             kbg_fragment = T.alloc_fragment((BC, block_DK), dtype=accum_dtype)
             kbg_shared = T.alloc_shared((BC, block_DK), dtype=accum_dtype)
             dkt_temp_fragment = T.alloc_fragment((BC, block_DK), dtype=accum_dtype)
+            # T.use_swizzle(10)
 
             NC_actual = T.min(NC, T.ceildiv(S - i_t * BT, BC))  # Process subsequent sub-chunks (i_j from i_i+1 to NC-1)
             if i_i < NC_actual - 1:
@@ -325,9 +326,10 @@ def tilelang_chunk_bwd_intra(
             bj_local = T.alloc_local((1), dtype=input_dtype)
             dAqk_col_lower = T.alloc_shared((BC,), dtype=input_dtype)
             dAkk_col_lower = T.alloc_shared((BC,), dtype=input_dtype)
+
             gkq_fragment = T.alloc_fragment((BC, block_DK), dtype=T.float32)
-            dkt_lower_temp = T.alloc_fragment((BC, block_DK), dtype=T.float32)
-            kbj_shared = T.alloc_shared((block_DK,), dtype=T.float32)
+            # dkt_lower_temp = T.alloc_fragment((BC, block_DK), dtype=T.float32)
+            kbj_fragment = T.alloc_fragment((block_DK,), dtype=T.float32)
 
             max_token_j_idx = T.min(S, i_ti + BC)
             for j in T.Pipelined(BC, num_stages=num_stages):
@@ -344,22 +346,20 @@ def tilelang_chunk_bwd_intra(
 
                     # Compute kbj = kj * bj
                     for i_k2 in T.Parallel(block_DK):
-                        kbj_shared[i_k2] = kj_shared_lower[i_k2] * bj_local[0]
+                        kbj_fragment[i_k2] = kj_shared_lower[i_k2] * bj_local[0]
                     # Compute gkq = exp2(gj - g_current)
                     for i_bc, i_k2 in T.Parallel(BC, block_DK):
                         gkq_fragment[i_bc, i_k2] = T.exp2(gj_shared_lower[i_k2] - g_current_shared[i_bc, i_k2])
 
                     # Accumulate: dkt += (dAkk * kbj + dAqk * qj) * gkq for i_bc <= j
                     for i_bc, i_k2 in T.Parallel(BC, block_DK):
-                        dkt_lower_temp[i_bc, i_k2] = T.if_then_else(
+                        dkt_fragment[i_bc, i_k2] += T.if_then_else(
                             i_bc <= j,
-                            (dAkk_col_lower[i_bc] * kbj_shared[i_k2] + dAqk_col_lower[i_bc] * qj_shared[i_k2]) * gkq_fragment[i_bc, i_k2],
+                            (dAkk_col_lower[i_bc] * kbj_fragment[i_k2] + dAqk_col_lower[i_bc] * qj_shared[i_k2]) * gkq_fragment[i_bc, i_k2],
                             0.0,
                         )
-                    for i_bc3, i_k3 in T.Parallel(BC, block_DK):
-                        dkt_fragment[i_bc3, i_k3] = dkt_fragment[i_bc3, i_k3] + dkt_lower_temp[i_bc3, i_k3]
 
-            # # Load dk and dg
+            # Load dk and dg
             T.copy(dk[bb, i_ti : i_ti + BC, bh, i_k * block_DK : (i_k + 1) * block_DK], dk_shared)
             T.copy(dg[bb, i_ti : i_ti + BC, bh, i_k * block_DK : (i_k + 1) * block_DK], dg_shared)
 

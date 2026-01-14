@@ -4,7 +4,7 @@ from tilelang.autotuner import autotune
 import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_inter import chunk_kda_bwd_dqkwg
-from test_utils import do_bench
+from test_utils import do_bench, compare_tensors
 
 import torch
 
@@ -42,7 +42,6 @@ def prepare_output(
     DK,
     DV,
     chunk_size,
-    qk_dtype,
     gate_dtype,
 ):
     dq = torch.randn(B, S, H, DK, dtype=torch.float32).cuda()
@@ -233,16 +232,16 @@ def run_test(
         scale=scale,
     )
 
-    dq, dk, dw, dg = prepare_output(B, S, H, DK, DV, chunk_size, getattr(torch, qk_dtype), getattr(torch, gate_dtype))
+    dq, dk, dw, dg = prepare_output(B, S, H, DK, DV, chunk_size, getattr(torch, gate_dtype))
     kernel = chunk_bwd_dqkwg(
         B=B, S=S, H=H, DK=DK, DV=DV, scale=scale, chunk_size=chunk_size, input_dtype=input_dtype, gate_dtype=gate_dtype
     )
     dq, dk, dw, dg = kernel(q, k, v_new, g, h, dv, do, dh)
 
-    # compare_tensors("dq", dq_ref, dq)
-    # compare_tensors("dk", dk_ref, dk)
-    # compare_tensors("dw", dw_ref, dw)
-    # compare_tensors("dg", dg_ref, dg)
+    compare_tensors("dq", dq_ref, dq)
+    compare_tensors("dk", dk_ref, dk)
+    compare_tensors("dw", dw_ref, dw)
+    compare_tensors("dg", dg_ref, dg)
 
     fla_time = do_bench(
         chunk_kda_bwd_dqkwg,
@@ -270,9 +269,9 @@ def main():
         DK=128,
         DV=128,
         scale=1.0,
-        input_dtype=T.float32,
-        gate_dtype=T.float32,  # gate must be float32
-        qk_dtype=T.float32,
+        input_dtype="float32",
+        gate_dtype="float32",  # gate must be float32
+        qk_dtype="float32",
         chunk_size=64,
         use_gk=True,
         use_initial_state=True,

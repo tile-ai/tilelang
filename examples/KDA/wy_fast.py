@@ -176,7 +176,7 @@ def run_test(
     threads,
     num_stages,
 ):
-    use_qg = (False,)
+    use_qg = False
     use_kg = True
     K, V, Beta, G, A = prepare_input(
         B, S, H, DK, DV, chunk_size, getattr(torch, input_dtype), getattr(torch, output_dtype), gate_dtype=getattr(torch, gate_dtype)

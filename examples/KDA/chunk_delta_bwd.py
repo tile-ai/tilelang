@@ -8,7 +8,7 @@ from tilelang.autotuner import autotune
 
 from FLA_KDA.fla_chunk_delta import chunk_gated_delta_rule_bwd_dhu
 from FLA_KDA.cumsum import chunk_local_cumsum
-from test_utils import do_bench
+from test_utils import do_bench, compare_tensors
 
 import torch
 import torch.nn.functional as F
@@ -295,9 +295,9 @@ def run_test(
     print(f"fla time: {fla_time} ms")
     print(f"tilelang time: {tilelang_time} ms")
 
-    # compare_tensors("dh", dh_ref, dh_tilelang)
-    # compare_tensors("dh0", dh0_ref, dh0_tilelang)
-    # compare_tensors("dv2", dv2_ref, dv2_tilelang)
+    compare_tensors("dh", dh_ref, dh_tilelang)
+    compare_tensors("dh0", dh0_ref, dh0_tilelang)
+    compare_tensors("dv2", dv2_ref, dv2_tilelang)
 
 
 def main():
@@ -308,11 +308,11 @@ def main():
         H=64,
         DK=DK,
         DV=128,
-        input_dtype=T.bfloat16,
-        output_dtype=T.bfloat16,
-        accum_dtype=T.float32,
-        gate_dtype=T.float32,
-        state_dtype=T.float32,
+        input_dtype="bfloat16",
+        output_dtype="bfloat16",
+        accum_dtype="float32",
+        gate_dtype="float32",
+        state_dtype="float32",
         chunk_size=64,
         scale=DK**-0.5,
         use_gk=True,
