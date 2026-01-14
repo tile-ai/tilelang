@@ -3196,27 +3196,55 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     if (lanes == 4) {
       // make_int8x4
       const int64_t *p = as_const_int(op->value);
-      ICHECK(p);
-      int64_t v = *p & 0xFF;
-      v = (v << 24) | (v << 16) | (v << 8) | v;
-      if (op->dtype.is_uint()) {
-        os << "(uint)" << v;
+      if (p) {
+        // Compile-time constant folding
+        int64_t v = *p & 0xFF;
+        v = (v << 24) | (v << 16) | (v << 8) | v;
+        if (op->dtype.is_uint()) {
+          os << "(uint)" << v;
+        } else {
+          os << "(int)" << v;
+        }
       } else {
-        os << "(int)" << v;
+        // Runtime broadcast: replicate byte to all 4 positions using
+        // multiplication
+        std::string val = PrintExpr(op->value);
+        if (op->dtype.is_uint()) {
+          os << "((uint)((unsigned char)(" << val << ")) * 0x01010101u)";
+        } else {
+          os << "((int)((unsigned char)(" << val << ")) * 0x01010101)";
+        }
       }
       return;
     } else if (lanes == 32) {
       // make_int8x32
       const int64_t *p = as_const_int(op->value);
-      ICHECK(p);
-      int64_t v = *p & 0xFF;
-      v = (v << 24) | (v << 16) | (v << 8) | v;
-      if (op->dtype.is_uint()) {
-        os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
-           << ")";
+      if (p) {
+        // Compile-time constant folding
+        int64_t v = *p & 0xFF;
+        v = (v << 24) | (v << 16) | (v << 8) | v;
+        if (op->dtype.is_uint()) {
+          os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
+             << ")";
+        } else {
+          os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
+             << ")";
+        }
       } else {
-        os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
-           << ")";
+        // Runtime broadcast: replicate byte to all 32 positions
+        std::string val = PrintExpr(op->value);
+        // First create int8x4 pattern, then extend to int8x8 for each longlong
+        os << "([&]() { ";
+        os << "unsigned int _b4 = (unsigned char)(" << val
+           << ") * 0x01010101u; ";
+        os << "unsigned long long _b8 = ((unsigned long long)_b4 << 32) | "
+              "_b4; ";
+        if (op->dtype.is_uint()) {
+          os << "return make_ulonglong4(_b8, _b8, _b8, _b8); ";
+        } else {
+          os << "return make_longlong4(_b8, _b8, _b8, _b8); ";
+        }
+        os << "}())";
       }
       return;
     }
@@ -3284,39 +3312,80 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4) {
     bool fail = false;
     const int64_t *p = as_const_int(op->value);
-    ICHECK(p);
-    int64_t v = *p & 0xF;
 
-    if (lanes == 4) {
-      v = (v << 12) | (v << 8) | (v << 4) | v;
-      if (op->dtype.is_uint()) {
-        os << "(uint16_t)" << v;
-      } else {
-        os << "(int16_t)" << v;
-      }
-    } else {
-      v = (v << 28) | (v << 24) | (v << 20) | (v << 16) | (v << 12) | (v << 8) |
-          (v << 4) | v;
-      if (lanes == 8) {
+    if (p) {
+      // Compile-time constant folding
+      int64_t v = *p & 0xF;
+
+      if (lanes == 4) {
+        v = (v << 12) | (v << 8) | (v << 4) | v;
         if (op->dtype.is_uint()) {
-          os << "(uint)" << v;
+          os << "(uint16_t)" << v;
         } else {
-          os << "(int)" << v;
+          os << "(int16_t)" << v;
         }
-      } else if (lanes == 16 || lanes == 32) {
-        os << "make_";
-        PrintType(op->dtype, os);
-        os << '(';
-        for (int i = 0; i < lanes / 8; ++i) {
-          if (i != 0)
-            os << ", ";
+      } else {
+        v = (v << 28) | (v << 24) | (v << 20) | (v << 16) | (v << 12) |
+            (v << 8) | (v << 4) | v;
+        if (lanes == 8) {
           if (op->dtype.is_uint()) {
             os << "(uint)" << v;
           } else {
             os << "(int)" << v;
           }
+        } else if (lanes == 16 || lanes == 32) {
+          os << "make_";
+          PrintType(op->dtype, os);
+          os << '(';
+          for (int i = 0; i < lanes / 8; ++i) {
+            if (i != 0)
+              os << ", ";
+            if (op->dtype.is_uint()) {
+              os << "(uint)" << v;
+            } else {
+              os << "(int)" << v;
+            }
+          }
+          os << ')';
+        } else {
+          fail = true;
         }
-        os << ')';
+      }
+    } else {
+      // Runtime broadcast for 4-bit integers
+      std::string val = PrintExpr(op->value);
+
+      if (lanes == 4) {
+        // 4 x 4-bit = 16-bit: multiply by 0x1111 to replicate nibble
+        if (op->dtype.is_uint()) {
+          os << "((uint16_t)((" << val << ") & 0xF) * 0x1111u)";
+        } else {
+          os << "((int16_t)((" << val << ") & 0xF) * 0x1111)";
+        }
+      } else if (lanes == 8) {
+        // 8 x 4-bit = 32-bit: multiply by 0x11111111 to replicate nibble
+        if (op->dtype.is_uint()) {
+          os << "((uint)((" << val << ") & 0xF) * 0x11111111u)";
+        } else {
+          os << "((int)((" << val << ") & 0xF) * 0x11111111)";
+        }
+      } else if (lanes == 16 || lanes == 32) {
+        // Multiple 32-bit values needed
+        os << "([&]() { ";
+        os << "unsigned int _n8 = ((" << val << ") & 0xF) * 0x11111111u; ";
+        os << "return make_";
+        PrintType(op->dtype, os);
+        os << "(";
+        for (int i = 0; i < lanes / 8; ++i) {
+          if (i != 0)
+            os << ", ";
+          if (op->dtype.is_uint()) {
+            os << "(uint)_n8";
+          } else {
+            os << "(int)_n8";
+          }
+        }
+        os << "); }())";
       } else {
         fail = true;
       }
