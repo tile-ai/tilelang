@@ -81,9 +81,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v, block_N, block_H, num_stages, 
                     T.clear(acc_s)
                     T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                     for i, j in T.Parallel(block_H, block_N):
-                        acc_s[i, j] = T.if_then_else(
-                            (start + k) * block_N + j >= cache_seqlens[bx], -T.infinity(accum_dtype), acc_s[i, j]
-                        )
+                        acc_s[i, j] = T.if_then_else((start + k) * block_N + j >= cache_seqlens[bx], -T.infinity(accum_dtype), acc_s[i, j])
                     T.copy(scores_max, scores_max_prev)
                     T.fill(scores_max, -T.infinity(accum_dtype))
                     T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -200,6 +198,7 @@ class SparseFlashAttn(torch.nn.Module):
             threads=128,
         )(query, key, value, block_mask, cache_seqlens, glse, output_partial)
         return output
+
 
 def sparse_gqa_decode_varlen_mask(query, key, value, block_mask, cache_seqlens, block_size):
     """

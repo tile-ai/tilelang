@@ -522,9 +522,9 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return {loop_layout, pred};
   };
 
-  auto ret = AtomicAddInferLayout(fused_loop,
-                                  {T.target, T.thread_bounds, T.layout_map,
-                                   analyzer, false, T.buffer_remap});
+  auto ret =
+      AtomicAddInferLayout(fused_loop, {T.target, T.thread_bounds, T.layout_map,
+                                        analyzer, false, T.buffer_remap});
   Fragment loop_layout = ret.loop_layout;
   auto thread_loop =
       PartitionLoop(fused_loop, T.thread_var, analyzer, loop_layout);
