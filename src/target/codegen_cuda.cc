@@ -3214,10 +3214,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
         v = (v << 24) | (v << 16) | (v << 8) | v;
         if (op->dtype.is_uint()) {
           os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
-            << ")";
+             << ")";
         } else {
           os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
-            << ")";
+             << ")";
         }
         return;
       }
@@ -3286,7 +3286,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4) {
     bool fail = false;
     const int64_t *p = as_const_int(op->value);
-    ICHECK(p) << "BroadcastNode " << op << " value: " << op->value << " is not a constant";
+    ICHECK(p) << "BroadcastNode " << op << " value: " << op->value
+              << " is not a constant";
     int64_t v = *p & 0xF;
 
     if (lanes == 4) {
