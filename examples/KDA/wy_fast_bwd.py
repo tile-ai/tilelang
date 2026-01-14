@@ -6,7 +6,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from FLA_KDA.fla_wy_fast import prepare_wy_repr_bwd
-from test_utils import do_bench, compare_tensors
+from test_utils_kda import do_bench, compare_tensors
 
 import torch
 

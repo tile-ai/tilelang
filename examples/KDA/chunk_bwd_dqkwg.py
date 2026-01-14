@@ -4,7 +4,7 @@ from tilelang.autotuner import autotune
 import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_inter import chunk_kda_bwd_dqkwg
-from test_utils import do_bench, compare_tensors
+from test_utils_kda import do_bench, compare_tensors
 
 import torch
 

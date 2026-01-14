@@ -8,7 +8,7 @@ from tilelang.autotuner import autotune
 
 from FLA_KDA.fla_chunk_delta import chunk_gated_delta_rule_bwd_dhu
 from FLA_KDA.cumsum import chunk_local_cumsum
-from test_utils import do_bench, compare_tensors
+from test_utils_kda import do_bench, compare_tensors
 
 import torch
 import torch.nn.functional as F

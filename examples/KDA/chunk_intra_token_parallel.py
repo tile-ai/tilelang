@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from FLA_KDA.fla_chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from FLA_KDA.cumsum import chunk_local_cumsum
-from test_utils import do_bench
+from test_utils_kda import do_bench
 
 torch.random.manual_seed(0)
 

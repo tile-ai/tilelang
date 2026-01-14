@@ -4,7 +4,7 @@ import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_intra import chunk_kda_fwd_inter_solve_fused
 from FLA_KDA.cumsum import chunk_local_cumsum
-from test_utils import compare_tensors, do_bench
+from test_utils_kda import compare_tensors, do_bench
 
 import torch
 import torch.nn.functional as F

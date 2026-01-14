@@ -7,7 +7,7 @@ import sys  # noqa: F401
 import torch
 
 from FLA_KDA.fla_wy_fast import recompute_w_u_fwd
-from test_utils import compare_tensors, do_bench
+from test_utils_kda import compare_tensors, do_bench
 
 torch.random.manual_seed(1)
 

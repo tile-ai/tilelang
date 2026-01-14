@@ -15,7 +15,7 @@ from FLA_KDA.cumsum import chunk_local_cumsum
 import torch
 import torch.nn.functional as F
 
-from test_utils import compare_tensors, do_bench
+from test_utils_kda import compare_tensors, do_bench
 
 torch.random.manual_seed(0)
 
