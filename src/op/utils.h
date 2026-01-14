@@ -7,6 +7,7 @@
 #define TVM_TL_OP_UTILS_H_
 
 #include "./operator.h"
+#include "../target/stubs/cuda.h"
 #include "region.h"
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/op.h>
@@ -15,6 +16,14 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+// Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
+TVM_DLL int to_CUtensorMapDataType(DataType dtype);
+
+// Reverses an array (used for row-major/column-major layout conversion).
+template <typename T> Array<T> ReverseArray(Array<T> array) {
+  return Array<T>{array.rbegin(), array.rend()};
+}
 
 // Normalize an argument (BufferRegion/BufferLoad/tl.region)
 // to BufferRegion so ops can uniformly consume regions.
