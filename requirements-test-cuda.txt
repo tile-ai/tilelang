@@ -8,4 +8,4 @@
 flash-attn==2.5.8
 cuda-python==12.9.4
 # CuTeDSL (CUTLASS Python DSL with CuTe support)
-nvidia-cutlass-dsl==4.3.3
+nvidia-cutlass-dsl==4.3.5
