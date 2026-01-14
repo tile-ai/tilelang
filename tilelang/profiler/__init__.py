@@ -6,7 +6,6 @@ from functools import partial
 import torch
 from contextlib import suppress
 from dataclasses import dataclass
-import tvm
 from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,

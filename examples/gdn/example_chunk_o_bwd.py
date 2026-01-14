@@ -6,7 +6,6 @@ import sys  # noqa: F401
 import tilelang
 import tilelang.language as T
 from tilelang.engine.callback import register_cuda_postproc_callback  # noqa: F401
-from tilelang.profiler import do_bench
 
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
