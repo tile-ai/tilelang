@@ -73,14 +73,10 @@ class MatmulConfig:
         return grid_x, grid_y
 
     def get_shared_memory_size(self):
-        return get_memory_requirements(
-            self.M, self.N, self.K, self.block_M, self.block_N, self.block_K
-        )
+        return get_memory_requirements(self.M, self.N, self.K, self.block_M, self.block_N, self.block_K)
 
     def validate(self):
-        return validate_parameters(
-            self.M, self.N, self.K, self.block_M, self.block_N, self.block_K
-        )
+        return validate_parameters(self.M, self.N, self.K, self.block_M, self.block_N, self.block_K)
 
 
 def create_reference_output(a, b, activation="relu"):
@@ -107,6 +103,7 @@ def benchmark_pytorch(M, N, K, num_iters=10, warmup=5):
 
     # Benchmark
     import time
+
     start = time.time()
     for _ in range(num_iters):
         _ = a @ b
