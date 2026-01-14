@@ -5,6 +5,7 @@
  */
 
 #include "./atomic_add.h"
+#include "./copy.h"
 #include "utils.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -304,37 +305,102 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 }
 
 /**
+ * @brief Compute linear layout for shared tensor (used in TMA atomic add).
+ *
+ * Creates a tiled layout that splits each dimension into blocks of 256
+ * elements. The layout maps [i, j, ...] to [i // 256, j // 256, ..., i % 256, j
+ * % 256, ...].
+ *
+ * @param shared_tensor The shared memory buffer to compute layout for.
+ * @return Layout A tiled linear layout for the buffer.
+ */
+Layout AtomicAddNode::ComputeLinearLayout(const Buffer &shared_tensor) const {
+  Array<PrimExpr> input_size = shared_tensor->shape;
+  Array<PrimExpr> forward_vars;
+  for (size_t i = 0; i < input_size.size(); i++) {
+    forward_vars.push_back(InputPlaceholder(i));
+  }
+  // [i, j] -> [i // 256, j // 256, i % 256, j % 256]
+  Array<PrimExpr> forward_index;
+  for (size_t i = 0; i < input_size.size(); i++) {
+    forward_index.push_back(FloorDiv(forward_vars[i], 256));
+  }
+  for (size_t i = 0; i < input_size.size(); i++) {
+    forward_index.push_back(FloorMod(forward_vars[i], 256));
+  }
+  return Layout(input_size, forward_index);
+}
+
+/**
  * @brief Infer and return the layout map for the atomic add operator.
  *
- * Constructs a cached ParallelOp (by building the SIMT loop) if not already
- * present, validates that local.fragment layouts for src and dst match when
- * both are provided, and then delegates layout inference to the underlying
- * ParallelOp.
+ * For TMA atomic add operations (when use_tma=True):
+ *   - src is always shared memory, dst is always global memory
+ *   - Automatically applies swizzle layout to the shared memory buffer when
+ *     the operation is not 1D, improving memory access efficiency
+ *
+ * For non-TMA atomic add operations:
+ *   - Returns empty layout map (no layout inference needed)
  *
  * @param T Layout inference inputs, including an optional mapping of buffers to
  * layouts.
  * @param level Inference strictness level.
  * @return LayoutMap The inferred layout mapping for buffers used by this
  * operator.
- *
- * @note This method mutates the AtomicAddNode by creating and storing a
- * ParallelOp on first invocation.
- * @throws If both src and dst have layouts in `local.fragment` and their
- * fragment layouts differ, an ICHECK failure is raised with diagnostic output.
  */
 LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
                                      InferLevel level) const {
-  if (T.layout_map.count(src) && T.layout_map.count(dst)) {
-    if (IsFragmentBuffer(src) && IsFragmentBuffer(dst)) {
-      const FragmentNode *src_layout = T.layout_map[src].as<FragmentNode>();
-      const FragmentNode *dst_layout = T.layout_map[dst].as<FragmentNode>();
-      if (src_layout && dst_layout) {
-        ICHECK(src_layout->IsEqual(dst_layout, true))
-            << "Get different layout for " << src << " and " << dst
-            << "\nLHS = " << src_layout->DebugOutput()
-            << "\nRHS = " << dst_layout->DebugOutput()
-            << "\nYou may need to use a shared memory to transform the layout";
+  // Handle TMA atomic add layout inference
+  if (GetUseTMA()) {
+    Map<Buffer, Layout> result_map;
+
+    // For TMA atomic add: src is shared memory, dst is global memory
+    Buffer shared_tensor = src;
+    Array<Range> shared_range = src_range;
+
+    // Check if this is 1D TMA
+    bool is_tma_1d = shared_range.size() == 1;
+
+    if (is_tma_1d) {
+      // 1D TMA atomic add with single dimension cannot be swizzled
+      return result_map;
+    }
+
+    // For non-1D TMA atomic add, apply swizzle layout if possible
+    if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
+      // TMA atomic add is similar to TMA Store - we should perform swizzle if
+      // possible Use the last two dimensions to analyze swizzling
+      int dim = shared_tensor->shape.size();
+      const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
+      const int64_t mat_continuous =
+          *as_const_int(shared_tensor->shape[dim - 1]);
+      Layout swizzle_layout =
+          makeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
+                                 shared_tensor->dtype.bits(), /*k_inner=*/true);
+      // If makeGemmABLayoutHopper returns a linear layout, fallback to
+      // ComputeLinearLayout which handles arbitrary tensor shapes correctly.
+      if (StructuralEqual()(swizzle_layout, makeLinearLayout(Array<PrimExpr>{
+                                                Integer(mat_stride),
+                                                Integer(mat_continuous)}))) {
+        result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
+      } else {
+        result_map.Set(shared_tensor, swizzle_layout);
       }
+    }
+
+    return result_map;
+  }
+
+  // For non-TMA atomic add, check that src and dst have the same layout if both
+  // are fragments
+  if (IsFragmentBuffer(src) && IsFragmentBuffer(dst)) {
+    if (T.layout_map.count(src) && T.layout_map.count(dst)) {
+      Layout src_layout = T.layout_map.at(src);
+      Layout dst_layout = T.layout_map.at(dst);
+      ICHECK(StructuralEqual()(src_layout, dst_layout))
+          << "AtomicAdd requires src and dst to have the same layout, but got "
+          << "src layout: " << src_layout << ", dst layout: " << dst_layout
+          << " for src buffer: " << src->name << ", dst buffer: " << dst->name;
     }
   }
   return {};
@@ -378,30 +444,217 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
 Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
   if (GetUseTMA()) {
-    Array<PrimExpr> src_indices, dst_indices;
-    PrimExpr src_size, dst_size;
-    std::tie(src_indices, src_size) = ReturnIndicesAndSize(0);
-    std::tie(dst_indices, dst_size) = ReturnIndicesAndSize(1);
-    ICHECK(analyzer->CanProveEqual(src_size, dst_size))
-        << "src_size = " << src_size << ", dst_size = " << dst_size;
-    BufferLoad src_node = BufferLoad(src, src_indices);
-    BufferLoad dst_node = BufferLoad(dst, dst_indices);
-    Call address_of_src =
-        Call(DataType::Handle(), builtin::address_of(), {src_node});
-    Call address_of_dst =
-        Call(DataType::Handle(), builtin::address_of(), {dst_node});
+    // For AtomicAdd with TMA: src is shared memory, dst is global memory
+    // Use cp.reduce.async.bulk.tensor instruction with tensor descriptor
+    Buffer shared_tensor = src;
+    Buffer global_tensor = dst;
+    Array<Range> shared_range = src_range;
+    Array<Range> global_range = dst_range;
 
-    int need_reduce = 1;
-    int eviction_policy = 0;
+    // Build TMADesc for the global tensor
+    TMADesc desc;
+    desc.rank = global_tensor->shape.size();
+    ICHECK(desc.rank >= 1 && desc.rank <= 5)
+        << "TMA reduce only supports 1-5 dimensions, got " << desc.rank;
+
+    // Data type must match
+    ICHECK(global_tensor->dtype == shared_tensor->dtype)
+        << "AtomicAdd between buffer " << shared_tensor->name << " and "
+        << global_tensor->name << " with different data type "
+        << shared_tensor->dtype << " and " << global_tensor->dtype;
+
+    desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
+
+    // Global tensor shape and stride
+    desc.global_addr = global_tensor->data;
+    desc.global_shape = ReverseArray(global_tensor->shape);
+    Array<PrimExpr> global_coords =
+        ReverseArray(global_range.Map([](Range r) { return r->min; }));
+
+    if (!global_tensor->strides.empty()) {
+      desc.global_stride = ReverseArray(global_tensor->strides);
+    } else {
+      // Create stride from shape (row-major)
+      PrimExpr stride = 1;
+      desc.global_stride.reserve(desc.rank);
+      for (size_t i = 0; i < desc.rank; i++) {
+        desc.global_stride.push_back(stride);
+        stride *= desc.global_shape[i];
+      }
+    }
+    // Make global stride in bytes
+    desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
+      return cast(DataType::Int(64), e) * global_tensor->dtype.bytes();
+    });
+
+    // Shared memory box (copy extent)
+    desc.smem_box =
+        ReverseArray(global_range.Map([](Range r) { return r->extent; }));
+    desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
+
+    // L2 & OOB settings
+    desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
+    desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+
+    // Detect smem layout for swizzle (similar to copy.cc)
+    // linear layout must be computed before remapping
+    auto linear_layout = makeLinearLayout(shared_tensor->shape);
+    desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
+    Layout shared_layout;
+    if (T.layout_map.count(shared_tensor)) {
+      shared_layout = T.layout_map.at(shared_tensor);
+      ICHECK(T.buffer_remap.count(shared_tensor))
+          << "shared_tensor: " << shared_tensor->name
+          << " not found in buffer_remap";
+      shared_tensor = T.buffer_remap.at(shared_tensor);
+    }
+    if (!shared_layout.defined()) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+    } else if (StructuralEqual()(shared_layout, linear_layout)) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+    } else {
+      ICHECK(shared_layout->InputDim() == 2) << "Cannot detect TMA layout.";
+      auto stride = as_const_int(shared_layout->InputShape()[0]);
+      auto continuous = as_const_int(shared_layout->InputShape()[1]);
+      ICHECK(stride != nullptr && continuous != nullptr);
+      if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(
+                                               *stride, *continuous,
+                                               shared_tensor->dtype.bits()))) {
+        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
+      } else if (StructuralEqual()(
+                     shared_layout,
+                     makeHalfBankSwizzleLayout(*stride, *continuous,
+                                               shared_tensor->dtype.bits()))) {
+        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
+      } else if (StructuralEqual()(
+                     shared_layout,
+                     makeFullBankSwizzleLayout(*stride, *continuous,
+                                               shared_tensor->dtype.bits()))) {
+        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
+      } else if (StructuralEqual()(
+                     shared_layout,
+                     makeGemmABLayoutPadded(*stride, *continuous,
+                                            shared_tensor->dtype.bits()))) {
+        LOG(WARNING) << "AtomicAdd TMA cannot support a padded layout for src: "
+                     << src->name << ", dst: " << dst->name;
+        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+      } else {
+        LOG(WARNING) << "AtomicAdd TMA unsupported swizzle layout for src: "
+                     << src->name << ", dst: " << dst->name;
+        desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+      }
+    }
+
+    // Adjust instruction_dim based on swizzle type (similar to copy.cc)
+    auto inner_box_dim = as_const_int(desc.smem_box[0]);
+    ICHECK(inner_box_dim != nullptr)
+        << "inner_box_dim must be a constant integer for TMA atomic add";
+    int instruction_dim = *inner_box_dim;
+    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
+      instruction_dim = 64 / shared_tensor->dtype.bytes();
+    } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
+      instruction_dim = 128 / shared_tensor->dtype.bytes();
+    }
+    if (instruction_dim > 256) {
+      ICHECK((*inner_box_dim) % 256 == 0)
+          << "inner_box_dim: " << *inner_box_dim << " is not divisible by 256";
+      instruction_dim = 256;
+    }
+    ICHECK((*inner_box_dim) % instruction_dim == 0)
+        << "inner_box_dim: " << *inner_box_dim
+        << " is not divisible by instruction_dim: " << instruction_dim;
+    desc.smem_box.Set(0, PrimExpr(instruction_dim));
+
+    int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
+    // Check inner_box_dim_ for each swizzle type
+    struct SwizzleCheck {
+      int swizzle;
+      int max_dim;
+    };
+    static const std::vector<SwizzleCheck> swizzle_checks = {
+        {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B), 32},
+        {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B), 64},
+        {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B), 128},
+    };
+    for (const auto &check : swizzle_checks) {
+      if (desc.swizzle == check.swizzle && inner_box_dim_ > check.max_dim) {
+        LOG(WARNING) << "AtomicAdd TMA cannot support swizzled layout with "
+                        "inner_box_dim_ > "
+                     << check.max_dim;
+      }
+    }
+
+    // Compute shared memory offset
+    Array<PrimExpr> shared_indices;
+    for (auto r : shared_range)
+      shared_indices.push_back(r->min);
+    std::vector<PrimExpr> shared_strides;
+    PrimExpr shared_stride = 1;
+    for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
+      auto s = shared_tensor->shape[shared_tensor->shape.size() - i - 1];
+      shared_strides.insert(shared_strides.begin(), shared_stride);
+      shared_stride *= s;
+    }
+    PrimExpr shared_offset = 0;
+    for (size_t i = 0; i < shared_indices.size(); i++) {
+      shared_offset += shared_indices[i] * shared_strides[i];
+    }
+
+    // Create TMA descriptor
+    Call create_descriptor = Call(DataType::Handle(), create_tma_descriptor(),
+                                  desc.EncodeCallArgs());
+
+    // Compute total elements for access_ptr
+    PrimExpr total_elements = 1;
+    for (auto e : desc.smem_box)
+      total_elements *= e;
+
     // erase use_tma from annotations
-    auto annotations = this->annotations;
-    annotations.erase("use_tma");
-    auto body = Evaluate(Call(DataType::Handle(), tma_store(),
-                              {address_of_src, address_of_dst,
-                               ceildiv(src_size * src->dtype.bits(), 8),
-                               need_reduce, eviction_policy},
-                              annotations));
-    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);
+    auto op_annotations = this->annotations;
+    op_annotations.erase("use_tma");
+
+    Stmt tma_reduce;
+    if ((*inner_box_dim) != instruction_dim) {
+      // Need to split the operation into multiple TMA calls
+      Var loop_var("i");
+      int loop_extent = (*inner_box_dim) / instruction_dim;
+
+      Array<PrimExpr> args;
+      args.reserve(desc.rank + 4);
+      args.push_back(create_descriptor);
+      PrimExpr shared_addr = shared_tensor.access_ptr(
+          1, DataType::Handle(), 1, shared_offset + total_elements * loop_var,
+          total_elements);
+      args.push_back(shared_addr);
+      Array<PrimExpr> loop_global_coords = global_coords;
+      loop_global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
+      for (auto coord : loop_global_coords)
+        args.push_back(coord);
+      int need_reduce = 1;
+      args.push_back(need_reduce);
+      int eviction_policy = 0;
+      args.push_back(eviction_policy);
+      tma_reduce = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
+                       Evaluate(Call(DataType::Handle(), tma_store(), args,
+                                     op_annotations)));
+    } else {
+      Array<PrimExpr> args;
+      args.reserve(desc.rank + 4);
+      args.push_back(create_descriptor);
+      PrimExpr shared_addr = shared_tensor.access_ptr(
+          1, DataType::Handle(), 1, shared_offset, total_elements);
+      args.push_back(shared_addr);
+      for (auto coord : global_coords)
+        args.push_back(coord);
+      int need_reduce = 1;
+      args.push_back(need_reduce);
+      int eviction_policy = 0;
+      args.push_back(eviction_policy);
+      tma_reduce =
+          Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations));
+    }
+
+    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_reduce);
   }
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));

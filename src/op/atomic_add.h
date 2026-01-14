@@ -77,6 +77,8 @@ protected:
   /// Create boundary predicate for memory safety
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
+  /// Compute linear layout for shared tensor (used in TMA atomic add)
+  Layout ComputeLinearLayout(const Buffer &shared_tensor) const;
 };
 
 /// Wrapper class for atomic addition operations
