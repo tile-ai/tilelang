@@ -7,7 +7,7 @@ from tilelang.layout import make_cutlass_metadata_layout
 from tilelang.utils.sparse import randn_semi_sparse
 from tilelang.utils.tensor import torch_assert_close
 
-from triton.testing import do_bench
+from tilelang.profiler import do_bench
 
 import torch
 
