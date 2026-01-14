@@ -1,4 +1,5 @@
 import tilelang.testing
+import tilelang.layout
 import tilelang.language as T
 import torch
 
@@ -388,14 +389,14 @@ def test_tile_atomic_add():
 def test_tma_atomic_add():
     out = torch.zeros((16, 16), dtype=torch.float32, device="cuda")
     tma_atomic_add_program(out)
-    assert torch.allclose(out, torch.ones((16, 16), dtype=torch.float32, device="cuda") * 16)
+    torch.testing.assert_close(out, torch.ones((16, 16), dtype=torch.float32, device="cuda") * 16)
 
     kernel = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32])
     assert "tma_store_add" in kernel.get_kernel_source()
     assert "desc" in kernel.get_kernel_source()  # Ensure using cp.reduce.async.bulk.tensor
 
     kernel_with_explicit_swizzle = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32], explicit_swizzle=True)
-    # Ensure auto swizzled layout is appiled
+    # Ensure auto swizzled layout is applied
     assert kernel.get_kernel_source() == kernel_with_explicit_swizzle.get_kernel_source()
 
 
