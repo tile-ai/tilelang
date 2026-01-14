@@ -352,11 +352,13 @@ def run_atomic_return_prev(M, N, block_M, block_N, dtype=T.float32):
 
 
 @tilelang.jit
-def tma_atomic_add_program(out):
+def tma_atomic_add_program(out, explicit_swizzle=False):
     out: T.Tensor[(16, 16), T.float32]
 
     with T.Kernel(1,):
         out_shared = T.alloc_shared((16, 16), dtype=T.float32)
+        if explicit_swizzle:
+            T.annotate_layout({out_shared: tilelang.layout.make_swizzled_layout(out_shared)})
         T.fill(out_shared, 1)
         for _ in range(16):
             T.atomic_add(out, out_shared, use_tma=True)
@@ -389,6 +391,10 @@ def test_tma_atomic_add():
     kernel = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32])
     assert 'tma_store_add' in kernel.get_kernel_source()
     assert 'desc' in kernel.get_kernel_source()  # Ensure using cp.reduce.async.bulk.tensor
+
+    kernel_with_explicit_swizzle = tma_atomic_add_program.compile(out=T.Tensor[(16, 16), T.float32], explicit_swizzle=True)
+    # Ensure auto swizzled layout is appiled
+    assert kernel.get_kernel_source() == kernel_with_explicit_swizzle.get_kernel_source()
 
 
 if __name__ == "__main__":
