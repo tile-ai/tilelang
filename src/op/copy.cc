@@ -724,7 +724,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                    << dst.scope() << " buffer `" << dst->name
                    << "` may cause conflicted write.";
     }
-    vectorized_thread_loop = VectorizeLoop(transformed_loop, T.layout_map);
+    vectorized_thread_loop = VectorizeLoop(fused_loop, T.layout_map);
     return vectorized_thread_loop;
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
