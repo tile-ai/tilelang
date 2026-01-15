@@ -564,7 +564,8 @@ AtomicAddx2Ret(float *ref, float *val,
   }
 }
 
-TL_DEVICE void AtomicAddx4(float *ref, float *val,
+template <typename src_dtype, typename dst_dtype>
+TL_DEVICE void AtomicAddx4(dst_dtype *ref, src_dtype *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<float4 *>(ref),
@@ -606,8 +607,47 @@ TL_DEVICE void AtomicAddx4(float *ref, float *val,
   }
 }
 
+template <typename dst_dtype>
+TL_DEVICE void AtomicAddx4(dst_dtype *ref, float4 val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
+  if (memory_order == int(cuda::memory_order_relaxed)) {
+    atomicAdd(reinterpret_cast<float4 *>(ref), val);
+  } else {
+    // Since atomicAdd does not support memory order, atomic_ref does not
+    // support vectorized atomic operation we can only inline ptx code here
+    // Note: Vectorized atomic operations only support global space
+    unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
+    float4 ret_val;
+    if (memory_order == int(cuda::memory_order_release) ||
+        memory_order == int(cuda::memory_order_consume)) {
+      asm volatile(
+          "atom.release.gpu.global.add.v4.f32 {%0,%1,%2,%3}, [%4], "
+          "{%5,%6,%7,%8};"
+          : "=f"(ret_val.x), "=f"(ret_val.y), "=f"(ret_val.z), "=f"(ret_val.w)
+          : "l"(ref_addr), "f"(val.x), "f"(val.y), "f"(val.z), "f"(val.w)
+          : "memory");
+    } else if (memory_order == int(cuda::memory_order_acquire)) {
+      asm volatile(
+          "atom.acquire.gpu.global.add.v4.f32 {%0,%1,%2,%3}, [%4], "
+          "{%5,%6,%7,%8};"
+          : "=f"(ret_val.x), "=f"(ret_val.y), "=f"(ret_val.z), "=f"(ret_val.w)
+          : "l"(ref_addr), "f"(val.x), "f"(val.y), "f"(val.z), "f"(val.w)
+          : "memory");
+    } else if (memory_order == int(cuda::memory_order_acq_rel) ||
+               memory_order == int(cuda::memory_order_seq_cst)) {
+      asm volatile(
+          "atom.acq_rel.gpu.global.add.v4.f32 {%0,%1,%2,%3}, [%4], "
+          "{%5,%6,%7,%8};"
+          : "=f"(ret_val.x), "=f"(ret_val.y), "=f"(ret_val.z), "=f"(ret_val.w)
+          : "l"(ref_addr), "f"(val.x), "f"(val.y), "f"(val.z), "f"(val.w)
+          : "memory");
+    }
+  }
+}
+
+template <typename src_dtype, typename dst_dtype>
 TL_DEVICE float4
-AtomicAddx4Ret(float *ref, float *val,
+AtomicAddx4Ret(dst_dtype *ref, src_dtype *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(reinterpret_cast<float4 *>(ref),
@@ -646,6 +686,43 @@ AtomicAddx4Ret(float *ref, float *val,
     return ret_val;
   }
 }
+
+template <typename dst_dtype>
+TL_DEVICE float4
+AtomicAddx4Ret(dst_dtype *ref, float4 val,
+               int memory_order = int(cuda::memory_order_relaxed)) {
+  if (memory_order == int(cuda::memory_order_relaxed)) {
+    return atomicAdd(reinterpret_cast<float4 *>(ref), val);
+  } else {
+    unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
+    float4 ret_val;
+    if (memory_order == int(cuda::memory_order_release) ||
+        memory_order == int(cuda::memory_order_consume)) {
+      asm volatile(
+          "atom.global.gpu.release.add.v4.f32 {%0,%1,%2,%3}, [%4], "
+          "{%5,%6,%7,%8};"
+          : "=f"(ret_val.x), "=f"(ret_val.y), "=f"(ret_val.z), "=f"(ret_val.w)
+          : "l"(ref_addr), "f"(val.x), "f"(val.y), "f"(val.z), "f"(val.w)
+          : "memory");
+    } else if (memory_order == int(cuda::memory_order_acquire)) {
+      asm volatile(
+          "atom.global.gpu.acquire.add.v4.f32 {%0,%1,%2,%3}, [%4], "
+          "{%5,%6,%7,%8};"
+          : "=f"(ret_val.x), "=f"(ret_val.y), "=f"(ret_val.z), "=f"(ret_val.w)
+          : "l"(ref_addr), "f"(val.x), "f"(val.y), "f"(val.z), "f"(val.w)
+          : "memory");
+    } else if (memory_order == int(cuda::memory_order_acq_rel) ||
+               memory_order == int(cuda::memory_order_seq_cst)) {
+      asm volatile(
+          "atom.global.gpu.acq_rel.add.v4.f32 {%0,%1,%2,%3}, [%4], "
+          "{%5,%6,%7,%8};"
+          : "=f"(ret_val.x), "=f"(ret_val.y), "=f"(ret_val.z), "=f"(ret_val.w)
+          : "l"(ref_addr), "f"(val.x), "f"(val.y), "f"(val.z), "f"(val.w)
+          : "memory");
+    }
+    return ret_val;
+  }
+}
 #else
 TL_DEVICE void AtomicAddx2(float *ref, float *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
@@ -666,7 +743,8 @@ AtomicAddx2Ret(float *ref, float *val,
   return ret;
 }
 
-TL_DEVICE void AtomicAddx4(float *ref, float *val,
+template <typename src_dtype, typename dst_dtype>
+TL_DEVICE void AtomicAddx4(dst_dtype *ref, src_dtype *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   (void)memory_order;
   float4 add_val = *reinterpret_cast<float4 *>(val);
@@ -676,8 +754,19 @@ TL_DEVICE void AtomicAddx4(float *ref, float *val,
   atomicAdd(ref + 3, add_val.w);
 }
 
+template <typename dst_dtype>
+TL_DEVICE void AtomicAddx4(dst_dtype *ref, float4 val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
+  (void)memory_order;
+  atomicAdd(ref + 0, val.x);
+  atomicAdd(ref + 1, val.y);
+  atomicAdd(ref + 2, val.z);
+  atomicAdd(ref + 3, val.w);
+}
+
+template <typename src_dtype, typename dst_dtype>
 TL_DEVICE float4
-AtomicAddx4Ret(float *ref, float *val,
+AtomicAddx4Ret(dst_dtype *ref, src_dtype *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   (void)memory_order;
   float4 add_val = *reinterpret_cast<float4 *>(val);
@@ -686,6 +775,19 @@ AtomicAddx4Ret(float *ref, float *val,
   ret.y = atomicAdd(ref + 1, add_val.y);
   ret.z = atomicAdd(ref + 2, add_val.z);
   ret.w = atomicAdd(ref + 3, add_val.w);
+  return ret;
+}
+
+template <typename dst_dtype>
+TL_DEVICE float4
+AtomicAddx4Ret(dst_dtype *ref, float4 val,
+               int memory_order = int(cuda::memory_order_relaxed)) {
+  (void)memory_order;
+  float4 ret;
+  ret.x = atomicAdd(ref + 0, val.x);
+  ret.y = atomicAdd(ref + 1, val.y);
+  ret.z = atomicAdd(ref + 2, val.z);
+  ret.w = atomicAdd(ref + 3, val.w);
   return ret;
 }
 #endif
