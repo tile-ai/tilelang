@@ -66,8 +66,6 @@ protected:
   /// Compute linear layout for shared tensor (used in TMA atomic add)
   Layout ComputeLinearLayout(const Buffer &shared_tensor) const;
 
-  /// Lower TMA-based atomic add
-  Stmt LowerTMA(const LowerArgs &T, arith::Analyzer *analyzer) const;
 };
 
 /// Wrapper class for atomic addition operations

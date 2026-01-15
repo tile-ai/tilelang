@@ -27,6 +27,7 @@ using namespace tir;
 // ============================================================================
 
 AtomicMax::AtomicMax(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ICHECK(args.size() >= 2) << "AtomicMax expects at least 2 arguments (src, dst), got " << args.size();
   ObjectPtr<AtomicMaxNode> node = tvm::ffi::make_object<AtomicMaxNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
@@ -56,6 +57,7 @@ const Op &AtomicMaxNode::GetElemOp() const { return atomic_max_elem_op(); }
 // ============================================================================
 
 AtomicMin::AtomicMin(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ICHECK(args.size() >= 2) << "AtomicMin expects at least 2 arguments (src, dst), got " << args.size();
   ObjectPtr<AtomicMinNode> node = tvm::ffi::make_object<AtomicMinNode>();
   Array<Range> rgs[2];
   Buffer bf[2];

@@ -212,7 +212,7 @@ private:
     } else {
       // Other calls should not be vectorized
       vector_size_ = 1;
-      return Downcast<PrimExpr>(node);
+      return ffi::GetRef<PrimExpr>(node);
     }
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }

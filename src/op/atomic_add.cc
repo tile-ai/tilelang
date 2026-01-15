@@ -42,6 +42,7 @@ using namespace tir;
  * - The constructed node is stored in this->data_.
  */
 AtomicAdd::AtomicAdd(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ICHECK(args.size() >= 2) << "AtomicAdd expects at least 2 arguments (src, dst), got " << args.size();
   ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
