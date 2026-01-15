@@ -209,6 +209,14 @@ private:
       // address_of have buffer load value so we should analysis the buffer load
       // node to update vector_size_.
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    } else if (node->op.same_as(tir::builtin::bitwise_and()) ||
+               node->op.same_as(tir::builtin::bitwise_or()) ||
+               node->op.same_as(tir::builtin::bitwise_xor()) ||
+               node->op.same_as(tir::builtin::bitwise_not()) ||
+               node->op.same_as(tir::builtin::shift_left()) ||
+               node->op.same_as(tir::builtin::shift_right())) {
+      // Bitwise operations can be vectorized
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else {
       // Other calls should not be vectorized
       vector_size_ = 1;
@@ -239,7 +247,6 @@ private:
       // forward indices
       auto layout = layout_map_[buffer];
       transformed_indices = layout->Forward(indices);
-
       // Reshape transformed_indices to match buffer->shape dimensions if needed
       if (transformed_indices.size() != buffer->shape.size()) {
         // Step 1: Compute linear offset using layout->OutputShape()
