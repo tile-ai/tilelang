@@ -4,7 +4,12 @@ import tilelang.language as T
 import torch
 
 
-@tilelang.jit
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    }
+)
 def atomic_add_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_add(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
@@ -21,6 +26,7 @@ def atomic_add_program(K, M, N, block_M, block_N, dtype=T.float32):
 
 def run_atomic_add(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
+    print(kernel.get_kernel_source())
     import torch
 
     def ref_program(A, B):
@@ -384,6 +390,80 @@ def test_atomic_return_prev():
 
 def test_tile_atomic_add():
     run_tile_atomic_add(8, 128, 128, 32, 32)
+
+
+# ======================= Tile-level atomic max =======================
+@tilelang.jit
+def tile_atomic_max_program(K, M, N, block_M, block_N, dtype=T.float32):
+    @T.prim_func
+    def tile_atomic_max(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
+        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), K, threads=32) as (bx, by, bz):
+            A_shared = T.alloc_shared((block_M, block_N), dtype)
+
+            T.copy(A[bz, bx * block_M : (bx + 1) * block_M, by * block_N : (by + 1) * block_N], A_shared)
+
+            T.atomic_max(B[bx * block_M, by * block_N], A_shared)
+
+    return tile_atomic_max
+
+
+def run_tile_atomic_max(K, M, N, block_M, block_N, dtype=T.float32):
+    kernel = tile_atomic_max_program(K, M, N, block_M, block_N, dtype=dtype)
+    print(kernel.get_kernel_source())
+
+    def ref_program(A, B):
+        for k in range(K):
+            for i in range(M):
+                for j in range(N):
+                    B[i, j] = max(B[i, j], A[k, i, j])
+
+    A = torch.randn(K, M, N, dtype=getattr(torch, dtype)).cuda()
+    B = torch.full((M, N), float("-inf"), dtype=getattr(torch, dtype)).cuda()
+    ref_B = B.clone()
+    ref_program(A, ref_B)
+    kernel(A, B)
+    torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
+
+
+def test_tile_atomic_max():
+    run_tile_atomic_max(8, 128, 128, 32, 32)
+
+
+# ======================= Tile-level atomic min =======================
+@tilelang.jit
+def tile_atomic_min_program(K, M, N, block_M, block_N, dtype=T.float32):
+    @T.prim_func
+    def tile_atomic_min(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
+        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), K, threads=32) as (bx, by, bz):
+            A_shared = T.alloc_shared((block_M, block_N), dtype)
+
+            T.copy(A[bz, bx * block_M : (bx + 1) * block_M, by * block_N : (by + 1) * block_N], A_shared)
+
+            T.atomic_min(B[bx * block_M, by * block_N], A_shared)
+
+    return tile_atomic_min
+
+
+def run_tile_atomic_min(K, M, N, block_M, block_N, dtype=T.float32):
+    kernel = tile_atomic_min_program(K, M, N, block_M, block_N, dtype=dtype)
+    print(kernel.get_kernel_source())
+
+    def ref_program(A, B):
+        for k in range(K):
+            for i in range(M):
+                for j in range(N):
+                    B[i, j] = min(B[i, j], A[k, i, j])
+
+    A = torch.randn(K, M, N, dtype=getattr(torch, dtype)).cuda()
+    B = torch.full((M, N), float("inf"), dtype=getattr(torch, dtype)).cuda()
+    ref_B = B.clone()
+    ref_program(A, ref_B)
+    kernel(A, B)
+    torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
+
+
+def test_tile_atomic_min():
+    run_tile_atomic_min(8, 128, 128, 32, 32)
 
 
 @tilelang.testing.requires_cuda

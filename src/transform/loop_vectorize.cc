@@ -24,6 +24,7 @@
 
 #include "loop_vectorize.h"
 #include "../op/builtin.h"
+#include "../op/utils.h"
 #include "../target/utils.h"
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -118,8 +119,7 @@ private:
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *node) final {
-    if (node->buffer.scope() == "shared" || node->buffer.scope() == "global" ||
-        node->buffer.scope() == "shared.dyn")
+    if (IsSharedBuffer(node->buffer) || IsGlobalBuffer(node->buffer))
       has_nonlocal_memory_access_ = true;
     if (node->buffer->shape.size() == 1) {
       // TODO(lei): This should be improved as
@@ -134,8 +134,7 @@ private:
   }
 
   Stmt VisitStmt_(const BufferStoreNode *node) final {
-    if (node->buffer.scope() == "shared" || node->buffer.scope() == "global" ||
-        node->buffer.scope() == "shared.dyn")
+    if (IsSharedBuffer(node->buffer) || IsGlobalBuffer(node->buffer))
       has_nonlocal_memory_access_ = true;
     UpdateVectorSize(node->indices, node->buffer, true);
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
@@ -149,12 +148,36 @@ private:
   PrimExpr VisitExpr_(const CallNode *node) final {
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
-    } else if (node->op == builtin::call_extern()) {
-      // do not vectorize extern calls
+    } else if (node->op == tl::atomic_add_elem_op()) {
+      // Assert at least 2 args (dst_ptr and src)
+      ICHECK(node->args.size() >= 2)
+          << "atomic_add_elem_op requires at least 2 args (dst and src)";
+
+      // Get dst dtype from args[0] (address_of call containing BufferLoad)
+      auto address_of_call = node->args[0].as<CallNode>();
+      ICHECK(address_of_call && address_of_call->op == builtin::address_of())
+          << "atomic_add_elem_op first arg must be address_of call";
+
+      auto buffer_load = address_of_call->args[0].as<BufferLoadNode>();
+      ICHECK(buffer_load) << "address_of arg must be BufferLoad";
+
+      DataType dtype = buffer_load->buffer->dtype;
+      int vectorize_length = 1;
+      if (dtype.is_float16() || dtype.is_bfloat16()) {
+        vectorize_length = 2;
+      } else if (dtype.is_float() && dtype.bits() == 32 &&
+                 TargetHasSMVersionGE(Target::Current(false), 90)) {
+        vectorize_length = 4;
+      }
+
+      vector_size_ = arith::ZeroAwareGCD(vector_size_, vectorize_length);
+      // Do not visit the args of atomic_add_elem_op, because pointer type
+      // is impossible to vectorize
+      return Downcast<PrimExpr>(node);
+    } else {
+      // Other calls should not be vectorized
       vector_size_ = 1;
-    } else if (node->op.same_as(tl::rng_init())) {
-      // do not vectorize random operation
-      vector_size_ = 1;
+      return Downcast<PrimExpr>(node);
     }
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }

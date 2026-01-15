@@ -585,7 +585,77 @@ TVM_DLL const Op &increase_descriptor_offset();
  *  This op is used to represent an element-wise atomic add operation in
  * tilelang.
  */
-TVM_DLL const Op &atomicadd_elem_op();
+TVM_DLL const Op &atomic_add_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for element-wise atomic addition with return value.
+ *
+ *  This op is used to represent an element-wise atomic add operation in
+ * tilelang that returns the previous value.
+ */
+TVM_DLL const Op &atomic_add_ret_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for vectorized (x2) atomic addition.
+ *
+ *  This op is used to represent a vectorized atomic add operation (2 elements)
+ * in tilelang.
+ */
+TVM_DLL const Op &atomic_addx2_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for vectorized (x4) atomic addition.
+ *
+ *  This op is used to represent a vectorized atomic add operation (4 elements)
+ * in tilelang.
+ */
+TVM_DLL const Op &atomic_addx4_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for atomic load.
+ *
+ *  This op is used to represent an atomic load operation in tilelang.
+ */
+TVM_DLL const Op &atomic_load_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for atomic store.
+ *
+ *  This op is used to represent an atomic store operation in tilelang.
+ */
+TVM_DLL const Op &atomic_store_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for element-wise atomic maximum.
+ *
+ *  This op is used to represent an element-wise atomic max operation in
+ * tilelang.
+ */
+TVM_DLL const Op &atomic_max_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for element-wise atomic maximum with return value.
+ *
+ *  This op is used to represent an element-wise atomic max operation in
+ * tilelang that returns the previous value.
+ */
+TVM_DLL const Op &atomic_max_ret_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for element-wise atomic minimum.
+ *
+ *  This op is used to represent an element-wise atomic min operation in
+ * tilelang.
+ */
+TVM_DLL const Op &atomic_min_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for element-wise atomic minimum with return value.
+ *
+ *  This op is used to represent an element-wise atomic min operation in
+ * tilelang that returns the previous value.
+ */
+TVM_DLL const Op &atomic_min_ret_elem_op();
 
 /*!
  * \brief tilelang intrinsic for assert on device.
