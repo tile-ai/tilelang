@@ -13,6 +13,7 @@
 
 #include "../layout/layout.h"
 #include "../target/utils.h"
+
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "builtin.h"
@@ -255,7 +256,7 @@ Stmt AtomicOpBaseNode<Derived>::Lower(const LowerArgs &T,
   auto loop_layout = par_op->GetLoopLayout();
   auto lowered_loop =
       LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                        T.layout_map, par_op->GetPredicate(T.thread_var));
+                        par_op->GetPredicate(T.thread_var));
   return lowered_loop;
 }
 
