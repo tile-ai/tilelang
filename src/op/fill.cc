@@ -13,7 +13,6 @@
 #include "../layout/tcgen05_layout.h"
 #include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
-#include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "builtin.h"
