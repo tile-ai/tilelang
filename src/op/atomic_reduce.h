@@ -17,13 +17,11 @@ using namespace tir;
 /*!
  * \brief Base node class for atomic operations (add/max/min).
  *
- * This template base class provides common functionality for all atomic
+ * This base class provides common functionality for all atomic
  * operations including buffer management, loop generation, and layout
  * inference.
- *
- * \tparam Derived The derived class type (CRTP pattern)
  */
-template <typename Derived> class AtomicOpBaseNode : public TileOperatorNode {
+class AtomicOpBaseNode : public TileOperatorNode {
 public:
   Buffer src, dst; ///< Source and destination buffers
   Array<Range> src_range,
@@ -51,6 +49,9 @@ public:
     return 0;
   }
 
+  /// Get the element-wise operation Op (pure virtual, implemented by derived)
+  virtual const Op &GetElemOp() const = 0;
+
 protected:
   /// Create SIMT-style parallel loop structure
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
@@ -64,24 +65,16 @@ protected:
   /// Create boundary predicate for memory safety
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
-
-  /// Get the element-wise operation Op (to be implemented by derived class)
-  /// This uses CRTP to call the derived class's static method
-  const Op &GetElemOp() const { return Derived::GetElemOpStatic(); }
 };
 
-// Backward compatibility alias
-template <typename Derived>
-using AtomicReduceBaseNode = AtomicOpBaseNode<Derived>;
-
 /// Node class for atomic maximum operations
-class AtomicMaxNode : public AtomicOpBaseNode<AtomicMaxNode> {
+class AtomicMaxNode : public AtomicOpBaseNode {
 public:
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicMax", AtomicMaxNode,
                                     TileOperatorNode);
 
   static const Op &Get();
-  static const Op &GetElemOpStatic();
+  const Op &GetElemOp() const override;
   TileOperator Clone() const;
 
   static void RegisterReflection() {
@@ -107,13 +100,13 @@ public:
 };
 
 /// Node class for atomic minimum operations
-class AtomicMinNode : public AtomicOpBaseNode<AtomicMinNode> {
+class AtomicMinNode : public AtomicOpBaseNode {
 public:
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicMin", AtomicMinNode,
                                     TileOperatorNode);
 
   static const Op &Get();
-  static const Op &GetElemOpStatic();
+  const Op &GetElemOp() const override;
   TileOperator Clone() const;
 
   static void RegisterReflection() {

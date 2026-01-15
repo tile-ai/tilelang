@@ -5,7 +5,6 @@
  */
 
 #include "./atomic_reduce.h"
-#include "./atomic_add.h"
 #include "utils.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -50,7 +49,7 @@ TileOperator AtomicMaxNode::Clone() const {
   return AtomicMax(op);
 }
 
-const Op &AtomicMaxNode::GetElemOpStatic() { return atomic_max_elem_op(); }
+const Op &AtomicMaxNode::GetElemOp() const { return atomic_max_elem_op(); }
 
 // ============================================================================
 // AtomicMin Implementation
@@ -79,14 +78,13 @@ TileOperator AtomicMinNode::Clone() const {
   return AtomicMin(op);
 }
 
-const Op &AtomicMinNode::GetElemOpStatic() { return atomic_min_elem_op(); }
+const Op &AtomicMinNode::GetElemOp() const { return atomic_min_elem_op(); }
 
 // ============================================================================
 // Common AtomicOpBaseNode Implementation
 // ============================================================================
 
-template <typename Derived>
-Array<IterVar> AtomicOpBaseNode<Derived>::MakeIterVars() const {
+Array<IterVar> AtomicOpBaseNode::MakeIterVars() const {
   Array<IterVar> loop_vars;
   size_t idx = 0;
   for (size_t i = 0; i < src_range.size(); i++) {
@@ -100,10 +98,8 @@ Array<IterVar> AtomicOpBaseNode<Derived>::MakeIterVars() const {
   return loop_vars;
 }
 
-template <typename Derived>
-Array<PrimExpr>
-AtomicOpBaseNode<Derived>::MakeIndices(const Array<IterVar> &ivs,
-                                       int src_dst) const {
+Array<PrimExpr> AtomicOpBaseNode::MakeIndices(const Array<IterVar> &ivs,
+                                              int src_dst) const {
   Array<PrimExpr> indices;
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
   size_t idx = 0;
@@ -121,11 +117,10 @@ AtomicOpBaseNode<Derived>::MakeIndices(const Array<IterVar> &ivs,
   return indices;
 }
 
-template <typename Derived>
-PrimExpr AtomicOpBaseNode<Derived>::MakePredicate(arith::Analyzer *analyzer,
-                                                  const Array<IterVar> &ivs,
-                                                  Array<PrimExpr> extents,
-                                                  int src_dst) const {
+PrimExpr AtomicOpBaseNode::MakePredicate(arith::Analyzer *analyzer,
+                                         const Array<IterVar> &ivs,
+                                         Array<PrimExpr> extents,
+                                         int src_dst) const {
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
   Array<PrimExpr> cond_list;
   ICHECK(extents.size() == ranges.size()) << extents << " " << ranges;
@@ -153,8 +148,7 @@ PrimExpr AtomicOpBaseNode<Derived>::MakePredicate(arith::Analyzer *analyzer,
   }
 }
 
-template <typename Derived>
-For AtomicOpBaseNode<Derived>::MakeSIMTLoop(arith::Analyzer *analyzer) const {
+For AtomicOpBaseNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
   if (is_scalar) {
@@ -191,9 +185,9 @@ For AtomicOpBaseNode<Derived>::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
   new_args.push_back(dst_ptr);
   new_args.push_back(src_value);
-  new_args.push_back(static_cast<const Derived *>(this)->GetMemoryOrder());
+  new_args.push_back(GetMemoryOrder());
 
-  // Use the appropriate elem_op based on the derived type (via CRTP)
+  // Use the appropriate elem_op based on the derived type (via virtual call)
   Call atomic_call =
       tvm::tir::Call(dst->dtype, GetElemOp(), new_args, annotations);
 
@@ -214,9 +208,8 @@ For AtomicOpBaseNode<Derived>::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   return Downcast<For>(body);
 }
 
-template <typename Derived>
-LayoutMap AtomicOpBaseNode<Derived>::InferLayout(const LayoutInferArgs &T,
-                                                 InferLevel level) const {
+LayoutMap AtomicOpBaseNode::InferLayout(const LayoutInferArgs &T,
+                                        InferLevel level) const {
   // For atomic reduce operations, check that src and dst have the same layout
   // if both are fragments
   if (IsFragmentBuffer(src) && IsFragmentBuffer(dst)) {
@@ -233,9 +226,8 @@ LayoutMap AtomicOpBaseNode<Derived>::InferLayout(const LayoutInferArgs &T,
   return {};
 }
 
-template <typename Derived>
-Stmt AtomicOpBaseNode<Derived>::Lower(const LowerArgs &T,
-                                      arith::Analyzer *analyzer) const {
+Stmt AtomicOpBaseNode::Lower(const LowerArgs &T,
+                             arith::Analyzer *analyzer) const {
   Target target = T.target;
 
   auto simt_loop = MakeSIMTLoop(analyzer);
@@ -256,14 +248,9 @@ Stmt AtomicOpBaseNode<Derived>::Lower(const LowerArgs &T,
   auto loop_layout = par_op->GetLoopLayout();
   auto lowered_loop =
       LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                        par_op->GetPredicate(T.thread_var));
+                        T.layout_map, par_op->GetPredicate(T.thread_var));
   return lowered_loop;
 }
-
-// Explicit template instantiations
-template class AtomicOpBaseNode<AtomicMaxNode>;
-template class AtomicOpBaseNode<AtomicMinNode>;
-template class AtomicOpBaseNode<AtomicAddNode>;
 
 // ============================================================================
 // Operator Registration

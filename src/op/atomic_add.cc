@@ -74,7 +74,7 @@ TileOperator AtomicAddNode::Clone() const {
   return AtomicAdd(op);
 }
 
-const Op &AtomicAddNode::GetElemOpStatic() { return atomic_add_elem_op(); }
+const Op &AtomicAddNode::GetElemOp() const { return atomic_add_elem_op(); }
 
 /**
  * @brief Get vectorization length based on dst dtype and target SM version.

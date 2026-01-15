@@ -18,7 +18,7 @@ using namespace tir;
  *
  * Inherits from AtomicOpBaseNode and adds TMA support and vectorization.
  */
-class AtomicAddNode : public AtomicOpBaseNode<AtomicAddNode> {
+class AtomicAddNode : public AtomicOpBaseNode {
 public:
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicAdd", AtomicAddNode,
                                     TileOperatorNode);
@@ -30,7 +30,7 @@ public:
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
 
   static const Op &Get();
-  static const Op &GetElemOpStatic();
+  const Op &GetElemOp() const override;
   TileOperator Clone() const;
 
   static void RegisterReflection() {
