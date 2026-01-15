@@ -708,7 +708,8 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   // As the pass will do post processing to the layout
   auto maybe_remapped_root_ =
       IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
-  int vector_size = GetVectorizeSize(maybe_remapped_root_, T.analyzer);
+  int vector_size =
+      GetVectorizeSize(maybe_remapped_root_, T.analyzer, T.layout_map);
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;

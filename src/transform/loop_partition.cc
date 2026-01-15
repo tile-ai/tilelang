@@ -272,8 +272,9 @@ For LoopPragmaUnroll(For stmt) {
 }
 
 Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
-                       arith::Analyzer *analyzer, Optional<PrimExpr> predicate,
-                       bool parallel_loop, bool should_vectorize) {
+                       arith::Analyzer *analyzer, const LayoutMap &layout_map,
+                       Optional<PrimExpr> predicate, bool parallel_loop,
+                       bool should_vectorize) {
   // Save analyzer state to prevent conflicted bindings during vectorization
   auto saved_analyzer = analyzer->Clone();
 
@@ -294,7 +295,7 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
 
   // Step 2: Vectorize the loop (if requested)
   if (should_vectorize) {
-    result_loop = VectorizeLoop(result_loop, saved_analyzer.get());
+    result_loop = VectorizeLoop(result_loop, saved_analyzer.get(), layout_map);
   }
 
   // Step 3: Vectorize atomic add operations

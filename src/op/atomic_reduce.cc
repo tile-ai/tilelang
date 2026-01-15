@@ -255,7 +255,7 @@ Stmt AtomicOpBaseNode<Derived>::Lower(const LowerArgs &T,
   auto loop_layout = par_op->GetLoopLayout();
   auto lowered_loop =
       LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                        par_op->GetPredicate(T.thread_var));
+                        T.layout_map, par_op->GetPredicate(T.thread_var));
   return lowered_loop;
 }
 
