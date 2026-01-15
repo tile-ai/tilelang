@@ -4,12 +4,7 @@ import tilelang.language as T
 import torch
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    }
-)
+@tilelang.jit
 def atomic_add_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_add(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
