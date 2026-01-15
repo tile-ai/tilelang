@@ -76,36 +76,35 @@ private:
     // Check if this is a vectorized loop
     if (node->kind == ForKind::kVectorized) {
       auto extent_ptr = as_const_int(node->extent);
-      if (extent_ptr) {
-        int vec_size = static_cast<int>(*extent_ptr);
-        // Push vectorized context
-        vectorized_loop_ = node;
-        vector_size_ = vec_size;
+      if (!extent_ptr) {
+        return StmtExprMutator::VisitStmt_(node);
+      }
 
-        Stmt body = VisitStmt(node->body);
-
-        // If we successfully vectorized atomic ops, transform the loop
-        if (has_vectorized_atomic_) {
-          has_vectorized_atomic_ = false;
-          vectorized_loop_ = nullptr;
-          vector_size_ = 1;
-
-          // Change loop extent to 1 since atomic op now handles all elements
-          return For(node->loop_var, node->min, Integer(1), node->kind, body,
-                     node->thread_binding, node->annotations, node->step,
-                     node->span);
-        }
-
+      int vec_size = static_cast<int>(*extent_ptr);
+      // Push vectorized context
+      vectorized_loop_ = node;
+      vector_size_ = vec_size;
+      Stmt body = VisitStmt(node->body);
+      // If we successfully vectorized atomic ops, transform the loop
+      if (has_vectorized_atomic_) {
+        has_vectorized_atomic_ = false;
         vectorized_loop_ = nullptr;
         vector_size_ = 1;
-
-        if (body.same_as(node->body)) {
-          return tvm::ffi::GetRef<Stmt>(node);
-        }
-        return For(node->loop_var, node->min, node->extent, node->kind, body,
+        // Change loop extent to 1 since atomic op now handles all elements
+        return For(node->loop_var, node->min, Integer(1), node->kind, body,
                    node->thread_binding, node->annotations, node->step,
                    node->span);
       }
+
+      vectorized_loop_ = nullptr;
+      vector_size_ = 1;
+
+      if (body.same_as(node->body)) {
+        return tvm::ffi::GetRef<Stmt>(node);
+      }
+      return For(node->loop_var, node->min, node->extent, node->kind, body,
+                 node->thread_binding, node->annotations, node->step,
+                 node->span);
     }
     return StmtExprMutator::VisitStmt_(node);
   }
