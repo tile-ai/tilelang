@@ -202,8 +202,6 @@ private:
       }
 
       vector_size_ = arith::ZeroAwareGCD(vector_size_, vectorize_length);
-      // Do not visit the args of atomic_add_elem_op, because pointer type
-      // is impossible to vectorize
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == builtin::address_of()) {
       // address_of have buffer load value so we should analysis the buffer load
