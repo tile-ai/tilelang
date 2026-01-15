@@ -260,7 +260,7 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     dst_extent = get_extent(dst)
 
     if dst_extent is None and src_extent is None:
-        atomic_add_op =  op.Op.get("tl.atomic_add_ret_elem_op") if return_prev else op.Op.get("tl.atomic_add_elem_op")
+        atomic_add_op = op.Op.get("tl.atomic_add_ret_elem_op") if return_prev else op.Op.get("tl.atomic_add_elem_op")
         return_type = dst.dtype if return_prev else "handle"
 
         # Pass destination by pointer to match device signature
@@ -334,9 +334,9 @@ def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>>         for j in range(0, grads.shape[1], 2):  # Process in pairs
         >>>             atomic_addx2(global_grads[i, j:j+2], grads[i, j:j+2])
     """
-    func_name = "AtomicAddx2Ret" if return_prev else "AtomicAddx2"
+    atomic_addx2_op = op.Op.get("tl.atomic_addx2_elem_op") if return_prev else op.Op.get("tl.atomic_addx2_elem_op")
     return_type = dst.dtype if return_prev else "handle"
-    return T.call_intrin(return_type, op.Op.get("tl.atomic_addx2_elem_op"), T.address_of(dst), T.address_of(value))
+    return T.call_intrin(return_type, atomic_addx2_op, T.address_of(dst), T.address_of(value))
 
 
 def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:
@@ -372,9 +372,9 @@ def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>> rgba_add = T.Tensor([4], "float32", name="rgba_add")
         >>> atomic_addx4(rgba_dst, rgba_add)  # Atomic blend of all 4 channels
     """
-    func_name = "AtomicAddx4Ret" if return_prev else "AtomicAddx4"
+    atomic_addx4_op = op.Op.get("tl.atomic_addx4_elem_op") if return_prev else op.Op.get("tl.atomic_addx4_elem_op")
     return_type = "float4" if "float" in str(dst.dtype).lower() else "handle"
-    return T.call_intrin(return_type, op.Op.get("tl.atomic_addx4_elem_op"), T.address_of(dst), T.address_of(value))
+    return T.call_intrin(return_type, atomic_addx4_op, T.address_of(dst), T.address_of(value))
 
 
 def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:

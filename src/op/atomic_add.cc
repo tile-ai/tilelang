@@ -99,7 +99,6 @@ int AtomicAddNode::GetVectorizeLength(Target target) const {
   return 1;
 }
 
-
 std::pair<Array<PrimExpr>, PrimExpr>
 AtomicAddNode::ReturnIndicesAndSize(int src_dst) const {
   Array<PrimExpr> indices;
@@ -111,7 +110,6 @@ AtomicAddNode::ReturnIndicesAndSize(int src_dst) const {
   }
   return {indices, size};
 }
-
 
 /**
  * @brief Build a SIMT-style loop nest that performs element-wise atomic
@@ -565,7 +563,8 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto par_op = ParallelOp(fused_loop);
   std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                     InferLevel::kFree};
-  // 1.give par_op a recommended vectorize size. (only works for free layout inference).
+  // 1.give par_op a recommended vectorize size. (only works for free layout
+  // inference).
   for (auto level : levels) {
     par_op->InferLayout({T.target,
                          T.thread_bounds,
@@ -577,8 +576,9 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
-  auto lowered_loop = LowerParallelLoop(fused_loop, loop_layout, T.thread_var,
-  analyzer, par_op->GetPredicate(T.thread_var));
+  auto lowered_loop =
+      LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
+                        par_op->GetPredicate(T.thread_var));
   return lowered_loop;
 }
 

@@ -18,15 +18,16 @@ using namespace tir;
  * \brief Base node class for atomic operations (add/max/min).
  *
  * This template base class provides common functionality for all atomic
- * operations including buffer management, loop generation, and layout inference.
+ * operations including buffer management, loop generation, and layout
+ * inference.
  *
  * \tparam Derived The derived class type (CRTP pattern)
  */
-template <typename Derived>
-class AtomicOpBaseNode : public TileOperatorNode {
+template <typename Derived> class AtomicOpBaseNode : public TileOperatorNode {
 public:
-  Buffer src, dst;                    ///< Source and destination buffers
-  Array<Range> src_range, dst_range;  ///< Access ranges for source and destination
+  Buffer src, dst; ///< Source and destination buffers
+  Array<Range> src_range,
+      dst_range; ///< Access ranges for source and destination
   Map<String, ObjectRef> annotations; ///< Annotations for the atomic operation
   // Supported annotation keys:
   //   - "coalesced_width": IntImm, width for memory coalescing optimization
@@ -66,9 +67,7 @@ protected:
 
   /// Get the element-wise operation Op (to be implemented by derived class)
   /// This uses CRTP to call the derived class's static method
-  const Op &GetElemOp() const {
-    return Derived::GetElemOpStatic();
-  }
+  const Op &GetElemOp() const { return Derived::GetElemOpStatic(); }
 };
 
 // Backward compatibility alias
@@ -139,7 +138,7 @@ public:
   static const Op &Get();
 };
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
 
-#endif  // TVM_TL_OP_ATOMIC_REDUCE_H_
+#endif // TVM_TL_OP_ATOMIC_REDUCE_H_

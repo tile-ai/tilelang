@@ -28,7 +28,7 @@ using namespace tir;
  */
 For VectorizeAtomicAdd(const For &for_node);
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
 
-#endif  // TVM_TL_ATOMICADD_VECTORIZE_H_
+#endif // TVM_TL_ATOMICADD_VECTORIZE_H_

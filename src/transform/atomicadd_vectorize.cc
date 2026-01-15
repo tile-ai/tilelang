@@ -16,7 +16,8 @@ using namespace tir;
 namespace {
 
 /*!
- * \brief Extract BufferLoad from an expression that may be wrapped in address_of.
+ * \brief Extract BufferLoad from an expression that may be wrapped in
+ * address_of.
  */
 Optional<BufferLoad> ExtractBufferLoad(const PrimExpr &expr) {
   if (const auto *load = expr.as<BufferLoadNode>()) {
@@ -64,7 +65,8 @@ private:
     if (dtype.is_float16() || dtype.is_bfloat16()) {
       return 2;
     }
-    if (dtype.is_float() && dtype.bits() == 32 && TargetHasSMVersionGE(target_, 90)) {
+    if (dtype.is_float() && dtype.bits() == 32 &&
+        TargetHasSMVersionGE(target_, 90)) {
       return 4;
     }
     return 1;
@@ -90,7 +92,8 @@ private:
 
           // Change loop extent to 1 since atomic op now handles all elements
           return For(node->loop_var, node->min, Integer(1), node->kind, body,
-                     node->thread_binding, node->annotations, node->step, node->span);
+                     node->thread_binding, node->annotations, node->step,
+                     node->span);
         }
 
         vectorized_loop_ = nullptr;
@@ -100,7 +103,8 @@ private:
           return tvm::ffi::GetRef<Stmt>(node);
         }
         return For(node->loop_var, node->min, node->extent, node->kind, body,
-                   node->thread_binding, node->annotations, node->step, node->span);
+                   node->thread_binding, node->annotations, node->step,
+                   node->span);
       }
     }
     return StmtExprMutator::VisitStmt_(node);
@@ -133,10 +137,13 @@ private:
     has_vectorized_atomic_ = true;
 
     // Create vectorized atomic op
-    Call addr_dst(DataType::Handle(), builtin::address_of(), {dst_load.value()});
-    Call addr_src(DataType::Handle(), builtin::address_of(), {src_load.value()});
+    Call addr_dst(DataType::Handle(), builtin::address_of(),
+                  {dst_load.value()});
+    Call addr_src(DataType::Handle(), builtin::address_of(),
+                  {src_load.value()});
 
-    return Call(node->dtype, GetVectorizedAtomicOp(vector_size_), {addr_dst, addr_src});
+    return Call(node->dtype, GetVectorizedAtomicOp(vector_size_),
+                {addr_dst, addr_src});
   }
 
   Target target_;
@@ -145,12 +152,12 @@ private:
   bool has_vectorized_atomic_ = false;
 };
 
-}  // namespace
+} // namespace
 
 For VectorizeAtomicAdd(const For &for_node) {
   Target target = Target::Current(false);
   return Downcast<For>(AtomicAddVectorizeRewriter(target)(for_node));
 }
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm

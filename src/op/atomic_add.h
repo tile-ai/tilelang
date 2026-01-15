@@ -81,7 +81,7 @@ public:
   static const Op &Get();
 };
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
 
-#endif  // TVM_TL_OP_ATOMIC_ADD_H_
+#endif // TVM_TL_OP_ATOMIC_ADD_H_

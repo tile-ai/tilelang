@@ -2899,8 +2899,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
-    // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns prev
-    // value
+    // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
     os << "AtomicAddRet(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]);
     if (op->args.size() > 2) {
@@ -2950,8 +2950,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   } else if (op->op.same_as(tl::atomic_max_ret_elem_op())) {
-    // atomic_max_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns prev
-    // value
+    // atomic_max_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
     os << "AtomicMaxRet(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]);
     if (op->args.size() > 2) {
@@ -2969,8 +2969,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   } else if (op->op.same_as(tl::atomic_min_ret_elem_op())) {
-    // atomic_min_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns prev
-    // value
+    // atomic_min_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
     os << "AtomicMinRet(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]);
     if (op->args.size() > 2) {
