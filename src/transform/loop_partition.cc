@@ -29,7 +29,6 @@
 #include <utility>
 
 #include "../op/utils.h"
-#include "atomicadd_vectorize.h"
 #include "loop_vectorize.h"
 
 namespace tvm {
