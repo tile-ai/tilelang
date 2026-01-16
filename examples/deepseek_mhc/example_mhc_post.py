@@ -82,7 +82,7 @@ def mhc_post_ref(
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
-    term2 = torch.einsum("amn,amc->anc", comb_res_mix, residual.float())
+    term2 = torch.bmm(comb_res_mix.mT, residual.float())
     return (x.float().unsqueeze(-2) * post_layer_mix + term2).bfloat16()
 
 
