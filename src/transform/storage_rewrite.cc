@@ -1094,6 +1094,10 @@ private:
       return NewAlloc(op, attach_scope, scope, const_nbits);
     }
 
+    if (scope.tag == ".var") {
+      return NewAlloc(op, attach_scope, scope, const_nbits);
+    }
+
     if (is_known_size) {
       // constant allocation.
       auto begin = const_free_map_.lower_bound(const_nbits / match_range);
