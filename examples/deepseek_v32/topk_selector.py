@@ -57,6 +57,8 @@ def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
             l_end_idx = T.alloc_var(T.int32)
             l_out_pos = T.alloc_var(T.int32)
 
+            pos = T.alloc_var(T.int32)
+
             l_new_topk = topk
             l_start_idx = starts[bx]
             l_end_idx = ends[bx]
