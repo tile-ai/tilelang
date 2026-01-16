@@ -327,8 +327,8 @@ TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
   }
 }
 
-// TODO add memory_order for vectorized atomic add
-TL_DEVICE void AtomicAddx2(half_t *ref, half_t *val,
+template <typename src_type>
+TL_DEVICE void AtomicAddx2(half_t *ref, src_type *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<half2 *>(ref),
@@ -374,8 +374,9 @@ TL_DEVICE void AtomicAddx2(half_t *ref, half_t *val,
   }
 }
 
+template <typename src_type>
 TL_DEVICE half2
-AtomicAddx2Ret(half_t *ref, half_t *val,
+AtomicAddx2Ret(half_t *ref, src_type *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(reinterpret_cast<half2 *>(ref),
@@ -419,7 +420,8 @@ AtomicAddx2Ret(half_t *ref, half_t *val,
 }
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
-TL_DEVICE void AtomicAddx2(bfloat16_t *ref, bfloat16_t *val,
+template <typename src_type>
+TL_DEVICE void AtomicAddx2(bfloat16_t *ref, src_type *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(
@@ -458,8 +460,9 @@ TL_DEVICE void AtomicAddx2(bfloat16_t *ref, bfloat16_t *val,
   }
 }
 
+template <typename src_type>
 TL_DEVICE __nv_bfloat162
-AtomicAddx2Ret(bfloat16_t *ref, bfloat16_t *val,
+AtomicAddx2Ret(bfloat16_t *ref, src_type *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(
@@ -502,7 +505,8 @@ AtomicAddx2Ret(bfloat16_t *ref, bfloat16_t *val,
 #endif
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
-TL_DEVICE void AtomicAddx2(float *ref, float *val,
+template <typename src_type>
+TL_DEVICE void AtomicAddx2(float *ref, src_type *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<float2 *>(ref),
@@ -532,8 +536,37 @@ TL_DEVICE void AtomicAddx2(float *ref, float *val,
   }
 }
 
+TL_DEVICE void AtomicAddx2(float *ref, float2 val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
+  if (memory_order == int(cuda::memory_order_relaxed)) {
+    atomicAdd(reinterpret_cast<float2 *>(ref), val);
+  } else {
+    unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
+    float2 ret_val;
+    if (memory_order == int(cuda::memory_order_release) ||
+        memory_order == int(cuda::memory_order_consume)) {
+      asm volatile("atom.release.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
+                   : "=f"(ret_val.x), "=f"(ret_val.y)
+                   : "l"(ref_addr), "f"(val.x), "f"(val.y)
+                   : "memory");
+    } else if (memory_order == int(cuda::memory_order_acquire)) {
+      asm volatile("atom.acquire.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
+                   : "=f"(ret_val.x), "=f"(ret_val.y)
+                   : "l"(ref_addr), "f"(val.x), "f"(val.y)
+                   : "memory");
+    } else if (memory_order == int(cuda::memory_order_acq_rel) ||
+               memory_order == int(cuda::memory_order_seq_cst)) {
+      asm volatile("atom.acq_rel.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
+                   : "=f"(ret_val.x), "=f"(ret_val.y)
+                   : "l"(ref_addr), "f"(val.x), "f"(val.y)
+                   : "memory");
+    }
+  }
+}
+
+template <typename src_type>
 TL_DEVICE float2
-AtomicAddx2Ret(float *ref, float *val,
+AtomicAddx2Ret(float *ref, src_type *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(reinterpret_cast<float2 *>(ref),
@@ -558,6 +591,38 @@ AtomicAddx2Ret(float *ref, float *val,
       asm volatile("atom.acq_rel.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
                    : "=f"(ret_val.x), "=f"(ret_val.y)
                    : "l"(ref_addr), "f"(add_val.x), "f"(add_val.y)
+                   : "memory");
+    }
+    return ret_val;
+  }
+}
+
+template <typename src_type>
+TL_DEVICE float2
+AtomicAddx2Ret(float *ref, float2 val,
+               int memory_order = int(cuda::memory_order_relaxed)) {
+  if (memory_order == int(cuda::memory_order_relaxed)) {
+    return atomicAdd(reinterpret_cast<float2 *>(ref),
+                     static_cast<float2>(val));
+  } else {
+    unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
+    float2 ret_val;
+    if (memory_order == int(cuda::memory_order_release) ||
+        memory_order == int(cuda::memory_order_consume)) {
+      asm volatile("atom.release.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
+                   : "=f"(ret_val.x), "=f"(ret_val.y)
+                   : "l"(ref_addr), "f"(val.x), "f"(val.y)
+                   : "memory");
+    } else if (memory_order == int(cuda::memory_order_acquire)) {
+      asm volatile("atom.acquire.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
+                   : "=f"(ret_val.x), "=f"(ret_val.y)
+                   : "l"(ref_addr), "f"(val.x), "f"(val.y)
+                   : "memory");
+    } else if (memory_order == int(cuda::memory_order_acq_rel) ||
+               memory_order == int(cuda::memory_order_seq_cst)) {
+      asm volatile("atom.acq_rel.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
+                   : "=f"(ret_val.x), "=f"(ret_val.y)
+                   : "l"(ref_addr), "f"(val.x), "f"(val.y)
                    : "memory");
     }
     return ret_val;
@@ -724,7 +789,8 @@ AtomicAddx4Ret(dst_dtype *ref, float4 val,
   }
 }
 #else
-TL_DEVICE void AtomicAddx2(float *ref, float *val,
+template <typename src_type>
+TL_DEVICE void AtomicAddx2(float *ref, src_type *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   (void)memory_order;
   float2 add_val = *reinterpret_cast<float2 *>(val);
@@ -732,8 +798,9 @@ TL_DEVICE void AtomicAddx2(float *ref, float *val,
   atomicAdd(ref + 1, add_val.y);
 }
 
+template <typename src_type>
 TL_DEVICE float2
-AtomicAddx2Ret(float *ref, float *val,
+AtomicAddx2Ret(float *ref, src_type *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   (void)memory_order;
   float2 add_val = *reinterpret_cast<float2 *>(val);
