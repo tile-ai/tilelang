@@ -215,15 +215,25 @@ private:
   // current statement. The current solution adopts a simplified approach:
   // directly applying the boundary constraints of all parameters to the
   // statement. While not entirely precise, it addresses most common scenarios.
+  // Check if the call is an atomic operation
+  bool IsAtomicOp(const Op &op) {
+    return op == atomic_add_elem_op() || op == atomic_add_ret_elem_op() ||
+           op == atomic_addx2_elem_op() || op == atomic_addx4_elem_op() ||
+           op == atomic_load_elem_op() || op == atomic_store_elem_op() ||
+           op == atomic_max_elem_op() || op == atomic_max_ret_elem_op() ||
+           op == atomic_min_elem_op() || op == atomic_min_ret_elem_op();
+  }
+
   Stmt VisitStmt_(const EvaluateNode *op) final {
     auto evaluate = Downcast<Evaluate>(op);
 
     if (const CallNode *call_op = op->value.as<CallNode>()) {
       auto call = Downcast<Call>(op->value);
-      if (call->op == builtin::call_extern()) {
-        // For CallExtern, we recursively collect conditions from all children.
-        // Since we cannot rewrite any BufferLoad in its children (Rewrite will
-        // cause potential Nullptr exception).
+      if (call->op == builtin::call_extern() ||
+          (call->op.as<OpNode>() && IsAtomicOp(Downcast<Op>(call->op)))) {
+        // For CallExtern and atomic ops, we recursively collect conditions
+        // from all children. Since we cannot rewrite any BufferLoad in its
+        // children (Rewrite will cause potential Nullptr exception).
         GlobalMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
         checker(call);
         Array<PrimExpr> conditions = checker.GetConditions();

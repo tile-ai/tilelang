@@ -30,6 +30,8 @@ def test_sync_if_with_same_index():
         temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
         T.launch_thread(blockIdx_x, 8)
         T.launch_thread(threadIdx_x, 4)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
         result_local[0] = T.float32(0)
         if threadIdx_y < 8:
             temp_shared[threadIdx_x] = p0[0]
@@ -51,6 +53,8 @@ def test_sync_read_thread_id_independent_location():
         temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
         T.launch_thread(blockIdx_x, 8)
         T.launch_thread(threadIdx_x, 4)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
         result_local[0] = T.float32(0)
         if threadIdx_x < 1:
             temp_shared[0] = p0[0]
@@ -72,6 +76,8 @@ def test_sync_shared():
         C = T.allocate([1], "float32", "local")
         D = T.allocate([16], "float32", "shared")
         threadIdx_x = T.launch_thread("threadIdx.x", 16)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
         B_1 = T.Buffer((24,), data=B, scope="shared")
         A_1 = T.Buffer((16,), data=A.data)
         B_1[threadIdx_x // 4 * 6 + threadIdx_x % 4] = A_1[threadIdx_x]
@@ -89,6 +95,8 @@ def test_sync_shared():
         C_1 = T.allocate([1], "float32", "local")
         D_1 = T.allocate([16], "float32", "shared")
         threadIdx_x = T.launch_thread("threadIdx.x", 16)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
         B_1_1 = T.Buffer((24,), data=B_1, scope="shared")
         A_1 = T.Buffer((16,), data=A.data)
         B_1_1[threadIdx_x // 4 * 6 + threadIdx_x % 4] = A_1[threadIdx_x]
@@ -113,6 +121,8 @@ def test_sync_let_stmt():
         in_thread_A_temp = T.allocate([1], "float32", "local")
         cross_thread_A_temp = T.allocate([1], "float32", "local")
         threadIdx_x = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
         A_shared_1 = T.Buffer((512,), data=A_shared, scope="shared")
         for ax0 in range(512):
             A_shared_1[ax0] = A[blockIdx_x * 512 + ax0]
@@ -147,6 +157,8 @@ def test_sync_let_stmt():
         in_thread_A_temp_1 = T.allocate([1], "float32", "local")
         cross_thread_A_temp_1 = T.allocate([1], "float32", "local")
         threadIdx_x = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
         A_shared_1_1 = T.Buffer((512,), data=A_shared_1, scope="shared")
         for ax0 in range(512):
             A_shared_1_1[ax0] = A[blockIdx_x * 512 + ax0]
@@ -186,6 +198,8 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
     def func():
         buf_dyn_shmem = T.alloc_buffer((98304,), "uint8", scope="shared.dyn")
         tx = T.launch_thread("threadIdx.x", 384)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
         for i in T.unroll(8):
             off = (
                 i // 4 * 8192

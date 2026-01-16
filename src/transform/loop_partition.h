@@ -29,6 +29,7 @@
 #include <tvm/tir/stmt.h>
 
 #include "../layout/layout.h"
+#include "../op/operator.h"
 
 namespace tvm {
 namespace tl {
@@ -68,6 +69,7 @@ For LoopPragmaUnroll(For stmt);
  */
 Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
                        arith::Analyzer *analyzer,
+                       const LayoutMap &layout_map = {},
                        Optional<PrimExpr> predicate = Optional<PrimExpr>(),
                        bool parallel_loop = true, bool should_vectorize = true);
 

@@ -30,6 +30,7 @@ bool TargetHasTmem(Target target);
 bool TargetHasBulkCopy(Target target);
 bool TargetSupportVectorize256(Target target);
 int TargetGetWarpSize(Target target);
+bool TargetHasSMVersionGE(Target target, int version);
 
 bool IsCudaVectorizableFP8(DataType dtype);
 bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty);

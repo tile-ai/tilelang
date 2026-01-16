@@ -2,7 +2,6 @@
  * \file eliminate_storage_sync_for_mbarrier.cc
  */
 #include "../op/builtin.h"
-#include "./storage_access.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include <tvm/ffi/function.h>

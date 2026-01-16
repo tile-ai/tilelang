@@ -71,7 +71,7 @@ def vectorize_access_with_atmoic_add_legalize(M: int = 64, N: int = 64, M_offset
                 # Nest if-then-else is expected, do not flatten it to pass structural equal check
                 if j + N_offset < N:  # noqa: SIM102
                     if tid + M_offset < M:
-                        T.call_extern("handle", "AtomicAdd", T.address_of(A[tid + M_offset, j + N_offset]), 1)
+                        T.atomic_add(A[tid + M_offset, j + N_offset], 1)
 
     return main, expected
 

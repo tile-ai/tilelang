@@ -827,7 +827,8 @@ private:
 
     // Lower the parallel loop using the common function
     return LowerParallelLoop(for_node, loop_layout, thread_var_->var, analyzer_,
-                             predicate, parallel_loop, should_vectorize);
+                             layout_map_, predicate, parallel_loop,
+                             should_vectorize);
   }
 
   Target target_;

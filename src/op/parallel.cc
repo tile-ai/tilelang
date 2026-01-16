@@ -9,6 +9,7 @@
 #include <tvm/tir/op.h>
 
 #include "../layout/layout.h"
+#include "arith/int_operator.h"
 
 #include "../layout/utils.h"
 #include "../target/utils.h"
@@ -453,17 +454,11 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     bool has_cross_thread_access = false;
     PostOrderVisit(root_, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
-        // check if scope is shared or global
-        if (store->buffer.scope() == "shared" ||
-            store->buffer.scope() == "shared.dyn" ||
-            store->buffer.scope() == "global") {
+        if (IsSharedBuffer(store->buffer) || IsGlobalBuffer(store->buffer)) {
           has_cross_thread_access = true;
         }
       } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        // check if scope is shared or global
-        if (load->buffer.scope() == "shared" ||
-            load->buffer.scope() == "shared.dyn" ||
-            load->buffer.scope() == "global") {
+        if (IsSharedBuffer(load->buffer) || IsGlobalBuffer(load->buffer)) {
           has_cross_thread_access = true;
         }
       }
@@ -478,8 +473,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     PostOrderVisit(root_, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
         auto buffer = store->buffer;
-        if (buffer.scope() == "shared" || buffer.scope() == "shared.dyn" ||
-            buffer.scope() == "global") {
+        if (IsSharedBuffer(buffer) || IsGlobalBuffer(buffer)) {
           store_shared_global_buffers.emplace_back(buffer);
         } else if (IsFragmentBuffer(buffer)) {
           store_fragment_buffers.emplace_back(buffer);
@@ -714,7 +708,8 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   // As the pass will do post processing to the layout
   auto maybe_remapped_root_ =
       IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
-  int vector_size = GetVectorizeSize(maybe_remapped_root_, T.analyzer);
+  int vector_size =
+      GetVectorizeSize(maybe_remapped_root_, T.analyzer, T.layout_map);
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;

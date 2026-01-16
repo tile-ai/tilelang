@@ -2888,6 +2888,95 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << "tl::warp_reduce_bitand(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_bitor())) {
     os << "tl::warp_reduce_bitor(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::atomic_add_elem_op())) {
+    // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr(op->args[0]);
+    std::string src_value = PrintExpr(op->args[1]);
+    this->PrintIndent();
+    this->stream << "AtomicAdd(" << dst_ptr << ", " << src_value;
+    if (op->args.size() > 2) {
+      this->stream << ", " << PrintExpr(op->args[2]);
+    }
+    this->stream << ");\n";
+  } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
+    // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
+    os << "AtomicAddRet(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_addx2_elem_op())) {
+    // atomic_addx2_elem_op(dst_ptr, src_ptr[, memory_order])
+    std::string dst_ptr = PrintExpr(op->args[0]);
+    std::string src_ptr = PrintExpr(op->args[1]);
+    this->PrintIndent();
+    this->stream << "AtomicAddx2(" << dst_ptr << ", " << src_ptr;
+    if (op->args.size() > 2) {
+      this->stream << ", " << PrintExpr(op->args[2]);
+    }
+    this->stream << ");\n";
+  } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
+    // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order])
+    std::string dst_ptr = PrintExpr(op->args[0]);
+    std::string src_ptr = PrintExpr(op->args[1]);
+    this->PrintIndent();
+    this->stream << "AtomicAddx4(" << dst_ptr << ", " << src_ptr;
+    if (op->args.size() > 2) {
+      this->stream << ", " << PrintExpr(op->args[2]);
+    }
+    this->stream << ");\n";
+  } else if (op->op.same_as(tl::atomic_load_elem_op())) {
+    // atomic_load_elem_op(src_ptr, memory_order) -> returns loaded value
+    os << "AtomicLoad(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_store_elem_op())) {
+    // atomic_store_elem_op(dst_ptr, value, memory_order)
+    std::string dst_ptr = PrintExpr(op->args[0]);
+    std::string value = PrintExpr(op->args[1]);
+    std::string memory_order = PrintExpr(op->args[2]);
+    this->PrintIndent();
+    this->stream << "AtomicStore(" << dst_ptr << ", " << value << ", "
+                 << memory_order << ");\n";
+  } else if (op->op.same_as(tl::atomic_max_elem_op())) {
+    // atomic_max_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr(op->args[0]);
+    std::string src_value = PrintExpr(op->args[1]);
+    this->PrintIndent();
+    this->stream << "AtomicMax(" << dst_ptr << ", " << src_value;
+    if (op->args.size() > 2) {
+      this->stream << ", " << PrintExpr(op->args[2]);
+    }
+    this->stream << ");\n";
+  } else if (op->op.same_as(tl::atomic_max_ret_elem_op())) {
+    // atomic_max_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
+    os << "AtomicMaxRet(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::atomic_min_elem_op())) {
+    // atomic_min_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr(op->args[0]);
+    std::string src_value = PrintExpr(op->args[1]);
+    this->PrintIndent();
+    this->stream << "AtomicMin(" << dst_ptr << ", " << src_value;
+    if (op->args.size() > 2) {
+      this->stream << ", " << PrintExpr(op->args[2]);
+    }
+    this->stream << ");\n";
+  } else if (op->op.same_as(tl::atomic_min_ret_elem_op())) {
+    // atomic_min_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
+    os << "AtomicMinRet(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]);
+    if (op->args.size() > 2) {
+      os << ", " << PrintExpr(op->args[2]);
+    }
+    os << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
@@ -3193,32 +3282,34 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
-    if (lanes == 4) {
-      // make_int8x4
-      const int64_t *p = as_const_int(op->value);
-      ICHECK(p);
-      int64_t v = *p & 0xFF;
-      v = (v << 24) | (v << 16) | (v << 8) | v;
-      if (op->dtype.is_uint()) {
-        os << "(uint)" << v;
-      } else {
-        os << "(int)" << v;
+    const int64_t *p = as_const_int(op->value);
+    if (p) {
+      if (lanes == 4) {
+        // make_int8x4
+        ICHECK(p);
+        int64_t v = *p & 0xFF;
+        v = (v << 24) | (v << 16) | (v << 8) | v;
+        if (op->dtype.is_uint()) {
+          os << "(uint)" << v;
+        } else {
+          os << "(int)" << v;
+        }
+        return;
+      } else if (lanes == 32) {
+        // make_int8x32
+        const int64_t *p = as_const_int(op->value);
+        ICHECK(p);
+        int64_t v = *p & 0xFF;
+        v = (v << 24) | (v << 16) | (v << 8) | v;
+        if (op->dtype.is_uint()) {
+          os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
+             << ")";
+        } else {
+          os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
+             << ")";
+        }
+        return;
       }
-      return;
-    } else if (lanes == 32) {
-      // make_int8x32
-      const int64_t *p = as_const_int(op->value);
-      ICHECK(p);
-      int64_t v = *p & 0xFF;
-      v = (v << 24) | (v << 16) | (v << 8) | v;
-      if (op->dtype.is_uint()) {
-        os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
-           << ")";
-      } else {
-        os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
-           << ")";
-      }
-      return;
     }
   }
 
@@ -3284,7 +3375,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4) {
     bool fail = false;
     const int64_t *p = as_const_int(op->value);
-    ICHECK(p);
+    ICHECK(p) << "BroadcastNode " << op << " value: " << op->value
+              << " is not a constant";
     int64_t v = *p & 0xF;
 
     if (lanes == 4) {

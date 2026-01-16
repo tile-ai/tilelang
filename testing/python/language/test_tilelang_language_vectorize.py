@@ -148,5 +148,22 @@ def test_vectorize_all_dtypes(dtype, vec_num):
     kernel(x)
 
 
+@tilelang.jit
+def vectorize_broadcast_int8(vec_num):
+    with T.Kernel(1, threads=128):
+        a = T.alloc_local((64,), "int8")
+        b = T.alloc_var("int8")
+
+        for i in T.vectorized(vec_num):
+            a[i] = b
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("vec_num", [4, 32])
+def test_vectorize_broadcast_int8(vec_num):
+    """Test broadcasting a non-constant int8 value to a vectorized store."""
+    vectorize_broadcast_int8.compile(vec_num=vec_num)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

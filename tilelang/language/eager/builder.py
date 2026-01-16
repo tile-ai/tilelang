@@ -1059,19 +1059,19 @@ class JITFunc(Generic[_P, _T]):
         tir_temp = self.p1_cache.get(p1_key, None)
         if tir_temp is None:
             # mode should be set by JITImpl before calling parse_args
-            tir_temp = self._build_tir_template(*args, **kwargs)
+            tir_temp = self._build_tir_template(**kwargs)
             self.p1_cache[p1_key] = tir_temp
         p2_key = tir_temp._parse_phase2_key(**tensor_args)
         return (p1_key, p2_key), tensor_args
 
     def get_tir(self, *args, **kwargs):
-        (p1_key, _), tensor_args = self.parse_args(*args, **kwargs)
+        p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
         if p1_key not in self.p1_cache:
             # in legacy gemm, we use lazy tir template to build the tir
-            tir_temp = self._build_tir_template(*args, **kwargs)
+            tir_temp = self._build_tir_template(**kwargs)
             self.p1_cache[p1_key] = tir_temp
-            return tir_temp.get_tir(**tensor_args)
-        return self.p1_cache[p1_key].get_tir(**tensor_args)
+            return tir_temp.get_tir(**tensor_args, **kwargs)
+        return self.p1_cache[p1_key].get_tir(**tensor_args, **kwargs)
 
     def __call__(self, *args, **kwargs):
         return self.get_tir(*args, **kwargs)

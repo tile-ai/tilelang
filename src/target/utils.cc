@@ -134,6 +134,13 @@ bool TargetSupportVectorize256(Target target) {
   return arch >= 100;
 }
 
+bool TargetHasSMVersionGE(Target target, int version) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetArchInt(target);
+  return arch >= version;
+}
+
 int TargetGetWarpSize(Target target) {
   int res = 32;
   if (TargetIsCDNA(target))

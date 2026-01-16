@@ -42,6 +42,36 @@ namespace tl {
 
 using namespace tir;
 
+/*!
+ * \brief Check if buffer strides represent a contiguous (row-major) layout.
+ * \param buffer The buffer to check.
+ * \param analyzer The analyzer for symbolic comparison.
+ * \return True if strides are empty (implicitly contiguous) or match row-major
+ * layout.
+ */
+bool IsBufferContiguous(const Buffer &buffer, arith::Analyzer *analyzer) {
+  if (buffer->strides.empty()) {
+    return true;
+  }
+  if (buffer->strides.size() != buffer->shape.size()) {
+    return false;
+  }
+  // For row-major layout:
+  // strides[n-1] = 1
+  // strides[i] = strides[i+1] * shape[i+1]
+  int n = buffer->shape.size();
+  PrimExpr expected_stride = make_const(buffer->shape[0].dtype(), 1);
+  for (int i = n - 1; i >= 0; --i) {
+    if (!analyzer->CanProveEqual(buffer->strides[i], expected_stride)) {
+      return false;
+    }
+    if (i > 0) {
+      expected_stride = expected_stride * buffer->shape[i];
+    }
+  }
+  return true;
+}
+
 struct VectorizePlanResult {
   int vector_size;
   bool dynamic;
@@ -131,8 +161,9 @@ bool ForBodyContainsSeqStmt(const For &loop) {
 
 class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
-  explicit VectorizePlanner(arith::Analyzer *analyzer)
-      : arith::IRMutatorWithAnalyzer(analyzer) {}
+  explicit VectorizePlanner(arith::Analyzer *analyzer,
+                            const LayoutMap &layout_map = {})
+      : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
 
   int Plan(const For &node) {
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
@@ -357,6 +388,41 @@ private:
     } else if (node->op.same_as(tl::rng_init())) {
       // do not vectorize random operation, record as vector_size=1
       buffer_vector_infos_.push_back({Buffer(), 1, false, {}});
+    } else if (node->op == tl::atomic_add_elem_op()) {
+      // Assert at least 2 args (dst_ptr and src)
+      ICHECK(node->args.size() >= 2)
+          << "atomic_add_elem_op requires at least 2 args (dst and src)";
+
+      // Get dst dtype from args[0] (address_of call containing BufferLoad)
+      auto address_of_call = node->args[0].as<CallNode>();
+      ICHECK(address_of_call && address_of_call->op == builtin::address_of())
+          << "atomic_add_elem_op first arg must be address_of call";
+
+      auto buffer_load = address_of_call->args[0].as<BufferLoadNode>();
+      ICHECK(buffer_load) << "address_of arg must be BufferLoad";
+
+      DataType dtype = buffer_load->buffer->dtype;
+      int vectorize_length = 1;
+      if (dtype.is_float16() || dtype.is_bfloat16()) {
+        vectorize_length = 2;
+      } else if (dtype.is_float() && dtype.bits() == 32 &&
+                 TargetHasSMVersionGE(Target::Current(false), 90)) {
+        vectorize_length = 4;
+      }
+
+      buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
+    } else if (node->op == builtin::address_of()) {
+      // address_of have buffer load value so we should analysis the buffer load
+      // node to update vector_size_.
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    } else if (node->op.same_as(tir::builtin::bitwise_and()) ||
+               node->op.same_as(tir::builtin::bitwise_or()) ||
+               node->op.same_as(tir::builtin::bitwise_xor()) ||
+               node->op.same_as(tir::builtin::bitwise_not()) ||
+               node->op.same_as(tir::builtin::shift_left()) ||
+               node->op.same_as(tir::builtin::shift_right())) {
+      // Bitwise operations can be vectorized
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
@@ -380,12 +446,45 @@ private:
 
     int buffer_vec_size = loop_extent_vector_size_;
 
+    // Transform indices using layout_map if present
+    auto transformed_indices = indices;
+    if (layout_map_.defined() && layout_map_.count(buffer)) {
+      ICHECK(IsBufferContiguous(buffer, analyzer_))
+          << buffer
+          << " has non-contiguous strides, but layout map is provided.";
+      // forward indices
+      auto layout = layout_map_[buffer];
+      transformed_indices = layout->Forward(indices);
+      // Reshape transformed_indices to match buffer->shape dimensions if needed
+      if (transformed_indices.size() != buffer->shape.size()) {
+        // Step 1: Compute linear offset using layout->OutputShape()
+        auto output_shape = layout->OutputShape();
+        ICHECK_EQ(transformed_indices.size(), output_shape.size())
+            << "Forward indices size " << transformed_indices.size()
+            << " != OutputShape size " << output_shape.size();
+        PrimExpr linear_offset = 0;
+        PrimExpr stride = 1;
+        for (int i = output_shape.size() - 1; i >= 0; --i) {
+          linear_offset = linear_offset + transformed_indices[i] * stride;
+          stride = stride * output_shape[i];
+        }
+        // Step 2: Decompose linear_offset into buffer->shape dimensions
+        Array<PrimExpr> new_indices;
+        for (int i = buffer->shape.size() - 1; i >= 0; --i) {
+          new_indices.push_back(FloorMod(linear_offset, buffer->shape[i]));
+          linear_offset = FloorDiv(linear_offset, buffer->shape[i]);
+        }
+        transformed_indices =
+            Array<PrimExpr>{new_indices.rbegin(), new_indices.rend()};
+      }
+    }
+
     // 1. Compute raw element offset
     Array<PrimExpr> strides = GetBufferStrides(buffer);
 
     PrimExpr elem_offset = 0;
-    for (size_t i = 0; i < indices.size(); ++i) {
-      elem_offset += indices[i] * strides[i];
+    for (size_t i = 0; i < transformed_indices.size(); ++i) {
+      elem_offset += transformed_indices[i] * strides[i];
     }
 
     // 2. Check if current buffer_vec_size works with invariant boundary check
@@ -473,6 +572,7 @@ private:
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;
+  LayoutMap layout_map_;
 };
 
 class VectorizeRewriter : public StmtExprMutator {
@@ -517,13 +617,14 @@ private:
   const int vector_size_;
 };
 
-int GetVectorizeSize(const For &loop) {
+int GetVectorizeSize(const For &loop, const LayoutMap &layout_map) {
   arith::Analyzer analyzer;
-  return VectorizePlanner(&analyzer).Plan(loop);
+  return VectorizePlanner(&analyzer, layout_map).Plan(loop);
 }
 
-int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer) {
-  return VectorizePlanner(analyzer).Plan(loop);
+int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
+                     const LayoutMap &layout_map) {
+  return VectorizePlanner(analyzer, layout_map).Plan(loop);
 }
 
 bool CanProveIndependent(const PrimExpr &expr, Var var,
@@ -623,10 +724,11 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
   }
 }
 
-For VectorizeLoop(const For &loop, int vectorize_hint) {
+For VectorizeLoop(const For &loop, const LayoutMap &layout_map,
+                  int vectorize_hint) {
   if (vectorize_hint <= 0) {
     arith::Analyzer analyzer;
-    VectorizePlanner planner(&analyzer);
+    VectorizePlanner planner(&analyzer, layout_map);
     vectorize_hint = planner.Plan(loop);
   }
   if (vectorize_hint == 1)
@@ -636,9 +738,9 @@ For VectorizeLoop(const For &loop, int vectorize_hint) {
 }
 
 For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
-                  int vectorize_hint) {
+                  const LayoutMap &layout_map, int vectorize_hint) {
   if (vectorize_hint <= 0) {
-    VectorizePlanner planner(analyzer);
+    VectorizePlanner planner(analyzer, layout_map);
     vectorize_hint = planner.Plan(loop);
   }
   if (vectorize_hint == 1)
