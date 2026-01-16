@@ -13,50 +13,44 @@ import tilelang.language as T
         tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
     },
 )
-def mhc_post_tilelang(hc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024) -> tilelang.JITKernel:
+def mhc_post_tilelang(a, b, c, d, x, hc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024) -> tilelang.JITKernel:
     # rename for shorter code
     n = T.dynamic("num_tokens")
     h = hidden
 
     h_blk = math.gcd(hidden, h_blk)
+    a: T.Tensor((n, hc, hc), T.float32)
+    b: T.Tensor((n, hc, h), T.bfloat16)
+    c: T.Tensor((n, hc), T.float32)
+    d: T.Tensor((n, h), T.bfloat16)
+    x: T.Tensor((n, hc, h), T.bfloat16)
+    with T.Kernel(n, threads=n_thr) as i_n:
+        x_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
+        b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
+        d_shared = T.alloc_shared(h_blk, T.bfloat16)
 
-    @T.prim_func
-    def _mhc_post(
-        a: T.Tensor((n, hc, hc), T.float32),
-        b: T.Tensor((n, hc, h), T.bfloat16),
-        c: T.Tensor((n, hc), T.float32),
-        d: T.Tensor((n, h), T.bfloat16),
-        x: T.Tensor((n, hc, h), T.bfloat16),
-    ) -> None:
-        with T.Kernel(n, threads=n_thr) as i_n:
-            x_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
-            b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
-            d_shared = T.alloc_shared(h_blk, T.bfloat16)
+        x_local = T.alloc_fragment((hc, h_blk), T.float32)
+        b_local = T.alloc_fragment((hc, h_blk), T.float32)
+        d_local = T.alloc_fragment(h_blk, T.float32)
 
-            x_local = T.alloc_fragment((hc, h_blk), T.float32)
-            b_local = T.alloc_fragment((hc, h_blk), T.float32)
-            d_local = T.alloc_fragment(h_blk, T.float32)
+        a_local = T.alloc_fragment((hc, hc), T.float32)
+        c_local = T.alloc_fragment(hc, T.float32)
+        T.copy(a[i_n, 0, 0], a_local)
+        T.copy(c[i_n, 0], c_local)
 
-            a_local = T.alloc_fragment((hc, hc), T.float32)
-            c_local = T.alloc_fragment(hc, T.float32)
-            T.copy(a[i_n, 0, 0], a_local)
-            T.copy(c[i_n, 0], c_local)
+        for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
+            T.copy(b[i_n, 0, i0_h * h_blk], b_shared)
+            T.copy(d[i_n, i0_h * h_blk], d_shared)
 
-            for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
-                T.copy(b[i_n, 0, i0_h * h_blk], b_shared)
-                T.copy(d[i_n, i0_h * h_blk], d_shared)
+            T.copy(b_shared, b_local)
+            T.copy(d_shared, d_local)
+            for i_hco, i1_h in T.Parallel(hc, h_blk):
+                x_local[i_hco, i1_h] = c_local[i_hco] * d_local[i1_h]
+                for i_hci in T.serial(hc):
+                    x_local[i_hco, i1_h] += a_local[i_hci, i_hco] * b_local[i_hci, i1_h]
+            T.copy(x_local, x_shared)
 
-                T.copy(b_shared, b_local)
-                T.copy(d_shared, d_local)
-                for i_hco, i1_h in T.Parallel(hc, h_blk):
-                    x_local[i_hco, i1_h] = c_local[i_hco] * d_local[i1_h]
-                    for i_hci in T.serial(hc):
-                        x_local[i_hco, i1_h] += a_local[i_hci, i_hco] * b_local[i_hci, i1_h]
-                T.copy(x_local, x_shared)
-
-                T.copy(x_shared, x[i_n, 0, i0_h * h_blk])
-
-    return _mhc_post
+            T.copy(x_shared, x[i_n, 0, i0_h * h_blk])
 
 
 def mhc_post(
@@ -66,13 +60,7 @@ def mhc_post(
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
     out = torch.empty_like(residual)
-    mhc_post_tilelang(residual.shape[-2], residual.shape[-1])(
-        comb_res_mix,
-        residual,
-        post_layer_mix.squeeze(-1),
-        x,
-        out,
-    )
+    mhc_post_tilelang(comb_res_mix, residual, post_layer_mix.squeeze(-1), x, out, residual.shape[-2], residual.shape[-1])
     return out
 
 
@@ -120,3 +108,7 @@ def main():
     for n in [4096]:
         for h in [1280, 2560, 7168]:
             test(n=n, h=h)
+
+
+if __name__ == "__main__":
+    main()
