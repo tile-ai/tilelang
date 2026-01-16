@@ -13,7 +13,6 @@
 
 #include "../layout/layout.h"
 #include "../target/utils.h"
-#include "../transform/atomicadd_vectorize.h"
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "builtin.h"

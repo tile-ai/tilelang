@@ -476,5 +476,43 @@ def test_tma_atomic_add():
     assert kernel.get_kernel_source() == kernel_with_explicit_swizzle.get_kernel_source()
 
 
+def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
+    kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
+    assert "AtomicAddx4" in kernel.get_kernel_source()
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_atomic_add_auto_vectorized():
+    run_atomic_add_auto_vectorized(8, 128, 128, 32, 32)
+
+
+@tilelang.jit
+def atomic_add_complicated_parallel_program(K, M, N, block_M, block_N, dtype=T.float32):
+    @T.prim_func
+    def atomic_add(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
+        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), K, threads=32) as (bx, by, bz):
+            A_shared = T.alloc_shared((block_M, block_N), dtype)
+
+            T.copy(A[bz, bx * block_M : (bx + 1) * block_M, by * block_N : (by + 1) * block_N], A_shared)
+
+            for i, j in T.Parallel(block_M, block_N):
+                value = A_shared[i, j]
+                T.atomic_add(B[bx * block_M + i, by * block_N + j], value)
+
+    return atomic_add
+
+
+def run_atomic_add_complicated_parallel(K, M, N, block_M, block_N, dtype=T.float32):
+    kernel = atomic_add_complicated_parallel_program(K, M, N, block_M, block_N, dtype=dtype)
+    assert "float4 value" in kernel.get_kernel_source()
+    assert "AtomicAddx4" in kernel.get_kernel_source()
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_atomic_add_complicated_parallel():
+    run_atomic_add_complicated_parallel(8, 128, 128, 32, 32)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
