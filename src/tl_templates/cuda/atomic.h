@@ -602,8 +602,7 @@ TL_DEVICE float2
 AtomicAddx2Ret(float *ref, float2 val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
-    return atomicAdd(reinterpret_cast<float2 *>(ref),
-                     static_cast<float2>(val));
+    return atomicAdd(reinterpret_cast<float2 *>(ref), static_cast<float2>(val));
   } else {
     unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
     float2 ret_val;
