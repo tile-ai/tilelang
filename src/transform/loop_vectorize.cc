@@ -420,6 +420,7 @@ private:
       // Bitwise operations can be vectorized
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
+    // for other call nodes, we should not apply vectorization
     buffer_vector_infos_.push_back({Buffer(), 1, false, {}});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
