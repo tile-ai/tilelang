@@ -382,12 +382,6 @@ private:
   PrimExpr VisitExpr_(const CallNode *node) final {
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
-    } else if (node->op == builtin::call_extern()) {
-      // do not vectorize extern calls, record as vector_size=1
-      buffer_vector_infos_.push_back({Buffer(), 1, false, {}});
-    } else if (node->op.same_as(tl::rng_init())) {
-      // do not vectorize random operation, record as vector_size=1
-      buffer_vector_infos_.push_back({Buffer(), 1, false, {}});
     } else if (node->op == tl::atomic_add_elem_op()) {
       // Assert at least 2 args (dst_ptr and src)
       ICHECK(node->args.size() >= 2)
@@ -424,6 +418,7 @@ private:
       // Bitwise operations can be vectorized
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
+    buffer_vector_infos_.push_back({Buffer(), 1, false, {}});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
