@@ -382,6 +382,7 @@ private:
   PrimExpr VisitExpr_(const CallNode *node) final {
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == tl::atomic_add_elem_op()) {
       // Assert at least 2 args (dst_ptr and src)
       ICHECK(node->args.size() >= 2)
