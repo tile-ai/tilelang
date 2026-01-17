@@ -405,6 +405,7 @@ private:
       }
 
       buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == builtin::address_of()) {
       // address_of have buffer load value so we should analysis the buffer load
       // node to update vector_size_.
