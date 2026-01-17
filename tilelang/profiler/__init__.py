@@ -4,7 +4,6 @@ from __future__ import annotations
 from typing import Callable, Any, Literal
 from functools import partial
 import torch
-from contextlib import suppress
 from dataclasses import dataclass
 from tilelang.utils.tensor import (
     get_tensor_supply,
