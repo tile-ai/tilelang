@@ -168,7 +168,7 @@ jobs:
             echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           fi
 
-          if [[ ${{ env.IS_RELEASE }} ]]; then
+          if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
             if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
               # Avoid using same file name for different toolkit.
               echo "NO_GIT_VERSION=ON" | tee -a "${GITHUB_ENV}"
