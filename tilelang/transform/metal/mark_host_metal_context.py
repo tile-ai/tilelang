@@ -1,3 +1,4 @@
+from tvm.ir import Op
 from tvm.tir import (
     PyStmtExprMutator,
     functor,
@@ -5,6 +6,8 @@ from tvm.tir import (
     AttrStmt,
 )
 from tvm.tir.transform import prim_func_pass
+
+tvm_call_packed_lowered = Op.get("tir.tvm_call_packed_lowered")
 
 
 @functor.mutator
@@ -22,7 +25,7 @@ class MarkHostMetalContextMutator(PyStmtExprMutator):
         return s
 
     def visit_evaluate_(self, op: Evaluate):
-        if self.is_in_compute_scope and op.value.op.name == "tir.tvm_call_packed_lowered":
+        if self.is_in_compute_scope and op.value.op.same_as(tvm_call_packed_lowered):
             return AttrStmt(0, "metal_context", "", op)
         return op
 

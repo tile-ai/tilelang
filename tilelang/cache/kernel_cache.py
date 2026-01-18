@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -23,19 +24,6 @@ from tilelang.jit import JITKernel
 from tilelang import __version__
 
 
-COMPILE_ARGS = {}
-BASE_KEY = {
-    "version": __version__,
-}
-
-if sys.platform == "darwin":
-    import torch
-    from torch.utils import cpp_extension
-
-    BASE_KEY["torch"] = torch.__version__
-    COMPILE_ARGS["options"] = ["-x", "objective-c++", "-g", "-std=gnu++17"] + ["-I" + i for i in cpp_extension.include_paths()]
-
-
 class KernelCache:
     """
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
@@ -54,6 +42,26 @@ class KernelCache:
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
+
+    @staticmethod
+    @functools.cache
+    def _get_compile_args() -> dict:
+        if sys.platform != "darwin":
+            return {}
+
+        from torch.utils import cpp_extension
+
+        return {"options": ["-x", "objective-c++", "-g", "-std=gnu++17"] + ["-I" + i for i in cpp_extension.include_paths()]}
+
+    @staticmethod
+    @functools.cache
+    def _get_base_key() -> dict:
+        base = {"version": __version__}
+        if sys.platform == "darwin":
+            import torch
+
+            base["torch"] = torch.__version__
+        return base
 
     def __new__(cls):
         """
@@ -114,7 +122,7 @@ class KernelCache:
             "execution_backend": execution_backend,
             "pass_configs": pass_configs,
             "compile_flags": compile_flags,
-            **BASE_KEY,
+            **self._get_base_key(),
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
@@ -272,10 +280,10 @@ class KernelCache:
         # Use atomic POSIX replace, so other processes cannot see a partial write
         os.replace(temp_path, path)
 
-    @staticmethod
-    def _safe_write_executable(executable: Executable, path: str):
+    @classmethod
+    def _safe_write_executable(cls, executable: Executable, path: str):
         temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.so")
-        executable.export_library(temp_path, **COMPILE_ARGS)
+        executable.export_library(temp_path, **cls._get_compile_args())
         os.replace(temp_path, path)
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False):
