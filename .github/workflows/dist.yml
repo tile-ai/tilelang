@@ -124,7 +124,8 @@ jobs:
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
     env:
-      NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
+      IS_RELEASE: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]') }}
+      NO_VERSION_LABEL: "OFF"
 
     steps:
       - name: Checkout repository
@@ -167,10 +168,13 @@ jobs:
             echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           fi
 
-          if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]] && [[ "${{ github.event_name }}" == "release" ]]; then
-            # Avoid using same file name for different toolkit.
-            echo "NO_VERSION_LABEL=OFF" | tee -a "${GITHUB_ENV}"
-            echo "NO_GIT_VERSION=ON" | tee -a "${GITHUB_ENV}"
+          if [[ ${{ env.IS_RELEASE }} ]]; then
+            if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
+              # Avoid using same file name for different toolkit.
+              echo "NO_GIT_VERSION=ON" | tee -a "${GITHUB_ENV}"
+            else
+              echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
+            fi
           fi
 
           if [[ "${{ runner.os }}" == "Linux" ]]; then
