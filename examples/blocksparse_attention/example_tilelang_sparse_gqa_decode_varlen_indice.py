@@ -401,24 +401,9 @@ def run_regression_perf(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, di
     dim_v = sparse_kernel.dim_v
     dim = sparse_kernel.dim
     block_size = sparse_kernel.block_size
-    max_selected_blocks = block_indices.shape[-1]
-
-    num_m_blocks = 1 * (heads // heads_kv + sparse_kernel.block_H - 1) // sparse_kernel.block_H
-    num_n_blocks = max_selected_blocks
-    size_one_kv_head = max_selected_blocks * block_size * (dim + dim_v) * 2
-    total_mblocks = batch * heads_kv * num_m_blocks
-    num_sm = sparse_kernel.num_sm
-
-    num_split = num_splits_heuristic(
-        total_mblocks, num_sm, num_n_blocks, num_m_blocks, size_one_kv_head, is_causal_or_local=True, max_splits=128
-    )
-
-    glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device="cuda")
-    output_partial = torch.empty((batch, heads, num_split, dim_v), dtype=torch.float32, device="cuda")
-    kernel = sparse_kernel.kernel
 
     def run_kernel_only():
-        kernel(Q, K, V, block_indices, cache_seqlens, glse, output_partial)
+        sparse_kernel(Q, K, V, block_indices, cache_seqlens)
 
     return do_bench(run_kernel_only, backend="cupti")
 

@@ -116,6 +116,20 @@ def is_fragment(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     return buffer.scope().startswith("local.fragment")
 
 
+def is_local_var(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
+    """
+    Check if the buffer is in the local.var memory scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in local.var memory, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "local.var"
+
+
 def get_buffer_elems(buffer: Buffer) -> int:
     """
     Get the number of elements in the buffer.

@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "../op/builtin.h"
+#include "../op/utils.h"
 
 namespace tvm {
 namespace tl {
@@ -30,7 +31,8 @@ public:
 
   Role GetRole(const StmtNode *stmt) const {
     auto it = map_.find(stmt);
-    ICHECK(it != map_.end());
+    ICHECK(it != map_.end())
+        << " Cannot find role for stmt: " << stmt->GetTypeKey();
     return it->second;
   }
 
@@ -48,9 +50,7 @@ public:
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    bool is_shared_store =
-        op->buffer.scope() == "shared.dyn" || op->buffer.scope() == "shared";
-    if (!is_shared_store) {
+    if (!IsSharedBuffer(op->buffer)) {
       SetRole(op, Role::kConsumer);
       return;
     }
@@ -62,7 +62,7 @@ public:
     auto reads = access[0];
     Role role = Role::kProducer;
     for (auto read : reads) {
-      if (read->buffer.scope() != "global") {
+      if (!IsGlobalBuffer(read->buffer)) {
         role = Role::kConsumer;
         break;
       }
@@ -110,6 +110,8 @@ public:
   void VisitStmt_(const AttrStmtNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const AssertStmtNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const BlockNode *op) final { HandleBodyStmt(op); }
+  void VisitStmt_(const AllocateNode *op) final { HandleBodyStmt(op); }
+  void VisitStmt_(const DeclBufferNode *op) final { HandleBodyStmt(op); }
 
   bool HasProducer() { return has_simt_copy_ || has_bulk_copy_; }
 
@@ -190,8 +192,7 @@ private:
     auto is_copy_stage = [&](size_t idx) {
       bool has_shared_write = false;
       for (const BufferRegion &wr : writes[idx]) {
-        auto scope = wr->buffer.scope();
-        if (scope == "shared" || scope == "shared.dyn") {
+        if (IsSharedBuffer(wr->buffer)) {
           has_shared_write = true;
           break;
         }
@@ -199,7 +200,7 @@ private:
       if (!has_shared_write)
         return false;
       for (const BufferRegion &rd : reads[idx]) {
-        if (rd->buffer.scope() == "global") {
+        if (IsGlobalBuffer(rd->buffer)) {
           return true;
         }
       }
@@ -361,8 +362,7 @@ private:
       if (!in_scope)
         continue;
       // Only double-buffer shared allocations; locals do not need versioning.
-      auto scope = buffer.scope();
-      if (!(scope == "shared" || scope == "shared.dyn"))
+      if (!IsSharedBuffer(buffer))
         continue;
       if (seen.insert(buffer.get()).second) {
         scoped_buffers.push_back(buffer);
@@ -376,8 +376,7 @@ private:
       if (map_it == block_alloc_buffers_.end())
         continue;
       for (const Buffer &buffer : map_it->second) {
-        auto scope = buffer.scope();
-        if (!(scope == "shared" || scope == "shared.dyn"))
+        if (!IsSharedBuffer(buffer))
           continue;
         if (seen.insert(buffer.get()).second) {
           scoped_buffers.push_back(buffer);
