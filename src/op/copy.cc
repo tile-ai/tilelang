@@ -788,13 +788,6 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   Array<PrimExpr> shared_indices = MakeIndices(loop_vars, is_ldmatrix ? 0 : 1);
   Array<PrimExpr> shared_indices_transformed = shared_indices;
-  Layout shared_layout;
-  if (T.buffer_remap.count(shared_tensor)) {
-    shared_layout = T.layout_map[shared_tensor];
-    shared_tensor = T.buffer_remap[shared_tensor];
-    shared_indices_transformed = shared_layout->Forward(shared_indices);
-  }
-
   // Check local_layout follows 8x8 layout
   // LDSM/STSM instructions require 8x8 matrix fragment layout
   // This matches the warp-level matrix multiplication pattern used in tensor
@@ -885,8 +878,6 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
              FloorMod(T.thread_var, 2),
          warp + FloorDiv(FloorMod(T.thread_var, 8), 2)});
   shared_coords.pop_back(); // remove rep
-  if (shared_layout.defined())
-    shared_coords = shared_layout->Forward(shared_coords);
   PrimExpr shared_addr = shared_tensor.access_ptr(
       is_ldmatrix ? 1 : 2, DataType::Handle(), 1,
       shared_tensor.OffsetOf(shared_coords).back(), PrimExpr(2 * num));
