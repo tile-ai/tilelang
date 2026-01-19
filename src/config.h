@@ -17,7 +17,8 @@ namespace tl_config {
  */
 inline bool VectorizePlannerVerboseEnabled() {
   auto ctxt = transform::PassContext::Current();
-  return ctxt->GetConfig("tl.enable_vectorize_planner_verbose", Optional<Bool>())
+  return ctxt
+      ->GetConfig("tl.enable_vectorize_planner_verbose", Optional<Bool>())
       .value_or(Bool(false));
 }
 
@@ -30,8 +31,8 @@ inline bool Vectorize256Disabled() {
       .value_or(Bool(false));
 }
 
-}  // namespace tl_config
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl_config
+} // namespace tl
+} // namespace tvm
 
-#endif  // TVM_TL_CONFIG_H_
+#endif // TVM_TL_CONFIG_H_
