@@ -876,7 +876,7 @@ def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
     builder = Builder.current()
     # assert builder is not None, "T.const() can only be used inside @tilelang.jit (eager mode)"
     # assert builder.eager_jit, "T.const() can only be used inside @tilelang.jit (eager mode)"
-    if builder is None or not builder.eager_jit != "none":
+    if builder is None or builder.eager_jit == "none":
         raise JITNoBuilderError("T.const() can only be used inside @tilelang.jit (eager mode)")
 
     if builder.eager_jit == "phase1":
