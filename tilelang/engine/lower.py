@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Callable
-import platform
+import sys
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -159,7 +159,7 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     host_mod = tilelang.transform.LowerIntrin()(host_mod)
     host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
     host_mod = tir.transform.CombineContextCall()(host_mod)
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         host_mod = MarkHostMetalContext()(host_mod)
     if target_host.kind.name == "llvm":
         host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)

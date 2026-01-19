@@ -7,17 +7,35 @@ from tvm.tir import (
 )
 from tvm.tir.transform import prim_func_pass
 
+"""
+Transformation pass to mark host-side kernel calls for Metal/MPS synchronization.
+
+To execute TVM-generated Metal kernels within a PyTorch environment, the TVM runtime
+must utilize PyTorch's active Metal command buffer (MPS). This ensures correct
+execution ordering and memory consistency between PyTorch operators and TVM kernels.
+
+This pass identifies calls to `tir.tvm_call_packed_lowered` occurring within a
+`compute_scope` and wraps them with a `metal_context` attribute. This attribute
+signals the downstream host C codegen to inject specific runtime logic that:
+1. Retrieves the current command buffer from `torch::mps`.
+2. Passes this stream to the TVM runtime before the kernel executes.
+"""
+
+
 tvm_call_packed_lowered = Op.get("tir.tvm_call_packed_lowered")
 
 
 @functor.mutator
 class MarkHostMetalContextMutator(PyStmtExprMutator):
-    is_in_compute_scope = False
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_in_compute_scope = False
 
     def visit_attr_stmt_(self, stmt):
         switch = stmt.attr_key == "compute_scope"
         old_value = False
         if switch:
+            assert not self.is_in_compute_scope
             old_value, self.is_in_compute_scope = self.is_in_compute_scope, True
         s = self.visit_stmt(stmt.body)
         if switch:
