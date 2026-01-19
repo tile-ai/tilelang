@@ -270,7 +270,7 @@ public:
     } else if (has_global_or_shared_buffer) {
       // Has memory buffers and simple case (no SeqStmt):
       // ignore local/fragment constraints
-      vector_size_ = memory_min;
+      vector_size_ = arith::ZeroAwareGCD(memory_min, call_node_min);
       if (verbose) {
         std::cerr << "  [Strategy] Has memory buffers (simple case), using "
                      "memory_min="
