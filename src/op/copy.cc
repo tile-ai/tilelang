@@ -866,7 +866,6 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   Layout inv = local_layout->Inverse();
   Array<PrimExpr> shared_coords;
   PrimExpr warp = FloorDiv(T.thread_var, 32) * 32;
-  // FIXME(lei): Buggy and may have duplicated load, should be fixed in future.
   if (!is_transposed)
     shared_coords = inv->Forward(
         {local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num),
