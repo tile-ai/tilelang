@@ -164,6 +164,9 @@ def is_var(v: Any) -> bool:
     return isinstance(v, Buffer) and v.scope() == "local.var"
 
 
+EagerJITStage = Literal['phase1', 'phase2', 'none']
+
+
 class Builder(BaseBuilder):
     def __init__(self):
         self.frames: list[AnyFrame] = []
@@ -173,7 +176,8 @@ class Builder(BaseBuilder):
         self.out_idx = []
         self.out_tensor_cnt = 0
         self.constexpr_var = set()
-        self.eager_jit = False
+        self.eager_jit: EagerJITStage = 'none'
+        self.eager_jit_subs: dict[str, PrimExpr] = {}
         self.current_file = "<unknown>"
         self.current_line = 0
         self.current_macro_name = "<unknown-macro>"
@@ -192,7 +196,7 @@ class Builder(BaseBuilder):
             with self.ir_builder, self.with_frame(tir.prim_func()):
                 tir.func_name(name)
                 yield
-            if len(self.out_idx) != self.out_tensor_cnt:
+            if self.eager_jit != 'phase1' and len(self.out_idx) != self.out_tensor_cnt:
                 raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
         finally:
             del thread_local_storage.builder
@@ -597,6 +601,8 @@ class Builder(BaseBuilder):
                 )
             return value
         else:
+            if self.eager_jit == 'phase1':
+                return NotImplemented
             if not isinstance(value, tuple):
                 value = (value,)
             for v in value:
@@ -683,6 +689,7 @@ class Builder(BaseBuilder):
     def constexpr(self, name: str, dtype: str = "int32") -> Var:
         var = tir.Var(name, dtype)
         self.constexpr_var.add(var)
+        var.orig_name = name
         return var
 
     def set_fileline(self, filename: str, lineno: int, name: str):
@@ -694,6 +701,8 @@ class Builder(BaseBuilder):
         stack = self.macro_fileline_stack + [(self.current_file, self.current_line, self.current_macro_name)]
         return stack[: len(stack) - stacklevel + 1]
 
+    def skip_kernel_ctx(self):
+        return self.eager_jit == 'phase1'
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
@@ -866,17 +875,29 @@ def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
     builder = Builder.current()
     # assert builder is not None, "T.const() can only be used inside @tilelang.jit (eager mode)"
     # assert builder.eager_jit, "T.const() can only be used inside @tilelang.jit (eager mode)"
-    if builder is None or not builder.eager_jit:
+    if builder is None or not builder.eager_jit != 'none':
         raise JITNoBuilderError("T.const() can only be used inside @tilelang.jit (eager mode)")
 
-    if "," in name:
-        names = re.split(r"\s*,\s*", name)
-        return tuple(builder.constexpr(n, dtype) for n in names)
-    if " " in name:
-        names = re.split(r"\s+", name)
-        return tuple(builder.constexpr(n, dtype) for n in names)
-    else:
-        return builder.constexpr(name, dtype)
+    if builder.eager_jit == 'phase1':
+        # in stage 1, we create constexpr variables
+        if "," in name:
+            names = re.split(r"\s*,\s*", name)
+            return tuple(builder.constexpr(n, dtype) for n in names)
+        if " " in name:
+            names = re.split(r"\s+", name)
+            return tuple(builder.constexpr(n, dtype) for n in names)
+        else:
+            return builder.constexpr(name, dtype)
+    elif builder.eager_jit == 'phase2':
+        # in stage 2, we substitute constexpr variables with actual values
+        if "," in name:
+            names = re.split(r"\s*,\s*", name)
+            return tuple(builder.eager_jit_subs[n] for n in names)
+        if " " in name:
+            names = re.split(r"\s+", name)
+            return tuple(builder.eager_jit_subs[n] for n in names)
+        else:
+            return builder.eager_jit_subs[name]
 
 
 @dataclass
@@ -889,12 +910,15 @@ class TirTemplate(Generic[_P, _T]):
     actual tensor shapes at runtime.
     """
 
+    name: str
     prim_func: PrimFunc[_P, _T]
     matcher: dict[Var, tuple[tvm.tir.Var, str, int, str]] | None = None
+    constexprs: set[Var] = None
     is_lazy_style: bool = False  # True if from lazy-style (returns PrimFunc directly)
+    ir_gen: IRGenerator[_P, _T] | None = None
 
     @classmethod
-    def create(cls, prim_func: PrimFunc[_P, _T], constexpr: set[Var]) -> TirTemplate[_P, _T]:
+    def create(cls, name: str, prim_func: PrimFunc[_P, _T], constexpr: set[Var], ir_gen: IRGenerator[_P, _T] | None = None) -> TirTemplate[_P, _T]:
         matcher = {}
         for k, v in prim_func.buffer_map.items():
             for i, s in enumerate(v.shape):
@@ -915,12 +939,13 @@ class TirTemplate(Generic[_P, _T]):
                     f"Buffer shapes: {shapes}\n"
                     f"Buffer strides: {strides}"
                 )
-        return cls(prim_func=prim_func, matcher=matcher, is_lazy_style=False)
+        matcher = {k: matcher[k] for k in constexpr}
+        return cls(name=name, prim_func=prim_func, matcher=matcher, constexprs=constexpr, is_lazy_style=False, ir_gen=ir_gen)
 
     @classmethod
-    def from_lazy_style(cls, prim_func: PrimFunc[_P, _T]) -> TirTemplate[_P, _T]:
+    def from_lazy_style(cls, name: str, prim_func: PrimFunc[_P, _T]) -> TirTemplate[_P, _T]:
         """Create template from lazy-style function that returns PrimFunc directly."""
-        return cls(prim_func=prim_func, is_lazy_style=True)
+        return cls(name=name, prim_func=prim_func, is_lazy_style=True)
 
     def _parse_phase2_key(self, **kwargs):
         if self.matcher is None:
@@ -946,16 +971,20 @@ class TirTemplate(Generic[_P, _T]):
                 )
         return tuple(result)
 
-    def get_tir(self, **kwargs):
+    def get_tir(self, tensor_args, given_tensor_args, kwargs):
         if self.is_lazy_style:
             return self.prim_func
-        values = self._parse_phase2_key(**kwargs)
-        subs = {name: value for name, value in zip(self.matcher, values)}
-        result = substitute_primfunc(self.prim_func, subs)
-        result.orig_func = self.prim_func.orig_func
-        if hasattr(self.prim_func, "out_idx_override"):
-            result.out_idx_override = self.prim_func.out_idx_override
-        return result
+        values = self._parse_phase2_key(**given_tensor_args, **kwargs)
+        subs = {name.orig_name: value for name, value in zip(self.matcher, values)}
+        builder = Builder()
+        builder.eager_jit = 'phase2'
+        builder.eager_jit_subs = subs
+        with builder.prim_func(self.name):
+            self.ir_gen.gen(builder)(**tensor_args, **kwargs)
+        pf = builder.get()
+        if builder.out_idx:
+            pf.out_idx_override = builder.out_idx
+        return pf
 
 
 @dataclass
@@ -1021,7 +1050,7 @@ class JITFunc(Generic[_P, _T]):
             # lazy jit must return PrimFunc
             if isinstance(prim_func, PrimFunc):
                 p1_key, _, _ = self._parse_phase1_key(*args, **kwargs)
-                self.p1_cache[p1_key] = TirTemplate.from_lazy_style(prim_func)
+                self.p1_cache[p1_key] = TirTemplate.from_lazy_style(self.orig_func.__name__, prim_func)
                 return True
             return False
         except (JITNoBuilderError, EagerJITBuildError, TypeError):
@@ -1036,18 +1065,18 @@ class JITFunc(Generic[_P, _T]):
         """Build TIR template based on the execution mode."""
         if self.mode == "lazy":
             # lazy: function returns PrimFunc directly
-            return TirTemplate.from_lazy_style(self.orig_func(*args, **kwargs))
+            return TirTemplate.from_lazy_style(self.orig_func.__name__, self.orig_func(*args, **kwargs))
         elif self.mode == "eager":
             # eager: trace function body through Builder to construct TIR
             builder = Builder()
-            builder.eager_jit = True
+            builder.eager_jit = 'phase1'
             with builder.prim_func(self.orig_func.__name__):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
             pf.orig_func = self.orig_func
             if builder.out_idx:
                 pf.out_idx_override = builder.out_idx
-            return TirTemplate.create(pf, builder.constexpr_var)
+            return TirTemplate.create(self.orig_func.__name__, pf, builder.constexpr_var, self.ir_gen)
         else:
             raise ValueError(f"Invalid jit mode: {self.mode}, expected 'lazy' or 'eager'")
 
@@ -1061,17 +1090,15 @@ class JITFunc(Generic[_P, _T]):
             # mode should be set by JITImpl before calling parse_args
             tir_temp = self._build_tir_template(**kwargs)
             self.p1_cache[p1_key] = tir_temp
-        p2_key = tir_temp._parse_phase2_key(**tensor_args)
+        p2_key = tir_temp._parse_phase2_key(**tensor_args, **kwargs)
         return (p1_key, p2_key), tensor_args
 
     def get_tir(self, *args, **kwargs):
         p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
         if p1_key not in self.p1_cache:
             # in legacy gemm, we use lazy tir template to build the tir
-            tir_temp = self._build_tir_template(**kwargs)
-            self.p1_cache[p1_key] = tir_temp
-            return tir_temp.get_tir(**tensor_args, **kwargs)
-        return self.p1_cache[p1_key].get_tir(**tensor_args, **kwargs)
+            self.p1_cache[p1_key] = self._build_tir_template(**kwargs)
+        return self.p1_cache[p1_key].get_tir(self.tensor_args, tensor_args, kwargs)
 
     def __call__(self, *args, **kwargs):
         return self.get_tir(*args, **kwargs)

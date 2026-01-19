@@ -570,9 +570,19 @@ class DSLMutator(ast.NodeTransformer):
         return quote("return __tb.ret(value)", value=node.value, span=node)
 
     def visit_With(self, node: ast.With):
+        is_kernel_ctx = False
+        for expr in node.items:
+            cexpr = expr.context_expr
+            if isinstance(cexpr, ast.Call) and isinstance(cexpr.func, ast.Attribute) and cexpr.func.attr == "Kernel":
+                eval_res = self._try_eval(cexpr.func)
+                from tilelang.language import Kernel
+                if eval_res is Kernel:
+                    is_kernel_ctx = True
         node = self.generic_visit(node)
         for expr in node.items:
             expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=expr)
+        if is_kernel_ctx:
+            return [quote1('if __tb.skip_kernel_ctx(): return'), node]
         return node
 
     def visit_Assert(self, node: ast.Assert):
