@@ -787,7 +787,6 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   }
 
   Array<PrimExpr> shared_indices = MakeIndices(loop_vars, is_ldmatrix ? 0 : 1);
-  Array<PrimExpr> shared_indices_transformed = shared_indices;
   // Check local_layout follows 8x8 layout
   // LDSM/STSM instructions require 8x8 matrix fragment layout
   // This matches the warp-level matrix multiplication pattern used in tensor
@@ -827,8 +826,7 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     // be fallback to normal copy
     return LowerNormalCopy(T, analyzer);
   }
-  PrimExpr flattened_indice =
-      shared_tensor.OffsetOf(shared_indices_transformed).back();
+  PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
   if (!IndiceCanVectorize(flattened_indice, loop_vars.back()->var,
                           loop_vars.back()->dom->extent, 8, analyzer)) {
     // TMA ldmatrix/stmatrix cannot support non-16 bytes continuous layout, will
