@@ -359,25 +359,17 @@ private:
         new_offset += forward_indices[i] * stride_offset;
         stride_offset *= new_shape[i];
       }
+      // Add the remaining offset (for accesses beyond one tile)
+      // stride_offset now equals the product of all new_shape dimensions
+      new_offset += remaining_offset * stride_offset;
       new_offset = analyzer_->Simplify(new_offset);
       Array<PrimExpr> new_indices;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_indices.insert(new_indices.begin(),
-                           floormod(new_offset, new_shape[i]));
-        new_offset = floordiv(new_offset, new_shape[i]);
-      }
-      PrimExpr total_offset = 0;
-      PrimExpr new_stride_offset = 1;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        total_offset += new_indices[i] * new_stride_offset;
-        new_stride_offset *= new_shape[i];
-      }
       layout_remap_.Set(new_buffer, layout);
 
       // Build new tvm_access_ptr call with new buffer and offset
       Array<PrimExpr> new_args = access_ptr_call->args;
       new_args.Set(1, new_buffer->data); // Replace data var
-      new_args.Set(2, total_offset);     // Replace offset
+      new_args.Set(2, new_offset);       // Replace offset
       result.rewritten = true;
       result.expr = Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
                          access_ptr_call->annotations, access_ptr_call->span);
