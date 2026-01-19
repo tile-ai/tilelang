@@ -164,7 +164,7 @@ def is_var(v: Any) -> bool:
     return isinstance(v, Buffer) and v.scope() == "local.var"
 
 
-EagerJITStage = Literal['phase1', 'phase2', 'none']
+EagerJITStage = Literal["phase1", "phase2", "none"]
 
 
 class Builder(BaseBuilder):
@@ -176,7 +176,7 @@ class Builder(BaseBuilder):
         self.out_idx = []
         self.out_tensor_cnt = 0
         self.constexpr_var = set()
-        self.eager_jit: EagerJITStage = 'none'
+        self.eager_jit: EagerJITStage = "none"
         self.eager_jit_subs: dict[str, PrimExpr] = {}
         self.current_file = "<unknown>"
         self.current_line = 0
@@ -196,7 +196,7 @@ class Builder(BaseBuilder):
             with self.ir_builder, self.with_frame(tir.prim_func()):
                 tir.func_name(name)
                 yield
-            if self.eager_jit != 'phase1' and len(self.out_idx) != self.out_tensor_cnt:
+            if self.eager_jit != "phase1" and len(self.out_idx) != self.out_tensor_cnt:
                 raise RuntimeError("Not all tensor allocated from `T.empty` are returned")
         finally:
             del thread_local_storage.builder
@@ -601,7 +601,7 @@ class Builder(BaseBuilder):
                 )
             return value
         else:
-            if self.eager_jit == 'phase1':
+            if self.eager_jit == "phase1":
                 return NotImplemented
             if not isinstance(value, tuple):
                 value = (value,)
@@ -702,7 +702,8 @@ class Builder(BaseBuilder):
         return stack[: len(stack) - stacklevel + 1]
 
     def skip_kernel_ctx(self):
-        return self.eager_jit == 'phase1'
+        return self.eager_jit == "phase1"
+
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
@@ -875,10 +876,10 @@ def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
     builder = Builder.current()
     # assert builder is not None, "T.const() can only be used inside @tilelang.jit (eager mode)"
     # assert builder.eager_jit, "T.const() can only be used inside @tilelang.jit (eager mode)"
-    if builder is None or not builder.eager_jit != 'none':
+    if builder is None or not builder.eager_jit != "none":
         raise JITNoBuilderError("T.const() can only be used inside @tilelang.jit (eager mode)")
 
-    if builder.eager_jit == 'phase1':
+    if builder.eager_jit == "phase1":
         # in stage 1, we create constexpr variables
         if "," in name:
             names = re.split(r"\s*,\s*", name)
@@ -888,7 +889,7 @@ def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
             return tuple(builder.constexpr(n, dtype) for n in names)
         else:
             return builder.constexpr(name, dtype)
-    elif builder.eager_jit == 'phase2':
+    elif builder.eager_jit == "phase2":
         # in stage 2, we substitute constexpr variables with actual values
         if "," in name:
             names = re.split(r"\s*,\s*", name)
@@ -918,7 +919,9 @@ class TirTemplate(Generic[_P, _T]):
     ir_gen: IRGenerator[_P, _T] | None = None
 
     @classmethod
-    def create(cls, name: str, prim_func: PrimFunc[_P, _T], constexpr: set[Var], ir_gen: IRGenerator[_P, _T] | None = None) -> TirTemplate[_P, _T]:
+    def create(
+        cls, name: str, prim_func: PrimFunc[_P, _T], constexpr: set[Var], ir_gen: IRGenerator[_P, _T] | None = None
+    ) -> TirTemplate[_P, _T]:
         matcher = {}
         for k, v in prim_func.buffer_map.items():
             for i, s in enumerate(v.shape):
@@ -977,7 +980,7 @@ class TirTemplate(Generic[_P, _T]):
         values = self._parse_phase2_key(**given_tensor_args, **kwargs)
         subs = {name.orig_name: value for name, value in zip(self.matcher, values)}
         builder = Builder()
-        builder.eager_jit = 'phase2'
+        builder.eager_jit = "phase2"
         builder.eager_jit_subs = subs
         with builder.prim_func(self.name):
             self.ir_gen.gen(builder)(**tensor_args, **kwargs)
@@ -1069,7 +1072,7 @@ class JITFunc(Generic[_P, _T]):
         elif self.mode == "eager":
             # eager: trace function body through Builder to construct TIR
             builder = Builder()
-            builder.eager_jit = 'phase1'
+            builder.eager_jit = "phase1"
             with builder.prim_func(self.orig_func.__name__):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
