@@ -334,15 +334,11 @@ private:
 
       Layout layout = layout_map_[original_buffer];
       Buffer new_buffer = buffer_remap_[original_buffer];
-      LOG(INFO) << "layout is " << layout;
-      LOG(INFO) << "new_buffer is " << new_buffer;
-
       // Get the offset from tvm_access_ptr args[2]
       PrimExpr elem_offset = access_ptr_call->args[2];
       if (offset.defined()) {
         elem_offset = elem_offset + offset.value();
       }
-
       // Get original and new buffer shapes
       Array<PrimExpr> old_shape = original_buffer->shape;
       Array<PrimExpr> new_shape = new_buffer->shape;
@@ -357,7 +353,6 @@ private:
       }
       // Apply layout transformation
       auto forward_indices = layout->Forward(multi_dim_indices);
-
       PrimExpr new_offset = 0;
       PrimExpr stride_offset = 1;
       for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
@@ -383,7 +378,6 @@ private:
       Array<PrimExpr> new_args = access_ptr_call->args;
       new_args.Set(1, new_buffer->data); // Replace data var
       new_args.Set(2, total_offset);     // Replace offset
-
       result.rewritten = true;
       result.expr = Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
                          access_ptr_call->annotations, access_ptr_call->span);
@@ -530,10 +524,12 @@ private:
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
-    if ((!has_tma_) && (op->op.same_as(tl::tma_load()) ||
-                        op->op.same_as(tl::tma_load_im2col()) ||
-                        op->op.same_as(tl::tma_store()))) {
+    if (op->op.same_as(tl::tma_load()) ||
+        op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_store())) {
+      // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
+      return Downcast<Call>(op);
     }
 
     if (is_ptx_) {
