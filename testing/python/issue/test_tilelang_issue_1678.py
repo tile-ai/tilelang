@@ -20,7 +20,6 @@ def test_issue_1678():
         return qwq_kernel
 
     kernel = qwq()
-    print(kernel.get_kernel_source())
 
 
 if __name__ == "__main__":
