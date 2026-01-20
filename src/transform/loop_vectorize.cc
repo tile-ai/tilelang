@@ -412,6 +412,17 @@ private:
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
 
+    // vectorizable property
+    OpAttrMap<TVectorizable> op_vectorizable_ =
+    Op::GetAttrMap<TVectorizable>("TVectorizable");
+
+    auto optional_op = node->op.as<Op>();
+    bool vectorizable = op_vectorizable_.get(optional_op.value(), false) &&
+                        !node->dtype.is_scalable_vector();
+    if (vectorizable) {
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    }
+
     // For other call nodes, use PostOrderVisit to check buffer accesses
     // and determine if the given vector size is invariant
     auto check_buffer_access_invariant = [&](int target_vec_size) -> bool {
@@ -451,7 +462,6 @@ private:
       });
       return all_invariant;
     };
-
     // Find the largest vector size where all buffer accesses are invariant
     int call_node_vector_size = loop_extent_vector_size_;
     while (call_node_vector_size > 1) {
