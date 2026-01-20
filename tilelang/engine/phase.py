@@ -263,7 +263,12 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     if allow_global_thread_synchronization():
         mod = tilelang.transform.ThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
+
+    tilelang.analysis.ASTPrinter()(mod)
+    print(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
+    tilelang.analysis.ASTPrinter()(mod)
+    print(mod)
 
     # Mark the function contains pdl_sync or pdl_trigger
     mod = tilelang.transform.MarkCudaSyncCalls(have_pdl(target))(mod)

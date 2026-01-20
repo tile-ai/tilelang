@@ -121,6 +121,12 @@ private:
       // Sort first by variable type, then by variable name
       std::vector<tir::Var> params{use_def.undefined_.begin(),
                                    use_def.undefined_.end()};
+
+      for (auto &&param : params) {
+        std::cout << "undefined param: " << param->name_hint << " ";
+      }
+      std::cout << std::endl;
+
       std::sort(params.begin(), params.end(),
                 [](const tir::Var &a, const tir::Var &b) {
                   auto sort_key = [](const tir::Var &var) {
