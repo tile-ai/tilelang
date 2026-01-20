@@ -414,7 +414,7 @@ private:
 
     // vectorizable property
     OpAttrMap<TVectorizable> op_vectorizable_ =
-    Op::GetAttrMap<TVectorizable>("TVectorizable");
+        Op::GetAttrMap<TVectorizable>("TVectorizable");
 
     auto optional_op = node->op.as<Op>();
     bool vectorizable = op_vectorizable_.get(optional_op.value(), false) &&
