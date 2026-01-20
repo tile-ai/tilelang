@@ -17,7 +17,7 @@ def supply_tensors_gpu(params):
         T.int32: torch.int32,
         T.int64: torch.int64,
     }
-    
+
     tensors = []
     for param in params:
         if hasattr(param, "shape") and hasattr(param, "dtype"):
@@ -53,8 +53,8 @@ def ref_program(Q, K, V, is_causal, groups=1):
 def get_configs():
     """Generates configurations for the autotuner, avoiding problematic combinations."""
     block_M = [64, 128, 256]
-    block_N = [64, 128, 256] 
-    threads = [128, 256] 
+    block_N = [64, 128, 256]
+    threads = [128, 256]
     num_split_q = [64, 128, 256]
     num_stages = [0, 1]
     enable_rasterization = [True]
@@ -254,4 +254,3 @@ if __name__ == "__main__":
     parser.add_argument("--groups", type=int, default=1, help="groups")
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
-
