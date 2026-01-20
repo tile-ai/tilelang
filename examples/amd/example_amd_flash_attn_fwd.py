@@ -8,15 +8,24 @@ import argparse
 from functools import partial
 
 
-# Custom supply function to ensure tensors are created on GPU
 def supply_tensors_gpu(params):
     """Supply function that creates tensors on GPU for ROCm/HIP."""
+    # TileLang dtype to PyTorch dtype mapping
+    dtype_map = {
+        T.float16: torch.float16,
+        T.float32: torch.float32,
+        T.int32: torch.int32,
+        T.int64: torch.int64,
+    }
+    
     tensors = []
     for param in params:
         if hasattr(param, "shape") and hasattr(param, "dtype"):
             # Force creation on GPU device
             shape = [int(s) for s in param.shape]
-            tensor = torch.randn(shape, dtype=param.dtype, device="cuda")
+            # Convert TileLang dtype to PyTorch dtype
+            torch_dtype = dtype_map.get(param.dtype, torch.float16)
+            tensor = torch.randn(shape, dtype=torch_dtype, device="cuda")
             tensors.append(tensor)
         else:
             tensors.append(param)
@@ -42,10 +51,10 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 
 def get_configs():
-    """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
-    block_M = [32, 64, 128, 256]
-    block_N = [32, 64, 128, 256]
-    threads = [128, 256, 512]
+    """Generates configurations for the autotuner, avoiding problematic combinations."""
+    block_M = [64, 128, 256]
+    block_N = [64, 128, 256] 
+    threads = [128, 256] 
     num_split_q = [64, 128, 256]
     num_stages = [0, 1]
     enable_rasterization = [True]
@@ -124,7 +133,7 @@ def fast_flashattn(
             bx = T.alloc_var(T.int32)
             bx = b_split
 
-            while bx < num_q_blocks:
+            with T.While(bx < num_q_blocks):
                 acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
                 m_i = T.alloc_fragment([block_M], accum_dtype)
                 l_i = T.alloc_fragment([block_M], accum_dtype)
@@ -184,6 +193,7 @@ def fast_flashattn(
                     for i, j in T.Parallel(block_M, dim):
                         acc_o[i, j] *= scale_factor[i]
 
+                    # Compute softmax values
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.exp(acc_s[i, j] * scale - m_i[i] * scale)
 
@@ -191,7 +201,7 @@ def fast_flashattn(
                     for i in T.Parallel(block_M):
                         l_i[i] += row_sum[i]
 
-                    # Cast acc_s (accum_dtype) to dtype in registers and directly GEMM with V
+                    # This avoids layout conflict between acc_s and acc_s_cast
                     T.copy(acc_s, acc_s_cast)
 
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
@@ -244,3 +254,4 @@ if __name__ == "__main__":
     parser.add_argument("--groups", type=int, default=1, help="groups")
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
+
