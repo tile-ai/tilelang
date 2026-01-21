@@ -649,7 +649,7 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     // check_forward_index=true: when validating loop layout against buffer
     // fragment, we need to ensure physical indices match for correct code gen.
     if (!ProveFragmentContains(candidate, fragment, vars, indice_map_[buffer],
-                               analyzer_, /*check_forward_index=*/true)) {
+                               analyzer_)) {
       return false;
     }
   }
@@ -815,7 +815,8 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
   auto contains = [&](const Fragment &big, const Fragment &small) {
     // contains(A, B) means: for any loop index, the threads that access
     // B's elements are a subset of those that access A's elements.
-    return ProveFragmentContains(small, big, vars, vars, analyzer_);
+    return ProveFragmentContains(small, big, vars, vars, analyzer_,
+                                 /*check_forward_index=*/true);
   };
 
   bool buf_ok = ValidateCandidateAgainstFragments(candidate_from_buffer, T);
