@@ -115,16 +115,21 @@ class GemmTCGEN5(GemmBase):
         # `elect_one_sync()`, we check if we are calling it using full warps
         analyzer = Analyzer()
         warp_size = 32
-        assert analyzer.can_prove(thread_bounds.min % warp_size == 0 and thread_bounds.extent % warp_size == 0), \
+        assert analyzer.can_prove(thread_bounds.min % warp_size == 0 and thread_bounds.extent % warp_size == 0), (
             "TCGEN5MMA requires thread bounds to be multiples of warp size (32) nd aligned to warps."
+        )
 
         @T.prim_func
         def _gemm_ss_cond() -> None:
             if thread_var // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
-        
+
         @T.prim_func
         def _gemm_ss() -> None:
             mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
-        return _Simplify(_gemm_ss, inline_let=True) if analyzer.can_prove(thread_bounds.extent == warp_size) else _Simplify(_gemm_ss_cond, inline_let=True)
+        return (
+            _Simplify(_gemm_ss, inline_let=True)
+            if analyzer.can_prove(thread_bounds.extent == warp_size)
+            else _Simplify(_gemm_ss_cond, inline_let=True)
+        )
