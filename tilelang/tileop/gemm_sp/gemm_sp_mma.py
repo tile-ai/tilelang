@@ -1,4 +1,5 @@
 from .gemm_sp_base import GemmSPBase
+from .inst import GemmInst
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment

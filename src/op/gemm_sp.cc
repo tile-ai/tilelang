@@ -19,15 +19,14 @@
 namespace tvm {
 namespace tl {
 
-std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
-                                                               int block_size,
-                                                               Target target,
-                                                               GemmInst gemm_inst,
-                                                               int bits) const {
+std::pair<int, int>
+GemmSPWarpPolicyNode::computeWarpPartition(int M, int N, int block_size,
+                                           Target target, GemmInst gemm_inst,
+                                           int bits) const {
   int num_warps = block_size / TargetGetWarpSize(target);
 
-  ICHECK(gemm_inst == GemmInst::kMMA || gemm_inst == GemmInst::kWGMMA) 
-      << "GemmSP currently only supports MMA and WGMMA";                                                              
+  ICHECK(gemm_inst == GemmInst::kMMA || gemm_inst == GemmInst::kWGMMA)
+      << "GemmSP currently only supports MMA and WGMMA";
   auto [m_warp, n_warp] = GemmWarpPolicyNode::computeWarpPartition(
       M, N, block_size, target, gemm_inst);
 
