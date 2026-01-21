@@ -1019,6 +1019,10 @@ class JITFunc(Generic[_P, _T]):
         if has_internal_prim_func(self.orig_func):
             return True
         try:
+            inspect.signature(self.orig_func).bind(*args, **kwargs)
+        except TypeError:
+            return False
+        try:
             prim_func = self.orig_func(*args, **kwargs)
             # lazy jit must return PrimFunc
             if isinstance(prim_func, PrimFunc):
@@ -1026,7 +1030,7 @@ class JITFunc(Generic[_P, _T]):
                 self.p1_cache[p1_key] = TirTemplate.from_lazy_style(prim_func)
                 return True
             return False
-        except (JITNoBuilderError, EagerJITBuildError, TypeError):
+        except (JITNoBuilderError, EagerJITBuildError):
             # In eager mode, we construct AST directly without prim_func,
             # so there's no Builder available when the function is called.
             # When eager-only features like T.const() or T.Kernel() are used,
