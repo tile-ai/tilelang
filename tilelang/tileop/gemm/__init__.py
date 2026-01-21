@@ -25,8 +25,8 @@ def gemm_py_infer_layout(gemm_py: GemmMMA, target: Target, thread_bounds: Range)
 
 @tvm_ffi.register_global_func("tl.gemm_py.lower")
 def gemm_py_lower(gemm_py: GemmMMA, layout_map, target: Target, thread_bounds: Range, thread_var: tir.Var):
-    thread_nums = thread_bounds.extent
-    stmt = gemm_py.lower(layout_map, target, thread_nums, thread_var)
+    # We pass thread_bounds rather than thread_extents because tcgen5mma need to check this
+    stmt = gemm_py.lower(layout_map, target, thread_bounds, thread_var)
     return stmt
 
 
@@ -117,11 +117,12 @@ class GemmPy(Node, Scriptable):
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).infer_layout(target, thread_nums)
 
-    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
         """Lower the GEMM operation to TIR statements based on target architecture."""
+        thread_nums = thread_bounds.extent
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
-        return impl_class(self).lower(layout_map, target, thread_nums, thread_var)
+        return impl_class(self).lower(layout_map, target, thread_bounds, thread_var)
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> GemmInst:
         """Select the appropriate GEMM instruction based on target and thread configuration.

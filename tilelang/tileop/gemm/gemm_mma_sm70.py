@@ -8,6 +8,7 @@ from tilelang.intrinsics.mma_sm70_macro_generator import (
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
+from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
@@ -47,7 +48,8 @@ class GemmMMASm70(GemmBase):
         else:
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+        thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)

@@ -4,6 +4,7 @@ from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang import language as T
 from tvm import tir
 from tvm.target import Target
+from tvm.ir import Range
 
 
 class GemmCuTeDSL(GemmBase):
@@ -35,7 +36,7 @@ class GemmCuTeDSL(GemmBase):
         else:
             return GemmMMA(self.gemm_node).infer_layout(target, thread_nums)
 
-    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
         """Lower to a direct gemm_v1 call without complex MMA/WGMMA lowering."""
         from tilelang.language.gemm_op import gemm_v1
         from tilelang.transform.simplify import _Simplify
