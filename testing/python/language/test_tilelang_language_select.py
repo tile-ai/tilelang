@@ -19,7 +19,7 @@ def get_select_kernel_1():
             B[tx, 1] = T.Select(False, 1.0, A[tx, 1])
             B[tx, 2] = T.Select(T.Cast(T.bfloat16, A[tx, 3]) == tmp, A[tx, 2], T.Cast(T.float32, tmp))
             B[tx, 3] = T.Select(B[tx, 0] != 0.0, T.if_then_else(B[tx, 1] != 0.0, A[tx, 3], 0.0), 0.0)
-            
+
             for i in T.serial(4):
                 B[tx, i + 4] = T.Select(
                     A[tx, 0] == 0, T.if_then_else(T.Select(True, False, True), 1.0, 2.0), T.Select(True, A[tx, i + 4], 3.0)
