@@ -7,17 +7,17 @@ import tilelang.language as T
 def get_select_kernel_1():
     @T.prim_func
     def main(
-        A: T.Tensor[(128, 8), 'float32'],
-        B: T.Tensor[(128, 8), 'float32'],
+        A: T.Tensor[(128, 8), T.float32],
+        B: T.Tensor[(128, 8), T.float32],
     ):
-        with T.Kernel(1, threads=128) as (bx):
+        with T.Kernel(1, threads=128):
             tx = T.get_thread_binding(0)
-            tmp = T.alloc_var('bfloat16')
+            tmp = T.alloc_var(T.bfloat16)
             tmp = A[tx, 3]
 
             B[tx, 0] = T.Select(True, A[tx, 0], 0.0)
             B[tx, 1] = T.Select(False, 1.0, A[tx, 1])
-            B[tx, 2] = T.Select(T.Cast('bfloat16', A[tx, 3]) == tmp, A[tx, 2], T.Cast('float32', tmp))
+            B[tx, 2] = T.Select(T.Cast(T.bfloat16, A[tx, 3]) == tmp, A[tx, 2], T.Cast(T.float32, tmp))
             B[tx, 3] = T.Select(B[tx, 0] != 0.0, T.if_then_else(B[tx, 1] != 0.0, A[tx, 3], 0.0), 0.0)
             
             for i in T.serial(4):
@@ -41,17 +41,17 @@ def test_select_correctness():
 def get_select_kernel_2():
     @T.prim_func
     def main(
-        A: T.Tensor[(128, 8), 'float32'],
-        B: T.Tensor[(128, 8), 'float32'],
+        A: T.Tensor[(128, 8), T.float32],
+        B: T.Tensor[(128, 8), T.float32],
     ):
-        with T.Kernel(1, threads=128) as (bx):
+        with T.Kernel(1, threads=128):
             tx = T.get_thread_binding(0)
-            tmp = T.alloc_var('bfloat16')
+            tmp = T.alloc_var(T.bfloat16)
             tmp = A[tx, 3]
 
             B[tx, 0] = T.Select(True, A[tx, 0], 0.0)
             B[tx, 1] = T.Select(False, 1.0, A[tx, 1])
-            B[tx, 2] = T.Select(T.Cast('bfloat16', A[tx, 3]) == tmp, A[tx, 2], T.Cast('float32', tmp))
+            B[tx, 2] = T.Select(T.Cast(T.bfloat16, A[tx, 3]) == tmp, A[tx, 2], T.Cast(T.float32, tmp))
             B[tx, 3] = T.Select(B[tx, 0] != 0.0, T.Select(B[tx, 1] != 0.0, A[tx, 3], 0.0), 0.0)
 
             for i in T.serial(4):
