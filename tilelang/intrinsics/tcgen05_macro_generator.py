@@ -119,6 +119,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         # For tcgen05, warp_row_tiles is 8 as we can use .ws to support m32
         assert warp_row_tiles >= 8, f"warp_row_tiles must be greater than 8, got {warp_row_tiles}"
         assert warp_row_tiles % 8 == 0, f"warp_row_tiles must be divisible by 8, got {warp_row_tiles}"
+        
+        # TODO: We should not apply constraints here. The warp partition is fakely calculated as 
+        # (1, warps) but only one warp will issue the tcgen5mma.
         assert warp_col_tiles >= 8, f"warp_col_tiles must be greater than 8, got {warp_col_tiles}"
         assert warp_col_tiles % 8 == 0, f"warp_col_tiles must be divisible by 8, got {warp_col_tiles}"
 
