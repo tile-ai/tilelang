@@ -844,17 +844,51 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   }
 
   // Do the lowering here, try vectorized ldmatrix/stmatrix by 4/2/1
+  // now, local_tensor is local instead of shared.
   PrimExpr extent = local_tensor->shape[0];
   int num = 1;
   if (analyzer->CanProveEqual(FloorMod(extent, 8), 0))
+    // 16x16 -> full warp, we use x4, for 32 threads in a warp, each thread can
+    // hold 4 elements
     num = 4;
   else if (analyzer->CanProveEqual(FloorMod(extent, 4), 0))
+    // 8x16 -> half warp, we use x2, for 32 threads in a warp, each thread can
+    // hold 2 elements
     num = 2;
 
   Array<PrimExpr> args;
   const Op &op = is_ldmatrix ? tl::ptx_ldmatrix() : tl::ptx_stmatrix();
   args.push_back(static_cast<int>(is_transposed));
   args.push_back(num);
+
+  // Use par_op_ to infer loop layout and compute shared_coords
+  // This is more general than the previous hardcoded approach
+  if (!par_op_.defined()) {
+    arith::Analyzer temp_analyzer;
+    par_op_ = ParallelOp(MakeSIMTLoop(&temp_analyzer));
+  }
+  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                    InferLevel::kFree};
+  for (auto level : levels) {
+    par_op_->InferLayout({T.target,
+                          T.thread_bounds,
+                          T.layout_map,
+                          analyzer,
+                          false,
+                          T.buffer_remap,
+                          {}},
+                         level);
+  }
+  Fragment loop_layout = par_op_->GetLoopLayout();
+
+  if (!loop_layout.defined()) {
+    return LowerNormalCopy(T, analyzer);
+  }
+  Optional<PrimExpr> predicate = par_op_->GetPredicate(T.thread_var);
+  if (predicate.defined()) {
+    // Apply predicate from loop_layout if defined
+    return LowerNormalCopy(T, analyzer);
+  }
 
   // Create shared address with regard to local address
   // if not transpose
@@ -866,15 +900,20 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   Layout inv = local_layout->Inverse();
   Array<PrimExpr> shared_coords;
   PrimExpr warp = FloorDiv(T.thread_var, 32) * 32;
-  if (!is_transposed)
-    shared_coords = inv->Forward(
-        {local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num),
-         warp + FloorMod(T.thread_var, 8) * 4});
-  else
-    shared_coords = inv->Forward(
-        {local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num) +
-             FloorMod(T.thread_var, 2),
-         warp + FloorDiv(FloorMod(T.thread_var, 8), 2)});
+  if (!is_transposed) {
+    auto local_index = analyzer->Simplify(
+        local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num));
+    auto thread_index =
+        analyzer->Simplify(warp + FloorMod(T.thread_var, 8) * 4);
+    shared_coords = inv->Forward({local_index, thread_index});
+  } else {
+    auto local_index = analyzer->Simplify(
+        local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num) +
+        FloorMod(T.thread_var, 2));
+    auto thread_index =
+        analyzer->Simplify(warp + FloorDiv(FloorMod(T.thread_var, 8), 2));
+    shared_coords = inv->Forward({local_index, thread_index});
+  }
   shared_coords.pop_back(); // remove rep
   PrimExpr shared_addr = shared_tensor.access_ptr(
       is_ldmatrix ? 1 : 2, DataType::Handle(), 1,

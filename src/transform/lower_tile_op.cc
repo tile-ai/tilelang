@@ -359,9 +359,10 @@ private:
         new_offset += forward_indices[i] * stride_offset;
         stride_offset *= new_shape[i];
       }
-      // Add the remaining offset (for accesses beyond one tile)
-      // stride_offset now equals the product of all new_shape dimensions
-      new_offset += remaining_offset * stride_offset;
+      // Verify that access is within a single tile
+      ICHECK(is_zero(analyzer_->Simplify(remaining_offset)))
+          << "Access offset exceeds tile bounds, remaining_offset: "
+          << remaining_offset;
       new_offset = analyzer_->Simplify(new_offset);
       Array<PrimExpr> new_indices;
       layout_remap_.Set(new_buffer, layout);

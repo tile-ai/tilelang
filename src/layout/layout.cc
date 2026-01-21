@@ -874,7 +874,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                                                  element_size);
            })
       .def("tl.make_linear_layout",
-           [](Array<PrimExpr> shape) { return makeLinearLayout(shape); });
+           [](Array<PrimExpr> shape) { return makeLinearLayout(shape); })
+      .def("tl.make_gemm_fragment_8x8", []() { return makeGemmFragment8x8(); })
+      .def("tl.make_gemm_fragment_8x8_transposed",
+           []() { return makeGemmFragment8x8Transposed(); });
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
