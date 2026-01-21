@@ -21,14 +21,16 @@ def get_select_kernel_1():
             B[tx, 3] = T.Select(B[tx, 0] != 0.0, T.if_then_else(B[tx, 1] != 0.0, A[tx, 3], 0.0), 0.0)
             
             for i in T.serial(4):
-                B[tx, i + 4] = T.Select(A[tx, 0] == 0, T.if_then_else(T.Select(True, False, True), 1.0, 2.0), T.Select(True, A[tx, i + 4], 3.0))
+                B[tx, i + 4] = T.Select(
+                    A[tx, 0] == 0, T.if_then_else(T.Select(True, False, True), 1.0, 2.0), T.Select(True, A[tx, i + 4], 3.0)
+                )
 
     return main
 
 
 def test_select_correctness():
-    A = torch.randn((128, 8), dtype=torch.float32, device='cuda')
-    B = torch.empty((128, 8), dtype=torch.float32, device='cuda')
+    A = torch.randn((128, 8), dtype=torch.float32, device="cuda")
+    B = torch.empty((128, 8), dtype=torch.float32, device="cuda")
     kernel = get_select_kernel_1()
 
     A = torch.clamp(A, min=1e-4)
@@ -55,7 +57,11 @@ def get_select_kernel_2():
             B[tx, 3] = T.Select(B[tx, 0] != 0.0, T.Select(B[tx, 1] != 0.0, A[tx, 3], 0.0), 0.0)
 
             for i in T.serial(4):
-                B[tx, i + 4] = T.Select(A[tx, 0] == 0, T.Select(T.Select(True, False, True), 1.0, 2.0), T.Select(T.sin(A[tx, 2]) == 1.0, T.sin(A[tx, 0]), T.cos(A[tx, 1])))
+                B[tx, i + 4] = T.Select(
+                    A[tx, 0] == 0,
+                    T.Select(T.Select(True, False, True), 1.0, 2.0),
+                    T.Select(T.sin(A[tx, 2]) == 1.0, T.sin(A[tx, 0]), T.cos(A[tx, 1])),
+                )
 
     return main
 
