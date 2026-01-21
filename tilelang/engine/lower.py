@@ -15,7 +15,7 @@ from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TIL
 from tilelang.transform import PassConfigKey
 from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.utils.target import determine_target
+from tilelang.utils.target import determine_target, COMMONIR_enabled
 from tilelang.engine.phase import (
     PreLowerSemanticCheck,
     LowerAndLegalize,
@@ -171,6 +171,9 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
 
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+    if target.kind.name == "commonir" or COMMONIR_enabled:
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_commonir")(device_mod, target)
+        return device_mod
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
@@ -255,6 +258,12 @@ def lower(
 
     # Phase 2: Optimize the IR for the target
     mod = OptimizeForTarget(mod, target)
+    
+    codegen_mod = device_codegen(mod, target)
+    print(codegen_mod.inspect_source())
+    return CompiledArtifact(
+            None, codegen_mod, params, codegen_mod.inspect_source(), None)
+    return codegen_mod.inspect_source()
 
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)

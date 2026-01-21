@@ -170,6 +170,8 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
     set(USE_METAL ON)
   elseif($ENV{USE_ROCM})
     set(USE_ROCM ON)
+  elseif($ENV{USE_COMMONIR})
+    set(USE_COMMONIR ON)
   else()
     if($ENV{USE_CUDA})
       set(USE_CUDA ON)
@@ -181,6 +183,14 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
       set(USE_CUDA ON)
     endif()
   endif()
+endif()
+
+if(USE_COMMONIR)
+  file(GLOB TILE_LANG_COMMONIR_SRCS
+    src/target/codegen_commonir.cc
+    src/target/rt_mod_commonir.cc
+  )
+  list(APPEND TILE_LANG_SRCS ${TILE_LANG_COMMONIR_SRCS})
 endif()
 
 if(USE_METAL)

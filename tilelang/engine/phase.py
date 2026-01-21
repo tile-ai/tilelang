@@ -4,7 +4,7 @@ from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
 from tilelang.contrib.nvcc import have_tma, is_hopper, have_pdl
-
+from tilelang.utils.target import COMMONIR_enabled
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
     # avoid circular import
@@ -157,7 +157,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
         IRModule: The transformed module, ready for target-specific optimization passes.
     """
     mod = tir.transform.BindTarget(target)(mod)
-
+    if target.kind.name == "commonir" or COMMONIR_enabled:
+        return mod
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
@@ -201,6 +202,11 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
+    if target.kind.name == "commonir" or COMMONIR_enabled:
+        mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+        mod = tir.transform.LowerOpaqueBlock()(mod)
+        mod = tir.transform.RemoveNoOp()(mod)
+        return mod
     # Lower the barrier.arrive into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)
     # Lower the shared.tmem into specific initialization slot
