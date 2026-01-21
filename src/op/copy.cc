@@ -773,6 +773,19 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   Buffer shared_tensor = is_ldmatrix ? src : dst;
   Buffer local_tensor = is_ldmatrix ? dst : src;
+  Array<Range> local_region = is_ldmatrix ? src_range : dst_range;
+  bool is_full_range = true;
+  for (size_t i = 0; i < local_region.size(); i++) {
+    if (!analyzer->CanProveEqual(local_region[i]->extent, local_tensor->shape[i])) {
+      is_full_range = false;
+      break;
+    }
+  }
+  if (!is_full_range) {
+    // ldmatrix/stmatrix can only support full range, will be fallback to
+    // normal copy
+    return LowerNormalCopy(T, analyzer);
+  }
 
   Array<PrimExpr> local_indices = MakeIndices(loop_vars, is_ldmatrix ? 1 : 0);
   Fragment local_layout = Downcast<Fragment>(T.layout_map[local_tensor]);
@@ -860,35 +873,6 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   const Op &op = is_ldmatrix ? tl::ptx_ldmatrix() : tl::ptx_stmatrix();
   args.push_back(static_cast<int>(is_transposed));
   args.push_back(num);
-
-  // Use par_op_ to infer loop layout and compute shared_coords
-  // This is more general than the previous hardcoded approach
-  if (!par_op_.defined()) {
-    arith::Analyzer temp_analyzer;
-    par_op_ = ParallelOp(MakeSIMTLoop(&temp_analyzer));
-  }
-  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                    InferLevel::kFree};
-  for (auto level : levels) {
-    par_op_->InferLayout({T.target,
-                          T.thread_bounds,
-                          T.layout_map,
-                          analyzer,
-                          false,
-                          T.buffer_remap,
-                          {}},
-                         level);
-  }
-  Fragment loop_layout = par_op_->GetLoopLayout();
-
-  if (!loop_layout.defined()) {
-    return LowerNormalCopy(T, analyzer);
-  }
-  Optional<PrimExpr> predicate = par_op_->GetPredicate(T.thread_var);
-  if (predicate.defined()) {
-    // Apply predicate from loop_layout if defined
-    return LowerNormalCopy(T, analyzer);
-  }
 
   // Create shared address with regard to local address
   // if not transpose

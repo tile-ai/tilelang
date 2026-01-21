@@ -263,12 +263,15 @@ def sparse_mla_bwd(q, kv, o, do, indices, lse, sm_scale=None, is_casual=True, re
 
     # Get kernels
     preprocess_kernel = preprocess(B, S, H, D)
+    tilelang.disable_cache()
     bwd_kernel = bwd(B, S, S_kv, H, D, D_tail, topk, kv_group, sm_scale, is_casual)
+    tilelang.enable_cache()
     postprocess_kernel = postprocess(B, S_kv, D, D_tail, kv_group)
 
     if delta is None:
         delta = preprocess_kernel(o, do)
     dkv = torch.zeros_like(kv, dtype=torch.float32)
+    print(bwd_kernel.get_kernel_source())
     dq = bwd_kernel(q, kv, do, indices, lse, delta, dkv)
     dkv = postprocess_kernel(dkv)
 
@@ -327,10 +330,10 @@ def test_sparse_mla_bwd(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, to
     def fn():
         return sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse)
 
-    ms = do_bench(fn, rep=100, warmup=250)
-    print(f"Average time: {ms:.3f} ms")
-    print(f"bwd io bandwidth = ", (B * S * max(DQKV * 2, DQKV + DV) * topk * 2) / (ms * 1e-3) / 1e12)
-    print(f"bwd tflops = ", per_token_flop * S / (ms * 1e-3) / 1e12)
+    # ms = do_bench(fn, rep=100, warmup=250)
+    # print(f"Average time: {ms:.3f} ms")
+    # print(f"bwd io bandwidth = ", (B * S * max(DQKV * 2, DQKV + DV) * topk * 2) / (ms * 1e-3) / 1e12)
+    # print(f"bwd tflops = ", per_token_flop * S / (ms * 1e-3) / 1e12)
 
 
 def run_regression_perf(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, topk=2048, dtype=torch.bfloat16):

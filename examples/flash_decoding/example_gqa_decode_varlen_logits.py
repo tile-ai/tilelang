@@ -464,7 +464,7 @@ def test_varlen_decode_main(args):
     batch = cu_seqlens_k.size(0) - 1
     k_h = k_varlen.size(1)
     tl_kernel = flashattn(batch, q_h, k_h, args.k_seqlen, cu_seqlens_k[-1].item(), head_size, args.test_sink)
-
+    print(tl_kernel.get_kernel_source())
     # Test our decode kernel
     O_triton, S_triton = flash_attn_with_attn_pool_decode(
         q_decode,
