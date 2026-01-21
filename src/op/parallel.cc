@@ -65,11 +65,11 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
     if (small_physical.size() != large_physical.size()) {
       return false;
     }
-      // Check each physical index component for equality.
-      for (size_t i = 0; i < small_physical.size(); i++) {
-        auto diff = analyzer_.Simplify(small_physical[i] - large_physical[i]);
-        if (!is_zero(diff)) {
-          return false;
+    // Check each physical index component for equality.
+    for (size_t i = 0; i < small_physical.size(); i++) {
+      auto diff = analyzer_.Simplify(small_physical[i] - large_physical[i]);
+      if (!is_zero(diff)) {
+        return false;
       }
     }
   }
