@@ -10,7 +10,7 @@ from tvm.ir.base import Span
 from tvm.ir.expr import Range
 from tvm.tir.stmt import BufferRegion
 from tvm.tir.stmt_functor import substitute
-from .ast import BaseBuilder, IRGenerator, eval_op, mutate
+from .ast import BaseBuilder, IRGenerator, eval_op, has_internal_prim_func, mutate
 from .utils import construct_strides
 from tilelang.utils import side_effect
 import tvm
@@ -1016,6 +1016,8 @@ class JITFunc(Generic[_P, _T]):
                 with T.Kernel(...): ...
                 # no return
         """
+        if has_internal_prim_func(self.orig_func):
+            return True
         try:
             prim_func = self.orig_func(*args, **kwargs)
             # lazy jit must return PrimFunc
