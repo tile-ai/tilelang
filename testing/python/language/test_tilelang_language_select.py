@@ -34,7 +34,6 @@ def test_select_correctness():
     kernel = get_select_kernel_1()
 
     A = torch.clamp(A, min=1e-4)
-    print(kernel.get_kernel_source())
     kernel(A, B)
     assert torch.allclose(A, B)
 
@@ -69,7 +68,6 @@ def get_select_kernel_2():
 def test_select_codegen_no_if():
     kernel = get_select_kernel_2()
     source = kernel.get_kernel_source()
-    print(source)
     assert "if (" not in source
 
 
