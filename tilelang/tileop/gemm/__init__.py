@@ -1,4 +1,3 @@
-from enum import IntEnum
 from tilelang import tvm as tvm
 from tvm import tir
 from tvm.target import Target
@@ -6,6 +5,7 @@ from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
+from .inst import GemmInst
 from .gemm_mma import GemmMMA
 from .gemm_mma_sm70 import GemmMMASm70
 from .gemm_wgmma import GemmWGMMA
@@ -28,30 +28,6 @@ def gemm_py_lower(gemm_py: GemmMMA, layout_map, target: Target, thread_bounds: R
     thread_nums = thread_bounds.extent
     stmt = gemm_py.lower(layout_map, target, thread_nums, thread_var)
     return stmt
-
-
-# TODO(lei): support Volta and WMMA?
-# same definition with src/op/gemm_py.h
-class GemmInst(IntEnum):
-    MMA = 0
-    WGMMA = 1
-    TCGEN5MMA = 2
-    MFMA = 3
-
-    def is_mma(self) -> bool:
-        return self == GemmInst.MMA
-
-    def is_wgmma(self) -> bool:
-        return self == GemmInst.WGMMA
-
-    def is_tcgen5mma(self) -> bool:
-        return self == GemmInst.TCGEN5MMA
-
-    def is_mfma(self) -> bool:
-        return self == GemmInst.MFMA
-
-    def __repr__(self) -> str:
-        return self.name
 
 
 @tvm_ffi.register_object("tl.GemmPy")

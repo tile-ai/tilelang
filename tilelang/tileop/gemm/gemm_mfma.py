@@ -1,4 +1,5 @@
 from .gemm_base import GemmBase
+from .inst import GemmInst
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mfma_macro_generator import (
     MatrixCoreIntrinEmitter,
@@ -13,7 +14,7 @@ from tilelang.transform.simplify import _Simplify
 
 class GemmMFMA(GemmBase):
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, False)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MFMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mfma_emitter = MatrixCoreIntrinEmitter(
@@ -58,7 +59,7 @@ class GemmMFMA(GemmBase):
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, False)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MFMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mfma_emitter = MatrixCoreIntrinEmitter(

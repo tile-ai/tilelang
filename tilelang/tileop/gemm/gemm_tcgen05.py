@@ -1,4 +1,5 @@
 from .gemm_base import GemmBase
+from .inst import GemmInst
 from tilelang.layout import make_tcgen05mma_swizzled_layout
 from tilelang.intrinsics.tcgen05_macro_generator import (
     TensorCoreIntrinEmitter,
@@ -20,7 +21,7 @@ _FLOAT8_DTYPES = {
 
 class GemmTCGEN5(GemmBase):
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, True)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -52,7 +53,7 @@ class GemmTCGEN5(GemmBase):
         return {}
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, True)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
