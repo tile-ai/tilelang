@@ -12,7 +12,7 @@ from tilelang.transform.simplify import _Simplify
 
 class GemmSPMMA(GemmSPBase):
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA, self.in_dtype.bits())
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA, self.in_dtype.bits)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = SparseTensorCoreIntrinEmitter(
@@ -57,7 +57,7 @@ class GemmSPMMA(GemmSPBase):
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA, self.in_dtype.bits())
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA, self.in_dtype.bits)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = SparseTensorCoreIntrinEmitter(
