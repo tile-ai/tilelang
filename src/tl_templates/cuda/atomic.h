@@ -31,6 +31,10 @@ template <> struct normalize_atomic_type<bfloat16_t> {
 };
 #endif
 
+template <> struct normalize_atomic_type<int64_t> {
+  using type = unsigned long long;
+};
+
 template <typename T1, typename T2> TL_DEVICE T1 cuda_cast(T2 val) {
   return T1(val);
 }
