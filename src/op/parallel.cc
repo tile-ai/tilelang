@@ -570,6 +570,9 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   LayoutMap results;
   for (const auto &[buffer, access] : indice_map_) {
     if (T.layout_map.count(buffer)) {
+      if (auto info = reducer_info_map_.Get(buffer->data);
+          info && info.value()->rep == ReducerRepType::ALL)
+        continue;
       auto fragment = T.layout_map[buffer].as<Fragment>().value();
       auto vars =
           loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
@@ -676,15 +679,18 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
   for (const auto &[buffer, access] : indice_map_) {
     if (!T.layout_map.count(buffer))
       continue;
+    if (auto info = reducer_info_map_.Get(buffer->data);
+        info && info.value()->rep == ReducerRepType::ALL)
+      continue;
     auto fragment = T.layout_map[buffer].as<Fragment>().value();
     // check_forward_index=true: when validating loop layout against buffer
     // fragment, we need to ensure physical indices match for correct code gen.
-    if (access.is_write &&
+    if (access.is_read &&
         !ProveFragmentContains(candidate, fragment, vars, access.indices,
                                analyzer_, /*check_forward_index=*/false)) {
       return false;
     }
-    if (access.is_read &&
+    if (access.is_write &&
         !ProveFragmentContains(fragment, candidate, access.indices, vars,
                                analyzer_, /*check_forward_index=*/false)) {
       return false;
