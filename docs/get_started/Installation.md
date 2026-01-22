@@ -172,6 +172,13 @@ python -c "import tilelang; print(tilelang.__version__)"
 
 ### ROCm container build (gfx942/gfx950)
 
+If you want a ready-to-use ROCm image that builds TileLang from source, use
+`docker/Dockerfile.rocm`. This is the recommended path for a clean, reproducible
+environment.
+
+If you are already inside another ROCm container (for example, the `sglang`
+image) and just need to rebuild TileLang in-place, follow the steps below.
+
 If you are using the `sglang` ROCm container and need to build TileLang in it (for example on MI300 `gfx942` or MI355 `gfx950`), the build requires extra system libraries, Cython, and a valid `llvm-config`. The following steps match the build flow used in `sglang/docker/rocm.Dockerfile`:
 
 ```bash
