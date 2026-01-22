@@ -3,15 +3,18 @@
 
 #define HIP_FP8_ENABLED 1
 
+#define TILELANG_FP8_E4M3_VARIANT_FN 0
+#define TILELANG_FP8_E4M3_VARIANT_FNUZ 1
+
 #ifndef TILELANG_FP8_E4M3_VARIANT
 #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-#define TILELANG_FP8_E4M3_VARIANT FNUZ
+#define TILELANG_FP8_E4M3_VARIANT TILELANG_FP8_E4M3_VARIANT_FNUZ
 #else
-#define TILELANG_FP8_E4M3_VARIANT FN
+#define TILELANG_FP8_E4M3_VARIANT TILELANG_FP8_E4M3_VARIANT_FN
 #endif
 #endif
 
-#if (TILELANG_FP8_E4M3_VARIANT == FN)
+#if (TILELANG_FP8_E4M3_VARIANT == TILELANG_FP8_E4M3_VARIANT_FN)
 #if defined(__clang__) && defined(__HIPCC__)
 #if __is_identifier(__hip_fp8_e4m3)
 #define TILELANG_HAVE_FP8_E4M3_FN 1
