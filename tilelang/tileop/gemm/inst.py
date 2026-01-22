@@ -2,7 +2,7 @@ from enum import IntEnum
 
 
 # TODO(lei): support Volta and WMMA?
-# same definition with src/op/gemm_py.h
+# same definition with src/op/gemm.h
 class GemmInst(IntEnum):
     MMA = 0
     WGMMA = 1

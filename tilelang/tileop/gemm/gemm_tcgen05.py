@@ -116,7 +116,7 @@ class GemmTCGEN5(GemmBase):
         analyzer = Analyzer()
         warp_size = 32
         assert analyzer.can_prove(thread_bounds.min % warp_size == 0 and thread_bounds.extent % warp_size == 0), (
-            "TCGEN5MMA requires thread bounds to be multiples of warp size (32) nd aligned to warps."
+            "TCGEN5MMA requires thread bounds to be multiples of warp size (32) and aligned to warps."
         )
 
         @T.prim_func
