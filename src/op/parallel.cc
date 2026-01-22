@@ -592,13 +592,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
             << "    fragment " << fragment->DebugOutput() << '\n';
         success = false;
       }
-      if (this->loop_vars_[0]->var->name_hint == "i_aaa") {
-        if (buffer->name == "col_sum2") {
-          LOG(INFO) << "Debug: Target=" << fragment << " Loop=" << loop_layout_
-                    << " result: " << success << " has_read: " << access.is_read
-                    << " has_write: " << access.is_write;
-        }
-      }
       if (!success) {
         throw LayoutConflictException(oss.str());
       }
