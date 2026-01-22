@@ -87,7 +87,7 @@ struct fp8_e5_4_t {
       fp8_e5_t x, y, z, w;
     };
   };
-  __device__ fp8_e5_4_t() = default;
+  __device__ fp8_e5_4_t() = delete;
   __device__ fp8_e5_4_t(const __hip_fp8x4_e5m2_fnuz &val) : data(val) {}
   __device__ operator __hip_fp8x4_e5m2_fnuz() const { return data; }
 };
