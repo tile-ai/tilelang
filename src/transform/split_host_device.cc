@@ -110,35 +110,61 @@ private:
     return body;
   }
 
+  std::tuple<Array<tir::Var>, Array<tir::Var>, Array<tir::Buffer>,
+             Map<tir::Var, tir::Var>>
+  collectCrossVars(tir::Stmt body) {
+    // "Cross Vars" are those variables which is defined in the host-side, used
+    // in the kernel-side, which is the most important type of variables when we
+    // do transforms like splitting functions.
+
+    // We need to carefully handle them. The process is as follows:
+
+    // 1. Perform UseDefAnalysis to collect all cross vars.
+    // 2. Make a copy of them to avoid cases like "identical variables
+    // appear in different PrimFuncs".
+    // 3. Promote them to the parameter list of new device function after
+    // splitted.
+    // 4. Do a remap to substitute all old vars with new vars.
+
+    // This function returns a list of old cross vars, a list of new copied
+    // cross vars, buffers need to be declared (This is a TIR convention. We can
+    // only pass T.handle as arguments) and the variable remap between old vars
+    // and new vars.
+
+    tir::VarUseDefAnalyzer use_def(/*defined_vars=*/{},
+                                   /*visit_thread_extent=*/true);
+    use_def(body);
+
+    // Sort first by variable type, then by variable name
+    std::vector<tir::Var> old_vars, new_vars;
+    ffi::Map<tir::Var, tir::Var> var_remap;
+
+    for (const auto &undefined_var : use_def.undefined_) {
+      auto new_var = undefined_var.copy_with_suffix("_device");
+      old_vars.push_back(undefined_var);
+      new_vars.push_back(new_var);
+      var_remap.Set(undefined_var, new_var);
+    }
+
+    std::sort(old_vars.begin(), old_vars.end(),
+              [](const tir::Var &a, const tir::Var &b) {
+                auto sort_key = [](const tir::Var &var) {
+                  return std::tuple{
+                      !var->dtype.is_handle(),
+                      var->name_hint,
+                  };
+                };
+                return sort_key(a) < sort_key(b);
+              });
+    return {old_vars, new_vars, use_def.undefined_buffers_, var_remap};
+  }
+
   tir::Stmt SplitDeviceFunc(tir::Stmt body, tvm::Target device_target) {
 
-    auto [params, buffers_to_declare] =
-        [&]() -> std::tuple<Array<tir::Var>, Array<tir::Buffer>> {
-      tir::VarUseDefAnalyzer use_def(/*defined_vars=*/{},
-                                     /*visit_thread_extent=*/true);
-      use_def(body);
-
-      // Sort first by variable type, then by variable name
-      std::vector<tir::Var> params{use_def.undefined_.begin(),
-                                   use_def.undefined_.end()};
-
-      for (auto &&param : params) {
-        std::cout << "undefined param: " << param->name_hint << " ";
-      }
-      std::cout << std::endl;
-
-      std::sort(params.begin(), params.end(),
-                [](const tir::Var &a, const tir::Var &b) {
-                  auto sort_key = [](const tir::Var &var) {
-                    return std::tuple{
-                        !var->dtype.is_handle(),
-                        var->name_hint,
-                    };
-                  };
-                  return sort_key(a) < sort_key(b);
-                });
-      return {params, use_def.undefined_buffers_};
-    }();
+    // Old vars as "args" for the generated Call / Evaluate;
+    // New vars as "params" for the new splitted device PrimFunc.
+    auto [old_vars, new_vars, buffers_to_declare, var_remap] =
+        collectCrossVars(body);
 
     // CodeGenCPU is used for some device-side targets, such as
     // "ext_dev", and expects to be able to return a int32_t status
@@ -165,7 +191,10 @@ private:
     // Copy assumes from host-side to device-side.
     body = wrapBodyWithHostSideAssumes(body);
 
-    tir::PrimFunc device_func(params, body, kernel_ret_type);
+    // Remap all old variables with new params.
+    body = tir::Substitute(body, var_remap);
+
+    tir::PrimFunc device_func(new_vars, body, kernel_ret_type);
     device_func =
         WithAttrs(std::move(device_func),
                   {{tvm::attr::kTarget, device_target},
@@ -175,22 +204,19 @@ private:
 
     GlobalVar kernel_symbol_global = var_supply_();
     (*device_mod_)->Add(kernel_symbol_global, device_func);
-    Array<PrimExpr> args =
-        params.Map([](const tir::Var &var) -> PrimExpr { return var; });
 
     if (can_propagate_errors) {
       tir::Var kernel_error_code("kernel_error_code", success->dtype);
-      tir::Call kernel_call(success->dtype, kernel_symbol_global, args);
+      tir::Call kernel_call(success->dtype, kernel_symbol_global, old_vars);
       tir::AssertStmt assert_success(
           kernel_error_code == success,
           tir::StringImm("Error executing compute kernel"), tir::Evaluate(0));
       tir::LetStmt let_check(kernel_error_code, kernel_call, assert_success);
 
       return let_check;
-
     } else {
       return tir::Evaluate(
-          tir::Call(DataType::Void(), kernel_symbol_global, args));
+          tir::Call(DataType::Void(), kernel_symbol_global, old_vars));
     }
   }
 
