@@ -405,6 +405,10 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
         return key
 
+    def get_kernel_source(self, *args: _P.args, **kwargs: _P.kwargs) -> str:
+        kernel = self.compile(*args, **kwargs)
+        return kernel.get_kernel_source()
+
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         # Separate out the tuning parameters from the user's kwargs
         # Whether to return the compile arguments (out_idx, target, target_host, etc.) for autotuner cache
