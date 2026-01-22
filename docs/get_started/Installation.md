@@ -170,6 +170,70 @@ docker exec -it tilelang_b200 /bin/zsh
 python -c "import tilelang; print(tilelang.__version__)"
 ```
 
+### ROCm container build (gfx942/gfx950)
+
+If you are using the `sglang` ROCm container and need to build TileLang in it (for example on MI300 `gfx942`), the build requires extra system libraries, Cython, and a valid `llvm-config`. The following steps match the build flow used in `sglang/docker/rocm.Dockerfile`:
+
+```bash
+# Inside the container (as root)
+apt-get update && apt-get install -y --no-install-recommends \
+  build-essential git wget curl ca-certificates gnupg \
+  libgtest-dev libgmock-dev \
+  libprotobuf-dev protobuf-compiler libgflags-dev libsqlite3-dev \
+  python3 python3-dev python3-setuptools python3-pip \
+  gcc libtinfo-dev zlib1g-dev libedit-dev libxml2-dev \
+  cmake ninja-build pkg-config libstdc++6 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Build GoogleTest static libs (Ubuntu package ships sources only)
+cmake -S /usr/src/googletest -B /tmp/build-gtest -DBUILD_GTEST=ON -DBUILD_GMOCK=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/build-gtest -j"$(nproc)"
+cp -v /tmp/build-gtest/lib/*.a /usr/lib/x86_64-linux-gnu/
+rm -rf /tmp/build-gtest
+
+# Keep setuptools < 80 (compat with some base images)
+python3 -m pip install --upgrade "setuptools>=77.0.3,<80" wheel cmake ninja
+
+# Locate ROCm llvm-config
+LLVM_CONFIG_PATH=""
+for p in /opt/rocm/llvm/bin/llvm-config /opt/rocm/llvm-*/bin/llvm-config /opt/rocm-*/llvm*/bin/llvm-config; do
+  if [ -x "$p" ]; then LLVM_CONFIG_PATH="$p"; break; fi
+done
+if [ -z "$LLVM_CONFIG_PATH" ]; then
+  echo "ERROR: ROCm llvm-config not found under /opt/rocm"
+  exit 1
+fi
+export LLVM_CONFIG="$LLVM_CONFIG_PATH"
+export PATH="$(dirname "$LLVM_CONFIG"):/usr/local/bin:${PATH}"
+
+# Optional shim for tools that expect llvm-config-16
+mkdir -p /usr/local/bin
+printf "#!/usr/bin/env bash\nexec \"%s\" \"\$@\"\n" "$LLVM_CONFIG_PATH" > /usr/local/bin/llvm-config-16
+chmod +x /usr/local/bin/llvm-config-16
+
+# TVM Python bits need Cython (for system Python used by the build)
+python3 -m pip install --no-cache-dir "cython>=0.29.36,<3.0"
+
+# Clone + build TileLang (ROCm)
+git clone --recursive https://github.com/tile-ai/tilelang.git
+cd /opt/tilelang
+export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=ON -DROCM_PATH=/opt/rocm -DLLVM_CONFIG=${LLVM_CONFIG}"
+
+# Avoid pulling CUDA wheels / reinstalling torch by skipping dependency resolution.
+# Assume torch is already installed in the container.
+python3 -m pip install -e . -v --no-build-isolation --no-deps
+
+# If you hit Cython compile errors like `PyLong_SHIFT`/`digit` not declared,
+# disable the stable ABI (abi3) for editable builds:
+# export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=ON -DROCM_PATH=/opt/rocm -DLLVM_CONFIG=${LLVM_CONFIG} -DSKBUILD_SABI_VERSION="
+# python3 -m pip install -e . -v --no-build-isolation --no-deps
+
+# Verify
+python -c "import tilelang; print(tilelang.__version__)"
+```
+
+If you still want to use `pip install -e . -v --no-build-isolation` without `--no-deps`, pip will try to resolve TileLang dependencies and may download CUDA wheels (e.g., `nvidia_cudnn`, `nvidia_nvshmem`) and reinstall `torch`. To avoid that in ROCm containers, keep `--no-deps` and ensure required packages are already installed.
+
 ## Install with Nightly Version
 
 For users who want access to the latest features and improvements before official releases, we provide nightly builds of tilelang.
