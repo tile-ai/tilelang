@@ -937,9 +937,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"bfloat16x4", "bfloat16x4_vec"},
         {"float32x4", "float32x4"},
         {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
-        {"float8_e4m3fnx4",   "fp8_e4_4_t"},
+        {"float8_e4m3fnx4", "fp8_e4_4_t"},
         {"float8_e4m3fnuzx8", "long"},
-        {"float8_e4m3fnx8",   "long"},
+        {"float8_e4m3fnx8", "long"},
         {"float8_e5m2fnuzx4", "fp8_e5_4_t"},
         {"float8_e5m2fnuzx8", "long"},
         {"float32x16", "float32x16"}};
@@ -1284,7 +1284,6 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     os << "bfloat16_t";
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;
-<<<<<<< HEAD
   } else if (op->dtype.is_float8_e4m3fnuz() || op->dtype.is_float8_e4m3() ||
              op->dtype.is_float8_e4m3fn()) {
     os << "fp8_e4_t";
