@@ -1,6 +1,8 @@
 import torch
 import tilelang.testing
 import tilelang.language as T
+
+from tilelang.intrinsics import make_mma_swizzle_layout
 import pytest
 
 
@@ -163,6 +165,37 @@ def vectorize_broadcast_int8(vec_num):
 def test_vectorize_broadcast_int8(vec_num):
     """Test broadcasting a non-constant int8 value to a vectorized store."""
     vectorize_broadcast_int8.compile(vec_num=vec_num)
+
+
+@tilelang.jit
+def vectorize_test_call_infinity():
+    A = T.empty((4,), dtype=T.float32)
+    with T.Kernel(1, threads=128):
+        for i in T.vectorized(4):
+            A[i] = T.infinity(T.float32)
+    return A
+
+
+def test_vectorize_call_infinity():
+    kernel = vectorize_test_call_infinity.compile()
+    assert "float4" in kernel.get_kernel_source()
+
+
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_VECTORIZE_PLANNER_VERBOSE: True})
+def vectorize_test_call_bitwise_logical():
+    A = T.empty((128, 32), dtype=T.float32)
+    with T.Kernel(1, threads=128):
+        A_shared = T.alloc_shared((128, 32), dtype=T.float32)
+        T.annotate_layout({A_shared: make_mma_swizzle_layout(A_shared)})
+        for i, j in T.Parallel(128, 32):
+            A_shared[i, j] = A[i, j]
+    return A
+
+
+def test_vectorize_call_bitwise_logical():
+    kernel = vectorize_test_call_bitwise_logical.compile()
+    print(kernel.get_kernel_source())
+    assert "float4" in kernel.get_kernel_source()
 
 
 if __name__ == "__main__":

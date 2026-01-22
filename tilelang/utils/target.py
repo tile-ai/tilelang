@@ -174,6 +174,10 @@ def target_is_hip(target: Target) -> bool:
     return _ffi_api.TargetIsRocm(target)
 
 
+def target_is_metal(target: Target) -> bool:
+    return _ffi_api.TargetIsMetal(target)
+
+
 def target_is_volta(target: Target) -> bool:
     return _ffi_api.TargetIsVolta(target)
 

@@ -1109,6 +1109,9 @@ private:
         // when not divided, no reuse, eg, float4 vs float3
         if (e->bits_offset % op_elem_bits != 0)
           continue;
+        // must check element type to avoid type mismatch in codegen
+        if (e->elem_type != op->dtype.element_of())
+          continue;
         if (reuse_require_exact_matched_dtype && e->elem_type != op->dtype) {
           continue;
         }
@@ -1962,21 +1965,12 @@ Pass StorageRewrite() {
         ctx->GetConfig<Bool>(kStorageRewriteDetectInplace, Bool(false)).value();
     bool enable_reuse = true;
     bool reuse_require_exact_matched_dtype = false;
-    bool merge_static_smem =
-        ctx->GetConfig<Bool>("tir.merge_static_smem", Bool(false)).value();
     AllocateCollector collector;
     collector(f->body);
-    bool has_dynamic = collector.dyn_shmem_allocs_.size() > 1;
-    if (has_dynamic || merge_static_smem) {
-      // For IRModule utilizing dynamic shared memory, reuse is not enabled
-      // Because dynamic doesn't require maintaining the readability and
-      // it benefits from a more optimized allocation strategy through the
-      // Pass `MergeSharedMemoryAllocations`.
-      // When `merge_static_smem` is true, we will reuse and merge shared
-      // memory in a dedicated pass `MergeSharedMemoryAllocations`.
-      // And so we don't enable reuse in this pass.
-      enable_reuse = false;
-    }
+    // Always disable reuse currently, for shared memory reuse we depend on
+    // MergeSharedMemoryAllocations pass, for register reuse we depend on nvcc
+    // or other compiler its self.
+    enable_reuse = false;
 
     Optional<Target> target = f->GetAttr<Target>("target");
     if (target.defined() && (target.value()->kind->name == "vulkan" ||

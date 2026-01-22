@@ -6,6 +6,7 @@
 #include "utils.h"
 
 #include "../support/ffi_aliases.h"
+#include "dlpack/dlpack.h"
 #include <tvm/node/node.h>
 
 namespace tvm {
@@ -16,6 +17,9 @@ bool TargetIsCuda(Target target) {
 }
 bool TargetIsRocm(Target target) {
   return target->GetTargetDeviceType() == kDLROCM;
+}
+bool TargetIsMetal(Target target) {
+  return target->GetTargetDeviceType() == kDLMetal;
 }
 
 int GetArchInt(Target target) {
@@ -196,6 +200,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsCuda(target); })
       .def("tl.TargetIsRocm",
            [](Target target) { return TargetIsRocm(target); })
+      .def("tl.TargetIsMetal",
+           [](Target target) { return TargetIsMetal(target); })
       .def("tl.TargetIsVolta",
            [](Target target) { return TargetIsVolta(target); })
       .def("tl.TargetIsTuring",

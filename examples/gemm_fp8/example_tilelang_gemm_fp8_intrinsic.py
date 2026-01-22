@@ -227,13 +227,10 @@ def run_regression_perf():
     out_dtype, accum_dtype = "float32", "float32"
     in_dtype = T.float8_e4m3fn
     kernel_e4m3 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    print(kernel_e4m3.get_kernel_source())
     profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
     latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")
-    in_dtype = T.float8_e5m2
-    kernel_e5m2 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    profiler_e5m2 = kernel_e5m2.get_profiler(tilelang.TensorSupplyType.Integer)
-    latency_e5m2 = profiler_e5m2.do_bench(backend="cupti")
-    return (latency_e4m3 + latency_e5m2) / 2
+    return latency_e4m3
 
 
 if __name__ == "__main__":

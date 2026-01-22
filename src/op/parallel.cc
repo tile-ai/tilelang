@@ -53,15 +53,18 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
   // (forward index) of both fragments are equal. This is required when
   // validating loop layout against buffer fragment, as code generation
   // needs to correctly derive buffer physical indices from loop layout.
+  bool large_physical_is_fully_replicated = large_frag->IsCompletedReplicated();
+  if (large_physical_is_fully_replicated) {
+    return true; // fully replicated fragments are always compatible
+  }
+
   if (check_forward_index) {
     auto small_physical = small_frag->Forward(small_frag_indices);
     auto large_physical = large_frag->Forward(large_frag_indices);
-
     // Dimension mismatch means they are not equal.
     if (small_physical.size() != large_physical.size()) {
       return false;
     }
-
     // Check each physical index component for equality.
     for (size_t i = 0; i < small_physical.size(); i++) {
       auto diff = analyzer_.Simplify(small_physical[i] - large_physical[i]);
