@@ -33,7 +33,6 @@ def test_ldg32_codegen():
     torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
-
 def test_ldg64_codegen():
     """Test that ldg64 generates tl::ldg64 in CUDA source."""
 
@@ -44,7 +43,7 @@ def test_ldg64_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 2, threads=32) as pid:
-            Y[pid * 2: pid * 2 + 2] = T.reinterpret(T.float32x2, T.ldg64(X[pid * 2: pid * 2 + 2]))
+            Y[pid * 2 : pid * 2 + 2] = T.reinterpret(T.float32x2, T.ldg64(X[pid * 2 : pid * 2 + 2]))
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.empty(128, dtype=torch.float32, device="cuda")
@@ -68,7 +67,7 @@ def test_ldg128_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 4, threads=32) as pid:
-            Y[pid * 4: pid * 4 + 4] = T.reinterpret(T.float32x4, T.ldg128(X[pid * 4: pid * 4 + 4]))
+            Y[pid * 4 : pid * 4 + 4] = T.reinterpret(T.float32x4, T.ldg128(X[pid * 4 : pid * 4 + 4]))
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.empty(128, dtype=torch.float32, device="cuda")
@@ -92,7 +91,7 @@ def test_ldg256_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 8, threads=32) as pid:
-            Y[pid * 8: pid * 8 + 8] = T.reinterpret(T.float32x8, T.ldg256(X[pid * 8: pid * 8 + 8]))
+            Y[pid * 8 : pid * 8 + 8] = T.reinterpret(T.float32x8, T.ldg256(X[pid * 8 : pid * 8 + 8]))
 
     X = torch.randn(256, dtype=torch.float32, device="cuda")
     Y = torch.empty(256, dtype=torch.float32, device="cuda")
@@ -141,7 +140,7 @@ def test_ldg64_predicated_codegen():
 
         with T.Kernel(N // 2, threads=32) as pid:
             # Only load for the first half of elements
-            Y[pid * 2: pid * 2 + 2] = T.reinterpret(T.float32x2, T.ldg64(X[pid * 2: pid * 2 + 2], pred=pid < N // 4))
+            Y[pid * 2 : pid * 2 + 2] = T.reinterpret(T.float32x2, T.ldg64(X[pid * 2 : pid * 2 + 2], pred=pid < N // 4))
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.zeros(128, dtype=torch.float32, device="cuda")
@@ -166,7 +165,7 @@ def test_ldg128_predicated_codegen():
 
         with T.Kernel(N // 4, threads=32) as pid:
             # Only load for the first half of elements
-            Y[pid * 4: pid * 4 + 4] = T.reinterpret(T.float32x4, T.ldg128(X[pid * 4: pid * 4 + 4], pred=pid < N // 8))
+            Y[pid * 4 : pid * 4 + 4] = T.reinterpret(T.float32x4, T.ldg128(X[pid * 4 : pid * 4 + 4], pred=pid < N // 8))
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.zeros(128, dtype=torch.float32, device="cuda")
@@ -179,6 +178,7 @@ def test_ldg128_predicated_codegen():
     print(src)
     assert "ldg128" in src, "Expected ldg128 call in generated CUDA source"
 
+
 def test_ldg256_predicated_codegen():
     """Test that ldg256 with predicate generates tl::ldg256(ptr, pred) in CUDA source."""
 
@@ -190,7 +190,7 @@ def test_ldg256_predicated_codegen():
 
         with T.Kernel(N // 8, threads=32) as pid:
             # Only load for the first half of elements
-            Y[pid * 8: pid * 8 + 8] = T.reinterpret(T.float32x8, T.ldg256(X[pid * 8: pid * 8 + 8], pred=pid < N // 16))
+            Y[pid * 8 : pid * 8 + 8] = T.reinterpret(T.float32x8, T.ldg256(X[pid * 8 : pid * 8 + 8], pred=pid < N // 16))
 
     X = torch.randn(256, dtype=torch.float32, device="cuda")
     Y = torch.zeros(256, dtype=torch.float32, device="cuda")
@@ -202,6 +202,7 @@ def test_ldg256_predicated_codegen():
     print("=== ldg256 predicated codegen ===")
     print(src)
     assert "ldg256" in src, "Expected ldg256 call in generated CUDA source"
+
 
 if __name__ == "__main__":
     # tilelang.testing.main()

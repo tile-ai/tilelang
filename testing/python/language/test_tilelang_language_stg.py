@@ -43,8 +43,8 @@ def test_stg64_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 2, threads=32) as pid:
-            val = T.ldg64(X[pid * 2: pid * 2 + 2])
-            T.stg64(Y[pid * 2: pid * 2 + 2], val)
+            val = T.ldg64(X[pid * 2 : pid * 2 + 2])
+            T.stg64(Y[pid * 2 : pid * 2 + 2], val)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.empty(128, dtype=torch.float32, device="cuda")
@@ -71,8 +71,8 @@ def test_stg128_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 4, threads=32) as pid:
-            val = T.ldg128(X[pid * 4: pid * 4 + 4])
-            T.stg128(Y[pid * 4: pid * 4 + 4], val)
+            val = T.ldg128(X[pid * 4 : pid * 4 + 4])
+            T.stg128(Y[pid * 4 : pid * 4 + 4], val)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.empty(128, dtype=torch.float32, device="cuda")
@@ -99,8 +99,8 @@ def test_stg256_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 8, threads=32) as pid:
-            val = T.ldg256(X[pid * 8: pid * 8 + 8])
-            T.stg256(Y[pid * 8: pid * 8 + 8], val)
+            val = T.ldg256(X[pid * 8 : pid * 8 + 8])
+            T.stg256(Y[pid * 8 : pid * 8 + 8], val)
 
     X = torch.randn(256, dtype=torch.float32, device="cuda")
     Y = torch.empty(256, dtype=torch.float32, device="cuda")
@@ -152,9 +152,9 @@ def test_stg64_predicated_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 2, threads=32) as pid:
-            val = T.ldg64(X[pid * 2: pid * 2 + 2])
+            val = T.ldg64(X[pid * 2 : pid * 2 + 2])
             # Only store for the first half of elements
-            T.stg64(Y[pid * 2: pid * 2 + 2], val, pred=pid < N // 4)
+            T.stg64(Y[pid * 2 : pid * 2 + 2], val, pred=pid < N // 4)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.zeros(128, dtype=torch.float32, device="cuda")
@@ -178,9 +178,9 @@ def test_stg128_predicated_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 4, threads=32) as pid:
-            val = T.ldg128(X[pid * 4: pid * 4 + 4])
+            val = T.ldg128(X[pid * 4 : pid * 4 + 4])
             # Only store for the first half of elements
-            T.stg128(Y[pid * 4: pid * 4 + 4], val, pred=pid < N // 8)
+            T.stg128(Y[pid * 4 : pid * 4 + 4], val, pred=pid < N // 8)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.zeros(128, dtype=torch.float32, device="cuda")
@@ -204,9 +204,9 @@ def test_stg256_predicated_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 8, threads=32) as pid:
-            val = T.ldg256(X[pid * 8: pid * 8 + 8])
+            val = T.ldg256(X[pid * 8 : pid * 8 + 8])
             # Only store for the first half of elements
-            T.stg256(Y[pid * 8: pid * 8 + 8], val, pred=pid < N // 16)
+            T.stg256(Y[pid * 8 : pid * 8 + 8], val, pred=pid < N // 16)
 
     X = torch.randn(256, dtype=torch.float32, device="cuda")
     Y = torch.zeros(256, dtype=torch.float32, device="cuda")
