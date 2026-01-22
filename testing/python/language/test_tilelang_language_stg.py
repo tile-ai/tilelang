@@ -6,6 +6,7 @@ import tilelang.testing
 import torch
 
 
+@tilelang.testing.requires_cuda
 def test_stg32_codegen():
     """Test that stg32 generates tl::stg32 in CUDA source."""
 
@@ -33,6 +34,7 @@ def test_stg32_codegen():
     torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
 
 
+@tilelang.testing.requires_cuda
 def test_stg64_codegen():
     """Test that stg64 generates tl::stg64 in CUDA source."""
 
@@ -61,6 +63,7 @@ def test_stg64_codegen():
     torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
 
 
+@tilelang.testing.requires_cuda
 def test_stg128_codegen():
     """Test that stg128 generates tl::stg128 in CUDA source."""
 
@@ -89,6 +92,7 @@ def test_stg128_codegen():
     torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
 
 
+@tilelang.testing.requires_cuda
 def test_stg256_codegen():
     """Test that stg256 generates tl::stg256 in CUDA source."""
 
@@ -117,6 +121,7 @@ def test_stg256_codegen():
     torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
 
 
+@tilelang.testing.requires_cuda
 def test_stg32_predicated_codegen():
     """Test that stg32 with predicate generates tl::stg32(ptr, val, pred) in CUDA source."""
 
@@ -142,6 +147,7 @@ def test_stg32_predicated_codegen():
     assert "stg32" in src, "Expected stg32 call in generated CUDA source"
 
 
+@tilelang.testing.requires_cuda
 def test_stg64_predicated_codegen():
     """Test that stg64 with predicate generates tl::stg64(ptr, val, pred) in CUDA source."""
 
@@ -168,6 +174,7 @@ def test_stg64_predicated_codegen():
     assert "stg64" in src, "Expected stg64 call in generated CUDA source"
 
 
+@tilelang.testing.requires_cuda
 def test_stg128_predicated_codegen():
     """Test that stg128 with predicate generates tl::stg128(ptr, val, pred) in CUDA source."""
 
@@ -194,6 +201,7 @@ def test_stg128_predicated_codegen():
     assert "stg128" in src, "Expected stg128 call in generated CUDA source"
 
 
+@tilelang.testing.requires_cuda
 def test_stg256_predicated_codegen():
     """Test that stg256 with predicate generates tl::stg256(ptr, val, pred) in CUDA source."""
 
@@ -221,13 +229,4 @@ def test_stg256_predicated_codegen():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    tilelang.disable_cache()
-    test_stg32_codegen()
-    test_stg64_codegen()
-    test_stg128_codegen()
-    test_stg256_codegen()
-    test_stg32_predicated_codegen()
-    test_stg64_predicated_codegen()
-    test_stg128_predicated_codegen()
-    test_stg256_predicated_codegen()
+    tilelang.testing.main()

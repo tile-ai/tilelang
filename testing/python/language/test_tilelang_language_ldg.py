@@ -6,6 +6,7 @@ import tilelang.testing
 import torch
 
 
+@tilelang.testing.requires_cuda
 def test_ldg32_codegen():
     """Test that ldg32 generates tl::ldg32 in CUDA source."""
 
@@ -33,6 +34,7 @@ def test_ldg32_codegen():
     torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
+@tilelang.testing.requires_cuda
 def test_ldg64_codegen():
     """Test that ldg64 generates tl::ldg64 in CUDA source."""
 
@@ -57,6 +59,7 @@ def test_ldg64_codegen():
     assert "ldg64" in src, "Expected ldg64 call in generated CUDA source"
 
 
+@tilelang.testing.requires_cuda
 def test_ldg128_codegen():
     """Test that ldg128 generates tl::ldg128 in CUDA source."""
 
@@ -81,6 +84,7 @@ def test_ldg128_codegen():
     assert "ldg128" in src, "Expected ldg128 call in generated CUDA source"
 
 
+@tilelang.testing.requires_cuda
 def test_ldg256_codegen():
     """Test that ldg256 generates tl::ldg256 in CUDA source."""
 
@@ -105,6 +109,7 @@ def test_ldg256_codegen():
     assert "ldg256" in src, "Expected ldg256 call in generated CUDA source"
 
 
+@tilelang.testing.requires_cuda
 def test_ldg32_predicated_codegen():
     """Test that ldg32 with predicate generates tl::ldg32(ptr, pred) in CUDA source."""
 
@@ -129,6 +134,7 @@ def test_ldg32_predicated_codegen():
     assert "ldg32" in src, "Expected ldg32 call in generated CUDA source"
 
 
+@tilelang.testing.requires_cuda
 def test_ldg64_predicated_codegen():
     """Test that ldg64 with predicate generates tl::ldg64(ptr, pred) in CUDA source."""
 
@@ -154,6 +160,7 @@ def test_ldg64_predicated_codegen():
     assert "ldg64" in src, "Expected ldg64 call in generated CUDA source"
 
 
+@tilelang.testing.requires_cuda
 def test_ldg128_predicated_codegen():
     """Test that ldg128 with predicate generates tl::ldg128(ptr, pred) in CUDA source."""
 
@@ -179,6 +186,8 @@ def test_ldg128_predicated_codegen():
     assert "ldg128" in src, "Expected ldg128 call in generated CUDA source"
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_ldg256_predicated_codegen():
     """Test that ldg256 with predicate generates tl::ldg256(ptr, pred) in CUDA source."""
 
@@ -205,13 +214,4 @@ def test_ldg256_predicated_codegen():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    tilelang.disable_cache()
-    test_ldg32_codegen()
-    test_ldg64_codegen()
-    test_ldg128_codegen()
-    test_ldg256_codegen()
-    test_ldg32_predicated_codegen()
-    test_ldg64_predicated_codegen()
-    test_ldg128_predicated_codegen()
-    test_ldg256_predicated_codegen()
+    tilelang.testing.main()
