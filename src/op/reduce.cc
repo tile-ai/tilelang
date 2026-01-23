@@ -472,9 +472,12 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
         throw LayoutConflictException(oss.str());
       }
 
-      if (dst_rep > src_rep) {
-        return {{dst, dst_layout}};
-      }
+      // We shouldn't widen the layout here,
+      // because is may be written by other parallel for op
+      // So just keep the original layout
+      // if (dst_rep > src_rep) {
+      //   return {{dst, dst_layout}};
+      // }
     }
   }
   return {};
