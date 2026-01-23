@@ -164,6 +164,9 @@ def is_var(v: Any) -> bool:
     return isinstance(v, Buffer) and v.scope() == "local.var"
 
 
+# phase1: eager jit obtain function signature
+# phase2: eager jit elaborate function
+# none: not inside eager jit, i.e. it is lazyjit
 EagerJITStage = Literal["phase1", "phase2", "none"]
 
 
