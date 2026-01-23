@@ -2696,7 +2696,28 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     // Handle float4_e2m1fn reinterpret
     if (!src_dtype.is_float4_e2m1fn() && !tgt_dtype.is_float4_e2m1fn()) {
-      return CodeGenC::VisitExpr_(op, os);
+      CHECK_EQ(tgt_dtype.lanes() * tgt_dtype.bits(),
+               src_dtype.lanes() * src_dtype.bits())
+          << "reinterpret expects source and target to have the same number of "
+             "bits";
+
+      std::string src_val = PrintExpr(value);
+      std::string rhs = SSAGetID(src_val, src_dtype);
+
+      // If SSAGetID returns the expression itself (happens when MarkConst was
+      // called for constants like -CUDART_INF_F), we need to create a temp
+      // variable because we cannot take the address of an rvalue.
+      if (rhs == src_val) {
+        rhs = name_supply_->FreshName("_reinterpret_tmp");
+        PrintIndent();
+        PrintType(src_dtype, stream);
+        stream << " " << rhs << " = " << src_val << ";\n";
+      }
+
+      os << "(*(";
+      this->PrintType(tgt_dtype, os);
+      os << " *)(&(" << rhs << ")))";
+      return;
     }
     if (src_dtype == tgt_dtype || tgt_dtype.lanes() * tgt_dtype.bits() ==
                                       src_dtype.lanes() * src_dtype.bits()) {
@@ -2718,7 +2739,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       // The case of lane=1 is same as the normal reinterpret,
       // except that we allow the src and dst dtype to have different number of
       // bits.
-      std::string rhs = SSAGetID(PrintExpr(value), src_dtype);
+      std::string src_val = PrintExpr(value);
+      std::string rhs = SSAGetID(src_val, src_dtype);
+      // If SSAGetID returns the expression itself (constant), create temp var
+      if (rhs == src_val) {
+        rhs = name_supply_->FreshName("_reinterpret_tmp");
+        PrintIndent();
+        PrintType(src_dtype, stream);
+        stream << " " << rhs << " = " << src_val << ";\n";
+      }
       os << "(*(";
       this->PrintType(tgt_dtype, os);
       os << " *)(&(" << rhs << ")))";
