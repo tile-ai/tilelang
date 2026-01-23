@@ -370,6 +370,10 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         )
 
     def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
+        key, _ = self.func.parse_args(*args, **kwargs)
+        if key in self._kernel_cache:
+            return self._kernel_cache[key]
+
         prim_func = self.get_tir(*args, **kwargs)
         kernel_result = compile(
             prim_func,
@@ -395,6 +399,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             with open(path.join(self.debug_root_path, program_file), "w") as f:
                 print(prim_func.script(), file=f)
 
+        self._kernel_cache[key] = kernel_result
         return kernel_result
 
     def parse_cache_key(self, *args: _P.args, **kwargs: _P.kwargs):
@@ -441,6 +446,25 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             return kernel(*kernel_args.values())
         else:
             return kernel
+
+    def get_kernel_source(self, *args: _P.args, **kwargs: _P.kwargs) -> str:
+        """
+        Get the source code of the compiled kernel for the given arguments.
+
+        Parameters
+        ----------
+        *args : _P.args
+            Positional arguments to pass to the JIT function.
+        **kwargs : _P.kwargs
+            Keyword arguments to pass to the JIT function.
+
+        Returns
+        -------
+        str
+            The source code of the compiled kernel.
+        """
+        kernel = self.compile(*args, **kwargs)
+        return kernel.get_kernel_source()
 
 
 ExecutionBackend = Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]

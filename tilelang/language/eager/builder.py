@@ -1054,7 +1054,9 @@ class JITFunc(Generic[_P, _T]):
     def parse_args(self, *args, **kwargs):
         """Parse arguments and return cache key and tensor args."""
         p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
-        if not tensor_args:
+        if self.mode == "auto":
+            self.mode = "lazy" if self._is_lazy_style(*args, **kwargs) else "eager"
+        if self.mode == "lazy":
             return (p1_key, None), kwargs
         tir_temp = self.p1_cache.get(p1_key, None)
         if tir_temp is None:
