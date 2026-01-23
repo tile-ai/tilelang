@@ -961,7 +961,7 @@ def ldg32(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) ->
         >>> val = T.ldg32(x[i:i+2])  # load 2 x fp16
         >>> val = T.ldg32(x[i], pred=i < N)  # predicated load
     """
-    if not isinstance(src, (Buffer, BufferRegion, BufferLoad)):
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
         raise TypeError(f"T.ldg32 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
     ptr = retrieve_ptr(src, access_type="r")
     if pred is None:
@@ -987,7 +987,7 @@ def ldg64(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) ->
         >>> val = T.ldg64(x[i:i+4])  # load 4 x fp16
         >>> val = T.ldg64(x[i], pred=i < N)  # predicated load
     """
-    if not isinstance(src, (Buffer, BufferRegion, BufferLoad)):
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
         raise TypeError(f"T.ldg64 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
     ptr = retrieve_ptr(src, access_type="r")
     if pred is None:
@@ -1013,7 +1013,7 @@ def ldg128(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -
         >>> val = T.ldg128(x[i:i+8])  # load 8 x fp16
         >>> val = T.ldg128(x[i], pred=i < N)  # predicated load
     """
-    if not isinstance(src, (Buffer, BufferRegion, BufferLoad)):
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
         raise TypeError(f"T.ldg128 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
     ptr = retrieve_ptr(src, access_type="r")
     if pred is None:
@@ -1039,7 +1039,7 @@ def ldg256(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -
         >>> val = T.ldg256(x[i:i+16])  # load 16 x fp16
         >>> val = T.ldg256(x[i], pred=i < N)  # predicated load
     """
-    if not isinstance(src, (Buffer, BufferRegion, BufferLoad)):
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
         raise TypeError(f"T.ldg256 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
     ptr = retrieve_ptr(src, access_type="r")
     if pred is None:
@@ -1062,7 +1062,7 @@ def stg32(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: Pr
         >>> T.stg32(y[i], val)
         >>> T.stg32(y[i], val, pred=i < N)  # predicated store
     """
-    if not isinstance(dst, (Buffer, BufferRegion, BufferLoad)):
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
         raise TypeError(f"T.stg32 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
     ptr = retrieve_ptr(dst, access_type="w")
     if pred is None:
@@ -1085,7 +1085,7 @@ def stg64(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: Pr
         >>> T.stg64(y[i:i+2], val)
         >>> T.stg64(y[i:i+2], val, pred=i < N)  # predicated store
     """
-    if not isinstance(dst, (Buffer, BufferRegion, BufferLoad)):
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
         raise TypeError(f"T.stg64 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
     ptr = retrieve_ptr(dst, access_type="w")
     if pred is None:
@@ -1108,7 +1108,7 @@ def stg128(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: P
         >>> T.stg128(y[i:i+4], val)
         >>> T.stg128(y[i:i+4], val, pred=i < N)  # predicated store
     """
-    if not isinstance(dst, (Buffer, BufferRegion, BufferLoad)):
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
         raise TypeError(f"T.stg128 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
     ptr = retrieve_ptr(dst, access_type="w")
     if pred is None:
@@ -1131,7 +1131,7 @@ def stg256(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: P
         >>> T.stg256(y[i:i+8], val)
         >>> T.stg256(y[i:i+8], val, pred=i < N)  # predicated store
     """
-    if not isinstance(dst, (Buffer, BufferRegion, BufferLoad)):
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
         raise TypeError(f"T.stg256 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
     ptr = retrieve_ptr(dst, access_type="w")
     if pred is None:
