@@ -475,9 +475,15 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
       // We shouldn't widen the layout here,
       // because is may be written by other parallel for op
       // So just keep the original layout
-      // if (dst_rep > src_rep) {
-      //   return {{dst, dst_layout}};
-      // }
+      if (dst_rep > src_rep) {
+        std::ostringstream oss;
+        oss << "Layout may conflict with ReduceOp for buffer " << dst << " vs. "
+            << src << "\nLHS = " << src_layout->DebugOutput()
+            << "\nRHS = " << orig_dst_layout->DebugOutput()
+            << "\nYou may need to use a shared memory to transform the "
+               "layout";
+        throw LayoutConflictException(oss.str());
+      }
     }
   }
   return {};
