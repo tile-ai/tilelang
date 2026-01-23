@@ -47,13 +47,7 @@ def test_vec_add():
     print(f'The maximum difference between torch and Tilellang is '
           f'{torch.max(torch.abs(y_ref - v3))}')
 
-    if torch.allclose(v3, y_ref, atol=1e-2, rtol=0):
-        print("✅ Tilellang and Torch match")
-    else:
-        print("❌ Tilellang and Torch differ")
-        diff = torch.abs(v3 - y_ref)
-        print(f"Max diff: {diff.max().item()}")
-        print(f"Mean diff: {diff.mean().item()}")
+    torch.testing.assert_close(v3, y_ref, atol=1e-2, rtol=0)
 
 
 if __name__ == "__main__":

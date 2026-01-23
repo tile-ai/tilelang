@@ -45,15 +45,8 @@ def main():
 
     kernel(a, b, result)
     golden = a @ b
-    print(f"result is {result}, golden is {golden}")
-    if torch.allclose(result, golden, atol=1e-2, rtol=1e-2):
-        print("✅ Tilellang and Torch match")
-    else:
-        print("❌ Tilellang and Torch differ")
-        diff = torch.abs(result - golden)
-        print(f"Max diff: {diff.max().item()}")
-        print(f"Mean diff: {diff.mean().item()}")
-
+    # print(f"result is {result}, golden is {golden}")
+    torch.testing.assert_close(result, golden, atol=1e-2, rtol=1e-2)
 
 if __name__ == "__main__":
     main()
