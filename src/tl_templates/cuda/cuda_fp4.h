@@ -34,7 +34,9 @@ struct fp4_e2_t {
   TL_DEVICE operator float() const {
     __nv_fp4_e2m1 tmp;
     tmp.__x = __x;
-    return float(tmp);
+    float result = float(tmp);
+    // printf("fp4_e2_t to float: %f\n", result);
+    return result;
   }
 
   // Implicit conversion to half_t (cutlass::half_t)
@@ -277,6 +279,31 @@ TL_DEVICE __nv_fp4x2_storage_t
 __tl_cvt_bfloat162_to_fp4x2(const __nv_bfloat162 src) {
   __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
   return __nv_cvt_bfloat16raw2_to_fp4x2(raw, __NV_E2M1, cudaRoundNearest);
+}
+
+// ============================================================================
+// FP4 Packed Buffer Access Helpers
+// ============================================================================
+// These helpers are used for accessing individual fp4 elements from packed
+// fp4_e2_2_t storage, where each byte stores 2 fp4 values.
+
+// Load a single fp4 element from packed storage
+// packed: pointer to fp4_e2_2_t array
+// idx: logical index of the fp4 element
+TL_DEVICE fp4_e2_t tl_fp4_packed_load(fp4_e2_2_t *packed, int idx) {
+  return (idx & 1) ? packed[idx >> 1].y() : packed[idx >> 1].x();
+}
+
+// Store a single fp4 element to packed storage
+// packed: pointer to fp4_e2_2_t array
+// idx: logical index of the fp4 element
+// val: value to store
+TL_DEVICE void tl_fp4_packed_store(fp4_e2_2_t *packed, int idx, fp4_e2_t val) {
+  if (idx & 1) {
+    packed[idx >> 1].set_y(val);
+  } else {
+    packed[idx >> 1].set_x(val);
+  }
 }
 
 #endif
