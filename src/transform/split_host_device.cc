@@ -109,14 +109,13 @@ private:
   // same name. We always perform substitution to ensure ConvertSSA sees
   // consistent variable references.
   Stmt wrapBodyWithHostSideAssumes(
-      Stmt body,
-      const std::unordered_map<std::string, tir::Var> &name_to_var) {
+      Stmt body, const std::unordered_map<std::string, tir::Var> &name_to_var) {
     // Build substitution map: assume_var -> body_var
     // Always substitute if we find a matching name, regardless of whether
     // it's the same object. This ensures ConvertSSA treats them as the same
     // variable.
-    auto substitute_func = [&name_to_var](const tir::Var &var)
-        -> Optional<PrimExpr> {
+    auto substitute_func =
+        [&name_to_var](const tir::Var &var) -> Optional<PrimExpr> {
       auto it = name_to_var.find(var->name_hint);
       if (it != name_to_var.end()) {
         return it->second;
@@ -127,9 +126,10 @@ private:
     for (auto it = host_assumes_.rbegin(); it != host_assumes_.rend(); ++it) {
       // Substitute variables in the assume condition
       PrimExpr original_node = Downcast<PrimExpr>((*it)->node);
-      PrimExpr substituted_node = tir::Substitute(original_node, substitute_func);
-      body = AttrStmt(substituted_node, tir::attr::tilelang_assume, (*it)->value,
-                      body);
+      PrimExpr substituted_node =
+          tir::Substitute(original_node, substitute_func);
+      body = AttrStmt(substituted_node, tir::attr::tilelang_assume,
+                      (*it)->value, body);
     }
     return body;
   }
@@ -177,20 +177,18 @@ private:
     // Also remap buffers to use new variables
     Array<tir::Buffer> new_buffers_to_declare;
     for (const auto &buf : buffers_to_declare) {
-      auto new_shape = buf->shape.Map([&](const PrimExpr &e) {
-        return tir::Substitute(e, var_remap);
-      });
-      auto new_strides = buf->strides.Map([&](const PrimExpr &e) {
-        return tir::Substitute(e, var_remap);
-      });
+      auto new_shape = buf->shape.Map(
+          [&](const PrimExpr &e) { return tir::Substitute(e, var_remap); });
+      auto new_strides = buf->strides.Map(
+          [&](const PrimExpr &e) { return tir::Substitute(e, var_remap); });
       auto new_elem_offset = tir::Substitute(buf->elem_offset, var_remap);
       auto new_data = var_remap.count(buf->data)
                           ? Downcast<tir::Var>(var_remap[buf->data])
                           : buf->data;
       tir::Buffer new_buf(new_data, buf->dtype, new_shape, new_strides,
                           new_elem_offset, buf->name, buf->data_alignment,
-                          buf->offset_factor, buf->buffer_type, buf->axis_separators,
-                          buf->span);
+                          buf->offset_factor, buf->buffer_type,
+                          buf->axis_separators, buf->span);
       new_buffers_to_declare.push_back(new_buf);
     }
     buffers_to_declare = new_buffers_to_declare;
