@@ -221,13 +221,24 @@ private:
     // that assume variables refer to function parameters.
     body = wrapBodyWithHostSideAssumes(body, name_to_var);
 
+    // Remap non_restrict_params to use new parameter variables
+    Array<tir::Var> remapped_non_restrict_params;
+    for (const auto &old_var : non_restrict_params_) {
+      if (var_remap.count(old_var)) {
+        remapped_non_restrict_params.push_back(
+            Downcast<tir::Var>(var_remap[old_var]));
+      } else {
+        remapped_non_restrict_params.push_back(old_var);
+      }
+    }
+
     tir::PrimFunc device_func(params, body, kernel_ret_type);
-    device_func =
-        WithAttrs(std::move(device_func),
-                  {{tvm::attr::kTarget, device_target},
-                   {tir::attr::kNoAlias, true},
-                   {tir::attr::kIsGlobalFunc, true},
-                   {tl::attr::kNonRestrictParams, non_restrict_params_}});
+    device_func = WithAttrs(
+        std::move(device_func),
+        {{tvm::attr::kTarget, device_target},
+         {tir::attr::kNoAlias, true},
+         {tir::attr::kIsGlobalFunc, true},
+         {tl::attr::kNonRestrictParams, remapped_non_restrict_params}});
 
     GlobalVar kernel_symbol_global = var_supply_();
     (*device_mod_)->Add(kernel_symbol_global, device_func);
