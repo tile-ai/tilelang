@@ -38,7 +38,7 @@ def allowed_backends_for_target(target: Target, *, include_unavailable: bool = T
     elif kind == "hip":
         allowed = ["tvm_ffi", "cython"]
     elif kind == "metal":
-        allowed = ["torch"]
+        allowed = ["tvm_ffi", "torch"]
     elif kind == "c":  # CPU C backend
         allowed = ["cython", "tvm_ffi"]
     else:
@@ -80,10 +80,8 @@ def resolve_execution_backend(requested: str | None, target: Target) -> str:
         if is_cutedsl_target(target):
             return "cutedsl"
         kind = _target_kind(target)
-        if kind == "cuda":
+        if kind == "cuda" or kind == "metal":
             choice = "tvm_ffi"
-        elif kind == "metal":
-            choice = "torch"
         else:
             choice = "cython"
         # If the chosen default is not available (very rare), fall back to first available

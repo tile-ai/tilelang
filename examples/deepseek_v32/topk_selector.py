@@ -57,6 +57,8 @@ def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
             l_end_idx = T.alloc_var(T.int32)
             l_out_pos = T.alloc_var(T.int32)
 
+            pos = T.alloc_var(T.int32)
+
             l_new_topk = topk
             l_start_idx = starts[bx]
             l_end_idx = ends[bx]
@@ -113,7 +115,7 @@ def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
             # stage 2: tail pass
             for round in T.serial(4):
                 if l_new_topk <= 0:
-                    T.loop_break()
+                    break
 
                 r_idx = round % 2
                 l_start_pos = topk - l_new_topk

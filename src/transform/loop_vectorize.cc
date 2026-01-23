@@ -23,6 +23,7 @@
  */
 
 #include "loop_vectorize.h"
+#include "../config.h"
 #include "../op/builtin.h"
 #include "../op/utils.h"
 #include "../target/utils.h"
@@ -166,15 +167,8 @@ public:
       : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
 
   int Plan(const For &node) {
-    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-    Optional<Bool> opt_disable_vectorize_256 =
-        ctxt->GetConfig(kDisableVectorize256, Optional<Bool>());
-    bool disable_vectorize_256 =
-        opt_disable_vectorize_256.value_or(Bool(false));
-
-    Optional<Bool> opt_verbose =
-        ctxt->GetConfig(kEnableVectorizePlannerVerbose, Optional<Bool>());
-    bool verbose = opt_verbose.value_or(Bool(false));
+    bool disable_vectorize_256 = tl_config::Vectorize256Disabled();
+    bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
     if (TargetSupportVectorize256(Target::Current(false)) &&
         !disable_vectorize_256 &&
@@ -216,9 +210,11 @@ public:
                 << "\n";
     }
 
-    // Separate buffers into local/fragment vs memory (global/shared)
+    // Separate buffers into local/fragment vs memory (global/shared) vs
+    // call/cast
     int local_fragment_min = initial_vector_size_;
     int memory_min = initial_vector_size_;
+    int call_node_min = initial_vector_size_;
     bool has_global_or_shared_buffer = false;
 
     auto is_local_or_fragment = [](const Buffer &buf) {
@@ -236,25 +232,28 @@ public:
                     << " -> vector_size=" << info.vector_size
                     << (info.is_store ? " [store]" : " [load]") << "\n";
         } else {
-          std::cerr << "  [cast/extern/rng] -> vector_size=" << info.vector_size
+          std::cerr << "  [cast/call] -> vector_size=" << info.vector_size
                     << "\n";
         }
       }
       if (!buffer.defined()) {
         // CastNode, CallNode do not have buffer defined.
-        local_fragment_min =
-            arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
-        memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
+        call_node_min = arith::ZeroAwareGCD(call_node_min, info.vector_size);
       } else if (is_local_or_fragment(buffer)) {
         local_fragment_min =
             arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
         local_fragment_buffers.push_back(info);
       } else {
-        // global, shared, shared.dyn, or non-buffer constraints
-        // (cast/extern/rng)
+        // global, shared, shared.dyn
         memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
         has_global_or_shared_buffer = true;
       }
+    }
+
+    if (verbose) {
+      std::cerr << "  Computed mins: local_fragment_min=" << local_fragment_min
+                << ", memory_min=" << memory_min
+                << ", call_node_min=" << call_node_min << "\n";
     }
 
     if (has_seq_stmt) {
@@ -262,17 +261,16 @@ public:
       // Use conservative strategy: take GCD of all buffers including local.
       // The special local buffer optimization only applies to simple single
       // BufferStore cases where we can be confident about the access pattern.
-      vector_size_ = arith::ZeroAwareGCD(local_fragment_min, memory_min);
+      vector_size_ = arith::ZeroAwareGCD(
+          arith::ZeroAwareGCD(local_fragment_min, memory_min), call_node_min);
       if (verbose) {
-        std::cerr << "  [Strategy] Has SeqStmt, using conservative GCD of all: "
-                  << "local_fragment_min=" << local_fragment_min
-                  << ", memory_min=" << memory_min
+        std::cerr << "  [Strategy] Has SeqStmt, using conservative GCD of all"
                   << " -> vector_size=" << vector_size_ << "\n";
       }
     } else if (has_global_or_shared_buffer) {
       // Has memory buffers and simple case (no SeqStmt):
       // ignore local/fragment constraints
-      vector_size_ = memory_min;
+      vector_size_ = arith::ZeroAwareGCD(memory_min, call_node_min);
       if (verbose) {
         std::cerr << "  [Strategy] Has memory buffers (simple case), using "
                      "memory_min="
@@ -306,12 +304,13 @@ public:
         }
       }
     } else {
-      // Only local/fragment buffers: use their min
-      vector_size_ = local_fragment_min;
+      // Only local/fragment buffers: use GCD of local_fragment_min and
+      // call_node_min
+      vector_size_ = arith::ZeroAwareGCD(local_fragment_min, call_node_min);
       if (verbose) {
         std::cerr << "  [Strategy] Only local/fragment buffers, using "
-                     "local_fragment_min="
-                  << local_fragment_min << "\n";
+                     "GCD(local_fragment_min, call_node_min)="
+                  << vector_size_ << "\n";
       }
     }
 
@@ -411,17 +410,68 @@ private:
       // address_of have buffer load value so we should analysis the buffer load
       // node to update vector_size_.
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
-    } else if (node->op.same_as(tir::builtin::bitwise_and()) ||
-               node->op.same_as(tir::builtin::bitwise_or()) ||
-               node->op.same_as(tir::builtin::bitwise_xor()) ||
-               node->op.same_as(tir::builtin::bitwise_not()) ||
-               node->op.same_as(tir::builtin::shift_left()) ||
-               node->op.same_as(tir::builtin::shift_right())) {
-      // Bitwise operations can be vectorized
+    }
+
+    // vectorizable property
+    OpAttrMap<TVectorizable> op_vectorizable_ =
+        Op::GetAttrMap<TVectorizable>("TVectorizable");
+
+    auto optional_op = node->op.as<Op>();
+    bool vectorizable = op_vectorizable_.get(optional_op.value(), false) &&
+                        !node->dtype.is_scalable_vector();
+    if (vectorizable) {
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
-    // for other call nodes, we should not apply vectorization
-    buffer_vector_infos_.push_back({Buffer(), 1, false, {}});
+
+    // For other call nodes, use PostOrderVisit to check buffer accesses
+    // and determine if the given vector size is invariant
+    auto check_buffer_access_invariant = [&](int target_vec_size) -> bool {
+      if (!inner_for_)
+        return true;
+      bool all_invariant = true;
+      PostOrderVisit(ffi::GetRef<PrimExpr>(node), [&](const ObjectRef &obj) {
+        if (!all_invariant)
+          return;
+        if (auto *load = obj.as<BufferLoadNode>()) {
+          auto transformed_indices =
+              TransformIndices(load->indices, load->buffer);
+          Array<PrimExpr> strides = GetBufferStrides(load->buffer);
+          PrimExpr elem_offset = 0;
+          for (size_t i = 0; i < transformed_indices.size(); ++i) {
+            elem_offset += transformed_indices[i] * strides[i];
+          }
+          if (!IsExprInvariantInVectorBoundary(elem_offset,
+                                               inner_for_->loop_var,
+                                               target_vec_size, analyzer_)) {
+            all_invariant = false;
+          }
+        } else if (auto *store = obj.as<BufferStoreNode>()) {
+          auto transformed_indices =
+              TransformIndices(store->indices, store->buffer);
+          Array<PrimExpr> strides = GetBufferStrides(store->buffer);
+          PrimExpr elem_offset = 0;
+          for (size_t i = 0; i < transformed_indices.size(); ++i) {
+            elem_offset += transformed_indices[i] * strides[i];
+          }
+          if (!IsExprInvariantInVectorBoundary(elem_offset,
+                                               inner_for_->loop_var,
+                                               target_vec_size, analyzer_)) {
+            all_invariant = false;
+          }
+        }
+      });
+      return all_invariant;
+    };
+    // Find the largest vector size where all buffer accesses are invariant
+    int call_node_vector_size = loop_extent_vector_size_;
+    while (call_node_vector_size > 1) {
+      if (check_buffer_access_invariant(call_node_vector_size)) {
+        break;
+      }
+      call_node_vector_size /= 2;
+    }
+    buffer_vector_infos_.push_back(
+        {Buffer(), call_node_vector_size, false, {}});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
@@ -429,22 +479,8 @@ private:
     // TODO: perform some checks here
   }
 
-  PrimExpr VisitExpr_(const CastNode *node) final {
-    int cast_vector_size = arith::ZeroAwareGCD(
-        vector_load_bits_max_ / node->dtype.bits(), initial_vector_size_);
-    // Record cast constraint (use empty buffer to indicate cast)
-    buffer_vector_infos_.push_back({Buffer(), cast_vector_size, false, {}});
-    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
-  }
-
-  int ComputeBufferVectorSize(const Array<PrimExpr> &indices,
-                              const Buffer &buffer, bool is_store) {
-    if (!inner_for_)
-      return initial_vector_size_;
-
-    int buffer_vec_size = loop_extent_vector_size_;
-
-    // Transform indices using layout_map if present
+  Array<PrimExpr> TransformIndices(const Array<PrimExpr> &indices,
+                                   const Buffer &buffer) {
     auto transformed_indices = indices;
     if (layout_map_.defined() && layout_map_.count(buffer)) {
       ICHECK(IsBufferContiguous(buffer, analyzer_))
@@ -476,6 +512,26 @@ private:
             Array<PrimExpr>{new_indices.rbegin(), new_indices.rend()};
       }
     }
+    return transformed_indices;
+  }
+
+  PrimExpr VisitExpr_(const CastNode *node) final {
+    int cast_vector_size = arith::ZeroAwareGCD(
+        vector_load_bits_max_ / node->dtype.bits(), initial_vector_size_);
+    // Record cast constraint (use empty buffer to indicate cast)
+    buffer_vector_infos_.push_back({Buffer(), cast_vector_size, false, {}});
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+  }
+
+  int ComputeBufferVectorSize(const Array<PrimExpr> &indices,
+                              const Buffer &buffer, bool is_store) {
+    if (!inner_for_)
+      return initial_vector_size_;
+
+    int buffer_vec_size = loop_extent_vector_size_;
+
+    // Transform indices using layout_map if present
+    auto transformed_indices = TransformIndices(indices, buffer);
 
     // 1. Compute raw element offset
     Array<PrimExpr> strides = GetBufferStrides(buffer);
