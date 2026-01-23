@@ -921,8 +921,11 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
     // fp4_e2_8_t
     if (t.lanes() >= 8)
       os << "." << access[(i % 8) / 4];
-    // fp4_e2_4_t or fp4_e2_2_t
-    os << "." << access[i % 4];
+    // fp4_e2_4_t -> fp4_e2_2_t member
+    if (t.lanes() >= 4)
+      os << "." << access[(i % 4) / 2];
+    // fp4_e2_2_t -> method call x() or y()
+    os << "." << access[i % 2] << "()";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -1040,8 +1043,11 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
     // fp4_e2_8_t
     if (t.lanes() >= 8)
       stream << "." << access[(i % 8) / 4];
-    // fp4_e2_4_t or fp4_e2_2_t
-    stream << "." << access[i % 4] << " = " << value << ";\n";
+    // fp4_e2_4_t -> fp4_e2_2_t member
+    if (t.lanes() >= 4)
+      stream << "." << access[(i % 4) / 2];
+    // fp4_e2_2_t -> set_x() or set_y()
+    stream << ".set_" << access[i % 2] << "(" << value << ");\n";
   } else {
     stream << vec << "." << access[i] << " = " << value << ";\n";
   }

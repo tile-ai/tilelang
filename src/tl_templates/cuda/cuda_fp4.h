@@ -44,27 +44,36 @@ struct fp4_e2_t {
   TL_DEVICE operator __half() const { return __half(float(*this)); }
 };
 
-using fp4_e2x2_t = __nv_fp4x2_e2m1;
-using fp4_e2x4_t = __nv_fp4x4_e2m1;
+class fp4_e2_2_t {
+public:
+  __nv_fp4x2_storage_t __x;
 
-struct fp4_e2x8_t {
-  fp4_e2_t data[8];
+  TL_DEVICE fp4_e2_2_t() = default;
+  TL_DEVICE fp4_e2_2_t(__nv_fp4x2_storage_t data) : __x(data) {}
+  TL_DEVICE fp4_e2_2_t(__nv_fp4x2_e2m1 data) : __x(data.__x) {}
+
+  // Get low 4 bits (first fp4)
+  TL_DEVICE fp4_e2_t x() const {
+    return fp4_e2_t(__nv_fp4_storage_t(__x & 0x0F));
+  }
+
+  // Get high 4 bits (second fp4)
+  TL_DEVICE fp4_e2_t y() const {
+    return fp4_e2_t(__nv_fp4_storage_t((__x >> 4) & 0x0F));
+  }
+
+  // Set low 4 bits (first fp4)
+  TL_DEVICE void set_x(fp4_e2_t val) { __x = (__x & 0xF0) | (val.__x & 0x0F); }
+
+  // Set high 4 bits (second fp4)
+  TL_DEVICE void set_y(fp4_e2_t val) {
+    __x = (__x & 0x0F) | ((val.__x & 0x0F) << 4);
+  }
 };
 
-struct fp4_e2x16_t {
-  fp4_e2_t data[16];
-};
-
-struct __CUDA_ALIGN__(1) fp4_e2_2_t {
-  fp4_e2_t x;
-  fp4_e2_t y;
-};
-
-struct __CUDA_ALIGN__(2) fp4_e2_4_t {
-  fp4_e2_t x;
-  fp4_e2_t y;
-  fp4_e2_t z;
-  fp4_e2_t w;
+struct __CUDA_ALIGN__(4) fp4_e2_4_t {
+  fp4_e2_2_t x;
+  fp4_e2_2_t y;
 };
 
 struct __CUDA_ALIGN__(4) fp4_e2_8_t {
@@ -97,9 +106,9 @@ struct __CUDA_ALIGN__(32) fp4_e2_64_t {
 
 // Pack two fp4_e2_t values.
 TL_DEVICE fp4_e2_2_t make_fp4_e2_2_t(fp4_e2_t x, fp4_e2_t y) {
+  __nv_fp4x2_storage_t packed = (x.__x & 0x0F) | ((y.__x & 0x0F) << 4);
   fp4_e2_2_t result;
-  result.x = x;
-  result.y = y;
+  result.__x = packed;
   return result;
 }
 
@@ -107,10 +116,8 @@ TL_DEVICE fp4_e2_2_t make_fp4_e2_2_t(fp4_e2_t x, fp4_e2_t y) {
 TL_DEVICE fp4_e2_4_t make_fp4_e2_4_t(fp4_e2_t x0, fp4_e2_t x1, fp4_e2_t x2,
                                      fp4_e2_t x3) {
   fp4_e2_4_t result;
-  result.x = x0;
-  result.y = x1;
-  result.z = x2;
-  result.w = x3;
+  result.x = make_fp4_e2_2_t(x0, x1);
+  result.y = make_fp4_e2_2_t(x2, x3);
   return result;
 }
 
