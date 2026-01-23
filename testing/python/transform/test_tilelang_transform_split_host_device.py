@@ -222,27 +222,27 @@ def test_split_host_device_no_dangling_vars():
     import re
 
     # Look for patterns like "n_1 = T.int32()" which indicate dangling vars
-    dangling_pattern = r'\bn_\d+\s*=\s*T\.int32\(\)'
+    dangling_pattern = r"\bn_\d+\s*=\s*T\.int32\(\)"
     matches = re.findall(dangling_pattern, device_str)
 
     # Filter out legitimate uses (like in blocks that might have their own scope)
     # We're specifically looking for dangling declarations at function level
-    lines = device_str.split('\n')
+    lines = device_str.split("\n")
     dangling_decls = []
     for line in lines:
         # Check if this is a top-level dangling declaration
         # (not inside a block's T.reads()/T.writes())
         stripped = line.strip()
-        if re.match(r'^n_\d+\s*=\s*T\.int32\(\)$', stripped):
+        if re.match(r"^n_\d+\s*=\s*T\.int32\(\)$", stripped):
             dangling_decls.append(stripped)
 
     # If assume is immediately followed by a dangling var declaration, that's the bug
-    assume_indices = [i for i, line in enumerate(lines) if 'tl.assume' in line]
+    assume_indices = [i for i, line in enumerate(lines) if "tl.assume" in line]
     for idx in assume_indices:
         # Check if line before assume has dangling var
         if idx > 0:
             prev_line = lines[idx - 1].strip()
-            if re.match(r'^n_\d+\s*=\s*T\.int32\(\)$', prev_line):
+            if re.match(r"^n_\d+\s*=\s*T\.int32\(\)$", prev_line):
                 raise AssertionError(
                     f"Found dangling variable declaration '{prev_line}' before assume. "
                     "This indicates SplitHostDevice did not properly substitute variables."
