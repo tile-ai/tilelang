@@ -256,6 +256,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
+    mod = tilelang.transform.LowerLDGSTG()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier

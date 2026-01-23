@@ -38,6 +38,8 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutVisualizationEnable, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutVisualizationFormats, String);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDeviceCompileFlags, ffi::Array<ffi::String>);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableDataRaceCheck, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableLowerLDGSTG, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableLowerLDGSTGPredicated, Bool);
 
 DataType cuTensorMapType() { return DataType::UInt(8, 128); }
 

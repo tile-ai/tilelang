@@ -55,6 +55,30 @@ static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
+
+/*!
+ * \brief Enable lowering non-predicated global load/store to ldg/stg intrinsics
+ *
+ * When enabled, transforms regular (non-predicated) global memory loads and
+ * stores to explicit ldg/stg intrinsics for potentially better performance.
+ * Default: OFF (disabled)
+ *
+ * kEnableLowerLDGSTG = "tl.enable_lower_ldgstg"
+ */
+static constexpr const char *kEnableLowerLDGSTG = "tl.enable_lower_ldgstg";
+
+/*!
+ * \brief Disable lowering predicated global load/store to ldg/stg intrinsics
+ *
+ * When enabled (set to true), predicated loads (if_then_else with else=0) and
+ * predicated stores (IfThenElse with store in then case) will NOT be lowered
+ * to predicated ldg/stg intrinsics.
+ * Default: OFF (predicated lowering is enabled by default)
+ *
+ * kDisableLowerLDGSTGPredicated = "tl.disable_lower_ldgstg_predicated"
+ */
+static constexpr const char *kDisableLowerLDGSTGPredicated =
+    "tl.disable_lower_ldgstg_predicated";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
 static constexpr const char *kASTPrintEnable = "tl.ast_print_enable";

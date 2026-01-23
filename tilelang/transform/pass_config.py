@@ -55,6 +55,17 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
 
+    TL_ENABLE_LOWER_LDGSTG = "tl.enable_lower_ldgstg"
+    """Enable non-predicated LDG/STG lowering for global memory access.
+    When enabled, converts Ramp-based global buffer load/store to ldg/stg intrinsics.
+    Default: False"""
+
+    TL_DISABLE_LOWER_LDGSTG_PREDICATED = "tl.disable_lower_ldgstg_predicated"
+    """Disable predicated LDG/STG lowering.
+    When False (default), predicated loads (if_then_else with else=0) and
+    predicated stores (IfThenElse with empty then case) are lowered to
+    ldg/stg intrinsics. Default: False"""
+
     TL_ENABLE_VECTORIZE_PLANNER_VERBOSE = "tl.enable_vectorize_planner_verbose"
     """Enable verbose output for vectorize planner. When enabled, prints detailed
     information about each buffer's inferred vector size and which buffer determines

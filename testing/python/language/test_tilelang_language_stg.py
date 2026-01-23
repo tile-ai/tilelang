@@ -202,6 +202,7 @@ def test_stg128_predicated_codegen():
 
 
 @tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_stg256_predicated_codegen():
     """Test that stg256 with predicate generates tl::stg256(ptr, val, pred) in CUDA source."""
 
