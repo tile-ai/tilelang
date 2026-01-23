@@ -3067,7 +3067,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
     // For FP4 scalar local buffers, we use packed storage type,
-    // so skip type declaration here (will be handled in the local scope section below)
+    // so skip type declaration here (will be handled in the local scope section
+    // below)
     bool is_fp4_scalar_local = op->dtype.is_float4() && op->dtype.is_scalar() &&
                                (scope == "local" || scope.empty());
     if (!is_fp4_scalar_local) {
@@ -3102,10 +3103,12 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     } else if (scope == "local") {
       // For FP4 types, use packed storage type to avoid wasting registers.
       // fp4_e2_t uses int8 as storage but only needs 4 bits per element.
-      // By using fp4_e2_2_t (which stores 2 fp4 values in 1 byte), we halve the storage.
+      // By using fp4_e2_2_t (which stores 2 fp4 values in 1 byte), we halve the
+      // storage.
       if (op->dtype.is_float4() && op->dtype.is_scalar()) {
         auto vid_packed = vid + "_packed";
-        stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2 << "];\n";
+        stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2
+               << "];\n";
         // Record mapping from original buffer to packed buffer name
         fp4_packed_buffers_[op->buffer_var.get()] = vid_packed;
       } else {
@@ -3271,7 +3274,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     std::string idx_str = PrintExpr(index_expr);
     std::string value = this->PrintExpr(op->value);
     this->PrintIndent();
-    stream << "tl_fp4_packed_store(" << packed_it->second << ", " << idx_str << ", " << value << ");\n";
+    stream << "tl_fp4_packed_store(" << packed_it->second << ", " << idx_str
+           << ", " << value << ");\n";
     return;
   }
 
