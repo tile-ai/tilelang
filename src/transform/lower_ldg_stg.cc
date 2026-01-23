@@ -2,8 +2,9 @@
  * \file lower_ldg_stg.cc
  * \brief Lower Ramp-based global memory load/store to ldg/stg intrinsics
  *
- * This pass transforms vectorized global memory loads and stores (using Ramp indices)
- * into explicit ldg32/64/128/256 and stg32/64/128/256 intrinsics for better codegen.
+ * This pass transforms vectorized global memory loads and stores (using Ramp
+ * indices) into explicit ldg32/64/128/256 and stg32/64/128/256 intrinsics for
+ * better codegen.
  *
  * Key behaviors:
  * 1. Converts Ramp-based global BufferLoad to ldg intrinsics
@@ -14,8 +15,10 @@
  * 6. Only enabled for CUDA targets
  *
  * Pass configurations:
- * - tl.enable_lower_ldgstg: Enable non-predicated ldg/stg lowering (default: OFF)
- * - tl.disable_lower_ldgstg_predicated: Disable predicated ldg/stg lowering (default: OFF)
+ * - tl.enable_lower_ldgstg: Enable non-predicated ldg/stg lowering (default:
+ * OFF)
+ * - tl.disable_lower_ldgstg_predicated: Disable predicated ldg/stg lowering
+ * (default: OFF)
  */
 
 #include <tvm/ffi/reflection/registry.h>
@@ -70,7 +73,8 @@ public:
     // Assume buffer has been flattened by FlattenBuffer pass
     ICHECK(store->indices.size() == 1)
         << "Expected flattened buffer with single index, but got "
-        << store->indices.size() << " indices for buffer " << store->buffer->name;
+        << store->indices.size() << " indices for buffer "
+        << store->buffer->name;
 
     // Check if this is a Ramp-based store (vectorized)
     if (store->indices[0]->IsInstance<RampNode>()) {
@@ -481,7 +485,8 @@ tvm::transform::Pass LowerLDGSTG() {
         ctx->GetConfig<Bool>(kEnableLowerLDGSTG, Bool(false)).value();
     // Predicated ldg/stg: default ON (so disable flag default is false)
     bool disable_predicated =
-        ctx->GetConfig<Bool>(kDisableLowerLDGSTGPredicated, Bool(false)).value();
+        ctx->GetConfig<Bool>(kDisableLowerLDGSTGPredicated, Bool(false))
+            .value();
     bool enable_predicated = !disable_predicated;
 
     // If both are disabled, skip the pass entirely

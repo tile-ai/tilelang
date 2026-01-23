@@ -22,10 +22,12 @@ def _apply_passes(mod, enable_non_predicated=False, disable_predicated=False):
     mod = tvm.tir.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
-    with tvm.transform.PassContext(config={
-        PassConfigKey.TL_ENABLE_LOWER_LDGSTG: enable_non_predicated,
-        PassConfigKey.TL_DISABLE_LOWER_LDGSTG_PREDICATED: disable_predicated,
-    }):
+    with tvm.transform.PassContext(
+        config={
+            PassConfigKey.TL_ENABLE_LOWER_LDGSTG: enable_non_predicated,
+            PassConfigKey.TL_DISABLE_LOWER_LDGSTG_PREDICATED: disable_predicated,
+        }
+    ):
         mod = tl.transform.LowerLDGSTG()(mod)
     return mod
 
@@ -35,9 +37,8 @@ def _check_has_intrinsic(mod, intrinsic_name):
     found = [False]
 
     def visitor(obj):
-        if isinstance(obj, tir.Call):
-            if hasattr(obj.op, "name") and intrinsic_name in obj.op.name:
-                found[0] = True
+        if isinstance(obj, tir.Call) and hasattr(obj.op, "name") and intrinsic_name in obj.op.name:
+            found[0] = True
 
     tir.stmt_functor.post_order_visit(mod["main"].body, visitor)
     return found[0]
