@@ -334,6 +334,21 @@ private:
 
       Layout layout = layout_map_[original_buffer];
       Buffer new_buffer = buffer_remap_[original_buffer];
+
+      // In TMA context, swizzle is encoded in TMA descriptor parameters
+      // rather than in memory indices, so we only update buffer data
+      // without recomputing indices.
+      if (in_tma_context_) {
+        Array<PrimExpr> new_args = access_ptr_call->args;
+        new_args.Set(1, new_buffer->data); // Only replace data var
+        layout_remap_.Set(new_buffer, layout);
+        result.rewritten = true;
+        result.expr =
+            Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
+                 access_ptr_call->annotations, access_ptr_call->span);
+        return result;
+      }
+
       // Get the offset from tvm_access_ptr args[2]
       PrimExpr elem_offset = access_ptr_call->args[2];
       if (offset.defined()) {
@@ -397,6 +412,31 @@ private:
           << "but got indices size: " << indices.size()
           << " and shape size: " << old_shape.size();
 
+      Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
+      Optional<Layout> layout = FindLayout(remap_key);
+      if (!layout.defined() || !buffer_map_.count(remap_key->data)) {
+        return result;
+      }
+      auto new_buffer = buffer_remap_.count(remap_key)
+                            ? buffer_remap_[remap_key]
+                            : load->buffer;
+      auto new_shape = new_buffer->shape;
+
+      // In TMA context, swizzle is encoded in TMA descriptor parameters
+      // rather than in memory indices, so we only update buffer data
+      // without recomputing indices.
+      if (in_tma_context_) {
+        Array<PrimExpr> new_args = {BufferLoad(new_buffer, indices)};
+        if (buffer_remap_.count(remap_key)) {
+          layout_remap_.Set(new_buffer, layout.value());
+        }
+        result.rewritten = true;
+        result.expr =
+            Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
+                 access_ptr_call->annotations, access_ptr_call->span);
+        return result;
+      }
+
       PrimExpr elem_offset = 0;
       PrimExpr stride = 1;
 
@@ -407,16 +447,6 @@ private:
 
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
-
-      Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
-      Optional<Layout> layout = FindLayout(remap_key);
-      if (!layout.defined() || !buffer_map_.count(remap_key->data)) {
-        return result;
-      }
-      auto new_buffer = buffer_remap_.count(remap_key)
-                            ? buffer_remap_[remap_key]
-                            : load->buffer;
-      auto new_shape = new_buffer->shape;
 
       auto buffer_map_iter = buffer_map_.find(Downcast<Var>(remap_key->data));
 
@@ -522,7 +552,10 @@ private:
         op->op.same_as(tl::tma_store())) {
       // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
-      return Downcast<Call>(op);
+      in_tma_context_ = true;
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      in_tma_context_ = false;
+      return call;
     }
 
     if (is_ptx_) {
@@ -1002,6 +1035,11 @@ private:
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
   bool has_tma_{false};
+  // Flag to indicate we are inside a TMA context (tma_load, tma_load_im2col,
+  // tma_store). When true, HandleAccessPtrAndOffset only updates buffer data
+  // without recomputing indices, since swizzle is encoded in TMA descriptor
+  // parameters rather than in memory indices.
+  bool in_tma_context_{false};
 };
 
 namespace transform {
