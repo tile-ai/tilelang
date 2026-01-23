@@ -34,9 +34,7 @@ struct fp4_e2_t {
   TL_DEVICE operator float() const {
     __nv_fp4_e2m1 tmp;
     tmp.__x = __x;
-    float result = float(tmp);
-    // printf("fp4_e2_t to float: %f\n", result);
-    return result;
+    return float(tmp);
   }
 
   // Implicit conversion to half_t (cutlass::half_t)
