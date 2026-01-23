@@ -305,25 +305,20 @@ private:
     PrimExpr ptr = CreateAccessPtr(load->buffer, base, 1);
 
     DataType ret_dtype;
-    autoOp ldg_op;
-    switch (bytes) {
-    case 4:
+    Op ldg_op;
+    if (bytes == 4) {
       ret_dtype = DataType::UInt(32);
       ldg_op = ldg32();
-      break;
-    case 8:
+    } else if (bytes == 8) {
       ret_dtype = DataType::UInt(32, 2);
       ldg_op = ldg64();
-      break;
-    case 16:
+    } else if (bytes == 16) {
       ret_dtype = DataType::UInt(32, 4);
       ldg_op = ldg128();
-      break;
-    case 32:
+    } else if (bytes == 32) {
       ret_dtype = DataType::UInt(32, 8);
       ldg_op = ldg256();
-      break;
-    default:
+    } else {
       LOG(FATAL) << "Unsupported byte width for ldg: " << bytes;
       return PrimExpr();
     }
@@ -345,25 +340,20 @@ private:
     PrimExpr ptr = CreateAccessPtr(load->buffer, base, 1);
 
     DataType ret_dtype;
-    auto Op ldg_op;
-    switch (bytes) {
-    case 4:
+    Op ldg_op;
+    if (bytes == 4) {
       ret_dtype = DataType::UInt(32);
       ldg_op = ldg32();
-      break;
-    case 8:
+    } else if (bytes == 8) {
       ret_dtype = DataType::UInt(32, 2);
       ldg_op = ldg64();
-      break;
-    case 16:
+    } else if (bytes == 16) {
       ret_dtype = DataType::UInt(32, 4);
       ldg_op = ldg128();
-      break;
-    case 32:
+    } else if (bytes == 32) {
       ret_dtype = DataType::UInt(32, 8);
       ldg_op = ldg256();
-      break;
-    default:
+    } else {
       LOG(FATAL) << "Unsupported byte width for ldg: " << bytes;
       return PrimExpr();
     }
