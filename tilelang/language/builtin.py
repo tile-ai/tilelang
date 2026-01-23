@@ -9,7 +9,7 @@ from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
 from typing import Any
-from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion, Buffer
+from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion
 from tilelang.utils.language import retrieve_ptr
 
 _IS_HIP_AVAILABLE = check_hip_availability()
@@ -944,7 +944,7 @@ def ptx_mma_sm70(
     )
 
 
-def ldg32(src: Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+def ldg32(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
     """Load 32 bits (4 bytes) from global memory using explicit PTX instructions.
 
     Usage: `T.ldg32(x[i])` or `T.ldg32(x[i:i+2])` emits `tl::ldg32(ptr)`.
@@ -970,7 +970,7 @@ def ldg32(src: Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> Pri
         return tir.call_intrin("uint32", tir.op.Op.get("tl.ldg32"), ptr, pred)
 
 
-def ldg64(src: Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+def ldg64(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
     """Load 64 bits (8 bytes) from global memory using explicit PTX instructions.
 
     Usage: `T.ldg64(x[i])` or `T.ldg64(x[i:i+4])` emits `tl::ldg64(ptr)`.
@@ -996,7 +996,7 @@ def ldg64(src: Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> Pri
         return tir.call_intrin("uint32x2", tir.op.Op.get("tl.ldg64"), ptr, pred)
 
 
-def ldg128(src: Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+def ldg128(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
     """Load 128 bits (16 bytes) from global memory using explicit PTX instructions.
 
     Usage: `T.ldg128(x[i])` or `T.ldg128(x[i:i+8])` emits `tl::ldg128(ptr)`.
@@ -1022,7 +1022,7 @@ def ldg128(src: Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> Pr
         return tir.call_intrin("uint32x4", tir.op.Op.get("tl.ldg128"), ptr, pred)
 
 
-def ldg256(src: Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+def ldg256(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
     """Load 256 bits (32 bytes) from global memory using explicit PTX instructions.
 
     Usage: `T.ldg256(x[i])` or `T.ldg256(x[i:i+16])` emits `tl::ldg256(ptr)`.
@@ -1048,7 +1048,7 @@ def ldg256(src: Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> Pr
         return tir.call_intrin("uint32x8", tir.op.Op.get("tl.ldg256"), ptr, pred)
 
 
-def stg32(dst: Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+def stg32(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
     """Store 32 bits (4 bytes) to global memory using explicit PTX instructions.
 
     Usage: `T.stg32(y[i], value)` emits `tl::stg32(ptr, value)`.
@@ -1071,7 +1071,7 @@ def stg32(dst: Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimEx
         return tir.call_intrin("handle", tir.op.Op.get("tl.stg32"), ptr, value, pred)
 
 
-def stg64(dst: Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+def stg64(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
     """Store 64 bits (8 bytes) to global memory using explicit PTX instructions.
 
     Usage: `T.stg64(y[i:i+2], value)` emits `tl::stg64(ptr, value)`.
@@ -1094,7 +1094,7 @@ def stg64(dst: Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimEx
         return tir.call_intrin("handle", tir.op.Op.get("tl.stg64"), ptr, value, pred)
 
 
-def stg128(dst: Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+def stg128(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
     """Store 128 bits (16 bytes) to global memory using explicit PTX instructions.
 
     Usage: `T.stg128(y[i:i+4], value)` emits `tl::stg128(ptr, value)`.
@@ -1117,7 +1117,7 @@ def stg128(dst: Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimE
         return tir.call_intrin("handle", tir.op.Op.get("tl.stg128"), ptr, value, pred)
 
 
-def stg256(dst: Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+def stg256(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
     """Store 256 bits (32 bytes) to global memory using explicit PTX instructions.
 
     Usage: `T.stg256(y[i:i+8], value)` emits `tl::stg256(ptr, value)`.
