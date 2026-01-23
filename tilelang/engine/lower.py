@@ -259,11 +259,11 @@ def lower(
     # Phase 2: Optimize the IR for the target
     mod = OptimizeForTarget(mod, target)
     
-    codegen_mod = device_codegen(mod, target)
-    print(codegen_mod.inspect_source())
-    return CompiledArtifact(
-            None, codegen_mod, params, codegen_mod.inspect_source(), None)
-    return codegen_mod.inspect_source()
+    if target.kind.name == "commonir" or COMMONIR_enabled:
+        codegen_mod = device_codegen(mod, target)
+        # print(codegen_mod.inspect_source())
+        return CompiledArtifact(
+                None, codegen_mod, params, codegen_mod.inspect_source(), None)
 
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
