@@ -66,7 +66,7 @@ public:
     }
 
     // Only handle global memory stores
-    if (store->buffer.scope() != "global" && store->buffer.scope() != "") {
+    if (store->buffer.scope() != "global") {
       return StmtExprMutator::VisitStmt_(store);
     }
 
@@ -180,7 +180,7 @@ public:
     }
 
     // Only handle global memory loads
-    if (load->buffer.scope() != "global" && load->buffer.scope() != "") {
+    if (load->buffer.scope() != "global") {
       return StmtExprMutator::VisitExpr_(load);
     }
 
