@@ -71,7 +71,7 @@ public:
   }
 };
 
-struct __CUDA_ALIGN__(4) fp4_e2_4_t {
+struct __CUDA_ALIGN__(2) fp4_e2_4_t {
   fp4_e2_2_t x;
   fp4_e2_2_t y;
 };
