@@ -469,6 +469,13 @@ tvm::transform::Pass LowerLDGSTG() {
       return f;
     }
 
+    // Check if target has "cutedsl" key - skip for CuTeDSL backend
+    for (const auto &key : target->keys) {
+      if (key == "cutedsl") {
+        return f;
+      }
+    }
+
     // Read pass configurations
     // Non-predicated ldg/stg: default OFF
     bool enable_non_predicated =

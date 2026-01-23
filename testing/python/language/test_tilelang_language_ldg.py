@@ -85,6 +85,7 @@ def test_ldg128_codegen():
 
 
 @tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_ldg256_codegen():
     """Test that ldg256 generates tl::ldg256 in CUDA source."""
 
