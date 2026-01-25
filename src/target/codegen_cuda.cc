@@ -2594,99 +2594,135 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto buffer_ref = this->GetBufferRef(op->dtype, buffer, base);
     os << "__ldg(&(" << buffer_ref << "))";
   } else if (op->op.same_as(tl::ldg32())) {
-    // Explicit 32-bit global memory load: ldg32(ptr) or ldg32(ptr, pred)
+    // Explicit 32-bit global memory load: ldg32(ptr) or ldg32_conditional(ptr,
+    // pred)
     ICHECK(!op->args.empty()) << "T.ldg32 expects a pointer argument.";
-    os << "tl::ldg32(";
-    this->PrintExpr(op->args[0], os);
     if (op->args.size() > 1) {
+      os << "tl::ldg32_conditional(";
+      this->PrintExpr(op->args[0], os);
       os << ", ";
       this->PrintExpr(op->args[1], os);
+    } else {
+      os << "tl::ldg32(";
+      this->PrintExpr(op->args[0], os);
     }
     os << ")";
   } else if (op->op.same_as(tl::ldg64())) {
-    // Explicit 64-bit global memory load: ldg64(ptr) or ldg64(ptr, pred)
+    // Explicit 64-bit global memory load: ldg64(ptr) or ldg64_conditional(ptr,
+    // pred)
     ICHECK(!op->args.empty()) << "T.ldg64 expects a pointer argument.";
-    os << "tl::ldg64(";
-    this->PrintExpr(op->args[0], os);
     if (op->args.size() > 1) {
+      os << "tl::ldg64_conditional(";
+      this->PrintExpr(op->args[0], os);
       os << ", ";
       this->PrintExpr(op->args[1], os);
+    } else {
+      os << "tl::ldg64(";
+      this->PrintExpr(op->args[0], os);
     }
     os << ")";
   } else if (op->op.same_as(tl::ldg128())) {
-    // Explicit 128-bit global memory load: ldg128(ptr) or ldg128(ptr, pred)
+    // Explicit 128-bit global memory load: ldg128(ptr) or
+    // ldg128_conditional(ptr, pred)
     ICHECK(!op->args.empty()) << "T.ldg128 expects a pointer argument.";
-    os << "tl::ldg128(";
-    this->PrintExpr(op->args[0], os);
     if (op->args.size() > 1) {
+      os << "tl::ldg128_conditional(";
+      this->PrintExpr(op->args[0], os);
       os << ", ";
       this->PrintExpr(op->args[1], os);
+    } else {
+      os << "tl::ldg128(";
+      this->PrintExpr(op->args[0], os);
     }
     os << ")";
   } else if (op->op.same_as(tl::ldg256())) {
-    // Explicit 256-bit global memory load: ldg256(ptr) or ldg256(ptr, pred)
+    // Explicit 256-bit global memory load: ldg256(ptr) or
+    // ldg256_conditional(ptr, pred)
     ICHECK(!op->args.empty()) << "T.ldg256 expects a pointer argument.";
-    os << "tl::ldg256(";
-    this->PrintExpr(op->args[0], os);
     if (op->args.size() > 1) {
+      os << "tl::ldg256_conditional(";
+      this->PrintExpr(op->args[0], os);
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
+    } else {
+      os << "tl::ldg256(";
+      this->PrintExpr(op->args[0], os);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::stg32())) {
+    // Explicit 32-bit global memory store: stg32(ptr, value) or
+    // stg32_conditional(ptr, value, pred)
+    ICHECK(op->args.size() >= 2)
+        << "T.stg32 expects pointer and value arguments.";
+    if (op->args.size() > 2) {
+      os << "tl::stg32_conditional(";
+      this->PrintExpr(op->args[0], os);
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
+      os << ", ";
+      this->PrintExpr(op->args[2], os);
+    } else {
+      os << "tl::stg32(";
+      this->PrintExpr(op->args[0], os);
       os << ", ";
       this->PrintExpr(op->args[1], os);
     }
     os << ")";
-  } else if (op->op.same_as(tl::stg32())) {
-    // Explicit 32-bit global memory store: stg32(ptr, value) or stg32(ptr,
-    // value, pred)
-    ICHECK(op->args.size() >= 2)
-        << "T.stg32 expects pointer and value arguments.";
-    os << "tl::stg32(";
-    this->PrintExpr(op->args[0], os);
-    os << ", ";
-    this->PrintExpr(op->args[1], os);
-    if (op->args.size() > 2) {
-      os << ", ";
-      this->PrintExpr(op->args[2], os);
-    }
-    os << ")";
   } else if (op->op.same_as(tl::stg64())) {
-    // Explicit 64-bit global memory store: stg64(ptr, value) or stg64(ptr,
-    // value, pred)
+    // Explicit 64-bit global memory store: stg64(ptr, value) or
+    // stg64_conditional(ptr, value, pred)
     ICHECK(op->args.size() >= 2)
         << "T.stg64 expects pointer and value arguments.";
-    os << "tl::stg64(";
-    this->PrintExpr(op->args[0], os);
-    os << ", ";
-    this->PrintExpr(op->args[1], os);
     if (op->args.size() > 2) {
+      os << "tl::stg64_conditional(";
+      this->PrintExpr(op->args[0], os);
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
       os << ", ";
       this->PrintExpr(op->args[2], os);
+    } else {
+      os << "tl::stg64(";
+      this->PrintExpr(op->args[0], os);
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
     }
     os << ")";
   } else if (op->op.same_as(tl::stg128())) {
-    // Explicit 128-bit global memory store: stg128(ptr, value) or stg128(ptr,
-    // value, pred)
+    // Explicit 128-bit global memory store: stg128(ptr, value) or
+    // stg128_conditional(ptr, value, pred)
     ICHECK(op->args.size() >= 2)
         << "T.stg128 expects pointer and value arguments.";
-    os << "tl::stg128(";
-    this->PrintExpr(op->args[0], os);
-    os << ", ";
-    this->PrintExpr(op->args[1], os);
     if (op->args.size() > 2) {
+      os << "tl::stg128_conditional(";
+      this->PrintExpr(op->args[0], os);
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
       os << ", ";
       this->PrintExpr(op->args[2], os);
+    } else {
+      os << "tl::stg128(";
+      this->PrintExpr(op->args[0], os);
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
     }
     os << ")";
   } else if (op->op.same_as(tl::stg256())) {
-    // Explicit 256-bit global memory store: stg256(ptr, value) or stg256(ptr,
-    // value, pred)
+    // Explicit 256-bit global memory store: stg256(ptr, value) or
+    // stg256_conditional(ptr, value, pred)
     ICHECK(op->args.size() >= 2)
         << "T.stg256 expects pointer and value arguments.";
-    os << "tl::stg256(";
-    this->PrintExpr(op->args[0], os);
-    os << ", ";
-    this->PrintExpr(op->args[1], os);
     if (op->args.size() > 2) {
+      os << "tl::stg256_conditional(";
+      this->PrintExpr(op->args[0], os);
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
       os << ", ";
       this->PrintExpr(op->args[2], os);
+    } else {
+      os << "tl::stg256(";
+      this->PrintExpr(op->args[0], os);
+      os << ", ";
+      this->PrintExpr(op->args[1], os);
     }
     os << ")";
   } else if (op->op.same_as(builtin::reinterpret())) {

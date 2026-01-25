@@ -168,20 +168,23 @@ template <typename T> TL_DEVICE uint4 ldg128(const T *ptr) {
   return ret;
 }
 
-// Predicated versions
-template <typename T> TL_DEVICE uint32_t ldg32(const T *ptr, bool pred) {
+// Predicated (conditional) versions
+template <typename T>
+TL_DEVICE uint32_t ldg32_conditional(const T *ptr, bool pred) {
   uint32_t ret{};
   global_load<uint32_t, 4>(ret, ptr, pred);
   return ret;
 }
 
-template <typename T> TL_DEVICE uint2 ldg64(const T *ptr, bool pred) {
+template <typename T>
+TL_DEVICE uint2 ldg64_conditional(const T *ptr, bool pred) {
   uint2 ret{};
   global_load<uint2, 8>(ret, ptr, pred);
   return ret;
 }
 
-template <typename T> TL_DEVICE uint4 ldg128(const T *ptr, bool pred) {
+template <typename T>
+TL_DEVICE uint4 ldg128_conditional(const T *ptr, bool pred) {
   uint4 ret{};
   global_load<uint4, 16>(ret, ptr, pred);
   return ret;
@@ -252,16 +255,19 @@ template <typename T> TL_DEVICE void stg128(T *ptr, uint4 value) {
   global_store<uint4, 16>(ptr, value, true);
 }
 
-// Predicated versions
-template <typename T> TL_DEVICE void stg32(T *ptr, uint32_t value, bool pred) {
+// Predicated (conditional) versions
+template <typename T>
+TL_DEVICE void stg32_conditional(T *ptr, uint32_t value, bool pred) {
   global_store<uint32_t, 4>(ptr, value, pred);
 }
 
-template <typename T> TL_DEVICE void stg64(T *ptr, uint2 value, bool pred) {
+template <typename T>
+TL_DEVICE void stg64_conditional(T *ptr, uint2 value, bool pred) {
   global_store<uint2, 8>(ptr, value, pred);
 }
 
-template <typename T> TL_DEVICE void stg128(T *ptr, uint4 value, bool pred) {
+template <typename T>
+TL_DEVICE void stg128_conditional(T *ptr, uint4 value, bool pred) {
   global_store<uint4, 16>(ptr, value, pred);
 }
 
