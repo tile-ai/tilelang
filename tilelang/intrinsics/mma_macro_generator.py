@@ -56,7 +56,9 @@ class TensorCoreIntrinEmitter:
     }
 
     # Represent the thread binding in the form of (tx, warp_n, warp_m)
-    is_m_first = False
+    is_m_first: bool = False
+    warp_rows: int = 1
+    warp_cols: int = 1
 
     def __init__(
         self,
