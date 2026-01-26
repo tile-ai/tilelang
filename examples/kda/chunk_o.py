@@ -128,7 +128,6 @@ def tilelang_chunk_fwd_o(
             for i_s1, i_s2 in T.Parallel(block_S, block_S):
                 A_shared[i_s1, i_s2] = T.if_then_else(i_s1 < i_s2, 0, A_shared[i_s1, i_s2])
 
-
             T.gemm(
                 A_shared,
                 V_shared,

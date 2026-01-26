@@ -164,7 +164,6 @@ def tilelang_wy_fast_bwd(
             dbeta_fragment_reduce_tmpv = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dg_fragment = T.alloc_fragment((block_S, block_DK), dtype=gate_dtype)
 
-
             T.clear(dA_fragment)
             T.clear(dk_fragment)
             T.clear(dk_fragment_beta_g)

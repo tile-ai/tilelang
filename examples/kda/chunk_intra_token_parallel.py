@@ -252,6 +252,7 @@ def run_test(
     print(f"fla time: {fla_time} ms")
     print(f"tilelang time: {tilelang_time} ms")
 
+
 def main():
     run_test(
         B=1,
