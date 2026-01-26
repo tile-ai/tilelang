@@ -144,10 +144,16 @@ def test_ldg32_predicated_codegen():
     print("=== ldg32 predicated codegen ===")
     print(src)
     # Verify codegen - should have ldg32 with two arguments and non-trivial predicate
-    assert "ldg32" in src, "Expected ldg32 call in generated CUDA source"
+    assert "ldg32_conditional" in src, "Expected ldg32_conditional call in generated CUDA source"
 
     # Verify correctness
-    Y_ref = X
+    Y_ref = torch.zeros(128, dtype=torch.float32, device="cuda")
+    for i in range(128):
+        if i < 64:
+            Y_ref[i] = X[i]
+        else:
+            Y_ref[i] = 0
+
     torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
@@ -174,10 +180,16 @@ def test_ldg64_predicated_codegen():
     src = ldg64_pred_kernel.get_kernel_source(N=128)
     print("=== ldg64 predicated codegen ===")
     print(src)
-    assert "ldg64" in src, "Expected ldg64 call in generated CUDA source"
+    assert "ldg64_conditional" in src, "Expected ldg64_conditional call in generated CUDA source"
 
     # Verify correctness
-    Y_ref = X
+    Y_ref = torch.zeros(128, dtype=torch.float32, device="cuda")
+    for i in range(128):
+        if i < 64:
+            Y_ref[i] = X[i]
+        else:
+            Y_ref[i] = 0
+
     torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
@@ -204,10 +216,16 @@ def test_ldg128_predicated_codegen():
     src = ldg128_pred_kernel.get_kernel_source(N=128)
     print("=== ldg128 predicated codegen ===")
     print(src)
-    assert "ldg128" in src, "Expected ldg128 call in generated CUDA source"
+    assert "ldg128_conditional" in src, "Expected ldg128_conditional call in generated CUDA source"
 
     # Verify correctness
-    Y_ref = X
+    Y_ref = torch.zeros(128, dtype=torch.float32, device="cuda")
+    for i in range(128):
+        if i < 64:
+            Y_ref[i] = X[i]
+        else:
+            Y_ref[i] = 0
+
     torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
@@ -235,7 +253,16 @@ def test_ldg256_predicated_codegen():
     src = ldg256_pred_kernel.get_kernel_source(N=256)
     print("=== ldg256 predicated codegen ===")
     print(src)
-    assert "ldg256" in src, "Expected ldg256 call in generated CUDA source"
+    assert "ldg256_conditional" in src, "Expected ldg256_conditional call in generated CUDA source"
+    # Verify correctness
+    Y_ref = torch.zeros(256, dtype=torch.float32, device="cuda")
+    for i in range(256):
+        if i < 64:
+            Y_ref[i] = X[i]
+        else:
+            Y_ref[i] = 0
+
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":
