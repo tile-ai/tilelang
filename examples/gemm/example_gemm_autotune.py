@@ -208,7 +208,7 @@ def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_ra
 
 
 def main(M: int = 4096, N: int = 4096, K: int = 4096, use_autotune: bool = False, with_roller: bool = False):
-    use_autotune = False
+    use_autotune = True
     if use_autotune:
         result = get_best_config(M, N, K, with_roller)
         print(result.config)
