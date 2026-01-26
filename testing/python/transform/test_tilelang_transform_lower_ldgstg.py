@@ -285,6 +285,7 @@ def test_e2e_load_global_store_global():
     print(src)
     assert "load_global_128" in src or "store_global_128" in src, "Expected load_global_128/store_global_128 in generated source"
 
+
 @tilelang.testing.requires_cuda
 def test_e2e_load_global_store_global_predicated():
     """End-to-end test that load_global/store_global intrinsics work correctly when enabled."""
@@ -319,7 +320,10 @@ def test_e2e_load_global_store_global_predicated():
     src = copy_kernel.get_kernel_source(N=128)
     print("=== Generated kernel source ===")
     print(src)
-    assert "load_global_128_conditional" in src or "store_global_128_conditional" in src, "Expected load_global_128_conditional/store_global_128_conditional in generated source"
+    assert "load_global_128_conditional" in src or "store_global_128_conditional" in src, (
+        "Expected load_global_128_conditional/store_global_128_conditional in generated source"
+    )
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
