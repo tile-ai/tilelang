@@ -178,6 +178,18 @@ bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
   if (IsCudaVectorizableFP8(from_ty) && target_ty.is_float())
     return true;
 
+  // float8 (E8M0) -> bfloat16
+  if (from_ty.is_float8_e8m0fnu() && target_ty.is_bfloat16())
+    return true;
+
+  // bfloat16 -> float8 (E4M3/E5M2)
+  if (from_ty.is_bfloat16() && target_ty.is_float8_e8m0fnu())
+    return true;
+
+  // float32/double -> float8 (E4M3/E5M2)
+  if (from_ty.is_float() && target_ty.is_float8_e8m0fnu())
+    return true;
+
   // float4_e2m1fn -> float32
   if (from_ty.is_float4_e2m1fn() && target_ty.is_float())
     return true;

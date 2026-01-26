@@ -55,8 +55,13 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
 
     code = kernel.get_kernel_source()
     code_parallel = kernel_parallel.get_kernel_source()
-    print(code)
+    # print(code)
+    # print(code_parallel)
     assert check_str in code and check_str in code_parallel, f"Cast {src_dtype} to {dst_dtype} with {lanes=} is not vectorized!"
+
+    # Requires torch >= 2.8
+    if src_dtype == T.float8_e8m0fnu or dst_dtype == T.float8_e8m0fnu:
+        return
 
     if src_dtype == T.float4_e2m1fn or dst_dtype == T.float4_e2m1fn:
         return
@@ -106,6 +111,11 @@ def test_vectorized_cast(src_dtype, dst_dtype, check_str, lanes):
         (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
         (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
         (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
+        # E8M0 <-> FP16
+        (T.float8_e8m0fnu, T.bfloat16, "__tl_cvt_e8m0x2_to_bfloat162", 2),
+        (T.bfloat16, T.float8_e8m0fnu, "__tl_cvt_bfloat162_to_e8m0x2", 2),
+        (T.float32, T.float8_e8m0fnu, "__tl_cvt_float2_to_e8m0x2", 2),
+        (T.float64, T.float8_e8m0fnu, "__tl_cvt_double2_to_e8m0x2", 2),
     ],
 )
 def test_vectorized_cast_fp8(src_dtype, dst_dtype, check_str, lanes):
