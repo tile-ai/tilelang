@@ -611,6 +611,51 @@ private:
       return call;
     }
 
+    if (op->op.same_as(tl::ptx_ldmatrix())) {
+      is_ptx_ = true;
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      is_ptx_ = false;
+      // form: T.ptx_ldmatrix(..., smem_ptr, smem_offset)
+      // smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
+      // or T.address_of(buffer, offset)
+      PrimExpr access_ptr = call->args[2];
+      Call access_ptr_call = Downcast<Call>(access_ptr);
+
+      // Handle both tvm_access_ptr and address_of
+      if (access_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(2, new_access_ptr.expr);
+        }
+      } else if (access_ptr_call->op.same_as(builtin::address_of())) {
+        Optional<PrimExpr> resolved =
+            ResolveBufferLoad(access_ptr_call->args[0]);
+        ICHECK(resolved.defined())
+            << "Invalid address_of argument for permuted layout: "
+            << access_ptr_call->args[0];
+        PrimExpr load_expr = resolved.value();
+        if (!load_expr.same_as(access_ptr_call->args[0])) {
+          auto call_node = call.CopyOnWrite();
+          call_node->args.Set(
+              2, Call(access_ptr_call->dtype, access_ptr_call->op, {load_expr},
+                      access_ptr_call->annotations, access_ptr_call->span));
+          access_ptr_call = Downcast<Call>(call->args[2]);
+          access_ptr = call->args[2];
+        }
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(2, new_access_ptr.expr);
+        }
+      } else {
+        LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;
+      }
+      return call;
+    }
+
     // Handle tl::ptx_stmatrix
     if (op->op.same_as(tl::ptx_stmatrix())) {
       is_ptx_ = true;
