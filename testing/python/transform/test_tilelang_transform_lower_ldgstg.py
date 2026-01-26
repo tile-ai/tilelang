@@ -257,7 +257,7 @@ def test_non_cuda_target_skip():
 
 
 @tilelang.testing.requires_cuda
-def test_e2e_ldg_stg():
+def test_e2e_load_global_store_global():
     """End-to-end test that ldg/stg intrinsics work correctly when enabled."""
     import torch
 
@@ -283,8 +283,43 @@ def test_e2e_ldg_stg():
     src = copy_kernel.get_kernel_source(N=128)
     print("=== Generated kernel source ===")
     print(src)
-    assert "ldg128" in src or "stg128" in src, "Expected ldg128/stg128 in generated source"
+    assert "load_global_128" in src or "store_global_128" in src, "Expected load_global_128/store_global_128 in generated source"
 
+@tilelang.testing.requires_cuda
+def test_e2e_load_global_store_global_predicated():
+    """End-to-end test that load_global/store_global intrinsics work correctly when enabled."""
+    import torch
+
+    @tilelang.jit(pass_configs={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True})
+    def copy_kernel(X, Y):
+        N = T.const("N")
+        X: T.Tensor[[N], T.float32]
+        Y: T.Tensor[[N], T.float32]
+
+        with T.Kernel(N // 4, threads=32) as pid:
+            for j in T.vectorized(4):
+                Y[pid * 4 + j] = T.if_then_else(pid < N // 8, X[pid * 4 + j], T.float32(0))
+
+    X = torch.randn(128, dtype=torch.float32, device="cuda")
+    Y = torch.empty(128, dtype=torch.float32, device="cuda")
+
+    copy_kernel(X, Y)
+
+    # Verify correctness
+    Y_ref = torch.zeros(128, dtype=torch.float32, device="cuda")
+    for i in range(128):
+        if i < 64:
+            Y_ref[i] = X[i]
+        else:
+            Y_ref[i] = 0
+
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
+
+    # Verify codegen contains load_global/store_global
+    src = copy_kernel.get_kernel_source(N=128)
+    print("=== Generated kernel source ===")
+    print(src)
+    assert "load_global_128_conditional" in src or "store_global_128_conditional" in src, "Expected load_global_128_conditional/store_global_128_conditional in generated source"
 
 if __name__ == "__main__":
     tilelang.testing.main()
