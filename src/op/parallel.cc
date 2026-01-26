@@ -668,27 +668,7 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
 
   Fragment result;
 
-  // Check if access indices match loop vars AND loop ranges match layout input
-  // shape. We can only use src_layout directly when both conditions are met.
-  // Otherwise, if the loop is a sub-region of the buffer (e.g., loop is 4x128
-  // but buffer layout is 64x128), using the full layout would cause index
-  // out-of-bounds.
-  bool can_use_src_layout_directly = false;
   if (IsCommonAccessIndice(buffer)) {
-    auto input_shape = src_layout->InputShape();
-    if (input_shape.size() == loop_vars_.size()) {
-      can_use_src_layout_directly = true;
-      for (size_t i = 0; i < loop_vars_.size(); i++) {
-        if (!analyzer_.CanProveEqual(loop_vars_[i]->dom->extent,
-                                     input_shape[i])) {
-          can_use_src_layout_directly = false;
-          break;
-        }
-      }
-    }
-  }
-
-  if (can_use_src_layout_directly) {
     result = src_layout;
   } else {
     Var rep;
