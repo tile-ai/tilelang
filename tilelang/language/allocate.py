@@ -161,7 +161,7 @@ def alloc_barrier(arrive_count: int | list[int]):
     Examples
     --------
     >>> mbar = alloc_barrier(128)  # allocate a barrier with arrive count 128
-    >>> mbars = alloc_barrier([128] * n)  # allocate n barriers with the same arrive count 128 
+    >>> mbars = alloc_barrier([128] * n)  # allocate n barriers with the same arrive count 128
     """
     # Normalize to list
     if isinstance(arrive_count, int):
@@ -173,7 +173,7 @@ def alloc_barrier(arrive_count: int | list[int]):
     # Use buffer.data as key to support multiple barrier buffer allocations
     arrive_count_exprs = [tir.IntImm("int32", c) for c in arrive_count]
     block_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
-    
+
     return buffer
 
 

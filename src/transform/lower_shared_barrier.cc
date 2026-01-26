@@ -21,7 +21,7 @@ namespace tl {
 namespace attr {
 // BlockAttr, Recording the arrive counts for each barrier allocation
 constexpr const char *kBarrierInit = "barrier_init";
-}
+} // namespace attr
 
 using namespace tir;
 
@@ -48,12 +48,14 @@ private:
       buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
     }
 
-    // Only check buffers allocated in THIS block, not accumulated from parent blocks
+    // Only check buffers allocated in THIS block, not accumulated from parent
+    // blocks
     Array<Buffer> barrier_buffers;
     for (auto buffer : alloc_buffers) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
-      if (!ptr_type) continue;
+      if (!ptr_type)
+        continue;
       auto storage_scope = ptr_type->storage_scope;
       if (storage_scope == "shared.barrier") {
         barrier_buffers.push_back(buffer);
@@ -72,11 +74,13 @@ private:
 
     /*
     Transform:
-        mbarrier_list = T.alloc_barrier(arrive_counts: list[int], "handle", scope="shared.barrier")
-    
+        mbarrier_list = T.alloc_barrier(arrive_counts: list[int], "handle",
+    scope="shared.barrier")
+
     into:
         # This is emitted by the definition of T.alloc_barrier
-        mbarrier_list = T.alloc_buffer(len(arrive_counts), "handle", scope="shared.barrier")
+        mbarrier_list = T.alloc_buffer(len(arrive_counts), "handle",
+    scope="shared.barrier")
 
         # This is emitted by this pass
         if tx == 0:
@@ -85,26 +89,35 @@ private:
     */
 
     // Extract the arrive counts from the block attr "barrier_init"
-    // The attr is a Map<Var, Array<PrimExpr>> where key is buffer.data and value is arrive counts
-    ICHECK(op->annotations.count(attr::kBarrierInit)) << "barrier_init is not defined";
-    auto barrier_init_map = op->annotations.Get(attr::kBarrierInit)->as<Map<Var, Array<PrimExpr>>>().value();
+    // The attr is a Map<Var, Array<PrimExpr>> where key is buffer.data and
+    // value is arrive counts
+    ICHECK(op->annotations.count(attr::kBarrierInit))
+        << "barrier_init is not defined";
+    auto barrier_init_map = op->annotations.Get(attr::kBarrierInit)
+                                ->as<Map<Var, Array<PrimExpr>>>()
+                                .value();
 
     // Create init calls for each barrier buffer
     // Initialize each barrier element with its respective arrive count
     Array<Stmt> init_mbarrier_calls_;
     for (auto buffer : barrier_buffers) {
       auto data = buffer->data;
-      ICHECK(barrier_init_map.count(data)) 
-          << "Barrier buffer " << buffer->name << " not found in barrier_init annotation";
+      ICHECK(barrier_init_map.count(data))
+          << "Barrier buffer " << buffer->name
+          << " not found in barrier_init annotation";
       auto arrive_counts = barrier_init_map.at(data);
-      ICHECK(arrive_counts.size() == static_cast<size_t>(buffer->shape[0].as<IntImmNode>()->value))
-          << "The number of arrive counts (" << arrive_counts.size() 
-          << ") must match the barrier buffer size (" << buffer->shape[0] << ") for buffer " << buffer->name;
-      
+      ICHECK(arrive_counts.size() ==
+             static_cast<size_t>(buffer->shape[0].as<IntImmNode>()->value))
+          << "The number of arrive counts (" << arrive_counts.size()
+          << ") must match the barrier buffer size (" << buffer->shape[0]
+          << ") for buffer " << buffer->name;
+
       for (size_t i = 0; i < arrive_counts.size(); i++) {
         auto call =
             Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
-                 {BufferLoad(buffer, {IntImm(DataType::Int(32), static_cast<int>(i))}), arrive_counts[i]});
+                 {BufferLoad(buffer,
+                             {IntImm(DataType::Int(32), static_cast<int>(i))}),
+                  arrive_counts[i]});
         init_mbarrier_calls_.push_back(Evaluate(call));
       }
     }

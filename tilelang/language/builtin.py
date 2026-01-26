@@ -8,9 +8,9 @@ from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
-from typing import Any
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad, BufferRegion
 from tilelang.utils.language import retrieve_ptr
+
 _IS_HIP_AVAILABLE = check_hip_availability()
 
 
@@ -30,7 +30,7 @@ def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
 
 def _mbar_to_buffer_load(mbar: Buffer | BufferLoad) -> BufferLoad:
     """Convert a memory barrier to a buffer load.
-    
+
     Args:
         mbar: Optional[Buffer | BufferLoad]
             The memory barrier to convert

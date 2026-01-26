@@ -1,7 +1,9 @@
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+
 tilelang.disable_cache()
+
 
 @tilelang.jit(
     pass_configs={
@@ -17,7 +19,7 @@ def matmul(M, N, K, block_M, block_N, block_K, mbars, dtype=T.float16, accum_dty
         C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            barriers = T.alloc_barrier(mbars)
+            barriers = T.alloc_barrier(mbars)  # noqa: F841
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -36,12 +38,11 @@ def matmul(M, N, K, block_M, block_N, block_K, mbars, dtype=T.float16, accum_dty
 def test_lower_shared_barrier():
     mbars = (1, 1, 128, 128)  # list is unhashable so we use tuple here
     kernel = matmul(1024, 1024, 1024, 128, 128, 32, mbars=mbars)
-   
+
     assert f"__shared__ uint64_t barriers_mem[{len(mbars)}];" in kernel.get_kernel_source()
     assert "if (tl::tl_shuffle_elect<0>()) {" in kernel.get_kernel_source()
     for i in range(len(mbars)):
         assert f"barriers[{i}].init({mbars[i]});" in kernel.get_kernel_source()
-    print(kernel.get_kernel_source())
 
 
 if __name__ == "__main__":
