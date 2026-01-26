@@ -131,15 +131,15 @@ __device__ __forceinline__ ulonglong4 load_global_256(const ulonglong4 *ptr) {
 }
 
 // Predicated (conditional) versions
-__device__ __forceinline__ longlong4 load_global_256_conditional(const longlong4 *ptr,
-                                                        bool pred) {
+__device__ __forceinline__ longlong4
+load_global_256_conditional(const longlong4 *ptr, bool pred) {
   longlong4 ret{};
   global_load_256<longlong4>(ret, ptr, pred);
   return ret;
 }
 
-__device__ __forceinline__ ulonglong4 load_global_256_conditional(const ulonglong4 *ptr,
-                                                         bool pred) {
+__device__ __forceinline__ ulonglong4
+load_global_256_conditional(const ulonglong4 *ptr, bool pred) {
   ulonglong4 ret{};
   global_load_256<ulonglong4>(ret, ptr, pred);
   return ret;
@@ -155,7 +155,7 @@ __device__ __forceinline__ ulonglong4 load_global_256(const T *ptr) {
 
 template <typename T>
 __device__ __forceinline__ ulonglong4 load_global_256_conditional(const T *ptr,
-                                                         bool pred) {
+                                                                  bool pred) {
   ulonglong4 ret{};
   global_load_256<ulonglong4>(ret, ptr, pred);
   return ret;
@@ -231,41 +231,47 @@ template <> struct global_store_256<ulonglong4> {
 };
 
 // Convenience wrapper functions for 256-bit store
-__device__ __forceinline__ void store_global_256(longlong4 *ptr, longlong4 &val) {
+__device__ __forceinline__ void store_global_256(longlong4 *ptr,
+                                                 longlong4 &val) {
   global_store_256<longlong4>(val, ptr, true);
 }
 
-__device__ __forceinline__ void store_global_256(longlong4 *ptr, const longlong4 &val) {
+__device__ __forceinline__ void store_global_256(longlong4 *ptr,
+                                                 const longlong4 &val) {
   global_store_256<longlong4>(val, ptr, true);
 }
 
-__device__ __forceinline__ void store_global_256(ulonglong4 *ptr, ulonglong4 &val) {
+__device__ __forceinline__ void store_global_256(ulonglong4 *ptr,
+                                                 ulonglong4 &val) {
   global_store_256<ulonglong4>(val, ptr, true);
 }
 
-__device__ __forceinline__ void store_global_256(ulonglong4 *ptr, const ulonglong4 &val) {
+__device__ __forceinline__ void store_global_256(ulonglong4 *ptr,
+                                                 const ulonglong4 &val) {
   global_store_256<ulonglong4>(val, ptr, true);
 }
 
 // Predicated (conditional) versions
-__device__ __forceinline__ void store_global_256_conditional(longlong4 *ptr,
-                                                   longlong4 &val, bool pred) {
+__device__ __forceinline__ void
+store_global_256_conditional(longlong4 *ptr, longlong4 &val, bool pred) {
   global_store_256<longlong4>(val, ptr, pred);
 }
 
-__device__ __forceinline__ void store_global_256_conditional(ulonglong4 *ptr,
-                                                   ulonglong4 &val, bool pred) {
+__device__ __forceinline__ void
+store_global_256_conditional(ulonglong4 *ptr, ulonglong4 &val, bool pred) {
   global_store_256<ulonglong4>(val, ptr, pred);
 }
 
 __device__ __forceinline__ void
-store_global_256_conditional(ulonglong4 *ptr, const ulonglong4 &val, bool pred) {
+store_global_256_conditional(ulonglong4 *ptr, const ulonglong4 &val,
+                             bool pred) {
   global_store_256<ulonglong4>(val, ptr, pred);
 }
 
 // Generic 256-bit store for FP8 and other types
 template <typename T>
-__device__ __forceinline__ void store_global_256(T *ptr, const ulonglong4 &val) {
+__device__ __forceinline__ void store_global_256(T *ptr,
+                                                 const ulonglong4 &val) {
   global_store_256<ulonglong4>(val, ptr, true);
 }
 
@@ -275,13 +281,15 @@ store_global_256_conditional(T *ptr, const ulonglong4 &val, bool pred) {
   global_store_256<ulonglong4>(val, ptr, pred);
 }
 
-template <typename T> __device__ __forceinline__ void store_global_256(T *ptr, T &val) {
+template <typename T>
+__device__ __forceinline__ void store_global_256(T *ptr, T &val) {
   ulonglong4 const &val_u64 = *reinterpret_cast<ulonglong4 const *>(&val);
   global_store_256<ulonglong4>(val_u64, ptr, true);
 }
 
 template <typename T>
-__device__ __forceinline__ void store_global_256_conditional(T *ptr, T &val, bool pred) {
+__device__ __forceinline__ void store_global_256_conditional(T *ptr, T &val,
+                                                             bool pred) {
   ulonglong4 const &val_u64 = *reinterpret_cast<ulonglong4 const *>(&val);
   global_store_256<ulonglong4>(val_u64, ptr, pred);
 }

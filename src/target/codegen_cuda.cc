@@ -1567,7 +1567,8 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
       << "Unsupported vector load size: " << t.bits() * t.lanes();
   auto buffer_ref = this->GetBufferRef(t, buffer, base);
   this->PrintIndent();
-  this->stream << "tl::store_global_256(&(" << buffer_ref << "), " << value << ");\n";
+  this->stream << "tl::store_global_256(&(" << buffer_ref << "), " << value
+               << ");\n";
 }
 
 /**
@@ -2594,8 +2595,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto buffer_ref = this->GetBufferRef(op->dtype, buffer, base);
     os << "__ldg(&(" << buffer_ref << "))";
   } else if (op->op.same_as(tl::ldg32())) {
-    // Explicit 32-bit global memory load: load_global_32(ptr) or load_global_32_conditional(ptr,
-    // pred)
+    // Explicit 32-bit global memory load: load_global_32(ptr) or
+    // load_global_32_conditional(ptr, pred)
     ICHECK(!op->args.empty()) << "T.ldg32 expects a pointer argument.";
     if (op->args.size() > 1) {
       os << "tl::load_global_32_conditional(";
@@ -2608,8 +2609,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   } else if (op->op.same_as(tl::ldg64())) {
-    // Explicit 64-bit global memory load: load_global_64(ptr) or load_global_64_conditional(ptr,
-    // pred)
+    // Explicit 64-bit global memory load: load_global_64(ptr) or
+    // load_global_64_conditional(ptr, pred)
     ICHECK(!op->args.empty()) << "T.ldg64 expects a pointer argument.";
     if (op->args.size() > 1) {
       os << "tl::load_global_64_conditional(";
