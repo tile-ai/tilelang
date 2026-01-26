@@ -257,7 +257,7 @@ def test_ldg256_predicated_codegen():
     # Verify correctness
     Y_ref = torch.zeros(256, dtype=torch.float32, device="cuda")
     for i in range(256):
-        if i < 64:
+        if i < 128:
             Y_ref[i] = X[i]
         else:
             Y_ref[i] = 0
