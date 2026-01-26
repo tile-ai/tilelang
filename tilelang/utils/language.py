@@ -116,6 +116,20 @@ def is_fragment(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     return buffer.scope().startswith("local.fragment")
 
 
+def is_local_var(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
+    """
+    Check if the buffer is in the local.var memory scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in local.var memory, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "local.var"
+
+
 def get_buffer_elems(buffer: Buffer) -> int:
     """
     Get the number of elements in the buffer.
@@ -372,6 +386,33 @@ def retrieve_offset(obj: Buffer | BufferRegion | BufferLoad) -> list:
             return [r.min for r in region.region]
         return list(obj.indices)
     raise ValueError(f"Unsupported retrieve_offset argument type: {type(obj)} for object {obj}")
+
+
+def retrieve_dtype(obj: Buffer | BufferRegion | BufferLoad) -> str:
+    """
+    Retrieve the dtype of a buffer-like object.
+
+    - Buffer -> buffer.dtype
+    - BufferRegion -> convert to BufferLoad with Ramp indices, then use load.dtype
+    - BufferLoad -> load.dtype
+    """
+    if isinstance(obj, tir.Buffer):
+        return obj.dtype
+    if isinstance(obj, tir.BufferRegion):
+        # Convert region ranges to indices, using Ramp for vector access
+        indices = []
+        for r in obj.region:
+            extent = r.extent
+            if isinstance(extent, tir.IntImm) and extent.value == 1:
+                indices.append(r.min)
+            else:
+                # Use Ramp for vector access: Ramp(base, stride=1, lanes=extent)
+                indices.append(tir.Ramp(r.min, 1, extent))
+        load = tir.BufferLoad(obj.buffer, indices)
+        return load.dtype
+    if isinstance(obj, tir.BufferLoad):
+        return obj.dtype
+    raise ValueError(f"Unsupported retrieve_dtype argument type: {type(obj)} for object {obj}")
 
 
 def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:

@@ -4,6 +4,7 @@ import sys  # noqa: F401
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
+from tilelang.profiler import do_bench
 
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
@@ -222,31 +223,6 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
                 T.copy(b_h_fragment, final_state[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
 
     return kernel
-
-
-def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-
-    return times.mean().item()
 
 
 def run_test(

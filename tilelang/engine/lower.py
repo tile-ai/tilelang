@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Callable
+import sys
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -12,6 +13,7 @@ from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.transform import PassConfigKey
+from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
@@ -157,6 +159,8 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     host_mod = tilelang.transform.LowerIntrin()(host_mod)
     host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
     host_mod = tir.transform.CombineContextCall()(host_mod)
+    if sys.platform == "darwin":
+        host_mod = MarkHostMetalContext()(host_mod)
     if target_host.kind.name == "llvm":
         host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
     elif target_host.kind.name == "c":
@@ -177,6 +181,8 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
         device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)
     elif target.kind.name == "hip":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
+    elif target.kind.name == "metal":
+        device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 

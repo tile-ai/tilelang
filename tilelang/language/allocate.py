@@ -31,6 +31,7 @@ from tvm.tir.expr import FloatImm, IntImm
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
+from .proxy import Tensor
 
 _Shapes = TypeVarTuple("_Shapes")
 _DType = TypeVar("_DType")
@@ -264,10 +265,10 @@ def alloc_tcgen05_instr_desc(dtype: str = _dtypes.uint32):
 
 
 @overload
-def empty(shape, dtype: str = _dtypes.float32): ...
+def empty(shape, dtype: str = _dtypes.float32) -> Tensor: ...
 
 
-def empty(*shape, dtype: str = _dtypes.float32):
+def empty(*shape, dtype: str = _dtypes.float32) -> Tensor:
     if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
         return OutTensor(shape[0], dtype)
     elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):
@@ -275,4 +276,4 @@ def empty(*shape, dtype: str = _dtypes.float32):
     elif all([isinstance(x, (int, PrimExpr)) for x in shape]):
         return OutTensor(shape, dtype)
     else:
-        raise RuntimeError(f"Invalid shape {shape}")
+        raise TypeError(f"Invalid shape {shape}")

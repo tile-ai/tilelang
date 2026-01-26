@@ -58,6 +58,17 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   // snprintf for richer assert messages with actual values
   decl_stream << "#include <stdio.h>\n";
   decl_stream << "#include <stdbool.h>\n";
+
+  decl_stream << "#ifdef __OBJC__\n";
+  decl_stream << "#include \"tvm/runtime/device_api.h\"\n";
+  decl_stream << "#include \"tvm/ffi/function.h\"\n";
+
+  decl_stream << "#include <Metal/Metal.h>\n";
+  decl_stream << "#include <Foundation/Foundation.h>\n";
+
+  decl_stream << "#include <torch/mps.h>\n";
+  decl_stream << "#endif\n";
+
   CodeGenCHost::InitGlobalContext();
   tvm::codegen::CodeGenC::Init(output_ssa);
 }
@@ -269,6 +280,9 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   std::string args_stack = PrintExpr(op->args[1]);
   this->PrintIndent();
   std::string result = name_supply_->FreshName("result");
+  if (is_in_metal_context) {
+    this->stream << "__block ";
+  }
   this->stream << "TVMFFIAny " << result << ";\n";
   this->PrintIndent();
   // must make sure type_index is set to none
@@ -277,6 +291,23 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   this->stream << result << ".zero_padding = 0;\n";
   this->PrintIndent();
   this->stream << result << ".v_int64 = 0;\n";
+
+  int metal_scope;
+  std::string metal_result;
+  if (is_in_metal_context) {
+    metal_result = name_supply_->FreshName("metal_ret");
+    this->PrintLine("__block int ", metal_result, " = 0;");
+    this->PrintLine("auto serialQueue = torch::mps::get_dispatch_queue();");
+    this->PrintLine("dispatch_sync(serialQueue, ^() {");
+    metal_scope = this->BeginScope();
+
+    this->PrintLine("const id<MTLCommandBuffer> commandBuffer = "
+                    "torch::mps::get_command_buffer();");
+    this->PrintLine(
+        "const auto f = tvm::ffi::Function::GetGlobal(\"metal.SetStream\");");
+    this->PrintLine("(*f)(static_cast<TVMStreamHandle>(commandBuffer));");
+  }
+
   this->PrintIndent();
   if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
     this->stream << "if (TVMFFIFunctionCall(" << packed_func_name << ", ";
@@ -286,11 +317,20 @@ void CodeGenCHost::PrintCallPacked(const tvm::tir::CallNode *op) {
   this->stream << "(TVMFFIAny*) " << args_stack << ", " << num_args << ", "
                << "&" << result << ") != 0) {\n";
   int func_call_scope = this->BeginScope();
-  this->PrintIndent();
-  this->stream << "return -1;\n";
+  if (is_in_metal_context) {
+    this->PrintLine(metal_result, " = -1;");
+  } else {
+    this->PrintLine("return -1;");
+  }
   this->EndScope(func_call_scope);
-  this->PrintIndent();
-  this->stream << "}\n";
+
+  this->PrintLine("}");
+
+  if (is_in_metal_context) {
+    this->EndScope(metal_scope);
+    this->PrintLine("});");
+    this->PrintLine("if (", metal_result, " != 0) return ", metal_result, ";");
+  }
 }
 
 std::string CodeGenCHost::GetPackedName(const tvm::tir::CallNode *op) {
@@ -401,6 +441,18 @@ void CodeGenCHost::VisitStmt_(const tvm::tir::AssertStmtNode *op) { // NOLINT(*)
     stream << "}\n";
   }
   this->PrintStmt(op->body);
+}
+
+void CodeGenCHost::VisitStmt_(const tvm::tir::AttrStmtNode *op) {
+  bool enter_metal_ctx = op->attr_key == "metal_context";
+  if (enter_metal_ctx) {
+    ICHECK(!is_in_metal_context) << "Nested metal context";
+    is_in_metal_context = true;
+  }
+  tvm::codegen::CodeGenC::VisitStmt_(op);
+  if (enter_metal_ctx) {
+    is_in_metal_context = false;
+  }
 }
 
 void CodeGenCHost::VisitExpr_(const tvm::tir::MinNode *op,

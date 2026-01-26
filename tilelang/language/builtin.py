@@ -10,6 +10,7 @@ from tvm import DataType, tir
 from tvm.runtime import convert
 from typing import Any
 from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion
+from tilelang.utils.language import retrieve_ptr
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 
@@ -941,3 +942,199 @@ def ptx_mma_sm70(
         accumulator,
         c_index,
     )
+
+
+def ldg32(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+    """Load 32 bits (4 bytes) from global memory using explicit PTX instructions.
+
+    Usage: `T.ldg32(x[i])` or `T.ldg32(x[i:i+2])` emits `tl::ldg32(ptr)`.
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad`.
+        pred: Optional predicate condition. If False, the load is skipped.
+
+    Returns:
+        PrimExpr: The loaded 32-bit value.
+
+    Example:
+        >>> val = T.ldg32(x[i])
+        >>> val = T.ldg32(x[i:i+2])  # load 2 x fp16
+        >>> val = T.ldg32(x[i], pred=i < N)  # predicated load
+    """
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.ldg32 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    if pred is None:
+        return tir.call_intrin("uint32", tir.op.Op.get("tl.ldg32"), ptr)
+    else:
+        return tir.call_intrin("uint32", tir.op.Op.get("tl.ldg32"), ptr, pred)
+
+
+def ldg64(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+    """Load 64 bits (8 bytes) from global memory using explicit PTX instructions.
+
+    Usage: `T.ldg64(x[i])` or `T.ldg64(x[i:i+4])` emits `tl::ldg64(ptr)`.
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad`.
+        pred: Optional predicate condition. If False, the load is skipped.
+
+    Returns:
+        PrimExpr: The loaded 64-bit value.
+
+    Example:
+        >>> val = T.ldg64(x[i])
+        >>> val = T.ldg64(x[i:i+4])  # load 4 x fp16
+        >>> val = T.ldg64(x[i], pred=i < N)  # predicated load
+    """
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.ldg64 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    if pred is None:
+        return tir.call_intrin("uint32x2", tir.op.Op.get("tl.ldg64"), ptr)
+    else:
+        return tir.call_intrin("uint32x2", tir.op.Op.get("tl.ldg64"), ptr, pred)
+
+
+def ldg128(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+    """Load 128 bits (16 bytes) from global memory using explicit PTX instructions.
+
+    Usage: `T.ldg128(x[i])` or `T.ldg128(x[i:i+8])` emits `tl::ldg128(ptr)`.
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad`.
+        pred: Optional predicate condition. If False, the load is skipped.
+
+    Returns:
+        PrimExpr: The loaded 128-bit value.
+
+    Example:
+        >>> val = T.ldg128(x[i])
+        >>> val = T.ldg128(x[i:i+8])  # load 8 x fp16
+        >>> val = T.ldg128(x[i], pred=i < N)  # predicated load
+    """
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.ldg128 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    if pred is None:
+        return tir.call_intrin("uint32x4", tir.op.Op.get("tl.ldg128"), ptr)
+    else:
+        return tir.call_intrin("uint32x4", tir.op.Op.get("tl.ldg128"), ptr, pred)
+
+
+def ldg256(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+    """Load 256 bits (32 bytes) from global memory using explicit PTX instructions.
+
+    Usage: `T.ldg256(x[i])` or `T.ldg256(x[i:i+16])` emits `tl::ldg256(ptr)`.
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad`.
+        pred: Optional predicate condition. If False, the load is skipped.
+
+    Returns:
+        PrimExpr: The loaded 256-bit value.
+
+    Example:
+        >>> val = T.ldg256(x[i])
+        >>> val = T.ldg256(x[i:i+16])  # load 16 x fp16
+        >>> val = T.ldg256(x[i], pred=i < N)  # predicated load
+    """
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.ldg256 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    if pred is None:
+        return tir.call_intrin("uint32x8", tir.op.Op.get("tl.ldg256"), ptr)
+    else:
+        return tir.call_intrin("uint32x8", tir.op.Op.get("tl.ldg256"), ptr, pred)
+
+
+def stg32(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+    """Store 32 bits (4 bytes) to global memory using explicit PTX instructions.
+
+    Usage: `T.stg32(y[i], value)` emits `tl::stg32(ptr, value)`.
+
+    Args:
+        dst: A `Buffer`, `BufferRegion`, or `BufferLoad` indicating the destination.
+        value: The 32-bit value to store.
+        pred: Optional predicate condition. If False, the store is skipped.
+
+    Example:
+        >>> T.stg32(y[i], val)
+        >>> T.stg32(y[i], val, pred=i < N)  # predicated store
+    """
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.stg32 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
+    ptr = retrieve_ptr(dst, access_type="w")
+    if pred is None:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg32"), ptr, value)
+    else:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg32"), ptr, value, pred)
+
+
+def stg64(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+    """Store 64 bits (8 bytes) to global memory using explicit PTX instructions.
+
+    Usage: `T.stg64(y[i:i+2], value)` emits `tl::stg64(ptr, value)`.
+
+    Args:
+        dst: A `Buffer`, `BufferRegion`, or `BufferLoad` indicating the destination.
+        value: The 64-bit value to store (e.g., uint2).
+        pred: Optional predicate condition. If False, the store is skipped.
+
+    Example:
+        >>> T.stg64(y[i:i+2], val)
+        >>> T.stg64(y[i:i+2], val, pred=i < N)  # predicated store
+    """
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.stg64 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
+    ptr = retrieve_ptr(dst, access_type="w")
+    if pred is None:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg64"), ptr, value)
+    else:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg64"), ptr, value, pred)
+
+
+def stg128(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+    """Store 128 bits (16 bytes) to global memory using explicit PTX instructions.
+
+    Usage: `T.stg128(y[i:i+4], value)` emits `tl::stg128(ptr, value)`.
+
+    Args:
+        dst: A `Buffer`, `BufferRegion`, or `BufferLoad` indicating the destination.
+        value: The 128-bit value to store (e.g., uint4).
+        pred: Optional predicate condition. If False, the store is skipped.
+
+    Example:
+        >>> T.stg128(y[i:i+4], val)
+        >>> T.stg128(y[i:i+4], val, pred=i < N)  # predicated store
+    """
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.stg128 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
+    ptr = retrieve_ptr(dst, access_type="w")
+    if pred is None:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg128"), ptr, value)
+    else:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg128"), ptr, value, pred)
+
+
+def stg256(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+    """Store 256 bits (32 bytes) to global memory using explicit PTX instructions.
+
+    Usage: `T.stg256(y[i:i+8], value)` emits `tl::stg256(ptr, value)`.
+
+    Args:
+        dst: A `Buffer`, `BufferRegion`, or `BufferLoad` indicating the destination.
+        value: The 256-bit value to store (e.g., ulonglong4).
+        pred: Optional predicate condition. If False, the store is skipped.
+
+    Example:
+        >>> T.stg256(y[i:i+8], val)
+        >>> T.stg256(y[i:i+8], val, pred=i < N)  # predicated store
+    """
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.stg256 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
+    ptr = retrieve_ptr(dst, access_type="w")
+    if pred is None:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg256"), ptr, value)
+    else:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg256"), ptr, value, pred)

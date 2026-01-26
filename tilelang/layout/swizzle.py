@@ -196,3 +196,28 @@ def make_linear_layout(buffer_or_load_or_region: Buffer | BufferLoad | BufferReg
     """
     _, shape, _ = _get_buffer_info(buffer_or_load_or_region)
     return _ffi_api.make_linear_layout(list(shape))
+
+
+def make_gemm_fragment_8x8():
+    """
+    Create a standard 8x8 GEMM fragment layout for ldmatrix/stmatrix.
+
+    This layout matches the warp-level matrix multiplication pattern used in tensor cores.
+
+    Returns:
+        Fragment: An 8x8 fragment layout
+    """
+    return _ffi_api.make_gemm_fragment_8x8()
+
+
+def make_gemm_fragment_8x8_transposed():
+    """
+    Create a transposed 8x8 GEMM fragment layout for ldmatrix/stmatrix.
+
+    This layout is the transposed version of make_gemm_fragment_8x8, useful for
+    different access patterns in matrix operations.
+
+    Returns:
+        Fragment: A transposed 8x8 fragment layout
+    """
+    return _ffi_api.make_gemm_fragment_8x8_transposed()

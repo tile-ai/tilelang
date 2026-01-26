@@ -6,6 +6,7 @@
 #include "utils.h"
 
 #include "../support/ffi_aliases.h"
+#include "dlpack/dlpack.h"
 #include <tvm/node/node.h>
 
 namespace tvm {
@@ -16,6 +17,9 @@ bool TargetIsCuda(Target target) {
 }
 bool TargetIsRocm(Target target) {
   return target->GetTargetDeviceType() == kDLROCM;
+}
+bool TargetIsMetal(Target target) {
+  return target->GetTargetDeviceType() == kDLMetal;
 }
 
 int GetArchInt(Target target) {
@@ -60,7 +64,7 @@ bool TargetIsSm100(Target target) {
   if (!TargetIsCuda(target))
     return false;
   int arch = GetArchInt(target);
-  return arch >= 100 & arch <= 110;
+  return arch >= 100 && arch <= 110;
 }
 
 bool TargetIsSM120(Target target) {
@@ -127,6 +131,20 @@ bool TargetHasBulkCopy(Target target) {
   return arch >= 90;
 }
 
+bool TargetSupportVectorize256(Target target) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetArchInt(target);
+  return arch >= 100;
+}
+
+bool TargetHasSMVersionGE(Target target, int version) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetArchInt(target);
+  return arch >= version;
+}
+
 int TargetGetWarpSize(Target target) {
   int res = 32;
   if (TargetIsCDNA(target))
@@ -182,6 +200,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsCuda(target); })
       .def("tl.TargetIsRocm",
            [](Target target) { return TargetIsRocm(target); })
+      .def("tl.TargetIsMetal",
+           [](Target target) { return TargetIsMetal(target); })
       .def("tl.TargetIsVolta",
            [](Target target) { return TargetIsVolta(target); })
       .def("tl.TargetIsTuring",

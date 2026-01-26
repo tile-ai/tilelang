@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from tilelang import tvm as tvm
 from tvm.target import Target
+from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.utils.language import is_shared, is_fragment
@@ -16,7 +17,7 @@ class GemmBase:
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
 
-    def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
         raise NotImplementedError("lower is not implemented")
 
     def is_gemm_ss(self) -> bool:

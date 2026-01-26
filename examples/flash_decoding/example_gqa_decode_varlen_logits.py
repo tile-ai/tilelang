@@ -5,6 +5,7 @@ import math
 import argparse
 import tilelang
 import tilelang.language as T
+from tilelang.profiler import do_bench
 
 torch.manual_seed(0)
 
@@ -615,31 +616,6 @@ def test_varlen_decode_main(args):
     ), f"Score mismatch: {max_diff_s_tl.item()}"
 
     print("✅ All tests passed!")
-
-
-def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
-    """
-    Do benchmark for a function.
-    """
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(rep)]
-    for _ in range(warmup):
-        fn(*args, **kwargs)
-
-    torch.cuda.synchronize()
-    for i in range(rep):
-        start_event[i].record()
-        fn(*args, **kwargs)
-        end_event[i].record()
-    torch.cuda.synchronize()
-
-    # Record clocks
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
-        dtype=torch.float,
-    )
-
-    return times.mean().item()
 
 
 def speed_benchmark_decode_comparison(args):

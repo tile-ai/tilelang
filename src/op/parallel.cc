@@ -9,6 +9,7 @@
 #include <tvm/tir/op.h>
 
 #include "../layout/layout.h"
+#include "arith/int_operator.h"
 
 #include "../layout/utils.h"
 #include "../target/utils.h"
@@ -52,15 +53,18 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
   // (forward index) of both fragments are equal. This is required when
   // validating loop layout against buffer fragment, as code generation
   // needs to correctly derive buffer physical indices from loop layout.
+  bool large_physical_is_fully_replicated = large_frag->IsCompletedReplicated();
+  if (large_physical_is_fully_replicated) {
+    return true; // fully replicated fragments are always compatible
+  }
+
   if (check_forward_index) {
     auto small_physical = small_frag->Forward(small_frag_indices);
     auto large_physical = large_frag->Forward(large_frag_indices);
-
     // Dimension mismatch means they are not equal.
     if (small_physical.size() != large_physical.size()) {
       return false;
     }
-
     // Check each physical index component for equality.
     for (size_t i = 0; i < small_physical.size(); i++) {
       auto diff = analyzer_.Simplify(small_physical[i] - large_physical[i]);
@@ -453,17 +457,11 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     bool has_cross_thread_access = false;
     PostOrderVisit(root_, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
-        // check if scope is shared or global
-        if (store->buffer.scope() == "shared" ||
-            store->buffer.scope() == "shared.dyn" ||
-            store->buffer.scope() == "global") {
+        if (IsSharedBuffer(store->buffer) || IsGlobalBuffer(store->buffer)) {
           has_cross_thread_access = true;
         }
       } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        // check if scope is shared or global
-        if (load->buffer.scope() == "shared" ||
-            load->buffer.scope() == "shared.dyn" ||
-            load->buffer.scope() == "global") {
+        if (IsSharedBuffer(load->buffer) || IsGlobalBuffer(load->buffer)) {
           has_cross_thread_access = true;
         }
       }
@@ -478,8 +476,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     PostOrderVisit(root_, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
         auto buffer = store->buffer;
-        if (buffer.scope() == "shared" || buffer.scope() == "shared.dyn" ||
-            buffer.scope() == "global") {
+        if (IsSharedBuffer(buffer) || IsGlobalBuffer(buffer)) {
           store_shared_global_buffers.emplace_back(buffer);
         } else if (IsFragmentBuffer(buffer)) {
           store_fragment_buffers.emplace_back(buffer);
@@ -670,6 +667,7 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
              << buffer << "` of layout " << src_layout->DebugOutput() << '\n';
 
   Fragment result;
+
   if (IsCommonAccessIndice(buffer)) {
     result = src_layout;
   } else {
@@ -714,7 +712,8 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   // As the pass will do post processing to the layout
   auto maybe_remapped_root_ =
       IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
-  int vector_size = GetVectorizeSize(maybe_remapped_root_, T.analyzer);
+  int vector_size =
+      GetVectorizeSize(maybe_remapped_root_, T.analyzer, T.layout_map);
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;

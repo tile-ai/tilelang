@@ -11,6 +11,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "target/source/codegen_c.h"
 
@@ -148,6 +149,8 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_shapes;
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<const VarNode *, IntImm> unroll_factor;
+  // Map from VarNode to packed buffer variable name for fp4 packed storage
+  std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,

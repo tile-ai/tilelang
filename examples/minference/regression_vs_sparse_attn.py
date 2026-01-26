@@ -3,7 +3,7 @@ import example_vertical_slash_sparse_attn
 
 
 def regression_example_vertical_slash_sparse_attn():
-    tilelang.testing.process_func(example_vertical_slash_sparse_attn.run_regression_perf, argv=[])
+    tilelang.testing.process_func(example_vertical_slash_sparse_attn.run_regression_perf)
 
 
 if __name__ == "__main__":

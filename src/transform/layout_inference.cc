@@ -26,7 +26,6 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_fusion_utils.h"
-#include "common/loop_parallel_transform_utils.h"
 #include "common/union_find.h"
 #include "layout_reducer.h"
 #include "parallel_loop_layout_validator.h"
@@ -1253,7 +1252,6 @@ private:
 tvm::transform::Pass LayoutInference() {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    f.CopyOnWrite()->body = ParallelLoopTransformer::Substitute(f->body);
     ThreadBindingCollector collector;
     collector(f->body);
     bool has_thread_binding = !collector.thread_binding_.empty();
