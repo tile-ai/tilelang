@@ -297,20 +297,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << ")\n";
   };
 
-  auto print_mbarrier_obj = [&](PrimExpr barrier_id) {
-    std::ostringstream ss;
-    if (barrier_id.as<IntImmNode>()) {
-      // incase the barrier_id is an integer, we need to print the barrier_id as
-      // an integer
-      ss << "(" << mbarrier_name_ << "+" << barrier_id << ")";
-    } else {
-      // otherwise may be a T.get_mbarrier() call or BufferLoad Node
-      // we need to print the barrier_id as a string
-      ss << PrintExpr_(barrier_id);
-    }
-    return ss.str();
-  };
-
   if (op->op.same_as(builtin::ptx_cp_async())) {
     std::string dst = PrintExpr_(op->args[0]);
     std::string dst_offset = PrintExpr_(op->args[1]);
@@ -347,11 +333,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     if (op->args.size() == 1) {
       PrintIndent();
-      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto mbarrier_obj = PrintExpr_(op->args[0]);
       stream << "tl.mbarrier_arrive(" << mbarrier_obj << ")\n";
     } else if (op->args.size() == 3) {
       PrintIndent();
-      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto mbarrier_obj = PrintExpr_(op->args[0]);
       auto cta_id = PrintExpr_(op->args[1]);
       auto pred = PrintExpr_(op->args[2]);
       stream << "tl.mbarrier_arrive(" << mbarrier_obj << ", " << cta_id << ", "
@@ -363,20 +349,20 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     ICHECK_EQ(op->args.size(), 2);
     PrintIndent();
-    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto mbarrier_obj = PrintExpr_(op->args[0]);
     auto arrive_count = PrintExpr_(op->args[1]);
     stream << "tl.mbarrier_init(" << mbarrier_obj << ", " << arrive_count
            << ")\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
     if (op->args.size() == 2) {
       PrintIndent();
-      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto mbarrier_obj = PrintExpr_(op->args[0]);
       auto transaction_bytes = PrintExpr_(op->args[1]);
       stream << "tl.arrive_and_expect_tx(" << mbarrier_obj << ", "
              << transaction_bytes << ")\n";
     } else if (op->args.size() == 4) {
       PrintIndent();
-      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto mbarrier_obj = PrintExpr_(op->args[0]);
       auto transaction_bytes = PrintExpr_(op->args[1]);
       auto cta_id = PrintExpr_(op->args[2]);
       auto pred = PrintExpr_(op->args[3]);
@@ -395,14 +381,14 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
     ICHECK_EQ(op->args.size(), 2);
     PrintIndent();
-    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto mbarrier_obj = PrintExpr_(op->args[0]);
     auto transaction_bytes = PrintExpr_(op->args[1]);
     stream << "tl.mbarrier_expect_tx(" << mbarrier_obj << ", "
            << transaction_bytes << ")\n";
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     ICHECK_EQ(op->args.size(), 2);
     PrintIndent();
-    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto mbarrier_obj = PrintExpr_(op->args[0]);
     auto phase = PrintExpr_(op->args[1]);
     stream << "tl.mbarrier_wait(" << mbarrier_obj << ", " << phase << ")\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
@@ -428,7 +414,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     }
     auto desc = op->args[0];
     ss << PrintExpr_(desc) << ", ";
-    ss << print_mbarrier_obj(op->args[1]) << ", ";
+    ss << PrintExpr_(op->args[1]) << ", ";
     ss << PrintExpr_(op->args[2]) << ", (";
     for (size_t i = 3; i < op->args.size() - 1; i++) {
       if (i > 3)

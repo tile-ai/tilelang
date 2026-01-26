@@ -9,9 +9,8 @@ from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
 from typing import Any
-from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion
+from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad, BufferRegion
 from tilelang.utils.language import retrieve_ptr
-
 _IS_HIP_AVAILABLE = check_hip_availability()
 
 
@@ -29,36 +28,22 @@ def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
     raise TypeError(f"Expect warp sizing argument to be int or PrimExpr, but got {type(value)}.")
 
 
-def create_list_of_mbarrier(*args: Any) -> Call:
+def _mbar_to_buffer_load(mbar: Buffer | BufferLoad) -> BufferLoad:
+    """Convert a memory barrier to a buffer load.
+    
+    Args:
+        mbar: Optional[Buffer | BufferLoad]
+            The memory barrier to convert
+
+    Returns:
+        tir.BufferLoad: A buffer load of the memory barrier
     """
-    Create a list of memory barrier handles.
-
-    Parameters
-    ----------
-    *args : list or Any
-        Either a single list of arguments, or multiple arguments directly.
-
-    Returns
-    -------
-    tvm.tir.Call
-        Handle to the created list of memory barriers.
-
-    Raises
-    ------
-    TypeError
-        If the input is not a list or variadic arguments.
-
-    Examples
-    --------
-    >>> create_list_of_mbarrier([128, 128])
-    >>> create_list_of_mbarrier(128, 128)
-    """
-    if len(args) == 1 and isinstance(args[0], list):
-        return tir.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), *args[0])
-    elif len(args) >= 1:
-        return tir.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), *args)
+    if isinstance(mbar, tir.BufferLoad):
+        return mbar
+    elif isinstance(mbar, tir.Buffer):
+        return tir.BufferLoad(mbar, [0])
     else:
-        raise TypeError("create_list_of_mbarrier expects a list or one or more arguments.")
+        raise TypeError(f"mbarrier must be an tir.BufferLoad or a tir.Buffer, but got {type(mbar)}")
 
 
 def __ldg(load_or_buf: BufferLoad | tir.Buffer, index: PrimExpr | int | None = None) -> PrimExpr:
@@ -88,18 +73,6 @@ def __ldg(load_or_buf: BufferLoad | tir.Buffer, index: PrimExpr | int | None = N
         bl = BufferLoad(load_or_buf, [idx])
         return tir.call_intrin(str(load_or_buf.dtype), tir.op.Op.get("tl.__ldg"), bl)
     raise TypeError("T.__ldg expects a BufferLoad or a Buffer.")
-
-
-def get_mbarrier(*args):
-    """Retrieve a memory barrier operation.
-
-    Args:
-        *args: Variable arguments to specify which memory barrier to retrieve
-
-    Returns:
-        tir.Call: A handle to the requested memory barrier
-    """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), *args)
 
 
 def create_tma_descriptor(*args):
@@ -210,84 +183,72 @@ def disable_warp_group_reg_alloc():
     return no_set_max_nreg()
 
 
-def mbarrier_wait_parity(mbarrier: int | PrimExpr | tir.Call, parity: int | Var):
+def mbarrier_wait_parity(mbarrier: Buffer | BufferLoad, parity: int | Var):
     """Wait for memory barrier parity condition.
 
     Args:
-        mbarrier: Optional[int, PrimExpr]
+            mbarrier: Buffer | BufferLoad
             The memory barrier to wait on
-        parity: Optional[int, Var]
+        parity: int | Var
             The parity value to wait for
     Examples:
         .. code-block:: python
 
-            # Wait for parity 0 on barrier 0
-            T.mbarrier_wait_parity(0, 0)
+            mbar = T.alloc_barrier(1)
+            # Wait for parity 0 on a single mbarrier
+            T.mbarrier_wait_parity(mbar, 0)
 
-            # Wait for parity value in variable ko on barrier 1
-            T.mbarrier_wait_parity(1, ko)
-
-            # Wait using barrier handle
-            barrier = T.get_mbarrier(0)
-            T.mbarrier_wait_parity(barrier, 1)
+            mbars = T.alloc_barrier([128] * n)
+            # Wait for parity value on one of the mbarriers
+            T.mbarrier_wait_parity(mbars[ko], ko)
 
             # Common usage in pipelined kernels:
             for ko in range(num_stages):
                 # Producer waits for consumer to finish previous iteration
-                T.mbarrier_wait_parity(1, ko ^ 1)
+                T.mbarrier_wait_parity(mbars[1], ko ^ 1)
                 # Producer copies data
                 T.copy(A_global, A_shared)
                 # Producer signals data ready
-                T.mbarrier_arrive(0)
+                T.mbarrier_arrive(mbars[0])
 
                 # Consumer waits for producer data
-                T.mbarrier_wait_parity(0, ko)
+                T.mbarrier_wait_parity(mbars[0], ko)
                 # Consumer computes
                 T.gemm(A_shared, B_shared, C_local)
                 # Consumer signals completion
-                T.mbarrier_arrive(1)
+                T.mbarrier_arrive(mbars[1])
     Returns:
         tir.Call: A handle to the barrier wait operation
     """
-    if isinstance(mbarrier, (tir.Call, tir.BufferLoad)):
-        mbarrier = mbarrier
-    elif isinstance(mbarrier, (tir.PrimExpr, int)):
-        mbarrier = get_mbarrier(mbarrier)
-    elif isinstance(mbarrier, tir.Buffer):
-        mbarrier = tir.BufferLoad(mbarrier, [0])
-    else:
-        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
+    mbarrier = _mbar_to_buffer_load(mbarrier)
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: int | PrimExpr | tir.Call):
+def mbarrier_arrive(mbarrier: Buffer | BufferLoad):
     """Arrive at memory barrier.
 
     Args:
-        mbarrier: Optional[int, PrimExpr]
+        mbarrier: Buffer | BufferLoad
             The memory barrier to arrive at
     """
-    if isinstance(mbarrier, (tir.Call, tir.BufferLoad)):
-        mbarrier = mbarrier
-    elif isinstance(mbarrier, (tir.PrimExpr, int)):
-        mbarrier = get_mbarrier(mbarrier)
-    elif isinstance(mbarrier, tir.Buffer):
-        mbarrier = tir.BufferLoad(mbarrier, [0])
-    else:
-        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
+    mbarrier = _mbar_to_buffer_load(mbarrier)
     return ptx_arrive_barrier(mbarrier)
 
 
-def mbarrier_expect_tx(*args):
+def mbarrier_expect_tx(mbarrier: Buffer | BufferLoad, tx: int):
     """Set expected transaction count for memory barrier.
 
     Args:
-        *args: Variable arguments specifying the expected transaction count
+        mbarrier: Buffer | BufferLoad
+            The memory barrier to expect transaction count for
+        tx: int
+            The expected transaction count
 
     Returns:
         tir.Call: A handle to the barrier expectation operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), *args)
+    mbarrier = _mbar_to_buffer_load(mbarrier)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), mbarrier, tx)
 
 
 def warpgroup_arrive():
@@ -632,29 +593,29 @@ def wait_wgmma(id: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
-def barrier_wait(barrier_id: int | PrimExpr | tir.Call, parity: int | Var | None = None):
+def barrier_wait(mbarrier: Buffer | BufferLoad, parity: int | Var):
     """Wait for a memory barrier to complete.
 
     Args:
-        barrier_id: Optional[int, PrimExpr]
+        mbarrier: Buffer | BufferLoad
             The memory barrier to wait on
-        parity: Optional[int, Var]
+        parity: int | Var
             The parity value to wait for
     Returns:
         tir.Call: A handle to the barrier wait operation
     Current implementation is a sugar syntax for mbarrier_wait_parity, as we only support parity 0 and 1.
     """
-    return mbarrier_wait_parity(barrier_id, parity)
+    return mbarrier_wait_parity(mbarrier, parity)
 
 
-def barrier_arrive(barrier_id: int | PrimExpr | tir.Call):
+def barrier_arrive(mbarrier: Buffer | BufferLoad):
     """Arrive at a memory barrier.
 
     Args:
-        barrier_id: Optional[int, PrimExpr]
+        mbarrier: Buffer | BufferLoad
             The memory barrier to arrive at
     """
-    return mbarrier_arrive(barrier_id)
+    return mbarrier_arrive(mbarrier)
 
 
 def shfl_xor(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
