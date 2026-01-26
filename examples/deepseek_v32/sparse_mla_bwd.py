@@ -327,10 +327,10 @@ def test_sparse_mla_bwd(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, to
     def fn():
         return sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse)
 
-    # ms = do_bench(fn, rep=100, warmup=250)
-    # print(f"Average time: {ms:.3f} ms")
-    # print(f"bwd io bandwidth = ", (B * S * max(DQKV * 2, DQKV + DV) * topk * 2) / (ms * 1e-3) / 1e12)
-    # print(f"bwd tflops = ", per_token_flop * S / (ms * 1e-3) / 1e12)
+    ms = do_bench(fn, rep=100, warmup=250)
+    print(f"Average time: {ms:.3f} ms")
+    print(f"bwd io bandwidth = ", (B * S * max(DQKV * 2, DQKV + DV) * topk * 2) / (ms * 1e-3) / 1e12)
+    print(f"bwd tflops = ", per_token_flop * S / (ms * 1e-3) / 1e12)
 
 
 def run_regression_perf(B=1, S=4096, SKV=8192, H=64, HKV=1, DQKV=576, DV=512, topk=2048, dtype=torch.bfloat16):
