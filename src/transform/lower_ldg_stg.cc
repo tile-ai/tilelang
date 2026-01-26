@@ -84,19 +84,21 @@ public:
         if (stride_imm->value == 1) {
           // Get lanes from the index dtype
           int lanes = store->indices[0]->dtype.lanes();
-          int bytes = lanes * store->buffer->dtype.bytes();
+          // Use bits() to correctly handle sub-byte types like float4_e2m1fn
+          int total_bits = lanes * store->buffer->dtype.bits();
 
-          // Check for supported vector widths
-          if (bytes == 4 || bytes == 8 || bytes == 16 || bytes == 32) {
-            return LowerToSTG(store, ramp->base, bytes);
+          // Check for supported vector widths (32/64/128/256 bits)
+          if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
+              total_bits == 256) {
+            return LowerToSTG(store, ramp->base, total_bits);
           }
         }
       }
     } else {
       // Single element store (non-Ramp)
-      int bytes = store->buffer->dtype.bytes();
-      if (bytes == 4 || bytes == 8 || bytes == 16 || bytes == 32) {
-        return LowerToSTG(store, store->indices[0], bytes);
+      int bits = store->buffer->dtype.bits();
+      if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
+        return LowerToSTG(store, store->indices[0], bits);
       }
     }
 
@@ -144,20 +146,23 @@ public:
               if (stride_imm->value == 1) {
                 // Get lanes from the index dtype
                 int lanes = store->indices[0]->dtype.lanes();
-                int bytes = lanes * store->buffer->dtype.bytes();
+                // Use bits() to correctly handle sub-byte types like
+                // float4_e2m1fn
+                int total_bits = lanes * store->buffer->dtype.bits();
 
-                // Check for supported vector widths
-                if (bytes == 4 || bytes == 8 || bytes == 16 || bytes == 32) {
-                  return LowerToSTGPredicated(store, ramp->base, bytes,
+                // Check for supported vector widths (32/64/128/256 bits)
+                if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
+                    total_bits == 256) {
+                  return LowerToSTGPredicated(store, ramp->base, total_bits,
                                               if_stmt->condition);
                 }
               }
             }
           } else {
             // Single element predicated store (non-Ramp)
-            int bytes = store->buffer->dtype.bytes();
-            if (bytes == 4 || bytes == 8 || bytes == 16 || bytes == 32) {
-              return LowerToSTGPredicated(store, store->indices[0], bytes,
+            int bits = store->buffer->dtype.bits();
+            if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
+              return LowerToSTGPredicated(store, store->indices[0], bits,
                                           if_stmt->condition);
             }
           }
@@ -197,19 +202,21 @@ public:
         if (stride_imm->value == 1) {
           // Get lanes from the index dtype
           int lanes = load->indices[0]->dtype.lanes();
-          int bytes = lanes * load->buffer->dtype.bytes();
+          // Use bits() to correctly handle sub-byte types like float4_e2m1fn
+          int total_bits = lanes * load->buffer->dtype.bits();
 
-          // Check for supported vector widths
-          if (bytes == 4 || bytes == 8 || bytes == 16 || bytes == 32) {
-            return LowerToLDG(load, ramp->base, bytes);
+          // Check for supported vector widths (32/64/128/256 bits)
+          if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
+              total_bits == 256) {
+            return LowerToLDG(load, ramp->base, total_bits);
           }
         }
       }
     } else {
       // Single element load (non-Ramp)
-      int bytes = load->buffer->dtype.bytes();
-      if (bytes == 4 || bytes == 8 || bytes == 16 || bytes == 32) {
-        return LowerToLDG(load, load->indices[0], bytes);
+      int bits = load->buffer->dtype.bits();
+      if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
+        return LowerToLDG(load, load->indices[0], bits);
       }
     }
 
@@ -263,19 +270,23 @@ public:
                 if (stride_imm->value == 1) {
                   // Get lanes from the index dtype
                   int lanes = load->indices[0]->dtype.lanes();
-                  int bytes = lanes * load->buffer->dtype.bytes();
+                  // Use bits() to correctly handle sub-byte types like
+                  // float4_e2m1fn
+                  int total_bits = lanes * load->buffer->dtype.bits();
 
-                  if (bytes == 4 || bytes == 8 || bytes == 16 || bytes == 32) {
-                    return LowerToLDGPredicated(load, ramp->base, bytes,
+                  // Check for supported vector widths (32/64/128/256 bits)
+                  if (total_bits == 32 || total_bits == 64 ||
+                      total_bits == 128 || total_bits == 256) {
+                    return LowerToLDGPredicated(load, ramp->base, total_bits,
                                                 condition);
                   }
                 }
               }
             } else {
               // Single element predicated load (non-Ramp)
-              int bytes = load->buffer->dtype.bytes();
-              if (bytes == 4 || bytes == 8 || bytes == 16 || bytes == 32) {
-                return LowerToLDGPredicated(load, load->indices[0], bytes,
+              int bits = load->buffer->dtype.bits();
+              if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
+                return LowerToLDGPredicated(load, load->indices[0], bits,
                                             condition);
               }
             }
@@ -301,25 +312,25 @@ private:
 
   // Lower a BufferLoad to ldg intrinsic
   PrimExpr LowerToLDG(const BufferLoadNode *load, const PrimExpr &base,
-                      int bytes) {
+                      int bits) {
     PrimExpr ptr = CreateAccessPtr(load->buffer, base, 1);
 
     DataType ret_dtype;
     Op ldg_op;
-    if (bytes == 4) {
+    if (bits == 32) {
       ret_dtype = DataType::UInt(32);
       ldg_op = ldg32();
-    } else if (bytes == 8) {
+    } else if (bits == 64) {
       ret_dtype = DataType::UInt(32, 2);
       ldg_op = ldg64();
-    } else if (bytes == 16) {
+    } else if (bits == 128) {
       ret_dtype = DataType::UInt(32, 4);
       ldg_op = ldg128();
-    } else if (bytes == 32) {
+    } else if (bits == 256) {
       ret_dtype = DataType::UInt(32, 8);
       ldg_op = ldg256();
     } else {
-      LOG(FATAL) << "Unsupported byte width for ldg: " << bytes;
+      LOG(FATAL) << "Unsupported bit width for ldg: " << bits;
       return PrimExpr();
     }
 
@@ -335,26 +346,26 @@ private:
 
   // Lower a predicated BufferLoad to ldg intrinsic
   PrimExpr LowerToLDGPredicated(const BufferLoadNode *load,
-                                const PrimExpr &base, int bytes,
+                                const PrimExpr &base, int bits,
                                 const PrimExpr &predicate) {
     PrimExpr ptr = CreateAccessPtr(load->buffer, base, 1);
 
     DataType ret_dtype;
     Op ldg_op;
-    if (bytes == 4) {
+    if (bits == 32) {
       ret_dtype = DataType::UInt(32);
       ldg_op = ldg32();
-    } else if (bytes == 8) {
+    } else if (bits == 64) {
       ret_dtype = DataType::UInt(32, 2);
       ldg_op = ldg64();
-    } else if (bytes == 16) {
+    } else if (bits == 128) {
       ret_dtype = DataType::UInt(32, 4);
       ldg_op = ldg128();
-    } else if (bytes == 32) {
+    } else if (bits == 256) {
       ret_dtype = DataType::UInt(32, 8);
       ldg_op = ldg256();
     } else {
-      LOG(FATAL) << "Unsupported byte width for ldg: " << bytes;
+      LOG(FATAL) << "Unsupported bit width for ldg: " << bits;
       return PrimExpr();
     }
 
@@ -370,7 +381,7 @@ private:
 
   // Lower a BufferStore to stg intrinsic
   Stmt LowerToSTG(const BufferStoreNode *store, const PrimExpr &base,
-                  int bytes) {
+                  int bits) {
     PrimExpr ptr = CreateAccessPtr(store->buffer, base, 2);
 
     // Get the value to store
@@ -379,25 +390,25 @@ private:
     // Reinterpret value to uint32xN if needed
     DataType store_dtype;
     const Op *stg_op;
-    switch (bytes) {
-    case 4:
+    switch (bits) {
+    case 32:
       store_dtype = DataType::UInt(32);
       stg_op = &stg32();
       break;
-    case 8:
+    case 64:
       store_dtype = DataType::UInt(32, 2);
       stg_op = &stg64();
       break;
-    case 16:
+    case 128:
       store_dtype = DataType::UInt(32, 4);
       stg_op = &stg128();
       break;
-    case 32:
+    case 256:
       store_dtype = DataType::UInt(32, 8);
       stg_op = &stg256();
       break;
     default:
-      LOG(FATAL) << "Unsupported byte width for stg: " << bytes;
+      LOG(FATAL) << "Unsupported bit width for stg: " << bits;
       return Stmt();
     }
 
@@ -412,7 +423,7 @@ private:
 
   // Lower a predicated BufferStore to stg intrinsic
   Stmt LowerToSTGPredicated(const BufferStoreNode *store, const PrimExpr &base,
-                            int bytes, const PrimExpr &predicate) {
+                            int bits, const PrimExpr &predicate) {
     PrimExpr ptr = CreateAccessPtr(store->buffer, base, 2);
 
     // Get the value to store
@@ -421,25 +432,25 @@ private:
     // Reinterpret value to uint32xN if needed
     DataType store_dtype;
     const Op *stg_op;
-    switch (bytes) {
-    case 4:
+    switch (bits) {
+    case 32:
       store_dtype = DataType::UInt(32);
       stg_op = &stg32();
       break;
-    case 8:
+    case 64:
       store_dtype = DataType::UInt(32, 2);
       stg_op = &stg64();
       break;
-    case 16:
+    case 128:
       store_dtype = DataType::UInt(32, 4);
       stg_op = &stg128();
       break;
-    case 32:
+    case 256:
       store_dtype = DataType::UInt(32, 8);
       stg_op = &stg256();
       break;
     default:
-      LOG(FATAL) << "Unsupported byte width for stg: " << bytes;
+      LOG(FATAL) << "Unsupported bit width for stg: " << bits;
       return Stmt();
     }
 
