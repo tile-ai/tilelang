@@ -8,18 +8,15 @@ Pass configurations:
 
 from tilelang import tvm as tvm
 import tilelang as tl
-from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
 from tvm import tir
 
-auto_target = tvm.target.Target(determine_target("auto"))
-
 
 def _apply_passes(mod, enable_non_predicated=False, disable_predicated=False):
     """Apply the LowerLDGSTG pass and related lowering passes."""
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tvm.tir.transform.BindTarget(tvm.target.Target("cuda"))(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
     with tvm.transform.PassContext(

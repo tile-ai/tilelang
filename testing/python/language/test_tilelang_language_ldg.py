@@ -58,6 +58,10 @@ def test_ldg64_codegen():
     print(src)
     assert "ldg64" in src, "Expected ldg64 call in generated CUDA source"
 
+    # Verify correctness
+    Y_ref = X
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
+
 
 @tilelang.testing.requires_cuda
 def test_ldg128_codegen():
@@ -82,6 +86,10 @@ def test_ldg128_codegen():
     print("=== ldg128 codegen ===")
     print(src)
     assert "ldg128" in src, "Expected ldg128 call in generated CUDA source"
+
+    # Verify correctness
+    Y_ref = X
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
 @tilelang.testing.requires_cuda
@@ -109,6 +117,10 @@ def test_ldg256_codegen():
     print(src)
     assert "ldg256" in src, "Expected ldg256 call in generated CUDA source"
 
+    # Verify correctness
+    Y_ref = X
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
+
 
 @tilelang.testing.requires_cuda
 def test_ldg32_predicated_codegen():
@@ -133,6 +145,10 @@ def test_ldg32_predicated_codegen():
     print(src)
     # Verify codegen - should have ldg32 with two arguments and non-trivial predicate
     assert "ldg32" in src, "Expected ldg32 call in generated CUDA source"
+
+    # Verify correctness
+    Y_ref = X
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
 @tilelang.testing.requires_cuda
@@ -160,6 +176,10 @@ def test_ldg64_predicated_codegen():
     print(src)
     assert "ldg64" in src, "Expected ldg64 call in generated CUDA source"
 
+    # Verify correctness
+    Y_ref = X
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
+
 
 @tilelang.testing.requires_cuda
 def test_ldg128_predicated_codegen():
@@ -185,6 +205,10 @@ def test_ldg128_predicated_codegen():
     print("=== ldg128 predicated codegen ===")
     print(src)
     assert "ldg128" in src, "Expected ldg128 call in generated CUDA source"
+
+    # Verify correctness
+    Y_ref = X
+    torch.testing.assert_close(Y, Y_ref, atol=1e-5, rtol=1e-5)
 
 
 @tilelang.testing.requires_cuda
