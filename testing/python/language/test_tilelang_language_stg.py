@@ -1,4 +1,4 @@
-"""Tests for stg32, stg64, stg128, stg256 intrinsics codegen using eager jit style."""
+"""Tests for store_global_32, store_global_64, store_global_128, store_global_256 intrinsics codegen using eager jit style."""
 
 import tilelang
 import tilelang.language as T
@@ -8,7 +8,7 @@ import torch
 
 @tilelang.testing.requires_cuda
 def test_stg32_codegen():
-    """Test that stg32 generates tl::stg32 in CUDA source."""
+    """Test that stg32 generates tl::store_global_32 in CUDA source."""
 
     @tilelang.jit
     def stg32_kernel(X, Y):
@@ -28,7 +28,7 @@ def test_stg32_codegen():
     print("=== stg32 codegen ===")
     print(src)
     # Verify codegen
-    assert "stg32" in src, "Expected stg32 call in generated CUDA source"
+    assert "store_global_32" in src, "Expected store_global_32 call in generated CUDA source"
 
     # Verify correctness
     torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
@@ -36,7 +36,7 @@ def test_stg32_codegen():
 
 @tilelang.testing.requires_cuda
 def test_stg64_codegen():
-    """Test that stg64 generates tl::stg64 in CUDA source."""
+    """Test that stg64 generates tl::store_global_64 in CUDA source."""
 
     @tilelang.jit
     def stg64_kernel(X, Y):
@@ -57,7 +57,7 @@ def test_stg64_codegen():
     src = stg64_kernel.get_kernel_source(N=128)
     print("=== stg64 codegen ===")
     print(src)
-    assert "stg64" in src, "Expected stg64 call in generated CUDA source"
+    assert "store_global_64" in src, "Expected store_global_64 call in generated CUDA source"
 
     # Verify correctness
     torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
@@ -65,7 +65,7 @@ def test_stg64_codegen():
 
 @tilelang.testing.requires_cuda
 def test_stg128_codegen():
-    """Test that stg128 generates tl::stg128 in CUDA source."""
+    """Test that stg128 generates tl::store_global_128 in CUDA source."""
 
     @tilelang.jit
     def stg128_kernel(X, Y):
@@ -86,7 +86,7 @@ def test_stg128_codegen():
     src = stg128_kernel.get_kernel_source(N=128)
     print("=== stg128 codegen ===")
     print(src)
-    assert "stg128" in src, "Expected stg128 call in generated CUDA source"
+    assert "store_global_128" in src, "Expected store_global_128 call in generated CUDA source"
 
     # Verify correctness
     torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
@@ -95,7 +95,7 @@ def test_stg128_codegen():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_stg256_codegen():
-    """Test that stg256 generates tl::stg256 in CUDA source."""
+    """Test that stg256 generates tl::store_global_256 in CUDA source."""
 
     @tilelang.jit
     def stg256_kernel(X, Y):
@@ -116,7 +116,7 @@ def test_stg256_codegen():
     src = stg256_kernel.get_kernel_source(N=256)
     print("=== stg256 codegen ===")
     print(src)
-    assert "stg256" in src, "Expected stg256 call in generated CUDA source"
+    assert "store_global_256" in src, "Expected store_global_256 call in generated CUDA source"
 
     # Verify correctness
     torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
@@ -124,7 +124,7 @@ def test_stg256_codegen():
 
 @tilelang.testing.requires_cuda
 def test_stg32_predicated_codegen():
-    """Test that stg32 with predicate generates tl::stg32(ptr, val, pred) in CUDA source."""
+    """Test that stg32 with predicate generates tl::store_global_32_conditional(ptr, val, pred) in CUDA source."""
 
     @tilelang.jit
     def stg32_pred_kernel(X, Y):
@@ -144,13 +144,13 @@ def test_stg32_predicated_codegen():
     src = stg32_pred_kernel.get_kernel_source(N=128)
     print("=== stg32 predicated codegen ===")
     print(src)
-    # Verify codegen - should have stg32 with predicate
-    assert "stg32" in src, "Expected stg32 call in generated CUDA source"
+    # Verify codegen - should have store_global_32 with predicate
+    assert "store_global_32" in src, "Expected store_global_32 call in generated CUDA source"
 
 
 @tilelang.testing.requires_cuda
 def test_stg64_predicated_codegen():
-    """Test that stg64 with predicate generates tl::stg64(ptr, val, pred) in CUDA source."""
+    """Test that stg64 with predicate generates tl::store_global_64_conditional(ptr, val, pred) in CUDA source."""
 
     @tilelang.jit
     def stg64_pred_kernel(X, Y):
@@ -172,12 +172,12 @@ def test_stg64_predicated_codegen():
     src = stg64_pred_kernel.get_kernel_source(N=128)
     print("=== stg64 predicated codegen ===")
     print(src)
-    assert "stg64" in src, "Expected stg64 call in generated CUDA source"
+    assert "store_global_64" in src, "Expected store_global_64 call in generated CUDA source"
 
 
 @tilelang.testing.requires_cuda
 def test_stg128_predicated_codegen():
-    """Test that stg128 with predicate generates tl::stg128(ptr, val, pred) in CUDA source."""
+    """Test that stg128 with predicate generates tl::store_global_128_conditional(ptr, val, pred) in CUDA source."""
 
     @tilelang.jit
     def stg128_pred_kernel(X, Y):
@@ -199,13 +199,13 @@ def test_stg128_predicated_codegen():
     src = stg128_pred_kernel.get_kernel_source(N=128)
     print("=== stg128 predicated codegen ===")
     print(src)
-    assert "stg128" in src, "Expected stg128 call in generated CUDA source"
+    assert "store_global_128" in src, "Expected store_global_128 call in generated CUDA source"
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_stg256_predicated_codegen():
-    """Test that stg256 with predicate generates tl::stg256(ptr, val, pred) in CUDA source."""
+    """Test that stg256 with predicate generates tl::store_global_256_conditional(ptr, val, pred) in CUDA source."""
 
     @tilelang.jit
     def stg256_pred_kernel(X, Y):
@@ -227,7 +227,7 @@ def test_stg256_predicated_codegen():
     src = stg256_pred_kernel.get_kernel_source(N=256)
     print("=== stg256 predicated codegen ===")
     print(src)
-    assert "stg256" in src, "Expected stg256 call in generated CUDA source"
+    assert "store_global_256" in src, "Expected store_global_256 call in generated CUDA source"
 
 
 if __name__ == "__main__":
