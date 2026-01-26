@@ -449,24 +449,24 @@ TIR_DEFINE_TL_BUILTIN(warp_reduce_bitor)
 TIR_DEFINE_TL_BUILTIN(__ldg).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
-// ldg32(Buffer, idx) -> 32-bit value
+// ldg32(address, predicate(optional)) -> 32-bit value
 // Global memory load with 32-bit vector width
-TIR_DEFINE_TL_BUILTIN(ldg32).set_num_inputs(2).set_attr<TCallEffectKind>(
+TIR_DEFINE_TL_BUILTIN(ldg32).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
-// ldg64(Buffer, idx) -> 64-bit value
+// ldg64(address, predicate(optional)) -> 64-bit value
 // Global memory load with 64-bit vector width
-TIR_DEFINE_TL_BUILTIN(ldg64).set_num_inputs(2).set_attr<TCallEffectKind>(
+TIR_DEFINE_TL_BUILTIN(ldg64).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
-// ldg128(Buffer, idx) -> 128-bit value
+// ldg128(address, predicate(optional)) -> 128-bit value
 // Global memory load with 128-bit vector width
-TIR_DEFINE_TL_BUILTIN(ldg128).set_num_inputs(2).set_attr<TCallEffectKind>(
+TIR_DEFINE_TL_BUILTIN(ldg128).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
-// ldg256(Buffer, idx) -> 256-bit value
+// ldg256(address, predicate(optional)) -> 256-bit value
 // Global memory load with 256-bit vector width
-TIR_DEFINE_TL_BUILTIN(ldg256).set_num_inputs(2).set_attr<TCallEffectKind>(
+TIR_DEFINE_TL_BUILTIN(ldg256).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
 // stg32(Buffer, idx, value) -> void
