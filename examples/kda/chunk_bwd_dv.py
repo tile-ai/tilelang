@@ -83,13 +83,7 @@ def tilelang_chunk_bwd_kernel_dv_local(
             DO_shared = T.alloc_shared((BS, block_DV), dtype=do_dtype)
             dv_fragment = T.alloc_fragment((BS, block_DV), dtype=T.float32)
             dv_shared = T.alloc_shared((BS, block_DV), dtype=output_dtype)
-            # T.annotate_layout(
-            #     {
-            #         A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-            #         DO_shared: tilelang.layout.make_swizzled_layout(DO_shared),
-            #     }
-            # )
-            # T.use_swizzle(10)
+
             T.copy(A[bb, bs * BS : (bs + 1) * BS, bh, :], A_shared)
             for i_s1, i_s2 in T.Parallel(BS, BS):
                 A_shared[i_s1, i_s2] = T.if_then_else(i_s1 >= i_s2, A_shared[i_s1, i_s2], 0.0)

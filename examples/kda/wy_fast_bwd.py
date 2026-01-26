@@ -151,8 +151,6 @@ def tilelang_wy_fast_bwd(
             dg_old_shared = T.alloc_shared((block_S, block_DK), dtype=gate_dtype)
             dA_shared = T.alloc_shared((block_S, block_S), dtype=input_dtype)
 
-            # dA_shared_tmp = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
-
             dA_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             dA_fragment_tmp1 = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
             dA_fragment_tmp2 = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
@@ -162,12 +160,10 @@ def tilelang_wy_fast_bwd(
             dv_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dv_fragment_beta = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dbeta_fragment = T.alloc_fragment((block_S,), dtype=accum_dtype)
-            # dbeta_fragment_v = T.alloc_fragment((block_S,), dtype=accum_dtype)
             dbeta_fragment_reduce_tmpk = T.alloc_fragment((block_S, block_DK), dtype=accum_dtype)
             dbeta_fragment_reduce_tmpv = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dg_fragment = T.alloc_fragment((block_S, block_DK), dtype=gate_dtype)
 
-            # T.use_swizzle(10)
 
             T.clear(dA_fragment)
             T.clear(dk_fragment)

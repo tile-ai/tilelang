@@ -46,12 +46,12 @@ def compare_tensors(name, x, y, atol=1e-5, rtol=1e-5):
 
     diff = (x - y).abs()
 
-    # ========= 最大绝对误差 =========
+    # ========= Max Absolute Error =========
     max_abs_err = diff.max().item()
     abs_flat_idx = diff.argmax()
     abs_idx = list(np.unravel_index(abs_flat_idx.cpu().numpy(), diff.shape))
 
-    # ========= 相对误差（NaN-safe） =========
+    # ========= Relative Error (NaN-safe) =========
     denom = y.abs()
     rel = torch.zeros_like(diff)
     mask = denom > 0
@@ -61,11 +61,11 @@ def compare_tensors(name, x, y, atol=1e-5, rtol=1e-5):
     rel_flat_idx = rel.argmax()
     rel_idx = list(np.unravel_index(rel_flat_idx.cpu().numpy(), rel.shape))
 
-    # ========= 交叉误差 =========
+    # ========= Cross Error =========
     abs_pos_rel_err = rel[tuple(abs_idx)].item()
     rel_pos_abs_err = diff[tuple(rel_idx)].item()
 
-    # ========= 打印 =========
+    # ========= Print =========
     print(f"========== Compare: {name} ==========")
 
     print(f"Max absolute error : {max_abs_err:.6e}")

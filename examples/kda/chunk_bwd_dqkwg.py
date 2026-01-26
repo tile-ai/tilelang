@@ -1,14 +1,13 @@
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
-import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_inter import chunk_kda_bwd_dqkwg
 from test_utils_kda import do_bench, compare_tensors
 
 import torch
 
-torch.random.manual_seed(1)
+torch.random.manual_seed(42)
 
 
 def prepare_input(
@@ -127,18 +126,6 @@ def chunk_bwd_dqkwg(
             dkkn_shared = T.alloc_shared((block_S, block_DK), dtype=T.float32)
             pp_shared = T.alloc_shared((block_DK), dtype=T.float32)
 
-            # T.annotate_layout(
-            #     {
-            #         h_shared: tilelang.layout.make_swizzled_layout(h_shared),
-            #         dh_shared: tilelang.layout.make_swizzled_layout(dh_shared),
-            #         V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-            #         DO_shared: tilelang.layout.make_swizzled_layout(DO_shared),
-            #         DV_shared: tilelang.layout.make_swizzled_layout(DV_shared),
-            #         G_shared: tilelang.layout.make_swizzled_layout(G_shared),
-            #     }
-            # )
-            # T.use_swizzle(10)
-
             T.clear(dgkn_fragment)
             T.clear(dq_fragment)
             T.clear(dk_fragment)
@@ -178,7 +165,6 @@ def chunk_bwd_dqkwg(
             T.copy(Q[bb, bs * block_S : (bs + 1) * block_S, bh, bk * block_DK : (bk + 1) * block_DK], Q_shared)
             T.copy(K[bb, bs * block_S : (bs + 1) * block_S, bh, bk * block_DK : (bk + 1) * block_DK], K_shared)
 
-            # T.copy(dgkn_fragment, pp_shared)
             for i_s2, i_k2 in T.Parallel(block_S, block_DK):
                 dkkn_shared[i_s2, i_k2] = dk_fragment[i_s2, i_k2] * K_shared[i_s2, i_k2]
             T.reduce_sum(dkkn_shared, pp_shared, dim=0, clear=True)

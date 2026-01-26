@@ -1,7 +1,6 @@
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
-import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_o import chunk_gla_bwd_dA
 from test_utils_kda import compare_tensors, do_bench
@@ -80,15 +79,6 @@ def tilelang_chunk_bwd_kernel_dv_local(
             do_shared = T.alloc_shared((block_S, block_DV), dtype=do_dtype)
             V_shared = T.alloc_shared((block_S, block_DV), dtype=do_dtype)
             dA_fragment = T.alloc_fragment((block_S, block_S), dtype=T.float32)
-            # dA_shared = T.alloc_shared((block_S, block_S), dtype=da_dtype)
-
-            # T.annotate_layout(
-            #     {
-            #         do_shared: tilelang.layout.make_swizzled_layout(do_shared),
-            #         V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-            #     }
-            # )
-            # T.use_swizzle(10)
 
             T.clear(dA_fragment)
             for i_v in T.Pipelined(T.ceildiv(DV, block_DV), num_stages=num_stages):
@@ -97,7 +87,6 @@ def tilelang_chunk_bwd_kernel_dv_local(
                 T.gemm(do_shared, V_shared, dA_fragment, transpose_B=True)
             for i_s1, i_s2 in T.Parallel(block_S, block_S):
                 dA_fragment[i_s1, i_s2] = T.if_then_else(i_s1 >= i_s2, dA_fragment[i_s1, i_s2] * scale, 0.0)  # 下三角矩阵
-            # T.copy(dA_fragment, dA_shared)
             T.copy(dA_fragment, dA[bb, bs * block_S : (bs + 1) * block_S, bh, 0:block_S])
 
     return kernel

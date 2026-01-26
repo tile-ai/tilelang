@@ -7,7 +7,7 @@ from FLA_KDA.fla_chunk_intra_token_parallel import chunk_kda_fwd_intra_token_par
 from FLA_KDA.cumsum import chunk_local_cumsum
 from test_utils_kda import do_bench
 
-torch.random.manual_seed(0)
+torch.random.manual_seed(42)
 
 
 def prepare_input(
@@ -24,7 +24,7 @@ def prepare_input(
     q = torch.randn(B, S, H, DK, dtype=input_dtype).cuda()
     k = torch.randn(B, S, H, DK, dtype=input_dtype).cuda()
     beta = torch.randn(B, S, H, dtype=input_dtype).cuda()
-    gk = torch.randn(B, S, H, DK, dtype=gate_dtype).cuda()  # should be cumsumed already
+    gk = torch.randn(B, S, H, DK, dtype=gate_dtype).cuda()
     gk = F.logsigmoid(gk)
     gk = chunk_local_cumsum(gk, chunk_size)
     return q, k, gk, beta
@@ -133,15 +133,6 @@ def tilelang_chunk_kda_fwd_intra_token_parallel(
                 (block_H,),
                 dtype=accum_dtype,
             )
-
-            # T.annotate_layout(
-            #     {
-            #         K_j_shared: tilelang.layout.make_swizzled_layout(K_j_shared),
-            #         GK_j_shared: tilelang.layout.make_swizzled_layout(GK_j_shared),
-            #         Aqk_shared: tilelang.layout.make_swizzled_layout(Aqk_shared),
-            #         Akk_shared: tilelang.layout.make_swizzled_layout(Akk_shared),
-            #     }
-            # )
 
             T.copy(Q[bb, bs, bh * block_H : (bh + 1) * block_H, :], Q_i_shared)
             T.copy(K[bb, bs, bh * block_H : (bh + 1) * block_H, :], K_i_shared)
@@ -261,29 +252,7 @@ def run_test(
     print(f"fla time: {fla_time} ms")
     print(f"tilelang time: {tilelang_time} ms")
 
-    # compare_tensors("Aqk", Aqk_ref, Aqk_tilelang)
-    # compare_tensors("Akk", Akk_ref, Akk_tilelang)
-    # print(Aqk_tilelang[0, 1, 0, :], Aqk_tilelang.dtype)
-    # print(Aqk_ref[0, 1, 0, :], Aqk_ref.dtype)
-    # print(Akk_tilelang[0, 1, 0, :], )
-    # print(Akk_ref[0, 1, 0, :],)
-
-
 def main():
-    # run_test(
-    #     B=1,
-    #     S=1024*8,# 32768
-    #     H=64,
-    #     DK=128,
-    #     scale=1.0,
-    #     input_dtype="float32",
-    #     output_dtype="float32",
-    #     accum_dtype="float32",
-    #     gate_dtype="float32",
-    #     chunk_size=64,
-    #     sub_chunk_size=16,
-    # )
-
     run_test(
         B=1,
         S=1024 * 8,  # 32768

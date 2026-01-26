@@ -7,7 +7,7 @@ from tilelang.autotuner import autotune
 
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
-# sys.path.insert(0, "/home/wufang11/tilelang/flash-linear-attention")
+# sys.path.insert(0, "/your/path/to/flash-linear-attention")
 
 from FLA_KDA.fla_chunk_delta import chunk_gated_delta_rule_fwd_h
 from FLA_KDA.cumsum import chunk_local_cumsum
@@ -17,7 +17,7 @@ import torch.nn.functional as F
 
 from test_utils_kda import compare_tensors, do_bench
 
-torch.random.manual_seed(0)
+torch.random.manual_seed(42)
 
 
 def prepare_input(
@@ -137,18 +137,6 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
             K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
             GK_last_shared = T.alloc_shared((DK), dtype=gate_dtype)
 
-            # T.annotate_layout(
-            #     {
-            #         b_h_shared: tilelang.layout.make_swizzled_layout(b_h_shared),
-            #         U_shared: tilelang.layout.make_swizzled_layout(U_shared),
-            #         W_shared: tilelang.layout.make_swizzled_layout(W_shared),
-            #         V_new_shared: tilelang.layout.make_swizzled_layout(V_new_shared),
-            #         K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-            #     }
-            # )
-
-            # T.use_swizzle(10)
-
             if use_initial_state:
                 T.copy(initial_state[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV], b_h_shared)
                 T.copy(b_h_shared, b_h_fragment)
@@ -266,8 +254,6 @@ def run_test(
         save_new_value,
     )
     h_tilelang, final_state_tilelang, V_new_tilelang = kernel(K, W, U, G, initial_state)
-    # (zhengju) If you want to print the generated cuda code, you can uncomment the following line
-    # print("CUDA Code:\n", kernel.get_kernel_source())
 
     fla_time = do_bench(
         chunk_gated_delta_rule_fwd_h,

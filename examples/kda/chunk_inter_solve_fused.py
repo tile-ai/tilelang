@@ -1,6 +1,5 @@
 import tilelang
 import tilelang.language as T
-import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_intra import chunk_kda_fwd_inter_solve_fused
 from FLA_KDA.cumsum import chunk_local_cumsum
@@ -10,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 
-torch.random.manual_seed(1)
+torch.random.manual_seed(42)
 
 
 def prepare_input(
@@ -50,17 +49,6 @@ def prepare_output(
     return Akk
 
 
-# def get_configs():
-#     import itertools
-#     block_DK = [32, 64,]
-#     threads = [32, 64, 128]
-#     num_stages = [0, 1, 2, 3, 4]
-#     _configs = list(itertools.product(block_DK, threads, num_stages))
-#     configs = [{"block_DK":c[0], "threads":c[1], "num_stages": c[2]} for c in _configs]
-#     return configs
-
-
-# @autotune(configs=get_configs(), warmup=3, rep=5)
 @tilelang.jit(out_idx=[-2, -1], pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def tilelang_chunk_kda_fwd_inter_fused(
     B,
@@ -169,22 +157,7 @@ def tilelang_chunk_kda_fwd_inter_fused(
             Ai_31_shared = T.alloc_shared((BC, BC), dtype=T.float32)
             Ai_32_shared = T.alloc_shared((BC, BC), dtype=T.float32)
             Ai_33_shared = T.alloc_shared((BC, BC), dtype=T.float32)
-            # T.annotate_layout(
-            #     {
-            #         Q_GK_scaled_shared: tilelang.layout.make_swizzled_layout(Q_GK_scaled_shared),
-            #         K_GK_scaled_shared: tilelang.layout.make_swizzled_layout(K_GK_scaled_shared),
-            #         Ai_00_shared: tilelang.layout.make_swizzled_layout(Ai_00_shared),
-            #         Ai_11_shared: tilelang.layout.make_swizzled_layout(Ai_11_shared),
-            #         Ai_20_shared: tilelang.layout.make_swizzled_layout(Ai_20_shared),
-            #         Ai_21_shared: tilelang.layout.make_swizzled_layout(Ai_21_shared),
-            #         Ai_22_shared: tilelang.layout.make_swizzled_layout(Ai_22_shared),
-            #         Ai_30_shared: tilelang.layout.make_swizzled_layout(Ai_30_shared),
-            #         Ai_31_shared: tilelang.layout.make_swizzled_layout(Ai_31_shared),
-            #         Ai_32_shared: tilelang.layout.make_swizzled_layout(Ai_32_shared),
-            #         Ai_33_shared: tilelang.layout.make_swizzled_layout(Ai_33_shared),
-            #     }
-            # )
-            # T.use_swizzle(10)
+
             T.clear(Aqk10_fragment)
             T.clear(Akk10_fragment)
             T.clear(Aqk20_fragment)

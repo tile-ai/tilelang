@@ -1,7 +1,4 @@
 # Reference: fla/ops/common/chunk_delta_h.py
-
-import sys  # noqa: F401
-
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
@@ -13,8 +10,7 @@ from test_utils_kda import do_bench, compare_tensors
 import torch
 import torch.nn.functional as F
 
-torch.random.manual_seed(0)
-# torch.set_printoptions(profile="full")
+torch.random.manual_seed(42)
 
 
 def prepare_input(
@@ -151,22 +147,6 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             W_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
             GK_last_shared = T.alloc_shared((DK,), dtype=gate_dtype)
-
-            # T.use_swizzle(10)
-
-            # T.annotate_layout(
-            #     {
-            #         b_dh_shared: tilelang.layout.make_swizzled_layout(b_dh_shared),
-            #         b_dh_shared_fp32: tilelang.layout.make_swizzled_layout(b_dh_shared_fp32),
-            #         dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-            #         dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
-            #         dO_shared_t: tilelang.layout.make_swizzled_layout(dO_shared_t),
-            #         K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-            #         Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-            #         Q_shared_fp32: tilelang.layout.make_swizzled_layout(Q_shared_fp32),
-            #         W_shared: tilelang.layout.make_swizzled_layout(W_shared),
-            #     }
-            # )
 
             if use_final_state_gradient:
                 T.copy(dht[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV], b_dh_shared)

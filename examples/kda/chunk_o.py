@@ -1,14 +1,13 @@
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
-import sys  # noqa: F401
 
 from FLA_KDA.fla_chunk_o import chunk_gla_fwd_o_gk
 from test_utils import compare_tensors
 
 import torch
 
-torch.random.manual_seed(1)
+torch.random.manual_seed(42)
 
 
 def prepare_input(
@@ -108,16 +107,6 @@ def tilelang_chunk_fwd_o(
             O_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             GK_shared = T.alloc_shared((block_S, block_DK), dtype=gate_dtype)
             GQ_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
-            # T.annotate_layout(
-            #     {
-            #         Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-            #         V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-            #         HIDDEN_shared: tilelang.layout.make_swizzled_layout(HIDDEN_shared),
-            #         A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-            #         O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-            #         GQ_shared: tilelang.layout.make_swizzled_layout(GQ_shared),
-            #     }
-            # )
 
             T.clear(O_fragment)
 
@@ -139,11 +128,6 @@ def tilelang_chunk_fwd_o(
             for i_s1, i_s2 in T.Parallel(block_S, block_S):
                 A_shared[i_s1, i_s2] = T.if_then_else(i_s1 < i_s2, 0, A_shared[i_s1, i_s2])
 
-            # 改成下面的代码为什么就错了
-            # for i_s1, i_s2 in T.Parallel(block_S, block_S):
-            #     with T.If(i_s1 < i_s2):
-            #         with T.Then():
-            #             A_shared[i_s1, i_s2] = 0
 
             T.gemm(
                 A_shared,

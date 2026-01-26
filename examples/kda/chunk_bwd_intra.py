@@ -1,7 +1,4 @@
 # Reference: FLA_KDA/fla_chunk_intra.py
-
-import sys  # noqa: F401
-
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
@@ -295,7 +292,6 @@ def tilelang_chunk_bwd_intra(
                     for i_bc, i_k2 in T.Parallel(BC, block_DK):
                         # kbg = k * beta
                         kbg_fragment[i_bc, i_k2] = k_next_shared[i_bc, i_k2] * beta_next_shared[i_bc]
-                        # gkn = exp2(g_next - gn_last)
                         gkn_shared[i_bc, i_k2] = T.if_then_else(
                             i_tj + i_bc < S, T.exp2(g_next_shared[i_bc, i_k2] - gn_last_shared[i_k2]), 0.0
                         )
