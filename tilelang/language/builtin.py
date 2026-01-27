@@ -8,7 +8,7 @@ from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
-from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad, BufferRegion
+from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion
 from tilelang.utils.language import retrieve_ptr
 
 _IS_HIP_AVAILABLE = check_hip_availability()
@@ -28,7 +28,7 @@ def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
     raise TypeError(f"Expect warp sizing argument to be int or PrimExpr, but got {type(value)}.")
 
 
-def _mbar_to_buffer_load(mbar: Buffer | BufferLoad) -> BufferLoad:
+def _mbar_to_buffer_load(mbar: tir.Buffer | BufferLoad) -> BufferLoad:
     """Convert a memory barrier to a buffer load.
 
     Args:
@@ -188,7 +188,7 @@ def disable_warp_group_reg_alloc():
     return no_set_max_nreg()
 
 
-def mbarrier_wait_parity(mbarrier: Buffer | BufferLoad, parity: int | Var):
+def mbarrier_wait_parity(mbarrier: tir.Buffer | BufferLoad, parity: int | Var):
     """Wait for memory barrier parity condition.
 
     Args:
@@ -229,7 +229,7 @@ def mbarrier_wait_parity(mbarrier: Buffer | BufferLoad, parity: int | Var):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: Buffer | BufferLoad):
+def mbarrier_arrive(mbarrier: tir.Buffer | BufferLoad):
     """Arrive at memory barrier.
 
     Args:
@@ -240,7 +240,7 @@ def mbarrier_arrive(mbarrier: Buffer | BufferLoad):
     return ptx_arrive_barrier(mbarrier)
 
 
-def mbarrier_expect_tx(mbarrier: Buffer | BufferLoad, tx: int):
+def mbarrier_expect_tx(mbarrier: tir.Buffer | BufferLoad, tx: int):
     """Set expected transaction count for memory barrier.
 
     Args:
@@ -598,7 +598,7 @@ def wait_wgmma(id: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
-def barrier_wait(mbarrier: Buffer | BufferLoad, parity: int | Var):
+def barrier_wait(mbarrier: tir.Buffer | BufferLoad, parity: int | Var):
     """Wait for a memory barrier to complete.
 
     Args:
@@ -613,7 +613,7 @@ def barrier_wait(mbarrier: Buffer | BufferLoad, parity: int | Var):
     return mbarrier_wait_parity(mbarrier, parity)
 
 
-def barrier_arrive(mbarrier: Buffer | BufferLoad):
+def barrier_arrive(mbarrier: tir.Buffer | BufferLoad):
     """Arrive at a memory barrier.
 
     Args:
@@ -795,9 +795,9 @@ def loop_break():
     return tir.call_intrin("handle", tir.op.Op.get("tl.loop_break"))
 
 
-def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
+def cp_async_barrier_noinc(barrier: tir.Buffer | BufferLoad):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
 def tcgen05_mma_arrive(mbar_ptr):
