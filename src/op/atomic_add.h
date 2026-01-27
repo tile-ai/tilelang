@@ -62,7 +62,6 @@ protected:
 
   /// Return buffer indices and total size
   std::pair<Array<PrimExpr>, PrimExpr> ReturnIndicesAndSize(int src_dst) const;
-
   /// Compute linear layout for shared tensor (used in TMA atomic add)
   Layout ComputeLinearLayout(const Buffer &shared_tensor) const;
 };

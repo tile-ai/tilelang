@@ -707,6 +707,7 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
              << buffer << "` of layout " << src_layout->DebugOutput() << '\n';
 
   Fragment result;
+
   if (IsCommonAccessIndice(buffer)) {
     result = src_layout;
   } else {

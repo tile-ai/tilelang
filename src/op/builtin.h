@@ -55,6 +55,30 @@ static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
+
+/*!
+ * \brief Enable lowering non-predicated global load/store to ldg/stg intrinsics
+ *
+ * When enabled, transforms regular (non-predicated) global memory loads and
+ * stores to explicit ldg/stg intrinsics for potentially better performance.
+ * Default: OFF (disabled)
+ *
+ * kEnableLowerLDGSTG = "tl.enable_lower_ldgstg"
+ */
+static constexpr const char *kEnableLowerLDGSTG = "tl.enable_lower_ldgstg";
+
+/*!
+ * \brief Disable lowering predicated global load/store to ldg/stg intrinsics
+ *
+ * When enabled (set to true), predicated loads (if_then_else with else=0) and
+ * predicated stores (IfThenElse with store in then case) will NOT be lowered
+ * to predicated ldg/stg intrinsics.
+ * Default: OFF (predicated lowering is enabled by default)
+ *
+ * kDisableLowerLDGSTGPredicated = "tl.disable_lower_ldgstg_predicated"
+ */
+static constexpr const char *kDisableLowerLDGSTGPredicated =
+    "tl.disable_lower_ldgstg_predicated";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
 static constexpr const char *kASTPrintEnable = "tl.ast_print_enable";
@@ -715,6 +739,98 @@ TVM_DLL const Op &warp_reduce_bitor();
  *  index expression.
  */
 TVM_DLL const Op &__ldg();
+
+/*!
+ * \brief tilelang intrinsic for global memory load with 32-bit vector width.
+ *
+ *  This op loads 32 bits (4 bytes) from global memory using explicit
+ *  PTX ld.global instructions for performance-sensitive loads.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.ldg32(x, i)
+ */
+TVM_DLL const Op &ldg32();
+
+/*!
+ * \brief tilelang intrinsic for global memory load with 64-bit vector width.
+ *
+ *  This op loads 64 bits (8 bytes) from global memory using explicit
+ *  PTX ld.global.v2 instructions for vectorized loads.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.ldg64(x, i)
+ */
+TVM_DLL const Op &ldg64();
+
+/*!
+ * \brief tilelang intrinsic for global memory load with 128-bit vector width.
+ *
+ *  This op loads 128 bits (16 bytes) from global memory using explicit
+ *  PTX ld.global.v4 or ld.global.v2.s64 instructions for wide vectorized loads.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.ldg128(x, i)
+ */
+TVM_DLL const Op &ldg128();
+
+/*!
+ * \brief tilelang intrinsic for global memory load with 256-bit vector width.
+ *
+ *  This op loads 256 bits (32 bytes) from global memory using explicit
+ *  PTX ld.global.v4.s64 instructions for maximum vectorized loads.
+ *  Requires CUDA 12.9+ for native support; older versions use two 128-bit
+ * loads.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.ldg256(x, i)
+ */
+TVM_DLL const Op &ldg256();
+
+/*!
+ * \brief tilelang intrinsic for global memory store with 32-bit vector width.
+ *
+ *  This op stores 32 bits (4 bytes) to global memory using explicit
+ *  PTX st.global instructions for performance-sensitive stores.
+ *
+ *  Usage from TVMScript:
+ *    T.stg32(y, i, value)
+ */
+TVM_DLL const Op &stg32();
+
+/*!
+ * \brief tilelang intrinsic for global memory store with 64-bit vector width.
+ *
+ *  This op stores 64 bits (8 bytes) to global memory using explicit
+ *  PTX st.global.v2 instructions for vectorized stores.
+ *
+ *  Usage from TVMScript:
+ *    T.stg64(y, i, value)
+ */
+TVM_DLL const Op &stg64();
+
+/*!
+ * \brief tilelang intrinsic for global memory store with 128-bit vector width.
+ *
+ *  This op stores 128 bits (16 bytes) to global memory using explicit
+ *  PTX st.global.v4 instructions for wide vectorized stores.
+ *
+ *  Usage from TVMScript:
+ *    T.stg128(y, i, value)
+ */
+TVM_DLL const Op &stg128();
+
+/*!
+ * \brief tilelang intrinsic for global memory store with 256-bit vector width.
+ *
+ *  This op stores 256 bits (32 bytes) to global memory using explicit
+ *  PTX st.global.v4.s64 instructions for maximum vectorized stores.
+ *  Requires CUDA 12.9+ for native support; older versions use two 128-bit
+ * stores.
+ *
+ *  Usage from TVMScript:
+ *    T.stg256(y, i, value)
+ */
+TVM_DLL const Op &stg256();
 
 } // namespace tl
 } // namespace tvm

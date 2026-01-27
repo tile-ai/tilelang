@@ -145,6 +145,8 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
     int M, int N, int block_size, Target target, GemmInst gemm_inst) const {
   int num_warps = block_size / TargetGetWarpSize(target);
   if (gemm_inst == GemmInst::kTCGEN5MMA) {
+    this->m_warp = 1;
+    this->n_warp = num_warps;
     return {1, num_warps}; // TCGEN5MMA doesn't care about warp partitioning
   }
 

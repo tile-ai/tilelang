@@ -1177,19 +1177,6 @@ private:
       }
     }
 
-    // Check if any external buffer (from outer blocks) is already used in
-    // another pipeline. This would cause conflicts in multi-versioning.
-    for (const auto &buffer : pipeline_allocs) {
-      // Only check external buffers (not locally allocated in this pipeline)
-      if (local_allocs_set.count(buffer) == 0) {
-        CHECK(buffers_used_in_pipeline_.count(buffer) == 0)
-            << "Buffer '" << buffer->name
-            << "' is used in multiple software pipeline loops. "
-            << "This is not supported because multi-versioning would conflict.";
-        buffers_used_in_pipeline_.insert(buffer);
-      }
-    }
-
     auto pipeline_stages = Downcast<Array<Integer>>(
         op->annotations.at(tir::attr::software_pipeline_stage));
     auto pipeline_orders = Downcast<Array<Integer>>(

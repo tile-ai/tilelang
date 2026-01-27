@@ -529,3 +529,25 @@ def UnrollLoop():
         The result pass
     """
     return _ffi_api.UnrollLoop()  # type: ignore
+
+
+def LowerLDGSTG():
+    """Lower Ramp-based global memory load/store to ldg/stg intrinsics.
+
+    This pass transforms vectorized global memory loads and stores (using Ramp indices)
+    into explicit ldg32/64/128/256 and stg32/64/128/256 intrinsics for better codegen.
+
+    Key behaviors:
+    - Converts Ramp-based global BufferLoad to ldg intrinsics
+    - Converts Ramp-based global BufferStore to stg intrinsics
+    - Supports predicated loads (if_then_else with else=0)
+    - Supports predicated stores (if in then case)
+    - Skips loads in async scope (will be lowered to cp.async)
+    - Only enabled for CUDA targets
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerLDGSTG()  # type: ignore

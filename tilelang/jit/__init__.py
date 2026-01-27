@@ -313,7 +313,8 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         # auto: infer by checking if function returns PrimFunc directly
         if not isinstance(self.func, JITFunc):
             return "lazy"
-        return "lazy" if self.func._is_lazy_style(*args, **kwargs) else "eager"
+        is_lazy_style = self.func._is_lazy_style(*args, **kwargs)
+        return "lazy" if is_lazy_style else "eager"
 
     def initialize_jit_mode(self, *args: _P.args, **kwargs: _P.kwargs) -> Literal["lazy", "eager"]:
         if self.mode == "auto":
@@ -404,6 +405,10 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         tuned_key_kwargs_tuple = tuple(sorted(tune_params.items()))
         key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
         return key
+
+    def get_kernel_source(self, *args: _P.args, **kwargs: _P.kwargs) -> str:
+        kernel = self.compile(*args, **kwargs)
+        return kernel.get_kernel_source()
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         # Separate out the tuning parameters from the user's kwargs

@@ -37,17 +37,11 @@ static std::string GetFP8Type(DataType type) {
     LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
                   "for FP8";
   }
-  if (type.code() == DataType::kFloat8_e4m3fn) {
+  if (type.is_float8_e4m3fn() || type.is_float8_e4m3fnuz() ||
+      type.is_float8_e4m3() || type.code() == DataType::kFloat8_e4m3b11fnuz) {
     stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e4m3fnuz) {
-    stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e4m3) {
-    stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e4m3b11fnuz) {
-    stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e5m2) {
-    stream << "fp8_e5" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e5m2fnuz) {
+  } else if (type.is_float8_e5m2() || type.is_float8_e5m2fnuz() ||
+             type.code() == DataType::kFloat8_e5m2) {
     stream << "fp8_e5" << vec << "_t";
   } else if (type.code() == DataType::kFloat8_e8m0fnu) {
     stream << "fp8_e8" << vec << "_t";
@@ -943,7 +937,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"bfloat16x4", "bfloat16x4_vec"},
         {"float32x4", "float32x4"},
         {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
+        {"float8_e4m3fnx4", "fp8_e4_4_t"},
         {"float8_e4m3fnuzx8", "long"},
+        {"float8_e4m3fnx8", "long"},
         {"float8_e5m2fnuzx4", "fp8_e5_4_t"},
         {"float8_e5m2fnuzx8", "long"},
         {"float32x16", "float32x16"}};

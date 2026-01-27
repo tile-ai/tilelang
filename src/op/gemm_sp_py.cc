@@ -227,12 +227,6 @@ static int GetArchInt(Target target) {
 }
 
 Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  auto block_size = *as_const_int(T.thread_bounds->extent);
-  GemmInst gemm_inst = GetGemmInst(block_size, T.target);
-
-  auto [warp_m, warp_n] =
-      policy->computeWarpPartition(M, N, block_size, T.target, gemm_inst);
-
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp_py.lower")) {
     auto prim_func =
         Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmSPPy>(this), T.target,

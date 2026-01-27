@@ -1,4 +1,5 @@
 from .gemm_base import GemmBase
+from .inst import GemmInst
 from tilelang.layout import make_wgmma_swizzled_layout
 from tilelang.intrinsics.wgmma_macro_generator import (
     TensorCoreIntrinEmitter,
@@ -6,6 +7,7 @@ from tilelang.intrinsics.wgmma_macro_generator import (
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import tvm as tvm
 from tvm.target import Target
+from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
@@ -13,7 +15,7 @@ from tilelang.transform.simplify import _Simplify
 
 class GemmWGMMA(GemmBase):
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, True)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -51,9 +53,9 @@ class GemmWGMMA(GemmBase):
         else:
             raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, True)
-
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+        thread_nums = thread_bounds.extent
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(

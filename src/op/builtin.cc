@@ -38,6 +38,8 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutVisualizationEnable, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutVisualizationFormats, String);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDeviceCompileFlags, ffi::Array<ffi::String>);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableDataRaceCheck, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableLowerLDGSTG, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableLowerLDGSTGPredicated, Bool);
 
 DataType cuTensorMapType() { return DataType::UInt(8, 128); }
 
@@ -446,6 +448,46 @@ TIR_DEFINE_TL_BUILTIN(warp_reduce_bitor)
 // Treat as a pure call that returns the loaded value.
 TIR_DEFINE_TL_BUILTIN(__ldg).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+// ldg32(address, predicate(optional)) -> 32-bit value
+// Global memory load with 32-bit vector width
+TIR_DEFINE_TL_BUILTIN(ldg32).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+// ldg64(address, predicate(optional)) -> 64-bit value
+// Global memory load with 64-bit vector width
+TIR_DEFINE_TL_BUILTIN(ldg64).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+// ldg128(address, predicate(optional)) -> 128-bit value
+// Global memory load with 128-bit vector width
+TIR_DEFINE_TL_BUILTIN(ldg128).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+// ldg256(address, predicate(optional)) -> 256-bit value
+// Global memory load with 256-bit vector width
+TIR_DEFINE_TL_BUILTIN(ldg256).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+// stg32(Buffer, idx, value) -> void
+// Global memory store with 32-bit vector width
+TIR_DEFINE_TL_BUILTIN(stg32).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+// stg64(Buffer, idx, value) -> void
+// Global memory store with 64-bit vector width
+TIR_DEFINE_TL_BUILTIN(stg64).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+// stg128(Buffer, idx, value) -> void
+// Global memory store with 128-bit vector width
+TIR_DEFINE_TL_BUILTIN(stg128).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+// stg256(Buffer, idx, value) -> void
+// Global memory store with 256-bit vector width
+TIR_DEFINE_TL_BUILTIN(stg256).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 } // namespace tl
 } // namespace tvm
