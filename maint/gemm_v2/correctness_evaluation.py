@@ -739,37 +739,21 @@ def test_gemm_rr_true_true(m, n, k, num_threads):
 
 
 if __name__ == "__main__":
-    import tilelang
-
-    tilelang.disable_cache()
-
-    # 复现 WGMMA 布局错误: M=64, N=32, K=32, RS gemm
-    # FAILED correctness_evaluation.py::test_gemm_rs_false_true[K32-float8_e4m3-float32-float32-threads256-N32-M64]
-    test_gemm_rs_false_true(
-        m=64,
-        n=32,
-        k=32,
-        in_dtype=T.float8_e4m3fn,
-        out_dtype=T.float32,
-        accum_dtype=T.float32,
+    run_gemm(
+        M=64,
+        N=192,
+        K=64,
+        trans_A=False,
+        trans_B=False,
+        in_dtype=T.bfloat16,
+        out_dtype=T.bfloat16,
+        dtypeAccum=T.float32,
+        block_M=64,
+        block_N=192,
+        block_K=64,
+        num_stages=0,
         num_threads=256,
     )
-
-    # run_gemm(
-    #     M=64,
-    #     N=192,
-    #     K=64,
-    #     trans_A=False,
-    #     trans_B=False,
-    #     in_dtype=T.bfloat16,
-    #     out_dtype=T.bfloat16,
-    #     dtypeAccum=T.float32,
-    #     block_M=64,
-    #     block_N=192,
-    #     block_K=64,
-    #     num_stages=0,
-    #     num_threads=256,
-    # )
 
     # # Test Pass
     # for m in [64, 128, 256]:
