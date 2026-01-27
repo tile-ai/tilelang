@@ -303,6 +303,10 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                             red_layout->ReplicateExtent())) {
       need_duplicate = true;
     }
+    ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
+                               red_layout->ReplicateExtent()))
+        << "Inconsistent layouts between src and dst in ReduceOp: "
+        << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
 
     if (need_duplicate) {
       // Create a new buffer with same shape and dtype as dst_buffer
