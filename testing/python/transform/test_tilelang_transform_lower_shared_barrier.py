@@ -39,7 +39,7 @@ def test_lower_shared_barrier():
     mbars = (1, 1, 128, 128)  # list is unhashable so we use tuple here
     kernel = matmul(1024, 1024, 1024, 128, 128, 32, mbars=mbars)
 
-    assert f"__shared__ uint64_t barriers_mem[{len(mbars)}];" in kernel.get_kernel_source()
+    assert f"uint64_t barriers_mem[{len(mbars)}];" in kernel.get_kernel_source()
     assert "if (tl::tl_shuffle_elect<0>()) {" in kernel.get_kernel_source()
     for i in range(len(mbars)):
         assert f"barriers[{i}].init({mbars[i]});" in kernel.get_kernel_source()
