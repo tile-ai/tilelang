@@ -1,6 +1,6 @@
 """The profiler and convert to torch utils"""
 
-from .target import determine_target  # noqa: F401
+from .target import determine_target, select_fp8_e4m3_dtype, select_torch_fp8_e4m3_dtype  # noqa: F401
 from .tensor import TensorSupplyType, torch_assert_close, map_torch_type  # noqa: F401
 from .language import (
     is_global,  # noqa: F401
