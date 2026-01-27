@@ -48,6 +48,7 @@ def test_issue_1719_layout_2():
     assert "tmp2[(((int)threadIdx.x) & 3)]" not in kernel.get_kernel_source()
 
 
+@tilelang.testing.requires_cuda
 def test_issue_1719_layout_3():
     @tilelang.jit(out_idx=-1)
     def buggy_kernel(M, N, dtype=T.float32):
