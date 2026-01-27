@@ -20,3 +20,4 @@ from .language import (
     side_effect,  # noqa: F401
 )
 from .deprecated import deprecated  # noqa: F401
+from .version import build_date  # noqa: F401

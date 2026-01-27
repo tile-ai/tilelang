@@ -158,6 +158,7 @@ if not env.is_light_import():
     from .utils import (
         TensorSupplyType,  # noqa: F401
         deprecated,  # noqa: F401
+        build_date,  # noqa: F401
     )
     from .layout import (
         Layout,  # noqa: F401

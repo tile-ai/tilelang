@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import time
 from pathlib import Path
 from functools import lru_cache
 
@@ -70,6 +71,10 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
                 backend = "cuda"
         if backend:
             exts.append(backend)
+
+        # Add build date if TILELANG_BUILD_WHEEL_WITH_DATE is set
+        if _read_cmake_bool(os.environ.get("TILELANG_BUILD_WHEEL_WITH_DATE")):
+            exts.append(f"d{time.strftime('%Y%m%d')}")
 
         if _read_cmake_bool(os.environ.get("NO_GIT_VERSION")):
             pass
