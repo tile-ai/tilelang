@@ -60,9 +60,9 @@ class PassConfigKey(str, Enum):
     When enabled, converts Ramp-based global buffer load/store to ldg/stg intrinsics.
     Default: False"""
 
-    TL_DISABLE_LOWER_LDGSTG_PREDICATED = "tl.disable_lower_ldgstg_predicated"
-    """Disable predicated LDG/STG lowering.
-    When False (default), predicated loads (if_then_else with else=0) and
+    TL_ENABLE_LOWER_LDGSTG_PREDICATED = "tl.enable_lower_ldgstg_predicated"
+    """Enable predicated LDG/STG lowering.
+    When True, predicated loads (if_then_else with else=0) and
     predicated stores (IfThenElse with empty then case) are lowered to
     ldg/stg intrinsics. Default: False"""
 

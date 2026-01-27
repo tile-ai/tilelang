@@ -17,7 +17,7 @@
  * Pass configurations:
  * - tl.enable_lower_ldgstg: Enable non-predicated ldg/stg lowering (default:
  * OFF)
- * - tl.disable_lower_ldgstg_predicated: Disable predicated ldg/stg lowering
+ * - tl.enable_lower_ldgstg_predicated: Enable predicated ldg/stg lowering
  * (default: OFF)
  */
 
@@ -491,11 +491,9 @@ tvm::transform::Pass LowerLDGSTG() {
     // Non-predicated ldg/stg: default OFF
     bool enable_non_predicated =
         ctx->GetConfig<Bool>(kEnableLowerLDGSTG, Bool(false)).value();
-    // Predicated ldg/stg: default ON (so disable flag default is false)
-    bool disable_predicated =
-        ctx->GetConfig<Bool>(kDisableLowerLDGSTGPredicated, Bool(false))
-            .value();
-    bool enable_predicated = !disable_predicated;
+    // Predicated ldg/stg: default OFF
+    bool enable_predicated =
+        ctx->GetConfig<Bool>(kEnableLowerLDGSTGPredicated, Bool(false)).value();
 
     // If both are disabled, skip the pass entirely
     if (!enable_non_predicated && !enable_predicated) {

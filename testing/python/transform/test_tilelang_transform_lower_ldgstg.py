@@ -3,7 +3,7 @@ load/store to ldg/stg intrinsics.
 
 Pass configurations:
 - tl.enable_lower_ldgstg: Enable non-predicated ldg/stg lowering (default: OFF)
-- tl.disable_lower_ldgstg_predicated: Disable predicated ldg/stg lowering (default: OFF)
+- tl.enable_lower_ldgstg_predicated: Enable predicated ldg/stg lowering (default: OFF)
 """
 
 from tilelang import tvm as tvm
@@ -14,7 +14,7 @@ from tilelang.transform import PassConfigKey
 from tvm import tir
 
 
-def _apply_passes(mod, enable_non_predicated=False, disable_predicated=False):
+def _apply_passes(mod, enable_non_predicated=False, enable_predicated=False):
     """Apply the LowerLDGSTG pass and related lowering passes."""
     mod = tvm.tir.transform.BindTarget(tvm.target.Target("cuda"))(mod)
     mod = tl.transform.FlattenBuffer()(mod)
@@ -22,7 +22,7 @@ def _apply_passes(mod, enable_non_predicated=False, disable_predicated=False):
     with tvm.transform.PassContext(
         config={
             PassConfigKey.TL_ENABLE_LOWER_LDGSTG: enable_non_predicated,
-            PassConfigKey.TL_DISABLE_LOWER_LDGSTG_PREDICATED: disable_predicated,
+            PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: enable_predicated,
         }
     ):
         mod = tl.transform.LowerLDGSTG()(mod)
@@ -135,7 +135,7 @@ def test_lower_ldg32_predicated():
             B[i] = T.if_then_else(pred > 0, A[i], T.float32(0))
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod)  # Default: predicated is ON
+    mod = _apply_passes(mod, enable_predicated=True)  # Default: predicated is ON
     print("=== test_lower_ldg32_predicated ===")
     print(mod)
     assert _check_has_intrinsic(mod, "ldg32"), "Expected predicated ldg32"
@@ -152,7 +152,7 @@ def test_lower_stg32_predicated():
                 B[i] = A[i]
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod)  # Default: predicated is ON
+    mod = _apply_passes(mod, enable_predicated=True)  # Default: predicated is ON
     print("=== test_lower_stg32_predicated ===")
     print(mod)
     assert _check_has_intrinsic(mod, "stg32"), "Expected predicated stg32"
@@ -169,7 +169,7 @@ def test_lower_ldg128_predicated():
                 B[i * 4 + j] = T.if_then_else(pred > 0, A[i * 4 + j], T.float32(0))
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod)  # Default: predicated is ON
+    mod = _apply_passes(mod, enable_predicated=True)  # Default: predicated is ON
     print("=== test_lower_ldg128_predicated ===")
     print(mod)
     assert _check_has_intrinsic(mod, "ldg128"), "Expected predicated ldg128"
@@ -187,7 +187,7 @@ def test_lower_stg128_predicated():
                     B[i * 4 + j] = A[i * 4 + j]
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod)  # Default: predicated is ON
+    mod = _apply_passes(mod, enable_predicated=True)  # Default: predicated is ON
     print("=== test_lower_stg128_predicated ===")
     print(mod)
     assert _check_has_intrinsic(mod, "stg128"), "Expected predicated stg128"
@@ -204,7 +204,7 @@ def test_predicated_disabled():
                 B[idx] = T.if_then_else(idx < N, A[idx], T.float32(0))
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod, disable_predicated=True)
+    mod = _apply_passes(mod, enable_predicated=False)
     print("=== test_predicated_disabled ===")
     print(mod)
     # When disabled, no predicated ldg/stg should be generated
@@ -291,7 +291,7 @@ def test_e2e_load_global_store_global_predicated():
     """End-to-end test that load_global/store_global intrinsics work correctly when enabled."""
     import torch
 
-    @tilelang.jit(pass_configs={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True})
+    @tilelang.jit(pass_configs={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True, PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: True})
     def copy_kernel(X, Y):
         N = T.const("N")
         X: T.Tensor[[N], T.float32]
