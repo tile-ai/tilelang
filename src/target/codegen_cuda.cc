@@ -1113,7 +1113,7 @@ void CodeGenTileLangCUDA::PrintStorageScope(const std::string &scope,
       << "Cannot allocate global memory when targeting CUDA. You must pass "
          "all global arrays as input instead";
   if (scope == "shared" || scope == "shared.barrier") {
-    os << "__shared__ ";
+    os << "__shared__ __align__(" << barrier_alignment_bytes_ << ") ";
   } else if (scope == "shared.dyn") {
     os << "extern __shared__ __align__(1024) ";
   }
@@ -1743,7 +1743,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     int barrier_count = Downcast<IntImm>(op->args[0])->value;
     auto mbarrier_storage_name = mbarrier_name_ + "_mem";
-    this->stream << "__shared__ uint64_t " << mbarrier_storage_name << "["
+    this->stream << "__shared__ __align__(" << barrier_alignment_bytes_
+                 << ") uint64_t " << mbarrier_storage_name << "["
                  << barrier_count << "];\n";
     this->PrintIndent();
     this->stream << "auto " << mbarrier_name_ << " = reinterpret_cast<"

@@ -138,6 +138,9 @@ private:
                                       ? init_mbarrier_calls_.back()
                                       : SeqStmt(init_mbarrier_calls_),
                                   Stmt()));
+
+    new_body.push_back(
+        Evaluate(Call(DataType::Handle(), ptx_fence_barrier_init(), {})));
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
