@@ -1,4 +1,5 @@
 """Version utilities for tilelang."""
+
 from __future__ import annotations
 
 import re
@@ -21,6 +22,7 @@ def build_date(version_str: str | None = None) -> int | None:
     """
     if version_str is None:
         import tilelang
+
         version_str = tilelang.__version__
 
     match = re.search(r"\.d(\d{8})\.", version_str)
