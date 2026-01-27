@@ -797,6 +797,7 @@ def loop_break():
 
 def cp_async_barrier_noinc(barrier: tir.Buffer | BufferLoad):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc."""
+    barrier = _mbar_to_buffer_load(barrier)
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
