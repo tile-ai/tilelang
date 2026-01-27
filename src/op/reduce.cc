@@ -428,12 +428,11 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       } else {
         update = BufferLoad(clear_buffer, red_indices);
       }
+      auto store = BufferStore(dst_buffer, update, dst_indices);
       if (analyzer->CanProve(predicate)) {
-        stmts.push_back(BufferStore(
-            dst_buffer, BufferLoad(clear_buffer, red_indices), dst_indices));
+        stmts.push_back(store);
       } else {
-        stmts.push_back(IfThenElse(
-            predicate, BufferStore(dst_buffer, update, dst_indices)));
+        stmts.push_back(IfThenElse(predicate, store));
       }
     }
 
