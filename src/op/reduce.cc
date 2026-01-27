@@ -174,7 +174,7 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
 
   auto reducer_shape = src_layout->InputShape();
   reducer_shape.erase(reducer_shape.begin() + dim);
-  if (reducer_shape.size() == 0) {
+  if (reducer_shape.empty()) {
     reducer_shape.push_back(1);
   }
 
