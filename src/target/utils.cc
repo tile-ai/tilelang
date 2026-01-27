@@ -162,28 +162,42 @@ bool IsCudaVectorizableFP8(DataType dtype) {
 
 bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
   // float16 -> float32
-  if (from_ty.is_float16() && target_ty.is_float())
+  if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32)
     return true;
 
   // float32 -> float16
-  if (from_ty.is_float() && target_ty.is_float16())
+  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_float16())
     return true;
 
   // bfloat16 -> float32
-  if (from_ty.is_bfloat16() && target_ty.is_float())
+  if (from_ty.is_bfloat16() && target_ty.is_float() && target_ty.bits() == 32)
     return true;
 
   // float32 -> bfloat16
-  if (from_ty.is_float() && target_ty.is_bfloat16())
+  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_bfloat16())
     return true;
 
   // float32 -> float8 (E4M3/E5M2)
-  if (from_ty.is_float() && IsCudaVectorizableFP8(target_ty))
+  if (from_ty.is_float() && from_ty.bits() == 32 &&
+      IsCudaVectorizableFP8(target_ty))
     return true;
 
   // float8 (E4M3/E5M2) -> float32
-  if (IsCudaVectorizableFP8(from_ty) && target_ty.is_float())
+  if (IsCudaVectorizableFP8(from_ty) && target_ty.is_float() &&
+      target_ty.bits() == 32)
     return true;
+
+  // Not implemented for now
+
+  // float64(double) -> float8 (E4M3/E5M2)
+  // if (from_ty.is_float() && from_ty.bits() == 64 &&
+  //     IsCudaVectorizableFP8(target_ty))
+  //   return true;
+
+  // float8 (E4M3/E5M2) -> float64(double)
+  // if (IsCudaVectorizableFP8(from_ty) && target_ty.is_float() &&
+  //     target_ty.bits() == 64)
+  //   return true;
 
   // float8 (E8M0) -> bfloat16
   if (from_ty.is_float8_e8m0fnu() && target_ty.is_bfloat16())
@@ -193,16 +207,50 @@ bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
   if (from_ty.is_bfloat16() && target_ty.is_float8_e8m0fnu())
     return true;
 
-  // float32/double -> float8 (E8M0)
-  if (from_ty.is_float() && target_ty.is_float8_e8m0fnu())
+  // float32 -> float8 (E8M0)
+  if (from_ty.is_float() && from_ty.bits() == 32 &&
+      target_ty.is_float8_e8m0fnu())
+    return true;
+
+  // float64(double) -> float8 (E8M0)
+  if (from_ty.is_float() && from_ty.bits() == 64 &&
+      target_ty.is_float8_e8m0fnu())
+    return true;
+
+  // float4_e2m1fn -> float16
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_float16())
+    return true;
+
+  // float16 -> float4_e2m1fn
+  if (from_ty.is_float16() && target_ty.is_float4_e2m1fn())
     return true;
 
   // float4_e2m1fn -> float32
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float())
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
+      target_ty.bits() == 32)
     return true;
 
   // float32 -> float4_e2m1fn
-  if (from_ty.is_float() && target_ty.is_float4_e2m1fn())
+  if (from_ty.is_float() && from_ty.bits() == 32 &&
+      target_ty.is_float4_e2m1fn())
+    return true;
+
+  // float4_e2m1fn -> float64(double)
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
+      target_ty.bits() == 64)
+    return true;
+
+  // float64(double) -> float4_e2m1fn
+  if (from_ty.is_float() && from_ty.bits() == 64 &&
+      target_ty.is_float4_e2m1fn())
+    return true;
+
+  // float4_e2m1fn -> bfloat16
+  if (from_ty.is_float4_e2m1fn() && target_ty.is_bfloat16())
+    return true;
+
+  // bfloat16 -> float4_e2m1fn
+  if (from_ty.is_bfloat16() && target_ty.is_float4_e2m1fn())
     return true;
 
   return false;

@@ -86,10 +86,6 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
         (T.float32, T.float16, "__float22half2_rn", 4),
         (T.float16, T.float32, "__half22float2", 2),
         (T.float16, T.float32, "__half22float2", 4),
-        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 2),
-        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 4),
-        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 2),
-        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 4),
         (T.float32, T.bfloat16, "__float22bfloat162_rn", 2),
         (T.float32, T.bfloat16, "__float22bfloat162_rn", 4),
         (T.bfloat16, T.float32, "__bfloat1622float2", 2),
@@ -105,6 +101,11 @@ def test_vectorized_cast(src_dtype, dst_dtype, check_str, lanes):
 @pytest.mark.parametrize(
     "src_dtype, dst_dtype, check_str, lanes",
     [
+        # FP8 <-> FP32
+        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 2),
+        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 4),
+        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 2),
+        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 4),
         (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
         (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
         (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
