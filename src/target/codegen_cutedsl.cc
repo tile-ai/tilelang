@@ -804,7 +804,8 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
       PrintType(op->dtype, stream);
       stream << ", " << constant_size << "), (" << constant_size << ",))\n";
     } else if (scope == "shared.barrier") {
-      ICHECK(false) << "Unsupported scope: " << scope;
+      stream << vid << " = tl.alloc_smem(cutlass.Uint64, size_in_elems="
+             << constant_size << ")\n";
     } else if (scope == "local") {
       stream << vid << " = tl.make_rmem_tensor((" << constant_size << "),";
       PrintType(op->dtype, stream);
