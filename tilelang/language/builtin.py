@@ -87,8 +87,10 @@ def create_tma_descriptor(*args):
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.create_tma_descriptor"), *args)
 
-# NOTE(wt): T.create_list_of_mbarrier and T.get_mbarrier is now only an intermediate intrinsic 
+
+# NOTE(wt): T.create_list_of_mbarrier and T.get_mbarrier is now only an intermediate intrinsic
 # during transforms, and won't be exposed to frontend. For creating mbarriers, please use T.alloc_barrier instead.
+
 
 def tma_load(*args):
     """Perform a Tensor Memory Access (TMA) load operation.

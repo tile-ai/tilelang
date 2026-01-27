@@ -27,7 +27,8 @@ inline Buffer CreateMBarrierBuffer(const std::string &name, int num_barriers) {
                 0, 0, kDefault);
 }
 
-const std::string injected_mbarrier_name_ = "mbarrier";  // todo: avoid conflict with user-defined mbarriers
+const std::string injected_mbarrier_name_ =
+    "mbarrier"; // todo: avoid conflict with user-defined mbarriers
 
 } // namespace tl
 } // namespace tvm

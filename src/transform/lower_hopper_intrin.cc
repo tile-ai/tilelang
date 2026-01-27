@@ -156,10 +156,11 @@ public:
           Stmt result = SeqStmt(stmt_seq);
 
           if (!init_mbarrier_calls_.empty()) {
-            mbarrier_buffer_ = CreateMBarrierBuffer(injected_mbarrier_name_, init_mbarrier_calls_.size());
+            mbarrier_buffer_ = CreateMBarrierBuffer(
+                injected_mbarrier_name_, init_mbarrier_calls_.size());
             result = DeclBuffer(mbarrier_buffer_, result);
             result = Allocate(mbarrier_buffer_->data, mbarrier_buffer_->dtype,
-                             mbarrier_buffer_->shape, const_true(), result);
+                              mbarrier_buffer_->shape, const_true(), result);
           }
 
           prefetch_calls_.clear();
