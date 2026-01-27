@@ -69,6 +69,8 @@ private:
     ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
 
     for (auto buffer : barrier_buffers) {
+      ICHECK(buffer->name != "mbarrier")
+          << "Shared barrier's name 'mbarrier' is reserved";
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
 

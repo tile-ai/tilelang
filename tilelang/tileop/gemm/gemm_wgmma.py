@@ -35,7 +35,6 @@ class GemmWGMMA(GemmBase):
         See: https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html
         """
         vectorized_size = 128 // self.in_dtype.bits
-        print(f"continuity: {continuity}, vectorized_size: {vectorized_size}")
         if continuity % (vectorized_size * 8) == 0:
             return make_full_bank_swizzled_layout
         elif continuity % (vectorized_size * 4) == 0:
