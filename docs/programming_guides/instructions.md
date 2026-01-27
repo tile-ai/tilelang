@@ -104,7 +104,7 @@ Memory allocation and descriptors
 - `T.alloc_shared(shape, dtype, scope='shared.dyn')`: Allocate shared buffer.
 - `T.alloc_fragment(shape, dtype, scope='local.fragment')`: Allocate fragment.
 - `T.alloc_var(dtype, [init], scope='local.var')`: Scalar var buffer (1 elem).
-- `T.alloc_barrier([arrive_count)`: Allocate and initialize one or more mbarriers.
+- `T.alloc_barrier(arrive_count)`: Allocate and initialize one or more mbarriers.
 - `T.alloc_tmem(shape, dtype)`: Tensor memory (TMEM) buffer (Hopper+).
 - `T.alloc_reducer(shape, dtype, op='sum', replication=None)`: Reducer buf.
 - `T.alloc_descriptor(kind, dtype)`: Generic descriptor allocator.

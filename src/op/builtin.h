@@ -183,17 +183,17 @@ TVM_DLL const Op &create_tma_descriptor();
 TVM_DLL const Op &create_tma_im2col_descriptor();
 
 /*!
- * \brief Create a list of mbarrier with num_threads
+ * \brief Create a list of mbarrier with arrive_counts for each barrier
  *
- * create_list_of_mbarrier(num_threads0, num_threads1, ...)
+ * create_list_of_mbarrier(arrive_counts0, arrive_counts1, ...)
  *
  */
 TVM_DLL const Op &create_list_of_mbarrier();
 
 /*!
- * \brief Get the mbarrier with barrier_id
+ * \brief Get the mbarrier injected by compiler via barrier_id
  *
- * int64_t* GetMBarrier(barrier_id)
+ * int64_t* get_mbarrier(barrier_id)
  *
  */
 TVM_DLL const Op &get_mbarrier();
