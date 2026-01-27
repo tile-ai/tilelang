@@ -1,4 +1,5 @@
 """Version utilities for tilelang."""
+from __future__ import annotations
 
 import re
 
