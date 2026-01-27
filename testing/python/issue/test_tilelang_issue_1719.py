@@ -10,13 +10,13 @@ def test_issue_1719_layout_1():
         @T.prim_func
         def main():
             with T.Kernel(threads=32):
-                tmp1 = T.alloc_shared([16, 16], T.float16)
-                tmp2 = T.alloc_shared([16, 16], T.float16)
-                tmp3 = T.alloc_fragment([16, 16], T.float32)
-                tmp4 = T.alloc_fragment([16], T.float32)
+                tmp1 = T.alloc_shared([32, 32], T.float16)
+                tmp2 = T.alloc_shared([32, 32], T.float16)
+                tmp3 = T.alloc_fragment([32, 32], T.float32)
+                tmp4 = T.alloc_fragment([32], T.float32)
                 T.gemm(tmp1, tmp2, tmp3, transpose_B=True)
                 T.reduce_max(tmp3, tmp4)
-                for i in T.Parallel(16):
+                for i in T.Parallel(32):
                     tmp4[i] = 1
 
         return main
