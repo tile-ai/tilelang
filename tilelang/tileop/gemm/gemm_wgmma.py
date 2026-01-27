@@ -1,6 +1,12 @@
 from .gemm_base import GemmBase
 from .inst import GemmInst
-from tilelang.layout import make_wgmma_swizzled_layout
+from tilelang.layout import (
+    make_full_bank_swizzled_layout,
+    make_half_bank_swizzled_layout,
+    make_quarter_bank_swizzled_layout,
+    make_linear_layout,
+    Layout,
+)
 from tilelang.intrinsics.wgmma_macro_generator import (
     TensorCoreIntrinEmitter,
 )
@@ -11,9 +17,34 @@ from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
+from typing import Callable
 
 
 class GemmWGMMA(GemmBase):
+    def infer_shared_layout(self, continuity: int) -> Callable[[tir.Buffer], Layout]:
+        """Infer the swizzle layout for shared memory based on continuity.
+
+        WGMMA can directly use shared memory as input, so the swizzle layout must
+        match the tensor core's access pattern. The swizzle granularity is determined
+        by the continuous dimension size:
+          - 128B swizzle (Full):    continuity % (vectorized_size * 8) == 0
+          - 64B swizzle (Half):     continuity % (vectorized_size * 4) == 0
+          - 32B swizzle (Quarter):  continuity % (vectorized_size * 2) == 0
+          - Linear (no swizzle):    otherwise
+
+        See: https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html
+        """
+        vectorized_size = 128 // self.in_dtype.bits
+        print(f"continuity: {continuity}, vectorized_size: {vectorized_size}")
+        if continuity % (vectorized_size * 8) == 0:
+            return make_full_bank_swizzled_layout
+        elif continuity % (vectorized_size * 4) == 0:
+            return make_half_bank_swizzled_layout
+        elif continuity % (vectorized_size * 2) == 0:
+            return make_quarter_bank_swizzled_layout
+        else:
+            return make_linear_layout
+
     def infer_layout(self, target: Target, thread_nums: int):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
         warp_row_tiles = int(self.M // m_warp)
@@ -32,22 +63,19 @@ class GemmWGMMA(GemmBase):
         )
         a_is_k_major = not self.trans_A
         b_is_k_major = self.trans_B
-
+        a_continuity = self.K if a_is_k_major else mma_emitter.wgmma_inst_m
+        b_continuity = self.K if b_is_k_major else mma_emitter.wgmma_inst_n
         if self.is_gemm_ss():
-            a_continuity = self.M if a_is_k_major else 4 * self.K // m_warp
-            b_continuity = self.K if b_is_k_major else self.N // n_warp
-
             return {
                 # WGMMA does not support padding
-                self.A: make_wgmma_swizzled_layout(self.A, continuity=a_continuity, k_major=a_is_k_major),
-                self.B: make_wgmma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.A: self.infer_shared_layout(a_continuity)(self.A),
+                self.B: self.infer_shared_layout(b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_rs():
-            b_continuity = self.N if b_is_k_major else 4 * self.K // n_warp
             return {
                 self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
-                self.B: make_wgmma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.B: self.infer_shared_layout(b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         else:
