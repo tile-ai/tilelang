@@ -233,18 +233,15 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (src_scope == "local.fragment" && dst_scope == "local.fragment") {
 
-    Buffer src_buffer = get_buffer(this->src);
-    Buffer dst_buffer = get_buffer(this->dst);
-    Fragment src_layout = T.layout_map[this->src].as<Fragment>().value();
-    Fragment dst_layout = T.layout_map[this->dst].as<Fragment>().value();
-    size_t src_dim = src_layout->InputDim();
-    size_t dst_dim = dst_layout->InputDim();
-
+    auto src_buffer = get_buffer(this->src);
+    auto dst_buffer = get_buffer(this->dst);
+    auto src_layout = T.layout_map[this->src].as<Fragment>().value();
+    auto dst_layout = T.layout_map[this->dst].as<Fragment>().value();
     auto red_layout = ComputeReducerLayout(src_layout, dim);
-    auto dst_rep = *as_const_int(dst_layout->ReplicateExtent());
-    auto red_rep = *as_const_int(red_layout->ReplicateExtent());
+    auto src_dim = src_layout->InputDim();
+    auto dst_dim = dst_layout->InputDim();
 
-    bool is_1d_reduce = src_dim == dst_dim && dst_dim == 1;
+    auto is_1d_reduce = src_dim == dst_dim && dst_dim == 1;
 
     if (is_1d_reduce) {
       ICHECK(is_one(dst_layout->OutputShape().back()))
@@ -268,25 +265,25 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     IterVar reduce_iv(reduce_dom, Var("rv"), IterVarType::kDataPar);
     src_vars.insert(src_vars.begin() + this->dim, reduce_iv);
 
-    Array<PrimExpr> src_indices = src_layout->Forward(
+    auto src_indices = src_layout->Forward(
         src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-    Array<PrimExpr> dst_indices = dst_layout->Forward(
+    auto dst_indices = dst_layout->Forward(
         dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-    Array<PrimExpr> red_indices = red_layout->Forward(
+    auto red_indices = red_layout->Forward(
         dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
 
     Array<Stmt> stmts;
 
-    bool require_init = this->clear;
+    auto require_init = this->clear;
     if (this->type->isSum() || this->type->isAbsSum() ||
         this->type->isBitAnd() || this->type->isBitOr() ||
         this->type->isBitXor()) {
       require_init = true;
     }
 
-    Buffer clear_buffer = dst_buffer;
-    bool need_duplicate = false;
-    bool need_update = false;
+    auto clear_buffer = dst_buffer;
+    auto need_duplicate = false;
+    auto need_update = false;
     if ((this->type->isSum() || this->type->isAbsSum()) && !this->clear) {
       need_duplicate = true;
       need_update = true;
@@ -299,7 +296,11 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       need_update = true;
     }
 
-    if (red_rep > dst_rep) {
+    // red_layout should always contain dst_layout
+    // if we can prove they are the same, no need to duplicate buffer
+    // otherwise, red_layout contains more replicated dimensions than dst_layout
+    if (!analyzer->CanProve(dst_layout->ReplicateExtent() ==
+                            red_layout->ReplicateExtent())) {
       need_duplicate = true;
     }
 
@@ -319,10 +320,8 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     Array<PrimExpr> src_indice_compressed;
     Array<IterVar> src_var_compressed;
     for (size_t i = 0; i < src_layout->OutputDim(); ++i) {
-      PrimExpr expr;
-      IterVar var;
-      std::tie(expr, var) = CompressIterator(
-          src_indices[i], src_vars, src_vars[this->dim]->var, analyzer);
+      auto [expr, var] = CompressIterator(src_indices[i], src_vars,
+                                          src_vars[this->dim]->var, analyzer);
       src_indice_compressed.push_back(expr);
       src_var_compressed.push_back(var);
     }
@@ -341,7 +340,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
     stmts.push_back(reduce_local);
 
-    PrimExpr src_thread = src_layout->ForwardThread(
+    auto src_thread = src_layout->ForwardThread(
         src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
     auto iter_sum =
         arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
@@ -412,8 +411,8 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     if (need_duplicate) {
       PrimExpr update;
       if (need_update) {
-        PrimExpr src_val = BufferLoad(clear_buffer, red_indices);
-        PrimExpr dst_val = BufferLoad(dst_buffer, dst_indices);
+        auto src_val = BufferLoad(clear_buffer, red_indices);
+        auto dst_val = BufferLoad(dst_buffer, dst_indices);
         if (this->type->isSum() || this->type->isAbsSum()) {
           update = dst_val + src_val;
         } else if (this->type->isBitAnd()) {
@@ -436,7 +435,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       }
     }
 
-    Stmt body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
+    auto body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
     for (int i = static_cast<int>(dst_layout->InputDim()) - 1; i >= 0; --i) {
       body = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
                  ForKind::kParallel, body);
@@ -446,7 +445,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
                            red_layout);
     } else {
-      PrimExpr guard = (T.thread_var == T.thread_bounds->min);
+      auto guard = (T.thread_var == T.thread_bounds->min);
       body = IfThenElse(guard, body);
     }
 
