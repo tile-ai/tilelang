@@ -1277,7 +1277,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // Handle conversion from float to float8 (E8M0)
   if (from_ty.is_float() && from_ty.bits() == 32 &&
       target_ty.is_float8_e8m0fnu()) {
-    // Use __nv_cvt_float2_to_e8m0x2 for vectorized conversion (float2 ->
+    // Use __tl_cvt_float2_to_e8m0x2 for vectorized conversion (float2 ->
     // fp8_e8m0x2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_float2_to_e8m0x2", "float2",
@@ -1289,7 +1289,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // Handle conversion from double to float8 (E8M0)
   if (from_ty.is_float() && from_ty.bits() == 64 &&
       target_ty.is_float8_e8m0fnu()) {
-    // Use __nv_cvt_double2_to_e8m0x2 for vectorized conversion (double2 ->
+    // Use __tl_cvt_double2_to_e8m0x2 for vectorized conversion (double2 ->
     // fp8_e8m0x2)
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_double2_to_e8m0x2", "double2",

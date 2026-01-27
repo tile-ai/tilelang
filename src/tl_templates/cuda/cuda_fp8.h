@@ -316,7 +316,7 @@ __tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
 // ============================================================================
 // FP8 E8M0 Related Conversions
 // ============================================================================
-#if defined(TL_HAS_FP8_E8M0)
+#if TL_HAS_FP8_E8M0
 
 // fp8_e8m0 -> bfloat16
 TL_DEVICE __nv_bfloat16

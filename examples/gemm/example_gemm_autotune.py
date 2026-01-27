@@ -219,7 +219,6 @@ def main(M: int = 4096, N: int = 4096, K: int = 4096, use_autotune: bool = False
 
     # benchmark
     profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
-    print(kernel.get_kernel_source())
     tilelang_latency = profiler.do_bench()
     ref_latency = profiler.do_bench(ref_program)
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)

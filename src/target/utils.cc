@@ -149,6 +149,9 @@ int TargetGetWarpSize(Target target) {
 }
 
 bool IsCudaVectorizableFP8(DataType dtype) {
+  // NOTE: E8M0 is a special type of FP8 which is not handled here
+  // We only handle FP8 types which can be represented with
+  // __nv_fp8_interpretation_t here
   return dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn() ||
          dtype.is_float8_e5m2();
 }
@@ -182,11 +185,11 @@ bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
   if (from_ty.is_float8_e8m0fnu() && target_ty.is_bfloat16())
     return true;
 
-  // bfloat16 -> float8 (E4M3/E5M2)
+  // bfloat16 -> float8 (E8M0)
   if (from_ty.is_bfloat16() && target_ty.is_float8_e8m0fnu())
     return true;
 
-  // float32/double -> float8 (E4M3/E5M2)
+  // float32/double -> float8 (E8M0)
   if (from_ty.is_float() && target_ty.is_float8_e8m0fnu())
     return true;
 

@@ -13,8 +13,6 @@
 
 namespace tl {
 
-#define TL_DEVICE __forceinline__ __device__
-
 TL_DEVICE void cp_async_commit() {
   asm volatile("cp.async.commit_group;\n" ::);
 }
