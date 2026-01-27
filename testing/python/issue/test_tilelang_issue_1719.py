@@ -43,10 +43,10 @@ def test_issue_1719_layout_2():
 @tilelang.testing.requires_cuda
 def test_issue_1719_layout_3():
     @tilelang.jit
-    def _buggy_kernel(A, B, dtype=T.float32):
+    def _buggy_kernel(A, dtype=T.float32):
         M, N = T.const("M, N")
         A: T.Tensor[(M, N), dtype]
-        B: T.Tensor[(M,), dtype]
+        B = T.empty((M,), dtype)
         with T.Kernel(1, threads=32) as _:
             A_local = T.alloc_fragment((M, N), dtype)
             B_local = T.alloc_fragment((M,), dtype)
@@ -54,6 +54,7 @@ def test_issue_1719_layout_3():
             T.copy(A, A_local)
             T.reduce_sum(A_local, B_local, dim=1)
             T.copy(B_local, B)
+        return B
 
     M, N = 2, 128
     kernel = _buggy_kernel.compile(M=M, N=N)
