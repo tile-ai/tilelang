@@ -269,8 +269,6 @@ if __name__ == "__main__":
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)
     ref_output = ref_program(*input_tensors)
-    # print(f"Tilelang output: {tilelang_output}")
-    # print(f"Ref output: {ref_output}")
     torch.testing.assert_close(tilelang_output, ref_output, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
