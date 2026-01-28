@@ -7,11 +7,22 @@
 #define TILELANG_FP8_E4M3_VARIANT_FN 0
 #define TILELANG_FP8_E4M3_VARIANT_FNUZ 1
 
+#define TILELANG_FP8_E5M2_VARIANT_FN 0
+#define TILELANG_FP8_E5M2_VARIANT_FNUZ 1
+
 #ifndef TILELANG_FP8_E4M3_VARIANT
 #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
 #define TILELANG_FP8_E4M3_VARIANT TILELANG_FP8_E4M3_VARIANT_FNUZ
 #else
 #define TILELANG_FP8_E4M3_VARIANT TILELANG_FP8_E4M3_VARIANT_FN
+#endif
+#endif
+
+#ifndef TILELANG_FP8_E5M2_VARIANT
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#define TILELANG_FP8_E5M2_VARIANT TILELANG_FP8_E5M2_VARIANT_FNUZ
+#else
+#define TILELANG_FP8_E5M2_VARIANT TILELANG_FP8_E5M2_VARIANT_FN
 #endif
 #endif
 
@@ -32,6 +43,24 @@ using hip_fp8x4_e4_t = __hip_fp8x4_e4m3;
 using hip_fp8_e4_t = __hip_fp8_e4m3_fnuz;
 using hip_fp8x2_e4_t = __hip_fp8x2_e4m3_fnuz;
 using hip_fp8x4_e4_t = __hip_fp8x4_e4m3_fnuz;
+#endif
+
+#if (TILELANG_FP8_E5M2_VARIANT == TILELANG_FP8_E5M2_VARIANT_FN)
+#if defined(__clang__) && defined(__HIPCC__)
+#if !__is_identifier(__hip_fp8_e5m2)
+#define TILELANG_HAVE_FP8_E5M2_FN 1
+#endif
+#endif
+#endif
+
+#if defined(TILELANG_HAVE_FP8_E5M2_FN)
+using hip_fp8_e5_t = __hip_fp8_e5m2;
+using hip_fp8x2_e5_t = __hip_fp8x2_e5m2;
+using hip_fp8x4_e5_t = __hip_fp8x4_e5m2;
+#else
+using hip_fp8_e5_t = __hip_fp8_e5m2_fnuz;
+using hip_fp8x2_e5_t = __hip_fp8x2_e5m2_fnuz;
+using hip_fp8x4_e5_t = __hip_fp8x4_e5m2_fnuz;
 #endif
 
 struct fp8_e4_t {
@@ -61,14 +90,22 @@ using fp8_e4_2_t = hip_fp8x2_e4_t;
 using fp8_e4_4_storage_t = uint32_t;
 
 // Additional FP8 types for compatibility
-using hip_fp8_e5_t = __hip_fp8_e5m2_fnuz;
-using fp8_e5_2_t = __hip_fp8x2_e5m2_fnuz;
+using fp8_e5_2_t = hip_fp8x2_e5_t;
 
 struct fp8_e5_t {
   unsigned char data;
   __device__ fp8_e5_t() {}
   __device__ fp8_e5_t(hip_fp8_e5_t val) {
     data = *reinterpret_cast<unsigned char *>(&val);
+  }
+  __device__ fp8_e5_t(float val) {
+    constexpr __hip_fp8_interpretation_t interp =
+#if (TILELANG_FP8_E5M2_VARIANT == TILELANG_FP8_E5M2_VARIANT_FNUZ)
+        __HIP_E5M2_FNUZ;
+#else
+        __HIP_E5M2;
+#endif
+    data = __hip_cvt_float_to_fp8(val, __HIP_SATFINITE, interp);
   }
   __device__ operator hip_fp8_e5_t() const {
     return *reinterpret_cast<const hip_fp8_e5_t *>(&data);
@@ -83,7 +120,15 @@ struct fp8_e5_t {
 
 // Simple wrapper that provides member access for generated code
 struct __align__(4) fp8_e4_4_t {
-  fp8_e4_4_storage_t data;
+  union {
+    fp8_e4_4_storage_t data;
+    struct {
+      fp8_e4_t x;
+      fp8_e4_t y;
+      fp8_e4_t z;
+      fp8_e4_t w;
+    };
+  };
 
   __device__ fp8_e4_4_t() {}
   __device__ fp8_e4_4_t(const fp8_e4_4_storage_t &val) : data(val) {}
@@ -115,13 +160,21 @@ struct __align__(16) fp8_e4_16_t {
 using fp8_e5_4_storage_t = uint32_t;
 
 struct __align__(4) fp8_e5_4_t {
-  fp8_e5_4_storage_t data;
+  union {
+    fp8_e5_4_storage_t data;
+    struct {
+      fp8_e5_t x;
+      fp8_e5_t y;
+      fp8_e5_t z;
+      fp8_e5_t w;
+    };
+  };
   __device__ fp8_e5_4_t() {}
-  __device__ fp8_e5_4_t(const __hip_fp8x4_e5m2_fnuz &val) {
+  __device__ fp8_e5_4_t(const hip_fp8x4_e5_t &val) {
     data = *reinterpret_cast<const fp8_e5_4_storage_t *>(&val);
   }
-  __device__ operator __hip_fp8x4_e5m2_fnuz() const {
-    return *reinterpret_cast<const __hip_fp8x4_e5m2_fnuz *>(&data);
+  __device__ operator hip_fp8x4_e5_t() const {
+    return *reinterpret_cast<const hip_fp8x4_e5_t *>(&data);
   }
 };
 

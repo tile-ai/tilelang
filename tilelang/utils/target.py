@@ -89,6 +89,31 @@ def select_torch_fp8_e4m3_dtype() -> torch.dtype:
     return torch_dtype
 
 
+def select_fp8_e5m2_dtype() -> str:
+    """
+    Select the correct FP8 E5M2 dtype string for the current platform.
+    - CUDA defaults to FP8 E5M2.
+    - ROCm uses FNUZ except gfx950 (OCP), which prefers non-FNUZ when available.
+    """
+    if torch.version.hip is None:
+        return "float8_e5m2"
+    if not torch.cuda.is_available():
+        return "float8_e5m2fnuz"
+    props = torch.cuda.get_device_properties(0)
+    gcn_arch = getattr(props, "gcnArchName", "")
+    if gcn_arch.startswith("gfx950") and hasattr(torch, "float8_e5m2"):
+        return "float8_e5m2"
+    return "float8_e5m2fnuz"
+
+
+def select_torch_fp8_e5m2_dtype() -> torch.dtype:
+    dtype_name = select_fp8_e5m2_dtype()
+    torch_dtype = getattr(torch, dtype_name, None)
+    if torch_dtype is None:
+        raise RuntimeError(f"PyTorch does not expose dtype {dtype_name}")
+    return torch_dtype
+
+
 def normalize_cutedsl_target(target: str | Target) -> Target | None:
     if isinstance(target, Target):
         if target.kind.name == "cuda" and "cutedsl" in target.keys:
