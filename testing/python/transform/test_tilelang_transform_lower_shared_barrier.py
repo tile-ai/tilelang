@@ -2,8 +2,6 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 
-tilelang.disable_cache()
-
 
 @tilelang.jit(
     pass_configs={
