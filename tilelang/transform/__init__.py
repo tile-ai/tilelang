@@ -203,6 +203,17 @@ def MergeIfStmt():
     return _ffi_api.MergeIfStmt()  # type: ignore
 
 
+def HoistLoopInvariantIf():
+    """HoistLoopInvariantIf
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.HoistLoopInvariantIf()  # type: ignore
+
+
 def MultiVersionBuffer():
     """WarpSpecializedPipeline
 
