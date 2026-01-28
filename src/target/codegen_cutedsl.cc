@@ -312,23 +312,25 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   };
 
   if (op->op.same_as(builtin::ptx_cp_async())) {
+    // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
+    // args[3] = predicate (optional)
+    ICHECK(op->args.size() == 3 || op->args.size() == 4)
+        << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+           "src_access_ptr, bytes, [predicate])";
+
     std::string dst = PrintExpr_(op->args[0]);
-    std::string dst_offset = PrintExpr_(op->args[1]);
-    std::string src = PrintExpr_(op->args[2]);
-    std::string src_offset = PrintExpr_(op->args[3]);
-    std::string size = PrintExpr_(op->args[4]);
-    // use size of argument list to indicate whether or not to use predicated
-    // cp.async
-    if (op->args.size() == 5) {
-      PrintIndent();
-      stream << "tl.cp_async_gs(" << size << ", " << dst << ", " << dst_offset
-             << ", " << src << ", " << src_offset << ")\n";
+    std::string src = PrintExpr_(op->args[1]);
+    std::string size = PrintExpr_(op->args[2]);
+
+    this->PrintIndent();
+    if (op->args.size() == 3) {
+      stream << "tl.cp_async_gs(" << size << ", " << dst << ", " << src
+             << ")\n";
     } else {
-      std::string condition = PrintExpr_(op->args[5]);
+      std::string condition = PrintExpr_(op->args[3]);
       PrintIndent();
       stream << "tl.cp_async_gs_conditional(" << size << ", " << dst << ", "
-             << dst_offset << ", " << src << ", " << src_offset << ", "
-             << condition << ")\n";
+             << src << ", " << condition << ")\n";
     }
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
     print_extern_call_stmt("tl.cp_async_commit");
