@@ -111,6 +111,19 @@ public:
 };
 
 /*!
+ * \brief Check if an expression contains any CallNode
+ */
+class CallNodeChecker : public ExprVisitor {
+public:
+  bool has_call = false;
+
+  void VisitExpr_(const CallNode *op) final {
+    has_call = true;
+    // No need to continue visiting once we find a call
+  }
+};
+
+/*!
  * \brief Check if a condition is loop-invariant
  */
 bool IsLoopInvariant(const PrimExpr &cond, const Var &loop_var,
@@ -123,7 +136,15 @@ bool IsLoopInvariant(const PrimExpr &cond, const Var &loop_var,
   // Check 2: must not read written buffers
   WrittenBufferReadChecker checker(written_vars);
   checker(cond);
-  return !checker.reads_written;
+  if (checker.reads_written) {
+    return false;
+  }
+
+  // Check 3: conservatively reject if condition contains any call node
+  // (calls may have side effects or depend on loop-variant state)
+  CallNodeChecker call_checker;
+  call_checker(cond);
+  return !call_checker.has_call;
 }
 
 /*!
