@@ -32,6 +32,7 @@ tutorials/logging
 
 programming_guides/overview
 programming_guides/language_basics
+programming_guides/tilelang_semantics
 programming_guides/instructions
 programming_guides/control_flow
 programming_guides/autotuning
