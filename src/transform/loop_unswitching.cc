@@ -248,8 +248,8 @@ public:
     // Track ALL Let bindings to detect when a condition uses a variable
     // that is defined inside the loop with a loop-variant value.
     // This is necessary because variables like i_s may be bound to expressions
-    // containing the loop variable (e.g., if_then_else(...k...)), and conditions
-    // using such variables should not be hoisted.
+    // containing the loop variable (e.g., if_then_else(...k...)), and
+    // conditions using such variables should not be hoisted.
     let_bindings_[op->var.get()] = op->value;
     StmtVisitor::VisitStmt_(op);
     // Remove the binding when leaving scope
