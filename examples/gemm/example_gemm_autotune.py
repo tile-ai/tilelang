@@ -76,9 +76,9 @@ def get_configs(M, N, K, with_roller=False, topk=20):
             config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
             configs.append(config)
     else:
-        block_M = [64, 128, 256]
-        block_N = [64, 128, 256]
-        block_K = [32, 64]
+        block_M = [64, 128, 256] if M > 32 else [16, 32]
+        block_N = [64, 128, 256] if M > 32 else [16, 32]
+        block_K = [32, 64, 128]
         num_stages = [0, 1, 2, 3]
         thread_num = [128, 256]
         enable_rasterization = [True, False]
@@ -107,7 +107,7 @@ def get_configs(M, N, K, with_roller=False, topk=20):
     return configs
 
 
-def get_best_config(M, N, K, with_roller=False):
+def get_best_config(M, N, K, with_roller=False, profile_backend="event"):
     def kernel(
         block_M=None,
         block_N=None,
@@ -156,6 +156,7 @@ def get_best_config(M, N, K, with_roller=False):
             supply_type=tl.TensorSupplyType.Integer,
             ref_prog=ref_program,
             skip_check=False,
+            backend=profile_backend,
         )
     )
     return autotuner.run(warmup=3, rep=20)
@@ -207,10 +208,12 @@ def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_ra
     return gemm_autotune
 
 
-def main(M: int = 4096, N: int = 4096, K: int = 4096, use_autotune: bool = False, with_roller: bool = False):
+def main(
+    M: int = 4096, N: int = 4096, K: int = 4096, use_autotune: bool = False, with_roller: bool = False, profile_backend: str = "event"
+):
     use_autotune = True
     if use_autotune:
-        result = get_best_config(M, N, K, with_roller)
+        result = get_best_config(M, N, K, with_roller, profile_backend)
         print(result.config)
         kernel = result.kernel
     else:
@@ -219,8 +222,8 @@ def main(M: int = 4096, N: int = 4096, K: int = 4096, use_autotune: bool = False
 
     # benchmark
     profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
-    tilelang_latency = profiler.do_bench()
-    ref_latency = profiler.do_bench(ref_program)
+    tilelang_latency = profiler.do_bench(backend=profile_backend)
+    ref_latency = profiler.do_bench(ref_program, backend=profile_backend)
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
     print(f"TileLang latency: {tilelang_latency}")
     print(f"Ref latency: {ref_latency}")
@@ -242,5 +245,6 @@ if __name__ == "__main__":
     parser.add_argument("--k", type=int, default=4096, help="Matrix dimension K")
     parser.add_argument("--use_autotune", action="store_true", default=False, help="Whether to use autotune for matmul configs")
     parser.add_argument("--with_roller", action="store_true", default=False, help="Whether to enable BitBLAS roller for search space")
+    parser.add_argument("--profile_backend", type=str, default="event", help="Profiler backend")
     args = parser.parse_args()
-    main(args.m, args.n, args.k, args.use_autotune, args.with_roller)
+    main(args.m, args.n, args.k, args.use_autotune, args.with_roller, args.profile_backend)
