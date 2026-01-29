@@ -33,8 +33,11 @@ from os import path, makedirs
 from logging import getLogger
 from tilelang.jit.param import Kernel
 import concurrent.futures
+from tilelang.utils.target import COMMONIR_enabled
 
 from tqdm.auto import tqdm
+
+from .jit_commonir import compiler_common
 
 logger = getLogger(__name__)
 
@@ -94,6 +97,10 @@ def compile(
         if func.out_idx_override is not None and out_idx is not None:
             raise ValueError("Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors")
         out_idx = func.out_idx_override or out_idx
+
+    if target == 'commonir' or COMMONIR_enabled :
+        compiler_commonir = compiler_common(out_idx=out_idx)
+        return compiler_commonir.compile(func)
 
     return cached(
         func=func,
