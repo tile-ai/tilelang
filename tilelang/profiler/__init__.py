@@ -14,6 +14,7 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
+from tvm import tir
 
 
 @dataclass
@@ -57,12 +58,40 @@ class Profiler:
         self.adapter = adapter
         return self
 
-    def _get_inputs(self, with_output=False):
+    def _get_inputs(self, with_output=False, dynamic_symbolic_constraints: dict[str, int] | None = None):
         ins = []
         for i in range(len(self.params)):
             if with_output or i not in self.result_idx:
-                ins.append(self.supply(self.params[i]))
+                param = self.params[i]
+                if dynamic_symbolic_constraints:
+                    param = self._substitute_dynamic_symbols(param, dynamic_symbolic_constraints)
+                ins.append(self.supply(param))
         return ins
+
+    def _substitute_dynamic_symbols(self, param: KernelParam, constraints: dict[str, int]) -> KernelParam:
+        """Substitute dynamic symbolic variables in param shape with concrete values.
+
+        Args:
+            param: The kernel parameter with potentially dynamic shape
+            constraints: A dict mapping symbolic variable names to concrete int values
+
+        Returns:
+            A new KernelParam with substituted shape
+        """
+        new_shape = []
+        for dim in param.shape:
+            if isinstance(dim, tir.Var):
+                var_name = dim.name
+                if var_name in constraints:
+                    new_shape.append(constraints[var_name])
+                else:
+                    raise ValueError(
+                        f"Dynamic symbolic variable '{var_name}' not found in constraints. "
+                        f"Available constraints: {list(constraints.keys())}"
+                    )
+            else:
+                new_shape.append(dim)
+        return KernelParam(dtype=param.dtype, shape=new_shape)
 
     def _get_params(self, with_output=False):
         params = []
@@ -200,6 +229,7 @@ class Profiler:
         backend: Literal["event", "cupti"] = "event",
         quantiles: list[float] | None = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
+        dynamic_symbolic_constraints: dict[str, int] | None = None,
     ) -> float:
         """Benchmarks the execution time of a given function.
 
@@ -211,6 +241,9 @@ class Profiler:
             n_repeat: Number of timing iterations
             profiler: Which profiling backend to use
             input_tensors: Optional pre-generated input tensors
+            dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
+                names to concrete int values. Use this when benchmarking kernels with
+                dynamic shapes, e.g., {"m": 2048, "n": 1024}
 
         Returns:
             float: Average execution time in milliseconds
@@ -218,7 +251,12 @@ class Profiler:
         if func is None:
             assert self.adapter is not None, "benchmarking function should be provided"
             func = self.adapter
-        ins = self._get_inputs() if input_tensors is None else input_tensors
+        if input_tensors is not None:
+            ins = input_tensors
+        elif dynamic_symbolic_constraints is not None:
+            ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints)
+        else:
+            ins = self._get_inputs()
         bench_func = partial(func, *ins)
         return do_bench(
             bench_func,
