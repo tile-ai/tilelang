@@ -20,6 +20,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <unordered_map>
 #include <unordered_set>
 
 namespace tvm {
@@ -69,19 +70,36 @@ public:
 
 /*!
  * \brief Check if an expression reads any written buffer
+ *
+ * Also handles Let-bound variables that are bound to BufferLoad expressions.
  */
 class WrittenBufferReadChecker : public ExprVisitor {
 public:
   bool reads_written = false;
   const std::unordered_set<const VarNode *> &written_vars;
+  const std::unordered_map<const VarNode *, PrimExpr> *let_bindings;
 
   explicit WrittenBufferReadChecker(
-      const std::unordered_set<const VarNode *> &written)
-      : written_vars(written) {}
+      const std::unordered_set<const VarNode *> &written,
+      const std::unordered_map<const VarNode *, PrimExpr> *bindings = nullptr)
+      : written_vars(written), let_bindings(bindings) {}
 
   void VisitExpr_(const BufferLoadNode *op) final {
     if (written_vars.count(op->buffer->data.get())) {
       reads_written = true;
+    }
+    ExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const VarNode *op) final {
+    // Check if this var is Let-bound to a BufferLoad that reads a written
+    // buffer
+    if (let_bindings) {
+      auto it = let_bindings->find(op);
+      if (it != let_bindings->end()) {
+        // Recursively check the bound expression
+        VisitExpr(it->second);
+      }
     }
     ExprVisitor::VisitExpr_(op);
   }
@@ -124,17 +142,56 @@ public:
 };
 
 /*!
+ * \brief Check if condition or any Let-bound variable it uses depends on loop
+ * var
+ */
+bool UsesLoopVarThroughLetBindings(
+    const PrimExpr &cond, const Var &loop_var,
+    const std::unordered_map<const VarNode *, PrimExpr> *let_bindings) {
+  // Check if condition directly uses loop variable
+  if (UsesVar(cond, [&](const VarNode *v) { return v == loop_var.get(); })) {
+    return true;
+  }
+
+  // Check if any Let-bound variable used in condition has a binding that uses
+  // the loop variable
+  if (let_bindings) {
+    bool uses_loop_var = false;
+    PostOrderVisit(cond, [&](const ObjectRef &obj) {
+      if (uses_loop_var)
+        return;
+      if (const auto *var_node = obj.as<VarNode>()) {
+        auto it = let_bindings->find(var_node);
+        if (it != let_bindings->end()) {
+          // Check if the bound expression uses the loop variable
+          if (UsesVar(it->second,
+                      [&](const VarNode *v) { return v == loop_var.get(); })) {
+            uses_loop_var = true;
+          }
+        }
+      }
+    });
+    if (uses_loop_var) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*!
  * \brief Check if a condition is loop-invariant
  */
 bool IsLoopInvariant(const PrimExpr &cond, const Var &loop_var,
-                     const std::unordered_set<const VarNode *> &written_vars) {
-  // Check 1: must not use loop variable
-  if (UsesVar(cond, [&](const VarNode *v) { return v == loop_var.get(); })) {
+                     const std::unordered_set<const VarNode *> &written_vars,
+                     const std::unordered_map<const VarNode *, PrimExpr>
+                         *let_bindings = nullptr) {
+  // Check 1: must not use loop variable (directly or through Let bindings)
+  if (UsesLoopVarThroughLetBindings(cond, loop_var, let_bindings)) {
     return false;
   }
 
-  // Check 2: must not read written buffers
-  WrittenBufferReadChecker checker(written_vars);
+  // Check 2: must not read written buffers (including through Let bindings)
+  WrittenBufferReadChecker checker(written_vars, let_bindings);
   checker(cond);
   if (checker.reads_written) {
     return false;
@@ -173,21 +230,37 @@ public:
 
 /*!
  * \brief Find first hoistable if (not descending into nested loops)
+ *
+ * Also tracks Let bindings where variables are bound to BufferLoad expressions.
  */
 class HoistableIfFinder : public StmtVisitor {
 public:
   const IfThenElseNode *found = nullptr;
   const Var &loop_var;
   const std::unordered_set<const VarNode *> &written_vars;
+  std::unordered_map<const VarNode *, PrimExpr> let_bindings_;
 
   HoistableIfFinder(const Var &loop_var,
                     const std::unordered_set<const VarNode *> &written_vars)
       : loop_var(loop_var), written_vars(written_vars) {}
 
+  void VisitStmt_(const LetStmtNode *op) final {
+    // Track Let bindings where variable is bound to a BufferLoad
+    if (op->value->IsInstance<BufferLoadNode>()) {
+      let_bindings_[op->var.get()] = op->value;
+    }
+    StmtVisitor::VisitStmt_(op);
+    // Remove the binding when leaving scope
+    if (op->value->IsInstance<BufferLoadNode>()) {
+      let_bindings_.erase(op->var.get());
+    }
+  }
+
   void VisitStmt_(const IfThenElseNode *op) final {
     if (found)
       return;
-    if (IsLoopInvariant(op->condition, loop_var, written_vars)) {
+    if (IsLoopInvariant(op->condition, loop_var, written_vars,
+                        &let_bindings_)) {
       found = op;
       return;
     }
