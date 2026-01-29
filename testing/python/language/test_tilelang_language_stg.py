@@ -17,7 +17,7 @@ def test_stg32_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N, threads=32) as pid:
-            val = T.reinterpret(T.uint32, X[pid])
+            val = T.reinterpret(X[pid], T.uint32)
             T.stg32(Y[pid], val)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
@@ -133,7 +133,7 @@ def test_stg32_predicated_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N, threads=32) as pid:
-            val = T.reinterpret(T.uint32, X[pid])
+            val = T.reinterpret(X[pid], T.uint32)
             # Only store for the first half of elements
             T.stg32(Y[pid], val, pred=pid < N // 2)
 

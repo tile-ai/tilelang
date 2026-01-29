@@ -8,18 +8,18 @@ pass_configs = {
 
 
 def convert_to_uint16(x):
-    hval = T.Cast(T.float16, x)
-    bits_uint = T.reinterpret(T.uint16, hval)
+    hval = T.cast(x, T.float16)
+    bits_uint = T.reinterpret(hval, T.uint16)
     bits_uint = T.if_then_else(x < 0, ~bits_uint & (0xFFFF), bits_uint | (0x8000))
     return bits_uint >> 8
 
 
 def convert_to_uint32(x):
-    bits_uint = T.reinterpret(T.uint32, x)
+    bits_uint = T.reinterpret(x, T.uint32)
     bits_uint = T.if_then_else(
         x < 0,
-        ~bits_uint & T.Cast(T.uint32, (0xFFFFFFFF)),
-        bits_uint | T.Cast(T.uint32, (0x80000000)),
+        ~bits_uint & T.cast((0xFFFFFFFF), T.uint32),
+        bits_uint | T.cast((0x80000000), T.uint32),
     )
     return bits_uint
 
@@ -101,7 +101,7 @@ def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
                 input_idx = s * BLOCK_SIZE + tx
                 if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
                     bin_id = convert_to_uint16(input[bx, input_idx])
-                    l_bin_id32 = T.Cast(T.int32, bin_id)
+                    l_bin_id32 = T.cast(bin_id, T.int32)
                     if l_bin_id32 > l_threshold_bin_id:
                         # need a pos = T.atomic_add(s_histogram[bin_id32+1], 1)
                         pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True)
@@ -129,8 +129,8 @@ def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
                 l_num_input = s_num_input[r_idx]
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     if s * BLOCK_SIZE + tx < l_num_input:
-                        l_bin_id32 = T.Cast(
-                            T.int32, ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
+                        l_bin_id32 = T.cast(
+                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
                         )
                         T.atomic_add(s_histogram[l_bin_id32], 1)
                 T.sync_threads()
@@ -158,8 +158,8 @@ def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     T.sync_threads()
                     if s * BLOCK_SIZE + tx < l_num_input:
-                        l_bin_id32 = T.Cast(
-                            T.int32, ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
+                        l_bin_id32 = T.cast(
+                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
                         )
                         if l_bin_id32 > l_threshold_bin_id:
                             pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos

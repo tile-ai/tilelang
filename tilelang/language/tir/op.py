@@ -2015,16 +2015,18 @@ def infinity(dtype: str, span: Span | None = None) -> Any:
     return call_intrin(dtype, _tvm_op.Op.get("tl.infinity"), dtype, span=span)
 
 
-def reinterpret(dtype, value, span: Span | None = None) -> Any:
-    """infinity value of dtype
+# NOTE(chaofan): Here we use the argument order (value, dtype, ...) instead of (dtype, value, ...) in TVM
+# to be consistent with T.cast.
+def reinterpret(value, dtype, span: Span | None = None) -> Any:
+    """Reinterpret cast a value to dtype.
 
     Parameters
     ----------
-    dtype : str
-        The data type.
-
     value : PrimExpr
         The input value.
+
+    dtype : str
+        The data type.
 
     span : Optional[Span]
         The location of this operator in the source code.
