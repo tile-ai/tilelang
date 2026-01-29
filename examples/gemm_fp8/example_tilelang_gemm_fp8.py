@@ -1,7 +1,7 @@
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.utils import select_fp8_e4m3_dtype, select_fp8_e5m2_dtype
+from tilelang.utils import determine_fp8_type
 
 
 def calc_diff(x, y):
@@ -56,18 +56,18 @@ def test_gemm_fp8(M, N, K, dtype):
 
 
 def main():
-    test_gemm_fp8(1024, 1024, 1024, select_fp8_e4m3_dtype())
-    test_gemm_fp8(1024, 1024, 1024, select_fp8_e5m2_dtype())
+    test_gemm_fp8(1024, 1024, 1024, determine_fp8_type())
+    test_gemm_fp8(1024, 1024, 1024, determine_fp8_type("e5m2"))
 
 
 def run_regression_perf():
     M, N, K = 4096, 4096, 4096
-    dtype = select_fp8_e4m3_dtype()
+    dtype = determine_fp8_type()
     kernel_e4m3 = matmul(M, N, K, 128, 128, 64, dtype)
     profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
     if torch.version.hip is None:
         latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")
-        dtype = select_fp8_e5m2_dtype()
+        dtype = determine_fp8_type("e5m2")
         kernel_e5m2 = matmul(M, N, K, 128, 128, 64, dtype)
         profiler_e5m2 = kernel_e5m2.get_profiler(tilelang.TensorSupplyType.Integer)
         latency_e5m2 = profiler_e5m2.do_bench(backend="cupti")

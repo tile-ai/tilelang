@@ -64,50 +64,31 @@ def check_metal_availability() -> bool:
     return arch == "arm64"
 
 
-def select_fp8_e4m3_dtype() -> str:
+def determine_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> str:
     """
-    Select the correct FP8 E4M3 dtype string for the current platform.
-    - CUDA defaults to FP8 E4M3FN.
-    - ROCm uses FNUZ except gfx950 (OCP), which requires FN.
-    """
-    if torch.version.hip is None:
-        return "float8_e4m3fn"
-    if not torch.cuda.is_available():
-        return "float8_e4m3fnuz"
-    props = torch.cuda.get_device_properties(0)
-    gcn_arch = getattr(props, "gcnArchName", "")
-    if gcn_arch.startswith("gfx950"):
-        return "float8_e4m3fn"
-    return "float8_e4m3fnuz"
-
-
-def select_torch_fp8_e4m3_dtype() -> torch.dtype:
-    dtype_name = select_fp8_e4m3_dtype()
-    torch_dtype = getattr(torch, dtype_name, None)
-    if torch_dtype is None:
-        raise RuntimeError(f"PyTorch does not expose dtype {dtype_name}")
-    return torch_dtype
-
-
-def select_fp8_e5m2_dtype() -> str:
-    """
-    Select the correct FP8 E5M2 dtype string for the current platform.
-    - CUDA defaults to FP8 E5M2.
+    Select the correct FP8 dtype string for the current platform.
+    - CUDA defaults to FP8 E4M3FN / E5M2.
     - ROCm uses FNUZ except gfx950 (OCP), which prefers non-FNUZ when available.
     """
+    if fp8_format not in {"e4m3", "e5m2"}:
+        raise ValueError(f"Unsupported FP8 format: {fp8_format}")
     if torch.version.hip is None:
-        return "float8_e5m2"
+        return "float8_e4m3fn" if fp8_format == "e4m3" else "float8_e5m2"
     if not torch.cuda.is_available():
-        return "float8_e5m2fnuz"
+        return "float8_e4m3fnuz" if fp8_format == "e4m3" else "float8_e5m2fnuz"
     props = torch.cuda.get_device_properties(0)
     gcn_arch = getattr(props, "gcnArchName", "")
+    if fp8_format == "e4m3":
+        if gcn_arch.startswith("gfx950"):
+            return "float8_e4m3fn"
+        return "float8_e4m3fnuz"
     if gcn_arch.startswith("gfx950") and hasattr(torch, "float8_e5m2"):
         return "float8_e5m2"
     return "float8_e5m2fnuz"
 
 
-def select_torch_fp8_e5m2_dtype() -> torch.dtype:
-    dtype_name = select_fp8_e5m2_dtype()
+def determine_torch_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> torch.dtype:
+    dtype_name = determine_fp8_type(fp8_format)
     torch_dtype = getattr(torch, dtype_name, None)
     if torch_dtype is None:
         raise RuntimeError(f"PyTorch does not expose dtype {dtype_name}")

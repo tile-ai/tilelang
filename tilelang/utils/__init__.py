@@ -2,10 +2,8 @@
 
 from .target import (  # noqa: F401
     determine_target,
-    select_fp8_e4m3_dtype,
-    select_torch_fp8_e4m3_dtype,
-    select_fp8_e5m2_dtype,
-    select_torch_fp8_e5m2_dtype,
+    determine_fp8_type,
+    determine_torch_fp8_type,
 )
 from .tensor import TensorSupplyType, torch_assert_close, map_torch_type  # noqa: F401
 from .language import (

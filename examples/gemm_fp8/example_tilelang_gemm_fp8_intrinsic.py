@@ -7,7 +7,7 @@ from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import TensorCoreIntrinEmitter
 from tilelang.intrinsics.mfma_macro_generator import MatrixCoreIntrinEmitter
 from tilelang.utils.tensor import map_torch_type
-from tilelang.utils import select_fp8_e4m3_dtype, select_fp8_e5m2_dtype
+from tilelang.utils import determine_fp8_type
 
 tilelang.testing.set_random_seed(0)
 
@@ -234,16 +234,16 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 def main():
-    e4m3_dtype = select_fp8_e4m3_dtype()
+    e4m3_dtype = determine_fp8_type()
     assert_tl_matmul_correctness(128, 128, 128, e4m3_dtype, T.float32, T.float32)
-    e5m2_dtype = select_fp8_e5m2_dtype()
+    e5m2_dtype = determine_fp8_type("e5m2")
     assert_tl_matmul_correctness(128, 128, 128, e5m2_dtype, T.float32, T.float32)
 
 
 def run_regression_perf():
     M, N, K = 4096, 4096, 4096
     out_dtype, accum_dtype = "float32", "float32"
-    in_dtype = select_fp8_e4m3_dtype()
+    in_dtype = determine_fp8_type()
     kernel_e4m3 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     print(kernel_e4m3.get_kernel_source())
     profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)

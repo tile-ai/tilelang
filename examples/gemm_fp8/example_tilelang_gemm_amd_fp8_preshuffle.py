@@ -7,7 +7,7 @@ import tilelang.language as T
 from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mfma_macro_generator import MatrixCorePreshuffleIntrinEmitter
-from tilelang.utils import select_fp8_e4m3_dtype
+from tilelang.utils import determine_fp8_type
 
 tilelang.testing.set_random_seed(0)
 
@@ -53,7 +53,7 @@ def tl_matmul(
     b_transposed=True,
 ):
     if in_dtype is None:
-        in_dtype = select_fp8_e4m3_dtype()
+        in_dtype = determine_fp8_type()
     b_preshuffle = True
     warp_size = 64
     num_warps = num_threads // warp_size
@@ -167,7 +167,7 @@ def shuffle_weight(
 
 
 def assert_tl_matmul_correctness(M, N, K, k_pack=1, a_transposed=False, b_transposed=True):
-    in_dtype = select_fp8_e4m3_dtype()
+    in_dtype = determine_fp8_type()
     out_dtype = T.float32
     accum_dtype = T.float32
     kernel = tl_matmul(
