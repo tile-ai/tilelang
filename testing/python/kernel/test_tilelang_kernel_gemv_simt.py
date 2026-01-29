@@ -90,7 +90,7 @@ def gemv_simt(
                         accum_res[0] += A_local[ki].astype(accum_dtype) * B_local[ki].astype(accum_dtype)
 
             with T.attr(
-                T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                T.comm_reducer(lambda x, y: x + y, [T.cast(0, accum_dtype)]),
                 "reduce_scope",
                 T.reinterpret(T.uint64(0), dtype="handle"),
             ):
