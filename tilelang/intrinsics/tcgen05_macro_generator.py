@@ -226,7 +226,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         )
         # Allocate an instruction descriptor wrapper and initialize it
         a_dtype_abbrv = self.a_dtype_abbrv
-        mask_zero = T.Cast(T.int32, 0)
+        mask_zero = T.cast(0, T.int32)
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
         # TCGEN05 only has one warp group
