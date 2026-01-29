@@ -162,6 +162,11 @@ public:
                     const std::string &arg_name, bool with_lets,
                     const PrimExpr &nullable_guard);
 
+  void RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
+                          const PrimExpr &logical_stride_val,
+                          const PrimExpr &is_null,
+                          const std::string &stride_element_name);
+
 private:
   std::vector<Var> getUndefVars(const std::vector<PrimExpr> &arg);
   // Internal bind function
