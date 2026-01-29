@@ -18,6 +18,11 @@
 namespace tvm {
 namespace tl {
 
+namespace attr {
+// BlockAttr, Recording the arrive counts for each barrier allocation
+constexpr const char *kBarrierInit = "barrier_init";
+} // namespace attr
+
 using namespace tir;
 
 class SharedBarrierRewriter : public StmtExprMutator {
@@ -43,13 +48,15 @@ private:
       buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
     }
 
+    // Only check buffers allocated in THIS block, not accumulated from parent
+    // blocks
     Array<Buffer> barrier_buffers;
-
-    for (const auto &[data, buffer] : buffer_map_) {
+    for (auto buffer : alloc_buffers) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
+      if (!ptr_type)
+        continue;
       auto storage_scope = ptr_type->storage_scope;
-      ICHECK(ptr_type) << "Buffer Var's type annotation must be of PointerType";
       if (storage_scope == "shared.barrier") {
         barrier_buffers.push_back(buffer);
       }
@@ -62,62 +69,59 @@ private:
     ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
 
     for (auto buffer : barrier_buffers) {
+      ICHECK(buffer->name != "mbarrier")
+          << "Shared barrier's name 'mbarrier' is reserved";
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
 
     /*
-    Transform the barrier buffers to new allocations
-    transform:
-        data_is_ready = T.alloc_buffer((128,), "uint64", scope="shared.barrier")
-        compute_is_done = T.alloc_buffer((128,), "uint64",
+    Transform:
+        mbarrier_list = T.alloc_barrier(arrive_counts: list[int], "handle",
     scope="shared.barrier")
 
     into:
-        data_is_ready = T.alloc_buffer((1,), "uint64", scope="shared")
-        compute_is_done = T.alloc_buffer((1,), "uint64", scope="shared")
+        # This is emitted by the definition of T.alloc_barrier
+        mbarrier_list = T.alloc_buffer(len(arrive_counts), "handle",
+    scope="shared.barrier")
 
+        # This is emitted by this pass
         if tx == 0:
-          T.ptx_init_barrier_thread_count(data_is_ready[0], 128)
-          T.ptx_init_barrier_thread_count(compute_is_done[0], 128)
+          for i in range(len(arrive_counts)):
+            T.ptx_init_barrier_thread_count(mbarrier_list[i], arrive_counts[i])
     */
 
-    // 2. create new buffers
-    Array<Buffer> new_buffers;
-    for (auto buffer : barrier_buffers) {
-      auto data = buffer->data;
-      auto new_buffer = Buffer(data, buffer->dtype, Array<PrimExpr>({1}),
-                               Array<PrimExpr>({1}), PrimExpr(0), buffer->name,
-                               buffer->data_alignment, buffer->offset_factor,
-                               buffer->buffer_type);
-      new_buffers.push_back(new_buffer);
-      buffer_remap_.Set(buffer, new_buffer);
-    }
+    // Extract the arrive counts from the block attr "barrier_init"
+    // The attr is a Map<Var, Array<PrimExpr>> where key is buffer.data and
+    // value is arrive counts
+    ICHECK(op->annotations.count(attr::kBarrierInit))
+        << "barrier_init is not defined";
+    auto barrier_init_map = op->annotations.Get(attr::kBarrierInit)
+                                ->as<Map<Var, Array<PrimExpr>>>()
+                                .value();
 
-    // remove the barrier buffers
-    alloc_buffers.MutateByApply([this](Buffer buf) {
-      if (buffer_remap_.find(buf) != buffer_remap_.end()) {
-        return buffer_remap_.at(buf);
-      }
-      return buf;
-    });
-    if (!alloc_buffers.same_as(op->alloc_buffers)) {
-      block.CopyOnWrite()->alloc_buffers = alloc_buffers;
-    } else {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-
-    // 3. create init calls for new buffers
+    // Create init calls for each barrier buffer
+    // Initialize each barrier element with its respective arrive count
     Array<Stmt> init_mbarrier_calls_;
     for (auto buffer : barrier_buffers) {
       auto data = buffer->data;
-      auto old_buffer = buffer_data_to_buffer_.at(data);
-      auto new_buffer = buffer_remap_.at(old_buffer);
-      auto count = old_buffer->shape[0];
+      ICHECK(barrier_init_map.count(data))
+          << "Barrier buffer " << buffer->name
+          << " not found in barrier_init annotation";
+      auto arrive_counts = barrier_init_map.at(data);
+      ICHECK(arrive_counts.size() ==
+             static_cast<size_t>(buffer->shape[0].as<IntImmNode>()->value))
+          << "The number of arrive counts (" << arrive_counts.size()
+          << ") must match the barrier buffer size (" << buffer->shape[0]
+          << ") for buffer " << buffer->name;
 
-      auto call =
-          Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
-               {BufferLoad(new_buffer, {0}), PrimExpr(count)});
-      init_mbarrier_calls_.push_back(Evaluate(call));
+      for (size_t i = 0; i < arrive_counts.size(); i++) {
+        auto call =
+            Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
+                 {BufferLoad(buffer,
+                             {IntImm(DataType::Int(32), static_cast<int>(i))}),
+                  arrive_counts[i]});
+        init_mbarrier_calls_.push_back(Evaluate(call));
+      }
     }
     if (init_mbarrier_calls_.empty())
       return block;
@@ -134,6 +138,9 @@ private:
                                       ? init_mbarrier_calls_.back()
                                       : SeqStmt(init_mbarrier_calls_),
                                   Stmt()));
+
+    new_body.push_back(
+        Evaluate(Call(DataType::Handle(), ptx_fence_barrier_init(), {})));
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));

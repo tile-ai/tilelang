@@ -12,6 +12,7 @@
 
 #include "../op/builtin.h"
 #include "../runtime/runtime.h"
+#include "./common/mbarrier.h"
 
 namespace tvm {
 namespace tl {
@@ -121,12 +122,6 @@ public:
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
           Array<Stmt> stmt_seq;
-          if (!init_mbarrier_calls_.empty()) {
-            auto alloc_mbarrier =
-                Evaluate(Call(DataType::Handle(), builtin::create_barriers(),
-                              {static_cast<int>(init_mbarrier_calls_.size())}));
-            stmt_seq.push_back(alloc_mbarrier);
-          }
 
           auto stmts = prefetch_calls_;
           stmts.insert(stmts.end(), init_mbarrier_calls_.begin(),
@@ -158,9 +153,19 @@ public:
           }
           stmt_seq.push_back(body);
 
+          Stmt result = SeqStmt(stmt_seq);
+
+          if (!init_mbarrier_calls_.empty()) {
+            mbarrier_buffer_ = CreateMBarrierBuffer(
+                injected_mbarrier_name_, init_mbarrier_calls_.size());
+            result = DeclBuffer(mbarrier_buffer_, result);
+            result = Allocate(mbarrier_buffer_->data, mbarrier_buffer_->dtype,
+                              mbarrier_buffer_->shape, const_true(), result);
+          }
+
           prefetch_calls_.clear();
           init_mbarrier_calls_.clear();
-          return AttrStmt(op->node, op->attr_key, op->value, SeqStmt(stmt_seq));
+          return AttrStmt(op->node, op->attr_key, op->value, result);
         }
       }
     }
@@ -206,6 +211,7 @@ private:
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;
+  Buffer mbarrier_buffer_;
 };
 
 using namespace tir::transform;

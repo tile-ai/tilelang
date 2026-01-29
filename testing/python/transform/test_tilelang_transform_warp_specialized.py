@@ -76,37 +76,57 @@ def test_warp_specialized():
         A_shared = T.decl_buffer((3, 1, 8, 256), T.float16, scope="shared.dyn")
         B_shared = T.decl_buffer((3, 1, 4, 512), T.float16, scope="shared.dyn")
         C_local = T.decl_buffer((32,), scope="local")
-        T.create_list_of_mbarrier(128, 128, 128, 128, 128, 128)
+        T.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), 128, 128, 128, 128, 128, 128)
         T.attr([128, 128], "kWarpSpecializationScope", 0)
         if v >= 128:
             T.set_max_nreg(24, 0)
             for k in range(16):
-                T.mbarrier_wait_parity(T.get_mbarrier(k % 3 + 3), T.bitwise_xor(k // 3 % 2, 1))
+                T.call_intrin(
+                    "handle",
+                    tir.op.Op.get("tl.mbarrier_wait_parity"),
+                    T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3 + 3),
+                    T.bitwise_xor(k // 3 % 2, 1),
+                )
                 if v - 128 == 0:
-                    T.mbarrier_expect_tx(T.get_mbarrier(k % 3), 4096)
+                    T.call_intrin(
+                        "handle",
+                        tir.op.Op.get("tl.mbarrier_expect_tx"),
+                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3),
+                        4096,
+                    )
                 if v - 128 == 0:
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                        T.get_mbarrier(k % 3),
+                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3),
                         T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 2),
                         k * 32,
                         by * 64,
                     )
                 if v - 128 == 0:
-                    T.mbarrier_expect_tx(T.get_mbarrier(k % 3), 4096)
+                    T.call_intrin(
+                        "handle",
+                        tir.op.Op.get("tl.mbarrier_expect_tx"),
+                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3),
+                        4096,
+                    )
                 if v - 128 == 0:
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3, 2, 0),
-                        T.get_mbarrier(k % 3),
+                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3),
                         T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 2),
                         bx * 64,
                         k * 32,
                     )
-                T.evaluate(tir.Call("handle", "tir.ptx_arrive_barrier", [T.get_mbarrier(k % 3)]))
+                T.evaluate(tir.Call("handle", "tir.ptx_arrive_barrier", [T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3)]))
         else:
             T.set_max_nreg(240, 1)
             for k in range(16):
-                T.mbarrier_wait_parity(T.get_mbarrier(k % 3), k // 3 % 2)
+                T.call_intrin(
+                    "handle",
+                    tir.op.Op.get("tl.mbarrier_wait_parity"),
+                    T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3),
+                    k // 3 % 2,
+                )
                 T.call_extern(
                     "handle",
                     "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
@@ -114,7 +134,9 @@ def test_warp_specialized():
                     T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 1),
                     T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
                 )
-                T.evaluate(tir.Call("handle", "tir.ptx_arrive_barrier", [T.get_mbarrier(k % 3 + 3)]))
+                T.evaluate(
+                    tir.Call("handle", "tir.ptx_arrive_barrier", [T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3 + 3)])
+                )
 
     _check(before, after)
 

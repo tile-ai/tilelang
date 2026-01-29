@@ -148,16 +148,32 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
     return buffer
 
 
-def alloc_barrier(arrive_count: int):
+def alloc_barrier(arrive_count: int | list[int]):
     """Allocate a barrier buffer.
 
     Args:
-        arrive_count (int): The number of threads that need to arrive at the barrier
+        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a barrier
+
+    Examples
+    --------
+    >>> mbar = alloc_barrier(128)  # allocate a barrier with arrive count 128
+    >>> mbars = alloc_barrier([128] * n)  # allocate n barriers with the same arrive count 128
     """
-    return T.alloc_buffer([arrive_count], _dtypes.uint64, scope="shared.barrier")
+    # Normalize to list
+    if isinstance(arrive_count, int):
+        arrive_count = [arrive_count]
+    else:
+        arrive_count = list(arrive_count)
+    buffer = T.alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier")
+    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
+    # Use buffer.data as key to support multiple barrier buffer allocations
+    arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
+    block_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+
+    return buffer
 
 
 def alloc_tmem(shape, dtype):

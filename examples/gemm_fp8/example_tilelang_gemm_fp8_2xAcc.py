@@ -1,6 +1,7 @@
 import torch
 import tilelang
 import tilelang.language as T
+from tilelang.utils import determine_fp8_type
 
 
 @tilelang.jit(out_idx=[-1])
@@ -73,21 +74,26 @@ def test_gemm_fp8(M, N, K, dtype):
 
 
 def main():
-    test_gemm_fp8(1024, 1024, 8192, T.float8_e4m3fn)
-    test_gemm_fp8(1024, 1024, 8192, T.float8_e5m2)
+    test_gemm_fp8(1024, 1024, 8192, determine_fp8_type())
+    test_gemm_fp8(1024, 1024, 8192, determine_fp8_type("e5m2"))
 
 
 def run_regression_perf():
     M, N, K = 1024, 1024, 8192
-    dtype = "float8_e4m3"
+    dtype = determine_fp8_type()
     kernel_e4m3 = matmul(M, N, K, 128, 128, 64, dtype)
     profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
-    latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")
-    dtype = "float8_e5m2"
-    kernel_e5m2 = matmul(M, N, K, 128, 128, 64, dtype)
-    profiler_e5m2 = kernel_e5m2.get_profiler(tilelang.TensorSupplyType.Integer)
-    latency_e5m2 = profiler_e5m2.do_bench(backend="cupti")
-    return (latency_e4m3 + latency_e5m2) / 2
+    if torch.version.hip is None:
+        latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")
+    else:
+        latency_e4m3 = profiler_e4m3.do_bench()
+    if torch.version.hip is None:
+        dtype = determine_fp8_type("e5m2")
+        kernel_e5m2 = matmul(M, N, K, 128, 128, 64, dtype)
+        profiler_e5m2 = kernel_e5m2.get_profiler(tilelang.TensorSupplyType.Integer)
+        latency_e5m2 = profiler_e5m2.do_bench(backend="cupti")
+        return (latency_e4m3 + latency_e5m2) / 2
+    return latency_e4m3
 
 
 if __name__ == "__main__":

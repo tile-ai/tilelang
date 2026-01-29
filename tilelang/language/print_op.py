@@ -99,6 +99,16 @@ def print_fragment_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Bu
 
 
 @macro
+def print_msg(msg: str) -> tir.PrimExpr:
+    """
+    Prints a message string.
+    """
+    assert isinstance(msg, str), "msg must be a string"
+    assert msg != "", "msg must not be empty"
+    tir.call_extern("handle", "debug_print_msg", msg)
+
+
+@macro
 def print_local_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
@@ -150,7 +160,7 @@ def device_assert(condition: tir.PrimExpr, msg: str = "", no_stack_info=False):
             T.call_intrin("void", tir.op.Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))
 
 
-def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:
+def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:
     """
     A generic print function that handles both TIR buffers and primitive expressions.
 
@@ -158,7 +168,7 @@ def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> 
     - If the input is a TIR primitive expression, it prints its value directly.
 
     Parameters:
-        obj (Any): The object to print. It can be either a tir.Buffer or tir.PrimExpr.
+        obj (Any): The object to print. It can be either a tir.Buffer, tir.PrimExpr, or None (for msg-only print).
         msg (str): An optional message to include in the print statement.
         warp_group_id (int): The warp group id to print.
         warp_id (int): The warp id to print.
@@ -227,6 +237,9 @@ def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> 
         # Directly print primitive expressions.
         return print_var(obj, msg)
 
+    elif obj is None:
+        return print_msg(msg)
+
     else:
         # Unsupported object type.
-        raise ValueError(f"Unexpected type: {type(obj)}. Supported types are tir.Buffer and tir.PrimExpr.")
+        raise ValueError(f"Unexpected type: {type(obj)}. Supported types are tir.Buffer, tir.PrimExpr, and None.")

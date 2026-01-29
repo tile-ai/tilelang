@@ -139,6 +139,7 @@ private:
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // The name of the mbarrier array in shared memory
+  // The same as injected_mbarrier_name_ in transform/common/mbarrier.h
   const std::string mbarrier_name_ = "mbarrier";
   // The type name of the mbarrier array
   const std::string mbarrier_dtype_ = "Barrier";
