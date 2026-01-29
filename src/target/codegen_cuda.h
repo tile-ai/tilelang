@@ -11,6 +11,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "target/source/codegen_c.h"
 
@@ -138,6 +139,7 @@ private:
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // The name of the mbarrier array in shared memory
+  // The same as injected_mbarrier_name_ in transform/common/mbarrier.h
   const std::string mbarrier_name_ = "mbarrier";
   // The type name of the mbarrier array
   const std::string mbarrier_dtype_ = "Barrier";
@@ -148,6 +150,8 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_shapes;
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<const VarNode *, IntImm> unroll_factor;
+  // Map from VarNode to packed buffer variable name for fp4 packed storage
+  std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,

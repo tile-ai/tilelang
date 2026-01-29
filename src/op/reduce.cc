@@ -16,6 +16,8 @@
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm/ir/expr.h"
+#include "tvm/tir/expr.h"
 #include "tvm/tir/stmt.h"
 #include "utils.h"
 
@@ -149,6 +151,40 @@ std::string ReduceOpNode::MakeCodegenReducer() const {
   }
 }
 
+static Array<PrimExpr> InputPlaceholders(size_t n) {
+  Array<PrimExpr> result;
+  result.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    result.push_back(InputPlaceholder(i));
+  }
+  return result;
+}
+
+static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
+  PrimExpr src_rep_extent = src_layout->ReplicateExtent();
+  PrimExpr indice_rep_extent = src_layout->InputShape()[dim];
+  PrimExpr reducer_rep_extent = indice_rep_extent * src_rep_extent;
+
+  auto fwd = InputPlaceholders(src_layout->InputDim() - 1);
+  fwd.insert(fwd.begin() + dim,
+             FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+
+  auto thd = src_layout->ForwardThread(
+      fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
+
+  auto reducer_shape = src_layout->InputShape();
+  reducer_shape.erase(reducer_shape.begin() + dim);
+  if (reducer_shape.empty()) {
+    reducer_shape.push_back(1);
+  }
+
+  auto reducer_layout =
+      Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt)
+          ->CondenseReplicateVar()
+          ->BindThreadRange(src_layout->ThreadRange());
+  return reducer_layout;
+}
+
 /**
  * @brief Lower the Reduce operator to a TIR statement.
  *
@@ -197,14 +233,15 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (src_scope == "local.fragment" && dst_scope == "local.fragment") {
 
-    Buffer src_buffer = get_buffer(this->src);
-    Buffer dst_buffer = get_buffer(this->dst);
-    Fragment src_layout = T.layout_map[this->src].as<Fragment>().value();
-    Fragment dst_layout = T.layout_map[this->dst].as<Fragment>().value();
-    size_t src_dim = src_layout->InputDim();
-    size_t dst_dim = dst_layout->InputDim();
+    auto src_buffer = get_buffer(this->src);
+    auto dst_buffer = get_buffer(this->dst);
+    auto src_layout = T.layout_map[this->src].as<Fragment>().value();
+    auto dst_layout = T.layout_map[this->dst].as<Fragment>().value();
+    auto red_layout = ComputeReducerLayout(src_layout, dim);
+    auto src_dim = src_layout->InputDim();
+    auto dst_dim = dst_layout->InputDim();
 
-    bool is_1d_reduce = src_dim == dst_dim && dst_dim == 1;
+    auto is_1d_reduce = src_dim == dst_dim && dst_dim == 1;
 
     if (is_1d_reduce) {
       ICHECK(is_one(dst_layout->OutputShape().back()))
@@ -228,60 +265,76 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     IterVar reduce_iv(reduce_dom, Var("rv"), IterVarType::kDataPar);
     src_vars.insert(src_vars.begin() + this->dim, reduce_iv);
 
-    Array<PrimExpr> src_indices = src_layout->Forward(
+    auto src_indices = src_layout->Forward(
         src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-    Array<PrimExpr> dst_indices = dst_layout->Forward(
+    auto dst_indices = dst_layout->Forward(
+        dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
+    auto red_indices = red_layout->Forward(
         dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
 
     Array<Stmt> stmts;
 
-    bool require_init = this->clear;
+    auto require_init = this->clear;
     if (this->type->isSum() || this->type->isAbsSum() ||
         this->type->isBitAnd() || this->type->isBitOr() ||
         this->type->isBitXor()) {
       require_init = true;
     }
 
-    Buffer clear_buffer = dst_buffer;
-    bool need_duplicate = false;
+    auto clear_buffer = dst_buffer;
+    auto need_duplicate = false;
+    auto need_update = false;
     if ((this->type->isSum() || this->type->isAbsSum()) && !this->clear) {
       need_duplicate = true;
+      need_update = true;
     } else if (this->type->isBitAnd() && !this->clear) {
       need_duplicate = true;
+      need_update = true;
     } else if ((this->type->isBitOr() || this->type->isBitXor()) &&
                !this->clear) {
       need_duplicate = true;
+      need_update = true;
     }
+
+    // red_layout should always contain dst_layout
+    // if we can prove they are the same, no need to duplicate buffer
+    // otherwise, red_layout contains more replicated dimensions than dst_layout
+    if (!analyzer->CanProve(dst_layout->ReplicateExtent() ==
+                            red_layout->ReplicateExtent())) {
+      need_duplicate = true;
+    }
+    ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
+                               red_layout->ReplicateExtent()))
+        << "Inconsistent layouts between src and dst in ReduceOp: "
+        << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
 
     if (need_duplicate) {
       // Create a new buffer with same shape and dtype as dst_buffer
-      clear_buffer = decl_buffer(dst_buffer->shape, dst_buffer->dtype,
+      clear_buffer = decl_buffer(red_layout->OutputShape(), dst_buffer->dtype,
                                  dst_buffer->name + "_clear",
                                  GetPtrStorageScope(dst_buffer->data));
     }
     // make reduce-init stmt
     if (require_init) {
       stmts.push_back(
-          BufferStore(clear_buffer, this->MakeInitValue(), dst_indices));
+          BufferStore(clear_buffer, this->MakeInitValue(), red_indices));
     }
 
     // make thread-local reduce
     Array<PrimExpr> src_indice_compressed;
     Array<IterVar> src_var_compressed;
     for (size_t i = 0; i < src_layout->OutputDim(); ++i) {
-      PrimExpr expr;
-      IterVar var;
-      std::tie(expr, var) = CompressIterator(
-          src_indices[i], src_vars, src_vars[this->dim]->var, analyzer);
+      auto [expr, var] = CompressIterator(src_indices[i], src_vars,
+                                          src_vars[this->dim]->var, analyzer);
       src_indice_compressed.push_back(expr);
       src_var_compressed.push_back(var);
     }
 
     Stmt reduce_local = BufferStore(
         clear_buffer,
-        this->MakeReduce(BufferLoad(clear_buffer, dst_indices),
+        this->MakeReduce(BufferLoad(clear_buffer, red_indices),
                          BufferLoad(src_buffer, src_indice_compressed)),
-        dst_indices);
+        red_indices);
 
     for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0; --i) {
       reduce_local =
@@ -291,7 +344,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
     stmts.push_back(reduce_local);
 
-    PrimExpr src_thread = src_layout->ForwardThread(
+    auto src_thread = src_layout->ForwardThread(
         src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
     auto iter_sum =
         arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
@@ -321,7 +374,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
              << ">::run";
         }
         Array<PrimExpr> thread_reduce_args = {
-            StringImm(ss.str()), BufferLoad(clear_buffer, dst_indices)};
+            StringImm(ss.str()), BufferLoad(clear_buffer, red_indices)};
         if (reducing_threads > 32) {
           PrimExpr workspace = T.AddWorkspace(
               *as_const_int(T.thread_bounds->extent), clear_buffer->dtype);
@@ -329,29 +382,64 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         }
         auto call = Call(clear_buffer->dtype, builtin::call_extern(),
                          thread_reduce_args);
-        stmts.push_back(BufferStore(clear_buffer, call, dst_indices));
+        stmts.push_back(BufferStore(clear_buffer, call, red_indices));
       }
     }
 
+    // Layout status in the loop:
+    //     clear_buffer: red_layout
+    //     dst_buffer:   dst_layout
+    //     loop_layout:  red_layout
+    // At each step of the loop, we do reduction on
+    // `clear_buffer[red_layout(loop_idx)]`
+    //   and then transfer it to `dst_buffer[dst_layout(loop_idx)]`
+    // However, since the red_layout is larger than dst_layout, not all write
+    // operations are valid We need to add predicate to guard the write
+    // operations
+    PrimExpr predicate = Bool(true);
+    {
+      // dst_indices is the same as loop_indices
+      auto dst_th_indices = dst_indices;
+      dst_th_indices.push_back(T.thread_var);
+      // 1. compute loop_idx based on thread: [dst_indices, T.thread_var] =>
+      // [loop_indices]
+      auto inv = dst_layout->Inverse()->Forward(dst_th_indices);
+      inv.pop_back(); // remove replicate var
+      // 2. ensure computed loop_idx maps back to the same [loop_indices]
+      for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
+        predicate = predicate && (inv[i] == dst_vars[i]->var);
+      }
+      // 3. simplify predicate
+      predicate = analyzer->Simplify(predicate);
+    }
     if (need_duplicate) {
-      PrimExpr src_val = BufferLoad(clear_buffer, dst_indices);
-      PrimExpr dst_val = BufferLoad(dst_buffer, dst_indices);
       PrimExpr update;
-      if (this->type->isSum() || this->type->isAbsSum()) {
-        update = dst_val + src_val;
-      } else if (this->type->isBitAnd()) {
-        update = this->clear ? src_val : bitwise_and(dst_val, src_val);
-      } else if (this->type->isBitOr()) {
-        update = bitwise_or(dst_val, src_val);
-      } else if (this->type->isBitXor()) {
-        update = bitwise_xor(dst_val, src_val);
+      if (need_update) {
+        auto src_val = BufferLoad(clear_buffer, red_indices);
+        auto dst_val = BufferLoad(dst_buffer, dst_indices);
+        if (this->type->isSum() || this->type->isAbsSum()) {
+          update = dst_val + src_val;
+        } else if (this->type->isBitAnd()) {
+          update = this->clear ? src_val : bitwise_and(dst_val, src_val);
+        } else if (this->type->isBitOr()) {
+          update = bitwise_or(dst_val, src_val);
+        } else if (this->type->isBitXor()) {
+          update = bitwise_xor(dst_val, src_val);
+        } else {
+          LOG(FATAL) << "Unsupported reduce type: " << this->type->type;
+        }
       } else {
-        LOG(FATAL) << "Unsupported reduce type: " << this->type->type;
+        update = BufferLoad(clear_buffer, red_indices);
       }
-      stmts.push_back(BufferStore(dst_buffer, update, dst_indices));
+      auto store = BufferStore(dst_buffer, update, dst_indices);
+      if (analyzer->CanProve(predicate)) {
+        stmts.push_back(store);
+      } else {
+        stmts.push_back(IfThenElse(predicate, store));
+      }
     }
 
-    Stmt body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
+    auto body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
     for (int i = static_cast<int>(dst_layout->InputDim()) - 1; i >= 0; --i) {
       body = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
                  ForKind::kParallel, body);
@@ -359,9 +447,9 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
     if (dst_layout->InputDim() > 0) {
       body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
-                           dst_layout);
+                           red_layout);
     } else {
-      PrimExpr guard = (T.thread_var == T.thread_bounds->min);
+      auto guard = (T.thread_var == T.thread_bounds->min);
       body = IfThenElse(guard, body);
     }
 
@@ -385,96 +473,32 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
   if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
       T.layout_map.count(src)) {
     auto src_layout = T.layout_map[src].as<Fragment>().value();
+    auto reducer_layout = ComputeReducerLayout(src_layout, this->dim);
 
-    PrimExpr indice_rep_extent = src->shape[dim];
-    PrimExpr src_rep_extent = src_layout->ReplicateExtent();
-    PrimExpr dest_buffer_rep_extent = indice_rep_extent * src_rep_extent;
-
-    Array<PrimExpr> fwd;
-    for (int i = 0; i < static_cast<int>(src->shape.size()); i++) {
-      if (i == dim) {
-        fwd.push_back(FloorMod(ReplicationPlaceholder(), indice_rep_extent));
-      } else if (i < dim) {
-        fwd.push_back(InputPlaceholder(i));
-      } else if (i > dim) {
-        fwd.push_back(InputPlaceholder(i - 1));
-      }
-    }
-    auto thd = src_layout->ForwardThread(
-        fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-
-    // Ensure the thread count is divisible by the replicate extent.
-    // Otherwise, we cannot infer a valid fragment<->fragment layout.
-    {
-      arith::Analyzer analyzer;
-      PrimExpr num_threads = T.thread_bounds->extent;
-      // Though the dest_buffer_rep_extent will be compressed at
-      // CondenseReplicateVar, we need to check the divisibility here to avoid
-      // the issue that the thread count is not divisible by the replicate
-      // extent.
-      if (!analyzer.CanProve(FloorMod(num_threads, dest_buffer_rep_extent) ==
-                             0) &&
-          !analyzer.CanProve(FloorMod(dest_buffer_rep_extent, num_threads) ==
-                             0)) {
-        ICHECK(false) << "ReduceOp fragment layout inference failed: "
-                         "num_threads % replicate_extent != 0. "
-                      << "This mapping requires the block's thread count to be "
-                         "divisible by the "
-                      << "replicate extent. "
-                      << "Try one of: (1) choose a thread block size divisible "
-                         "by replicate_extent; "
-                      << "(2) pick a different reduce dimension or adjust the "
-                         "source fragment layout; "
-                      << "Details: num_threads=" << num_threads
-                      << ", replicate_extent=" << indice_rep_extent
-                      << ", src=" << src << ", dst=" << dst;
-      }
+    if (!T.layout_map.count(dst)) {
+      return {{dst, reducer_layout}};
     }
 
-    Fragment dst_layout =
-        Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, std::nullopt)
-            ->CondenseReplicateVar()
-            ->BindThreadRange(T.thread_bounds);
+    auto orig_dst_layout = T.layout_map.Get(dst).value().as<Fragment>().value();
+    ICHECK(reducer_layout->InputDim() == orig_dst_layout->InputDim());
 
-    if (!T.layout_map.count(dst))
-      return {{dst, dst_layout}};
-    else {
-      // Check if computed layout is compatible with existing: the existing one
-      // must strictly contains the computed layout
-      auto orig_dst_layout =
-          T.layout_map.Get(dst).value().as<Fragment>().value();
-      ICHECK(dst_layout->InputDim() == orig_dst_layout->InputDim());
-      Array<PrimExpr> indices;
-      indices.reserve(dst_layout->InputDim());
-      arith::Analyzer inner_analyzer;
-      for (int i = 0; i < dst_layout->InputDim(); ++i) {
-        auto x = InputPlaceholder(i);
-        indices.push_back(x);
-        // should be literal - literal = 0, any analyzer will work
-        ICHECK(is_zero(inner_analyzer.Simplify(
-            dst_layout->InputShape()[i] - orig_dst_layout->InputShape()[i])));
-        inner_analyzer.Bind(x, Range(0, dst_layout->InputShape()[i]));
-      }
-
-      ICHECK(as_const_int(dst_layout->ReplicateExtent()));
-      ICHECK(as_const_int(src_layout->ReplicateExtent()));
-      auto dst_rep = *as_const_int(dst_layout->ReplicateExtent());
-      auto src_rep = *as_const_int(src_layout->ReplicateExtent());
-      if (dst_rep < src_rep ||
-          !ProveFragmentContains(orig_dst_layout, dst_layout, indices, indices,
-                                 inner_analyzer)) {
-        std::ostringstream oss;
-        oss << "Layout may conflict with ReduceOp for buffer " << dst << " vs. "
-            << src << "\nLHS = " << src_layout->DebugOutput()
-            << "\nRHS = " << orig_dst_layout->DebugOutput()
-            << "\nYou may need to use a shared memory to transform the "
-               "layout";
-        throw LayoutConflictException(oss.str());
-      }
-
-      if (dst_rep > src_rep) {
-        return {{dst, dst_layout}};
-      }
+    auto indices = InputPlaceholders(reducer_layout->InputDim());
+    arith::Analyzer analyzer;
+    for (size_t i = 0; i < indices.size(); i++) {
+      analyzer.Bind(Downcast<Var>(indices[i]),
+                    Range(0, reducer_layout->InputShape()[i]));
+    }
+    if (!ProveFragmentContains(orig_dst_layout, reducer_layout, indices,
+                               indices, analyzer)) {
+      std::ostringstream oss;
+      oss << "Layout may conflict with ReduceOp for buffer " << dst << " vs. "
+          << src << "\n"
+          << "src_layout = " << src_layout << "\n"
+          << "reducer_layout = " << reducer_layout << "\n"
+          << "orig_dst_layout = " << orig_dst_layout << "\n"
+          << "You may need to use a shared memory to transform the "
+             "layout";
+      throw LayoutConflictException(oss.str());
     }
   }
   return {};

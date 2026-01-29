@@ -207,7 +207,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tir.transform.LowerOpaqueBlock()(mod)
         mod = tir.transform.RemoveNoOp()(mod)
         return mod
-    # Lower the barrier.arrive into specific initialization slot
+    # Lower the shared.barrier into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
@@ -246,7 +246,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.RenormalizeSplitPattern()(mod)
     mod = tir.transform.Simplify()(mod)
     mod = tir.transform.RemoveNoOp()(mod)
-    mod = tir.transform.RewriteUnsafeSelect()(mod)
     mod = tir.transform.HoistIfThenElse()(mod)
 
     mod = tir.transform.VerifyMemory()(mod)
@@ -262,7 +261,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # the Legalization.
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
-
+    mod = tilelang.transform.LowerLDGSTG()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier

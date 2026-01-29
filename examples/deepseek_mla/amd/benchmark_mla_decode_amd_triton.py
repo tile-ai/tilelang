@@ -378,8 +378,8 @@ def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal
 
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
     bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (torch.finfo(dtype).bits // 8)
-    print(f"perf {baseline}: {perf_a:.3f} ms, {FLOPS / 10**9 / perf_a:.0f} TFLOPS, {bytes / 10**6 / perf_a:.0f} GB/s")
-    print(f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10**9 / perf_b:.0f} TFLOPS, {bytes / 10**6 / perf_b:.0f} GB/s")
+    print(f"perf {baseline}: {perf_a:.3f} ms, {FLOPS / 10**9 / perf_a:.3f} TFLOPS, {bytes / 10**6 / perf_a:.3f} GB/s")
+    print(f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10**9 / perf_b:.3f} TFLOPS, {bytes / 10**6 / perf_b:.3f} GB/s")
     return bytes / 10**6 / perf_a, bytes / 10**6 / perf_b
 
 
@@ -410,7 +410,7 @@ def compare_a(target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
 
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
     bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (torch.finfo(dtype).bits // 8)
-    print(f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10**9 / perf_b:.0f} TFLOPS, {bytes / 10**6 / perf_b:.0f} GB/s")
+    print(f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10**9 / perf_b:.3f} TFLOPS, {bytes / 10**6 / perf_b:.3f} GB/s")
     return bytes / 10**6 / perf_b
 
 

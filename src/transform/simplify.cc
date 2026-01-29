@@ -316,7 +316,6 @@ private:
       // Remove loops with non-positive extent
       return Evaluate(0);
     }
-    analyzer_->Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
     With<ConstraintContext> ctx1(analyzer_, op->loop_var >= op->min);
     With<ConstraintContext> ctx2(analyzer_,
                                  op->loop_var < op->min + op->extent);

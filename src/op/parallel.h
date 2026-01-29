@@ -9,6 +9,8 @@
 #include <tvm/target/target.h>
 #include <tvm/tir/stmt_functor.h>
 
+#include <unordered_map>
+
 #include "../layout/layout.h"
 #include "../transform/layout_reducer.h"
 #include "./operator.h"
@@ -49,6 +51,15 @@ private:
 // predicates.
 class ParallelOpNode : public TileOperatorNode {
 public:
+  struct BufferAccessInfo {
+    Array<PrimExpr> indices;
+    bool is_read = false;
+    bool is_write = false;
+  };
+
+  using BufferIndiceMap = std::unordered_map<Buffer, BufferAccessInfo,
+                                             ObjectPtrHash, ObjectPtrEqual>;
+
   // The root For loop node.
   For root_;
   // The inferred layout for the loop, mutable to allow lazy inference.
@@ -101,8 +112,8 @@ public:
   Fragment GetLoopLayout() const { return loop_layout_; }
   // Get the root For loop.
   For GetRoot() const { return root_; }
-  // Get the mapping from buffer to access indices.
-  Map<Buffer, Array<PrimExpr>> GetIndiceMap() const { return indice_map_; }
+  // Get the mapping from buffer to access indices + access type.
+  const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
   // Get the predicate for a given thread variable.
   Optional<PrimExpr> GetPredicate(Var thread_var) const;
 
@@ -114,6 +125,11 @@ private:
   Fragment CompleteBufferFragment(const Buffer &buffer) const;
   // Check if the buffer is accessed with common indices (i.e., loop variables).
   bool IsCommonAccessIndice(const Buffer &buffer) const;
+  // Record buffer access and validate consistent indices.
+  void RecordBufferAccess(const Buffer &buffer, const Array<PrimExpr> &indices,
+                          bool is_write);
+  // Access info lookup with validation.
+  const BufferAccessInfo &GetAccessInfo(const Buffer &buffer) const;
   // Validate a candidate loop layout against all source fragments in
   // T.layout_map. Returns true if compatible with all fragments; otherwise
   // false. Does not throw.
@@ -153,10 +169,8 @@ private:
 
   // Visitor for collecting loop nest information.
   ParallelLoopNestVisitor V;
-  // Mapping from buffer to their access indices in the loop.
-  Map<Buffer, Array<PrimExpr>> indice_map_;
-  // Set of buffers that are written to in the loop.
-  std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_is_write_;
+  // Mapping from buffer to their access indices and access type in the loop.
+  BufferIndiceMap indice_map_;
   // The loop variables for the parallel loop nest.
   Array<IterVar> loop_vars_;
   // The inner_vars_

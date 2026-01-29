@@ -10,15 +10,6 @@ def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
     return T.call_intrin("handle", op.Op.get("tl.tileop.region"), buffer, access_type, *args)
 
 
-def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: list[PrimExpr]):
-    """Convert a BufferLoad to a tl.region call with explicit extents."""
-    indices = list(load.indices)
-    if len(indices) > len(extents):
-        extents = [tir.IntImm("int32", 1) for _ in range(len(indices) - len(extents))] + list(extents)
-    assert len(indices) == len(extents), f"indices = {indices}, extents = {extents}"
-    return region(load, access_type, *extents)
-
-
 def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str, extents: list[tir.PrimExpr]):
     """Clamp extents and return a tl.region call."""
     mins = [r.min for r in buffer_region.region]

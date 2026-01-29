@@ -255,6 +255,25 @@ Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size);
 Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
                                     int element_size);
 
+// Swizzle mode for shared memory layouts (nvidia only)
+// Smaller enum value = smaller swizzle granularity
+enum class SwizzleMode {
+  kNone = 0,    // Not a swizzle layout (linear or padded)
+  kQuarter = 1, // 32B swizzle (CU_TENSOR_MAP_SWIZZLE_32B)
+  kHalf = 2,    // 64B swizzle (CU_TENSOR_MAP_SWIZZLE_64B)
+  kFull = 3     // 128B swizzle (CU_TENSOR_MAP_SWIZZLE_128B)
+};
+
+// Detect which swizzle mode a layout uses
+SwizzleMode DetectSwizzleMode(const Layout &layout, int stride, int continuous,
+                              int element_size);
+
+// Merge two swizzle layouts by taking the smaller granularity
+// Returns NullOpt if either layout is not a swizzle layout
+Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
+                                     const Layout &layout2, int stride,
+                                     int continuous, int element_size);
+
 namespace attr {
 // BlockAttr, Containing the layout for all the buffers in the block
 constexpr const char *kLayoutMap = "layout_map";

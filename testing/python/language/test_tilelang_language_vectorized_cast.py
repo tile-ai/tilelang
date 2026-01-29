@@ -55,8 +55,11 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
 
     code = kernel.get_kernel_source()
     code_parallel = kernel_parallel.get_kernel_source()
-    print(code)
     assert check_str in code and check_str in code_parallel, f"Cast {src_dtype} to {dst_dtype} with {lanes=} is not vectorized!"
+
+    # Requires torch >= 2.8
+    if src_dtype == T.float8_e8m0fnu or dst_dtype == T.float8_e8m0fnu:
+        return
 
     if src_dtype == T.float4_e2m1fn or dst_dtype == T.float4_e2m1fn:
         return
@@ -83,10 +86,6 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
         (T.float32, T.float16, "__float22half2_rn", 4),
         (T.float16, T.float32, "__half22float2", 2),
         (T.float16, T.float32, "__half22float2", 4),
-        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 2),
-        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 4),
-        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 2),
-        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 4),
         (T.float32, T.bfloat16, "__float22bfloat162_rn", 2),
         (T.float32, T.bfloat16, "__float22bfloat162_rn", 4),
         (T.bfloat16, T.float32, "__bfloat1622float2", 2),
@@ -102,10 +101,22 @@ def test_vectorized_cast(src_dtype, dst_dtype, check_str, lanes):
 @pytest.mark.parametrize(
     "src_dtype, dst_dtype, check_str, lanes",
     [
+        # FP8 <-> FP32
+        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 2),
+        (T.float32, T.float8_e4m3fn, "__nv_cvt_float2_to_fp8x2", 4),
+        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 2),
+        (T.float32, T.float8_e5m2, "__nv_cvt_float2_to_fp8x2", 4),
         (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
         (T.float8_e4m3fn, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
         (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 2),
         (T.float8_e5m2, T.float32, "__tl_cvt_fp8x2_to_float2", 4),
+        # E8M0 <-> BFloat16
+        (T.float8_e8m0fnu, T.bfloat16, "__tl_cvt_e8m0x2_to_bfloat162", 2),
+        (T.bfloat16, T.float8_e8m0fnu, "__tl_cvt_bfloat162_to_e8m0x2", 2),
+        # Float -> E8M0
+        (T.float32, T.float8_e8m0fnu, "__tl_cvt_float2_to_e8m0x2", 2),
+        # Double -> E8M0
+        (T.float64, T.float8_e8m0fnu, "__tl_cvt_double2_to_e8m0x2", 2),
     ],
 )
 def test_vectorized_cast_fp8(src_dtype, dst_dtype, check_str, lanes):

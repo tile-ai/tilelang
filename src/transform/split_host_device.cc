@@ -102,17 +102,41 @@ private:
   bool found_device_region_{false};
   Array<tir::Var> non_restrict_params_;
 
-  Stmt wrapBodyWithHostSideAssumes(Stmt body) {
+  // Wrap body with assumes, substituting variables in assumes with the
+  // corresponding variables in the device body based on name_hint matching.
+  // This substitution is necessary because host-side assume variables may be
+  // different Var objects from device-side parameters, even if they have the
+  // same name. We always perform substitution to ensure ConvertSSA sees
+  // consistent variable references.
+  Stmt wrapBodyWithHostSideAssumes(
+      Stmt body, const std::unordered_map<std::string, tir::Var> &name_to_var) {
+    // Build substitution map: assume_var -> body_var
+    // Always substitute if we find a matching name, regardless of whether
+    // it's the same object. This ensures ConvertSSA treats them as the same
+    // variable.
+    auto substitute_func =
+        [&name_to_var](const tir::Var &var) -> Optional<PrimExpr> {
+      auto it = name_to_var.find(var->name_hint);
+      if (it != name_to_var.end()) {
+        return it->second;
+      }
+      return Optional<PrimExpr>();
+    };
+
     for (auto it = host_assumes_.rbegin(); it != host_assumes_.rend(); ++it) {
-      body =
-          AttrStmt((*it)->node, tir::attr::tilelang_assume, (*it)->value, body);
+      // Substitute variables in the assume condition
+      PrimExpr original_node = Downcast<PrimExpr>((*it)->node);
+      PrimExpr substituted_node =
+          tir::Substitute(original_node, substitute_func);
+      body = AttrStmt(substituted_node, tir::attr::tilelang_assume,
+                      (*it)->value, body);
     }
     return body;
   }
 
   tir::Stmt SplitDeviceFunc(tir::Stmt body, tvm::Target device_target) {
-
-    auto [params, buffers_to_declare] =
+    // First, analyze undefined variables in the device body
+    auto [old_params, buffers_to_declare] =
         [&]() -> std::tuple<Array<tir::Var>, Array<tir::Buffer>> {
       tir::VarUseDefAnalyzer use_def(/*defined_vars=*/{},
                                      /*visit_thread_extent=*/true);
@@ -133,6 +157,41 @@ private:
                 });
       return {params, use_def.undefined_buffers_};
     }();
+
+    // Create new parameter variables for the device function to avoid sharing
+    // Var objects with the host function. This prevents ConvertSSA from
+    // incorrectly renaming variables when it processes multiple functions.
+    Array<tir::Var> params;
+    Map<tir::Var, PrimExpr> var_remap;
+    std::unordered_map<std::string, tir::Var> name_to_var;
+    for (const auto &old_var : old_params) {
+      tir::Var new_var(old_var->name_hint, old_var->type_annotation);
+      params.push_back(new_var);
+      var_remap.Set(old_var, new_var);
+      name_to_var[old_var->name_hint] = new_var;
+    }
+
+    // Substitute old variables with new ones in the body
+    body = tir::Substitute(body, var_remap);
+
+    // Also remap buffers to use new variables
+    Array<tir::Buffer> new_buffers_to_declare;
+    for (const auto &buf : buffers_to_declare) {
+      auto new_shape = buf->shape.Map(
+          [&](const PrimExpr &e) { return tir::Substitute(e, var_remap); });
+      auto new_strides = buf->strides.Map(
+          [&](const PrimExpr &e) { return tir::Substitute(e, var_remap); });
+      auto new_elem_offset = tir::Substitute(buf->elem_offset, var_remap);
+      auto new_data = var_remap.count(buf->data)
+                          ? Downcast<tir::Var>(var_remap[buf->data])
+                          : buf->data;
+      tir::Buffer new_buf(new_data, buf->dtype, new_shape, new_strides,
+                          new_elem_offset, buf->name, buf->data_alignment,
+                          buf->offset_factor, buf->buffer_type,
+                          buf->axis_separators, buf->span);
+      new_buffers_to_declare.push_back(new_buf);
+    }
+    buffers_to_declare = new_buffers_to_declare;
 
     // CodeGenCPU is used for some device-side targets, such as
     // "ext_dev", and expects to be able to return a int32_t status
@@ -156,21 +215,36 @@ private:
       body = tir::DeclBuffer(buf, std::move(body));
     }
 
-    // Copy assumes from host-side to device-side.
-    body = wrapBodyWithHostSideAssumes(body);
+    // Copy assumes from host-side to device-side, with variable substitution.
+    // This must be done after DeclBuffer so that assumes are at the outermost
+    // level of the function body. This ensures ConvertSSA correctly identifies
+    // that assume variables refer to function parameters.
+    body = wrapBodyWithHostSideAssumes(body, name_to_var);
+
+    // Remap non_restrict_params to use new parameter variables
+    Array<tir::Var> remapped_non_restrict_params;
+    for (const auto &old_var : non_restrict_params_) {
+      if (var_remap.count(old_var)) {
+        remapped_non_restrict_params.push_back(
+            Downcast<tir::Var>(var_remap[old_var]));
+      } else {
+        remapped_non_restrict_params.push_back(old_var);
+      }
+    }
 
     tir::PrimFunc device_func(params, body, kernel_ret_type);
-    device_func =
-        WithAttrs(std::move(device_func),
-                  {{tvm::attr::kTarget, device_target},
-                   {tir::attr::kNoAlias, true},
-                   {tir::attr::kIsGlobalFunc, true},
-                   {tl::attr::kNonRestrictParams, non_restrict_params_}});
+    device_func = WithAttrs(
+        std::move(device_func),
+        {{tvm::attr::kTarget, device_target},
+         {tir::attr::kNoAlias, true},
+         {tir::attr::kIsGlobalFunc, true},
+         {tl::attr::kNonRestrictParams, remapped_non_restrict_params}});
 
     GlobalVar kernel_symbol_global = var_supply_();
     (*device_mod_)->Add(kernel_symbol_global, device_func);
+    // Use old_params as call arguments (host-side variables)
     Array<PrimExpr> args =
-        params.Map([](const tir::Var &var) -> PrimExpr { return var; });
+        old_params.Map([](const tir::Var &var) -> PrimExpr { return var; });
 
     if (can_propagate_errors) {
       tir::Var kernel_error_code("kernel_error_code", success->dtype);

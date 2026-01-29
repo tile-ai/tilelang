@@ -29,7 +29,7 @@ def _gemm_impl(
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-    mbar: tir.Buffer | None = None,
+    mbar: tir.Buffer | tir.BufferLoad | None = None,
 ):
     """Shared GEMM implementation.
 
@@ -95,7 +95,13 @@ def _gemm_impl(
     offset_a = A_offset[-1]
     offset_b = B_offset[-1]
 
-    mbar = to_buffer_region(mbar, access_type="rw") if mbar is not None else tir.const(0, T.uint32)
+    if mbar is not None:
+        assert isinstance(mbar, (tir.Buffer, tir.BufferLoad)), (
+            f"mbar for tcgen5mma must be a tir.Buffer or tir.BufferLoad, but got {type(mbar)}"
+        )
+        mbar = to_buffer_region(mbar, access_type="rw")
+    else:
+        mbar = tir.const(0, T.uint32)
     C_coords = [r.min for r in C_region.region]
     # Convert BufferRegion to tl.region calls for arguments
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
@@ -137,7 +143,7 @@ def gemm_v1(
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-    mbar: tir.Buffer | None = None,
+    mbar: tir.Buffer | tir.BufferLoad | None = None,
 ):
     """GEMM v1: use op tl.gemm."""
     return _gemm_impl(
@@ -166,7 +172,7 @@ def gemm_v2(
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-    mbar: tir.Buffer | None = None,
+    mbar: tir.Buffer | tir.BufferLoad | None = None,
 ):
     """GEMM v2: use op tl.gemm_py."""
     return _gemm_impl(
@@ -198,7 +204,7 @@ def gemm(
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-    mbar: tir.Buffer | None = None,
+    mbar: tir.Buffer | tir.BufferLoad | None = None,
 ):
     """TileLang GEMM operator.
 
@@ -212,7 +218,7 @@ def gemm(
         clear_accum (bool): Whether to clear the accumulator.
         k_pack (int): Numbers of packed matrix cores, for ROCm only. Defaults to 1.
         wg_wait (int): Int identifier of the warpgroup MMA batch to wait on.. Defaults to 0.
-        mbar (tir.Buffer | None, optional): Mbarrier in Blackwell. Defaults to None.
+        mbar (tir.Buffer | tir.BufferLoad, optional): Mbarrier in Blackwell. Defaults to None.
 
     Returns:
         tir.Call: A handle to the GEMM operation.

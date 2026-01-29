@@ -31,6 +31,7 @@ from tvm.tir.expr import FloatImm, IntImm
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
+from .proxy import Tensor
 
 _Shapes = TypeVarTuple("_Shapes")
 _DType = TypeVar("_DType")
@@ -147,16 +148,32 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
     return buffer
 
 
-def alloc_barrier(arrive_count: int):
+def alloc_barrier(arrive_count: int | list[int]):
     """Allocate a barrier buffer.
 
     Args:
-        arrive_count (int): The number of threads that need to arrive at the barrier
+        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a barrier
+
+    Examples
+    --------
+    >>> mbar = alloc_barrier(128)  # allocate a barrier with arrive count 128
+    >>> mbars = alloc_barrier([128] * n)  # allocate n barriers with the same arrive count 128
     """
-    return T.alloc_buffer([arrive_count], _dtypes.uint64, scope="shared.barrier")
+    # Normalize to list
+    if isinstance(arrive_count, int):
+        arrive_count = [arrive_count]
+    else:
+        arrive_count = list(arrive_count)
+    buffer = T.alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier")
+    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
+    # Use buffer.data as key to support multiple barrier buffer allocations
+    arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
+    block_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+
+    return buffer
 
 
 def alloc_tmem(shape, dtype):
@@ -264,10 +281,10 @@ def alloc_tcgen05_instr_desc(dtype: str = _dtypes.uint32):
 
 
 @overload
-def empty(shape, dtype: str = _dtypes.float32): ...
+def empty(shape, dtype: str = _dtypes.float32) -> Tensor: ...
 
 
-def empty(*shape, dtype: str = _dtypes.float32):
+def empty(*shape, dtype: str = _dtypes.float32) -> Tensor:
     if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
         return OutTensor(shape[0], dtype)
     elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):
@@ -275,4 +292,4 @@ def empty(*shape, dtype: str = _dtypes.float32):
     elif all([isinstance(x, (int, PrimExpr)) for x in shape]):
         return OutTensor(shape, dtype)
     else:
-        raise RuntimeError(f"Invalid shape {shape}")
+        raise TypeError(f"Invalid shape {shape}")

@@ -820,5 +820,61 @@ Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kPack) {
   return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
 }
+
+SwizzleMode DetectSwizzleMode(const Layout &layout, int stride, int continuous,
+                              int element_size) {
+  int vector_size = 128 / element_size;
+
+  // Check from smallest to largest granularity
+  // Need to verify stride and continuous constraints before comparing
+  if (stride % 8 == 0 && continuous % (vector_size * 2) == 0) {
+    if (StructuralEqual()(layout, makeQuarterBankSwizzleLayout(
+                                      stride, continuous, element_size))) {
+      return SwizzleMode::kQuarter;
+    }
+  }
+  if (stride % 8 == 0 && continuous % (vector_size * 4) == 0) {
+    if (StructuralEqual()(layout, makeHalfBankSwizzleLayout(stride, continuous,
+                                                            element_size))) {
+      return SwizzleMode::kHalf;
+    }
+  }
+  if (stride % 8 == 0 && continuous % (vector_size * 8) == 0) {
+    if (StructuralEqual()(layout, makeFullBankSwizzleLayout(stride, continuous,
+                                                            element_size))) {
+      return SwizzleMode::kFull;
+    }
+  }
+  return SwizzleMode::kNone;
+}
+
+Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
+                                     const Layout &layout2, int stride,
+                                     int continuous, int element_size) {
+  SwizzleMode mode1 =
+      DetectSwizzleMode(layout1, stride, continuous, element_size);
+  SwizzleMode mode2 =
+      DetectSwizzleMode(layout2, stride, continuous, element_size);
+
+  // If either is not a swizzle layout, cannot merge
+  if (mode1 == SwizzleMode::kNone || mode2 == SwizzleMode::kNone) {
+    return std::nullopt;
+  }
+
+  // Take the smaller swizzle granularity (smaller enum value)
+  SwizzleMode min_mode = std::min(mode1, mode2);
+
+  switch (min_mode) {
+  case SwizzleMode::kQuarter:
+    return makeQuarterBankSwizzleLayout(stride, continuous, element_size);
+  case SwizzleMode::kHalf:
+    return makeHalfBankSwizzleLayout(stride, continuous, element_size);
+  case SwizzleMode::kFull:
+    return makeFullBankSwizzleLayout(stride, continuous, element_size);
+  default:
+    return std::nullopt;
+  }
+}
+
 } // namespace tl
 } // namespace tvm

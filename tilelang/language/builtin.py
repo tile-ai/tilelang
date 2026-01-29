@@ -8,8 +8,8 @@ from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
-from typing import Any
 from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion
+from tilelang.utils.language import retrieve_ptr
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 
@@ -28,36 +28,23 @@ def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
     raise TypeError(f"Expect warp sizing argument to be int or PrimExpr, but got {type(value)}.")
 
 
-def create_list_of_mbarrier(*args: Any) -> Call:
+def _mbar_to_buffer_load(mbar: tir.Buffer | BufferLoad) -> BufferLoad:
+    """Convert a memory barrier to a buffer load.
+
+    Args:
+        mbar: Buffer | BufferLoad
+            The memory barrier to convert
+
+    Returns:
+        tir.BufferLoad: A buffer load of the memory barrier
     """
-    Create a list of memory barrier handles.
-
-    Parameters
-    ----------
-    *args : list or Any
-        Either a single list of arguments, or multiple arguments directly.
-
-    Returns
-    -------
-    tvm.tir.Call
-        Handle to the created list of memory barriers.
-
-    Raises
-    ------
-    TypeError
-        If the input is not a list or variadic arguments.
-
-    Examples
-    --------
-    >>> create_list_of_mbarrier([128, 128])
-    >>> create_list_of_mbarrier(128, 128)
-    """
-    if len(args) == 1 and isinstance(args[0], list):
-        return tir.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), *args[0])
-    elif len(args) >= 1:
-        return tir.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), *args)
+    if isinstance(mbar, tir.BufferLoad):
+        return mbar
+    elif isinstance(mbar, tir.Buffer):
+        assert len(mbar.shape) == 1, f"mbarrier must be a single element buffer, but got {mbar.shape}"
+        return tir.BufferLoad(mbar, [0])
     else:
-        raise TypeError("create_list_of_mbarrier expects a list or one or more arguments.")
+        raise TypeError(f"mbarrier must be an tir.BufferLoad or a tir.Buffer, but got {type(mbar)}")
 
 
 def __ldg(load_or_buf: BufferLoad | tir.Buffer, index: PrimExpr | int | None = None) -> PrimExpr:
@@ -89,18 +76,6 @@ def __ldg(load_or_buf: BufferLoad | tir.Buffer, index: PrimExpr | int | None = N
     raise TypeError("T.__ldg expects a BufferLoad or a Buffer.")
 
 
-def get_mbarrier(*args):
-    """Retrieve a memory barrier operation.
-
-    Args:
-        *args: Variable arguments to specify which memory barrier to retrieve
-
-    Returns:
-        tir.Call: A handle to the requested memory barrier
-    """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), *args)
-
-
 def create_tma_descriptor(*args):
     """Create a Tensor Memory Access (TMA) descriptor.
 
@@ -111,6 +86,10 @@ def create_tma_descriptor(*args):
         tir.Call: A handle to the created TMA descriptor
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.create_tma_descriptor"), *args)
+
+
+# NOTE(wt): T.create_list_of_mbarrier and T.get_mbarrier is now only an intermediate intrinsic
+# during transforms, and won't be exposed to frontend. For creating mbarriers, please use T.alloc_barrier instead.
 
 
 def tma_load(*args):
@@ -209,84 +188,72 @@ def disable_warp_group_reg_alloc():
     return no_set_max_nreg()
 
 
-def mbarrier_wait_parity(mbarrier: int | PrimExpr | tir.Call, parity: int | Var):
+def mbarrier_wait_parity(mbarrier: tir.Buffer | BufferLoad, parity: int | Var):
     """Wait for memory barrier parity condition.
 
     Args:
-        mbarrier: Optional[int, PrimExpr]
+            mbarrier: Buffer | BufferLoad
             The memory barrier to wait on
-        parity: Optional[int, Var]
+        parity: int | Var
             The parity value to wait for
     Examples:
         .. code-block:: python
 
-            # Wait for parity 0 on barrier 0
-            T.mbarrier_wait_parity(0, 0)
+            mbar = T.alloc_barrier(1)
+            # Wait for parity 0 on a single mbarrier
+            T.mbarrier_wait_parity(mbar, 0)
 
-            # Wait for parity value in variable ko on barrier 1
-            T.mbarrier_wait_parity(1, ko)
-
-            # Wait using barrier handle
-            barrier = T.get_mbarrier(0)
-            T.mbarrier_wait_parity(barrier, 1)
+            mbars = T.alloc_barrier([128] * n)
+            # Wait for parity value on one of the mbarriers
+            T.mbarrier_wait_parity(mbars[ko], ko)
 
             # Common usage in pipelined kernels:
             for ko in range(num_stages):
                 # Producer waits for consumer to finish previous iteration
-                T.mbarrier_wait_parity(1, ko ^ 1)
+                T.mbarrier_wait_parity(mbars[1], ko ^ 1)
                 # Producer copies data
                 T.copy(A_global, A_shared)
                 # Producer signals data ready
-                T.mbarrier_arrive(0)
+                T.mbarrier_arrive(mbars[0])
 
                 # Consumer waits for producer data
-                T.mbarrier_wait_parity(0, ko)
+                T.mbarrier_wait_parity(mbars[0], ko)
                 # Consumer computes
                 T.gemm(A_shared, B_shared, C_local)
                 # Consumer signals completion
-                T.mbarrier_arrive(1)
+                T.mbarrier_arrive(mbars[1])
     Returns:
         tir.Call: A handle to the barrier wait operation
     """
-    if isinstance(mbarrier, (tir.Call, tir.BufferLoad)):
-        mbarrier = mbarrier
-    elif isinstance(mbarrier, (tir.PrimExpr, int)):
-        mbarrier = get_mbarrier(mbarrier)
-    elif isinstance(mbarrier, tir.Buffer):
-        mbarrier = tir.BufferLoad(mbarrier, [0])
-    else:
-        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
+    mbarrier = _mbar_to_buffer_load(mbarrier)
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: int | PrimExpr | tir.Call):
+def mbarrier_arrive(mbarrier: tir.Buffer | BufferLoad):
     """Arrive at memory barrier.
 
     Args:
-        mbarrier: Optional[int, PrimExpr]
+        mbarrier: Buffer | BufferLoad
             The memory barrier to arrive at
     """
-    if isinstance(mbarrier, (tir.Call, tir.BufferLoad)):
-        mbarrier = mbarrier
-    elif isinstance(mbarrier, (tir.PrimExpr, int)):
-        mbarrier = get_mbarrier(mbarrier)
-    elif isinstance(mbarrier, tir.Buffer):
-        mbarrier = tir.BufferLoad(mbarrier, [0])
-    else:
-        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
+    mbarrier = _mbar_to_buffer_load(mbarrier)
     return ptx_arrive_barrier(mbarrier)
 
 
-def mbarrier_expect_tx(*args):
+def mbarrier_expect_tx(mbarrier: tir.Buffer | BufferLoad, tx: int):
     """Set expected transaction count for memory barrier.
 
     Args:
-        *args: Variable arguments specifying the expected transaction count
+        mbarrier: Buffer | BufferLoad
+            The memory barrier to expect transaction count for
+        tx: int
+            The expected transaction count
 
     Returns:
         tir.Call: A handle to the barrier expectation operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), *args)
+    mbarrier = _mbar_to_buffer_load(mbarrier)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), mbarrier, tx)
 
 
 def warpgroup_arrive():
@@ -631,29 +598,29 @@ def wait_wgmma(id: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
-def barrier_wait(barrier_id: int | PrimExpr | tir.Call, parity: int | Var | None = None):
+def barrier_wait(mbarrier: tir.Buffer | BufferLoad, parity: int | Var):
     """Wait for a memory barrier to complete.
 
     Args:
-        barrier_id: Optional[int, PrimExpr]
+        mbarrier: Buffer | BufferLoad
             The memory barrier to wait on
-        parity: Optional[int, Var]
+        parity: int | Var
             The parity value to wait for
     Returns:
         tir.Call: A handle to the barrier wait operation
     Current implementation is a sugar syntax for mbarrier_wait_parity, as we only support parity 0 and 1.
     """
-    return mbarrier_wait_parity(barrier_id, parity)
+    return mbarrier_wait_parity(mbarrier, parity)
 
 
-def barrier_arrive(barrier_id: int | PrimExpr | tir.Call):
+def barrier_arrive(mbarrier: tir.Buffer | BufferLoad):
     """Arrive at a memory barrier.
 
     Args:
-        barrier_id: Optional[int, PrimExpr]
+        mbarrier: Buffer | BufferLoad
             The memory barrier to arrive at
     """
-    return mbarrier_arrive(barrier_id)
+    return mbarrier_arrive(mbarrier)
 
 
 def shfl_xor(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
@@ -828,9 +795,10 @@ def loop_break():
     return tir.call_intrin("handle", tir.op.Op.get("tl.loop_break"))
 
 
-def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
+def cp_async_barrier_noinc(barrier: tir.Buffer | BufferLoad):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc."""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)
+    barrier = _mbar_to_buffer_load(barrier)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
 def tcgen05_mma_arrive(mbar_ptr):
@@ -941,3 +909,199 @@ def ptx_mma_sm70(
         accumulator,
         c_index,
     )
+
+
+def ldg32(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+    """Load 32 bits (4 bytes) from global memory using explicit PTX instructions.
+
+    Usage: `T.ldg32(x[i])` or `T.ldg32(x[i:i+2])` emits `tl::ldg32(ptr)`.
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad`.
+        pred: Optional predicate condition. If False, the load is skipped.
+
+    Returns:
+        PrimExpr: The loaded 32-bit value.
+
+    Example:
+        >>> val = T.ldg32(x[i])
+        >>> val = T.ldg32(x[i:i+2])  # load 2 x fp16
+        >>> val = T.ldg32(x[i], pred=i < N)  # predicated load
+    """
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.ldg32 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    if pred is None:
+        return tir.call_intrin("uint32", tir.op.Op.get("tl.ldg32"), ptr)
+    else:
+        return tir.call_intrin("uint32", tir.op.Op.get("tl.ldg32"), ptr, pred)
+
+
+def ldg64(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+    """Load 64 bits (8 bytes) from global memory using explicit PTX instructions.
+
+    Usage: `T.ldg64(x[i])` or `T.ldg64(x[i:i+4])` emits `tl::ldg64(ptr)`.
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad`.
+        pred: Optional predicate condition. If False, the load is skipped.
+
+    Returns:
+        PrimExpr: The loaded 64-bit value.
+
+    Example:
+        >>> val = T.ldg64(x[i])
+        >>> val = T.ldg64(x[i:i+4])  # load 4 x fp16
+        >>> val = T.ldg64(x[i], pred=i < N)  # predicated load
+    """
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.ldg64 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    if pred is None:
+        return tir.call_intrin("uint32x2", tir.op.Op.get("tl.ldg64"), ptr)
+    else:
+        return tir.call_intrin("uint32x2", tir.op.Op.get("tl.ldg64"), ptr, pred)
+
+
+def ldg128(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+    """Load 128 bits (16 bytes) from global memory using explicit PTX instructions.
+
+    Usage: `T.ldg128(x[i])` or `T.ldg128(x[i:i+8])` emits `tl::ldg128(ptr)`.
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad`.
+        pred: Optional predicate condition. If False, the load is skipped.
+
+    Returns:
+        PrimExpr: The loaded 128-bit value.
+
+    Example:
+        >>> val = T.ldg128(x[i])
+        >>> val = T.ldg128(x[i:i+8])  # load 8 x fp16
+        >>> val = T.ldg128(x[i], pred=i < N)  # predicated load
+    """
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.ldg128 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    if pred is None:
+        return tir.call_intrin("uint32x4", tir.op.Op.get("tl.ldg128"), ptr)
+    else:
+        return tir.call_intrin("uint32x4", tir.op.Op.get("tl.ldg128"), ptr, pred)
+
+
+def ldg256(src: tir.Buffer | BufferRegion | BufferLoad, pred: PrimExpr = None) -> PrimExpr:
+    """Load 256 bits (32 bytes) from global memory using explicit PTX instructions.
+
+    Usage: `T.ldg256(x[i])` or `T.ldg256(x[i:i+16])` emits `tl::ldg256(ptr)`.
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad`.
+        pred: Optional predicate condition. If False, the load is skipped.
+
+    Returns:
+        PrimExpr: The loaded 256-bit value.
+
+    Example:
+        >>> val = T.ldg256(x[i])
+        >>> val = T.ldg256(x[i:i+16])  # load 16 x fp16
+        >>> val = T.ldg256(x[i], pred=i < N)  # predicated load
+    """
+    if not isinstance(src, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.ldg256 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    if pred is None:
+        return tir.call_intrin("uint32x8", tir.op.Op.get("tl.ldg256"), ptr)
+    else:
+        return tir.call_intrin("uint32x8", tir.op.Op.get("tl.ldg256"), ptr, pred)
+
+
+def stg32(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+    """Store 32 bits (4 bytes) to global memory using explicit PTX instructions.
+
+    Usage: `T.stg32(y[i], value)` emits `tl::stg32(ptr, value)`.
+
+    Args:
+        dst: A `Buffer`, `BufferRegion`, or `BufferLoad` indicating the destination.
+        value: The 32-bit value to store.
+        pred: Optional predicate condition. If False, the store is skipped.
+
+    Example:
+        >>> T.stg32(y[i], val)
+        >>> T.stg32(y[i], val, pred=i < N)  # predicated store
+    """
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.stg32 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
+    ptr = retrieve_ptr(dst, access_type="w")
+    if pred is None:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg32"), ptr, value)
+    else:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg32"), ptr, value, pred)
+
+
+def stg64(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+    """Store 64 bits (8 bytes) to global memory using explicit PTX instructions.
+
+    Usage: `T.stg64(y[i:i+2], value)` emits `tl::stg64(ptr, value)`.
+
+    Args:
+        dst: A `Buffer`, `BufferRegion`, or `BufferLoad` indicating the destination.
+        value: The 64-bit value to store (e.g., uint2).
+        pred: Optional predicate condition. If False, the store is skipped.
+
+    Example:
+        >>> T.stg64(y[i:i+2], val)
+        >>> T.stg64(y[i:i+2], val, pred=i < N)  # predicated store
+    """
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.stg64 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
+    ptr = retrieve_ptr(dst, access_type="w")
+    if pred is None:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg64"), ptr, value)
+    else:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg64"), ptr, value, pred)
+
+
+def stg128(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+    """Store 128 bits (16 bytes) to global memory using explicit PTX instructions.
+
+    Usage: `T.stg128(y[i:i+4], value)` emits `tl::stg128(ptr, value)`.
+
+    Args:
+        dst: A `Buffer`, `BufferRegion`, or `BufferLoad` indicating the destination.
+        value: The 128-bit value to store (e.g., uint4).
+        pred: Optional predicate condition. If False, the store is skipped.
+
+    Example:
+        >>> T.stg128(y[i:i+4], val)
+        >>> T.stg128(y[i:i+4], val, pred=i < N)  # predicated store
+    """
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.stg128 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
+    ptr = retrieve_ptr(dst, access_type="w")
+    if pred is None:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg128"), ptr, value)
+    else:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg128"), ptr, value, pred)
+
+
+def stg256(dst: tir.Buffer | BufferRegion | BufferLoad, value: PrimExpr, pred: PrimExpr = None) -> None:
+    """Store 256 bits (32 bytes) to global memory using explicit PTX instructions.
+
+    Usage: `T.stg256(y[i:i+8], value)` emits `tl::stg256(ptr, value)`.
+
+    Args:
+        dst: A `Buffer`, `BufferRegion`, or `BufferLoad` indicating the destination.
+        value: The 256-bit value to store (e.g., ulonglong4).
+        pred: Optional predicate condition. If False, the store is skipped.
+
+    Example:
+        >>> T.stg256(y[i:i+8], val)
+        >>> T.stg256(y[i:i+8], val, pred=i < N)  # predicated store
+    """
+    if not isinstance(dst, (tir.Buffer, BufferRegion, BufferLoad)):
+        raise TypeError(f"T.stg256 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
+    ptr = retrieve_ptr(dst, access_type="w")
+    if pred is None:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg256"), ptr, value)
+    else:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.stg256"), ptr, value, pred)

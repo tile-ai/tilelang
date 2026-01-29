@@ -131,7 +131,7 @@ def flashmla_decode(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, 
                 lse_local_split = glse[bz, by, k]
                 scale_local = T.exp2(lse_local_split - lse_logsum_local)
                 for i in T.Parallel(dim):
-                    o_accum_local[i] += po_local[i] * scale_local[0]
+                    o_accum_local[i] += po_local[i] * scale_local
             for i in T.Parallel(dim):
                 Output[bz, by, i] = o_accum_local[i]
 
@@ -259,6 +259,8 @@ if __name__ == "__main__":
     num_split = 4
     threads = 128
 
+    print(f"Using {batch=}, {heads=}, {kv_heads=}, {kv_ctx=}, {dim=}, {pe_dim=}")
+
     if enable_autotune:
         kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim)
     else:
@@ -267,8 +269,6 @@ if __name__ == "__main__":
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)
     ref_output = ref_program(*input_tensors)
-    print(f"Tilelang output: {tilelang_output}")
-    print(f"Ref output: {ref_output}")
     torch.testing.assert_close(tilelang_output, ref_output, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")

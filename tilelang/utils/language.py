@@ -388,6 +388,33 @@ def retrieve_offset(obj: Buffer | BufferRegion | BufferLoad) -> list:
     raise ValueError(f"Unsupported retrieve_offset argument type: {type(obj)} for object {obj}")
 
 
+def retrieve_dtype(obj: Buffer | BufferRegion | BufferLoad) -> str:
+    """
+    Retrieve the dtype of a buffer-like object.
+
+    - Buffer -> buffer.dtype
+    - BufferRegion -> convert to BufferLoad with Ramp indices, then use load.dtype
+    - BufferLoad -> load.dtype
+    """
+    if isinstance(obj, tir.Buffer):
+        return obj.dtype
+    if isinstance(obj, tir.BufferRegion):
+        # Convert region ranges to indices, using Ramp for vector access
+        indices = []
+        for r in obj.region:
+            extent = r.extent
+            if isinstance(extent, tir.IntImm) and extent.value == 1:
+                indices.append(r.min)
+            else:
+                # Use Ramp for vector access: Ramp(base, stride=1, lanes=extent)
+                indices.append(tir.Ramp(r.min, 1, extent))
+        load = tir.BufferLoad(obj.buffer, indices)
+        return load.dtype
+    if isinstance(obj, tir.BufferLoad):
+        return obj.dtype
+    raise ValueError(f"Unsupported retrieve_dtype argument type: {type(obj)} for object {obj}")
+
+
 def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
     """
     Compute the number of bits in a Buffer (shape with dtype)."""

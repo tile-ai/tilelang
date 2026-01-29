@@ -168,8 +168,10 @@ def run_tilelang_copy_fp4(M=1024, N=1024, block_M=128, block_N=128, src_dtype=T.
     source = kernel.get_kernel_source()
     assert "fp4_e2_t" in source
     # For FP4, use same shape as kernel expects, since int8 is used as storage type
-    dummy_input = torch.randint(0, 100, (M, N), device="cuda", dtype=torch.int8)
+    dummy_input = torch.randint(0, 100, (M, N // 2), device="cuda", dtype=torch.int8)
     output = kernel(dummy_input)
+    if src_dtype == dst_dtype:
+        assert torch.allclose(output.view(torch.int8), dummy_input)
     assert output is not None
 
 

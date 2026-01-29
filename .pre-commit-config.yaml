@@ -9,7 +9,7 @@ default_stages: [pre-commit, pre-push, manual]
 exclude: '^(build|3rdparty)/.*$'  # exclude build and 3rdparty directories
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
+    rev: v6.0.0 # May not sync with requirements-lint.txt, but it's OK for now
     hooks:
       - id: check-symlinks
       - id: destroyed-symlinks
@@ -35,7 +35,7 @@ repos:
       - id: clang-format
         types_or: [c++, c]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.10  # sync with requirements-lint.txt
+    rev: v0.14.11  # sync with requirements-lint.txt
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]

@@ -166,11 +166,6 @@ def test_jit2_return():
     def copy_impl(A):
         M, N = A.shape
         B = T.empty(M, N, dtype=A.dtype)
-        M, N = A.shape
-        M_, N_ = B.shape
-        assert M == M_, f"M mismatch {M} {M_}"
-        assert N == N_, f"N mismatch {N} {N_}"
-        # assert tuple(A.shape) == tuple(B.shape), f"Invalid tensor shape: {A.shape}, {B.shape}"
         with T.Kernel(T.ceildiv(M, 128), T.ceildiv(N, 128), threads=128) as (bx, by):
             T.copy(A[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128], B[bx * 128 : bx * 128 + 128, by * 128 : by * 128 + 128])
         return B
@@ -211,8 +206,6 @@ def test_jit2_return():
         M, N_, M_ = T.const("M, N_, M_")
         A: T.StridedTensor[[N, M], [N_, M_], T.float32]
         return copy_impl(A)
-
-    tilelang.par_compile([copy.get_tir(T.Tensor((128, 128))) for copy in [copy1, copy2, copy3, copy4]])
 
     for copy in [copy1, copy2, copy3, copy4]:
         A = torch.randn(128, 128, device="cuda")

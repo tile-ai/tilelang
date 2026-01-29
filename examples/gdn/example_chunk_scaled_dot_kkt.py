@@ -111,16 +111,15 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
                 for i_s1, i_s2 in T.Parallel(block_S, block_S):
                     G_diff_local[i_s1, i_s2] = G_shared[i_s1] - G_shared[i_s2]
                 for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    with T.If(G_diff_local[i_s1, i_s2] <= 0 and i_s1 > i_s2):
-                        with T.Then():
-                            A_fragment[i_s1, i_s2] = A_fragment[i_s1, i_s2] * T.exp(G_diff_local[i_s1, i_s2])
-                        with T.Else():
-                            A_fragment[i_s1, i_s2] = 0
+                    A_fragment[i_s1, i_s2] = T.if_then_else(
+                        G_diff_local[i_s1, i_s2] <= 0 and i_s1 > i_s2,
+                        A_fragment[i_s1, i_s2] * T.exp(G_diff_local[i_s1, i_s2]),
+                        0,
+                    )
             else:
                 for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    with T.If(i_s1 <= i_s2):  # noqa: SIM117
-                        with T.Then():
-                            A_fragment[i_s1, i_s2] = 0
+                    if i_s1 <= i_s2:
+                        A_fragment[i_s1, i_s2] = 0
 
             T.copy(A_fragment, A_shared)
             T.copy(A_shared, A[bb, bs * block_S : (bs + 1) * block_S, bh, :])
