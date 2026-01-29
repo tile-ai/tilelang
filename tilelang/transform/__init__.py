@@ -203,6 +203,17 @@ def MergeIfStmt():
     return _ffi_api.MergeIfStmt()  # type: ignore
 
 
+def LoopUnswitching():
+    """LoopUnswitching: Hoist loop-invariant if statements out of loops.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LoopUnswitching()  # type: ignore
+
+
 def MultiVersionBuffer():
     """WarpSpecializedPipeline
 
