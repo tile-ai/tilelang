@@ -10,4 +10,3 @@
 [submodule "3rdparty/DLCompiler"]
 	path = 3rdparty/DLCompiler
 	url = https://github.com/DeepLink-org/DLCompiler.git
-	branch = main
