@@ -107,7 +107,6 @@ def debug_print_msg(M=16, N=16, msg_only=False):
                 else:
                     T.print(bx + by + bz, msg="hello world")
 
-
     jit_kernel = tilelang.compile(program)
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
