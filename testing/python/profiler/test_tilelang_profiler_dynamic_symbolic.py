@@ -118,7 +118,7 @@ def test_profiler_dynamic_symbolic_missing_constraint():
     # Test that missing constraint raises ValueError
     try:
         profiler.do_bench(dynamic_symbolic_constraints={"wrong_name": 256})
-        assert False, "Expected ValueError for missing constraint"
+        raise ValueError("Expected ValueError for missing constraint")
     except ValueError as e:
         assert "m" in str(e), f"Error message should mention missing variable 'm', got: {e}"
         print(f"Correctly raised error for missing constraint: {e}")
