@@ -245,15 +245,15 @@ public:
       : loop_var(loop_var), written_vars(written_vars) {}
 
   void VisitStmt_(const LetStmtNode *op) final {
-    // Track Let bindings where variable is bound to a BufferLoad
-    if (op->value->IsInstance<BufferLoadNode>()) {
-      let_bindings_[op->var.get()] = op->value;
-    }
+    // Track ALL Let bindings to detect when a condition uses a variable
+    // that is defined inside the loop with a loop-variant value.
+    // This is necessary because variables like i_s may be bound to expressions
+    // containing the loop variable (e.g., if_then_else(...k...)), and conditions
+    // using such variables should not be hoisted.
+    let_bindings_[op->var.get()] = op->value;
     StmtVisitor::VisitStmt_(op);
     // Remove the binding when leaving scope
-    if (op->value->IsInstance<BufferLoadNode>()) {
-      let_bindings_.erase(op->var.get());
-    }
+    let_bindings_.erase(op->var.get());
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
