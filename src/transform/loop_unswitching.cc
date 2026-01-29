@@ -142,6 +142,36 @@ public:
 };
 
 /*!
+ * \brief Check if a statement contains any CallNode, excluding a specific If
+ *
+ * Loop unswitching is unsafe when there are function calls OUTSIDE the
+ * hoisted if statement, because those calls (originally executed by all
+ * threads together) would be split into different code paths after
+ * unswitching, potentially breaking synchronization semantics.
+ *
+ * Calls INSIDE the if are safe because they were already conditionally
+ * executed before unswitching.
+ */
+class CallCheckerExcludingIf : public StmtExprVisitor {
+public:
+  bool has_call = false;
+  const IfThenElseNode *excluded_if = nullptr;
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    if (op == excluded_if) {
+      // Skip the interior of the excluded if statement
+      return;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    has_call = true;
+    // No need to continue once we find a call
+  }
+};
+
+/*!
  * \brief Check if condition or any Let-bound variable it uses depends on loop
  * var
  */
@@ -290,6 +320,21 @@ public:
     finder(body);
 
     if (!finder.found) {
+      if (body.same_as(op->body)) {
+        return ffi::GetRef<Stmt>(op);
+      }
+      return For(op->loop_var, op->min, op->extent, op->kind, body,
+                 op->thread_binding, op->annotations);
+    }
+
+    // Check if there are any function calls OUTSIDE the hoisted if statement.
+    // Calls outside the if are executed by all threads together; unswitching
+    // would split them into different code paths, breaking synchronization.
+    // Calls inside the if are already conditionally executed, so they're safe.
+    CallCheckerExcludingIf call_checker;
+    call_checker.excluded_if = finder.found;
+    call_checker(body);
+    if (call_checker.has_call) {
       if (body.same_as(op->body)) {
         return ffi::GetRef<Stmt>(op);
       }
