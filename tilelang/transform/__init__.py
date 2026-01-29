@@ -9,6 +9,7 @@ from tvm.ir.transform import PassContext  # noqa: F401
 from .add_bufstore_wrapper import AddWrapperForSingleBufStore  # noqa: F401
 from .hoist_broadcast_values import HoistBroadcastValues  # noqa: F401
 from .decouple_type_cast import DecoupleTypeCast  # noqa: F401
+from . import z3_scheduler  # noqa: F401
 
 
 def get_pass_context():
@@ -499,6 +500,11 @@ def LowerDeviceKernelLaunch():
 def LowerSharedTmem():
     """LowerSharedTmem"""
     return _ffi_api.LowerSharedTmem()  # type: ignore
+
+
+def AutoSchedule():
+    """Auto schedule for high-level operations"""
+    return _ffi_api.AutoSchedule()  # type: ignore
 
 
 def LayoutReducer():

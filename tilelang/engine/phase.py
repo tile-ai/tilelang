@@ -172,6 +172,11 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
+    # tilelang.analysis.ASTPrinter()(mod)
+    print(mod)
+    # Auto schedule for high-level operations
+    mod = tilelang.transform.AutoSchedule()(mod)
+    print(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory

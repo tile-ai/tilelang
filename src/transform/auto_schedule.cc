@@ -33,6 +33,10 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/runtime/packed_func.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/container/array.h>
+
 
 #include <utility>
 #include <vector>
@@ -41,8 +45,10 @@
 #include <sstream>
 #include <string>
 #include <algorithm>
+#include <cmath>
 #include <queue>
 #include <unordered_map>
+#include <optional>
 
 #include "./common/attr.h"
 #include "../op/builtin.h"
@@ -76,6 +82,17 @@ inline MemoryType GetMemoryTypeFromScope(const String& scope) {
   return MemoryType::kUnknown;
 }
 
+// Helper function to compare if two regions are equal
+bool RegionsEqual(const Region& a, const Region& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (!tir::is_one(a[i]->min - b[i]->min) || !tir::is_one(a[i]->extent - b[i]->extent)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Base class for IR structure nodes
 class IRStructure {
 public:
@@ -92,6 +109,32 @@ public:
   bool IsTask() const { return GetKind() == Kind::kTask; }
   bool IsControl() const { return GetKind() == Kind::kControl; }
   bool IsSequence() const { return GetKind() == Kind::kSequence; }
+
+  // Resource usage flags (accessible by all IR nodes)
+  virtual bool UsesCUDACore() const = 0;
+  virtual bool UsesTMACore() const = 0;
+  virtual bool UsesTensorCore() const = 0;
+
+  // Memory access regions (collected during analysis)
+  virtual std::vector<BufferRegion> GetReadRegions() const = 0;
+  virtual std::vector<BufferRegion> GetWriteRegions() const = 0;
+
+  // Latency estimation
+  virtual int64_t GetLatency() const = 0;      // Estimated latency in cycles
+  virtual int64_t GetII() const = 0;           // Initiation interval in cycles
+
+  // Setters (for analysis passes to update these values)
+  virtual void SetUsesCUDACore(bool value) = 0;
+  virtual void SetUsesTMACore(bool value) = 0;
+  virtual void SetUsesTensorCore(bool value) = 0;
+  virtual void SetReadRegions(const std::vector<BufferRegion>& regions) = 0;
+  virtual void SetWriteRegions(const std::vector<BufferRegion>& regions) = 0;
+  virtual void SetLatency(int64_t latency) = 0;
+  virtual void SetII(int64_t ii) = 0;
+
+  // Helper methods to add regions (for incremental analysis)
+  virtual void AddReadRegion(const BufferRegion& region) = 0;
+  virtual void AddWriteRegion(const BufferRegion& region) = 0;
 };
 
 
@@ -100,20 +143,71 @@ class TaskNode : public IRStructure {
 public:
   std::vector<Stmt> stmts;
 
+  Kind GetKind() const override { return Kind::kTask; }
+
   // Resource usage flags
-  bool uses_cuda_core{false};
-  bool uses_tma_core{false};
-  bool uses_tensor_core{false};
+  bool UsesCUDACore() const override { return uses_cuda_core_; }
+  bool UsesTMACore() const override { return uses_tma_core_; }
+  bool UsesTensorCore() const override { return uses_tensor_core_; }
 
   // Memory access regions (collected during analysis)
-  std::vector<BufferRegion> read_regions;
-  std::vector<BufferRegion> write_regions;
+  std::vector<BufferRegion> GetReadRegions() const override { return read_regions_; }
+  std::vector<BufferRegion> GetWriteRegions() const override { return write_regions_; }
 
   // Latency estimation
-  int64_t latency{0};      // Estimated latency in cycles
-  int64_t ii{0};           // Initiation interval in cycles
+  int64_t GetLatency() const override { return latency_; }
+  int64_t GetII() const override { return ii_; }
 
-  Kind GetKind() const override { return Kind::kTask; }
+  // Setters
+  void SetUsesCUDACore(bool value) override { uses_cuda_core_ = value; }
+  void SetUsesTMACore(bool value) override { uses_tma_core_ = value; }
+  void SetUsesTensorCore(bool value) override { uses_tensor_core_ = value; }
+  void SetReadRegions(const std::vector<BufferRegion>& regions) override { read_regions_ = regions; }
+  void SetWriteRegions(const std::vector<BufferRegion>& regions) override { write_regions_ = regions; }
+  void SetLatency(int64_t latency) override { latency_ = latency; }
+  void SetII(int64_t ii) override { ii_ = ii; }
+
+  // Start time for scheduling
+  void SetStartTime(int64_t start_time) { start_time_ = start_time; }
+  int64_t GetStartTime() const { return start_time_; }
+
+  // Helper methods to add regions (for incremental analysis)
+  void AddReadRegion(const BufferRegion& region) override {
+    // Check for duplicate regions
+    for (const auto& existing : read_regions_) {
+      if (existing->buffer.same_as(region->buffer) &&
+          RegionsEqual(existing->region, region->region)) {
+        return; // Region already exists
+      }
+    }
+    read_regions_.push_back(region);
+  }
+
+  void AddWriteRegion(const BufferRegion& region) override {
+    // Check for duplicate regions
+    for (const auto& existing : write_regions_) {
+      if (existing->buffer.same_as(region->buffer) &&
+          RegionsEqual(existing->region, region->region)) {
+        return; // Region already exists
+      }
+    }
+    write_regions_.push_back(region);
+  }
+
+private:
+  // Resource usage flags
+  bool uses_cuda_core_{false};
+  bool uses_tma_core_{false};
+  bool uses_tensor_core_{false};
+
+  // Memory access regions (collected during analysis)
+  std::vector<BufferRegion> read_regions_;
+  std::vector<BufferRegion> write_regions_;
+
+  // Latency estimation
+  int64_t latency_{0};      // Estimated latency in cycles
+  int64_t ii_{0};           // Initiation interval in cycles
+  int64_t start_time_{0};   // Scheduled start time in cycles
 };
 
 // Control node: contains a For operation and a child IRStructure
@@ -123,6 +217,36 @@ public:
   std::unique_ptr<IRStructure> child;
 
   Kind GetKind() const override { return Kind::kControl; }
+
+  // Resource usage flags (aggregate from child)
+  bool UsesCUDACore() const override { return child ? child->UsesCUDACore() : false; }
+  bool UsesTMACore() const override { return child ? child->UsesTMACore() : false; }
+  bool UsesTensorCore() const override { return child ? child->UsesTensorCore() : false; }
+
+  // Memory access regions (aggregate from child)
+  std::vector<BufferRegion> GetReadRegions() const override {
+    return child ? child->GetReadRegions() : std::vector<BufferRegion>{};
+  }
+  std::vector<BufferRegion> GetWriteRegions() const override {
+    return child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
+  }
+
+  // Latency estimation (aggregate from child)
+  int64_t GetLatency() const override { return child ? child->GetLatency() : 0; }
+  int64_t GetII() const override { return child ? child->GetII() : 0; }
+
+  // Setters (delegate to child if exists)
+  void SetUsesCUDACore(bool value) override { if (child) child->SetUsesCUDACore(value); }
+  void SetUsesTMACore(bool value) override { if (child) child->SetUsesTMACore(value); }
+  void SetUsesTensorCore(bool value) override { if (child) child->SetUsesTensorCore(value); }
+  void SetReadRegions(const std::vector<BufferRegion>& regions) override { if (child) child->SetReadRegions(regions); }
+  void SetWriteRegions(const std::vector<BufferRegion>& regions) override { if (child) child->SetWriteRegions(regions); }
+  void SetLatency(int64_t latency) override { if (child) child->SetLatency(latency); }
+  void SetII(int64_t ii) override { if (child) child->SetII(ii); }
+
+  // Helper methods to add regions (delegate to child)
+  void AddReadRegion(const BufferRegion& region) override { if (child) child->AddReadRegion(region); }
+  void AddWriteRegion(const BufferRegion& region) override { if (child) child->AddWriteRegion(region); }
 };
 
 // Sequence node: contains a vector of child IRStructures
@@ -131,6 +255,147 @@ public:
   std::vector<std::unique_ptr<IRStructure>> children;
 
   Kind GetKind() const override { return Kind::kSequence; }
+
+  // Resource usage flags (aggregate from all children)
+  bool UsesCUDACore() const override {
+    for (const auto& child : children) {
+      if (child && child->UsesCUDACore()) return true;
+    }
+    return false;
+  }
+  bool UsesTMACore() const override {
+    for (const auto& child : children) {
+      if (child && child->UsesTMACore()) return true;
+    }
+    return false;
+  }
+  bool UsesTensorCore() const override {
+    for (const auto& child : children) {
+      if (child && child->UsesTensorCore()) return true;
+    }
+    return false;
+  }
+
+  // Memory access regions (aggregate from all children)
+  std::vector<BufferRegion> GetReadRegions() const override {
+    std::vector<BufferRegion> all_read_regions;
+    for (const auto& child : children) {
+      if (child) {
+        auto child_read_regions = child->GetReadRegions();
+        all_read_regions.insert(all_read_regions.end(), child_read_regions.begin(), child_read_regions.end());
+      }
+    }
+    // Remove duplicates (by buffer and region equality)
+    // This is a simplified deduplication - in practice might need more sophisticated logic
+    std::vector<BufferRegion> deduplicated;
+    for (const auto& region : all_read_regions) {
+      bool found = false;
+      for (const auto& existing : deduplicated) {
+        if (existing->buffer.same_as(region->buffer) &&
+            RegionsEqual(existing->region, region->region)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) deduplicated.push_back(region);
+    }
+    return deduplicated;
+  }
+
+  std::vector<BufferRegion> GetWriteRegions() const override {
+    std::vector<BufferRegion> all_write_regions;
+    for (const auto& child : children) {
+      if (child) {
+        auto child_write_regions = child->GetWriteRegions();
+        all_write_regions.insert(all_write_regions.end(), child_write_regions.begin(), child_write_regions.end());
+      }
+    }
+    // Remove duplicates (by buffer and region equality)
+    std::vector<BufferRegion> deduplicated;
+    for (const auto& region : all_write_regions) {
+      bool found = false;
+      for (const auto& existing : deduplicated) {
+        if (existing->buffer.same_as(region->buffer) &&
+            RegionsEqual(existing->region, region->region)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) deduplicated.push_back(region);
+    }
+    return deduplicated;
+  }
+
+  // Latency estimation (sum of children latencies)
+  int64_t GetLatency() const override {
+    int64_t total = 0;
+    for (const auto& child : children) {
+      if (child) total += child->GetLatency();
+    }
+    return total;
+  }
+
+  // Initiation interval (maximum of children II)
+  int64_t GetII() const override {
+    int64_t max_ii = 0;
+    for (const auto& child : children) {
+      if (child) max_ii = std::max(max_ii, child->GetII());
+    }
+    return max_ii;
+  }
+
+  // Setters (not typically used for SequenceNode as it aggregates from children)
+  // These could be used to set properties on all children, but that might not be the right semantics
+  void SetUsesCUDACore(bool value) override {
+    for (auto& child : children) {
+      if (child) child->SetUsesCUDACore(value);
+    }
+  }
+  void SetUsesTMACore(bool value) override {
+    for (auto& child : children) {
+      if (child) child->SetUsesTMACore(value);
+    }
+  }
+  void SetUsesTensorCore(bool value) override {
+    for (auto& child : children) {
+      if (child) child->SetUsesTensorCore(value);
+    }
+  }
+  void SetReadRegions(const std::vector<BufferRegion>& regions) override {
+    // Not clear what this means for SequenceNode - maybe set on first child?
+    if (!children.empty() && children[0]) {
+      children[0]->SetReadRegions(regions);
+    }
+  }
+  void SetWriteRegions(const std::vector<BufferRegion>& regions) override {
+    if (!children.empty() && children[0]) {
+      children[0]->SetWriteRegions(regions);
+    }
+  }
+  void SetLatency(int64_t latency) override {
+    // Not clear how to distribute latency across children
+    if (!children.empty() && children[0]) {
+      children[0]->SetLatency(latency);
+    }
+  }
+  void SetII(int64_t ii) override {
+    // Not clear how to distribute II across children
+    if (!children.empty() && children[0]) {
+      children[0]->SetII(ii);
+    }
+  }
+
+  // Helper methods to add regions (add to first child)
+  void AddReadRegion(const BufferRegion& region) override {
+    if (!children.empty() && children[0]) {
+      children[0]->AddReadRegion(region);
+    }
+  }
+  void AddWriteRegion(const BufferRegion& region) override {
+    if (!children.empty() && children[0]) {
+      children[0]->AddWriteRegion(region);
+    }
+  }
 };
 
 // ScheduleUnit: a group of consecutive TaskNodes that can be scheduled together
@@ -483,16 +748,6 @@ private:
   }
 };
 
-// Helper function to compare if two regions are equal
-bool RegionsEqual(const Region& a, const Region& b) {
-  if (a.size() != b.size()) return false;
-  for (size_t i = 0; i < a.size(); ++i) {
-    if (!tir::is_one(a[i]->min - b[i]->min) || !tir::is_one(a[i]->extent - b[i]->extent)) {
-      return false;
-    }
-  }
-  return true;
-}
 
 // Latency estimator for H100 GPU
 class LatencyEstimator {
@@ -534,7 +789,7 @@ public:
     int64_t register_bytes = 0;
 
     // Estimate latency from memory accesses and track bandwidth usage
-    for (const auto& region : task->read_regions) {
+    for (const auto& region : task->GetReadRegions()) {
       int64_t region_latency = EstimateMemoryAccessLatency(region, true); // read
       memory_latency += region_latency;
       num_memory_ops++;
@@ -561,7 +816,7 @@ public:
       }
     }
 
-    for (const auto& region : task->write_regions) {
+    for (const auto& region : task->GetWriteRegions()) {
       int64_t region_latency = EstimateMemoryAccessLatency(region, false); // write
       memory_latency += region_latency;
       num_memory_ops++;
@@ -589,17 +844,17 @@ public:
     }
 
     // Estimate compute latency based on resource usage
-    if (task->uses_cuda_core) {
+    if (task->UsesCUDACore()) {
       // Simple heuristic: assume some number of CUDA operations
       // For now, assume 1 operation per statement as a rough estimate
       compute_latency = params_.cuda_core_operation * std::max(1, static_cast<int>(task->stmts.size()));
     }
 
-    if (task->uses_tensor_core) {
+    if (task->UsesTensorCore()) {
       compute_latency = std::max(compute_latency, params_.tensor_core_operation);
     }
 
-    if (task->uses_tma_core) {
+    if (task->UsesTMACore()) {
       compute_latency = std::max(compute_latency, params_.tma_operation);
     }
 
@@ -609,7 +864,7 @@ public:
     // Calculate initiation interval (II)
     int64_t ii = 1;  // Default minimum II
 
-    if (task->uses_tma_core) {
+    if (task->UsesTMACore()) {
       // TMA operations (async memory copies): instruction latency can be hidden
       // II is determined by bandwidth constraints only
       if (global_memory_bytes > 0) {
@@ -630,7 +885,7 @@ public:
       if (num_memory_ops == 1 && task->stmts.size() == 1) {
         // Single operation that is a memory access
         // Check if this is likely a memory operation (has read/write regions)
-        if (!task->read_regions.empty() || !task->write_regions.empty()) {
+        if (!task->GetReadRegions().empty() || !task->GetWriteRegions().empty()) {
           ii = memory_latency;
         }
       }
@@ -652,8 +907,8 @@ public:
     if (ii < 1) ii = 1;
 
     // Store results in task node
-    task->latency = total_latency;
-    task->ii = ii;
+    task->SetLatency(total_latency);
+    task->SetII(ii);
   }
 
 private:
@@ -741,13 +996,160 @@ public:
     // Finalize the last unit if any
     FinalizeCurrentUnit();
 
-    // Apply topological sort to each unit and update IRStructure
+    // Apply scheduling (Z3-based) to each unit and update IRStructure
     for (auto& unit : units_) {
-      ApplyTopologicalSort(unit);
+      ApplyScheduling(unit);
     }
 
     return std::move(units_);
   }
+
+  // Z3-based scheduler that calls Python implementation via FFI
+  std::vector<TaskNode*> Z3SchedulePython(const std::vector<TaskNode*>& tasks) {
+    size_t n = tasks.size();
+    if (n <= 1) {
+      if (n == 1) {
+        tasks[0]->SetStartTime(0);
+      }
+      return tasks;
+    }
+
+    LOG(INFO) << "Z3SchedulePython: Starting Python-based scheduling for " << n << " tasks";
+
+    try {
+      // Get the Python-registered function using ffi::Function::GetGlobal
+      static std::optional<tvm::ffi::Function> z3_schedule_func =
+          tvm::ffi::Function::GetGlobal("tl.transform.z3_schedule_python");
+      if (!z3_schedule_func.has_value()) {
+        LOG(WARNING) << "Python Z3 scheduler not registered, falling back to topological sort";
+        return tasks;
+      }
+
+      // Prepare input data
+      std::vector<int64_t> latencies;
+      std::vector<int64_t> iis;
+      std::vector<int64_t> resource_flags;
+      std::vector<std::pair<int64_t, int64_t>> data_deps;
+      std::vector<std::pair<int64_t, int64_t>> resource_deps;
+
+      latencies.reserve(n);
+      iis.reserve(n);
+      resource_flags.reserve(n);
+
+      for (size_t i = 0; i < n; ++i) {
+        const TaskNode* task = tasks[i];
+        latencies.push_back(task->GetLatency());
+        iis.push_back(task->GetII());
+
+        // Encode resource flags as bitmask
+        int64_t flags = 0;
+        if (task->UsesCUDACore()) flags |= 1;
+        if (task->UsesTMACore()) flags |= 2;
+        if (task->UsesTensorCore()) flags |= 4;
+        resource_flags.push_back(flags);
+      }
+
+      // Collect data dependencies
+      for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+          if (HasDependency(tasks[i], tasks[j])) {
+            data_deps.emplace_back(i, j);
+          }
+        }
+      }
+
+      // Collect resource dependencies
+      for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+          if (HasResourceDependency(tasks[i], tasks[j])) {
+            resource_deps.emplace_back(i, j);
+          }
+        }
+      }
+
+      LOG(INFO) << "Z3SchedulePython: Calling Python function with "
+                << data_deps.size() << " data dependencies and "
+                << resource_deps.size() << " resource dependencies";
+
+      // Convert vectors to TVM containers
+      ffi::Array<int64_t> tvm_latencies;
+      ffi::Array<int64_t> tvm_iis;
+      ffi::Array<int64_t> tvm_resource_flags;
+      ffi::Array<ffi::Array<int64_t>> tvm_data_deps;
+      ffi::Array<ffi::Array<int64_t>> tvm_resource_deps;
+
+      for (auto val : latencies) {
+        tvm_latencies.push_back(val);
+      }
+      for (auto val : iis) {
+        tvm_iis.push_back(val);
+      }
+      for (auto val : resource_flags) {
+        tvm_resource_flags.push_back(val);
+      }
+      for (const auto& dep : data_deps) {
+        ffi::Array<int64_t> pair;
+        pair.push_back(dep.first);
+        pair.push_back(dep.second);
+        tvm_data_deps.push_back(pair);
+      }
+      for (const auto& dep : resource_deps) {
+        ffi::Array<int64_t> pair;
+        pair.push_back(dep.first);
+        pair.push_back(dep.second);
+        tvm_resource_deps.push_back(pair);
+      }
+
+      // Extract results
+      // Python function returns only start_times, C++ side will sort by start_time
+      auto start_times = z3_schedule_func.value()(tvm_latencies, tvm_iis, tvm_resource_flags,
+                                              tvm_data_deps, tvm_resource_deps).cast<ffi::Array<int64_t>>();
+
+      if (start_times.size() != n) {
+        LOG(WARNING) << "Python Z3 scheduler returned invalid results (size mismatch), falling back to topological sort";
+        return tasks;
+      }
+
+      // Apply start times to tasks
+      for (size_t i = 0; i < n; ++i) {
+        tasks[i]->SetStartTime(start_times[i]);
+      }
+
+      // Create sorted task list based on start_time (and original index as tie-breaker)
+      std::vector<std::pair<int64_t, size_t>> start_time_with_idx;
+      start_time_with_idx.reserve(n);
+      for (size_t i = 0; i < n; ++i) {
+        start_time_with_idx.emplace_back(start_times[i], i);
+      }
+
+      // Sort by start_time, then by original index
+      std::sort(start_time_with_idx.begin(), start_time_with_idx.end(),
+                [](const std::pair<int64_t, size_t>& a,
+                   const std::pair<int64_t, size_t>& b) {
+                  if (a.first != b.first) return a.first < b.first;
+                  return a.second < b.second;
+                });
+
+      // Create sorted task list
+      std::vector<TaskNode*> sorted_tasks;
+      sorted_tasks.reserve(n);
+      for (const auto& p : start_time_with_idx) {
+        sorted_tasks.push_back(tasks[p.second]);
+      }
+
+      LOG(INFO) << "Z3SchedulePython: Python scheduling completed successfully";
+      return sorted_tasks;
+
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Python Z3 scheduler failed with exception: " << e.what()
+                   << ", falling back to topological sort";
+      return tasks;
+    } catch (...) {
+      LOG(WARNING) << "Python Z3 scheduler failed with unknown exception, falling back to topological sort";
+      return tasks;
+    }
+  }
+
 
 private:
   std::vector<ScheduleUnit> units_;
@@ -771,99 +1173,56 @@ private:
 
     // For simplicity, we check if they access the same buffer
     // and at least one of them writes to that buffer
-    for (const auto& write_region_a : a->write_regions) {
-      for (const auto& read_region_b : b->read_regions) {
+    for (const auto& write_region_a : a->GetWriteRegions()) {
+      for (const auto& read_region_b : b->GetReadRegions()) {
         if (SameBuffer(write_region_a, read_region_b)) return true;
       }
-      for (const auto& write_region_b : b->write_regions) {
+      for (const auto& write_region_b : b->GetWriteRegions()) {
         if (SameBuffer(write_region_a, write_region_b)) return true;
       }
     }
-    for (const auto& read_region_a : a->read_regions) {
-      for (const auto& write_region_b : b->write_regions) {
+    for (const auto& read_region_a : a->GetReadRegions()) {
+      for (const auto& write_region_b : b->GetWriteRegions()) {
         if (SameBuffer(read_region_a, write_region_b)) return true;
       }
     }
     return false;
   }
 
-  // Perform topological sort on tasks based on data dependencies
-  std::vector<TaskNode*> TopologicalSort(const std::vector<TaskNode*>& tasks) const {
-    size_t n = tasks.size();
-    if (n <= 1) return tasks;
+  // Check if two TaskNodes have resource dependency (use same hardware resource)
+  bool HasResourceDependency(const TaskNode* a, const TaskNode* b) const {
+    // Resource dependencies occur when two tasks use the same hardware resource
+    // that cannot be used simultaneously (or has limited throughput)
 
-    // Build adjacency list and indegree array
-    std::vector<std::vector<size_t>> adj(n);
-    std::vector<int> indegree(n, 0);
-
-    // For each pair (i, j) where i < j, check dependency
-    for (size_t i = 0; i < n; ++i) {
-      for (size_t j = i + 1; j < n; ++j) {
-        bool dep_ij = HasDependency(tasks[i], tasks[j]);
-        bool dep_ji = HasDependency(tasks[j], tasks[i]);
-
-        if (dep_ij && !dep_ji) {
-          // i -> j dependency (i must come before j)
-          adj[i].push_back(j);
-          indegree[j]++;
-        } else if (!dep_ij && dep_ji) {
-          // j -> i dependency (j must come before i)
-          adj[j].push_back(i);
-          indegree[i]++;
-        } else if (dep_ij && dep_ji) {
-          // Mutual dependency (e.g., WAW on same buffer)
-          // Choose direction based on original order (i before j)
-          adj[i].push_back(j);
-          indegree[j]++;
-          LOG(INFO) << "Mutual dependency between tasks " << i << " and " << j
-                    << ", using original order (i before j)";
-        }
-        // else: no dependency
-      }
+    // Check TMA core dependency
+    if (a->UsesTMACore() && b->UsesTMACore()) {
+      return true;  // Both use TMA core, cannot execute simultaneously
     }
 
-    // Kahn's algorithm for topological sort (modified: always pop largest index)
-    std::vector<TaskNode*> result;
-    result.reserve(n);
-    std::vector<size_t> zero_indegree_nodes;
-
-    // Add nodes with zero indegree
-    for (size_t i = 0; i < n; ++i) {
-      if (indegree[i] == 0) {
-        zero_indegree_nodes.push_back(i);
-      }
+    // Check Tensor core dependency
+    if (a->UsesTensorCore() && b->UsesTensorCore()) {
+      return true;  // Both use Tensor core, cannot execute simultaneously
     }
 
-    while (!zero_indegree_nodes.empty()) {
-      // Find the node with largest index in zero_indegree_nodes
-      auto max_it = std::max_element(zero_indegree_nodes.begin(), zero_indegree_nodes.end());
-      size_t u = *max_it;
-      // Remove it from zero_indegree_nodes (swap with last element and pop)
-      *max_it = zero_indegree_nodes.back();
-      zero_indegree_nodes.pop_back();
-
-      result.push_back(tasks[u]);
-
-      for (size_t v : adj[u]) {
-        indegree[v]--;
-        if (indegree[v] == 0) {
-          zero_indegree_nodes.push_back(v);
-        }
-      }
+    // Check CUDA core dependency (more nuanced - CUDA cores can often be pipelined)
+    // For now, we treat CUDA core as a shared resource with limited throughput
+    // Could be refined based on actual hardware constraints
+    if (a->UsesCUDACore() && b->UsesCUDACore()) {
+      // CUDA cores are more plentiful, but we still mark dependency for now
+      // This could be refined to allow some level of parallelism
+      return true;
     }
 
-    // If not all nodes are included, there's a cycle
-    // For now, return original order if cycle detected
-    if (result.size() != n) {
-      LOG(WARNING) << "Cycle detected in data dependencies, using original order";
-      return tasks;
-    }
+    // TODO: Add more specific resource dependency checks:
+    // - Memory bandwidth constraints (shared between TMA and other operations)
+    // - Shared memory bank conflicts
+    // - Register file limitations
 
-    return result;
+    return false;
   }
 
-  // Apply topological sort to a ScheduleUnit and update parent SequenceNode
-  void ApplyTopologicalSort(ScheduleUnit& unit) {
+  // Apply scheduling (Z3-based) to a ScheduleUnit and update parent SequenceNode
+  void ApplyScheduling(ScheduleUnit& unit) {
     if (unit.tasks.size() <= 1) {
       // No reordering needed for single task
       return;
@@ -875,8 +1234,8 @@ private:
       return;
     }
 
-    // Perform topological sort
-    std::vector<TaskNode*> sorted_tasks = TopologicalSort(unit.tasks);
+    // Perform Z3-based scheduling using Python implementation
+    std::vector<TaskNode*> sorted_tasks = Z3SchedulePython(unit.tasks);
 
     // Check if order actually changed
     bool order_changed = false;
@@ -1050,13 +1409,13 @@ void PrintScheduleUnits(const std::vector<ScheduleUnit>& units) {
               << ", Inside ControlNode: " << (unit.inside_control_node ? "yes" : "no");
     for (size_t j = 0; j < unit.tasks.size(); j++) {
       const TaskNode* task = unit.tasks[j];
-      LOG(INFO) << "    Task " << j << ": uses_cuda_core=" << task->uses_cuda_core
-                << ", uses_tma_core=" << task->uses_tma_core
-                << ", uses_tensor_core=" << task->uses_tensor_core
-                << ", read_regions=" << task->read_regions.size()
-                << ", write_regions=" << task->write_regions.size()
-                << ", latency=" << task->latency << " cycles"
-                << ", II=" << task->ii << " cycles";
+      LOG(INFO) << "    Task " << j << ": uses_cuda_core=" << task->UsesCUDACore()
+                << ", uses_tma_core=" << task->UsesTMACore()
+                << ", uses_tensor_core=" << task->UsesTensorCore()
+                << ", read_regions=" << task->GetReadRegions().size()
+                << ", write_regions=" << task->GetWriteRegions().size()
+                << ", latency=" << task->GetLatency() << " cycles"
+                << ", II=" << task->GetII() << " cycles";
 
       // Print statements in this task
       if (!task->stmts.empty()) {
@@ -1068,20 +1427,20 @@ void PrintScheduleUnits(const std::vector<ScheduleUnit>& units) {
       }
 
       // Print read regions if any
-      if (!task->read_regions.empty()) {
+      if (!task->GetReadRegions().empty()) {
         LOG(INFO) << "      Read regions:";
-        for (size_t k = 0; k < task->read_regions.size(); ++k) {
+        for (size_t k = 0; k < task->GetReadRegions().size(); ++k) {
           LOG(INFO) << "      Region " << k << ":";
-          PrintBufferRegion(task->read_regions[k], "        ");
+          PrintBufferRegion(task->GetReadRegions()[k], "        ");
         }
       }
 
       // Print write regions if any
-      if (!task->write_regions.empty()) {
+      if (!task->GetWriteRegions().empty()) {
         LOG(INFO) << "      Write regions:";
-        for (size_t k = 0; k < task->write_regions.size(); ++k) {
+        for (size_t k = 0; k < task->GetWriteRegions().size(); ++k) {
           LOG(INFO) << "      Region " << k << ":";
-          PrintBufferRegion(task->write_regions[k], "        ");
+          PrintBufferRegion(task->GetWriteRegions()[k], "        ");
         }
       }
     }
@@ -1101,10 +1460,10 @@ void PrintAllStmts(const IRStructure* node, int indent = 0) {
       LOG(INFO) << indent_str << "  Statement " << i << ":";
       LOG(INFO) << indent_str + "    " << task->stmts[i];
     }
-    LOG(INFO) << indent_str << "  Resource usage: CUDA=" << task->uses_cuda_core
-              << ", TMA=" << task->uses_tma_core
-              << ", Tensor=" << task->uses_tensor_core;
-    LOG(INFO) << indent_str << "  Latency: " << task->latency << " cycles, II: " << task->ii << " cycles";
+    LOG(INFO) << indent_str << "  Resource usage: CUDA=" << task->UsesCUDACore()
+              << ", TMA=" << task->UsesTMACore()
+              << ", Tensor=" << task->UsesTensorCore();
+    LOG(INFO) << indent_str << "  Latency: " << task->GetLatency() << " cycles, II: " << task->GetII() << " cycles";
   } else if (node->IsControl()) {
     const ControlNode* control = static_cast<const ControlNode*>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";
@@ -1137,11 +1496,11 @@ void PrintIRStructure(const IRStructure* node, int indent = 0) {
     const TaskNode* task = static_cast<const TaskNode*>(node);
     LOG(INFO) << indent_str << "TaskNode:";
     LOG(INFO) << indent_str << "  stmts: " << task->stmts.size() << " statements";
-    LOG(INFO) << indent_str << "  uses_cuda_core: " << task->uses_cuda_core;
-    LOG(INFO) << indent_str << "  uses_tma_core: " << task->uses_tma_core;
-    LOG(INFO) << indent_str << "  uses_tensor_core: " << task->uses_tensor_core;
-    LOG(INFO) << indent_str << "  latency: " << task->latency << " cycles";
-    LOG(INFO) << indent_str << "  II: " << task->ii << " cycles";
+    LOG(INFO) << indent_str << "  uses_cuda_core: " << task->UsesCUDACore();
+    LOG(INFO) << indent_str << "  uses_tma_core: " << task->UsesTMACore();
+    LOG(INFO) << indent_str << "  uses_tensor_core: " << task->UsesTensorCore();
+    LOG(INFO) << indent_str << "  latency: " << task->GetLatency() << " cycles";
+    LOG(INFO) << indent_str << "  II: " << task->GetII() << " cycles";
   } else if (node->IsControl()) {
     const ControlNode* control = static_cast<const ControlNode*>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";
@@ -1360,9 +1719,9 @@ protected:
     AnalyzeResourceUsage(Evaluate(op->condition), task_node.get());
     AnalyzeResourceUsage(op->body, task_node.get());
 
-    LOG(INFO) << "  TaskNode resource usage: CUDA=" << task_node->uses_cuda_core
-              << ", TMA=" << task_node->uses_tma_core
-              << ", Tensor=" << task_node->uses_tensor_core;
+    LOG(INFO) << "  TaskNode resource usage: CUDA=" << task_node->UsesCUDACore()
+              << ", TMA=" << task_node->UsesTMACore()
+              << ", Tensor=" << task_node->UsesTensorCore();
 
     root_ = std::move(task_node);
   }
@@ -1468,14 +1827,14 @@ private:
 
     // Set task node flags based on what was found
     if (analyzer.found_tma) {
-      task_node->uses_tma_core = true;
+      task_node->SetUsesTMACore(true);
     }
     if (analyzer.found_tensor) {
-      task_node->uses_tensor_core = true;
+      task_node->SetUsesTensorCore(true);
     }
     // If neither TMA nor Tensor core was used, and CUDA operations were found, set CUDA core flag
     if (!analyzer.found_tma && !analyzer.found_tensor && analyzer.found_cuda) {
-      task_node->uses_cuda_core = true;
+      task_node->SetUsesCUDACore(true);
     }
 
     // Analyze memory access regions
@@ -1486,31 +1845,11 @@ private:
 
     // Merge with existing regions (avoid duplicates)
     for (const auto& region : read_regions) {
-      bool found = false;
-      for (const auto& existing : task_node->read_regions) {
-        if (existing->buffer.same_as(region->buffer) &&
-            RegionsEqual(existing->region, region->region)) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        task_node->read_regions.push_back(region);
-      }
+      task_node->AddReadRegion(region);
     }
 
     for (const auto& region : write_regions) {
-      bool found = false;
-      for (const auto& existing : task_node->write_regions) {
-        if (existing->buffer.same_as(region->buffer) &&
-            RegionsEqual(existing->region, region->region)) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        task_node->write_regions.push_back(region);
-      }
+      task_node->AddWriteRegion(region);
     }
 
     // Estimate latency and initiation interval for this task
