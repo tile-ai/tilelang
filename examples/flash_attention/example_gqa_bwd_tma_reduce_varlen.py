@@ -76,7 +76,7 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
             T.fill(logsum, 0.0)
             # Warning: in causal/varlen/unaligned seqlen scenarios, the -inf will cause undefined behavior in exp ops
             # We should set it to negative large number instead
-            T.fill(scores_max, T.Cast(accum_dtype, -1e30))
+            T.fill(scores_max, T.cast(-1e30, accum_dtype))
             loop_range = T.ceildiv(k_current_seqlen, block_N)
             for k in T.Pipelined(loop_range, num_stages=1):
                 for i, d in T.Parallel(block_N, dim_qk):
@@ -91,12 +91,12 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
                             (bx * block_M + i >= k * block_N + j)
                             and (bx * block_M + i < q_current_seqlen and k * block_N + j < k_current_seqlen),
                             0,
-                            T.Cast(accum_dtype, -1e30),
+                            T.cast(-1e30, accum_dtype),
                         )
                 else:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(
-                            bx * block_M + i < q_current_seqlen and k * block_N + j < k_current_seqlen, 0, T.Cast(accum_dtype, -1e30)
+                            bx * block_M + i < q_current_seqlen and k * block_N + j < k_current_seqlen, 0, T.cast(-1e30, accum_dtype)
                         )
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 for i, d in T.Parallel(block_N, dim_v):

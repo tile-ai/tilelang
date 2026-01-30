@@ -135,7 +135,7 @@ def dequantize_gemv(
                         accum_res[0] += A_local[ki] * B_dequantize_local[ki]
 
             with T.attr(
-                T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                T.comm_reducer(lambda x, y: x + y, [T.cast(0, accum_dtype)]),
                 "reduce_scope",
                 T.reinterpret(T.uint64(0), dtype="handle"),
             ):
