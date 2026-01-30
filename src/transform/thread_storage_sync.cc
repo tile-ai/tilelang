@@ -1304,7 +1304,11 @@ private:
           analyzer.z3_prover.CanProve(tir::Or(tir::Not(curr_constr), prev_constr));
 
       if (prev_implies_curr && curr_implies_prev) {
+        // If constraints are equivalent, they are not in conflict
         return false;
+      } else {
+        // If constraints are not equivalent, they are in conflict
+        return true;
       }
     }
 
