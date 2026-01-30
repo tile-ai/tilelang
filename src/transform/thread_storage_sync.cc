@@ -1297,11 +1297,11 @@ private:
       }
 
       // Check P => C: ¬P ∨ C
-      bool prev_implies_curr =
-          analyzer.z3_prover.CanProve(tir::Or(tir::Not(prev_constr), curr_constr));
+      bool prev_implies_curr = analyzer.z3_prover.CanProve(
+          tir::Or(tir::Not(prev_constr), curr_constr));
       // Check C => P: ¬C ∨ P
-      bool curr_implies_prev =
-          analyzer.z3_prover.CanProve(tir::Or(tir::Not(curr_constr), prev_constr));
+      bool curr_implies_prev = analyzer.z3_prover.CanProve(
+          tir::Or(tir::Not(curr_constr), prev_constr));
 
       if (prev_implies_curr && curr_implies_prev) {
         // If constraints are equivalent, they are not in conflict

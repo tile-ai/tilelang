@@ -125,7 +125,8 @@ struct ConstrSet {
     }
   }
 
-  /*! \brief Convert the constraint set to a conjunction (AND) of all constraints */
+  /*! \brief Convert the constraint set to a conjunction (AND) of all
+   * constraints */
   PrimExpr ToConjunction() const {
     if (constrs_.empty())
       return Bool(true);
