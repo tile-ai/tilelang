@@ -1150,6 +1150,158 @@ public:
     }
   }
 
+  // Z3-based scheduler for loops that calls Python implementation via FFI
+  // with distance-aware dependencies
+  std::vector<TaskNode*> Z3SchedulePythonLoop(const std::vector<TaskNode*>& tasks) {
+    size_t n = tasks.size();
+    if (n <= 1) {
+      if (n == 1) {
+        tasks[0]->SetStartTime(0);
+      }
+      return tasks;
+    }
+
+    LOG(INFO) << "Z3SchedulePythonLoop: Starting Python-based loop scheduling for " << n << " tasks";
+
+    try {
+      // Get the Python-registered function using ffi::Function::GetGlobal
+      static std::optional<tvm::ffi::Function> z3_schedule_loop_func =
+          tvm::ffi::Function::GetGlobal("tl.transform.z3_schedule_loop_python");
+      if (!z3_schedule_loop_func.has_value()) {
+        LOG(WARNING) << "Python Z3 loop scheduler not registered, falling back to topological sort";
+        return tasks;
+      }
+
+      // Prepare input data
+      std::vector<int64_t> latencies;
+      std::vector<int64_t> iis;
+      std::vector<int64_t> resource_flags;
+      std::vector<std::tuple<int64_t, int64_t, int64_t>> data_deps;  // (i, j, distance)
+      std::vector<std::pair<int64_t, int64_t>> resource_deps;
+
+      latencies.reserve(n);
+      iis.reserve(n);
+      resource_flags.reserve(n);
+
+      for (size_t i = 0; i < n; ++i) {
+        const TaskNode* task = tasks[i];
+        latencies.push_back(task->GetLatency());
+        iis.push_back(task->GetII());
+
+        // Encode resource flags as bitmask
+        int64_t flags = 0;
+        if (task->UsesCUDACore()) flags |= 1;
+        if (task->UsesTMACore()) flags |= 2;
+        if (task->UsesTensorCore()) flags |= 4;
+        resource_flags.push_back(flags);
+      }
+
+      // Collect data dependencies with distance
+      // distance = 0 if i < j (same iteration), distance = 1 if i > j (next iteration)
+      for (size_t i = 0; i < n; ++i) {
+        for (size_t j = 0; j < n; ++j) {
+          if (i == j) continue;  // Skip self-dependency
+          if (HasDependency(tasks[i], tasks[j])) {
+            // distance = 0 if i < j, 1 if i > j
+            int64_t distance = (i < j) ? 0 : 1;
+            data_deps.emplace_back(i, j, distance);
+          }
+        }
+      }
+
+      // Collect resource dependencies
+      for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+          if (HasResourceDependency(tasks[i], tasks[j])) {
+            resource_deps.emplace_back(i, j);
+          }
+        }
+      }
+
+      LOG(INFO) << "Z3SchedulePythonLoop: Calling Python loop scheduler with "
+                << data_deps.size() << " data dependencies and "
+                << resource_deps.size() << " resource dependencies";
+
+      // Convert vectors to TVM containers
+      ffi::Array<int64_t> tvm_latencies;
+      ffi::Array<int64_t> tvm_iis;
+      ffi::Array<int64_t> tvm_resource_flags;
+      ffi::Array<ffi::Array<int64_t>> tvm_data_deps;  // each element is [i, j, distance]
+      ffi::Array<ffi::Array<int64_t>> tvm_resource_deps;
+
+      for (auto val : latencies) {
+        tvm_latencies.push_back(val);
+      }
+      for (auto val : iis) {
+        tvm_iis.push_back(val);
+      }
+      for (auto val : resource_flags) {
+        tvm_resource_flags.push_back(val);
+      }
+      for (const auto& dep : data_deps) {
+        ffi::Array<int64_t> triple;
+        triple.push_back(std::get<0>(dep));
+        triple.push_back(std::get<1>(dep));
+        triple.push_back(std::get<2>(dep));
+        tvm_data_deps.push_back(triple);
+      }
+      for (const auto& dep : resource_deps) {
+        ffi::Array<int64_t> pair;
+        pair.push_back(dep.first);
+        pair.push_back(dep.second);
+        tvm_resource_deps.push_back(pair);
+      }
+
+      // Extract results
+      // Python function returns only start_times, C++ side will sort by start_time
+      auto start_times = z3_schedule_loop_func.value()(tvm_latencies, tvm_iis, tvm_resource_flags,
+                                                  tvm_data_deps, tvm_resource_deps).cast<ffi::Array<int64_t>>();
+
+      if (start_times.size() != n) {
+        LOG(WARNING) << "Python Z3 loop scheduler returned invalid results (size mismatch), falling back to topological sort";
+        return tasks;
+      }
+
+      // Apply start times to tasks
+      for (size_t i = 0; i < n; ++i) {
+        tasks[i]->SetStartTime(start_times[i]);
+      }
+
+      // Create sorted task list based on start_time (and original index as tie-breaker)
+      std::vector<std::pair<int64_t, size_t>> start_time_with_idx;
+      start_time_with_idx.reserve(n);
+      for (size_t i = 0; i < n; ++i) {
+        start_time_with_idx.emplace_back(start_times[i], i);
+      }
+
+      // Sort by start_time, then by original index
+      std::sort(start_time_with_idx.begin(), start_time_with_idx.end(),
+                [](const std::pair<int64_t, size_t>& a,
+                   const std::pair<int64_t, size_t>& b) {
+                  if (a.first != b.first) return a.first < b.first;
+                  return a.second < b.second;
+                });
+
+      // Create sorted task list
+      std::vector<TaskNode*> sorted_tasks;
+      sorted_tasks.reserve(n);
+      for (const auto& p : start_time_with_idx) {
+        sorted_tasks.push_back(tasks[p.second]);
+      }
+
+      LOG(INFO) << "Z3SchedulePythonLoop: Python loop scheduling completed successfully";
+      return sorted_tasks;
+
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Python Z3 loop scheduler failed with exception: " << e.what()
+                   << ", falling back to topological sort";
+      return tasks;
+    } catch (...) {
+      LOG(WARNING) << "Python Z3 loop scheduler failed with unknown exception, falling back to topological sort";
+      return tasks;
+    }
+  }
+
 
 private:
   std::vector<ScheduleUnit> units_;
@@ -1235,7 +1387,15 @@ private:
     }
 
     // Perform Z3-based scheduling using Python implementation
-    std::vector<TaskNode*> sorted_tasks = Z3SchedulePython(unit.tasks);
+    // Use loop-aware scheduler if inside control node (loop)
+    std::vector<TaskNode*> sorted_tasks;
+    if (unit.inside_control_node) {
+      LOG(INFO) << "ScheduleUnit is inside control node, using loop-aware scheduler";
+      sorted_tasks = Z3SchedulePythonLoop(unit.tasks);
+    } else {
+      LOG(INFO) << "ScheduleUnit is not inside control node, using regular scheduler";
+      sorted_tasks = Z3SchedulePython(unit.tasks);
+    }
 
     // Check if order actually changed
     bool order_changed = false;
