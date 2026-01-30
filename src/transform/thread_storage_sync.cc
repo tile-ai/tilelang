@@ -1270,23 +1270,42 @@ private:
       }
     }
     if (has_same_index) {
-      bool range_is_equal = true;
-      arith::Analyzer prev_analyzer, curr_analyzer;
-      prev.cset.Populate(prev_analyzer);
-      curr.cset.Populate(curr_analyzer);
-      for (unsigned idx = 0; idx != 3; ++idx) {
-        Var prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
-        Var curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
-        auto prev_bound = prev_analyzer.const_int_bound(prev_var);
-        auto curr_bound = curr_analyzer.const_int_bound(curr_var);
-        if (prev_bound->min_value != curr_bound->min_value ||
-            prev_bound->max_value != curr_bound->max_value) {
-          range_is_equal = false;
-          break;
+      // Use Z3 to check if prev and curr constraints are equivalent.
+      // If equivalent, the same set of threads execute both accesses, so no
+      // sync is needed.
+      //
+      // Formally, let P(t) denote the predicate for prev's constraint set and
+      // C(t) denote the predicate for curr's constraint set, where t represents
+      // the thread indices (threadIdx.x, threadIdx.y, threadIdx.z).
+      //
+      // We check bidirectional implication:
+      //   1. P(t) => C(t): Every thread executing prev also executes curr
+      //   2. C(t) => P(t): Every thread executing curr also executes prev
+      //
+      // If both hold, then P(t) <=> C(t), meaning the exact same set of threads
+      // execute both accesses. Combined with has_same_index (same buffer index
+      // expression), this guarantees each thread only accesses locations it
+      // wrote itself, eliminating cross-thread conflicts.
+      PrimExpr prev_constr = prev.cset.ToConjunction();
+      PrimExpr curr_constr = curr.cset.ToConjunction();
+
+      arith::Analyzer analyzer;
+      for (const auto &iv : prev.threads) {
+        if (iv->dom.defined()) {
+          analyzer.Bind(iv->var, iv->dom);
         }
       }
-      if (range_is_equal)
+
+      // Check P => C: ¬P ∨ C
+      bool prev_implies_curr =
+          analyzer.z3_prover.CanProve(tir::Or(tir::Not(prev_constr), curr_constr));
+      // Check C => P: ¬C ∨ P
+      bool curr_implies_prev =
+          analyzer.z3_prover.CanProve(tir::Or(tir::Not(curr_constr), prev_constr));
+
+      if (prev_implies_curr && curr_implies_prev) {
         return false;
+      }
     }
 
     for (size_t i = 0; i < prev.buffer_indices.size(); i++) {

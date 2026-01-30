@@ -125,6 +125,17 @@ struct ConstrSet {
     }
   }
 
+  /*! \brief Convert the constraint set to a conjunction (AND) of all constraints */
+  PrimExpr ToConjunction() const {
+    if (constrs_.empty())
+      return Bool(true);
+    PrimExpr result = constrs_[0].ToGenericConstr();
+    for (size_t i = 1; i < constrs_.size(); ++i) {
+      result = tir::And(result, constrs_[i].ToGenericConstr());
+    }
+    return result;
+  }
+
   void format(std::ostream &os) const {
     os << "ConstrSet(size=" << constrs_.size() << ") {\n";
     for (size_t i = 0; i < constrs_.size(); ++i) {
