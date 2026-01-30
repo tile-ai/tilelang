@@ -232,7 +232,7 @@ def plot_fragment_tv(
     frag : T.Fragment
         The fragment object that describes how indices are mapped.
     save_directory : str | None, optional
-        The directory where the output images will be saved (default is "./tmp").
+        The directory where the output images will be saved.
     name : str, optional
         The base name of the output files (default is "layout").
     apply_idx_fn : function, optional
@@ -263,21 +263,19 @@ def plot_fragment_tv(
             for src_idx, item in enumerate(itertools.product(*([range(i) for i in src_shape]))):
                 th = frag.map_forward_thread([rep] + list(item))[0].value
                 dst_idx = frag.map_forward_index([rep] + list(item))[0].value
-                name = "(" + ",".join([str(i) for i in apply_idx_fn(*item)]) + ")"
                 src_flat_idx[dst_idx, th] = src_idx
-                src_idx_str[dst_idx, th] = name
+                src_idx_str[dst_idx, th] = "(" + ",".join([str(i) for i in apply_idx_fn(*item)]) + ")"
     else:
         for src_idx, item in enumerate(itertools.product(*([range(i) for i in src_shape]))):
             th = frag.map_forward_thread(item)[0].value
             dst_idx = frag.map_forward_index(item)[0].value
-            name = "(" + ",".join([str(i) for i in apply_idx_fn(*item)]) + ")"
             src_flat_idx[dst_idx, th] = src_idx
-            src_idx_str[dst_idx, th] = name
+            src_idx_str[dst_idx, th] = "(" + ",".join([str(i) for i in apply_idx_fn(*item)]) + ")"
 
     plt.figure(figsize=(item_scale * num_thread_dim, item_scale * num_local_dim))
     cmap = plt.get_cmap(colormap)
     plt.pcolormesh(src_flat_idx, cmap=colormap, edgecolors="k", linewidth=0.5)
-    mx = np.max(src_flat_idx)
+    mx = np.max(src_flat_idx) + 1
     for i in range(num_local_dim):
         for j in range(num_thread_dim):
             r, g, b, a = cmap(src_flat_idx[i, j] / mx)
@@ -296,3 +294,4 @@ def plot_fragment_tv(
             formats = [formats]
         for fmt in formats:
             plt.savefig(save_dir / f"{name}.{fmt}", bbox_inches="tight", dpi=dpi)
+        plt.close()
