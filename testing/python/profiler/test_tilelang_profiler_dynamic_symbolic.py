@@ -1,5 +1,3 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
 """Test for profiler with dynamic symbolic constraints."""
 
 import tilelang
