@@ -7,3 +7,6 @@
 [submodule "3rdparty/composable_kernel"]
 	path = 3rdparty/composable_kernel
 	url = https://github.com/ROCm/composable_kernel
+[submodule "3rdparty/DLCompiler"]
+	path = 3rdparty/DLCompiler
+	url = https://github.com/DeepLink-org/DLCompiler.git
