@@ -20,6 +20,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../op/builtin.h"
+
 #include <unordered_map>
 #include <unordered_set>
 
@@ -371,6 +373,11 @@ using namespace tir::transform;
 
 tvm::transform::Pass LoopUnswitching() {
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    bool disable_loop_unswitching =
+        ctx->GetConfig<Bool>(kDisableLoopUnswitching, Bool(false)).value();
+    if (disable_loop_unswitching) {
+      return f;
+    }
     f.CopyOnWrite()->body = ApplyLoopUnswitching(f->body);
     return f;
   };

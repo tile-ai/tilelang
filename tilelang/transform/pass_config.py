@@ -84,6 +84,9 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_SHUFFLE_ELECT = "tl.disable_shuffle_elect"
     """Disable shuffle election optimization. Default: False"""
 
+    TL_DISABLE_LOOP_UNSWITCHING = "tl.disable_loop_unswitching"
+    """Disable loop unswitching optimization. Default: False"""
+
     TL_DISABLE_THREAD_STORAGE_SYNC = "tl.disable_thread_storage_sync"
     """Disable thread storage synchronization pass. When enabled, disables the
     automatic insertion of thread synchronization barriers (e.g., __syncthreads())
