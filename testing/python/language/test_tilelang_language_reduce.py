@@ -4,6 +4,7 @@ import tilelang as tl
 import tilelang.language as T
 
 tilelang.testing.set_random_seed()
+tilelang.disable_cache()
 
 
 def _make_shared_reduce(M, N, dtype, reduce_cb):
@@ -94,7 +95,16 @@ def run_reduce_sum(M, N, dtype=T.float32, mode="rr"):
         program = reduce_sum_ss(M, N, dtype)
     else:
         raise NotImplementedError("run_reduce_sum only supports rr and ss")
-    _run_program(program, lambda A: A.sum(dim=1))
+
+    import torch
+
+    def ref_fn(A):
+        res = A.sum(dim=1)
+        if A.dtype in [torch.uint32, torch.int32, torch.int64]:
+            return res.to(A.dtype)
+        return res
+
+    _run_program(program, ref_fn)
 
 
 def run_shared_reduce(program_builder, ref_program, M, N, dtype=T.float32):
@@ -217,6 +227,12 @@ def run_reduce_max_clear(M, N, dtype=T.float16):
 
 def test_reduce_max_clear():
     run_reduce_max_clear(256, 256, T.float16)
+
+
+def test_reduce_sum_int32():
+    run_reduce_sum(256, 256, T.int32)
+    run_reduce_sum(512, 128, T.int32)
+    run_reduce_sum(128, 512, T.int32)
 
 
 if __name__ == "__main__":
