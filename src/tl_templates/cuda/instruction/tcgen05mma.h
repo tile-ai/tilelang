@@ -85,7 +85,7 @@ TL_DEVICE void tcgen05mma_ts<DataType::kTensorFloat32>(
   }
 }
 
-// INT8 instruction kind
+// INT8 instruction kind (maps to kind::i8)
 template <>
 TL_DEVICE void tcgen05mma_ts<DataType::kInt8>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
@@ -102,6 +102,16 @@ TL_DEVICE void tcgen05mma_ts<DataType::kInt8>(
                  : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(desc_val),
                    "r"(scalec), "r"(mask0), "r"(mask1), "r"(mask2), "r"(mask3));
   }
+}
+
+// UINT8 maps to the same i8-kind instruction
+template <>
+TL_DEVICE void tcgen05mma_ts<DataType::kUInt8>(
+    uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ts<DataType::kInt8>(tmem_a, desc_b, tmem_c, scalec, desc_val,
+                                 mask0, mask1, mask2, mask3);
 }
 
 // FP8 family instruction kind (maps to f8f6f4)
@@ -183,7 +193,7 @@ TL_DEVICE void tcgen05mma_ss<DataType::kTensorFloat32>(
   }
 }
 
-// INT8 instruction kind
+// INT8 instruction kind (maps to kind::i8)
 template <>
 TL_DEVICE void tcgen05mma_ss<DataType::kInt8>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
@@ -200,6 +210,16 @@ TL_DEVICE void tcgen05mma_ss<DataType::kInt8>(
                  : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val),
                    "r"(scalec), "r"(mask0), "r"(mask1), "r"(mask2), "r"(mask3));
   }
+}
+
+// UINT8 maps to the same i8-kind instruction
+template <>
+TL_DEVICE void tcgen05mma_ss<DataType::kUInt8>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ss<DataType::kInt8>(desc_a, desc_b, tmem_c, scalec, desc_val,
+                                 mask0, mask1, mask2, mask3);
 }
 
 // FP8 family instruction kind (maps to f8f6f4)
@@ -305,6 +325,16 @@ TL_DEVICE void tcgen05mma_ws_ss<DataType::kInt8>(
         :
         : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec));
   }
+}
+
+// UINT8 ws, maps to the same i8-kind instruction
+template <>
+TL_DEVICE void tcgen05mma_ws_ss<DataType::kUInt8>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ws_ss<DataType::kInt8>(desc_a, desc_b, tmem_c, scalec, desc_val,
+                                    mask0, mask1, mask2, mask3);
 }
 
 // FP8 ws (maps to f8f6f4)
