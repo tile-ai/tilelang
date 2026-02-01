@@ -47,6 +47,7 @@ class TensorCoreIntrinEmitter:
         "float32": "fp32",
         "float64": "fp64",
         "int8": "int8",
+        "uint8": "uint8",
         "int32": "int32",
         "float8_e4m3": "e4m3",
         "float8_e4m3fn": "e4m3",
