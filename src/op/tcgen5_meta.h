@@ -164,7 +164,7 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
     c_format = 0;
   } else if (c_dtype.is_float()) {
     c_format = 1;
-  } else if (c_dtype.is_int()) {
+  } else if (c_dtype.is_int() && c_dtype.bits() == 32) {
     c_format = 2;
   } else {
     LOG(FATAL) << "Unsupported accumulator dtype for TCGEN5MMA descriptor: "
