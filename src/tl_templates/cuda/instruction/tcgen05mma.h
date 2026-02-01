@@ -85,7 +85,7 @@ TL_DEVICE void tcgen05mma_ts<DataType::kTensorFloat32>(
   }
 }
 
-// INT8 instruction kind(maps to kind::i8)
+// INT8 instruction kind (maps to kind::i8)
 template <>
 TL_DEVICE void tcgen05mma_ts<DataType::kInt8>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,

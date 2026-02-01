@@ -57,8 +57,8 @@ def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_
         A = torch.randint(-128, 128, (M, K), device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 128, (N, K), device="cuda", dtype=torch.int8)
     elif in_dtype is T.uint8:
-        A = torch.randint(0, 255, (M, K), device="cuda", dtype=torch.uint8)
-        B = torch.randint(0, 255, (N, K), device="cuda", dtype=torch.uint8)
+        A = torch.randint(0, 256, (M, K), device="cuda", dtype=torch.uint8)
+        B = torch.randint(0, 256, (N, K), device="cuda", dtype=torch.uint8)
     else:
         raise ValueError(f"Unsupported input dtype: {in_dtype}")
 
