@@ -41,7 +41,7 @@ def matmul_nt(M, N, K, bM, bN, bK, in_dtype, out_dtype, accum_dtype):
 def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype):
     func = matmul_nt(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype)
     kernel = tilelang.compile(
-        func, 
+        func,
         out_idx=-1,
         target="cuda",
         pass_configs={
