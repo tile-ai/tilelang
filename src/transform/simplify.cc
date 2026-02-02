@@ -32,6 +32,7 @@ struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
   bool propagate_knowns_to_simplify_expressions{};
   bool convert_boolean_to_and_of_ors{};
   bool apply_constraints_to_boolean_branches{};
+  bool enable_simplify_let_inline{true};
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -61,7 +62,11 @@ struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
                 "If true, simplify each branch of AND/OR under a constraints "
                 "provided by the other "
                 "branch",
-                refl::DefaultValue(false));
+                refl::DefaultValue(false))
+        .def_ro("enable_simplify_let_inline",
+                &SimplifyConfigNode::enable_simplify_let_inline,
+                "If true, inline let statements when possible",
+                refl::DefaultValue(true));
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.transform.SimplifyConfig",
                                     SimplifyConfigNode, BaseAttrsNode);
@@ -323,6 +328,8 @@ private:
   }
 
   bool CanInlineLetStmt(const LetStmtNode *op) {
+    if (!config_->enable_simplify_let_inline)
+      return false;
     if (is_const_number(op->value))
       return true;
     if (op->value.as<VarNode>())
