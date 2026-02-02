@@ -316,7 +316,8 @@ private:
   bool in_async_scope_{false};
   bool enable_non_predicated_{false};
   bool enable_predicated_{true};
-  Optional<PrimExpr> current_predicate_;  // Track predicate context for nested loads
+  Optional<PrimExpr>
+      current_predicate_; // Track predicate context for nested loads
 
   // Create access pointer for the buffer at given base offset
   PrimExpr CreateAccessPtr(const Buffer &buffer, const PrimExpr &base,
