@@ -10,6 +10,7 @@ import tilelang.testing
 def _apply_licm(func):
     """Apply LICM pass and return the transformed function."""
     from tilelang.transform import PassConfigKey
+
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOOP_INVARIANT_CODE_MOTION: True}):
         mod = tl.transform.LoopInvariantCodeMotion()(mod)
@@ -19,7 +20,7 @@ def _apply_licm(func):
 def _get_body(func):
     """Get the body of a function, skipping BlockRealize/Block if present."""
     body = func.body
-    while hasattr(body, 'block'):
+    while hasattr(body, "block"):
         body = body.block.body
     return body
 
@@ -47,9 +48,7 @@ def _find_lets_in_stmt(stmt, in_loop=False):
                 visit(s, in_loop)
         elif isinstance(node, tir.AttrStmt):
             visit(node.body, in_loop)
-        elif isinstance(node, tir.BufferStore):
-            pass
-        elif isinstance(node, tir.Evaluate):
+        elif isinstance(node, tir.BufferStore) or isinstance(node, tir.Evaluate):
             pass
         elif isinstance(node, tir.BlockRealize):
             visit(node.block.body, in_loop)
@@ -68,6 +67,7 @@ def _count_expr_occurrences(func, expr_pattern):
 # Phase 1 Tests: LetStmt Hoisting
 # =============================================================================
 
+
 def test_basic_let_hoist():
     """Basic case: loop-invariant let should be hoisted outside the loop."""
 
@@ -85,8 +85,8 @@ def test_basic_let_hoist():
     result = _apply_licm(before)
     outside, inside = _find_lets_in_stmt(_get_body(result))
 
-    assert "x" in outside, f"x should be outside loop"
-    assert "x" not in inside, f"x should not be inside loop"
+    assert "x" in outside, "x should be outside loop"
+    assert "x" not in inside, "x should not be inside loop"
 
 
 def test_let_chain_hoist():
@@ -107,10 +107,10 @@ def test_let_chain_hoist():
     result = _apply_licm(before)
     outside, inside = _find_lets_in_stmt(_get_body(result))
 
-    assert "x" in outside, f"x should be outside loop"
-    assert "y" in outside, f"y should be outside loop"
-    assert "x" not in inside, f"x should not be inside loop"
-    assert "y" not in inside, f"y should not be inside loop"
+    assert "x" in outside, "x should be outside loop"
+    assert "y" in outside, "y should be outside loop"
+    assert "x" not in inside, "x should not be inside loop"
+    assert "y" not in inside, "y should not be inside loop"
 
 
 def test_no_hoist_loop_variant():
@@ -128,8 +128,8 @@ def test_no_hoist_loop_variant():
     result = _apply_licm(before)
     outside, inside = _find_lets_in_stmt(_get_body(result))
 
-    assert "x" in inside, f"x should remain inside loop (uses loop var)"
-    assert "x" not in outside, f"x should not be outside loop"
+    assert "x" in inside, "x should remain inside loop (uses loop var)"
+    assert "x" not in outside, "x should not be outside loop"
 
 
 def test_partial_hoist():
@@ -150,10 +150,10 @@ def test_partial_hoist():
     result = _apply_licm(before)
     outside, inside = _find_lets_in_stmt(_get_body(result))
 
-    assert "x" in outside, f"x should be outside loop"
-    assert "x" not in inside, f"x should not be inside loop"
-    assert "y" in inside, f"y should remain inside loop (uses loop var)"
-    assert "y" not in outside, f"y should not be outside loop"
+    assert "x" in outside, "x should be outside loop"
+    assert "x" not in inside, "x should not be inside loop"
+    assert "y" in inside, "y should remain inside loop (uses loop var)"
+    assert "y" not in outside, "y should not be outside loop"
 
 
 def test_no_hoist_reads_written_buffer():
@@ -172,12 +172,13 @@ def test_no_hoist_reads_written_buffer():
     result = _apply_licm(before)
     outside, inside = _find_lets_in_stmt(_get_body(result))
 
-    assert "x" in inside, f"x should remain inside loop (reads written buffer)"
+    assert "x" in inside, "x should remain inside loop (reads written buffer)"
 
 
 # =============================================================================
 # Phase 2 Tests: Subexpression Extraction
 # =============================================================================
+
 
 def test_extract_repeated_subexpr():
     """Repeated loop-invariant subexpressions should be extracted."""
@@ -298,6 +299,7 @@ def test_extract_single_occurrence_high_complexity():
 # Combined Tests
 # =============================================================================
 
+
 def test_combined_let_and_subexpr():
     """Test both LetStmt hoisting and subexpression extraction together."""
 
@@ -319,10 +321,10 @@ def test_combined_let_and_subexpr():
     outside, inside = _find_lets_in_stmt(_get_body(result))
 
     # 'offset' should be hoisted
-    assert "offset" in outside, f"offset should be hoisted"
+    assert "offset" in outside, "offset should be hoisted"
     # CSE var should be created for (base + scale)
     cse_vars = [v for v in outside if v.startswith("cse_var")]
-    assert len(cse_vars) >= 1, f"Should have extracted CSE variable"
+    assert len(cse_vars) >= 1, "Should have extracted CSE variable"
 
 
 def test_nested_loop():
@@ -362,8 +364,8 @@ def test_parallel_loop():
     result = _apply_licm(before)
     outside, inside = _find_lets_in_stmt(_get_body(result))
 
-    assert "x" in outside, f"x should be outside loop"
-    assert "x" not in inside, f"x should not be inside loop"
+    assert "x" in outside, "x should be outside loop"
+    assert "x" not in inside, "x should not be inside loop"
 
 
 def test_no_change_needed():
@@ -400,13 +402,14 @@ def test_config_custom_threshold():
 
     # With higher threshold (min_complexity_for_licm=5), should NOT extract
     from tilelang.transform import PassConfigKey
+
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    with tvm.transform.PassContext(config={
-        PassConfigKey.TL_ENABLE_LOOP_INVARIANT_CODE_MOTION: True,
-        PassConfigKey.TL_LICM: {
-            PassConfigKey.TL_LICM_MIN_COMPLEXITY_FOR_LICM: 5
+    with tvm.transform.PassContext(
+        config={
+            PassConfigKey.TL_ENABLE_LOOP_INVARIANT_CODE_MOTION: True,
+            PassConfigKey.TL_LICM: {PassConfigKey.TL_LICM_MIN_COMPLEXITY_FOR_LICM: 5},
         }
-    }):
+    ):
         result_strict = tl.transform.LoopInvariantCodeMotion()(mod)["main"]
     outside_strict, _ = _find_lets_in_stmt(_get_body(result_strict))
     cse_vars_strict = [v for v in outside_strict if v.startswith("cse_var")]
@@ -435,20 +438,21 @@ def test_enable_licm():
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     result_disabled = tl.transform.LoopInvariantCodeMotion()(mod)["main"]
     outside_disabled, inside_disabled = _find_lets_in_stmt(_get_body(result_disabled))
-    assert "x" in inside_disabled, f"x should remain inside loop when LICM disabled"
-    assert "x" not in outside_disabled, f"x should not be outside when LICM disabled"
+    assert "x" in inside_disabled, "x should remain inside loop when LICM disabled"
+    assert "x" not in outside_disabled, "x should not be outside when LICM disabled"
 
     # With LICM enabled, x should be hoisted
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOOP_INVARIANT_CODE_MOTION: True}):
         result_enabled = tl.transform.LoopInvariantCodeMotion()(mod)["main"]
     outside_enabled, inside_enabled = _find_lets_in_stmt(_get_body(result_enabled))
-    assert "x" in outside_enabled, f"x should be outside loop when LICM enabled"
+    assert "x" in outside_enabled, "x should be outside loop when LICM enabled"
 
 
 # =============================================================================
 # Debug Test
 # =============================================================================
+
 
 def test_print_result():
     """Debug test to print the transformation result."""
