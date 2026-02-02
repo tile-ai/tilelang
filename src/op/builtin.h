@@ -57,7 +57,8 @@ static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kDisableLoopUnswitching =
     "tl.disable_loop_unswitching";
-static constexpr const char *kEnableLICM = "tl.enable_licm";
+static constexpr const char *kEnableLoopInvariantCodeMotion =
+    "tl.enable_loop_invariant_code_motion";
 
 /*!
  * \brief Enable lowering non-predicated global load/store to ldg/stg intrinsics

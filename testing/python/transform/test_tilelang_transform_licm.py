@@ -11,7 +11,7 @@ def _apply_licm(func):
     """Apply LICM pass and return the transformed function."""
     from tilelang.transform import PassConfigKey
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LICM: True}):
+    with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOOP_INVARIANT_CODE_MOTION: True}):
         mod = tl.transform.LoopInvariantCodeMotion()(mod)
     return mod["main"]
 
@@ -402,7 +402,7 @@ def test_config_custom_threshold():
     from tilelang.transform import PassConfigKey
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     with tvm.transform.PassContext(config={
-        PassConfigKey.TL_ENABLE_LICM: True,
+        PassConfigKey.TL_ENABLE_LOOP_INVARIANT_CODE_MOTION: True,
         PassConfigKey.TL_LICM: {
             PassConfigKey.TL_LICM_MIN_COMPLEXITY_FOR_LICM: 5
         }
@@ -440,7 +440,7 @@ def test_enable_licm():
 
     # With LICM enabled, x should be hoisted
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LICM: True}):
+    with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOOP_INVARIANT_CODE_MOTION: True}):
         result_enabled = tl.transform.LoopInvariantCodeMotion()(mod)["main"]
     outside_enabled, inside_enabled = _find_lets_in_stmt(_get_body(result_enabled))
     assert "x" in outside_enabled, f"x should be outside loop when LICM enabled"

@@ -121,7 +121,7 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_LOOP_UNSWITCHING = "tl.disable_loop_unswitching"
     """Disable loop unswitching optimization. Default: False"""
 
-    TL_ENABLE_LICM = "tl.enable_licm"
+    TL_ENABLE_LOOP_INVARIANT_CODE_MOTION = "tl.enable_loop_invariant_code_motion"
     """Enable Loop Invariant Code Motion (LICM) optimization. Default: False"""
 
     TL_LICM = "tl.LoopInvariantCodeMotion"

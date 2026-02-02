@@ -590,8 +590,9 @@ using namespace tir::transform;
 tvm::transform::Pass LoopInvariantCodeMotion() {
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     // Check if LICM is enabled (default: false)
-    bool enable_licm = ctx->GetConfig<Bool>(kEnableLICM, Bool(false)).value();
-    if (!enable_licm) {
+    bool enabled =
+        ctx->GetConfig<Bool>(kEnableLoopInvariantCodeMotion, Bool(false)).value();
+    if (!enabled) {
       return f;
     }
 
