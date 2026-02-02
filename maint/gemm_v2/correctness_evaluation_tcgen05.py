@@ -131,25 +131,38 @@ M_VALUES = [32, 64, 128, 256]
 N_VALUES = [64, 128, 256, 512]
 K_VALUES = [16, 32, 64, 128]
 K_VALUES_8Bit = [32, 64, 128]
-FALSE_TRUE_CASES = [
-    pytest.param(
-        k,
-        T.float16,
-        T.float32,
-        T.float32,
-        id=f"K{k}-float16-float-float",
-    )
-    for k in K_VALUES
-] + [
-    pytest.param(
-        k,
-        T.float8_e5m2,
-        T.float32,
-        T.float32,
-        id="K32-float8_e5m2-float32-float32",
-    )
-    for k in K_VALUES_8Bit
-]
+FALSE_TRUE_CASES = (
+    [
+        pytest.param(
+            k,
+            T.float16,
+            T.float32,
+            T.float32,
+            id=f"K{k}-float16-float-float",
+        )
+        for k in K_VALUES
+    ]
+    + [
+        pytest.param(
+            k,
+            T.float8_e5m2,
+            T.float32,
+            T.float32,
+            id="K32-float8_e5m2-float32-float32",
+        )
+        for k in K_VALUES_8Bit
+    ]
+    + [
+        pytest.param(
+            k,
+            T.int8,
+            T.int32,
+            T.int32,
+            id="K32-int8-int32-int32",
+        )
+        for k in K_VALUES_8Bit
+    ]
+)
 
 TRANS_CASES = [
     pytest.param(False, True, id="nt"),

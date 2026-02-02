@@ -144,7 +144,8 @@ public:
 };
 
 /*!
- * \brief Check if a statement contains any CallNode, excluding a specific If
+ * \brief Check if a statement contains any CallNode, excluding matching If
+ * nodes
  *
  * Loop unswitching is unsafe when there are function calls OUTSIDE the
  * hoisted if statement, because those calls (originally executed by all
@@ -153,15 +154,19 @@ public:
  *
  * Calls INSIDE the if are safe because they were already conditionally
  * executed before unswitching.
+ *
+ * Since we replace ALL if statements with matching conditions, we need to
+ * exclude all such if statements when checking for calls.
  */
 class CallCheckerExcludingIf : public StmtExprVisitor {
 public:
   bool has_call = false;
-  const IfThenElseNode *excluded_if = nullptr;
+  PrimExpr excluded_condition;
 
   void VisitStmt_(const IfThenElseNode *op) final {
-    if (op == excluded_if) {
-      // Skip the interior of the excluded if statement
+    // Skip the interior of any if statement with matching condition
+    if (excluded_condition.defined() &&
+        StructuralEqual()(op->condition, excluded_condition)) {
       return;
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -237,18 +242,35 @@ bool IsLoopInvariant(const PrimExpr &cond, const Var &loop_var,
 }
 
 /*!
- * \brief Replace a specific if node with its then/else branch
+ * \brief Replace if nodes with matching condition with their then/else branch
+ *
+ * When hoisting a condition out of a loop, we need to replace ALL if statements
+ * with the same condition, not just the first one found. This ensures that
+ * in the then-branch all matching conditions are replaced with their then-case,
+ * and in the else-branch all matching conditions are replaced with their
+ * else-case.
+ *
+ * Also removes LetStmts for variables that have been hoisted, since they are
+ * now redundant (the variable is already bound outside the loop).
  */
 class IfBranchReplacer : public StmtExprMutator {
 public:
-  const IfThenElseNode *target;
+  PrimExpr hoisted_condition;
   bool take_then;
+  std::unordered_set<const VarNode *> hoisted_vars;
 
-  IfBranchReplacer(const IfThenElseNode *target, bool take_then)
-      : target(target), take_then(take_then) {}
+  IfBranchReplacer(
+      const PrimExpr &condition, bool take_then,
+      const std::vector<std::pair<Var, PrimExpr>> &hoisted_let_bindings)
+      : hoisted_condition(condition), take_then(take_then) {
+    for (const auto &binding : hoisted_let_bindings) {
+      hoisted_vars.insert(binding.first.get());
+    }
+  }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    if (op == target) {
+    // Replace if the condition is structurally equal to the hoisted condition
+    if (StructuralEqual()(op->condition, hoisted_condition)) {
       if (take_then) {
         return VisitStmt(op->then_case);
       } else {
@@ -257,6 +279,43 @@ public:
       }
     }
     return StmtExprMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const LetStmtNode *op) final {
+    // Remove LetStmts for hoisted variables (they are now bound outside the
+    // loop)
+    if (hoisted_vars.count(op->var.get())) {
+      return VisitStmt(op->body);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+};
+
+/*!
+ * \brief Collect Let-bound variables used in an expression
+ */
+class LetVarCollector : public ExprVisitor {
+public:
+  std::vector<std::pair<Var, PrimExpr>> used_let_bindings;
+  const std::unordered_map<const VarNode *, PrimExpr> &let_bindings;
+  std::unordered_set<const VarNode *> visited;
+
+  explicit LetVarCollector(
+      const std::unordered_map<const VarNode *, PrimExpr> &bindings)
+      : let_bindings(bindings) {}
+
+  void VisitExpr_(const VarNode *op) final {
+    if (visited.count(op))
+      return;
+    auto it = let_bindings.find(op);
+    if (it != let_bindings.end()) {
+      visited.insert(op);
+      // First recursively collect Let-bound vars used in this binding's value
+      VisitExpr(it->second);
+      // Then add this binding (so dependencies come first)
+      used_let_bindings.push_back(
+          std::make_pair(ffi::GetRef<Var>(op), it->second));
+    }
   }
 };
 
@@ -271,6 +330,8 @@ public:
   const Var &loop_var;
   const std::unordered_set<const VarNode *> &written_vars;
   std::unordered_map<const VarNode *, PrimExpr> let_bindings_;
+  // Let bindings that need to be hoisted with the condition
+  std::vector<std::pair<Var, PrimExpr>> hoisted_let_bindings;
 
   HoistableIfFinder(const Var &loop_var,
                     const std::unordered_set<const VarNode *> &written_vars)
@@ -294,6 +355,10 @@ public:
     if (IsLoopInvariant(op->condition, loop_var, written_vars,
                         &let_bindings_)) {
       found = op;
+      // Collect Let-bound variables used in the condition
+      LetVarCollector collector(let_bindings_);
+      collector(op->condition);
+      hoisted_let_bindings = std::move(collector.used_let_bindings);
       return;
     }
     StmtVisitor::VisitStmt_(op);
@@ -334,7 +399,7 @@ public:
     // would split them into different code paths, breaking synchronization.
     // Calls inside the if are already conditionally executed, so they're safe.
     CallCheckerExcludingIf call_checker;
-    call_checker.excluded_if = finder.found;
+    call_checker.excluded_condition = finder.found->condition;
     call_checker(body);
     if (call_checker.has_call) {
       if (body.same_as(op->body)) {
@@ -346,9 +411,12 @@ public:
 
     // Unswitch: create two loop versions
     const IfThenElseNode *if_node = finder.found;
+    PrimExpr hoisted_condition = if_node->condition;
 
-    Stmt then_body = IfBranchReplacer(if_node, true)(body);
-    Stmt else_body = IfBranchReplacer(if_node, false)(body);
+    Stmt then_body = IfBranchReplacer(hoisted_condition, true,
+                                      finder.hoisted_let_bindings)(body);
+    Stmt else_body = IfBranchReplacer(hoisted_condition, false,
+                                      finder.hoisted_let_bindings)(body);
 
     // Create new loop_var for else_loop to maintain SSA form
     Var else_loop_var(op->loop_var->name_hint, op->loop_var->dtype);
@@ -359,7 +427,16 @@ public:
     For else_loop(else_loop_var, op->min, op->extent, op->kind, else_body,
                   op->thread_binding, op->annotations);
 
-    return IfThenElse(if_node->condition, then_loop, else_loop);
+    Stmt result = IfThenElse(if_node->condition, then_loop, else_loop);
+
+    // Wrap with hoisted Let bindings (in reverse order so first binding is
+    // outermost)
+    for (auto it = finder.hoisted_let_bindings.rbegin();
+         it != finder.hoisted_let_bindings.rend(); ++it) {
+      result = LetStmt(it->first, it->second, result);
+    }
+
+    return result;
   }
 };
 
