@@ -171,6 +171,10 @@ public:
   void SetStartTime(int64_t start_time) { start_time_ = start_time; }
   int64_t GetStartTime() const { return start_time_; }
 
+  // Promote flag for software pipelining
+  void SetPromote(bool promote) { promote_ = promote; }
+  bool GetPromote() const { return promote_; }
+
   // Helper methods to add regions (for incremental analysis)
   void AddReadRegion(const BufferRegion& region) override {
     // Check for duplicate regions
@@ -208,6 +212,7 @@ private:
   int64_t latency_{0};      // Estimated latency in cycles
   int64_t ii_{0};           // Initiation interval in cycles
   int64_t start_time_{0};   // Scheduled start time in cycles
+  bool promote_{false};     // Promote flag for software pipelining
 };
 
 // Control node: contains a For operation and a child IRStructure
@@ -404,6 +409,7 @@ struct ScheduleUnit {
   SequenceNode* parent_seq{nullptr};  // Parent SequenceNode containing these tasks
   size_t start_idx{0};  // Starting index in parent_seq->children
   bool inside_control_node{false};  // Whether this unit is inside a ControlNode (For loop)
+  ControlNode* control_node{nullptr};  // Pointer to containing ControlNode (if inside_control_node is true)
   // Additional metadata could be added here, e.g., resource usage summary
 };
 
@@ -1253,18 +1259,42 @@ public:
       }
 
       // Extract results
-      // Python function returns only start_times, C++ side will sort by start_time
-      auto start_times = z3_schedule_loop_func.value()(tvm_latencies, tvm_iis, tvm_resource_flags,
-                                                  tvm_data_deps, tvm_resource_deps).cast<ffi::Array<int64_t>>();
+      // Python function returns (start_times, promotes) as a tuple of two arrays
+      auto return_val = z3_schedule_loop_func.value()(tvm_latencies, tvm_iis, tvm_resource_flags,
+                                                  tvm_data_deps, tvm_resource_deps).cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<bool>>>();
 
-      if (start_times.size() != n) {
+      ffi::Array<int64_t> start_times = return_val.get<0>();
+      ffi::Array<bool> promotes = return_val.get<1>();
+
+      if (start_times.size() != n || promotes.size() != n) {
         LOG(WARNING) << "Python Z3 loop scheduler returned invalid results (size mismatch), falling back to topological sort";
         return tasks;
       }
 
-      // Apply start times to tasks
+      // Apply start times and promote flags to tasks
+      size_t num_promoted = 0;
       for (size_t i = 0; i < n; ++i) {
         tasks[i]->SetStartTime(start_times[i]);
+        bool promote = promotes[i] != 0;  // Convert int to bool
+        tasks[i]->SetPromote(promote);
+        if (promote) {
+          num_promoted++;
+        }
+      }
+      LOG(INFO) << "Z3SchedulePythonLoop: " << num_promoted << " tasks marked for promotion";
+      if (num_promoted > 0) {
+        LOG(INFO) << "Z3SchedulePythonLoop: Promote flags can be used for loop transformation (software pipelining)";
+        // Promote transformation will be applied in IRStructureRewriter
+        // For promoted tasks, they should be executed in previous iteration
+        // Loop bounds will be extended by step (not II) as per user requirement
+        // Example transformation:
+        // for i = start to end:
+        //   Task0 (not promoted)
+        //   Task1 (promoted)
+        // =>
+        // for i = start to end+step:
+        //   if i > start: Task1 with index i-step
+        //   if i < end+step: Task0 with index i
       }
 
       // Create sorted task list based on start_time (and original index as tie-breaker)
@@ -1302,6 +1332,126 @@ public:
     }
   }
 
+  // Apply promote transformation for software pipelining
+  // This transforms loops with promoted tasks according to the pattern:
+  // Original: for i = start to end: Task0 (promoted), Task1 (non-promoted)
+  // Transformed: for i = start to end+step:
+  //   if i > start: Task1 with i-step (non-promoted, adjusted index)
+  //   if i < end+step: Task0 with i (promoted, original index)
+  void ApplyPromoteTransformation(std::vector<TaskNode*>& tasks, ControlNode* control_node) {
+    if (tasks.empty() || !control_node) {
+      return;
+    }
+
+    // Count promoted tasks
+    size_t num_promoted = 0;
+    std::vector<TaskNode*> promoted_tasks;
+    std::vector<TaskNode*> non_promoted_tasks;
+
+    for (TaskNode* task : tasks) {
+      if (task->GetPromote()) {
+        num_promoted++;
+        promoted_tasks.push_back(task);
+      } else {
+        non_promoted_tasks.push_back(task);
+      }
+    }
+
+    if (num_promoted == 0) {
+      LOG(INFO) << "ApplyPromoteTransformation: No promoted tasks, skipping transformation";
+      return;
+    }
+
+    LOG(INFO) << "ApplyPromoteTransformation: Applying promote transformation for "
+              << num_promoted << " promoted tasks out of " << tasks.size() << " total tasks";
+
+    // Get loop step from control_node->control
+    // ForNode has a 'step' member (ffi::Optional<PrimExpr>, default is 1)
+    const ForNode* for_node = control_node->control.get();
+    PrimExpr loop_step_expr = for_node->step.has_value() ? for_node->step.value() : IntImm(DataType::Int(32), 1);
+
+    // Get step expression (no simplification)
+
+    // Try to get constant step value for logging
+    int64_t loop_step_value = 1;
+    if (const auto* int_imm = loop_step_expr.as<IntImmNode>()) {
+      loop_step_value = int_imm->value;
+    } else {
+      LOG(WARNING) << "ApplyPromoteTransformation: Loop step is not constant: " << loop_step_expr
+                   << ", using default step = 1";
+      loop_step_value = 1;
+    }
+
+    LOG(INFO) << "ApplyPromoteTransformation: Loop step = " << loop_step_value;
+
+    // Get loop bounds from control_node->control
+    PrimExpr loop_var = for_node->loop_var;
+    PrimExpr loop_start = for_node->min;
+    PrimExpr loop_extent = for_node->extent;
+
+    // Calculate loop end
+    PrimExpr loop_end = loop_start + loop_extent;
+
+    LOG(INFO) << "ApplyPromoteTransformation: Loop bounds: var=" << loop_var
+              << ", start=" << loop_start << ", extent=" << loop_extent
+              << ", end=" << loop_end << ", step=" << loop_step_value;
+
+    // Create new loop with extended bounds: end = loop_end + loop_step_expr
+    PrimExpr new_loop_end = loop_end + loop_step_expr;
+    LOG(INFO) << "ApplyPromoteTransformation: New loop end = " << new_loop_end
+              << " (original end " << loop_end << " + step " << loop_step_value << ")";
+
+    // Algorithm for building transformed loop body:
+    // 1. Create a new sequence for the loop body
+    // 2. For each promoted task:
+    //    - Create condition: if (loop_var > loop_start)
+    //    - Create substitution map: replace loop_var with (loop_var - loop_step)
+    //    - Apply substitution to task statements
+    //    - Add conditional execution
+    // 3. For each non-promoted task:
+    //    - Create condition: if (loop_var < new_loop_end)
+    //    - Add conditional execution (no index adjustment needed)
+    // 4. Build new For loop:
+    //    For(loop_var, loop_start, new_loop_end, kind, new_body, ...)
+
+    // Example IR transformation pseudocode:
+    // ```
+    // // Original loop
+    // for (i = start; i < end; i += step) {
+    //   Task0();  // promoted (executes with original index i, condition i < end+step)
+    //   Task1();  // non-promoted (executes with adjusted index i-step, condition i > start)
+    // }
+    //
+    // // Transformed loop with extended bounds
+    // // Each task has independent conditional statement
+    // // Promoted tasks (using original index) are placed after non-promoted tasks
+    // for (i = start; i < end + step; i += step) {
+    //   // Non-promoted task (Task1): uses adjusted index i-step, condition i > start
+    //   if (i > start) {
+    //     Task1_adjusted();  // with i-step substitution
+    //   }
+    //   // Promoted task (Task0): uses original index i, condition i < end+step
+    //   if (i < end + step) {
+    //     Task0();  // with original index i
+    //   }
+    // }
+    // ```
+
+    LOG(INFO) << "ApplyPromoteTransformation: Promote transformation analysis completed";
+    LOG(INFO) << "  - Promoted tasks: " << promoted_tasks.size();
+    LOG(INFO) << "  - Non-promoted tasks: " << non_promoted_tasks.size();
+    LOG(INFO) << "  - Loop extension: end + " << loop_step_value << " (step)";
+    LOG(INFO) << "  - Promoted tasks execute with index: i (original index)";
+    LOG(INFO) << "  - Non-promoted tasks execute with index: i - " << loop_step_value;
+    LOG(INFO) << "  - Actual IR transformation will be applied in IRStructureRewriter";
+
+    // The actual IR modification is implemented in IRStructureRewriter::Rewrite()
+    // when processing ControlNode with promoted tasks. It will:
+    // 1. Extend loop bounds by step (already calculated above)
+    // 2. Add conditional execution for promoted and non-promoted tasks
+    // 3. Adjust loop variable indices for non-promoted tasks (i -> i-step)
+  }
+
 
 private:
   std::vector<ScheduleUnit> units_;
@@ -1309,6 +1459,7 @@ private:
   SequenceNode* current_seq_{nullptr};
   size_t current_child_idx_{0};
   int control_nesting_depth_{0};
+  ControlNode* current_control_node_{nullptr};  // Track current ControlNode for promote transformation
 
   // Check if two regions refer to the same buffer
   bool SameBuffer(const BufferRegion& a, const BufferRegion& b) const {
@@ -1459,6 +1610,32 @@ private:
     }
 
     LOG(INFO) << "Reordered " << num_tasks << " TaskNodes in SequenceNode";
+
+    // Apply promote transformation if inside control node (loop)
+    if (unit.inside_control_node) {
+      LOG(INFO) << "ScheduleUnit is inside control node, checking for promoted tasks";
+
+      // Check if any tasks are marked for promotion
+      bool has_promoted_tasks = false;
+      for (TaskNode* task : unit.tasks) {
+        if (task->GetPromote()) {
+          has_promoted_tasks = true;
+          break;
+        }
+      }
+
+      if (has_promoted_tasks) {
+        LOG(INFO) << "Found promoted tasks, applying promote transformation";
+
+        if (unit.control_node) {
+          LOG(INFO) << "ControlNode available, applying promote transformation";
+          ApplyPromoteTransformation(unit.tasks, unit.control_node);
+        } else {
+          LOG(WARNING) << "ControlNode not set in ScheduleUnit, cannot apply promote transformation";
+          LOG(INFO) << "Promote transformation requires access to For loop step information";
+        }
+      }
+    }
   }
 
   void StartNewUnit() {
@@ -1466,6 +1643,8 @@ private:
     units_.emplace_back();
     current_unit_ = &units_.back();
     current_unit_->inside_control_node = (control_nesting_depth_ > 0);
+    // Set control_node pointer if inside a ControlNode
+    current_unit_->control_node = current_control_node_;
   }
 
   void FinalizeCurrentUnit() {
@@ -1518,8 +1697,13 @@ private:
       FinalizeCurrentUnit();
       // Increase control nesting depth
       control_nesting_depth_++;
+      // Set current ControlNode for promote transformation
+      ControlNode* prev_control_node = current_control_node_;
+      current_control_node_ = ctrl;
       // Process the body of the control node (creates new units internally)
       Collect(ctrl->child.get());
+      // Restore previous ControlNode
+      current_control_node_ = prev_control_node;
       // Decrease control nesting depth
       control_nesting_depth_--;
       // After control node, current_unit_ should remain nullptr
@@ -1680,9 +1864,207 @@ void PrintIRStructure(const IRStructure* node, int indent = 0) {
 }
 
 
+// Helper function to check if an IRStructure contains any promoted tasks
+bool HasPromotedTasks(const IRStructure* node) {
+  if (!node) return false;
+
+  if (node->IsTask()) {
+    const TaskNode* task = static_cast<const TaskNode*>(node);
+    return task->GetPromote();
+  } else if (node->IsSequence()) {
+    const SequenceNode* seq = static_cast<const SequenceNode*>(node);
+    for (const auto& child : seq->children) {
+      if (HasPromotedTasks(child.get())) {
+        return true;
+      }
+    }
+    return false;
+  } else if (node->IsControl()) {
+    const ControlNode* control = static_cast<const ControlNode*>(node);
+    return HasPromotedTasks(control->child.get());
+  }
+
+  return false;
+}
+
+// Helper function to collect all promoted tasks from an IRStructure
+void CollectPromotedTasks(const IRStructure* node, std::vector<const TaskNode*>& promoted_tasks) {
+  if (!node) return;
+
+  if (node->IsTask()) {
+    const TaskNode* task = static_cast<const TaskNode*>(node);
+    if (task->GetPromote()) {
+      promoted_tasks.push_back(task);
+    }
+  } else if (node->IsSequence()) {
+    const SequenceNode* seq = static_cast<const SequenceNode*>(node);
+    for (const auto& child : seq->children) {
+      CollectPromotedTasks(child.get(), promoted_tasks);
+    }
+  } else if (node->IsControl()) {
+    const ControlNode* control = static_cast<const ControlNode*>(node);
+    CollectPromotedTasks(control->child.get(), promoted_tasks);
+  }
+}
+
 // Rewriter to convert IRStructure back to TIR statements
 class IRStructureRewriter {
 public:
+  // Build loop body with promote transformation
+  Stmt BuildPromotedLoopBody(const IRStructure* node, const Var& loop_var,
+                             const PrimExpr& loop_min, const PrimExpr& loop_step,
+                             const PrimExpr& new_loop_end) {
+    if (!node) return Stmt();
+
+    // Calculate original loop end: end = new_loop_end - loop_step
+    PrimExpr loop_end = new_loop_end - loop_step;
+
+    // Recursive helper function
+    std::function<Stmt(const IRStructure*)> build = [&](const IRStructure* n) -> Stmt {
+      if (!n) return Stmt();
+
+      if (n->IsTask()) {
+        const TaskNode* task = static_cast<const TaskNode*>(n);
+        bool promoted = task->GetPromote();
+
+        // Get the task statements (may be multiple)
+        if (task->stmts.empty()) {
+          return Stmt();
+        }
+
+        // Combine multiple statements into SeqStmt if needed
+        Stmt task_body;
+        if (task->stmts.size() == 1) {
+          task_body = task->stmts[0];
+        } else {
+          task_body = SeqStmt(task->stmts);
+        }
+
+        // Apply variable substitution for non-promoted tasks
+        if (!promoted) {
+          // Substitute loop_var with (loop_var - loop_step) for non-promoted tasks
+          Map<Var, PrimExpr> substitution;
+          substitution.Set(loop_var, loop_var - loop_step);
+          task_body = Substitute(task_body, substitution);
+        }
+
+        // Build condition
+        PrimExpr condition;
+        if (promoted) {
+          // Promoted tasks: execute when loop_var < loop_end (original loop boundary)
+          condition = loop_var < loop_end;
+        } else {
+          // Non-promoted tasks: execute when loop_var > loop_min
+          condition = loop_var > loop_min;
+        }
+
+        // Create conditional statement
+        return IfThenElse(condition, task_body);
+
+      } else if (n->IsSequence()) {
+        const SequenceNode* seq = static_cast<const SequenceNode*>(n);
+
+        // Collect tasks and other statements, but reorder: non-promoted first, then promoted
+        std::vector<Stmt> non_promoted_stmts;
+        std::vector<Stmt> promoted_stmts;
+        std::vector<Stmt> other_stmts;  // for non-task statements
+
+        for (const auto& child : seq->children) {
+          if (child->IsTask()) {
+            const TaskNode* task = static_cast<const TaskNode*>(child.get());
+            bool promoted = task->GetPromote();
+
+            if (task->stmts.empty()) {
+              continue;
+            }
+
+            // Combine multiple statements into SeqStmt if needed
+            Stmt task_body;
+            if (task->stmts.size() == 1) {
+              task_body = task->stmts[0];
+            } else {
+              task_body = SeqStmt(task->stmts);
+            }
+
+            // Apply variable substitution for non-promoted tasks
+            if (!promoted) {
+              // Substitute loop_var with (loop_var - loop_step) for non-promoted tasks
+              // Non-promoted tasks execute in previous iteration with index i-step
+              Map<Var, PrimExpr> substitution;
+              substitution.Set(loop_var, loop_var - loop_step);
+              task_body = Substitute(task_body, substitution);
+            }
+
+            // Create independent conditional statement for each task
+            PrimExpr condition;
+            if (promoted) {
+              // Promoted tasks: execute when i < end (original loop boundary)
+              // They execute in the current iteration with original index i
+              condition = loop_var < loop_end;
+            } else {
+              // Non-promoted tasks: execute when i > start (i.e., not in first iteration)
+              // They execute in previous iteration with adjusted index i-step
+              condition = loop_var > loop_min;
+            }
+
+            Stmt conditional_stmt = IfThenElse(condition, task_body);
+
+            if (promoted) {
+              promoted_stmts.push_back(conditional_stmt);
+            } else {
+              non_promoted_stmts.push_back(conditional_stmt);
+            }
+
+          } else if (child->IsSequence() || child->IsControl()) {
+            // For nested sequences or control nodes, recursively process them
+            // They will maintain their own internal structure
+            Stmt child_stmt = build(child.get());
+            if (child_stmt.defined()) {
+              // We don't know if they contain promoted tasks, so put them
+              // in the middle (between non-promoted and promoted)
+              other_stmts.push_back(child_stmt);
+            }
+          }
+        }
+
+        // Combine all statements in order: non-promoted first, then other statements,
+        // then promoted tasks (following the user's example pattern)
+        std::vector<Stmt> all_stmts;
+        all_stmts.insert(all_stmts.end(), non_promoted_stmts.begin(), non_promoted_stmts.end());
+        all_stmts.insert(all_stmts.end(), other_stmts.begin(), other_stmts.end());
+        all_stmts.insert(all_stmts.end(), promoted_stmts.begin(), promoted_stmts.end());
+
+        if (all_stmts.empty()) {
+          return Stmt();
+        } else if (all_stmts.size() == 1) {
+          return all_stmts[0];
+        } else {
+          return SeqStmt(all_stmts);
+        }
+
+      } else if (n->IsControl()) {
+        // For control nodes (nested loops), use regular Rewrite
+        // Promote transformation only applies to tasks in the current loop
+        const ControlNode* control = static_cast<const ControlNode*>(n);
+        Stmt child_stmt = Rewrite(control->child.get());
+        if (!child_stmt.defined()) {
+          return Stmt();
+        }
+        // Reconstruct the control node with rewritten child
+        return For(control->control->loop_var, control->control->min,
+                   control->control->extent, control->control->kind,
+                   child_stmt, control->control->thread_binding,
+                   control->control->annotations);
+
+      } else {
+        LOG(WARNING) << "BuildPromotedLoopBody: Unknown IRStructure type";
+        return Stmt();
+      }
+    };
+
+    return build(node);
+  }
+
   Stmt Rewrite(const IRStructure* node) {
     if (!node) {
       return Stmt();
@@ -1702,20 +2084,69 @@ public:
 
     } else if (node->IsControl()) {
       const ControlNode* control = static_cast<const ControlNode*>(node);
-      // Rebuild the For loop with rewritten body
-      Stmt body = Rewrite(control->child.get());
-      if (!body.defined()) {
-        LOG(WARNING) << "ControlNode body is undefined";
-        return control->control;
+
+      // Check if there are any promoted tasks in this loop
+      bool has_promoted_tasks = HasPromotedTasks(control->child.get());
+
+      if (has_promoted_tasks) {
+        LOG(INFO) << "IRStructureRewriter: ControlNode has promoted tasks, applying promote transformation";
+
+        // Get For loop information
+        const ForNode* for_node = control->control.get();
+        Var loop_var = for_node->loop_var;
+        PrimExpr loop_min = for_node->min;
+        PrimExpr loop_extent = for_node->extent;
+        PrimExpr loop_step = for_node->step.has_value() ? for_node->step.value() : IntImm(DataType::Int(32), 1);
+
+        // Use original expressions (no simplification)
+
+        // Calculate new loop extent: extent + step
+        PrimExpr new_loop_extent = loop_extent + loop_step;
+
+        LOG(INFO) << "IRStructureRewriter: Promote transformation details:";
+        LOG(INFO) << "  Original loop: for " << loop_var << " in [" << loop_min << ", "
+                  << (loop_min + loop_extent) << ") with step " << loop_step;
+        LOG(INFO) << "  New loop extent: " << new_loop_extent << " (original " << loop_extent << " + step " << loop_step << ")";
+
+        // Collect promoted tasks for logging
+        std::vector<const TaskNode*> promoted_tasks;
+        CollectPromotedTasks(control->child.get(), promoted_tasks);
+        LOG(INFO) << "  Found " << promoted_tasks.size() << " promoted tasks";
+
+        // Build transformed loop body with conditional execution (promote transformation implemented)
+        Stmt transformed_body = BuildPromotedLoopBody(control->child.get(), loop_var, loop_min,
+                                                      loop_step, loop_min + new_loop_extent);
+
+        if (!transformed_body.defined()) {
+          LOG(WARNING) << "Failed to build promoted loop body, using original";
+          Stmt body = Rewrite(control->child.get());
+          if (!body.defined()) {
+            return control->control;
+          }
+          return For(loop_var, loop_min, new_loop_extent, for_node->kind, body,
+                     for_node->thread_binding, for_node->annotations);
+        }
+
+        LOG(INFO) << "IRStructureRewriter: Successfully built promoted loop body";
+        // Create new For loop with extended extent and transformed body
+        return For(loop_var, loop_min, new_loop_extent, for_node->kind, transformed_body,
+                   for_node->thread_binding, for_node->annotations);
+      } else {
+        // No promoted tasks, rebuild normally
+        Stmt body = Rewrite(control->child.get());
+        if (!body.defined()) {
+          LOG(WARNING) << "ControlNode body is undefined";
+          return control->control;
+        }
+        // Create a new For loop with the same parameters but updated body
+        return For(control->control->loop_var,
+                   control->control->min,
+                   control->control->extent,
+                   control->control->kind,
+                   body,
+                   control->control->thread_binding,
+                   control->control->annotations);
       }
-      // Create a new For loop with the same parameters but updated body
-      return For(control->control->loop_var,
-                 control->control->min,
-                 control->control->extent,
-                 control->control->kind,
-                 body,
-                 control->control->thread_binding,
-                 control->control->annotations);
 
     } else if (node->IsSequence()) {
       const SequenceNode* seq = static_cast<const SequenceNode*>(node);

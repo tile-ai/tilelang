@@ -347,12 +347,19 @@ def z3_schedule_loop_python(
             # Create k and r variables for modulo scheduling
             k_vars = [z3.Int(f"k_{i}") for i in range(n)]
             r_vars = [z3.Int(f"r_{i}") for i in range(n)]
+            pro_vars = [z3.Bool(f"pro_{i}") for i in range(n)]
+            begin = z3.Int("begin")
 
             # Add constraints: k_i >= 0, 0 <= r_i < II
             for i in range(n):
                 solver.add(k_vars[i] >= 0)
                 solver.add(r_vars[i] >= 0)
                 solver.add(r_vars[i] < ii_mid)
+                solver.add(begin <= k_vars[i] * ii_mid + r_vars[i] + pro_vars[i] * ii_mid)
+                latency_i = latencies[i]
+                if latency_i < 0:
+                    latency_i = abs(latency_i)
+                solver.add(k_vars[i] * ii_mid + r_vars[i] + latency_i + pro_vars[i] * ii_mid - begin <= ii_mid)
                 # start_i = k_i * II + r_i must be non-negative (automatically satisfied)
 
             # Add data dependency constraints with distance
@@ -395,6 +402,7 @@ def z3_schedule_loop_python(
                 best_model = solver.model()
                 best_k_vars = k_vars
                 best_r_vars = r_vars
+                best_pro_vars = pro_vars
                 # Try smaller II
                 ii_upper = ii_mid
             else:
@@ -411,15 +419,19 @@ def z3_schedule_loop_python(
 
         # Extract start times from best model
         start_times = []
+        promotes = []
         for i in range(n):
             try:
                 k_val = best_model.eval(best_k_vars[i]).as_long()
                 r_val = best_model.eval(best_r_vars[i]).as_long()
                 start_time = k_val * best_ii + r_val
+                promote = z3.is_true(best_model.eval(best_pro_vars[i]))
             except:
                 # Fallback to 0 if evaluation fails
                 start_time = 0
+                promote = False
             start_times.append(start_time)
+            promotes.append(promote)
 
         # Sort tasks by start time (and by index as tie-breaker)
         task_indices = list(range(n))
@@ -429,10 +441,10 @@ def z3_schedule_loop_python(
         for i in range(n):
             idx = task_indices[i]
             print(f"[Python Z3 Loop]   Task {idx}: start_time={start_times[idx]}, "
-                  f"latency={latencies[idx]}, II={iis[idx]}, "
+                  f"latency={latencies[idx]}, II={iis[idx]}, pro={promotes[idx]}, "
                   f"resource_flags={resource_flags[idx]:03b}")
 
-        return start_times, task_indices
+        return start_times, promotes, task_indices
 
     except Exception as e:
         print(f"[Python Z3 Loop] Error in Z3 scheduling: {e}")
@@ -476,7 +488,7 @@ def z3_schedule_loop_ffi(
                 resource_deps_list.append((int(resource_deps[i][0]), int(resource_deps[i][1])))
 
     # Call the actual scheduler
-    start_times, _ = z3_schedule_loop_python(
+    start_times, promotes, _ = z3_schedule_loop_python(
         latencies_list,
         iis_list,
         resource_flags_list,
@@ -484,7 +496,8 @@ def z3_schedule_loop_ffi(
         resource_deps_list
     )
 
-    # Return only start_times, C++ side will sort by start_time
-    return start_times
+    # Return start_times and promotes as separate arrays for easier FFI handling
+    # C++ side expects a tuple of (start_times_array, promotes_array)
+    return (start_times, promotes)
 
 
