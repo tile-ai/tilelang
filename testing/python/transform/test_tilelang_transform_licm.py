@@ -48,7 +48,7 @@ def _find_lets_in_stmt(stmt, in_loop=False):
                 visit(s, in_loop)
         elif isinstance(node, tir.AttrStmt):
             visit(node.body, in_loop)
-        elif isinstance(node, tir.BufferStore) or isinstance(node, tir.Evaluate):
+        elif isinstance(node, (tir.BufferStore, tir.Evaluate)):
             pass
         elif isinstance(node, tir.BlockRealize):
             visit(node.block.body, in_loop)
@@ -248,6 +248,7 @@ def test_no_extract_single_occurrence():
 
     # Should NOT have extracted any CSE variable (each expr appears once)
     cse_vars = [v for v in outside if v.startswith("cse_var")]
+    print(cse_vars)
     # This is a weaker test - we just check it doesn't crash
     assert result is not None
 
