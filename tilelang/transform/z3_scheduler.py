@@ -17,6 +17,22 @@ except ImportError:
     Z3_AVAILABLE = False
     print("[Python Z3] WARNING: z3-solver package not installed. Z3 scheduling will not work.")
 
+# Try to import mip, but handle missing installation gracefully
+try:
+    import mip
+    MIP_AVAILABLE = True
+except ImportError:
+    MIP_AVAILABLE = False
+    print("[Python MIP] WARNING: python-mip package not installed. MIP scheduling will not work.")
+
+# Try to import ortools, but handle missing installation gracefully
+try:
+    from ortools.sat.python import cp_model
+    ORTOOLS_AVAILABLE = True
+except ImportError:
+    ORTOOLS_AVAILABLE = False
+    print("[Python OR-Tools] WARNING: ortools package not installed. OR-Tools scheduling will not work.")
+
 
 def z3_schedule_python(
     latencies: List[int],
@@ -70,6 +86,8 @@ def z3_schedule_python(
     try:
         # Create Z3 solver
         solver = z3.Optimize()
+        solver.set("timeout", 10000)
+
 
         # Create start time variables
         start_vars = [z3.Int(f"start_{i}") for i in range(n)]
@@ -332,8 +350,7 @@ def z3_schedule_loop_python(
         ii_upper = sum(abs(l) if l > 0 else 1 for l in latencies) + 1
         best_ii = ii_upper
         best_model = None
-        best_k_vars = None
-        best_r_vars = None
+        best_start_vars = None
 
         print(f"[Python Z3 Loop] Binary search range: [{ii_lower}, {ii_upper})")
 
@@ -343,56 +360,50 @@ def z3_schedule_loop_python(
 
             # Create solver for feasibility check
             solver = z3.Solver()
+            solver.set("timeout", 100000)
 
-            # Create k and r variables for modulo scheduling
-            k_vars = [z3.Int(f"k_{i}") for i in range(n)]
-            r_vars = [z3.Int(f"r_{i}") for i in range(n)]
+            start_vars = [z3.Int(f"start_{i}") for i in range(n)]
             pro_vars = [z3.Bool(f"pro_{i}") for i in range(n)]
             begin = z3.Int("begin")
 
-            # Add constraints: k_i >= 0, 0 <= r_i < II
             for i in range(n):
-                solver.add(k_vars[i] >= 0)
-                solver.add(r_vars[i] >= 0)
-                solver.add(r_vars[i] < ii_mid)
-                solver.add(begin <= k_vars[i] * ii_mid + r_vars[i] + pro_vars[i] * ii_mid)
+                solver.add(start_vars[i] >= 0)
+                solver.add(begin <= start_vars[i] + pro_vars[i] * ii_mid)
                 latency_i = latencies[i]
                 if latency_i < 0:
                     latency_i = abs(latency_i)
-                solver.add(k_vars[i] * ii_mid + r_vars[i] + latency_i + pro_vars[i] * ii_mid - begin <= ii_mid)
-                # start_i = k_i * II + r_i must be non-negative (automatically satisfied)
+                solver.add(start_vars[i] + latency_i + pro_vars[i] * ii_mid - begin <= ii_mid)
 
             # Add data dependency constraints with distance
-            # (k_v * II + r_v) - (k_u * II + r_u) >= latency_u - II * distance
             for u, v, distance in data_deps:
                 latency_u = latencies[u]
                 if latency_u < 0:
                     latency_u = abs(latency_u)
-                # Constraint: (k_v - k_u) * II + (r_v - r_u) >= latency_u - II * distance
-                solver.add((k_vars[v] - k_vars[u]) * ii_mid + (r_vars[v] - r_vars[u]) >= latency_u - ii_mid * distance)
                 print(f"[Python Z3 Loop] Data dependency: task {v} - task {u} >= {latency_u} - {ii_mid}*{distance}")
+                solver.add(start_vars[v] - start_vars[u] >= latency_u - ii_mid * distance)
 
-            # Add resource dependency constraints with modulo scheduling
-            # For each resource dependency pair (i, j)
+            # Add resource dependency constraints
+            # For tasks i and j that use same resource, they cannot execute simultaneously
+            # We create ordering variable O_i,j (True means i before j, False means j before i)
             for i, j in resource_deps:
-                ii_i = iis[i]
-                ii_j = iis[j]
-                if ii_i < 0:
-                    ii_i = abs(ii_i)
-                if ii_j < 0:
-                    ii_j = abs(ii_j)
+                if i < j:  # Only consider each pair once
+                    ii_i = iis[i]
+                    ii_j = iis[j]
+                    if ii_i < 0:
+                        ii_i = abs(ii_i)
+                    if ii_j < 0:
+                        ii_j = abs(ii_j)
 
-                # Create ordering variable delta_ij (True means i before j in modulo schedule)
-                delta_ij = z3.Bool(f"delta_{i}_{j}")
+                    # Create ordering variable
+                    o_ij = z3.Bool(f"O_{i}_{j}")
 
-                # Modulo scheduling resource constraints:
-                # If delta_ij is True (i before j), then r_i - r_j + II >= ii_i
-                # If delta_ij is False (j before i), then r_j - r_i + II >= ii_j
-                # This ensures operations don't overlap modulo II
-                solver.add(z3.Implies(delta_ij, r_vars[i] - r_vars[j] + ii_mid >= ii_i))
-                solver.add(z3.Implies(z3.Not(delta_ij), r_vars[j] - r_vars[i] + ii_mid >= ii_j))
+                    # If o_ij is True (i before j), then start_j >= start_i + ii_i
+                    solver.add(z3.Implies(o_ij, start_vars[j] >= start_vars[i] + ii_i))
 
-                print(f"[Python Z3 Loop] Resource dependency between {i} and {j}: ii_i={ii_i}, ii_j={ii_j}")
+                    # If o_ij is False (j before i), then start_i >= start_j + ii_j
+                    solver.add(z3.Implies(z3.Not(o_ij), start_vars[i] >= start_vars[j] + ii_j))
+
+                    print(f"[Python Z3 Loop] Resource dependency between {i} and {j}: ii_i={ii_i}, ii_j={ii_j}")
 
             # Check feasibility
             print(f"[Python Z3 Loop] Checking feasibility for II = {ii_mid}...")
@@ -400,8 +411,7 @@ def z3_schedule_loop_python(
                 print(f"[Python Z3 Loop] II = {ii_mid} is feasible")
                 best_ii = ii_mid
                 best_model = solver.model()
-                best_k_vars = k_vars
-                best_r_vars = r_vars
+                best_start_vars = start_vars
                 best_pro_vars = pro_vars
                 # Try smaller II
                 ii_upper = ii_mid
@@ -422,9 +432,7 @@ def z3_schedule_loop_python(
         promotes = []
         for i in range(n):
             try:
-                k_val = best_model.eval(best_k_vars[i]).as_long()
-                r_val = best_model.eval(best_r_vars[i]).as_long()
-                start_time = k_val * best_ii + r_val
+                start_time = best_model.eval(best_start_vars[i]).as_long()
                 promote = z3.is_true(best_model.eval(best_pro_vars[i]))
             except:
                 # Fallback to 0 if evaluation fails
@@ -499,5 +507,3 @@ def z3_schedule_loop_ffi(
     # Return start_times and promotes as separate arrays for easier FFI handling
     # C++ side expects a tuple of (start_times_array, promotes_array)
     return (start_times, promotes)
-
-
