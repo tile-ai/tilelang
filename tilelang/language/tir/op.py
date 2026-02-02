@@ -7,6 +7,9 @@ from tvm.runtime import const
 from tvm.tir.expr import IntImm, PrimExprWithOp
 import tvm.tir.op as _tvm_op
 
+from tilelang.language.dtypes import AnyDType
+from tilelang.utils.deprecated import deprecated_warning
+
 
 def call_packed(*args, span=None):
     """Build expression by call an external packed function.
@@ -2036,6 +2039,11 @@ def reinterpret(value, dtype, span: Span | None = None) -> Any:
     value : tvm.Expr
         The reinterpret cast value of dtype.
     """
+
+    # NOTE(chaofan): For compatibility, we allow the old API where dtype comes first
+    if isinstance(value, AnyDType):
+        deprecated_warning("T.reinterpret(dtype, value)", "reinterpret(value, dtype)")
+        value, dtype = dtype, value
     return _tvm_op.reinterpret(dtype, value, span)
 
 

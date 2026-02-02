@@ -276,7 +276,9 @@ anylist_setitem_call_packed = _op_wrapper(_tir_op.anylist_setitem_call_packed)
 anylist_setitem_call_cpacked = _op_wrapper(_tir_op.anylist_setitem_call_cpacked)
 vscale = _op_wrapper(_tir_op.vscale)
 
-reinterpret = _dtype_forward(_tir_op.reinterpret)
+# reinterpret = _dtype_forward(_tir_op.reinterpret)
+reinterpret = _tir_op.reinterpret
+
 call_extern = _dtype_forward(_tir_op.call_extern)
 call_intrin = _dtype_forward(_tir_op.call_intrin)
 call_llvm_intrin = _dtype_forward(_tir_op.call_llvm_intrin)
