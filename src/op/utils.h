@@ -45,7 +45,7 @@ TVM_DLL PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
 
 // Build a tvm_access_ptr(handle) from a BufferLoad.
 TVM_DLL PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load,
-                                         int rw_mask);
+                                             int rw_mask);
 
 // Check if a buffer is a fragment buffer (scope == "local.fragment")
 inline bool IsFragmentBuffer(const Buffer &buffer) {

@@ -130,7 +130,8 @@ public:
   // only will be enabled under cdna mfma instructions
   int kPack_ = 1;
   int wgWait_ = 0;
-  std::optional<tir::BufferLoad> mbar_;  // mbar is optional, only used for TCGEN5MMA
+  std::optional<tir::BufferLoad>
+      mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   mutable GemmWarpPolicy policy_;
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
@@ -155,7 +156,7 @@ public:
         .def_ro("offsetB", &GemmNode::offsetB_)
         .def_ro("clearAccum", &GemmNode::clearAccum_)
         .def_ro("kPack", &GemmNode::kPack_)
-        .def_ro("wgWait", &GemmNode::wgWait_)        
+        .def_ro("wgWait", &GemmNode::wgWait_)
         .def_ro("cCoords", &GemmNode::cCoords_)
         .def_ro("policy", &GemmNode::policy_);
   }

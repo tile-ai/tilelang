@@ -42,18 +42,25 @@ def gemm(
         if tx < 32:  # warp 0: issue tma
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
-                T.copy(A[by * block_M: (by + 1) * block_M, k * block_K: (k + 1) * block_K], A_shared[k % num_stages, :, :])
-                T.copy(B[k * block_K: (k + 1) * block_K, bx * block_N: (bx + 1) * block_N], B_shared[k % num_stages, :, :])
+                T.copy(A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[k % num_stages, :, :])
+                T.copy(B[k * block_K : (k + 1) * block_K, bx * block_N : (bx + 1) * block_N], B_shared[k % num_stages, :, :])
                 T.mbarrier_arrive(loaded[k % num_stages])
         elif tx < 64:  # warp 1: issue tcgen5
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(loaded[k % num_stages], (k // num_stages) & 1)
-                T.gemm(A_shared[k % num_stages, :, :], B_shared[k % num_stages, :, :], C_tmem, mbar=consumed[k % num_stages], wg_wait=-1, clear_accum=k == 0)
-        
+                T.gemm(
+                    A_shared[k % num_stages, :, :],
+                    B_shared[k % num_stages, :, :],
+                    C_tmem,
+                    mbar=consumed[k % num_stages],
+                    wg_wait=-1,
+                    clear_accum=k == 0,
+                )
+
         # Wait for the last wave of tcgen5 to finish
         for i in T.unroll(num_stages):
-            T.mbarrier_wait_parity(consumed[i], ((k_iters-i-1) // num_stages) & 1)
-        
+            T.mbarrier_wait_parity(consumed[i], ((k_iters - i - 1) // num_stages) & 1)
+
         T.sync_threads()  # TileLang won't generate this if not annotated
         T.copy(C_tmem, C_local)
         T.copy(C_local, C_shared)
@@ -75,10 +82,10 @@ def main():
 
     ref_c = (a.to(torch.float) @ b.to(torch.float)).to(torch.bfloat16)
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
-    print('All checks passed. ✅')
+    print("All checks passed. ✅")
 
     tl_latency = do_bench(lambda: gemm(a, b, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages), backend="cupti")
-    torch_latency = do_bench(lambda: a@b, backend='cupti')
+    torch_latency = do_bench(lambda: a @ b, backend="cupti")
     print(f"Tilelang latency: {tl_latency} ms")
     print(f"Flops: {2 * M * N * K / (tl_latency / 1e3) / 1e12} TFLOPS")
     print(f"Torch latency: {torch_latency} ms")
