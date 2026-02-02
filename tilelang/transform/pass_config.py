@@ -87,6 +87,95 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_LOOP_UNSWITCHING = "tl.disable_loop_unswitching"
     """Disable loop unswitching optimization. Default: False"""
 
+    TL_ENABLE_LICM = "tl.enable_licm"
+    """Enable Loop Invariant Code Motion (LICM) optimization. Default: False"""
+
+    TL_LICM = "tl.LoopInvariantCodeMotion"
+    """Loop Invariant Code Motion (LICM) pass configuration.
+
+    This pass performs two optimizations:
+    1. LetStmt Hoisting: Moves loop-invariant LetStmt nodes outside the loop.
+    2. Invariant Subexpression Extraction: Extracts loop-invariant subexpressions
+       that appear multiple times or have high complexity.
+
+    See TL_LICM_MIN_OCCURRENCES_FOR_CSE, TL_LICM_MIN_COMPLEXITY_FOR_CSE,
+    and TL_LICM_MIN_COMPLEXITY_FOR_LICM for individual config options.
+
+    Example:
+    ```python
+    from tilelang.transform import PassContext, PassConfigKey
+
+    with PassContext(config={
+        PassConfigKey.TL_LICM: {
+            PassConfigKey.TL_LICM_MIN_OCCURRENCES_FOR_CSE: 2,
+            PassConfigKey.TL_LICM_MIN_COMPLEXITY_FOR_CSE: 2,
+            PassConfigKey.TL_LICM_MIN_COMPLEXITY_FOR_LICM: 5,
+        }
+    }):
+        mod = tilelang.transform.LoopInvariantCodeMotion()(mod)
+    ```
+    """
+
+    TL_LICM_MIN_OCCURRENCES_FOR_CSE = "min_occurrences_for_cse"
+    """Minimum number of occurrences required for CSE-style extraction.
+
+    Expressions appearing >= this many times within a loop will be extracted
+    into a variable and hoisted outside the loop.
+
+    Default: 2
+
+    Example:
+    ```python
+    with PassContext(config={
+        PassConfigKey.TL_LICM: {
+            PassConfigKey.TL_LICM_MIN_OCCURRENCES_FOR_CSE: 3,
+        }
+    }):
+        mod = tilelang.transform.LoopInvariantCodeMotion()(mod)
+    ```
+    """
+
+    TL_LICM_MIN_COMPLEXITY_FOR_CSE = "min_complexity_for_cse"
+    """Minimum expression complexity (node count) required for CSE extraction.
+
+    Only expressions with complexity (number of IR nodes) >= this threshold
+    will be considered for CSE extraction. Simple expressions like single
+    variables are not extracted.
+
+    Default: 2
+
+    Example:
+    ```python
+    with PassContext(config={
+        PassConfigKey.TL_LICM: {
+            PassConfigKey.TL_LICM_MIN_COMPLEXITY_FOR_CSE: 4,
+        }
+    }):
+        mod = tilelang.transform.LoopInvariantCodeMotion()(mod)
+    ```
+    """
+
+    TL_LICM_MIN_COMPLEXITY_FOR_LICM = "min_complexity_for_licm"
+    """Minimum complexity for LICM-style extraction (even if appears once).
+
+    Expressions with complexity >= this threshold will be hoisted outside
+    the loop regardless of how many times they appear. This handles cases
+    like `blockIdx.y * 131072` which may appear only once but are expensive
+    to compute repeatedly.
+
+    Default: 3
+
+    Example:
+    ```python
+    with PassContext(config={
+        PassConfigKey.TL_LICM: {
+            PassConfigKey.TL_LICM_MIN_COMPLEXITY_FOR_LICM: 5,  # more conservative
+        }
+    }):
+        mod = tilelang.transform.LoopInvariantCodeMotion()(mod)
+    ```
+    """
+
     TL_DISABLE_THREAD_STORAGE_SYNC = "tl.disable_thread_storage_sync"
     """Disable thread storage synchronization pass. When enabled, disables the
     automatic insertion of thread synchronization barriers (e.g., __syncthreads())
@@ -155,9 +244,6 @@ class PassConfigKey(str, Enum):
 
     TIR_DISABLE_CSE = "tir.disable_cse_tir"
     """Disable TIR Common Subexpression Elimination. Default: False"""
-
-    TIR_SIMPLIFY = "tir.Simplify"
-    """Enable/disable TIR simplification passes. Default: True"""
 
     TIR_DISABLE_STORAGE_REWRITE = "tir.disable_storage_rewrite"
     """Disable storage rewrite optimization. Default: False"""

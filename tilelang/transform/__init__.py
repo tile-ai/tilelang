@@ -214,6 +214,26 @@ def LoopUnswitching():
     return _ffi_api.LoopUnswitching()  # type: ignore
 
 
+def LoopInvariantCodeMotion():
+    """LoopInvariantCodeMotion (LICM): Hoist loop-invariant LetStmt out of loops.
+
+    This pass identifies LetStmt nodes whose values are loop-invariant and
+    hoists them outside the loop to avoid redundant computation.
+
+    A LetStmt is considered loop-invariant if its value expression:
+    1. Does not use the loop variable
+    2. Does not read buffers written inside the loop
+    3. Has no side effects
+    4. All variables it uses are either defined outside the loop or are also loop-invariant
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LoopInvariantCodeMotion()  # type: ignore
+
+
 def MultiVersionBuffer():
     """WarpSpecializedPipeline
 
