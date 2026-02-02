@@ -82,9 +82,7 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   if (args.size() > 16) {
     if (const auto *load = args[16].as<BufferLoadNode>()) {
-      node->mbarRegion_ =
-          NormalizeToBufferRegion(Downcast<BufferLoad>(args[16]));
-      node->mbar_ = node->mbarRegion_->buffer;
+      node->mbar_ = Downcast<BufferLoad>(args[16]);
     } else {
       node->mbar_ = std::nullopt;
     }
@@ -492,8 +490,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
     auto C_buffer = T.buffer_remap.count(c_) ? T.buffer_remap[c_] : c_;
     Array<PrimExpr> new_args;
-    auto mbarPtr =
-        MakeAccessPtrFromRegion(mbarRegion_, /*rw*/ 3, /*require_2d*/ true);
+    auto mbarPtr = MakeAccessPtrFromBufferLoad(mbar_.value(), /*rw*/ 3);
     new_args.push_back(StringImm(ss.str()));
     new_args.push_back(Aptr);
     new_args.push_back(Bptr);

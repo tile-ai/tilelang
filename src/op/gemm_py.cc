@@ -82,9 +82,7 @@ GemmPy::GemmPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   if (args.size() > 16) {
     if (const auto *load = args[16].as<BufferLoadNode>()) {
-      node->mbarRegion_ =
-          NormalizeToBufferRegion(Downcast<BufferLoad>(args[16]));
-      node->mbar_ = node->mbarRegion_->buffer;
+      node->mbar_ = Downcast<BufferLoad>(args[16]);
     }
   }
   node->cCoords_ = Array<PrimExpr>(

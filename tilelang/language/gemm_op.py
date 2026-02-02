@@ -101,8 +101,6 @@ def _gemm_impl(
             f"mbar for tcgen5mma must be a tir.Buffer or tir.BufferLoad, but got {type(mbar)}"
         )
         mbar = to_buffer_region(mbar, access_type="rw")
-    else:
-        mbar = tir.const(0, T.uint32)
     C_coords = [r.min for r in C_region.region]
     # Convert BufferRegion to tl.region calls for arguments
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])

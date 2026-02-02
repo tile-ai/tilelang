@@ -5,6 +5,7 @@ from tilelang.intrinsics.tcgen05_macro_generator import (
     TensorCoreIntrinEmitter,
 )
 from tilelang import language as T
+from tilelang.utils.language import retrieve_ptr
 from tilelang.transform.simplify import _Simplify
 from tvm import tir
 from tvm.target import Target
@@ -93,10 +94,10 @@ class GemmTCGEN5(GemmBase):
             raise ValueError("TCGEN5MMA currently requires wg_wait == -1")
 
         mbar = self.mbar
-        if mbar == 0:
+        if mbar is None:
             raise ValueError("TCGEN5MMA requires a valid mbarrier")
 
-        mbarptr = mbar.access_ptr("rw")
+        mbarptr = retrieve_ptr(mbar, "rw")
 
         C_coords = self.C_coords
         if len(C_coords) != 2:
