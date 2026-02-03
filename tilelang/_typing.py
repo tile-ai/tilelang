@@ -1,5 +1,8 @@
 """Type annotations for TileLang."""
 
+# Union compatibility for Python 3.9
+from __future__ import annotations
+
 # NOTE(chaofan): We should name it "_typing.py" to avoid module shadowing with standard library "typing"
 
 # Python 3.9 compatibility
@@ -7,7 +10,6 @@ try:
     from typing import TypeAlias
 except ImportError:  # Python < 3.10
     from typing_extensions import TypeAlias
-
 
 from tvm import ir
 from tvm import tir

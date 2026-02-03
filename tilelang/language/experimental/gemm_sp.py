@@ -136,7 +136,7 @@ def gemm_sp_v2(
         AssertionError: If the K dimensions of matrices A and B don't match
     """
 
-    def legalize_arguments(arg: BufferLikeType | tir.Var):
+    def legalize_arguments(arg: BufferLikeType | tir.Var) -> BufferLikeType:
         """Convert let-bound variables to their corresponding buffers.
 
         Args:

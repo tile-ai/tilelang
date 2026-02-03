@@ -9,7 +9,7 @@ from tilelang.utils.language import get_buffer_elems
 from tilelang._typing import BufferLikeType
 
 
-def any_of(buffer: BufferLikeType):
+def any_of(buffer: BufferLikeType) -> tir.PrimExpr:
     """Check if any element in the buffer is true.
 
     Args:
@@ -43,7 +43,7 @@ def any_of(buffer: BufferLikeType):
         raise ValueError(f"Invalid buffer type: {type(buffer)}")
 
 
-def all_of(buffer: BufferLikeType):
+def all_of(buffer: BufferLikeType) -> tir.PrimExpr:
     """Check if all elements in the buffer are true.
 
     Args:
