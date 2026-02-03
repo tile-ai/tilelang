@@ -30,7 +30,7 @@ from .eager.builder import OutTensor
 from .proxy import Tensor
 
 
-def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn"):
+def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
     """Allocate a shared memory buffer for inter-thread communication.
 
     Args:
@@ -48,7 +48,7 @@ def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_local(shape: ShapeType, dtype: DType, scope="local"):
+def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
     """Allocate a local memory buffer for thread-private storage.
 
     Args:
@@ -62,7 +62,7 @@ def alloc_local(shape: ShapeType, dtype: DType, scope="local"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment"):
+def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Buffer:
     """Allocate a fragment memory buffer for specialized operations.
 
     Args:
@@ -84,7 +84,7 @@ def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.va
 def alloc_var(dtype: DType, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
 
 
-def alloc_var(dtype: DType, *args, scope="local.var", init: PrimExpr | None = None):
+def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | int | float | None = None) -> Buffer:
     """Allocate a single-element variable buffer.
 
     Args:
@@ -141,7 +141,7 @@ def alloc_var(dtype: DType, *args, scope="local.var", init: PrimExpr | None = No
     return buffer
 
 
-def alloc_barrier(arrive_count: int | list[int]):
+def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     """Allocate a barrier buffer.
 
     Args:
@@ -169,7 +169,7 @@ def alloc_barrier(arrive_count: int | list[int]):
     return buffer
 
 
-def alloc_tmem(shape: ShapeType, dtype: DType):
+def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
 
@@ -201,7 +201,7 @@ def alloc_tmem(shape: ShapeType, dtype: DType):
 ReducerOp = Literal["sum", "max", "min"]
 
 
-def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None):
+def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None) -> Buffer:
     """
     Allocate a reducer buffer.
 
@@ -243,7 +243,7 @@ DescKind = Literal["wgmma", "tcgen05_smem", "tcgen05_instr"]
 def alloc_descriptor(
     kind: DescKind = "wgmma",
     dtype: DType = _dtypes.uint64,
-):
+) -> Buffer:
     """Allocate a descriptor buffer for WGMMA and TCGEN5.MMA.
 
     Args:
