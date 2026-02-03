@@ -34,6 +34,7 @@ def gemm(
         C_shared = T.alloc_shared((block_M, block_N), out_dtype)
         loaded = T.alloc_barrier([32] * num_stages)
         consumed = T.alloc_barrier([1] * num_stages)
+        tmem_full = T.alloc_barrier([1])
 
         tx = T.get_thread_binding()
 
@@ -56,10 +57,10 @@ def gemm(
                     wg_wait=-1,
                     clear_accum=k == 0,
                 )
+            T.tcgen05_mma_arrive(tmem_full)
 
-        # Wait for the last wave of tcgen5 to finish
-        for i in T.unroll(num_stages):
-            T.mbarrier_wait_parity(consumed[i], ((k_iters - i - 1) // num_stages) & 1)
+        # Wait for all tcgen5 to finish
+        T.mbarrier_wait_parity(tmem_full, 0)
 
         T.sync_threads()  # TileLang won't generate this if not annotated
         T.copy(C_tmem, C_local)
