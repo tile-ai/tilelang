@@ -21,7 +21,7 @@ _REDUCE_OP_KEY = "tl.tileop.reduce"
 ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor", "bitxor"]
 
 
-def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: int, clear: bool) -> tir.PrimExpr:
+def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: int, clear: bool) -> None:
     """Perform a reduction operation on a buffer along a specified dimension.
 
     Args:
@@ -44,7 +44,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
         )
 
     @macro
-    def reduce_macro(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool) -> tir.PrimExpr:
+    def reduce_macro(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
         if is_shared(buffer) and is_shared(out):
             red_frag_in = alloc_fragment(buffer.shape, buffer.dtype)
             red_frag_out = alloc_fragment(out.shape, out.dtype)
@@ -54,7 +54,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
             IRBuilder.name(out.name + "_frag", red_frag_out)
 
             copy(buffer, red_frag_in)
-            return tir.call_intrin(
+            tir.call_intrin(
                 "handle",
                 tir.op.Op.get(_REDUCE_OP_KEY),
                 to_buffer_region(red_frag_in, access_type="r"),
@@ -69,7 +69,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
             IRBuilder.name(buffer.name + "_frag", red_frag_in)
 
             copy(buffer, red_frag_in)
-            return tir.call_intrin(
+            tir.call_intrin(
                 "handle",
                 tir.op.Op.get(_REDUCE_OP_KEY),
                 to_buffer_region(red_frag_in, access_type="r"),
@@ -82,7 +82,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
             red_frag_out = alloc_fragment(out.shape, out.dtype)
             IRBuilder.name(out.name + "_frag", red_frag_out)
 
-            return tir.call_intrin(
+            tir.call_intrin(
                 "handle",
                 tir.op.Op.get(_REDUCE_OP_KEY),
                 to_buffer_region(buffer, access_type="r"),
@@ -93,7 +93,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
             )
             copy(red_frag_out, out)
         elif is_fragment(buffer) and is_fragment(out):
-            return tir.call_intrin(
+            tir.call_intrin(
                 "handle",
                 tir.op.Op.get(_REDUCE_OP_KEY),
                 to_buffer_region(buffer, access_type="r"),
@@ -105,10 +105,10 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
         else:
             raise ValueError(f"Invalid buffer scopes: {buffer.scope()} and {out.scope()}")
 
-    return reduce_macro(buffer, out, reduce_type, dim, clear)
+    reduce_macro(buffer, out, reduce_type, dim, clear)
 
 
-def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> tir.PrimExpr:
+def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
     """Perform reduce max on input buffer, store the result to output buffer
 
     Parameters
@@ -126,10 +126,10 @@ def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
     handle : PrimExpr
     """
     dim = _legalize_dim(buffer, dim)
-    return reduce(buffer, out, "max", dim, clear)
+    reduce(buffer, out, "max", dim, clear)
 
 
-def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> tir.PrimExpr:
+def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
     """Perform reduce min on input buffer, store the result to output buffer.
 
     Args:
@@ -142,10 +142,10 @@ def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    return reduce(buffer, out, "min", dim, clear)
+    reduce(buffer, out, "min", dim, clear)
 
 
-def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> tir.PrimExpr:
+def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
     """Perform reduce sum on input buffer, store the result to output buffer.
 
     Args:
@@ -167,10 +167,10 @@ def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    return reduce(buffer, out, "sum", dim, clear)
+    reduce(buffer, out, "sum", dim, clear)
 
 
-def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1) -> tir.PrimExpr:
+def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1) -> None:
     """Perform reduce absolute sum on input buffer, store the result to output buffer.
 
     Args:
@@ -182,10 +182,10 @@ def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1) -> tir.Pri
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    return reduce(buffer, out, "abssum", dim, True)
+    reduce(buffer, out, "abssum", dim, True)
 
 
-def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> tir.PrimExpr:
+def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
     """Perform reduce absolute max on input buffer, store the result to output buffer.
 
     Args:
@@ -197,10 +197,10 @@ def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    return reduce(buffer, out, "absmax", dim, clear)
+    reduce(buffer, out, "absmax", dim, clear)
 
 
-def reduce_bitand(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> tir.PrimExpr:
+def reduce_bitand(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
     """Perform reduce bitwise-and on input buffer, store the result to output buffer.
 
     Args:
@@ -212,10 +212,10 @@ def reduce_bitand(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    return reduce(buffer, out, "bitand", dim, clear)
+    reduce(buffer, out, "bitand", dim, clear)
 
 
-def reduce_bitor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> tir.PrimExpr:
+def reduce_bitor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
     """Perform reduce bitwise-or on input buffer, store the result to output buffer.
 
     Args:
@@ -227,10 +227,10 @@ def reduce_bitor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    return reduce(buffer, out, "bitor", dim, clear)
+    reduce(buffer, out, "bitor", dim, clear)
 
 
-def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> tir.PrimExpr:
+def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
     """Perform reduce bitwise-xor on input buffer, store the result to output buffer.
 
     Args:
@@ -242,7 +242,7 @@ def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    return reduce(buffer, out, "bitxor", dim, clear)
+    reduce(buffer, out, "bitxor", dim, clear)
 
 
 @macro
@@ -251,7 +251,7 @@ def cumsum_fragment(
     dst: tir.Buffer,
     dim: int,
     reverse: bool,
-):
+) -> None:
     """
     Compute cumulative sum for fragment buffers by copying to shared memory first.
 
