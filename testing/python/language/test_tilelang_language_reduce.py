@@ -219,5 +219,42 @@ def test_reduce_max_clear():
     run_reduce_max_clear(256, 256, T.float16)
 
 
+def reduce_sum_test_clear_shared(M, N, dtype=T.float32):
+    import tilelang.language as T
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
+    ):
+        with T.Kernel(1, threads=32) as _:
+            A_local = T.alloc_fragment((M, N), dtype)
+            B_shared = T.alloc_shared((M,), dtype)
+
+            T.copy(A, A_local)
+            T.fill(B_shared, 1)
+            T.reduce_sum(A_local, B_shared, dim=1, clear=False)
+            T.copy(B_shared, B)
+
+    return main
+
+
+def test_reduce_sum_clear_shared():
+    M, N, dtype = 256, 256, T.float32
+    program = reduce_sum_test_clear_shared(M, N, dtype)
+    jit_kernel = tl.compile(program, out_idx=-1)
+
+    def ref_program(A):
+        return A.sum(dim=1) + 1
+
+    import torch
+
+    dummy_A = torch.randn((M, N), dtype=getattr(torch, dtype)).cuda()
+    ref_out = ref_program(dummy_A)
+    tl_out = jit_kernel(dummy_A)
+    torch.testing.assert_close(tl_out, ref_out, atol=1e-2, rtol=1e-2)
+
+
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_reduce_sum_clear_shared()

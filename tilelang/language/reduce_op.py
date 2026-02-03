@@ -81,6 +81,9 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             red_frag_out = alloc_fragment(out.shape, out.dtype)
             IRBuilder.name(out.name + "_frag", red_frag_out)
 
+            if not clear:
+                copy(out, red_frag_out)
+
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get(_REDUCE_OP_KEY),

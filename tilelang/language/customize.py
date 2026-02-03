@@ -37,7 +37,7 @@ def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
     return dst
 
 
-def reshape(src: Buffer, shape: list[PrimExpr] | tuple[PrimExpr, ...]) -> Buffer:
+def reshape(src: Buffer, shape: list[PrimExpr]) -> Buffer:
     """Reshapes the input buffer to the specified shape.
 
     Args:
@@ -53,7 +53,7 @@ def reshape(src: Buffer, shape: list[PrimExpr] | tuple[PrimExpr, ...]) -> Buffer
     return T.Tensor(shape, src.dtype, src.data)
 
 
-def view(src: Buffer, shape: list[PrimExpr] | tuple[PrimExpr, ...] | None = None, dtype: str | object | None = None) -> Buffer:
+def view(src: Buffer, shape: list[PrimExpr] | None = None, dtype: str | None = None) -> Buffer:
     """Return a Tensor view of the input buffer with an optional new shape and dtype.
 
     If `shape` is None the source buffer's shape is used; if `dtype` is None the source buffer's dtype is used. The returned buffer shares the same underlying data as `src` (no copy).
