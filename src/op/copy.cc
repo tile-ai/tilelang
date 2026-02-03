@@ -1418,8 +1418,9 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     args.push_back(GetEvictionPolicy());
     tma_copy = Evaluate(Call(DataType::Handle(), op, args));
   }
-  tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
-
+  tma_copy = IfThenElse(
+      Call(DataType::Bool(), tl_shuffle_elect(), {T.thread_bounds->extent}),
+      tma_copy);
   return tma_copy;
 }
 

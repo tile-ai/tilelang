@@ -1,4 +1,4 @@
-# Non-persistent, 1-SM GEMM, 1400+TFLOPs on Blackwell
+# Non-persistent, 1-SM GEMM
 
 import torch
 import tilelang
