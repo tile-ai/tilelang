@@ -1440,8 +1440,8 @@ private:
 
     // If this is a read into a double buffer that was previously
     // swapped out, then it doesn't conflict.
-    if (prev.double_buffer_write && curr.type == kRead && !loop_carry) {
-      return false;
+    if (curr.type == kWrite && prev.type == kRead && loop_carry) {
+      return true;
     }
 
     // If nothing else allows sharing the same buffer, then they are
