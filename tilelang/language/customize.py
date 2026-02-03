@@ -67,7 +67,7 @@ def view(src: Buffer, shape: ShapeType | None = None, dtype: DType | None = None
     return T.Tensor(shape, dtype, src.data)
 
 
-def loop_break():
+def loop_break() -> PrimExpr:
     """Break out of the current loop.
 
     Returns:
