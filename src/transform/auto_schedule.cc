@@ -52,6 +52,7 @@
 
 #include "./common/attr.h"
 #include "../op/builtin.h"
+#include "auto_schedule.h"
 
 namespace tvm {
 namespace tl {
@@ -59,28 +60,6 @@ namespace tl {
 using namespace tir;
 using ffi::GetRef;
 
-// Forward declaration
-class IRStructure;
-
-// Memory type classification
-enum class MemoryType {
-  kGlobal,    // Global memory (DRAM)
-  kShared,    // Shared memory (L1/shared)
-  kRegister,  // Register/local memory
-  kUnknown    // Unknown memory type
-};
-
-// Helper function to determine memory type from buffer scope
-inline MemoryType GetMemoryTypeFromScope(const String& scope) {
-  if (scope == "global") {
-    return MemoryType::kGlobal;
-  } else if (scope == "shared" || scope == "shared.dyn") {
-    return MemoryType::kShared;
-  } else if (scope == "local" || scope == "local.var") {
-    return MemoryType::kRegister;
-  }
-  return MemoryType::kUnknown;
-}
 
 // Helper function to compare if two regions are equal
 bool RegionsEqual(const Region& a, const Region& b) {
@@ -93,325 +72,496 @@ bool RegionsEqual(const Region& a, const Region& b) {
   return true;
 }
 
-// Base class for IR structure nodes
-class IRStructure {
-public:
-  enum class Kind {
-    kTask,
-    kControl,
-    kSequence
-  };
+// Helper function to check if two ranges overlap
+bool RangesOverlap(const Range& a, const Range& b) {
+  // Two ranges [a_min, a_min+a_extent) and [b_min, b_min+b_extent) overlap if:
+  // max(a_min, b_min) < min(a_min+a_extent, b_min+b_extent)
+  // Since min and extent might be symbolic, we use arithmetic simplification
+  // For simplicity, assume they are constants or can be compared
+  // Use tir::is_zero to check if max(a_min, b_min) - min(a_min+a_extent, b_min+b_extent) < 0
+  // Actually, we can check if they are provably non-overlapping
+  // If we can't prove either way, assume they might overlap (conservative)
 
-  virtual ~IRStructure() = default;
-  virtual Kind GetKind() const = 0;
+  // Simplify expressions
+  auto analyzer = tvm::arith::Analyzer();
+  PrimExpr a_min = analyzer.Simplify(a->min);
+  PrimExpr a_extent = analyzer.Simplify(a->extent);
+  PrimExpr b_min = analyzer.Simplify(b->min);
+  PrimExpr b_extent = analyzer.Simplify(b->extent);
 
-  // Helper methods for safe casting
-  bool IsTask() const { return GetKind() == Kind::kTask; }
-  bool IsControl() const { return GetKind() == Kind::kControl; }
-  bool IsSequence() const { return GetKind() == Kind::kSequence; }
+  // Compute a_end = a_min + a_extent, b_end = b_min + b_extent
+  PrimExpr a_end = analyzer.Simplify(a_min + a_extent);
+  PrimExpr b_end = analyzer.Simplify(b_min + b_extent);
 
-  // Resource usage flags (accessible by all IR nodes)
-  virtual bool UsesCUDACore() const = 0;
-  virtual bool UsesTMACore() const = 0;
-  virtual bool UsesTensorCore() const = 0;
-
-  // Memory access regions (collected during analysis)
-  virtual std::vector<BufferRegion> GetReadRegions() const = 0;
-  virtual std::vector<BufferRegion> GetWriteRegions() const = 0;
-
-  // Latency estimation
-  virtual int64_t GetLatency() const = 0;      // Estimated latency in cycles
-  virtual int64_t GetII() const = 0;           // Initiation interval in cycles
-
-  // Setters (for analysis passes to update these values)
-  virtual void SetUsesCUDACore(bool value) = 0;
-  virtual void SetUsesTMACore(bool value) = 0;
-  virtual void SetUsesTensorCore(bool value) = 0;
-  virtual void SetReadRegions(const std::vector<BufferRegion>& regions) = 0;
-  virtual void SetWriteRegions(const std::vector<BufferRegion>& regions) = 0;
-  virtual void SetLatency(int64_t latency) = 0;
-  virtual void SetII(int64_t ii) = 0;
-
-  // Helper methods to add regions (for incremental analysis)
-  virtual void AddReadRegion(const BufferRegion& region) = 0;
-  virtual void AddWriteRegion(const BufferRegion& region) = 0;
-};
-
-
-// Task node: contains a vector of statements
-class TaskNode : public IRStructure {
-public:
-  std::vector<Stmt> stmts;
-
-  Kind GetKind() const override { return Kind::kTask; }
-
-  // Resource usage flags
-  bool UsesCUDACore() const override { return uses_cuda_core_; }
-  bool UsesTMACore() const override { return uses_tma_core_; }
-  bool UsesTensorCore() const override { return uses_tensor_core_; }
-
-  // Memory access regions (collected during analysis)
-  std::vector<BufferRegion> GetReadRegions() const override { return read_regions_; }
-  std::vector<BufferRegion> GetWriteRegions() const override { return write_regions_; }
-
-  // Latency estimation
-  int64_t GetLatency() const override { return latency_; }
-  int64_t GetII() const override { return ii_; }
-
-  // Setters
-  void SetUsesCUDACore(bool value) override { uses_cuda_core_ = value; }
-  void SetUsesTMACore(bool value) override { uses_tma_core_ = value; }
-  void SetUsesTensorCore(bool value) override { uses_tensor_core_ = value; }
-  void SetReadRegions(const std::vector<BufferRegion>& regions) override { read_regions_ = regions; }
-  void SetWriteRegions(const std::vector<BufferRegion>& regions) override { write_regions_ = regions; }
-  void SetLatency(int64_t latency) override { latency_ = latency; }
-  void SetII(int64_t ii) override { ii_ = ii; }
-
-  // Start time for scheduling
-  void SetStartTime(int64_t start_time) { start_time_ = start_time; }
-  int64_t GetStartTime() const { return start_time_; }
-
-  // Promote flag for software pipelining
-  void SetPromote(bool promote) { promote_ = promote; }
-  bool GetPromote() const { return promote_; }
-
-  // Helper methods to add regions (for incremental analysis)
-  void AddReadRegion(const BufferRegion& region) override {
-    // Check for duplicate regions
-    for (const auto& existing : read_regions_) {
-      if (existing->buffer.same_as(region->buffer) &&
-          RegionsEqual(existing->region, region->region)) {
-        return; // Region already exists
-      }
-    }
-    read_regions_.push_back(region);
-  }
-
-  void AddWriteRegion(const BufferRegion& region) override {
-    // Check for duplicate regions
-    for (const auto& existing : write_regions_) {
-      if (existing->buffer.same_as(region->buffer) &&
-          RegionsEqual(existing->region, region->region)) {
-        return; // Region already exists
-      }
-    }
-    write_regions_.push_back(region);
-  }
-
-private:
-  // Resource usage flags
-  bool uses_cuda_core_{false};
-  bool uses_tma_core_{false};
-  bool uses_tensor_core_{false};
-
-  // Memory access regions (collected during analysis)
-  std::vector<BufferRegion> read_regions_;
-  std::vector<BufferRegion> write_regions_;
-
-  // Latency estimation
-  int64_t latency_{0};      // Estimated latency in cycles
-  int64_t ii_{0};           // Initiation interval in cycles
-  int64_t start_time_{0};   // Scheduled start time in cycles
-  bool promote_{false};     // Promote flag for software pipelining
-};
-
-// Control node: contains a For operation and a child IRStructure
-class ControlNode : public IRStructure {
-public:
-  For control;  // The For operation
-  std::unique_ptr<IRStructure> child;
-
-  Kind GetKind() const override { return Kind::kControl; }
-
-  // Resource usage flags (aggregate from child)
-  bool UsesCUDACore() const override { return child ? child->UsesCUDACore() : false; }
-  bool UsesTMACore() const override { return child ? child->UsesTMACore() : false; }
-  bool UsesTensorCore() const override { return child ? child->UsesTensorCore() : false; }
-
-  // Memory access regions (aggregate from child)
-  std::vector<BufferRegion> GetReadRegions() const override {
-    return child ? child->GetReadRegions() : std::vector<BufferRegion>{};
-  }
-  std::vector<BufferRegion> GetWriteRegions() const override {
-    return child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
-  }
-
-  // Latency estimation (aggregate from child)
-  int64_t GetLatency() const override { return child ? child->GetLatency() : 0; }
-  int64_t GetII() const override { return child ? child->GetII() : 0; }
-
-  // Setters (delegate to child if exists)
-  void SetUsesCUDACore(bool value) override { if (child) child->SetUsesCUDACore(value); }
-  void SetUsesTMACore(bool value) override { if (child) child->SetUsesTMACore(value); }
-  void SetUsesTensorCore(bool value) override { if (child) child->SetUsesTensorCore(value); }
-  void SetReadRegions(const std::vector<BufferRegion>& regions) override { if (child) child->SetReadRegions(regions); }
-  void SetWriteRegions(const std::vector<BufferRegion>& regions) override { if (child) child->SetWriteRegions(regions); }
-  void SetLatency(int64_t latency) override { if (child) child->SetLatency(latency); }
-  void SetII(int64_t ii) override { if (child) child->SetII(ii); }
-
-  // Helper methods to add regions (delegate to child)
-  void AddReadRegion(const BufferRegion& region) override { if (child) child->AddReadRegion(region); }
-  void AddWriteRegion(const BufferRegion& region) override { if (child) child->AddWriteRegion(region); }
-};
-
-// Sequence node: contains a vector of child IRStructures
-class SequenceNode : public IRStructure {
-public:
-  std::vector<std::unique_ptr<IRStructure>> children;
-
-  Kind GetKind() const override { return Kind::kSequence; }
-
-  // Resource usage flags (aggregate from all children)
-  bool UsesCUDACore() const override {
-    for (const auto& child : children) {
-      if (child && child->UsesCUDACore()) return true;
-    }
+  // Check if ranges are definitely disjoint
+  // Case 1: a_end <= b_min
+  if (tir::is_one(a_end <= b_min)) {
     return false;
   }
-  bool UsesTMACore() const override {
-    for (const auto& child : children) {
-      if (child && child->UsesTMACore()) return true;
-    }
-    return false;
-  }
-  bool UsesTensorCore() const override {
-    for (const auto& child : children) {
-      if (child && child->UsesTensorCore()) return true;
-    }
+  // Case 2: b_end <= a_min
+  if (tir::is_one(b_end <= a_min)) {
     return false;
   }
 
-  // Memory access regions (aggregate from all children)
-  std::vector<BufferRegion> GetReadRegions() const override {
-    std::vector<BufferRegion> all_read_regions;
-    for (const auto& child : children) {
-      if (child) {
-        auto child_read_regions = child->GetReadRegions();
-        all_read_regions.insert(all_read_regions.end(), child_read_regions.begin(), child_read_regions.end());
-      }
+  // Otherwise, they may overlap (either proven overlap or unknown)
+  return true;
+}
+
+// Helper function to check if two regions overlap
+bool RegionsOverlap(const Region& a, const Region& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (!RangesOverlap(a[i], b[i])) {
+      return false;
     }
-    // Remove duplicates (by buffer and region equality)
-    // This is a simplified deduplication - in practice might need more sophisticated logic
-    std::vector<BufferRegion> deduplicated;
-    for (const auto& region : all_read_regions) {
-      bool found = false;
-      for (const auto& existing : deduplicated) {
-        if (existing->buffer.same_as(region->buffer) &&
-            RegionsEqual(existing->region, region->region)) {
-          found = true;
-          break;
+  }
+  return true;
+}
+
+
+
+
+
+// Helper function to check if a buffer region is in register memory
+bool IsRegisterRegion(const BufferRegion& region) {
+  const Buffer& buffer = region->buffer;
+  String scope = buffer.scope();
+  MemoryType mem_type = GetMemoryTypeFromScope(scope);
+  return mem_type == MemoryType::kRegister;
+}
+
+// Helper function to collect all register regions from a task
+std::vector<BufferRegion> CollectRegisterRegions(const TaskNode* task) {
+  std::vector<BufferRegion> reg_regions;
+  // Check read regions
+  for (const auto& region : task->GetReadRegions()) {
+    if (IsRegisterRegion(region)) {
+      reg_regions.push_back(region);
+    }
+  }
+  // Check write regions
+  for (const auto& region : task->GetWriteRegions()) {
+    if (IsRegisterRegion(region)) {
+      reg_regions.push_back(region);
+    }
+  }
+  return reg_regions;
+}
+
+// Check if two TaskNodes use the same register region
+// Used for warpgroup specialization: different warpgroups cannot share registers
+bool UseSameRegisterRegion(const TaskNode* a, const TaskNode* b) {
+  if (!a || !b) return false;
+
+  auto reg_regions_a = CollectRegisterRegions(a);
+  auto reg_regions_b = CollectRegisterRegions(b);
+
+  // For each pair of register regions, check if they refer to the same buffer
+  // and their regions overlap (conservative: if same buffer, assume overlap)
+  for (const auto& region_a : reg_regions_a) {
+    for (const auto& region_b : reg_regions_b) {
+      // Check if same buffer
+      if (region_a->buffer.same_as(region_b->buffer)) {
+        // If same buffer, check if regions overlap
+        if (RegionsOverlap(region_a->region, region_b->region)) {
+          return true;
         }
       }
-      if (!found) deduplicated.push_back(region);
     }
-    return deduplicated;
   }
+  return false;
+}
 
-  std::vector<BufferRegion> GetWriteRegions() const override {
-    std::vector<BufferRegion> all_write_regions;
-    for (const auto& child : children) {
-      if (child) {
-        auto child_write_regions = child->GetWriteRegions();
-        all_write_regions.insert(all_write_regions.end(), child_write_regions.begin(), child_write_regions.end());
+// Helper function to count register regions in a task
+int CountRegisterRegions(const TaskNode* task) {
+  auto reg_regions = CollectRegisterRegions(task);
+  return static_cast<int>(reg_regions.size());
+}
+
+
+
+// Helper function to collect all TaskNodes with context information
+void CollectAllTaskNodesWithContext(const IRStructure* node,
+                                    std::vector<TaskNodeWithContext>& all_tasks,
+                                    ControlNode* current_control_node) {
+  if (!node) return;
+
+  if (node->IsTask()) {
+    TaskNode* task = const_cast<TaskNode*>(static_cast<const TaskNode*>(node));
+    TaskNodeWithContext task_ctx;
+    task_ctx.task = task;
+    task_ctx.control_node = current_control_node;
+
+    // Calculate tripcount if inside a loop
+    if (current_control_node) {
+      const ForNode* for_node = current_control_node->control.get();
+      PrimExpr loop_extent = for_node->extent;
+      // Try to convert loop_extent to int64_t
+      if (const int64_t* extent_ptr = tir::as_const_int(loop_extent)) {
+        task_ctx.tripcount = *extent_ptr;
+      } else {
+        // If extent is not constant, use 100 as default (as requested)
+        task_ctx.tripcount = 100;
+      }
+    } else {
+      task_ctx.tripcount = 1;  // Not inside a loop
+    }
+
+    all_tasks.push_back(task_ctx);
+  } else if (node->IsSequence()) {
+    const SequenceNode* seq = static_cast<const SequenceNode*>(node);
+    for (const auto& child : seq->children) {
+      CollectAllTaskNodesWithContext(child.get(), all_tasks, current_control_node);
+    }
+  } else if (node->IsControl()) {
+    const ControlNode* control = static_cast<const ControlNode*>(node);
+    // When entering a control node, update the current control context
+    CollectAllTaskNodesWithContext(control->child.get(), all_tasks,
+                                   const_cast<ControlNode*>(control));
+  }
+}
+
+// SequenceNode member function implementations
+bool SequenceNode::UsesCUDACore() const {
+  for (const auto& child : children) {
+    if (child && child->UsesCUDACore()) return true;
+  }
+  return false;
+}
+
+bool SequenceNode::UsesTMACore() const {
+  for (const auto& child : children) {
+    if (child && child->UsesTMACore()) return true;
+  }
+  return false;
+}
+
+bool SequenceNode::UsesTensorCore() const {
+  for (const auto& child : children) {
+    if (child && child->UsesTensorCore()) return true;
+  }
+  return false;
+}
+
+std::vector<BufferRegion> SequenceNode::GetReadRegions() const {
+  std::vector<BufferRegion> all_read_regions;
+  for (const auto& child : children) {
+    if (child) {
+      auto child_read_regions = child->GetReadRegions();
+      all_read_regions.insert(all_read_regions.end(), child_read_regions.begin(), child_read_regions.end());
+    }
+  }
+  // Remove duplicates (by buffer and region equality)
+  // This is a simplified deduplication - in practice might need more sophisticated logic
+  std::vector<BufferRegion> deduplicated;
+  for (const auto& region : all_read_regions) {
+    bool found = false;
+    for (const auto& existing : deduplicated) {
+      if (existing->buffer.same_as(region->buffer) &&
+          RegionsEqual(existing->region, region->region)) {
+        found = true;
+        break;
       }
     }
-    // Remove duplicates (by buffer and region equality)
-    std::vector<BufferRegion> deduplicated;
-    for (const auto& region : all_write_regions) {
-      bool found = false;
-      for (const auto& existing : deduplicated) {
-        if (existing->buffer.same_as(region->buffer) &&
-            RegionsEqual(existing->region, region->region)) {
-          found = true;
-          break;
-        }
+    if (!found) deduplicated.push_back(region);
+  }
+  return deduplicated;
+}
+
+std::vector<BufferRegion> SequenceNode::GetWriteRegions() const {
+  std::vector<BufferRegion> all_write_regions;
+  for (const auto& child : children) {
+    if (child) {
+      auto child_write_regions = child->GetWriteRegions();
+      all_write_regions.insert(all_write_regions.end(), child_write_regions.begin(), child_write_regions.end());
+    }
+  }
+  // Remove duplicates (by buffer and region equality)
+  std::vector<BufferRegion> deduplicated;
+  for (const auto& region : all_write_regions) {
+    bool found = false;
+    for (const auto& existing : deduplicated) {
+      if (existing->buffer.same_as(region->buffer) &&
+          RegionsEqual(existing->region, region->region)) {
+        found = true;
+        break;
       }
-      if (!found) deduplicated.push_back(region);
     }
-    return deduplicated;
+    if (!found) deduplicated.push_back(region);
+  }
+  return deduplicated;
+}
+
+int64_t SequenceNode::GetLatency() const {
+  int64_t total = 0;
+  for (const auto& child : children) {
+    if (child) total += child->GetLatency();
+  }
+  return total;
+}
+
+int64_t SequenceNode::GetII() const {
+  int64_t max_ii = 0;
+  for (const auto& child : children) {
+    if (child) max_ii = std::max(max_ii, child->GetII());
+  }
+  return max_ii;
+}
+
+void SequenceNode::SetUsesCUDACore(bool value) {
+  for (auto& child : children) {
+    if (child) child->SetUsesCUDACore(value);
+  }
+}
+
+void SequenceNode::SetUsesTMACore(bool value) {
+  for (auto& child : children) {
+    if (child) child->SetUsesTMACore(value);
+  }
+}
+
+void SequenceNode::SetUsesTensorCore(bool value) {
+  for (auto& child : children) {
+    if (child) child->SetUsesTensorCore(value);
+  }
+}
+
+void SequenceNode::SetReadRegions(const std::vector<BufferRegion>& regions) {
+  // Not clear what this means for SequenceNode - maybe set on first child?
+  if (!children.empty() && children[0]) {
+    children[0]->SetReadRegions(regions);
+  }
+}
+
+void SequenceNode::SetWriteRegions(const std::vector<BufferRegion>& regions) {
+  if (!children.empty() && children[0]) {
+    children[0]->SetWriteRegions(regions);
+  }
+}
+
+void SequenceNode::SetLatency(int64_t latency) {
+  // Not clear how to distribute latency across children
+  if (!children.empty() && children[0]) {
+    children[0]->SetLatency(latency);
+  }
+}
+
+void SequenceNode::SetII(int64_t ii) {
+  // Not clear how to distribute II across children
+  if (!children.empty() && children[0]) {
+    children[0]->SetII(ii);
+  }
+}
+
+void SequenceNode::AddReadRegion(const BufferRegion& region) {
+  if (!children.empty() && children[0]) {
+    children[0]->AddReadRegion(region);
+  }
+}
+
+void SequenceNode::AddWriteRegion(const BufferRegion& region) {
+  if (!children.empty() && children[0]) {
+    children[0]->AddWriteRegion(region);
+  }
+}
+
+// Global warpgroup id assignment - should be called from the top level
+// Tasks that use the same register region must have the same warpgroup id
+// Goal: balance weighted latency between two warpgroups (0 and 1)
+// Weighted latency = latency * tripcount (tripcount = 100 for non-constant loop extent)
+void AssignWarpgroupIdsGlobal(IRStructure* root) {
+  if (!root) return;
+
+  // Step 1: Collect all TaskNodes with context information
+  std::vector<TaskNodeWithContext> all_tasks;
+  CollectAllTaskNodesWithContext(root, all_tasks);
+
+  if (all_tasks.empty()) return;
+
+  int n = all_tasks.size();
+
+  // Step 2: Initialize all warpgroup ids to -1 (unassigned)
+  for (auto& task_ctx : all_tasks) {
+    task_ctx.task->SetWarpgroupId(-1);
   }
 
-  // Latency estimation (sum of children latencies)
-  int64_t GetLatency() const override {
-    int64_t total = 0;
-    for (const auto& child : children) {
-      if (child) total += child->GetLatency();
-    }
-    return total;
-  }
-
-  // Initiation interval (maximum of children II)
-  int64_t GetII() const override {
-    int64_t max_ii = 0;
-    for (const auto& child : children) {
-      if (child) max_ii = std::max(max_ii, child->GetII());
-    }
-    return max_ii;
-  }
-
-  // Setters (not typically used for SequenceNode as it aggregates from children)
-  // These could be used to set properties on all children, but that might not be the right semantics
-  void SetUsesCUDACore(bool value) override {
-    for (auto& child : children) {
-      if (child) child->SetUsesCUDACore(value);
-    }
-  }
-  void SetUsesTMACore(bool value) override {
-    for (auto& child : children) {
-      if (child) child->SetUsesTMACore(value);
-    }
-  }
-  void SetUsesTensorCore(bool value) override {
-    for (auto& child : children) {
-      if (child) child->SetUsesTensorCore(value);
-    }
-  }
-  void SetReadRegions(const std::vector<BufferRegion>& regions) override {
-    // Not clear what this means for SequenceNode - maybe set on first child?
-    if (!children.empty() && children[0]) {
-      children[0]->SetReadRegions(regions);
-    }
-  }
-  void SetWriteRegions(const std::vector<BufferRegion>& regions) override {
-    if (!children.empty() && children[0]) {
-      children[0]->SetWriteRegions(regions);
-    }
-  }
-  void SetLatency(int64_t latency) override {
-    // Not clear how to distribute latency across children
-    if (!children.empty() && children[0]) {
-      children[0]->SetLatency(latency);
-    }
-  }
-  void SetII(int64_t ii) override {
-    // Not clear how to distribute II across children
-    if (!children.empty() && children[0]) {
-      children[0]->SetII(ii);
+  // Step 3: Build union-find based on shared register regions
+  TaskUnionFind uf(n);
+  for (int i = 0; i < n; i++) {
+    for (int j = i + 1; j < n; j++) {
+      if (UseSameRegisterRegion(all_tasks[i].task, all_tasks[j].task)) {
+        uf.unite(i, j);
+      }
     }
   }
 
-  // Helper methods to add regions (add to first child)
-  void AddReadRegion(const BufferRegion& region) override {
-    if (!children.empty() && children[0]) {
-      children[0]->AddReadRegion(region);
-    }
+  // Step 4: Group tasks by connected component
+  std::unordered_map<int, std::vector<int>> components; // root -> indices
+  for (int i = 0; i < n; i++) {
+    int root_idx = uf.find(i);
+    components[root_idx].push_back(i);
   }
-  void AddWriteRegion(const BufferRegion& region) override {
-    if (!children.empty() && children[0]) {
-      children[0]->AddWriteRegion(region);
-    }
-  }
-};
 
-// ScheduleUnit: a group of consecutive TaskNodes that can be scheduled together
-struct ScheduleUnit {
-  std::vector<TaskNode*> tasks;  // consecutive TaskNodes
-  SequenceNode* parent_seq{nullptr};  // Parent SequenceNode containing these tasks
-  size_t start_idx{0};  // Starting index in parent_seq->children
-  bool inside_control_node{false};  // Whether this unit is inside a ControlNode (For loop)
-  ControlNode* control_node{nullptr};  // Pointer to containing ControlNode (if inside_control_node is true)
-  // Additional metadata could be added here, e.g., resource usage summary
-};
+  // Step 5: Calculate weighted latency for each component
+  std::vector<ComponentInfo> component_infos;
+  for (const auto& kv : components) {
+    int root = kv.first;
+    const std::vector<int>& indices = kv.second;
+    int64_t total_weighted_latency = 0;
+    for (int idx : indices) {
+      int64_t latency = all_tasks[idx].task->GetLatency();
+      int64_t tripcount = all_tasks[idx].tripcount;
+      total_weighted_latency += latency * tripcount;
+    }
+    component_infos.push_back({root, total_weighted_latency, indices});
+  }
+
+  // Step 6: Sort components by weighted latency (descending)
+  // Greedy assignment: assign larger components to the warpgroup with less current usage
+  std::sort(component_infos.begin(), component_infos.end(),
+            [](const ComponentInfo& a, const ComponentInfo& b) {
+              return a.weighted_latency > b.weighted_latency;
+            });
+
+  // Step 7: Greedy assignment to balance weighted latency
+  int64_t warpgroup0_latency = 0;
+  int64_t warpgroup1_latency = 0;
+
+  for (const auto& comp : component_infos) {
+    int assigned_warpgroup = 0;
+    if (warpgroup0_latency <= warpgroup1_latency) {
+      assigned_warpgroup = 0;
+      warpgroup0_latency += comp.weighted_latency;
+    } else {
+      assigned_warpgroup = 1;
+      warpgroup1_latency += comp.weighted_latency;
+    }
+
+    // Assign warpgroup id to all tasks in this component
+    for (int idx : comp.task_indices) {
+      all_tasks[idx].task->SetWarpgroupId(assigned_warpgroup);
+    }
+  }
+
+  // Log the assignment
+  int count_warpgroup0 = 0;
+  int count_warpgroup1 = 0;
+  for (const auto& task_ctx : all_tasks) {
+    if (task_ctx.task->GetWarpgroupId() == 0) count_warpgroup0++;
+    else if (task_ctx.task->GetWarpgroupId() == 1) count_warpgroup1++;
+  }
+
+  LOG(INFO) << "Global warpgroup id assignment: " << count_warpgroup0
+            << " tasks to warpgroup 0 (" << warpgroup0_latency
+            << " weighted latency), " << count_warpgroup1
+            << " tasks to warpgroup 1 (" << warpgroup1_latency
+            << " weighted latency)";
+}
+
+// Assign warpgroup ids to tasks within a ScheduleUnit (legacy function, kept for compatibility)
+// Tasks that use the same register region must have the same warpgroup id
+// Goal: balance weighted latency between two warpgroups (0 and 1)
+// Weighted latency = latency * tripcount if task is inside a loop, otherwise latency
+void AssignWarpgroupIds(ScheduleUnit& unit) {
+  std::vector<TaskNode*>& tasks = unit.tasks;
+  if (tasks.empty()) return;
+
+  int n = tasks.size();
+
+  // Step 1: Initialize all warpgroup ids to -1 (unassigned)
+  for (auto* task : tasks) {
+    task->SetWarpgroupId(-1);
+  }
+
+  // Step 2: Build union-find based on shared register regions
+  TaskUnionFind uf(n);
+  for (int i = 0; i < n; i++) {
+    for (int j = i + 1; j < n; j++) {
+      if (UseSameRegisterRegion(tasks[i], tasks[j])) {
+        uf.unite(i, j);
+      }
+    }
+  }
+
+  // Step 3: Group tasks by connected component
+  std::unordered_map<int, std::vector<int>> components; // root -> indices
+  for (int i = 0; i < n; i++) {
+    int root = uf.find(i);
+    components[root].push_back(i);
+  }
+
+  // Step 4: Calculate weighted latency for each component
+
+  // Determine tripcount multiplier if inside a loop
+  int64_t tripcount = 1;
+  if (unit.inside_control_node && unit.control_node) {
+    const ForNode* for_node = unit.control_node->control.get();
+    PrimExpr loop_extent = for_node->extent;
+    // Try to convert loop_extent to int64_t
+    if (const int64_t* extent_ptr = tir::as_const_int(loop_extent)) {
+      tripcount = *extent_ptr;
+    } else {
+      // If extent is not constant, use tripcount = 100 (as requested)
+      LOG(WARNING) << "Loop extent is not constant, using tripcount = 100 for latency weighting";
+      tripcount = 100;
+    }
+  }
+
+  std::vector<ComponentInfo> component_infos;
+  for (const auto& kv : components) {
+    int root = kv.first;
+    const std::vector<int>& indices = kv.second;
+    int64_t total_weighted_latency = 0;
+    for (int idx : indices) {
+      int64_t latency = tasks[idx]->GetLatency();
+      total_weighted_latency += latency * tripcount;
+    }
+    component_infos.push_back({root, total_weighted_latency, indices});
+  }
+
+  // Step 5: Sort components by weighted latency (descending)
+  // Greedy assignment: assign larger components to the warpgroup with less current usage
+  std::sort(component_infos.begin(), component_infos.end(),
+            [](const ComponentInfo& a, const ComponentInfo& b) {
+              return a.weighted_latency > b.weighted_latency;
+            });
+
+  // Step 6: Greedy assignment to balance weighted latency
+  int64_t warpgroup0_latency = 0;
+  int64_t warpgroup1_latency = 0;
+
+  for (const auto& comp : component_infos) {
+    int assigned_warpgroup = 0;
+    if (warpgroup0_latency <= warpgroup1_latency) {
+      assigned_warpgroup = 0;
+      warpgroup0_latency += comp.weighted_latency;
+    } else {
+      assigned_warpgroup = 1;
+      warpgroup1_latency += comp.weighted_latency;
+    }
+
+    // Assign warpgroup id to all tasks in this component
+    for (int idx : comp.task_indices) {
+      tasks[idx]->SetWarpgroupId(assigned_warpgroup);
+    }
+  }
+
+  // Log the assignment
+  int count_warpgroup0 = 0;
+  int count_warpgroup1 = 0;
+  for (const auto* task : tasks) {
+    if (task->GetWarpgroupId() == 0) count_warpgroup0++;
+    else if (task->GetWarpgroupId() == 1) count_warpgroup1++;
+  }
+
+  LOG(INFO) << "Assigned warpgroup ids: " << count_warpgroup0 << " tasks to warpgroup 0 ("
+            << warpgroup0_latency << " weighted latency), "
+            << count_warpgroup1 << " tasks to warpgroup 1 ("
+            << warpgroup1_latency << " weighted latency), tripcount multiplier = " << tripcount;
+}
+
+
+
 
 // MemoryAccessDetector: detect read/write regions in statements
 // Adapted from BlockReadWriteDetector in TVM
@@ -998,6 +1148,12 @@ public:
     current_seq_ = nullptr;
     current_child_idx_ = 0;
     control_nesting_depth_ = 0;
+
+    // Global warpgroup id assignment from the top level
+    // This ensures register region constraints are respected across all ScheduleUnits
+    LOG(INFO) << "Performing global warpgroup id assignment...";
+    AssignWarpgroupIdsGlobal(root);
+
     Collect(root);
     // Finalize the last unit if any
     FinalizeCurrentUnit();
@@ -1528,8 +1684,15 @@ private:
   void ApplyScheduling(ScheduleUnit& unit) {
     if (unit.tasks.size() <= 1) {
       // No reordering needed for single task
+      // Still assign warpgroup id if single task
+      if (!unit.tasks.empty()) {
+        unit.tasks[0]->SetWarpgroupId(0); // assign to warpgroup 0 by default
+      }
       return;
     }
+
+    // Assign warpgroup ids to tasks based on weighted latency
+    AssignWarpgroupIds(unit);
 
     if (!unit.parent_seq) {
       // No parent sequence to update (should not happen for tasks from SequenceNode)
