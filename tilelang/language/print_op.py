@@ -3,6 +3,8 @@ This module provides macros and utilities for debugging TileLang (tl) programs.
 It includes functionality to print variables, print values in buffers, conditionally execute debug prints and assert.
 """
 
+from __future__ import annotations
+
 from tilelang.language.eager.builder import Builder
 from tvm import tir
 from typing import Any
@@ -23,11 +25,11 @@ def print_var(var: tir.PrimExpr, msg: str = "") -> tir.PrimExpr:
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation.
     """
-    tir.call_extern("handle", "debug_print_var", msg, var)
+    return tir.call_extern("handle", "debug_print_var", msg, var)
 
 
 @macro
-def print_var_with_condition(condition: tir.PrimExpr, var: tir.PrimExpr, msg: str = "") -> tir.PrimExpr:
+def print_var_with_condition(condition: tir.PrimExpr, var: tir.PrimExpr, msg: str = "") -> tir.PrimExpr | None:
     """
     Conditionally prints a TIR primitive expression (PrimExpr) if a given condition is True.
 
@@ -39,11 +41,11 @@ def print_var_with_condition(condition: tir.PrimExpr, var: tir.PrimExpr, msg: st
         tir.PrimExpr: The TIR expression for the debug print operation, if the condition is True.
     """
     if condition:
-        tir.call_extern("handle", "debug_print_var", msg, var)
+        return tir.call_extern("handle", "debug_print_var", msg, var)
 
 
 @macro
-def print_global_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr:
+def print_global_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr | None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
     """
@@ -51,13 +53,13 @@ def print_global_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buff
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+            return tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
     else:
-        tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+        return tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro
-def print_shared_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr:
+def print_shared_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr | None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -73,11 +75,11 @@ def print_shared_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buff
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+            return tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro
-def print_fragment_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr:
+def print_fragment_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr | None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -95,7 +97,7 @@ def print_fragment_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Bu
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, smem[coords])
+            return tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, smem[coords])
 
 
 @macro
@@ -105,11 +107,11 @@ def print_msg(msg: str) -> tir.PrimExpr:
     """
     assert isinstance(msg, str), "msg must be a string"
     assert msg != "", "msg must not be empty"
-    tir.call_extern("handle", "debug_print_msg", msg)
+    return tir.call_extern("handle", "debug_print_msg", msg)
 
 
 @macro
-def print_local_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr:
+def print_local_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr | None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -125,7 +127,7 @@ def print_local_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffe
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+            return tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 from tilelang.utils.target import check_cuda_availability
@@ -160,7 +162,7 @@ def device_assert(condition: tir.PrimExpr, msg: str = "", no_stack_info=False):
             T.call_intrin("void", tir.op.Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))
 
 
-def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:
+def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr | None:
     """
     A generic print function that handles both TIR buffers and primitive expressions.
 

@@ -21,7 +21,7 @@ def copy(
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
-):
+) -> tir.PrimExpr:
     """Copy data between memory regions.
 
     Args:
