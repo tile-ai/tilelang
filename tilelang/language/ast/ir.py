@@ -87,14 +87,14 @@ from tvm.tir.generic import cast
 
 from . import _ffi_api
 from tvm.script.ir_builder.tir import frame
-from tilelang.language import dtypes
+from tilelang.language import dtypes as _dtypes
 
 # pylint: enable=unused-import
 
 
 def buffer(
     shape: ShapeType | tir.PrimExpr | Integral,
-    dtype: DType = dtypes.float32,
+    dtype: DType = _dtypes.float32,
     data: Optional[Var] = None,
     strides: Optional[List[PrimExpr]] = None,
     elem_offset: Optional[PrimExpr] = None,
@@ -145,7 +145,7 @@ def buffer(
     """
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        strides = [Var(s, dtypes.int32) if isinstance(s, str) else s for s in strides]
+        strides = [Var(s, _dtypes.int32) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
     return _ffi_api.Buffer(  # type: ignore[attr-defined] # pylint: disable=no-member
@@ -246,7 +246,7 @@ def func_ret(ret_type: Type) -> Type:
 def match_buffer(
     param: Union[Var, BufferLoad, BufferRegion],
     shape: ShapeType | PrimExpr | Integral | None = None,
-    dtype: DType = dtypes.float32,
+    dtype: DType = _dtypes.float32,
     data: Optional[Var] = None,
     strides: Optional[List[PrimExpr]] = None,
     elem_offset: Optional[PrimExpr] = None,
@@ -442,7 +442,7 @@ def block_attr(attrs: Dict[str, Any]) -> None:
 
 def alloc_buffer(
     shape: ShapeType | PrimExpr | Integral,
-    dtype: DType = dtypes.float32,
+    dtype: DType = _dtypes.float32,
     data: Optional[Var] = None,
     strides: Optional[List[PrimExpr]] = None,
     elem_offset: Optional[PrimExpr] = None,
@@ -539,7 +539,7 @@ class axis:  # pylint: disable=invalid-name
     def spatial(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = T.int32,
+        dtype: DType = _dtypes.int32,
     ) -> Var:
         """The spatial block axis defining function.
 
@@ -567,7 +567,7 @@ class axis:  # pylint: disable=invalid-name
     def reduce(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = T.int32,
+        dtype: DType = _dtypes.int32,
     ) -> Var:
         """The reduced block axis defining function.
 
@@ -595,7 +595,7 @@ class axis:  # pylint: disable=invalid-name
     def scan(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = T.int32,
+        dtype: DType = _dtypes.int32,
     ) -> Var:
         """The scanning block axis defining function.
 
@@ -623,7 +623,7 @@ class axis:  # pylint: disable=invalid-name
     def opaque(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = T.int32,
+        dtype: DType = _dtypes.int32,
     ) -> Var:
         """The opaque block axis defining function.
 

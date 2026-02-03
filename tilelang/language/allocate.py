@@ -259,28 +259,28 @@ def alloc_descriptor(
     return T.alloc_buffer([1], dtype, scope=scope)
 
 
-def alloc_wgmma_desc(dtype: str = _dtypes.uint64):
+def alloc_wgmma_desc(dtype: DType = _dtypes.uint64):
     return alloc_descriptor("wgmma", dtype=dtype)
 
 
-def alloc_tcgen05_smem_desc(dtype: str = _dtypes.uint64):
+def alloc_tcgen05_smem_desc(dtype: DType = _dtypes.uint64):
     return alloc_descriptor("tcgen05_smem", dtype=dtype)
 
 
-def alloc_tcgen05_instruction_desc(dtype: str = _dtypes.uint32):
+def alloc_tcgen05_instruction_desc(dtype: DType = _dtypes.uint32):
     return alloc_descriptor("tcgen05_instr", dtype=dtype)
 
 
 # Alias: short name consistent with imports
-def alloc_tcgen05_instr_desc(dtype: str = _dtypes.uint32):
+def alloc_tcgen05_instr_desc(dtype: DType = _dtypes.uint32):
     return alloc_tcgen05_instruction_desc(dtype)
 
 
 @overload
-def empty(shape, dtype: str = _dtypes.float32) -> Tensor: ...
+def empty(shape, dtype: DType = _dtypes.float32) -> Tensor: ...
 
 
-def empty(*shape, dtype: str = _dtypes.float32) -> Tensor:
+def empty(*shape, dtype: DType = _dtypes.float32) -> Tensor:
     if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
         return OutTensor(shape[0], dtype)
     elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, SupportsIndex, TYPE_CHECKING, Generic, TypeVar
+from typing import Any, TYPE_CHECKING, Generic, TypeVar
 from tilelang.typing import DType, ShapeType
-from collections.abc import Sequence
 from typing_extensions import Self
 
 from tvm import tir
@@ -12,6 +11,8 @@ from tvm.tir import Var, PrimExpr
 from tvm.script.ir_builder.tir import buffer, handle, match_buffer
 from tilelang.utils import deprecated
 from tilelang.jit.exceptions import JITNoBuilderError
+
+from tilelang.language import dtypes as _dtypes
 
 
 class BufferProxy:
@@ -22,7 +23,7 @@ class BufferProxy:
     def __call__(
         self,
         shape: ShapeType,
-        dtype: DType = "float32",
+        dtype: DType = _dtypes.float32,
         data=None,
         strides=None,
         elem_offset=None,
@@ -120,7 +121,7 @@ class BaseTensorProxy:
         return self(*keys)
 
     def from_ptr(
-        self, pointer_var: Var, shape: tuple[PrimExpr, ...], dtype: str = "float32", strides: tuple[PrimExpr, ...] = None
+        self, pointer_var: Var, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None
     ) -> tir.Buffer:
         """Create a buffer from a pointer, shape, and data type.
 
@@ -150,7 +151,7 @@ class TensorProxy(BaseTensorProxy):
             strides.append(s)
         return tuple(reversed(strides))
 
-    def __call__(self, shape: tuple[Any] | PrimExpr | int, dtype: str = "float32", data=None, scope=None) -> tir.Buffer:
+    def __call__(self, shape: ShapeType | PrimExpr | int, dtype: DType = "float32", data=None, scope=None) -> tir.Buffer:
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
         return super().__call__(shape, dtype=dtype, strides=TensorProxy._construct_strides(shape), data=data, scope=scope)
@@ -162,7 +163,7 @@ class StridedTensorProxy(BaseTensorProxy):
     This class implements the default tensor proxy with global memory scope, with the stride information required.
     """
 
-    def __call__(self, shape: tuple[Any], strides: tuple[Any], dtype: str = "float32", scope=None) -> tir.Buffer:
+    def __call__(self, shape: ShapeType, strides: tuple[Any], dtype: DType = "float32", scope=None) -> tir.Buffer:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
         return super().__call__(shape, dtype=dtype, strides=strides, scope=scope)
@@ -214,8 +215,8 @@ if TYPE_CHECKING:
 
         def __init__(
             self,
-            shape: Sequence[SupportsIndex],
-            dtype="float32",
+            shape: ShapeType,
+            dtype: DType = "float32",
             data=None,
             strides=None,
             elem_offset=None,
@@ -228,7 +229,7 @@ if TYPE_CHECKING:
 
         @classmethod
         def from_ptr(
-            cls, pointer_var: Var, shape: Sequence[PrimExpr, ...], dtype: str = "float32", strides: tuple[PrimExpr, ...] = None
+            cls, pointer_var: Var, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None
         ) -> Self: ...
 
     class Tensor(BaseTensor): ...
@@ -259,7 +260,7 @@ def ptr(dtype: DType | None = None, storage_scope: str = "global", *, is_size_va
 
     Parameters
     ----------
-    dtype: str
+    dtype: DType
         The data type of the pointer.
 
     storage_scope: str

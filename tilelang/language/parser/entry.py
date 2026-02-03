@@ -30,7 +30,8 @@ from ..ast import buffer, ptr
 from tvm.script.parser._core import parse, scan_macro, utils
 from tvm.script.parser.core.parser import Parser, ScriptMacro
 
-from tilelang.language import dtypes
+from tilelang.typing import ShapeType, DType
+from tilelang.language import dtypes as _dtypes
 
 
 def prim_func(func: Optional[Callable] = None, private: bool = False, check_well_formed=True) -> Union[PrimFunc, Callable]:
@@ -159,8 +160,8 @@ class BufferProxy:
 
     def __call__(
         self,
-        shape,
-        dtype=dtypes.float32,
+        shape: ShapeType,
+        dtype: DType = _dtypes.float32,
         data=None,
         strides=None,
         elem_offset=None,

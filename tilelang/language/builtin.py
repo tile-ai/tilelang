@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tilelang.typing import BufferLikeType, BufferLikeTypeTuple, BarrierType
+from tilelang.typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
@@ -428,7 +428,10 @@ def shuffle_elect(thread_extent: int) -> PrimExpr:
 
 
 def warpgroup_fence_operand(
-    buffer_or_ptr: BufferLikeType | PrimExpr, offset: int | PrimExpr = 0, num_regs: int | PrimExpr | None = None, dtype: str | None = None
+    buffer_or_ptr: BufferLikeType | PrimExpr,
+    offset: int | PrimExpr = 0,
+    num_regs: int | PrimExpr | None = None,
+    dtype: DType | None = None,
 ):
     """Insert a warpgroup fence for the destination accumulator registers.
 
@@ -445,7 +448,7 @@ def warpgroup_fence_operand(
         num_regs: int | PrimExpr | None
             Number of 32-bit registers to fence. If None and a Buffer is provided, it will be
             derived from the buffer shape and dtype.
-        dtype: str | None
+        dtype: DType | None
             Data type string of the accumulator elements. When passing a buffer or
             buffer-derived expression, dtype is inferred. It is required only when
             passing a raw pointer expression that cannot be inferred.
