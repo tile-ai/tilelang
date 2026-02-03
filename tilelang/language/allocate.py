@@ -259,20 +259,20 @@ def alloc_descriptor(
     return T.alloc_buffer([1], dtype, scope=scope)
 
 
-def alloc_wgmma_desc(dtype: DType = _dtypes.uint64):
+def alloc_wgmma_desc(dtype: DType = _dtypes.uint64) -> Buffer:
     return alloc_descriptor("wgmma", dtype=dtype)
 
 
-def alloc_tcgen05_smem_desc(dtype: DType = _dtypes.uint64):
+def alloc_tcgen05_smem_desc(dtype: DType = _dtypes.uint64) -> Buffer:
     return alloc_descriptor("tcgen05_smem", dtype=dtype)
 
 
-def alloc_tcgen05_instruction_desc(dtype: DType = _dtypes.uint32):
+def alloc_tcgen05_instruction_desc(dtype: DType = _dtypes.uint32) -> Buffer:
     return alloc_descriptor("tcgen05_instr", dtype=dtype)
 
 
 # Alias: short name consistent with imports
-def alloc_tcgen05_instr_desc(dtype: DType = _dtypes.uint32):
+def alloc_tcgen05_instr_desc(dtype: DType = _dtypes.uint32) -> Buffer:
     return alloc_tcgen05_instruction_desc(dtype)
 
 

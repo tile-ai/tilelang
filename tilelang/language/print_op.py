@@ -52,8 +52,6 @@ def print_global_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buff
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
             tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
-    else:
-        tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro

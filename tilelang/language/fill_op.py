@@ -7,7 +7,7 @@ from tilelang.language import has_let_value, get_let_value
 from tilelang.utils.language import get_buffer_region_from_load, to_buffer_region
 
 
-def fill(buffer: BufferLikeType, value: tir.PrimExpr):
+def fill(buffer: BufferLikeType, value: tir.PrimExpr) -> tir.PrimExpr:
     """Fill a buffer or buffer region with a specified value.
 
     Args:
@@ -37,7 +37,7 @@ def fill(buffer: BufferLikeType, value: tir.PrimExpr):
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.fill"), to_buffer_region(buffer, access_type="w", extents=extents), value)
 
 
-def clear(buffer: BufferLikeType):
+def clear(buffer: BufferLikeType) -> tir.PrimExpr:
     """Clear a buffer by filling it with zeros.
 
     Args:
