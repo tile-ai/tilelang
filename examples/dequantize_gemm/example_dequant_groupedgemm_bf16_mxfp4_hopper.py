@@ -271,7 +271,7 @@ def matmul(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
             topk_weights_shared = T.alloc_shared((block_M), out_dtype)
-            sorted_token_ids_local = T.alloc_fragment((block_M), T.int32)
+            sorted_token_ids_shared = T.alloc_shared((block_M), T.int32)
             expert_id = T.alloc_local((1), T.int32)  # the expert id for the current block
             # To use 1D TMA, the last dim of Scale_shared must have stride=1
             # May use much more shared memory than necessary
@@ -287,13 +287,13 @@ def matmul(
             if threads == 512:
                 T.disable_warp_group_reg_alloc()
 
-            T.copy(sorted_token_ids[by * block_M : (by + 1) * block_M], sorted_token_ids_local)
+            T.copy(sorted_token_ids[by * block_M : (by + 1) * block_M], sorted_token_ids_shared)
             expert_id[0] = expert_ids[by]
 
             # Get the topk weights of each token in the current block
             for i in T.Parallel(block_M):
-                if sorted_token_ids_local[i] != -1:
-                    topk_weights_shared[i] = topk_weights[sorted_token_ids_local[i]]
+                if sorted_token_ids_shared[i] != -1:
+                    topk_weights_shared[i] = topk_weights[sorted_token_ids_shared[i]]
 
             # Get bias and scale based on the expert id
             if with_bias:
@@ -312,10 +312,10 @@ def matmul(
                 # Each thread copies 4 bytes, local size is 16
                 for copy_i in T.serial(block_M * block_K // threads // 16):
                     base = copy_i * threads * 16 + tx * 16
-                    if sorted_token_ids_local[base // block_K] != -1:
+                    if sorted_token_ids_shared[base // block_K] != -1:
                         for copy_j in T.vectorized(16):
                             A_shared[base // block_K, base % block_K + copy_j] = A[
-                                sorted_token_ids_local[base // block_K] // topk, k * block_K + base % block_K + copy_j
+                                sorted_token_ids_shared[base // block_K] // topk, k * block_K + base % block_K + copy_j
                             ]
 
                 T.copy(B[expert_id[0], bx * block_N, k * block_K // num_elems_per_byte], B_shared)
@@ -332,11 +332,11 @@ def matmul(
             T.copy(C_local, C_shared)
             for copy_i in T.serial(block_M * block_N // threads // 16):
                 base = copy_i * threads * 16 + tx * 16
-                if sorted_token_ids_local[base // block_N] != -1:
+                if sorted_token_ids_shared[base // block_N] != -1:
                     for copy_j in T.vectorized(16):
                         C[
-                            sorted_token_ids_local[base // block_N] // topk,
-                            sorted_token_ids_local[base // block_N] % topk,
+                            sorted_token_ids_shared[base // block_N] // topk,
+                            sorted_token_ids_shared[base // block_N] % topk,
                             bx * block_N + base % block_N + copy_j,
                         ] = C_shared[base // block_N, base % block_N + copy_j]
 
@@ -560,9 +560,9 @@ def run_regression_perf(m=4096, n=4096, k=4096, scale_size=32, topk=4, E=32, fas
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--M", type=int, default=16384, help="M")  # From gpt-oss-20b MoE's first gemm
-    parser.add_argument("--N", type=int, default=5760, help="N")
-    parser.add_argument("--K", type=int, default=2944, help="K")
+    parser.add_argument("--M", type=int, default=256, help="M")  # From gpt-oss-20b MoE's first gemm
+    parser.add_argument("--N", type=int, default=256, help="N")
+    parser.add_argument("--K", type=int, default=256, help="K")
     parser.add_argument("--scale_size", type=int, default=32, help="scale size")
     parser.add_argument("--topk", type=int, default=4, help="topk")  # experts activated for each token
     parser.add_argument("--E", type=int, default=32, help="E")  # number of experts
