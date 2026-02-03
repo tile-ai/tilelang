@@ -4,13 +4,13 @@ from tvm.tir import PrimExpr, BufferLoad, op
 from tilelang import language as T
 
 
-def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
+def region(buffer: BufferLoad, access_type: str, *args: PrimExpr) -> PrimExpr:
     """Create a tl.region call for a BufferLoad and extents."""
     access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
     return T.call_intrin("handle", op.Op.get("tl.tileop.region"), buffer, access_type, *args)
 
 
-def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str, extents: list[tir.PrimExpr]):
+def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str, extents: list[tir.PrimExpr]) -> PrimExpr:
     """Clamp extents and return a tl.region call."""
     mins = [r.min for r in buffer_region.region]
     region_extents = [r.extent for r in buffer_region.region]

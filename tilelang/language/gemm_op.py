@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir
@@ -20,23 +21,23 @@ from tilelang.env import env as _env
 
 def _gemm_impl(
     op_key: str,
-    A: tir.Buffer | tir.Var,
-    B: tir.Buffer | tir.Var,
-    C: tir.Buffer | tir.Var,
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-    mbar: tir.Buffer | tir.BufferLoad | None = None,
-):
+    mbar: BarrierType | None = None,
+) -> tir.PrimExpr:
     """Shared GEMM implementation.
 
     Returns a call_intrin handle for the given op key.
     """
 
-    def legalize_arguments(arg: tir.Buffer | tir.Var):
+    def legalize_arguments(arg: BufferLikeType | tir.Var) -> BufferLikeType:
         """Convert let-bound variables to their corresponding buffers.
 
         Args:
@@ -134,17 +135,17 @@ def _gemm_impl(
 
 # Public wrappers
 def gemm_v1(
-    A: tir.Buffer | tir.Var,
-    B: tir.Buffer | tir.Var,
-    C: tir.Buffer | tir.Var,
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-    mbar: tir.Buffer | tir.BufferLoad | None = None,
-):
+    mbar: BarrierType | None = None,
+) -> tir.PrimExpr:
     """GEMM v1: use op tl.gemm."""
     return _gemm_impl(
         "tl.tileop.gemm",
@@ -163,17 +164,17 @@ def gemm_v1(
 
 # experimental currently, for fast compilation
 def gemm_v2(
-    A: tir.Buffer | tir.Var,
-    B: tir.Buffer | tir.Var,
-    C: tir.Buffer | tir.Var,
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-    mbar: tir.Buffer | tir.BufferLoad | None = None,
-):
+    mbar: BarrierType | None = None,
+) -> tir.PrimExpr:
     """GEMM v2: use op tl.gemm_py."""
     return _gemm_impl(
         "tl.tileop.gemm_py",
@@ -195,30 +196,30 @@ def gemm_v2(
 
 
 def gemm(
-    A: tir.Buffer | tir.Var,
-    B: tir.Buffer | tir.Var,
-    C: tir.Buffer | tir.Var,
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
-    mbar: tir.Buffer | tir.BufferLoad | None = None,
-):
+    mbar: BarrierType | None = None,
+) -> tir.PrimExpr:
     """TileLang GEMM operator.
 
     Args:
-        A (tir.Buffer | tir.Var): Input buffer A.
-        B (tir.Buffer | tir.Var): Input buffer B.
-        C (tir.Buffer | tir.Var): Output buffer C.
+        A (BufferLikeType, i.e. Buffer | BufferLoad | BufferRegion, or Var): Input buffer A.
+        B (BufferLikeType): Input buffer B.
+        C (BufferLikeType): Output buffer C.
         transpose_A (bool): Whether to transpose A. Defaults to False.
         transpose_B (bool): Whether to transpose B. Defaults to False.
         policy (GemmWarpPolicy): GEMM warp partition policy.
         clear_accum (bool): Whether to clear the accumulator.
         k_pack (int): Numbers of packed matrix cores, for ROCm only. Defaults to 1.
         wg_wait (int): Int identifier of the warpgroup MMA batch to wait on.. Defaults to 0.
-        mbar (tir.Buffer | tir.BufferLoad, optional): Mbarrier in Blackwell. Defaults to None.
+        mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell. Defaults to None.
 
     Returns:
         tir.Call: A handle to the GEMM operation.
