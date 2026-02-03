@@ -6,6 +6,7 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import TypeAlias
 
+
 from tvm import ir
 from tvm import tir
 
@@ -27,4 +28,4 @@ BufferLikeTypeTuple = (tir.Buffer, BufferLoad, BufferRegion)
 # - DType is a more specific type alias that represents a data type in the context of TileLang, and must be
 #   adapted to string.
 DType: TypeAlias = dtype | ir.Type | str | type
-ShapeType: TypeAlias = list[tir.PrimExpr] | tuple[tir.PrimExpr]
+ShapeType: TypeAlias = list[tir.PrimExpr | int] | tuple[tir.PrimExpr | int, ...]

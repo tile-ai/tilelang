@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, SupportsIndex, TYPE_CHECKING, Generic, TypeVar
+from tilelang.typing import DType, ShapeType
 from collections.abc import Sequence
 from typing_extensions import Self
 
@@ -20,8 +21,8 @@ class BufferProxy:
     @deprecated("T.Buffer(...)", "T.Tensor(...)")
     def __call__(
         self,
-        shape,
-        dtype="float32",
+        shape: ShapeType,
+        dtype: DType = "float32",
         data=None,
         strides=None,
         elem_offset=None,
@@ -54,8 +55,8 @@ class BufferProxy:
         return self(*keys)  # type: ignore[attr-defined] # pylint: disable=no-member
 
     def from_ptr(
-        self, pointer_var: Var, shape: tuple[PrimExpr, ...], dtype: str = "float32", strides: tuple[PrimExpr, ...] = None
-    ) -> Buffer:
+        self, pointer_var: Var, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None
+    ) -> tir.Buffer:
         """Create a buffer from a pointer, shape, and data type.
 
         Args:
@@ -83,8 +84,8 @@ class BaseTensorProxy:
 
     def __call__(
         self,
-        shape,
-        dtype="float32",
+        shape: ShapeType,
+        dtype: DType = "float32",
         data=None,
         strides=None,
         elem_offset=None,
@@ -253,7 +254,7 @@ else:
     class Ref: ...
 
 
-def ptr(dtype: str | None = None, storage_scope: str = "global", *, is_size_var: bool = False) -> Var:
+def ptr(dtype: DType | None = None, storage_scope: str = "global", *, is_size_var: bool = False) -> Var:
     """Create a TIR var that represents a pointer.
 
     Parameters
@@ -275,7 +276,7 @@ def ptr(dtype: str | None = None, storage_scope: str = "global", *, is_size_var:
     return handle(dtype=dtype, storage_scope=storage_scope, is_size_var=is_size_var)
 
 
-def make_tensor(ptr: Var, shape: tuple[PrimExpr, ...], dtype: str = "float32", strides: tuple[PrimExpr, ...] = None) -> tir.Buffer:
+def make_tensor(ptr: Var, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None) -> tir.Buffer:
     from tilelang.language.eager.builder import Builder
 
     if Builder.current() is None:
