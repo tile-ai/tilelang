@@ -127,7 +127,7 @@ def c2d_im2col(
     dilation: int,
     pad: int,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
-):
+) -> tir.PrimExpr:
     """Perform im2col transformation for 2D convolution.
 
     Args:

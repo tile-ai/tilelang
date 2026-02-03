@@ -31,7 +31,7 @@ def _gemm_impl(
     k_pack: int = 1,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
-):
+) -> tir.PrimExpr:
     """Shared GEMM implementation.
 
     Returns a call_intrin handle for the given op key.
@@ -145,7 +145,7 @@ def gemm_v1(
     k_pack: int = 1,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
-):
+) -> tir.PrimExpr:
     """GEMM v1: use op tl.gemm."""
     return _gemm_impl(
         "tl.tileop.gemm",
@@ -174,7 +174,7 @@ def gemm_v2(
     k_pack: int = 1,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
-):
+) -> tir.PrimExpr:
     """GEMM v2: use op tl.gemm_py."""
     return _gemm_impl(
         "tl.tileop.gemm_py",
@@ -206,7 +206,7 @@ def gemm(
     k_pack: int = 1,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
-):
+) -> tir.PrimExpr:
     """TileLang GEMM operator.
 
     Args:

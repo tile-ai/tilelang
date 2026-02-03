@@ -155,6 +155,7 @@ def device_assert(condition: tir.PrimExpr, msg: str = "", no_stack_info=False):
             T.call_intrin("void", tir.op.Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))
 
 
+# NOTE(chaofan): T.print is implemented as a macro, so no return
 def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> None:
     """
     A generic print function that handles both TIR buffers and primitive expressions.

@@ -21,6 +21,7 @@ _REDUCE_OP_KEY = "tl.tileop.reduce"
 ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor", "bitxor"]
 
 
+# NOTE(chaofan): T.reduce is implemented as a macro, so no return
 def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: int, clear: bool) -> None:
     """Perform a reduction operation on a buffer along a specified dimension.
 
@@ -30,9 +31,6 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
         reduce_type (str): Type of reduction ('max', 'min', 'sum', 'abssum')
         dim (int): Dimension along which to perform reduction
         clear (bool): Whether to initialize the output buffer before reduction
-
-    Returns:
-        tir.Call: Handle to the reduction operation
     """
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
