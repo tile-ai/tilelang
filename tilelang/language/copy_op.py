@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from typing import Literal, Any
+from tilelang.typing import BufferLikeType
 from tilelang import language as T
 from tilelang.utils.language import (
     to_buffer_region,
@@ -12,8 +13,8 @@ from tvm import ir, tir
 
 
 def copy(
-    src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
-    dst: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
+    src: BufferLikeType,
+    dst: BufferLikeType,
     *,
     coalesced_width: int | None = None,
     disable_tma: bool = False,

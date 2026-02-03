@@ -227,7 +227,7 @@ class KernelLaunchFrame(TIRFrame):
 
 
 def Kernel(
-    *blocks: tir.PrimExpr,
+    *blocks: int | tir.PrimExpr,
     threads: int | list[int] | tuple | None = None,
     is_cpu: bool = False,
     prelude: str | None = None,

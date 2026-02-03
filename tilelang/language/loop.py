@@ -11,7 +11,7 @@ from tvm.script.ir_builder.tir import frame
 
 
 def Parallel(
-    *extents: tir.PrimExpr,
+    *extents: int | tir.PrimExpr,
     coalesced_width: int | None = None,
     loop_layout: Any | None = None,
 ):

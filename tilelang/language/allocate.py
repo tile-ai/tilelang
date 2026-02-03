@@ -22,6 +22,7 @@ try:
     from typing import TypeVarTuple  # type: ignore[attr-defined]
 except Exception:
     from typing_extensions import TypeVarTuple  # type: ignore
+
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
