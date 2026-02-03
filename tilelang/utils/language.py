@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tilelang._typing import BufferLikeType
 from tvm.tir import Buffer, BufferLoad, BufferRegion, PrimExpr
 from tilelang.language.utils import region as _make_region_call
 from functools import reduce
@@ -10,7 +11,7 @@ from tvm.tir.expr import CallEffectKind
 # These utility functions check the memory scope of a given TVM buffer.
 
 
-def _get_buffer(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> Buffer:
+def _get_buffer(buffer_or_load_or_region: BufferLikeType) -> Buffer:
     """
     Extract Buffer from Buffer, BufferLoad, or BufferRegion.
 
@@ -28,7 +29,7 @@ def _get_buffer(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) ->
         raise TypeError(f"Expected Buffer, BufferLoad, or BufferRegion, got {type(buffer_or_load_or_region)}")
 
 
-def is_global(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
+def is_global(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in the global memory scope.
 
@@ -42,7 +43,7 @@ def is_global(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     return buffer.scope() == "global"
 
 
-def is_shared(buffer: Buffer | BufferLoad | BufferRegion, allow_dynamic: bool = True) -> bool:
+def is_shared(buffer: BufferLikeType, allow_dynamic: bool = True) -> bool:
     """
     Check if the buffer is in the shared memory scope.
 
@@ -60,7 +61,7 @@ def is_shared(buffer: Buffer | BufferLoad | BufferRegion, allow_dynamic: bool = 
     return any(conditions)
 
 
-def is_shared_dynamic(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
+def is_shared_dynamic(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in the dynamic shared memory scope.
 
@@ -74,7 +75,7 @@ def is_shared_dynamic(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     return buffer.scope() == "shared.dyn"
 
 
-def is_tensor_memory(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
+def is_tensor_memory(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in tensor memory scope (e.g., shared.tmem).
 
@@ -88,7 +89,7 @@ def is_tensor_memory(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     return buffer.scope().startswith("shared.tmem")
 
 
-def is_local(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
+def is_local(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in the local memory scope.
 
@@ -102,7 +103,7 @@ def is_local(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     return buffer.scope() == "local"
 
 
-def is_fragment(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
+def is_fragment(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is a fragment (e.g., for matrix multiplication operations).
 
@@ -116,7 +117,7 @@ def is_fragment(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
     return buffer.scope().startswith("local.fragment")
 
 
-def is_local_var(buffer: Buffer | BufferLoad | BufferRegion) -> bool:
+def is_local_var(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in the local.var memory scope.
 
@@ -205,9 +206,7 @@ def get_buffer_region_from_load(buffer_load: tir.BufferLoad, extents: list[PrimE
         return None
 
 
-def to_buffer_region(
-    obj: Buffer | BufferLoad | BufferRegion | tir.Var, access_type: str = "rw", extents: list[PrimExpr] | None = None
-) -> PrimExpr | BufferRegion:
+def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list[PrimExpr] | None = None) -> PrimExpr | BufferRegion:
     """
     Convert to/from the tl.region representation.
 
@@ -251,7 +250,7 @@ def to_buffer_region(
     raise ValueError(f"Unsupported argument type for to_buffer_region: {type(obj)}")
 
 
-def retrieve_shape(obj: Buffer | BufferRegion | BufferLoad) -> list:
+def retrieve_shape(obj: BufferLikeType) -> list:
     """
     Retrieve shape-like extents for a buffer-like object.
 
@@ -271,7 +270,7 @@ def retrieve_shape(obj: Buffer | BufferRegion | BufferLoad) -> list:
     raise ValueError(f"Unsupported retrieve_shape argument type: {type(obj)} for object {obj}")
 
 
-def retrieve_stride(obj: Buffer | BufferRegion | BufferLoad) -> list:
+def retrieve_stride(obj: BufferLikeType) -> list:
     """
     Retrieve row-major strides for a buffer-like object based on its buffer.shape.
 
@@ -292,7 +291,7 @@ def retrieve_stride(obj: Buffer | BufferRegion | BufferLoad) -> list:
     return strides
 
 
-def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion, access_type: str = "r") -> PrimExpr:
+def retrive_ptr_from_buffer_region(buffer_or_load_or_region: BufferLikeType, access_type: str = "r") -> PrimExpr:
     if isinstance(buffer_or_load_or_region, Buffer):
         return buffer_or_load_or_region.access_ptr(access_type)
     elif isinstance(buffer_or_load_or_region, BufferLoad):
@@ -322,7 +321,7 @@ def retrive_ptr_from_buffer_region(buffer_or_load_or_region: Buffer | BufferLoad
 
 
 def retrieve_ptr(
-    obj: Buffer | BufferRegion | BufferLoad,
+    obj: BufferLikeType,
     access_type: str = "r",
     ignore_last_ndim: int = 0,
 ) -> PrimExpr:
@@ -368,7 +367,7 @@ def retrieve_ptr(
     raise ValueError(f"Unsupported retrieve_ptr argument type: {type(obj)} for object {obj}")
 
 
-def retrieve_offset(obj: Buffer | BufferRegion | BufferLoad) -> list:
+def retrieve_offset(obj: BufferLikeType) -> list:
     """
     Retrieve per-dimension minima offsets.
 
@@ -388,7 +387,7 @@ def retrieve_offset(obj: Buffer | BufferRegion | BufferLoad) -> list:
     raise ValueError(f"Unsupported retrieve_offset argument type: {type(obj)} for object {obj}")
 
 
-def retrieve_dtype(obj: Buffer | BufferRegion | BufferLoad) -> str:
+def retrieve_dtype(obj: BufferLikeType) -> str:
     """
     Retrieve the dtype of a buffer-like object.
 

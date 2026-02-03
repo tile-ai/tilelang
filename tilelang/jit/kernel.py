@@ -225,10 +225,9 @@ class JITKernel(Generic[_P, _T]):
         target_host = self.target_host
 
         execution_backend = self.execution_backend
-        pass_configs = self.pass_configs or {}
+        pass_configs = dict(self.pass_configs) if self.pass_configs else {}
 
         compile_flags = self.compile_flags
-
         if compile_flags is not None:
             compile_flags_cfg = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
             pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = (

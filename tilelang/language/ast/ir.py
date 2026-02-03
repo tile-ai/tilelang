@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 # isort: off
 from typing_extensions import Literal
+from tilelang._typing import ShapeType, DType
 
 # isort: on
 
@@ -86,21 +87,22 @@ from tvm.tir.generic import cast
 
 from . import _ffi_api
 from tvm.script.ir_builder.tir import frame
+from tilelang.language import dtypes as _dtypes
 
 # pylint: enable=unused-import
 
 
 def buffer(
-    shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral],
-    dtype: str = T.float32,
-    data: Var = None,
-    strides: List[PrimExpr] = None,
-    elem_offset: PrimExpr = None,
+    shape: ShapeType | tir.PrimExpr | Integral,
+    dtype: DType = _dtypes.float32,
+    data: Optional[Var] = None,
+    strides: Optional[List[PrimExpr]] = None,
+    elem_offset: Optional[PrimExpr] = None,
     scope: str = "global",
     align: int = 0,
     offset_factor: int = 0,
     buffer_type: str = "",
-    axis_separators: List[int] = None,
+    axis_separators: Optional[List[int]] = None,
 ) -> Buffer:
     """The buffer declaration function.
 
@@ -109,16 +111,16 @@ def buffer(
     shape : Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral]
         The type of the buffer prior to flattening.
 
-    dtype : str
+    dtype : DType, optional
         The data type in the content of the buffer.
 
-    data : Var
+    data : Var, optional
         The pointer to the head of the data.
 
-    strides : List[PrimExpr]
+    strides : List[PrimExpr], optional
         The strides of each dimension.
 
-    elem_offset : PrimExpr
+    elem_offset : PrimExpr, optional
         The offset in terms of number of dtype elements (including lanes).
 
     scope : str
@@ -133,7 +135,7 @@ def buffer(
     buffer_type : str
         The buffer type.
 
-    axis_separators : List[int]
+    axis_separators : List[int], optional
         The separators between input axes when generating flattened output axes.
 
     Returns
@@ -143,7 +145,7 @@ def buffer(
     """
     shape = (shape,) if isinstance(shape, (PrimExpr, Integral)) else shape
     if strides is not None:
-        strides = [Var(s, T.int32) if isinstance(s, str) else s for s in strides]
+        strides = [Var(s, _dtypes.int32) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
     return _ffi_api.Buffer(  # type: ignore[attr-defined] # pylint: disable=no-member
@@ -243,16 +245,16 @@ def func_ret(ret_type: Type) -> Type:
 
 def match_buffer(
     param: Union[Var, BufferLoad, BufferRegion],
-    shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral] = None,
-    dtype: str = T.float32,
-    data: Var = None,
-    strides: List[PrimExpr] = None,
-    elem_offset: PrimExpr = None,
+    shape: ShapeType | PrimExpr | Integral | None = None,
+    dtype: DType = _dtypes.float32,
+    data: Optional[Var] = None,
+    strides: Optional[List[PrimExpr]] = None,
+    elem_offset: Optional[PrimExpr] = None,
     scope: str = "global",
     align: int = -1,
     offset_factor: int = 0,
     buffer_type: str = "default",
-    axis_separators: List[int] = None,
+    axis_separators: Optional[List[int]] = None,
 ) -> Buffer:
     """The buffer match function.
 
@@ -277,19 +279,19 @@ def match_buffer(
     param : Union[Var, BufferLoad, BufferRegion]
         The parameter of the PrimFunc to match.
 
-    shape : Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral]
+    shape : Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral, None]
         The type of the buffer prior to flattening.
 
-    dtype : str
+    dtype : DType
         The data type in the content of the buffer.
 
-    data : Var
+    data : Var, optional
         The pointer to the head of the data.
 
-    strides : List[PrimExpr]
+    strides : List[PrimExpr], optional
         The strides of each dimension.
 
-    elem_offset : PrimExpr
+    elem_offset : PrimExpr, optional
         The offset in terms of number of dtype elements (including lanes).
 
     scope : str
@@ -304,7 +306,7 @@ def match_buffer(
     buffer_type : str
         The buffer type.
 
-    axis_separators : List[int]
+    axis_separators : List[int], optional
         The separators between input axes when generating flattened output axes.
 
     Returns
@@ -439,34 +441,34 @@ def block_attr(attrs: Dict[str, Any]) -> None:
 
 
 def alloc_buffer(
-    shape: Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral],
-    dtype: str = T.float32,
-    data: Var = None,
-    strides: List[PrimExpr] = None,
-    elem_offset: PrimExpr = None,
+    shape: ShapeType | PrimExpr | Integral,
+    dtype: DType = _dtypes.float32,
+    data: Optional[Var] = None,
+    strides: Optional[List[PrimExpr]] = None,
+    elem_offset: Optional[PrimExpr] = None,
     scope: str = "global",
     align: int = -1,
     offset_factor: int = 0,
     buffer_type: str = "default",
-    axis_separators: List[int] = None,
+    axis_separators: Optional[List[int]] = None,
 ) -> Buffer:
     """The buffer allocation function.
 
     Parameters
     ----------
-    shape : Union[List[PrimExpr], Tuple[PrimExpr], PrimExpr, Integral]
+    shape : ShapeType | PrimExpr | Integral
         The type of the buffer prior to flattening.
 
-    dtype : str
+    dtype : DType
         The data type in the content of the buffer.
 
-    data : Var
+    data : Var, optional
         The pointer to the head of the data.
 
-    strides : List[PrimExpr]
+    strides : List[PrimExpr], optional
         The strides of each dimension.
 
-    elem_offset : PrimExpr
+    elem_offset : PrimExpr, optional
         The offset in terms of number of dtype elements (including lanes).
 
     scope : str
@@ -481,7 +483,7 @@ def alloc_buffer(
     buffer_type : str
         The buffer type.
 
-    axis_separators : List[int]
+    axis_separators : List[int], optional
         The separators between input axes when generating flattened output axes.
 
     Returns
@@ -537,7 +539,7 @@ class axis:  # pylint: disable=invalid-name
     def spatial(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = T.int32,
+        dtype: DType = _dtypes.int32,
     ) -> Var:
         """The spatial block axis defining function.
 
@@ -565,7 +567,7 @@ class axis:  # pylint: disable=invalid-name
     def reduce(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = T.int32,
+        dtype: DType = _dtypes.int32,
     ) -> Var:
         """The reduced block axis defining function.
 
@@ -593,7 +595,7 @@ class axis:  # pylint: disable=invalid-name
     def scan(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = T.int32,
+        dtype: DType = _dtypes.int32,
     ) -> Var:
         """The scanning block axis defining function.
 
@@ -621,7 +623,7 @@ class axis:  # pylint: disable=invalid-name
     def opaque(
         dom: Union[ir.Range, List[PrimExpr], Tuple[PrimExpr]],
         binding: PrimExpr,
-        dtype: str = T.int32,
+        dtype: DType = _dtypes.int32,
     ) -> Var:
         """The opaque block axis defining function.
 
@@ -788,10 +790,10 @@ def unroll(start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any
 
 def thread_binding(
     start: PrimExpr,
-    stop: PrimExpr = None,
-    thread: str = None,
+    stop: Optional[PrimExpr] = None,
+    thread: Optional[str] = None,
     *,
-    annotations: Dict[str, Any] = None,
+    annotations: Optional[Dict[str, Any]] = None,
 ) -> frame.ForFrame:
     """The thread-binding For statement.
 
@@ -800,13 +802,13 @@ def thread_binding(
     start : PrimExpr
         The minimum value of iteration.
 
-    stop : PrimExpr
+    stop : PrimExpr, optional
         The maximum value of iteration.
 
-    thread : str
+    thread : str, optional
         The thread for loop variable to bind.
 
-    annotations : Dict[str, Any]
+    annotations : Dict[str, Any], optional
         The optional annotations of the For statement.
 
     Returns
@@ -915,7 +917,7 @@ def Let(  # pylint: disable=invalid-name
 def let(
     v: Var,
     value: PrimExpr,
-    body: PrimExpr = None,
+    body: Optional[PrimExpr] = None,
 ) -> frame.LetFrame:
     """Create a new let binding.
 
@@ -927,7 +929,7 @@ def let(
     value : PrimExpr
         The value to be bound.
 
-    body : PrimExpr
+    body : PrimExpr, optional
         The body expression, None will be used if it was not specified.
 
     Returns
@@ -982,7 +984,7 @@ def allocate(
     extents: List[PrimExpr],
     dtype: str,
     scope: str = "global",
-    condition: PrimExpr = None,
+    condition: Optional[PrimExpr] = None,
     annotations=None,
 ) -> frame.AllocateFrame:
     """Allocate node.
@@ -998,7 +1000,7 @@ def allocate(
     scope : str
         The storage scope.
 
-    condition : PrimExpr
+    condition : PrimExpr, optional
         The condition.
 
     annotations: Optional[Mapping[str, Object]]
@@ -1132,7 +1134,7 @@ def Else() -> frame.ElseFrame:  # pylint: disable=invalid-name
 
 
 def decl_buffer(
-    shape,
+    shape: ShapeType,
     dtype=T.float32,
     data=None,
     strides=None,

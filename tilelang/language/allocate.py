@@ -15,29 +15,22 @@ with the appropriate memory scope.
 """
 
 from __future__ import annotations
-from typing import TypeVar, overload, Literal
-
-# Python 3.9 compatibility for advanced typing features (PEP 646)
-try:
-    from typing import TypeVarTuple  # type: ignore[attr-defined]
-except Exception:
-    from typing_extensions import TypeVarTuple  # type: ignore
+from typing import overload, Literal
+from tilelang._typing import DType, ShapeType
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
 from tvm.tir.buffer import Buffer
 from tvm.tir.expr import FloatImm, IntImm
+
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
 from .proxy import Tensor
 
-_Shapes = TypeVarTuple("_Shapes")
-_DType = TypeVar("_DType")
 
-
-def alloc_shared(shape, dtype: _DType, scope="shared.dyn"):
+def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
     """Allocate a shared memory buffer for inter-thread communication.
 
     Args:
@@ -55,7 +48,7 @@ def alloc_shared(shape, dtype: _DType, scope="shared.dyn"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_local(shape, dtype: _DType, scope="local"):
+def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
     """Allocate a local memory buffer for thread-private storage.
 
     Args:
@@ -69,7 +62,7 @@ def alloc_local(shape, dtype: _DType, scope="local"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_fragment(shape, dtype: _DType, scope="local.fragment"):
+def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Buffer:
     """Allocate a fragment memory buffer for specialized operations.
 
     Args:
@@ -84,14 +77,14 @@ def alloc_fragment(shape, dtype: _DType, scope="local.fragment"):
 
 
 @overload
-def alloc_var(dtype: str, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
+def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
 
 
 @overload
-def alloc_var(dtype: str, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
+def alloc_var(dtype: DType, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
 
 
-def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
+def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | int | float | None = None) -> Buffer:
     """Allocate a single-element variable buffer.
 
     Args:
@@ -148,7 +141,7 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
     return buffer
 
 
-def alloc_barrier(arrive_count: int | list[int]):
+def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     """Allocate a barrier buffer.
 
     Args:
@@ -176,7 +169,7 @@ def alloc_barrier(arrive_count: int | list[int]):
     return buffer
 
 
-def alloc_tmem(shape, dtype):
+def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
 
@@ -205,7 +198,10 @@ def alloc_tmem(shape, dtype):
     return T.alloc_buffer(shape, dtype, scope="shared.tmem")
 
 
-def alloc_reducer(shape, dtype, op="sum", replication=None):
+ReducerOp = Literal["sum", "max", "min"]
+
+
+def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None) -> Buffer:
     """
     Allocate a reducer buffer.
 
@@ -246,8 +242,8 @@ DescKind = Literal["wgmma", "tcgen05_smem", "tcgen05_instr"]
 
 def alloc_descriptor(
     kind: DescKind = "wgmma",
-    dtype: str = _dtypes.uint64,
-):
+    dtype: DType = _dtypes.uint64,
+) -> Buffer:
     """Allocate a descriptor buffer for WGMMA and TCGEN5.MMA.
 
     Args:
@@ -263,28 +259,28 @@ def alloc_descriptor(
     return T.alloc_buffer([1], dtype, scope=scope)
 
 
-def alloc_wgmma_desc(dtype: str = _dtypes.uint64):
+def alloc_wgmma_desc(dtype: DType = _dtypes.uint64) -> Buffer:
     return alloc_descriptor("wgmma", dtype=dtype)
 
 
-def alloc_tcgen05_smem_desc(dtype: str = _dtypes.uint64):
+def alloc_tcgen05_smem_desc(dtype: DType = _dtypes.uint64) -> Buffer:
     return alloc_descriptor("tcgen05_smem", dtype=dtype)
 
 
-def alloc_tcgen05_instruction_desc(dtype: str = _dtypes.uint32):
+def alloc_tcgen05_instruction_desc(dtype: DType = _dtypes.uint32) -> Buffer:
     return alloc_descriptor("tcgen05_instr", dtype=dtype)
 
 
 # Alias: short name consistent with imports
-def alloc_tcgen05_instr_desc(dtype: str = _dtypes.uint32):
+def alloc_tcgen05_instr_desc(dtype: DType = _dtypes.uint32) -> Buffer:
     return alloc_tcgen05_instruction_desc(dtype)
 
 
 @overload
-def empty(shape, dtype: str = _dtypes.float32) -> Tensor: ...
+def empty(shape, dtype: DType = _dtypes.float32) -> Tensor: ...
 
 
-def empty(*shape, dtype: str = _dtypes.float32) -> Tensor:
+def empty(*shape, dtype: DType = _dtypes.float32) -> Tensor:
     if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
         return OutTensor(shape[0], dtype)
     elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):

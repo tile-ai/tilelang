@@ -861,7 +861,7 @@ def get_type_hints(func):
     return hints
 
 
-def const(name: str, dtype: str = "int32") -> tuple[Var, ...]:
+def const(name: str, dtype: str = "int32") -> Var | tuple[Var, ...]:
     """
     Declare constexpr variables for dynamic tensor dimensions (eager mode only).
 
