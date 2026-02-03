@@ -193,6 +193,30 @@ def test_lower_stg128_predicated():
     assert _check_has_intrinsic(mod, "stg128"), "Expected predicated stg128"
 
 
+def test_predicated_store_with_load():
+    """Test that when a predicated store contains a load, the load also gets predicated.
+
+    This tests the pattern: if (pred) { B[i] = A[i] }
+    Both the store and the load should use predicated versions to avoid
+    out-of-bounds memory access when pred is false.
+    """
+
+    @T.prim_func
+    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
+        for i in T.thread_binding(32, "threadIdx.x"):
+            for j in T.vectorized(4):
+                with T.If(pred > 0), T.Then():
+                    B[i * 4 + j] = A[i * 4 + j]
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = _apply_passes(mod, enable_predicated=True)
+    print("=== test_predicated_store_with_load ===")
+    print(mod)
+    # Both load and store should be predicated
+    assert _check_has_intrinsic(mod, "ldg128"), "Expected predicated ldg128 for load inside predicated store"
+    assert _check_has_intrinsic(mod, "stg128"), "Expected predicated stg128"
+
+
 def test_predicated_disabled():
     """Test that predicated lowering can be disabled."""
 

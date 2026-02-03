@@ -161,7 +161,7 @@ def test_sync_let_stmt():
         with T.attr(
             T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]),
             "reduce_scope",
-            T.reinterpret("handle", T.uint64(0)),
+            T.reinterpret(T.uint64(0), dtype="handle"),
         ):
             T.tvm_thread_allreduce(
                 T.uint32(1),
@@ -197,7 +197,7 @@ def test_sync_let_stmt():
         T.attr(
             T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]),
             "reduce_scope",
-            T.reinterpret("handle", T.uint64(0)),
+            T.reinterpret(T.uint64(0), dtype="handle"),
         )
         cross_thread_A_temp_1_1 = T.Buffer((1,), data=cross_thread_A_temp_1, scope="local")
         T.tvm_thread_allreduce(

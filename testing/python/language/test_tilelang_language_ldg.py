@@ -17,7 +17,7 @@ def test_ldg32_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N, threads=32) as pid:
-            Y[pid] = T.reinterpret(T.float32, T.ldg32(X[pid]))
+            Y[pid] = T.reinterpret(T.ldg32(X[pid]), T.float32)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.empty(128, dtype=torch.float32, device="cuda")
@@ -45,7 +45,7 @@ def test_ldg64_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 2, threads=32) as pid:
-            Y[pid * 2 : pid * 2 + 2] = T.reinterpret(T.float32x2, T.ldg64(X[pid * 2 : pid * 2 + 2]))
+            Y[pid * 2 : pid * 2 + 2] = T.reinterpret(T.ldg64(X[pid * 2 : pid * 2 + 2]), T.float32x2)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.empty(128, dtype=torch.float32, device="cuda")
@@ -74,7 +74,7 @@ def test_ldg128_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 4, threads=32) as pid:
-            Y[pid * 4 : pid * 4 + 4] = T.reinterpret(T.float32x4, T.ldg128(X[pid * 4 : pid * 4 + 4]))
+            Y[pid * 4 : pid * 4 + 4] = T.reinterpret(T.ldg128(X[pid * 4 : pid * 4 + 4]), T.float32x4)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.empty(128, dtype=torch.float32, device="cuda")
@@ -104,7 +104,7 @@ def test_ldg256_codegen():
         Y: T.Tensor[[N], T.float32]
 
         with T.Kernel(N // 8, threads=32) as pid:
-            Y[pid * 8 : pid * 8 + 8] = T.reinterpret(T.float32x8, T.ldg256(X[pid * 8 : pid * 8 + 8]))
+            Y[pid * 8 : pid * 8 + 8] = T.reinterpret(T.ldg256(X[pid * 8 : pid * 8 + 8]), T.float32x8)
 
     X = torch.randn(256, dtype=torch.float32, device="cuda")
     Y = torch.empty(256, dtype=torch.float32, device="cuda")
@@ -134,7 +134,7 @@ def test_ldg32_predicated_codegen():
 
         with T.Kernel(N, threads=32) as pid:
             # Only load for the first half of elements
-            Y[pid] = T.reinterpret(T.float32, T.ldg32(X[pid], pred=pid < N // 2))
+            Y[pid] = T.reinterpret(T.ldg32(X[pid], pred=pid < N // 2), T.float32)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.zeros(128, dtype=torch.float32, device="cuda")
@@ -169,7 +169,7 @@ def test_ldg64_predicated_codegen():
 
         with T.Kernel(N // 2, threads=32) as pid:
             # Only load for the first half of elements
-            Y[pid * 2 : pid * 2 + 2] = T.reinterpret(T.float32x2, T.ldg64(X[pid * 2 : pid * 2 + 2], pred=pid < N // 4))
+            Y[pid * 2 : pid * 2 + 2] = T.reinterpret(T.ldg64(X[pid * 2 : pid * 2 + 2], pred=pid < N // 4), T.float32x2)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.zeros(128, dtype=torch.float32, device="cuda")
@@ -205,7 +205,7 @@ def test_ldg128_predicated_codegen():
 
         with T.Kernel(N // 4, threads=32) as pid:
             # Only load for the first half of elements
-            Y[pid * 4 : pid * 4 + 4] = T.reinterpret(T.float32x4, T.ldg128(X[pid * 4 : pid * 4 + 4], pred=pid < N // 8))
+            Y[pid * 4 : pid * 4 + 4] = T.reinterpret(T.ldg128(X[pid * 4 : pid * 4 + 4], pred=pid < N // 8), T.float32x4)
 
     X = torch.randn(128, dtype=torch.float32, device="cuda")
     Y = torch.zeros(128, dtype=torch.float32, device="cuda")
@@ -242,7 +242,7 @@ def test_ldg256_predicated_codegen():
 
         with T.Kernel(N // 8, threads=32) as pid:
             # Only load for the first half of elements
-            Y[pid * 8 : pid * 8 + 8] = T.reinterpret(T.float32x8, T.ldg256(X[pid * 8 : pid * 8 + 8], pred=pid < N // 16))
+            Y[pid * 8 : pid * 8 + 8] = T.reinterpret(T.ldg256(X[pid * 8 : pid * 8 + 8], pred=pid < N // 16), T.float32x8)
 
     X = torch.randn(256, dtype=torch.float32, device="cuda")
     Y = torch.zeros(256, dtype=torch.float32, device="cuda")

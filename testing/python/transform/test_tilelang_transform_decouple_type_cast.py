@@ -29,7 +29,7 @@ def test_local_to_memory():
         b_frag = T.alloc_local((16,), T.float32)
         b_local_cast = T.decl_buffer((16,), T.float4_e2m1fn, scope="local")
         for i in T.vectorized(16):
-            b_local_cast[i] = T.Cast(T.float4_e2m1fn, b_frag[i])
+            b_local_cast[i] = T.cast(b_frag[i], T.float4_e2m1fn)
         for i_copy in T.vectorized(16):
             b[i_copy] = b_local_cast[i_copy]
 
@@ -90,7 +90,7 @@ def test_no_transform_local_to_local():
         a_frag = T.alloc_local((16,), T.float32)
         b_frag = T.alloc_local((16,), T.float4_e2m1fn)
         for i in T.vectorized(16):
-            b_frag[i] = T.Cast(T.float4_e2m1fn, a_frag[i])
+            b_frag[i] = T.cast(a_frag[i], T.float4_e2m1fn)
 
     _check(before, after)
 
