@@ -49,6 +49,9 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
             IRBuilder.name(buffer.name + "_frag", red_frag_in)
             IRBuilder.name(out.name + "_frag", red_frag_out)
 
+            if not clear:
+                copy(out, red_frag_out)
+
             copy(buffer, red_frag_in)
             tir.call_intrin(
                 "handle",
