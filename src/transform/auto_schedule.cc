@@ -51,6 +51,7 @@
 #include <optional>
 
 #include "./common/attr.h"
+#include "./common/collector.h"
 #include "../op/builtin.h"
 #include "auto_schedule.h"
 
@@ -60,6 +61,9 @@ namespace tl {
 using namespace tir;
 using ffi::GetRef;
 
+// Forward declaration
+void ApplyWarpgroupPartition(ScheduleUnit& unit, IterVar thread_var);
+std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* root, IterVar thread_var);
 
 // Helper function to compare if two regions are equal
 bool RegionsEqual(const Region& a, const Region& b) {
@@ -365,6 +369,53 @@ void SequenceNode::AddWriteRegion(const BufferRegion& region) {
   }
 }
 
+std::unique_ptr<IRStructure> SequenceNode::Clone() const {
+  auto new_seq = std::make_unique<SequenceNode>();
+  new_seq->children.reserve(children.size());
+  for (const auto& child : children) {
+    if (child) {
+      new_seq->children.push_back(child->Clone());
+    } else {
+      new_seq->children.push_back(nullptr);
+    }
+  }
+  return new_seq;
+}
+
+std::unique_ptr<IRStructure> TaskNode::Clone() const {
+  auto new_task = std::make_unique<TaskNode>();
+  // Copy statements
+  new_task->stmts = stmts;
+  // Copy resource usage flags
+  new_task->SetUsesCUDACore(UsesCUDACore());
+  new_task->SetUsesTMACore(UsesTMACore());
+  new_task->SetUsesTensorCore(UsesTensorCore());
+  // Copy memory access regions
+  new_task->SetReadRegions(GetReadRegions());
+  new_task->SetWriteRegions(GetWriteRegions());
+  // Copy latency and II
+  new_task->SetLatency(GetLatency());
+  new_task->SetII(GetII());
+  // Copy start time
+  new_task->SetStartTime(GetStartTime());
+  // Copy promote flag
+  new_task->SetPromote(GetPromote());
+  // Copy warpgroup id
+  new_task->SetWarpgroupId(GetWarpgroupId());
+  return new_task;
+}
+
+std::unique_ptr<IRStructure> ControlNode::Clone() const {
+  auto new_ctrl = std::make_unique<ControlNode>();
+  // Copy For control (For is a TVM object with reference counting)
+  new_ctrl->control = control;
+  // Clone child if exists
+  if (child) {
+    new_ctrl->child = child->Clone();
+  }
+  return new_ctrl;
+}
+
 // Global warpgroup id assignment - should be called from the top level
 // Tasks that use the same register region must have the same warpgroup id
 // Goal: balance weighted latency between two warpgroups (0 and 1)
@@ -462,105 +513,6 @@ void AssignWarpgroupIdsGlobal(IRStructure* root) {
 // Tasks that use the same register region must have the same warpgroup id
 // Goal: balance weighted latency between two warpgroups (0 and 1)
 // Weighted latency = latency * tripcount if task is inside a loop, otherwise latency
-void AssignWarpgroupIds(ScheduleUnit& unit) {
-  std::vector<TaskNode*>& tasks = unit.tasks;
-  if (tasks.empty()) return;
-
-  int n = tasks.size();
-
-  // Step 1: Initialize all warpgroup ids to -1 (unassigned)
-  for (auto* task : tasks) {
-    task->SetWarpgroupId(-1);
-  }
-
-  // Step 2: Build union-find based on shared register regions
-  TaskUnionFind uf(n);
-  for (int i = 0; i < n; i++) {
-    for (int j = i + 1; j < n; j++) {
-      if (UseSameRegisterRegion(tasks[i], tasks[j])) {
-        uf.unite(i, j);
-      }
-    }
-  }
-
-  // Step 3: Group tasks by connected component
-  std::unordered_map<int, std::vector<int>> components; // root -> indices
-  for (int i = 0; i < n; i++) {
-    int root = uf.find(i);
-    components[root].push_back(i);
-  }
-
-  // Step 4: Calculate weighted latency for each component
-
-  // Determine tripcount multiplier if inside a loop
-  int64_t tripcount = 1;
-  if (unit.inside_control_node && unit.control_node) {
-    const ForNode* for_node = unit.control_node->control.get();
-    PrimExpr loop_extent = for_node->extent;
-    // Try to convert loop_extent to int64_t
-    if (const int64_t* extent_ptr = tir::as_const_int(loop_extent)) {
-      tripcount = *extent_ptr;
-    } else {
-      // If extent is not constant, use tripcount = 100 (as requested)
-      LOG(WARNING) << "Loop extent is not constant, using tripcount = 100 for latency weighting";
-      tripcount = 100;
-    }
-  }
-
-  std::vector<ComponentInfo> component_infos;
-  for (const auto& kv : components) {
-    int root = kv.first;
-    const std::vector<int>& indices = kv.second;
-    int64_t total_weighted_latency = 0;
-    for (int idx : indices) {
-      int64_t latency = tasks[idx]->GetLatency();
-      total_weighted_latency += latency * tripcount;
-    }
-    component_infos.push_back({root, total_weighted_latency, indices});
-  }
-
-  // Step 5: Sort components by weighted latency (descending)
-  // Greedy assignment: assign larger components to the warpgroup with less current usage
-  std::sort(component_infos.begin(), component_infos.end(),
-            [](const ComponentInfo& a, const ComponentInfo& b) {
-              return a.weighted_latency > b.weighted_latency;
-            });
-
-  // Step 6: Greedy assignment to balance weighted latency
-  int64_t warpgroup0_latency = 0;
-  int64_t warpgroup1_latency = 0;
-
-  for (const auto& comp : component_infos) {
-    int assigned_warpgroup = 0;
-    if (warpgroup0_latency <= warpgroup1_latency) {
-      assigned_warpgroup = 0;
-      warpgroup0_latency += comp.weighted_latency;
-    } else {
-      assigned_warpgroup = 1;
-      warpgroup1_latency += comp.weighted_latency;
-    }
-
-    // Assign warpgroup id to all tasks in this component
-    for (int idx : comp.task_indices) {
-      tasks[idx]->SetWarpgroupId(assigned_warpgroup);
-    }
-  }
-
-  // Log the assignment
-  int count_warpgroup0 = 0;
-  int count_warpgroup1 = 0;
-  for (const auto* task : tasks) {
-    if (task->GetWarpgroupId() == 0) count_warpgroup0++;
-    else if (task->GetWarpgroupId() == 1) count_warpgroup1++;
-  }
-
-  LOG(INFO) << "Assigned warpgroup ids: " << count_warpgroup0 << " tasks to warpgroup 0 ("
-            << warpgroup0_latency << " weighted latency), "
-            << count_warpgroup1 << " tasks to warpgroup 1 ("
-            << warpgroup1_latency << " weighted latency), tripcount multiplier = " << tripcount;
-}
-
-
 
 
 // MemoryAccessDetector: detect read/write regions in statements
@@ -1557,61 +1509,97 @@ public:
     LOG(INFO) << "ApplyPromoteTransformation: New loop end = " << new_loop_end
               << " (original end " << loop_end << " + step " << loop_step_value << ")";
 
-    // Algorithm for building transformed loop body:
-    // 1. Create a new sequence for the loop body
-    // 2. For each promoted task:
-    //    - Create condition: if (loop_var > loop_start)
-    //    - Create substitution map: replace loop_var with (loop_var - loop_step)
-    //    - Apply substitution to task statements
-    //    - Add conditional execution
-    // 3. For each non-promoted task:
-    //    - Create condition: if (loop_var < new_loop_end)
-    //    - Add conditional execution (no index adjustment needed)
-    // 4. Build new For loop:
-    //    For(loop_var, loop_start, new_loop_end, kind, new_body, ...)
+    // Actually apply the promote transformation:
+    // 1. Update ControlNode's loop bounds: extent = loop_extent + loop_step_expr
+    // 2. For each promoted task: add condition if (loop_var < loop_end)
+    // 3. For each non-promoted task: add condition if (loop_var > loop_start) and substitute loop_var with (loop_var - loop_step_expr)
 
-    // Example IR transformation pseudocode:
-    // ```
-    // // Original loop
-    // for (i = start; i < end; i += step) {
-    //   Task0();  // promoted (executes with original index i, condition i < end+step)
-    //   Task1();  // non-promoted (executes with adjusted index i-step, condition i > start)
-    // }
-    //
-    // // Transformed loop with extended bounds
-    // // Each task has independent conditional statement
-    // // Promoted tasks (using original index) are placed after non-promoted tasks
-    // for (i = start; i < end + step; i += step) {
-    //   // Non-promoted task (Task1): uses adjusted index i-step, condition i > start
-    //   if (i > start) {
-    //     Task1_adjusted();  // with i-step substitution
-    //   }
-    //   // Promoted task (Task0): uses original index i, condition i < end+step
-    //   if (i < end + step) {
-    //     Task0();  // with original index i
-    //   }
-    // }
-    // ```
-
-    LOG(INFO) << "ApplyPromoteTransformation: Promote transformation analysis completed";
+    LOG(INFO) << "ApplyPromoteTransformation: Actually applying promote transformation";
     LOG(INFO) << "  - Promoted tasks: " << promoted_tasks.size();
     LOG(INFO) << "  - Non-promoted tasks: " << non_promoted_tasks.size();
     LOG(INFO) << "  - Loop extension: end + " << loop_step_value << " (step)";
     LOG(INFO) << "  - Promoted tasks execute with index: i (original index)";
     LOG(INFO) << "  - Non-promoted tasks execute with index: i - " << loop_step_value;
-    LOG(INFO) << "  - Actual IR transformation will be applied in IRStructureRewriter";
 
-    // The actual IR modification is implemented in IRStructureRewriter::Rewrite()
-    // when processing ControlNode with promoted tasks. It will:
-    // 1. Extend loop bounds by step (already calculated above)
-    // 2. Add conditional execution for promoted and non-promoted tasks
-    // 3. Adjust loop variable indices for non-promoted tasks (i -> i-step)
+    // 1. Update ControlNode's loop bounds
+    PrimExpr new_loop_extent = loop_extent + loop_step_expr;
+    control_node->control.CopyOnWrite()->extent = new_loop_extent;
+    LOG(INFO) << "ApplyPromoteTransformation: Updated ControlNode loop extent from " << loop_extent << " to " << new_loop_extent;
+
+    // 2. Process promoted tasks
+    for (TaskNode* task : promoted_tasks) {
+      if (task->stmts.empty()) {
+        continue;
+      }
+
+      // Combine multiple statements into SeqStmt if needed
+      Stmt task_body;
+      if (task->stmts.size() == 1) {
+        task_body = task->stmts[0];
+      } else {
+        task_body = SeqStmt(task->stmts);
+      }
+
+      // Create condition: loop_var < loop_end (original loop boundary)
+      PrimExpr condition = loop_var < loop_end;
+
+      // Create conditional statement
+      Stmt conditional_stmt = IfThenElse(condition, task_body);
+
+      // Replace task statements with the conditional statement
+      task->stmts.clear();
+      task->stmts.push_back(conditional_stmt);
+
+      LOG(INFO) << "ApplyPromoteTransformation: Added condition " << condition << " to promoted task";
+    }
+
+    // 3. Process non-promoted tasks
+    for (TaskNode* task : non_promoted_tasks) {
+      if (task->stmts.empty()) {
+        continue;
+      }
+
+      // Combine multiple statements into SeqStmt if needed
+      Stmt task_body;
+      if (task->stmts.size() == 1) {
+        task_body = task->stmts[0];
+      } else {
+        task_body = SeqStmt(task->stmts);
+      }
+
+      // Apply variable substitution: loop_var -> loop_var - loop_step_expr
+      Map<Var, PrimExpr> substitution;
+      substitution.Set(for_node->loop_var, loop_var - loop_step_expr);
+      task_body = Substitute(task_body, substitution);
+
+      // Create condition: loop_var > loop_start (i.e., not in first iteration)
+      PrimExpr condition = loop_var > loop_start;
+
+      // Create conditional statement
+      Stmt conditional_stmt = IfThenElse(condition, task_body);
+
+      // Replace task statements with the conditional statement
+      task->stmts.clear();
+      task->stmts.push_back(conditional_stmt);
+
+      LOG(INFO) << "ApplyPromoteTransformation: Added condition " << condition
+                << " and substituted " << loop_var << " -> " << loop_var << " - " << loop_step_expr
+                << " to non-promoted task";
+    }
+
+    LOG(INFO) << "ApplyPromoteTransformation: Promote transformation completed successfully";
+  }
+
+  // Set thread index variable for warpgroup partition
+  void SetThreadVar(IterVar thread_var) {
+    thread_var_ = thread_var;
   }
 
 
 private:
   std::vector<ScheduleUnit> units_;
   ScheduleUnit* current_unit_{nullptr};
+  IterVar thread_var_;  // Thread index variable for warpgroup partition
   SequenceNode* current_seq_{nullptr};
   size_t current_child_idx_{0};
   int control_nesting_depth_{0};
@@ -1691,8 +1679,6 @@ private:
       return;
     }
 
-    // Assign warpgroup ids to tasks based on weighted latency
-    AssignWarpgroupIds(unit);
 
     if (!unit.parent_seq) {
       // No parent sequence to update (should not happen for tasks from SequenceNode)
@@ -1799,6 +1785,10 @@ private:
         }
       }
     }
+
+    // Apply warpgroup partition after scheduling
+    // NOTE: Now applied at the entire IRStructure level, not per ScheduleUnit
+    // ApplyWarpgroupPartition(unit, thread_var_);
   }
 
   void StartNewUnit() {
@@ -1885,6 +1875,10 @@ void PrintBufferRegion(const BufferRegion& region, const std::string& indent) {
 
   LOG(INFO) << indent << "Buffer: " << buffer_name;
 
+  // Get scope information
+  String scope_str = buffer.scope();
+  LOG(INFO) << indent << "  Scope: " << scope_str;
+
   // Build shape string
   std::ostringstream shape_ss;
   shape_ss << "[";
@@ -1922,7 +1916,8 @@ void PrintScheduleUnits(const std::vector<ScheduleUnit>& units) {
                 << ", read_regions=" << task->GetReadRegions().size()
                 << ", write_regions=" << task->GetWriteRegions().size()
                 << ", latency=" << task->GetLatency() << " cycles"
-                << ", II=" << task->GetII() << " cycles";
+                << ", II=" << task->GetII() << " cycles"
+                << ", warpgroup_id=" << task->GetWarpgroupId();
 
       // Print statements in this task
       if (!task->stmts.empty()) {
@@ -1970,7 +1965,7 @@ void PrintAllStmts(const IRStructure* node, int indent = 0) {
     LOG(INFO) << indent_str << "  Resource usage: CUDA=" << task->UsesCUDACore()
               << ", TMA=" << task->UsesTMACore()
               << ", Tensor=" << task->UsesTensorCore();
-    LOG(INFO) << indent_str << "  Latency: " << task->GetLatency() << " cycles, II: " << task->GetII() << " cycles";
+    LOG(INFO) << indent_str << "  Latency: " << task->GetLatency() << " cycles, II: " << task->GetII() << " cycles, warpgroup_id: " << task->GetWarpgroupId();
   } else if (node->IsControl()) {
     const ControlNode* control = static_cast<const ControlNode*>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";
@@ -2008,6 +2003,7 @@ void PrintIRStructure(const IRStructure* node, int indent = 0) {
     LOG(INFO) << indent_str << "  uses_tensor_core: " << task->UsesTensorCore();
     LOG(INFO) << indent_str << "  latency: " << task->GetLatency() << " cycles";
     LOG(INFO) << indent_str << "  II: " << task->GetII() << " cycles";
+    LOG(INFO) << indent_str << "  warpgroup_id: " << task->GetWarpgroupId();
   } else if (node->IsControl()) {
     const ControlNode* control = static_cast<const ControlNode*>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";
@@ -2337,6 +2333,48 @@ public:
   }
 };
 
+// Mutator to update thread extent in AttrStmt nodes
+// Used after warpgroup partition to double thread extent
+class ThreadExtentUpdater : public StmtExprMutator {
+public:
+  explicit ThreadExtentUpdater(PrimExpr updated_extent)
+      : updated_thread_extent_(updated_extent) {}
+
+  Stmt VisitStmt_(const AttrStmtNode* op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      auto iter_var = Downcast<IterVar>(op->node);
+      if (iter_var->thread_tag == "threadIdx.x") {
+        // Save the thread IterVar
+        thread_iv_ = iter_var;
+
+        // Visit the body first (to update any references)
+        AttrStmt attr_stmt = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+
+        // Update the thread extent
+        LOG(INFO) << "ThreadExtentUpdater: Updating thread extent for " << thread_iv_->thread_tag
+                  << " from " << thread_iv_->dom->extent << " to " << updated_thread_extent_;
+
+        // Create new IterVar with updated domain
+        Range new_dom = Range::FromMinExtent(thread_iv_->dom->min, updated_thread_extent_);
+
+        // Update the AttrStmt with new IterVar and value
+        attr_stmt.CopyOnWrite()->node = iter_var;
+        attr_stmt.CopyOnWrite()->value = updated_thread_extent_;
+
+        // Clear the saved reference
+        thread_iv_ = {};
+
+        return attr_stmt;
+      }
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+private:
+  PrimExpr updated_thread_extent_;
+  IterVar thread_iv_;
+};
+
 // Visitor to extract the body of tilelang_root block
 class TilelangRootBodyExtractor : public StmtVisitor {
 public:
@@ -2624,6 +2662,8 @@ tvm::transform::Pass AutoSchedule() {
     extractor(func->body);
     Stmt body_to_schedule;
     bool has_tilelang_root = false;
+    PrimExpr updated_thread_extent;  // Will be set if warpgroup partition doubles thread extent
+    IterVar thread_var;  // Thread index variable for warpgroup partition
 
     if (extractor.body.defined()) {
       LOG(INFO) << "Found tilelang_root block, scheduling its body only";
@@ -2655,12 +2695,50 @@ tvm::transform::Pass AutoSchedule() {
       // Build ScheduleUnits from IRStructure
       LOG(INFO) << "Building ScheduleUnits...";
       ScheduleUnitBuilder unit_builder;
+      // Get thread index variable for warpgroup partition
+      // First try to get from body_to_schedule, if not found, try from the entire function body
+      thread_var = ThreadTagChecker::GetThreadVar(body_to_schedule);
+      if (!thread_var.defined()) {
+        LOG(INFO) << "Thread variable not found in body_to_schedule, trying full function body";
+        thread_var = ThreadTagChecker::GetThreadVar(func->body);
+      }
+      if (thread_var.defined()) {
+        LOG(INFO) << "Found thread index variable: " << thread_var->thread_tag
+                  << " with extent " << thread_var->dom->extent;
+        unit_builder.SetThreadVar(thread_var);
+      } else {
+        LOG(WARNING) << "Could not find thread index variable, warpgroup partition will use default";
+      }
       auto schedule_units = unit_builder.Build(ir_structure.get());
       PrintScheduleUnits(schedule_units);
 
       // Print the modified summary view
       LOG(INFO) << "IRStructure modified summary:";
       PrintIRStructure(ir_structure.get());
+
+      // Apply warpgroup partition to entire IRStructure
+      if (thread_var.defined()) {
+        LOG(INFO) << "Applying warpgroup partition to entire IRStructure...";
+        auto partitioned_ir_structure = ApplyWarpgroupPartitionToIRStructure(ir_structure.get(), thread_var);
+        if (partitioned_ir_structure) {
+          ir_structure = std::move(partitioned_ir_structure);
+          LOG(INFO) << "Warpgroup partition applied successfully";
+          LOG(INFO) << "IRStructure after warpgroup partition:";
+          PrintIRStructure(ir_structure.get());
+
+          // After warpgroup partition, thread extent should be doubled
+          // ThreadExtentUpdater will update the AttrStmt node in the final IR
+          Range old_dom = thread_var->dom;
+          PrimExpr new_extent = old_dom->extent * 2;
+          updated_thread_extent = new_extent;
+          LOG(INFO) << "Thread extent will be updated from " << old_dom->extent
+                    << " to " << new_extent << " (doubled for warpgroup partition)";
+        } else {
+          LOG(WARNING) << "Warpgroup partition returned null, keeping original IRStructure";
+        }
+      } else {
+        LOG(WARNING) << "Thread variable not defined, skipping warpgroup partition";
+      }
 
     } else {
       LOG(INFO) << "IRStructure is null (empty body?)";
@@ -2677,11 +2755,20 @@ tvm::transform::Pass AutoSchedule() {
       new_body = body_to_schedule;
     }
 
+
     // If we extracted from tilelang_root block, replace the body
     Stmt final_body;
     if (has_tilelang_root) {
       TilelangRootBodyReplacer replacer(new_body);
       final_body = replacer(func->body);
+      // Apply thread extent update if warpgroup partition was applied
+      if (updated_thread_extent.defined() && thread_var.defined()) {
+        LOG(INFO) << "Applying thread extent update from " << thread_var->dom->extent
+                  << " to " << updated_thread_extent;
+        ThreadExtentUpdater extent_updater(updated_thread_extent);
+        final_body = extent_updater(final_body);
+        LOG(INFO) << "Thread extent update applied";
+      }
       LOG(INFO) << "Replaced tilelang_root block body";
     } else {
       final_body = new_body;
@@ -2694,6 +2781,782 @@ tvm::transform::Pass AutoSchedule() {
   };
 
   return CreatePrimFuncPass(pass_func, 0, "tl.AutoSchedule", {});
+}
+
+// Helper function to collect all TaskNodes from an IRStructure
+void CollectTaskNodesFromIRStructure(IRStructure* node, std::vector<TaskNode*>& tasks) {
+  if (!node) return;
+  if (node->IsTask()) {
+    tasks.push_back(static_cast<TaskNode*>(node));
+  } else if (node->IsSequence()) {
+    SequenceNode* seq = static_cast<SequenceNode*>(node);
+    for (const auto& child : seq->children) {
+      if (child) {
+        CollectTaskNodesFromIRStructure(child.get(), tasks);
+      }
+    }
+  } else if (node->IsControl()) {
+    ControlNode* ctrl = static_cast<ControlNode*>(node);
+    if (ctrl->child) {
+      CollectTaskNodesFromIRStructure(ctrl->child.get(), tasks);
+    }
+  }
+}
+
+// Helper function to clone IRStructure with warpgroup filter
+std::unique_ptr<IRStructure> CloneIRStructureWithWarpgroupFilter(
+    IRStructure* node, int warpgroup_id) {
+  if (!node) return nullptr;
+
+  if (node->IsTask()) {
+    TaskNode* task = static_cast<TaskNode*>(node);
+    if (task->GetWarpgroupId() == warpgroup_id) {
+      return task->Clone();
+    } else {
+      // Create empty task node for other warpgroup
+      auto new_task = std::make_unique<TaskNode>();
+      // Copy metadata but no statements
+      new_task->SetUsesCUDACore(task->UsesCUDACore());
+      new_task->SetUsesTMACore(task->UsesTMACore());
+      new_task->SetUsesTensorCore(task->UsesTensorCore());
+      new_task->SetReadRegions(task->GetReadRegions());
+      new_task->SetWriteRegions(task->GetWriteRegions());
+      new_task->SetLatency(task->GetLatency());
+      new_task->SetII(task->GetII());
+      new_task->SetStartTime(task->GetStartTime());
+      new_task->SetPromote(task->GetPromote());
+      new_task->SetWarpgroupId(task->GetWarpgroupId());
+      // Empty statements
+      return new_task;
+    }
+  } else if (node->IsSequence()) {
+    SequenceNode* seq = static_cast<SequenceNode*>(node);
+    auto new_seq = std::make_unique<SequenceNode>();
+    for (const auto& child : seq->children) {
+      if (child) {
+        new_seq->children.push_back(CloneIRStructureWithWarpgroupFilter(child.get(), warpgroup_id));
+      } else {
+        new_seq->children.push_back(nullptr);
+      }
+    }
+    return new_seq;
+  } else if (node->IsControl()) {
+    ControlNode* ctrl = static_cast<ControlNode*>(node);
+    auto new_ctrl = std::make_unique<ControlNode>();
+    new_ctrl->control = ctrl->control;
+    if (ctrl->child) {
+      new_ctrl->child = CloneIRStructureWithWarpgroupFilter(ctrl->child.get(), warpgroup_id);
+    }
+    return new_ctrl;
+  }
+  return nullptr;
+}
+
+// Apply warpgroup partition to a ScheduleUnit
+// Split tasks into two groups based on warpgroup id and insert conditional branching
+// if tx < original_threads: execute warpgroup 0 tasks, else: execute warpgroup 1 tasks
+// Note: cross-warpgroup dependencies are ignored for now (will be handled later with barriers)
+void ApplyWarpgroupPartition(ScheduleUnit& unit, IterVar thread_var) {
+  if (unit.tasks.size() <= 1) {
+    // No partition needed for single task
+    return;
+  }
+
+  // Check if tasks have mixed warpgroup ids
+  bool has_warpgroup0 = false;
+  bool has_warpgroup1 = false;
+  for (const auto* task : unit.tasks) {
+    int wg_id = task->GetWarpgroupId();
+    if (wg_id == 0) has_warpgroup0 = true;
+    else if (wg_id == 1) has_warpgroup1 = true;
+  }
+
+  // If all tasks belong to the same warpgroup, no partition needed
+  if (!(has_warpgroup0 && has_warpgroup1)) {
+    LOG(INFO) << "All tasks belong to the same warpgroup, skipping partition";
+    return;
+  }
+
+  LOG(INFO) << "Applying warpgroup partition to ScheduleUnit with " << unit.tasks.size() << " tasks";
+
+  // We need to modify the parent SequenceNode's children
+  if (!unit.parent_seq) {
+    LOG(WARNING) << "ScheduleUnit has no parent SequenceNode, cannot apply partition";
+    return;
+  }
+
+  // Check if this unit is inside a ControlNode and the child is a ControlNode
+  if (unit.inside_control_node && unit.control_node) {
+    // Find the ControlNode in parent sequence
+    // The ControlNode should be at position start_idx in parent_seq
+    size_t start_idx = unit.start_idx;
+    if (start_idx >= unit.parent_seq->children.size()) {
+      LOG(WARNING) << "Start index out of bounds";
+      // Fall back to regular TaskNode case
+      unit.inside_control_node = false;
+      unit.control_node = nullptr;
+    } else {
+      IRStructure* child_ptr = unit.parent_seq->children[start_idx].get();
+      if (child_ptr->IsControl()) {
+        // Found ControlNode, process it
+        ControlNode* original_ctrl = static_cast<ControlNode*>(child_ptr);
+
+        // Clone ControlNode for warpgroup 0 and warpgroup 1
+        auto ctrl_wg0 = CloneIRStructureWithWarpgroupFilter(original_ctrl, 0);
+        auto ctrl_wg1 = CloneIRStructureWithWarpgroupFilter(original_ctrl, 1);
+
+        // Check if both clones have actual statements (not just empty tasks)
+        auto has_actual_statements = [](IRStructure* node) -> bool {
+          std::vector<TaskNode*> tasks;
+          CollectTaskNodesFromIRStructure(node, tasks);
+          for (TaskNode* task : tasks) {
+            if (!task->stmts.empty()) {
+              return true;
+            }
+          }
+          return false;
+        };
+
+        bool wg0_has_stmts = has_actual_statements(ctrl_wg0.get());
+        bool wg1_has_stmts = has_actual_statements(ctrl_wg1.get());
+
+        // Use the provided thread index variable from ThreadTagChecker
+        PrimExpr condition;
+        if (thread_var.defined() && thread_var->dom.defined()) {
+          // Extract thread variable and domain
+          Var thread_idx_var = thread_var->var;
+          Range thread_dom = thread_var->dom;
+          // Calculate condition: thread_idx < thread_dom->extent
+          // Assuming threads are doubled: original threads = thread_dom->extent,
+          // after warpgroup partition, total threads = 2 * thread_dom->extent
+          // Condition splits into two warpgroups: tx < original_thread_count
+          PrimExpr original_threads = thread_dom->extent;
+          condition = thread_idx_var < original_threads;
+          LOG(INFO) << "Using thread index variable " << thread_idx_var
+                    << " with original domain " << thread_dom->min << " to " << thread_dom->min + thread_dom->extent
+                    << " (threads will be doubled for warpgroup partition)"
+                    << ", condition: " << condition;
+        } else {
+          LOG(WARNING) << "Thread index variable not properly defined, falling back to default tx < 128";
+          Var tx_var("tx", DataType::Int(32));
+          condition = tx_var < IntImm(DataType::Int(32), 128);
+        }
+
+        // Create IfThenElse statement with ControlNode clones as bodies
+        // We need to convert IRStructure to Stmt
+        std::function<Stmt(IRStructure*)> irstructure_to_stmt;
+        irstructure_to_stmt = [&irstructure_to_stmt](IRStructure* structure) -> Stmt {
+          if (!structure) {
+            return Evaluate(0);
+          }
+
+          if (structure->IsTask()) {
+            TaskNode* task = static_cast<TaskNode*>(structure);
+            if (task->stmts.empty()) {
+              return Evaluate(0);
+            } else if (task->stmts.size() == 1) {
+              return task->stmts[0];
+            } else {
+              return SeqStmt(task->stmts);
+            }
+          } else if (structure->IsSequence()) {
+            SequenceNode* seq = static_cast<SequenceNode*>(structure);
+            std::vector<Stmt> stmts;
+            for (const auto& child : seq->children) {
+              if (child) {
+                Stmt child_stmt = irstructure_to_stmt(child.get());
+                stmts.push_back(child_stmt);
+              }
+            }
+            if (stmts.empty()) {
+              return Evaluate(0);
+            } else if (stmts.size() == 1) {
+              return stmts[0];
+            } else {
+              return SeqStmt(stmts);
+            }
+          } else if (structure->IsControl()) {
+            ControlNode* ctrl = static_cast<ControlNode*>(structure);
+            Stmt body = Evaluate(0);
+            if (ctrl->child) {
+              body = irstructure_to_stmt(ctrl->child.get());
+            }
+            return For(ctrl->control->loop_var, ctrl->control->min,
+                      ctrl->control->extent, ctrl->control->kind,
+                      body, ctrl->control->thread_binding,
+                      ctrl->control->annotations);
+          }
+
+          LOG(WARNING) << "Failed to convert IRStructure to Stmt, returning empty statement";
+          return Evaluate(0);
+        };
+
+        Stmt then_body = wg0_has_stmts ? irstructure_to_stmt(ctrl_wg0.get()) : Evaluate(0);
+        Stmt else_body = wg1_has_stmts ? irstructure_to_stmt(ctrl_wg1.get()) : Evaluate(0);
+
+        // Create IfThenElse statement
+        Stmt if_then_else;
+        if (wg0_has_stmts && wg1_has_stmts) {
+          if_then_else = IfThenElse(condition, then_body, else_body);
+        } else if (wg0_has_stmts) {
+          // Only warpgroup 0 has statements, execute unconditionally
+          if_then_else = then_body;
+        } else if (wg1_has_stmts) {
+          // Only warpgroup 1 has statements, execute unconditionally
+          if_then_else = else_body;
+        } else {
+          LOG(WARNING) << "Both warpgroups have no statements, skipping partition";
+          return;
+        }
+
+        // Create a new TaskNode containing the IfThenElse statement
+        auto new_task_node = std::make_unique<TaskNode>();
+        new_task_node->stmts.push_back(if_then_else);
+
+        // Copy resource usage flags from original tasks (take union)
+        bool uses_cuda_core = false;
+        bool uses_tma_core = false;
+        bool uses_tensor_core = false;
+        int64_t total_latency = 0;
+        int64_t max_ii = 0;
+        for (TaskNode* task : unit.tasks) {
+          uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
+          uses_tma_core = uses_tma_core || task->UsesTMACore();
+          uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
+          total_latency += task->GetLatency();
+          max_ii = std::max(max_ii, task->GetII());
+        }
+        new_task_node->SetUsesCUDACore(uses_cuda_core);
+        new_task_node->SetUsesTMACore(uses_tma_core);
+        new_task_node->SetUsesTensorCore(uses_tensor_core);
+        new_task_node->SetLatency(total_latency);
+        new_task_node->SetII(max_ii);
+        new_task_node->SetWarpgroupId(-1);  // mixed
+
+        // Also copy read/write regions from original tasks
+        for (TaskNode* task : unit.tasks) {
+          auto read_regions = task->GetReadRegions();
+          for (const auto& region : read_regions) {
+            new_task_node->AddReadRegion(region);
+          }
+          auto write_regions = task->GetWriteRegions();
+          for (const auto& region : write_regions) {
+            new_task_node->AddWriteRegion(region);
+          }
+        }
+
+        // Replace the ControlNode with the new conditional task
+        unit.parent_seq->children[start_idx] = std::move(new_task_node);
+
+        // Update the ScheduleUnit
+        unit.tasks.clear();
+        TaskNode* new_task = static_cast<TaskNode*>(unit.parent_seq->children[start_idx].get());
+        unit.tasks.push_back(new_task);
+
+        LOG(INFO) << "Created warpgroup partition for ControlNode: if " << condition
+                  << " execute warpgroup 0, else execute warpgroup 1";
+        LOG(INFO) << "Replaced ControlNode with conditional task";
+        return;
+      } else {
+        LOG(WARNING) << "Expected ControlNode at position " << start_idx << ", but found "
+                     << (child_ptr->IsTask() ? "TaskNode" : "SequenceNode")
+                     << ", falling back to regular TaskNode case";
+        // Fall back to regular TaskNode case
+        unit.inside_control_node = false;
+        unit.control_node = nullptr;
+      }
+    }
+  }
+
+  // Regular TaskNode case (no ControlNode)
+  {
+    // Group tasks by warpgroup id
+    std::vector<TaskNode*> warpgroup0_tasks;
+    std::vector<TaskNode*> warpgroup1_tasks;
+    for (TaskNode* task : unit.tasks) {
+      if (task->GetWarpgroupId() == 0) {
+        warpgroup0_tasks.push_back(task);
+      } else if (task->GetWarpgroupId() == 1) {
+        warpgroup1_tasks.push_back(task);
+      } else {
+        LOG(WARNING) << "Task has invalid warpgroup id " << task->GetWarpgroupId() << ", assigning to warpgroup 0";
+        warpgroup0_tasks.push_back(task);
+      }
+    }
+
+    // Extract the original children from parent sequence
+    size_t start_idx = unit.start_idx;
+    size_t num_tasks = unit.tasks.size();
+
+    // First, move the task children out of parent sequence
+    std::vector<std::unique_ptr<IRStructure>> task_children;
+    task_children.reserve(num_tasks);
+    for (size_t i = 0; i < num_tasks; ++i) {
+      task_children.push_back(std::move(unit.parent_seq->children[start_idx + i]));
+    }
+
+    // Create mapping from TaskNode pointer to its child index
+    std::unordered_map<TaskNode*, size_t> task_to_child_index;
+    for (size_t i = 0; i < num_tasks; ++i) {
+      IRStructure* child_ptr = task_children[i].get();
+      if (child_ptr->IsTask()) {
+        TaskNode* task = static_cast<TaskNode*>(child_ptr);
+        task_to_child_index[task] = i;
+      } else {
+        LOG(FATAL) << "Expected TaskNode child in ScheduleUnit";
+      }
+    }
+
+    // Collect statements for each warpgroup
+    std::vector<Stmt> warpgroup0_stmts;
+    std::vector<Stmt> warpgroup1_stmts;
+
+    for (TaskNode* task : warpgroup0_tasks) {
+      auto it = task_to_child_index.find(task);
+      if (it == task_to_child_index.end()) {
+        LOG(FATAL) << "TaskNode not found in extracted children";
+      }
+      TaskNode* task_node = static_cast<TaskNode*>(task_children[it->second].get());
+      for (const auto& stmt : task_node->stmts) {
+        warpgroup0_stmts.push_back(stmt);
+      }
+    }
+
+    for (TaskNode* task : warpgroup1_tasks) {
+      auto it = task_to_child_index.find(task);
+      if (it == task_to_child_index.end()) {
+        LOG(FATAL) << "TaskNode not found in extracted children";
+      }
+      TaskNode* task_node = static_cast<TaskNode*>(task_children[it->second].get());
+      for (const auto& stmt : task_node->stmts) {
+        warpgroup1_stmts.push_back(stmt);
+      }
+    }
+
+    // Build statements for each warpgroup
+    Stmt then_body;
+    if (warpgroup0_stmts.empty()) {
+      then_body = Evaluate(0);  // Empty statement
+    } else if (warpgroup0_stmts.size() == 1) {
+      then_body = warpgroup0_stmts[0];
+    } else {
+      then_body = SeqStmt(warpgroup0_stmts);
+    }
+
+    Stmt else_body;
+    if (warpgroup1_stmts.empty()) {
+      else_body = Evaluate(0);  // Empty statement
+    } else if (warpgroup1_stmts.size() == 1) {
+      else_body = warpgroup1_stmts[0];
+    } else {
+      else_body = SeqStmt(warpgroup1_stmts);
+    }
+
+    // Use the provided thread index variable from ThreadTagChecker
+    PrimExpr condition;
+    if (thread_var.defined() && thread_var->dom.defined()) {
+      // Extract thread variable and domain
+      Var thread_idx_var = thread_var->var;
+      Range thread_dom = thread_var->dom;
+      // Calculate condition: thread_idx < thread_dom->extent
+      PrimExpr original_threads = thread_dom->extent;
+      condition = thread_idx_var < original_threads;
+      LOG(INFO) << "Using thread index variable " << thread_idx_var
+                << " with original domain " << thread_dom->min << " to " << thread_dom->min + thread_dom->extent
+                << ", condition: " << condition;
+    } else {
+      LOG(WARNING) << "Thread index variable not properly defined, falling back to default tx < 128";
+      Var tx_var("tx", DataType::Int(32));
+      condition = tx_var < IntImm(DataType::Int(32), 128);
+    }
+
+    // Create IfThenElse statement
+    Stmt if_then_else = IfThenElse(condition, then_body, else_body);
+
+    // Create a new TaskNode containing the IfThenElse statement
+    auto new_task_node = std::make_unique<TaskNode>();
+    new_task_node->stmts.push_back(if_then_else);
+
+    // Copy resource usage flags from original tasks (take union)
+    bool uses_cuda_core = false;
+    bool uses_tma_core = false;
+    bool uses_tensor_core = false;
+    int64_t total_latency = 0;
+    int64_t max_ii = 0;
+    for (TaskNode* task : unit.tasks) {
+      uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
+      uses_tma_core = uses_tma_core || task->UsesTMACore();
+      uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
+      total_latency += task->GetLatency();
+      max_ii = std::max(max_ii, task->GetII());
+    }
+    new_task_node->SetUsesCUDACore(uses_cuda_core);
+    new_task_node->SetUsesTMACore(uses_tma_core);
+    new_task_node->SetUsesTensorCore(uses_tensor_core);
+    new_task_node->SetLatency(total_latency);
+    new_task_node->SetII(max_ii);
+    new_task_node->SetWarpgroupId(-1);  // mixed
+
+    // Also copy read/write regions from original tasks
+    for (TaskNode* task : unit.tasks) {
+      auto read_regions = task->GetReadRegions();
+      for (const auto& region : read_regions) {
+        new_task_node->AddReadRegion(region);
+      }
+      auto write_regions = task->GetWriteRegions();
+      for (const auto& region : write_regions) {
+        new_task_node->AddWriteRegion(region);
+      }
+    }
+
+    // Replace the original tasks with the new conditional task
+    for (size_t i = 0; i < num_tasks; ++i) {
+      if (i == 0) {
+        unit.parent_seq->children[start_idx + i] = std::move(new_task_node);
+      } else {
+        unit.parent_seq->children[start_idx + i].reset();
+      }
+    }
+
+    // Clean up empty slots
+    std::vector<std::unique_ptr<IRStructure>> new_children;
+    new_children.reserve(unit.parent_seq->children.size());
+    for (size_t i = 0; i < unit.parent_seq->children.size(); ++i) {
+      if (unit.parent_seq->children[i]) {
+        new_children.push_back(std::move(unit.parent_seq->children[i]));
+      }
+    }
+    unit.parent_seq->children.swap(new_children);
+
+    // Update the ScheduleUnit
+    unit.tasks.clear();
+    if (start_idx < unit.parent_seq->children.size()) {
+      TaskNode* new_task = static_cast<TaskNode*>(unit.parent_seq->children[start_idx].get());
+      unit.tasks.push_back(new_task);
+    } else {
+      unit.start_idx = 0;
+      if (!unit.parent_seq->children.empty()) {
+        TaskNode* new_task = static_cast<TaskNode*>(unit.parent_seq->children[0].get());
+        unit.tasks.push_back(new_task);
+      }
+    }
+
+    LOG(INFO) << "Created warpgroup partition for TaskNodes: if " << condition
+              << " execute " << warpgroup0_stmts.size() << " statements (warpgroup 0), else execute "
+              << warpgroup1_stmts.size() << " statements (warpgroup 1)";
+    LOG(INFO) << "Replaced " << num_tasks << " tasks with 1 conditional task";
+  }
+}
+
+// Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
+std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* root, IterVar thread_var) {
+  if (!root) return nullptr;
+
+  // Check if there are tasks with mixed warpgroup ids
+  std::vector<TaskNode*> all_tasks;
+  CollectTaskNodesFromIRStructure(root, all_tasks);
+
+  bool has_warpgroup0 = false;
+  bool has_warpgroup1 = false;
+  for (TaskNode* task : all_tasks) {
+    int wg_id = task->GetWarpgroupId();
+    if (wg_id == 0) has_warpgroup0 = true;
+    else if (wg_id == 1) has_warpgroup1 = true;
+  }
+
+  // If all tasks belong to the same warpgroup, no partition needed
+  if (!(has_warpgroup0 && has_warpgroup1)) {
+    LOG(INFO) << "All tasks belong to the same warpgroup, skipping partition for entire IRStructure";
+    // Return a clone of the original structure
+    if (root->IsTask()) {
+      return static_cast<TaskNode*>(root)->Clone();
+    } else if (root->IsSequence()) {
+      return static_cast<SequenceNode*>(root)->Clone();
+    } else if (root->IsControl()) {
+      return static_cast<ControlNode*>(root)->Clone();
+    }
+    return nullptr;
+  }
+
+  LOG(INFO) << "Applying warpgroup partition to entire IRStructure with " << all_tasks.size() << " tasks";
+
+  // Clone IRStructure for warpgroup 0 and warpgroup 1
+  auto wg0_structure = CloneIRStructureWithWarpgroupFilter(root, 0);
+  auto wg1_structure = CloneIRStructureWithWarpgroupFilter(root, 1);
+
+  // Check if both clones have actual statements
+  auto has_actual_statements = [](IRStructure* node) -> bool {
+    std::vector<TaskNode*> tasks;
+    CollectTaskNodesFromIRStructure(node, tasks);
+    for (TaskNode* task : tasks) {
+      if (!task->stmts.empty()) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  bool wg0_has_stmts = has_actual_statements(wg0_structure.get());
+  bool wg1_has_stmts = has_actual_statements(wg1_structure.get());
+
+  // Prepare condition: tx < original_threads
+  PrimExpr condition;
+  if (thread_var.defined() && thread_var->dom.defined()) {
+    Var thread_idx_var = thread_var->var;
+    Range thread_dom = thread_var->dom;
+    PrimExpr original_threads = thread_dom->extent;
+    condition = thread_idx_var < original_threads;
+    LOG(INFO) << "Using thread index variable " << thread_idx_var
+              << " with original domain " << thread_dom->min << " to " << thread_dom->min + thread_dom->extent
+              << " (threads will be doubled for warpgroup partition)"
+              << ", condition: " << condition;
+  } else {
+    LOG(WARNING) << "Thread index variable not properly defined, falling back to default tx < 128";
+    Var tx_var("tx", DataType::Int(32));
+    condition = tx_var < IntImm(DataType::Int(32), 128);
+  }
+
+  // Convert IRStructure to Stmt for IfThenElse
+  std::function<Stmt(IRStructure*)> irstructure_to_stmt;
+  irstructure_to_stmt = [&irstructure_to_stmt](IRStructure* structure) -> Stmt {
+    if (!structure) {
+      return Evaluate(0);
+    }
+
+    if (structure->IsTask()) {
+      TaskNode* task = static_cast<TaskNode*>(structure);
+      if (task->stmts.empty()) {
+        return Evaluate(0);
+      } else if (task->stmts.size() == 1) {
+        return task->stmts[0];
+      } else {
+        return SeqStmt(task->stmts);
+      }
+    } else if (structure->IsSequence()) {
+      SequenceNode* seq = static_cast<SequenceNode*>(structure);
+      std::vector<Stmt> stmts;
+      for (const auto& child : seq->children) {
+        if (child) {
+          Stmt child_stmt = irstructure_to_stmt(child.get());
+          stmts.push_back(child_stmt);
+        }
+      }
+      if (stmts.empty()) {
+        return Evaluate(0);
+      } else if (stmts.size() == 1) {
+        return stmts[0];
+      } else {
+        return SeqStmt(stmts);
+      }
+    } else if (structure->IsControl()) {
+      ControlNode* ctrl = static_cast<ControlNode*>(structure);
+      Stmt body = Evaluate(0);
+      if (ctrl->child) {
+        body = irstructure_to_stmt(ctrl->child.get());
+      }
+      return For(ctrl->control->loop_var, ctrl->control->min,
+                ctrl->control->extent, ctrl->control->kind,
+                body, ctrl->control->thread_binding,
+                ctrl->control->annotations);
+    }
+
+    LOG(WARNING) << "Failed to convert IRStructure to Stmt, returning empty statement";
+    return Evaluate(0);
+  };
+
+  Stmt then_body = wg0_has_stmts ? irstructure_to_stmt(wg0_structure.get()) : Evaluate(0);
+  Stmt else_body = wg1_has_stmts ? irstructure_to_stmt(wg1_structure.get()) : Evaluate(0);
+
+  // Create IfThenElse statement
+  Stmt if_then_else;
+  if (wg0_has_stmts && wg1_has_stmts) {
+    if_then_else = IfThenElse(condition, then_body, else_body);
+  } else if (wg0_has_stmts) {
+    // Only warpgroup 0 has statements, execute unconditionally
+    if_then_else = then_body;
+  } else if (wg1_has_stmts) {
+    // Only warpgroup 1 has statements, execute unconditionally
+    if_then_else = else_body;
+  } else {
+    LOG(WARNING) << "Both warpgroups have no statements, returning original structure";
+    if (root->IsTask()) {
+      return static_cast<TaskNode*>(root)->Clone();
+    } else if (root->IsSequence()) {
+      return static_cast<SequenceNode*>(root)->Clone();
+    } else if (root->IsControl()) {
+      return static_cast<ControlNode*>(root)->Clone();
+    }
+    return nullptr;
+  }
+
+  // Create appropriate IRStructure based on original node type
+  if (root->IsControl()) {
+    // For ControlNode, we need to preserve the outer For loop
+    // but filter tasks inside based on warpgroup id
+    const ControlNode* original_ctrl = static_cast<const ControlNode*>(root);
+
+    // Clone and filter the child of ControlNode for each warpgroup
+    std::unique_ptr<IRStructure> wg0_child = nullptr;
+    std::unique_ptr<IRStructure> wg1_child = nullptr;
+    if (original_ctrl->child) {
+      wg0_child = CloneIRStructureWithWarpgroupFilter(original_ctrl->child.get(), 0);
+      wg1_child = CloneIRStructureWithWarpgroupFilter(original_ctrl->child.get(), 1);
+    }
+
+    // Convert filtered children to Stmt
+    Stmt then_body = wg0_child ? irstructure_to_stmt(wg0_child.get()) : Evaluate(0);
+    Stmt else_body = wg1_child ? irstructure_to_stmt(wg1_child.get()) : Evaluate(0);
+
+    // Create IfThenElse statement
+    Stmt if_then_else_stmt;
+
+    // Check if each warpgroup has actual statements
+    bool wg0_has_stmts = wg0_child ? has_actual_statements(wg0_child.get()) : false;
+    bool wg1_has_stmts = wg1_child ? has_actual_statements(wg1_child.get()) : false;
+
+    if (wg0_has_stmts && wg1_has_stmts) {
+      if_then_else_stmt = IfThenElse(condition, then_body, else_body);
+    } else if (wg0_has_stmts) {
+      // Only warpgroup 0 has statements, execute unconditionally
+      if_then_else_stmt = then_body;
+    } else if (wg1_has_stmts) {
+      // Only warpgroup 1 has statements, execute unconditionally
+      if_then_else_stmt = else_body;
+    } else {
+      LOG(WARNING) << "Both warpgroups have no statements, creating empty statement";
+      if_then_else_stmt = Evaluate(0);
+    }
+
+    // Create new ControlNode with the same For loop parameters
+    auto new_ctrl = std::make_unique<ControlNode>();
+    new_ctrl->control = original_ctrl->control;
+
+    // Create a TaskNode to hold the IfThenElse statement as the body
+    auto body_task_node = std::make_unique<TaskNode>();
+    body_task_node->stmts.push_back(if_then_else_stmt);
+
+    // Copy resource usage flags from all tasks (take union)
+    bool uses_cuda_core = false;
+    bool uses_tma_core = false;
+    bool uses_tensor_core = false;
+    int64_t total_latency = 0;
+    int64_t max_ii = 0;
+    for (TaskNode* task : all_tasks) {
+      uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
+      uses_tma_core = uses_tma_core || task->UsesTMACore();
+      uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
+      total_latency += task->GetLatency();
+      max_ii = std::max(max_ii, task->GetII());
+    }
+    body_task_node->SetUsesCUDACore(uses_cuda_core);
+    body_task_node->SetUsesTMACore(uses_tma_core);
+    body_task_node->SetUsesTensorCore(uses_tensor_core);
+    body_task_node->SetLatency(total_latency);
+    body_task_node->SetII(max_ii);
+    body_task_node->SetWarpgroupId(-1);  // mixed
+
+    // Also copy read/write regions from all tasks
+    for (TaskNode* task : all_tasks) {
+      auto read_regions = task->GetReadRegions();
+      for (const auto& region : read_regions) {
+        body_task_node->AddReadRegion(region);
+      }
+      auto write_regions = task->GetWriteRegions();
+      for (const auto& region : write_regions) {
+        body_task_node->AddWriteRegion(region);
+      }
+    }
+
+    new_ctrl->child = std::move(body_task_node);
+    LOG(INFO) << "Created warpgroup partition inside ControlNode: if " << condition
+              << " execute warpgroup 0, else execute warpgroup 1";
+    return new_ctrl;
+
+  } else if (root->IsSequence()) {
+    // Create a new SequenceNode with a single TaskNode containing the IfThenElse
+    auto new_seq = std::make_unique<SequenceNode>();
+    auto new_task_node = std::make_unique<TaskNode>();
+    new_task_node->stmts.push_back(if_then_else);
+
+    // Copy resource usage flags from all tasks (take union)
+    bool uses_cuda_core = false;
+    bool uses_tma_core = false;
+    bool uses_tensor_core = false;
+    int64_t total_latency = 0;
+    int64_t max_ii = 0;
+    for (TaskNode* task : all_tasks) {
+      uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
+      uses_tma_core = uses_tma_core || task->UsesTMACore();
+      uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
+      total_latency += task->GetLatency();
+      max_ii = std::max(max_ii, task->GetII());
+    }
+    new_task_node->SetUsesCUDACore(uses_cuda_core);
+    new_task_node->SetUsesTMACore(uses_tma_core);
+    new_task_node->SetUsesTensorCore(uses_tensor_core);
+    new_task_node->SetLatency(total_latency);
+    new_task_node->SetII(max_ii);
+    new_task_node->SetWarpgroupId(-1);  // mixed
+
+    // Also copy read/write regions from all tasks
+    for (TaskNode* task : all_tasks) {
+      auto read_regions = task->GetReadRegions();
+      for (const auto& region : read_regions) {
+        new_task_node->AddReadRegion(region);
+      }
+      auto write_regions = task->GetWriteRegions();
+      for (const auto& region : write_regions) {
+        new_task_node->AddWriteRegion(region);
+      }
+    }
+
+    new_seq->children.push_back(std::move(new_task_node));
+    LOG(INFO) << "Created warpgroup partition in SequenceNode: if " << condition
+              << " execute warpgroup 0, else execute warpgroup 1";
+    return new_seq;
+
+  } else {
+    // TaskNode or unknown type - create a TaskNode containing the IfThenElse statement
+    auto new_task_node = std::make_unique<TaskNode>();
+    new_task_node->stmts.push_back(if_then_else);
+
+    // Copy resource usage flags from all tasks (take union)
+    bool uses_cuda_core = false;
+    bool uses_tma_core = false;
+    bool uses_tensor_core = false;
+    int64_t total_latency = 0;
+    int64_t max_ii = 0;
+    for (TaskNode* task : all_tasks) {
+      uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
+      uses_tma_core = uses_tma_core || task->UsesTMACore();
+      uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
+      total_latency += task->GetLatency();
+      max_ii = std::max(max_ii, task->GetII());
+    }
+    new_task_node->SetUsesCUDACore(uses_cuda_core);
+    new_task_node->SetUsesTMACore(uses_tma_core);
+    new_task_node->SetUsesTensorCore(uses_tensor_core);
+    new_task_node->SetLatency(total_latency);
+    new_task_node->SetII(max_ii);
+    new_task_node->SetWarpgroupId(-1);  // mixed
+
+    // Also copy read/write regions from all tasks
+    for (TaskNode* task : all_tasks) {
+      auto read_regions = task->GetReadRegions();
+      for (const auto& region : read_regions) {
+        new_task_node->AddReadRegion(region);
+      }
+      auto write_regions = task->GetWriteRegions();
+      for (const auto& region : write_regions) {
+        new_task_node->AddWriteRegion(region);
+      }
+    }
+
+    LOG(INFO) << "Created warpgroup partition in TaskNode: if " << condition
+              << " execute warpgroup 0, else execute warpgroup 1";
+
+    return new_task_node;
+  }
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

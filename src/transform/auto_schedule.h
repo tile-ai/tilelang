@@ -40,7 +40,7 @@ inline MemoryType GetMemoryTypeFromScope(const String& scope) {
     return MemoryType::kGlobal;
   } else if (scope == "shared" || scope == "shared.dyn") {
     return MemoryType::kShared;
-  } else if (scope == "local" || scope == "local.var") {
+  } else if (scope == "local" || scope == "local.var" || scope == "local.fragment") {
     return MemoryType::kRegister;
   }
   return MemoryType::kUnknown;
@@ -60,6 +60,7 @@ public:
 
   virtual ~IRStructure() = default;
   virtual Kind GetKind() const = 0;
+  virtual std::unique_ptr<IRStructure> Clone() const = 0;
 
   // Helper methods for safe casting
   bool IsTask() const { return GetKind() == Kind::kTask; }
@@ -133,6 +134,9 @@ public:
   // Warpgroup id for warpgroup specialization
   void SetWarpgroupId(int warpgroup_id) { warpgroup_id_ = warpgroup_id; }
   int GetWarpgroupId() const { return warpgroup_id_; }
+
+  // Clone method
+  std::unique_ptr<IRStructure> Clone() const override;
 
   // Helper methods to add regions (for incremental analysis)
   void AddReadRegion(const BufferRegion& region) override {
@@ -212,6 +216,9 @@ public:
   // Helper methods to add regions (delegate to child)
   void AddReadRegion(const BufferRegion& region) override { if (child) child->AddReadRegion(region); }
   void AddWriteRegion(const BufferRegion& region) override { if (child) child->AddWriteRegion(region); }
+
+  // Clone method
+  std::unique_ptr<IRStructure> Clone() const override;
 };
 
 // Sequence node: contains a vector of child IRStructures
@@ -246,6 +253,9 @@ public:
   // Helper methods to add regions (delegate to first child if exists)
   void AddReadRegion(const BufferRegion& region) override;
   void AddWriteRegion(const BufferRegion& region) override;
+
+  // Clone method
+  std::unique_ptr<IRStructure> Clone() const override;
 };
 
 // ScheduleUnit: a group of consecutive TaskNodes that can be scheduled together
@@ -332,11 +342,12 @@ void CollectAllTaskNodesWithContext(const IRStructure* node,
 // Weighted latency = latency * tripcount (tripcount = 100 for non-constant loop extent)
 void AssignWarpgroupIdsGlobal(IRStructure* root);
 
-// Assign warpgroup ids to tasks within a ScheduleUnit (legacy function, kept for compatibility)
-// Tasks that use the same register region must have the same warpgroup id
-// Goal: balance weighted latency between two warpgroups (0 and 1)
-// Weighted latency = latency * tripcount if task is inside a loop, otherwise latency
-void AssignWarpgroupIds(ScheduleUnit& unit);
+
+// Apply warpgroup partition to a ScheduleUnit
+// Split tasks into two groups based on warpgroup id and insert conditional branching
+// if tx < 128: execute warpgroup 0 tasks, else: execute warpgroup 1 tasks
+// Note: cross-warpgroup dependencies are ignored for now (will be handled later with barriers)
+void ApplyWarpgroupPartition(ScheduleUnit& unit);
 
 } // namespace tl
 } // namespace tvm
