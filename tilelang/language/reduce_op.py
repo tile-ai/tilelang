@@ -246,7 +246,7 @@ def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
 @macro
 def cumsum_fragment(
     src: BufferLikeType,
-    dst: tir.Buffer,
+    dst: BufferLikeType,
     dim: int,
     reverse: bool,
 ) -> None:
@@ -282,12 +282,13 @@ def cumsum_fragment(
     copy(cumsum_smem, dst)
 
 
+# NOTE(chaofan): T.cumsum returns None if it goes to macro implementations
 def cumsum(
     src: BufferLikeType,
     dst: BufferLikeType | None = None,
     dim: int = 0,
     reverse: bool = False,
-) -> tir.PrimExpr:
+) -> tir.PrimExpr | None:
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
@@ -352,7 +353,9 @@ def cumsum(
 
     # Check if src is a fragment buffer
     if is_fragment(src):
-        return cumsum_fragment(src, dst, dim, reverse)
+        cumsum_fragment(src, dst, dim, reverse)
+        return
+
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.tileop.cumsum"),
