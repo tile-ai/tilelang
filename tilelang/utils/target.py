@@ -10,6 +10,7 @@ from tilelang import _ffi_api
 from tvm.target import Target
 from tvm.contrib import rocm
 from tilelang.contrib import nvcc
+import os
 
 SUPPORTED_TARGETS: dict[str, str] = {
     "auto": "Auto-detect CUDA/HIP/Metal based on availability.",
@@ -20,9 +21,10 @@ SUPPORTED_TARGETS: dict[str, str] = {
     "webgpu": "WebGPU target for browser/WebGPU runtimes.",
     "c": "C source backend.",
     "cutedsl": "CuTe DSL GPU target.",
+    "commonir": "commonir target.",
 }
 
-
+COMMONIR_enabled = os.environ.get('USE_COMMONIR', '0') in ('1', 'true', 'on')
 def describe_supported_targets() -> dict[str, str]:
     """
     Return a mapping of supported target names to usage descriptions.
@@ -135,6 +137,11 @@ def determine_target(target: str | Target | Literal["auto"] = "auto", return_obj
     """
 
     return_var: str | Target = target
+    if COMMONIR_enabled:
+        return_var = "commonir"
+        if return_object:
+            return Target(return_var)
+        return return_var
 
     if target == "auto":
         target = tvm.target.Target.current(allow_none=True)
