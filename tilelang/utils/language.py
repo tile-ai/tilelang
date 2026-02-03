@@ -1,5 +1,5 @@
 from __future__ import annotations
-from tilelang.typing import BufferLikeType
+from tilelang._typing import BufferLikeType
 from tvm.tir import Buffer, BufferLoad, BufferRegion, PrimExpr
 from tilelang.language.utils import region as _make_region_call
 from functools import reduce

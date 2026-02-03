@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 # isort: off
 from typing_extensions import Literal
-from tilelang.typing import ShapeType, DType
+from tilelang._typing import ShapeType, DType
 
 # isort: on
 

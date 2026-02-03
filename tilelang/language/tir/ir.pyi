@@ -1,5 +1,5 @@
 from typing import TypeVar, Literal
-from tilelang.typing import DType
+from tilelang._typing import DType
 from tvm.tir.expr import Span, PrimExpr, BufferLoad, Var, IntImm
 
 _T = TypeVar("_T")

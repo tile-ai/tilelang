@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from tvm import tir
 
-from tilelang.typing import DType
+from tilelang._typing import DType
 from tilelang.utils import deprecated
 
 __all__ = ["dynamic", "symbolic"]

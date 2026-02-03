@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING, Generic, TypeVar
-from tilelang.typing import DType, ShapeType
+from tilelang._typing import DType, ShapeType
 from typing_extensions import Self
 
 from tvm import tir

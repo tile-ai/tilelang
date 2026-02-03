@@ -6,7 +6,7 @@ from tilelang import language as T
 from tvm.tir import Buffer, BufferRegion, BufferLoad
 from tvm import tir
 from tilelang.utils.language import get_buffer_elems
-from tilelang.typing import BufferLikeType
+from tilelang._typing import BufferLikeType
 
 
 def any_of(buffer: BufferLikeType):

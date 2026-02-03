@@ -1,7 +1,7 @@
 """Some customized operations frequently used in tensor programming, exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from tilelang.typing import ShapeType, DType
+from tilelang._typing import ShapeType, DType
 import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer, op
 from tilelang.utils.language import bits_product, prim_expr_equal

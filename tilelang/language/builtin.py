@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tilelang.typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
+from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.kernel import get_thread_bindings, get_block_extents

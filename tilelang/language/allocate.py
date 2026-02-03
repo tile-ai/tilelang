@@ -16,7 +16,7 @@ with the appropriate memory scope.
 
 from __future__ import annotations
 from typing import overload, Literal
-from tilelang.typing import DType, ShapeType
+from tilelang._typing import DType, ShapeType
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr

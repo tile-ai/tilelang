@@ -30,7 +30,7 @@ from ..ast import buffer, ptr
 from tvm.script.parser._core import parse, scan_macro, utils
 from tvm.script.parser.core.parser import Parser, ScriptMacro
 
-from tilelang.typing import ShapeType, DType
+from tilelang._typing import ShapeType, DType
 from tilelang.language import dtypes as _dtypes
 
 

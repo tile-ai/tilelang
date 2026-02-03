@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from typing import Literal
-from tilelang.typing import BufferLikeType
+from tilelang._typing import BufferLikeType
 from tvm import tir
 from tilelang.language import copy, macro, alloc_shared, alloc_fragment
 from tilelang.utils.language import to_buffer_region, retrieve_shape, _get_buffer

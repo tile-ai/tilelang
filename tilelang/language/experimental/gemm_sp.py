@@ -14,7 +14,7 @@ from tilelang.utils.language import (
 from tilelang.language.utils import (
     buffer_region_to_tile_region,
 )
-from tilelang.typing import BufferLikeType
+from tilelang._typing import BufferLikeType
 
 
 def gemm_sp(

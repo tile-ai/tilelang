@@ -1,7 +1,7 @@
 """Fill operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from tilelang.typing import BufferLikeType
+from tilelang._typing import BufferLikeType
 from tvm import tir
 from tilelang.language import has_let_value, get_let_value
 from tilelang.utils.language import get_buffer_region_from_load, to_buffer_region

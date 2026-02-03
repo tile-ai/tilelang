@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tilelang.typing import BufferLikeType, BarrierType
+from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir

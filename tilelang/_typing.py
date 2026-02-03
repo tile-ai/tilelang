@@ -1,5 +1,7 @@
 """Type annotations for TileLang."""
 
+# NOTE(chaofan): We should name it "_typing.py" to avoid module shadowing with standard library "typing"
+
 # Python 3.9 compatibility
 try:
     from typing import TypeAlias

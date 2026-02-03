@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from typing import Literal, Any
-from tilelang.typing import BufferLikeType
+from tilelang._typing import BufferLikeType
 from tilelang import language as T
 from tilelang.utils.language import (
     to_buffer_region,
