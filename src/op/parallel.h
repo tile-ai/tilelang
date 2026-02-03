@@ -12,6 +12,7 @@
 #include <unordered_map>
 
 #include "../layout/layout.h"
+#include "../layout/utils.h"
 #include "../transform/layout_reducer.h"
 #include "./operator.h"
 
@@ -25,12 +26,6 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
-                           Array<PrimExpr> small_frag_indices,
-                           Array<PrimExpr> large_frag_indices,
-                           arith::Analyzer &analyzer_,
-                           bool check_forward_index = false);
 
 class ParallelOpNode;
 
@@ -130,11 +125,17 @@ private:
                           bool is_write);
   // Access info lookup with validation.
   const BufferAccessInfo &GetAccessInfo(const Buffer &buffer) const;
+  // Check if a buffer is completely replicated (all threads hold same data).
+  bool IsBufferCompletelyReplicated(const Buffer &buffer,
+                                    const LayoutMap &layout_map) const;
   // Validate a candidate loop layout against all source fragments in
   // T.layout_map. Returns true if compatible with all fragments; otherwise
-  // false. Does not throw.
-  bool ValidateCandidateAgainstFragments(const Fragment &candidate,
-                                         const LayoutInferArgs &T) const;
+  // false. When throw_on_error is true, throws LayoutConflictException with
+  // detailed error message on failure.
+  bool ValidateCandidateAgainstFragments(
+      const Fragment &candidate, const LayoutInferArgs &T,
+      bool throw_on_error = false, bool check_forward_index = false,
+      const Buffer &source_buffer = Buffer()) const;
   // Choose the better loop layout from two candidates using validation,
   // containment and replication heuristic.
   Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,
@@ -179,6 +180,12 @@ private:
   mutable arith::Analyzer analyzer_;
   // Mapping from buffer to reducer info.
   Map<Var, ReducerInfo> reducer_info_map_;
+  // Whether the loop body has cross-thread shared/global memory access.
+  bool has_cross_thread_access_ = false;
+  // Buffers that are stored to shared/global memory in the loop body.
+  std::vector<Buffer> store_shared_global_buffers_;
+  // Fragment buffers that are stored to in the loop body.
+  std::vector<Buffer> store_fragment_buffers_;
 };
 
 class ParallelOp : public TileOperator {
