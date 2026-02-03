@@ -415,14 +415,11 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     if (read_source_buffer.defined() && allow_layout_propgate) {
       candidate_from_buffer =
           ComputeLoopLayoutFromBuffer(read_source_buffer, T);
-      LOG(INFO) << "read_source_buffer: " << read_source_buffer;
-      LOG(INFO) << "candidate_from_buffer: " << candidate_from_buffer;
     }
 
     // try to infer loop layout with two mechanisms and choose the best one
     {
       candidate_from_plan = ComputePlanCandidate(T);
-      LOG(INFO) << "candidate_from_plan: " << candidate_from_plan;
     }
 
     // Choose the best candidate:
@@ -629,16 +626,9 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
     Var rep("_rep");
     auto rep_iter =
         IterVar({0, src_layout->ReplicateExtent()}, rep, IterVarType::kDataPar);
-    LOG(INFO) << "rep: " << rep;
-    LOG(INFO) << "src_layout: " << src_layout->DebugOutput();
-    LOG(INFO) << "src_layout->DeReplicate(): "
-              << src_layout->DeReplicate()->DebugOutput();
-    LOG(INFO) << "Create rep_iter: " << rep_iter
-              << " from rep_extent: " << src_layout->ReplicateExtent();
     PrimExpr loop_var_to_thread =
         src_layout->ForwardThread(GetAccessInfo(buffer).indices, rep);
     loop_var_to_thread = analyzer_.Simplify(loop_var_to_thread);
-    LOG(INFO) << "loop_var_to_thread after simplify: " << loop_var_to_thread;
     PostOrderVisit(loop_var_to_thread, [&](const ObjectRef &objref) {
       if (auto opt_var = objref.as<Var>();
           opt_var && inner_vars_.count(*opt_var)) {
@@ -652,8 +642,6 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
     try {
       result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
                    ->BindThreadRange(T.thread_bounds);
-      LOG(INFO) << "result: " << result;
-      LOG(INFO) << "result->DeReplicate(): " << result->DeReplicate();
     } catch (const tvm::runtime::Error &err) {
       std::ostringstream msg;
       msg << "Layout inference for buffer `" << buffer->name
