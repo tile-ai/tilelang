@@ -15,30 +15,22 @@ with the appropriate memory scope.
 """
 
 from __future__ import annotations
-from typing import TypeVar, overload, Literal
-
-# Python 3.9 compatibility for advanced typing features (PEP 646)
-try:
-    from typing import TypeVarTuple  # type: ignore[attr-defined]
-except Exception:
-    from typing_extensions import TypeVarTuple  # type: ignore
-
+from typing import overload, Literal
+from tilelang.typing import DType, ShapeType
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
 from tvm.tir.buffer import Buffer
 from tvm.tir.expr import FloatImm, IntImm
+
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
 from .proxy import Tensor
 
-_Shapes = TypeVarTuple("_Shapes")
-_DType = TypeVar("_DType")
 
-
-def alloc_shared(shape, dtype: _DType, scope="shared.dyn"):
+def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn"):
     """Allocate a shared memory buffer for inter-thread communication.
 
     Args:
@@ -56,7 +48,7 @@ def alloc_shared(shape, dtype: _DType, scope="shared.dyn"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_local(shape, dtype: _DType, scope="local"):
+def alloc_local(shape: ShapeType, dtype: DType, scope="local"):
     """Allocate a local memory buffer for thread-private storage.
 
     Args:
@@ -70,7 +62,7 @@ def alloc_local(shape, dtype: _DType, scope="local"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_fragment(shape, dtype: _DType, scope="local.fragment"):
+def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment"):
     """Allocate a fragment memory buffer for specialized operations.
 
     Args:
@@ -85,14 +77,14 @@ def alloc_fragment(shape, dtype: _DType, scope="local.fragment"):
 
 
 @overload
-def alloc_var(dtype: str, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
+def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
 
 
 @overload
-def alloc_var(dtype: str, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
+def alloc_var(dtype: DType, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
 
 
-def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
+def alloc_var(dtype: DType, *args, scope="local.var", init: PrimExpr | None = None):
     """Allocate a single-element variable buffer.
 
     Args:
@@ -177,7 +169,7 @@ def alloc_barrier(arrive_count: int | list[int]):
     return buffer
 
 
-def alloc_tmem(shape, dtype):
+def alloc_tmem(shape: ShapeType, dtype: DType):
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
 
@@ -206,7 +198,10 @@ def alloc_tmem(shape, dtype):
     return T.alloc_buffer(shape, dtype, scope="shared.tmem")
 
 
-def alloc_reducer(shape, dtype, op="sum", replication=None):
+ReducerOp = Literal["sum", "max", "min"]
+
+
+def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None):
     """
     Allocate a reducer buffer.
 
@@ -247,7 +242,7 @@ DescKind = Literal["wgmma", "tcgen05_smem", "tcgen05_instr"]
 
 def alloc_descriptor(
     kind: DescKind = "wgmma",
-    dtype: str = _dtypes.uint64,
+    dtype: DType = _dtypes.uint64,
 ):
     """Allocate a descriptor buffer for WGMMA and TCGEN5.MMA.
 

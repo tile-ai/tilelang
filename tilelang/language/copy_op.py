@@ -118,8 +118,8 @@ def copy(
 
 
 def c2d_im2col(
-    img: tir.Buffer,
-    col: tir.Buffer,
+    img: BufferLikeType,
+    col: BufferLikeType,
     nhw_step: tir.PrimExpr,
     c_step: tir.PrimExpr,
     kernel: int,

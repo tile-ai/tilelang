@@ -6,10 +6,11 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import TypeAlias
 
+from tvm import ir
 from tvm import tir
+
 from tvm.tir import BufferLoad, BufferRegion
-from tilelang.dtypes import AnyDType
-from typing import Union
+from tilelang.dtypes import dtype
 
 # Barrier can only be a Buffer, a BufferLoad
 BarrierType: TypeAlias = tir.Buffer | BufferLoad
@@ -25,4 +26,5 @@ BufferLikeTypeTuple = (tir.Buffer, BufferLoad, BufferRegion)
 # - AnyDType is a union of all possible types that can represent a data type, including torch.dtype
 # - DType is a more specific type alias that represents a data type in the context of TileLang, and must be
 #   adapted to string.
-DType: TypeAlias = Union[AnyDType, str]
+DType: TypeAlias = dtype | ir.Type | str | type
+ShapeType: TypeAlias = list[tir.PrimExpr] | tuple[tir.PrimExpr]

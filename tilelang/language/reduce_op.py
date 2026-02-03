@@ -1,6 +1,7 @@
 """Reduce operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
+from typing import Literal
 from tilelang.typing import BufferLikeType
 from tvm import tir
 from tilelang.language import copy, macro, alloc_shared, alloc_fragment
@@ -17,8 +18,10 @@ def _legalize_dim(buffer: tir.Buffer, dim: int):
 
 _REDUCE_OP_KEY = "tl.tileop.reduce"
 
+ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor", "bitxor"]
 
-def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool):
+
+def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: int, clear: bool):
     """Perform a reduction operation on a buffer along a specified dimension.
 
     Args:
