@@ -467,7 +467,7 @@ public:
    */
   bool DependsOnRuntimeValue(const PrimExpr &expr, const IterVar &iv) {
     depends_on_runtime_ = false;
-    this->VisitExpr(std::move(expr));
+    this->VisitExpr(expr);
     auto thread_extent = static_cast<int64_t>(*as_const_int(iv->dom->extent));
     {
       With<arith::ConstraintContext> ctx(analyzer_, expr);
