@@ -1462,8 +1462,12 @@ private:
       }
       // Add loop variable constraint for loop-carry analysis
       if (loop != nullptr) {
+        // For loop-carry analysis, we compare iteration i with iteration i+1.
+        // Since i+1 must be a valid iteration, i can only range from min to
+        // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
+        PrimExpr adjusted_extent = loop->extent - make_const(loop->extent.dtype(), 1);
         analyzer.Bind(loop->loop_var,
-                      Range::FromMinExtent(loop->min, loop->extent));
+                      Range::FromMinExtent(loop->min, adjusted_extent));
       }
 
       // Check P => C: ¬P ∨ C
@@ -1506,8 +1510,12 @@ private:
 
       // Add loop variable constraint for loop-carry analysis
       if (loop != nullptr) {
+        // For loop-carry analysis, we compare iteration i with iteration i+1.
+        // Since i+1 must be a valid iteration, i can only range from min to
+        // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
+        PrimExpr adjusted_extent = loop->extent - make_const(loop->extent.dtype(), 1);
         analyzer.Bind(loop->loop_var,
-                      Range::FromMinExtent(loop->min, loop->extent));
+                      Range::FromMinExtent(loop->min, adjusted_extent));
       }
 
       struct ThreadVarInfo {
