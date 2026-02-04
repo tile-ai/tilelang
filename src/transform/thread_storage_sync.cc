@@ -1465,7 +1465,8 @@ private:
         // For loop-carry analysis, we compare iteration i with iteration i+1.
         // Since i+1 must be a valid iteration, i can only range from min to
         // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
-        PrimExpr adjusted_extent = loop->extent - make_const(loop->extent.dtype(), 1);
+        PrimExpr adjusted_extent =
+            loop->extent - make_const(loop->extent.dtype(), 1);
         analyzer.Bind(loop->loop_var,
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
@@ -1513,7 +1514,8 @@ private:
         // For loop-carry analysis, we compare iteration i with iteration i+1.
         // Since i+1 must be a valid iteration, i can only range from min to
         // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
-        PrimExpr adjusted_extent = loop->extent - make_const(loop->extent.dtype(), 1);
+        PrimExpr adjusted_extent =
+            loop->extent - make_const(loop->extent.dtype(), 1);
         analyzer.Bind(loop->loop_var,
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
