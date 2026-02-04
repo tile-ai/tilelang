@@ -471,14 +471,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
   // Step 2: Check that the loop's partition can correctly align with all source
   // fragment, and infer layout only when it's not yet layout-ed.
-  // Try DeReplicate first to reduce replication if possible.
-  Fragment dereplicated_layout = loop_layout_->DeReplicate();
-  ;
-  if (ValidateCandidateAgainstFragments(
-          dereplicated_layout, T, /*throw_on_error=*/false,
-          /*check_forward_index=*/false, source_buffer)) {
-    loop_layout_ = dereplicated_layout;
-  }
   ValidateCandidateAgainstFragments(loop_layout_, T, /*throw_on_error=*/true,
                                     /*check_forward_index=*/false,
                                     source_buffer);
@@ -656,6 +648,15 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
   }
   DLOG(INFO) << "[compute_loop_layout_from_buffer] ... and get "
              << result->DebugOutput() << '\n';
+  // Try DeReplicate first to reduce replication if possible.
+  Fragment dereplicated_layout = result->DeReplicate();
+  if (ValidateCandidateAgainstFragments(
+          dereplicated_layout, T, /*throw_on_error=*/false,
+          /*check_forward_index=*/false, /*source_buffer=*/buffer)) {
+    DLOG(INFO) << "[compute_loop_layout_from_buffer] DeReplicate success, get "
+               << dereplicated_layout->DebugOutput() << '\n';
+    result = dereplicated_layout;
+  }
   return result;
 }
 

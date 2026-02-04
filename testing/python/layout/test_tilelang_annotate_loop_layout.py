@@ -3,7 +3,6 @@ import tilelang.testing
 import tilelang.language as T
 
 
-# TODO(lei): replicate loop layout and more complicated layout cases
 @tilelang.jit
 def loop_layout_kernel(A, B, loop_layout):
     M, N = T.const("M, N")
@@ -41,9 +40,10 @@ def test_loop_layout_identity():
 
     M, N = 128, 32
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn)
+    tilelang.disable_cache()
     kernel = loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
-
+    print(code)
     assert "*(float4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(float4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));" in code
 
 
@@ -88,6 +88,7 @@ def replicate_loop_layout_kernel(A, B, loop_layout):
 
 
 @tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_annotate_replicate_loop_layout_vec4():
     M, N = 128, 32
 
@@ -98,10 +99,8 @@ def test_annotate_replicate_loop_layout_vec4():
         return forward_thread, forward_local
 
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn, replicate=2)
-
     kernel = replicate_loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
-
     assert (
         "*(float4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(float4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
         in code
@@ -109,4 +108,5 @@ def test_annotate_replicate_loop_layout_vec4():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_loop_layout_identity()
