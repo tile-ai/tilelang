@@ -438,7 +438,8 @@ private:
   bool IsThreadVar(const VarNode *op) const {
     // Check if this variable is a thread index by name
     const std::string &name = op->name_hint;
-    if (name == "threadIdx.x" || name == "threadIdx.y" || name == "threadIdx.z" ||
+    if (name == "threadIdx.x" || name == "threadIdx.y" ||
+        name == "threadIdx.z" ||
         name.find("thread_binding") != std::string::npos) {
       return true;
     }
@@ -814,7 +815,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       if (!is_uniform) {
         // Non-uniform condition: syncs inside will cause deadlock!
         // Remove the internal syncs and mark the if-statement itself for sync
-        LOG(WARNING) << "[ThreadSync] Hoisting sync from inside non-uniform if to before if. "
+        LOG(WARNING) << "[ThreadSync] Hoisting sync from inside non-uniform if "
+                        "to before if. "
                      << "condition=" << op->condition;
 
         for (const auto &sync : syncs_in_then) {
