@@ -55,9 +55,9 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
                                      int target_vectorized_size,
                                      arith::Analyzer *analyzer);
 
-bool IndiceCanVectorize(const PrimExpr &expr, Var var,
-                        const PrimExpr &iter_var_size,
-                        int target_vectorized_size, arith::Analyzer *analyzer);
+bool IndicesCanVectorize(const PrimExpr &expr, Var var,
+                         const PrimExpr &iter_var_size,
+                         int target_vectorized_size, arith::Analyzer *analyzer);
 
 } // namespace tl
 } // namespace tvm

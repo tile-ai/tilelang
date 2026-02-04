@@ -290,12 +290,9 @@ public:
           for (size_t i = 0; i < info.indices.size(); ++i) {
             elem_offset += info.indices[i] * strides[i];
           }
-          if (!(IsExprInvariantInVectorBoundary(elem_offset,
-                                                inner_for_->loop_var,
-                                                vector_size_, analyzer_) ||
-                IndiceCanVectorize(elem_offset, inner_for_->loop_var,
-                                   loop_extent_vector_size_, vector_size_,
-                                   analyzer_))) {
+          if (!IndicesCanVectorize(elem_offset, inner_for_->loop_var,
+                                   inner_for_->extent, vector_size_,
+                                   analyzer_)) {
             // Not invariant at this vector_size, need to take GCD
             int old_vector_size = vector_size_;
             vector_size_ = arith::ZeroAwareGCD(vector_size_, info.vector_size);
@@ -534,14 +531,18 @@ private:
       return initial_vector_size_;
 
     int buffer_vec_size = loop_extent_vector_size_;
+
     // Transform indices using layout_map if present
     auto transformed_indices = TransformIndices(indices, buffer);
+
     // 1. Compute raw element offset
     Array<PrimExpr> strides = GetBufferStrides(buffer);
+
     PrimExpr elem_offset = 0;
     for (size_t i = 0; i < transformed_indices.size(); ++i) {
       elem_offset += transformed_indices[i] * strides[i];
     }
+
     // 2. Check if current buffer_vec_size works with invariant boundary check
     // In some cases, buffer_vec_size is max (e.g. 128), but
     // IsExprInvariantInVectorBoundary may only be true at a smaller size (e.g.
@@ -579,9 +580,9 @@ private:
     }
     // 4. Try to find max vectorize size for this buffer
     while (buffer_vec_size > 1 &&
-           !IndiceCanVectorize(elem_offset, inner_for_->loop_var,
-                               inner_for_->extent, buffer_vec_size,
-                               analyzer_)) {
+           !IndicesCanVectorize(elem_offset, inner_for_->loop_var,
+                                inner_for_->extent, buffer_vec_size,
+                                analyzer_)) {
       buffer_vec_size /= 2;
     }
     return buffer_vec_size;
@@ -722,9 +723,10 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
   return false;
 }
 
-bool IndiceCanVectorize(const PrimExpr &expr, Var var,
-                        const PrimExpr &iter_var_size,
-                        int target_vectorized_size, arith::Analyzer *analyzer) {
+bool IndicesCanVectorize(const PrimExpr &expr, Var var,
+                         const PrimExpr &iter_var_size,
+                         int target_vectorized_size,
+                         arith::Analyzer *analyzer) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1)
     return true;
