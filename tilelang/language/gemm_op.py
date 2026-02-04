@@ -106,6 +106,10 @@ def _gemm_impl(
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
+    # When mbar is None, pass a placeholder constant (0).
+    # The C++ side checks if arg 16 is a BufferLoadNode before using it,
+    # so a non-BufferLoad value will be correctly ignored.
+    mbar_arg = mbar if mbar is not None else tir.const(0, dtype="int32")
     return tir.call_intrin(
         "handle",
         tir.op.Op.get(op_key),
@@ -125,7 +129,7 @@ def _gemm_impl(
         offset_b,
         k_pack,
         wg_wait,
-        mbar,
+        mbar_arg,
         C_coords[0],
         C_coords[1],
     )
