@@ -29,6 +29,7 @@
 #include "../op/gemm.h"
 #include "../op/gemm_py.h"
 #include "../op/operator.h"
+#include "../op/region.h"
 #include "tvm/tir/expr.h"
 
 
@@ -68,18 +69,50 @@ static bool IsTmemBuffer(const Buffer &buffer) {
 }
 
 /*!
- * \brief Create a Call node for a Copy tile operation
+ * \brief Create a T.region Call from a BufferRegion
+ * @param region The BufferRegion to convert
+ * @param access_mask The access mask (1=read, 2=write, 3=rw)
  */
-static Call MakeCopyCall(const Buffer &src, const Buffer &dst) {
-  // Create source and destination buffer regions using FullRegion
-  BufferRegion src_region = BufferRegion::FullRegion(src);
-  BufferRegion dst_region = BufferRegion::FullRegion(dst);
+static Call MakeRegionCallFromBufferRegion(const BufferRegion &region, int access_mask) {
+  const Buffer &buffer = region->buffer;
+  const Array<Range> &ranges = region->region;
+
+  // Create BufferLoad with min indices
+  Array<PrimExpr> indices;
+  for (const auto &range : ranges) {
+    indices.push_back(range->min);
+  }
+  BufferLoad load(buffer, indices);
+
+  // Build T.region call args: BufferLoad, access_mask, extents...
+  Array<PrimExpr> region_args;
+  region_args.push_back(load);
+  region_args.push_back(IntImm(DataType::Int(32), access_mask));
+  for (const auto &range : ranges) {
+    region_args.push_back(range->extent);
+  }
+
+  return Call(DataType::Handle(), RegionOp::Get(), region_args);
+}
+
+/*!
+ * \brief Create a Call node for a Copy tile operation from BufferRegions
+ * @param src_buffer The source buffer
+ * @param dst_region The destination BufferRegion (used for region bounds)
+ * The source region will use the same bounds as dst_region but with src_buffer
+ */
+static Call MakeRegionalCopyCall(const Buffer &src_buffer, const BufferRegion &dst_region) {
+  // Create source BufferRegion with same bounds as dst but using src_buffer
+  BufferRegion src_region(src_buffer, dst_region->region);
+
+  // Create T.region calls for src (read=1) and dst (write=2)
+  Call src_region_call = MakeRegionCallFromBufferRegion(src_region, 1);
+  Call dst_region_call = MakeRegionCallFromBufferRegion(dst_region, 2);
 
   // Create the copy call using the Copy tile op
-  // Convert BufferRegion to PrimExpr for the call arguments
   Array<PrimExpr> args;
-  args.push_back(src_region->ToPrimExpr());
-  args.push_back(dst_region->ToPrimExpr());
+  args.push_back(src_region_call);
+  args.push_back(dst_region_call);
 
   return Call(DataType::Handle(), Copy::Get(), args);
 }
@@ -142,14 +175,10 @@ private:
         }
         ICHECK(IsFragmentBufferLocal(c_buffer));
         BufferRegion c_region = gemm_node->cRegion_;
-        ICHECK(IsFullRegion(c_region)) << "Currently only support full region for C";
-        // todo: support c as partial region
         fragment_c_buffers.insert(c_buffer.get());
 
         // todo: check tcgen5 instructions is selected
-
-        // todo: fix_v1: requires 2d raises error
-    
+            
         // Only add if not already tracked
         if (gemm_infos.find(c_buffer.get()) == gemm_infos.end()) {
           GemmTmemInfo info;
@@ -246,10 +275,10 @@ private:
 
       for (const auto &copy_info : pending_copies_) {
         const Buffer &tmem_buf = copy_info.first;
-        const Buffer &frag_buf = copy_info.second;
+        const BufferRegion &frag_region = copy_info.second;
 
         // Create copy from tmem to fragment
-        Call copy_call = MakeCopyCall(tmem_buf, frag_buf);
+        Call copy_call = MakeRegionalCopyCall(tmem_buf, frag_region);
         stmts.push_back(Evaluate(copy_call));
       }
 
@@ -281,6 +310,7 @@ private:
   Stmt TransformGemm(const GemmNodeVariant &gemm_node, const CallNode *call) {
     return std::visit([&, call](auto &node) -> Stmt {
         Buffer c_buffer = node->c_;
+        BufferRegion c_region = node->cRegion_;
         auto it = frag_to_tmem_.find(c_buffer.get());
         if (it == frag_to_tmem_.end()) {
           // Not tracked for tmem injection, return original call
@@ -289,17 +319,15 @@ private:
         const Buffer &tmem_buffer = it->second;
 
         // Schedule a copy to be inserted after the pipelined loop
-        pending_copies_.push_back({tmem_buffer, c_buffer});
+        pending_copies_.push_back({tmem_buffer, c_region});
 
         // Rebuild the gemm call with the tmem buffer
         // args[2] is the C buffer region
         Array<PrimExpr> new_args;
         for (size_t i = 0; i < call->args.size(); i++) {
             if (i == 2) {
-                // Replace the C region with tmem buffer region
-                BufferRegion old_region = node->cRegion_;
-                BufferRegion new_region(tmem_buffer, old_region->region);
-                new_args.push_back(new_region->ToPrimExpr());
+                BufferRegion new_region = BufferRegion(tmem_buffer, c_region->region);
+                new_args.push_back(MakeRegionCallFromBufferRegion(new_region, 2));
             } else {
                 new_args.push_back(call->args[i]);
             }
@@ -314,8 +342,8 @@ private:
   std::unordered_map<const BufferNode *, Buffer> frag_to_tmem_;
   std::unordered_map<const BufferNode *, Buffer> tmem_to_frag_;
   // Pending copies to insert after the current pipelined loop
-  // Pair of (tmem_buffer, frag_buffer)
-  std::vector<std::pair<Buffer, Buffer>> pending_copies_;
+  // Pair of (tmem_buffer, frag_buffer_region)
+  std::vector<std::pair<Buffer, BufferRegion>> pending_copies_;
 };
 
 tvm::transform::Pass InjectTmem() {
