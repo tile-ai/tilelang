@@ -288,7 +288,7 @@ def z3_schedule_loop_python(
     resource_flags: List[int],
     data_deps: List[Tuple[int, int, int]],  # (i, j, distance)
     resource_deps: List[Tuple[int, int]]
-) -> Tuple[List[int], List[int]]:
+) -> Tuple[List[int], List[int], int]:
     """Z3-based scheduler for loops with distance-aware dependencies.
 
     New modeling:
@@ -452,7 +452,7 @@ def z3_schedule_loop_python(
                   f"latency={latencies[idx]}, II={iis[idx]}, pro={promotes[idx]}, "
                   f"resource_flags={resource_flags[idx]:03b}")
 
-        return start_times, promotes, task_indices
+        return start_times, promotes, best_ii
 
     except Exception as e:
         print(f"[Python Z3 Loop] Error in Z3 scheduling: {e}")
@@ -496,7 +496,7 @@ def z3_schedule_loop_ffi(
                 resource_deps_list.append((int(resource_deps[i][0]), int(resource_deps[i][1])))
 
     # Call the actual scheduler
-    start_times, promotes, _ = z3_schedule_loop_python(
+    start_times, promotes, best_ii = z3_schedule_loop_python(
         latencies_list,
         iis_list,
         resource_flags_list,
@@ -506,4 +506,4 @@ def z3_schedule_loop_ffi(
 
     # Return start_times and promotes as separate arrays for easier FFI handling
     # C++ side expects a tuple of (start_times_array, promotes_array)
-    return (start_times, promotes)
+    return (start_times, promotes, best_ii)

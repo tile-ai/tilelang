@@ -62,7 +62,6 @@ using namespace tir;
 using ffi::GetRef;
 
 // Forward declaration
-void ApplyWarpgroupPartition(ScheduleUnit& unit, IterVar thread_var);
 std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* root, IterVar thread_var);
 
 // Helper function to compare if two regions are equal
@@ -1369,10 +1368,11 @@ public:
       // Extract results
       // Python function returns (start_times, promotes) as a tuple of two arrays
       auto return_val = z3_schedule_loop_func.value()(tvm_latencies, tvm_iis, tvm_resource_flags,
-                                                  tvm_data_deps, tvm_resource_deps).cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<bool>>>();
+                                                  tvm_data_deps, tvm_resource_deps).cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<bool>, int64_t>>();
 
       ffi::Array<int64_t> start_times = return_val.get<0>();
       ffi::Array<bool> promotes = return_val.get<1>();
+
 
       if (start_times.size() != n || promotes.size() != n) {
         LOG(WARNING) << "Python Z3 loop scheduler returned invalid results (size mismatch), falling back to topological sort";
@@ -1409,7 +1409,7 @@ public:
       std::vector<std::pair<int64_t, size_t>> start_time_with_idx;
       start_time_with_idx.reserve(n);
       for (size_t i = 0; i < n; ++i) {
-        start_time_with_idx.emplace_back(start_times[i], i);
+        start_time_with_idx.emplace_back(start_times[i] + promotes[i] * return_val.get<2>(), i);
       }
 
       // Sort by start_time, then by original index
@@ -1785,10 +1785,6 @@ private:
         }
       }
     }
-
-    // Apply warpgroup partition after scheduling
-    // NOTE: Now applied at the entire IRStructure level, not per ScheduleUnit
-    // ApplyWarpgroupPartition(unit, thread_var_);
   }
 
   void StartNewUnit() {
@@ -1998,6 +1994,9 @@ void PrintIRStructure(const IRStructure* node, int indent = 0) {
     const TaskNode* task = static_cast<const TaskNode*>(node);
     LOG(INFO) << indent_str << "TaskNode:";
     LOG(INFO) << indent_str << "  stmts: " << task->stmts.size() << " statements";
+    for (auto &stmt: task->stmts) {
+      LOG(INFO) << indent_str << "  stmt: " << stmt;
+    }
     LOG(INFO) << indent_str << "  uses_cuda_core: " << task->UsesCUDACore();
     LOG(INFO) << indent_str << "  uses_tma_core: " << task->UsesTMACore();
     LOG(INFO) << indent_str << "  uses_tensor_core: " << task->UsesTensorCore();
@@ -2069,268 +2068,63 @@ void CollectPromotedTasks(const IRStructure* node, std::vector<const TaskNode*>&
 // Rewriter to convert IRStructure back to TIR statements
 class IRStructureRewriter {
 public:
-  // Build loop body with promote transformation
-  Stmt BuildPromotedLoopBody(const IRStructure* node, const Var& loop_var,
-                             const PrimExpr& loop_min, const PrimExpr& loop_step,
-                             const PrimExpr& new_loop_end) {
-    if (!node) return Stmt();
-
-    // Calculate original loop end: end = new_loop_end - loop_step
-    PrimExpr loop_end = new_loop_end - loop_step;
-
-    // Recursive helper function
-    std::function<Stmt(const IRStructure*)> build = [&](const IRStructure* n) -> Stmt {
-      if (!n) return Stmt();
-
-      if (n->IsTask()) {
-        const TaskNode* task = static_cast<const TaskNode*>(n);
-        bool promoted = task->GetPromote();
-
-        // Get the task statements (may be multiple)
-        if (task->stmts.empty()) {
-          return Stmt();
-        }
-
-        // Combine multiple statements into SeqStmt if needed
-        Stmt task_body;
-        if (task->stmts.size() == 1) {
-          task_body = task->stmts[0];
-        } else {
-          task_body = SeqStmt(task->stmts);
-        }
-
-        // Apply variable substitution for non-promoted tasks
-        if (!promoted) {
-          // Substitute loop_var with (loop_var - loop_step) for non-promoted tasks
-          Map<Var, PrimExpr> substitution;
-          substitution.Set(loop_var, loop_var - loop_step);
-          task_body = Substitute(task_body, substitution);
-        }
-
-        // Build condition
-        PrimExpr condition;
-        if (promoted) {
-          // Promoted tasks: execute when loop_var < loop_end (original loop boundary)
-          condition = loop_var < loop_end;
-        } else {
-          // Non-promoted tasks: execute when loop_var > loop_min
-          condition = loop_var > loop_min;
-        }
-
-        // Create conditional statement
-        return IfThenElse(condition, task_body);
-
-      } else if (n->IsSequence()) {
-        const SequenceNode* seq = static_cast<const SequenceNode*>(n);
-
-        // Collect tasks and other statements, but reorder: non-promoted first, then promoted
-        std::vector<Stmt> non_promoted_stmts;
-        std::vector<Stmt> promoted_stmts;
-        std::vector<Stmt> other_stmts;  // for non-task statements
-
-        for (const auto& child : seq->children) {
-          if (child->IsTask()) {
-            const TaskNode* task = static_cast<const TaskNode*>(child.get());
-            bool promoted = task->GetPromote();
-
-            if (task->stmts.empty()) {
-              continue;
-            }
-
-            // Combine multiple statements into SeqStmt if needed
-            Stmt task_body;
-            if (task->stmts.size() == 1) {
-              task_body = task->stmts[0];
-            } else {
-              task_body = SeqStmt(task->stmts);
-            }
-
-            // Apply variable substitution for non-promoted tasks
-            if (!promoted) {
-              // Substitute loop_var with (loop_var - loop_step) for non-promoted tasks
-              // Non-promoted tasks execute in previous iteration with index i-step
-              Map<Var, PrimExpr> substitution;
-              substitution.Set(loop_var, loop_var - loop_step);
-              task_body = Substitute(task_body, substitution);
-            }
-
-            // Create independent conditional statement for each task
-            PrimExpr condition;
-            if (promoted) {
-              // Promoted tasks: execute when i < end (original loop boundary)
-              // They execute in the current iteration with original index i
-              condition = loop_var < loop_end;
-            } else {
-              // Non-promoted tasks: execute when i > start (i.e., not in first iteration)
-              // They execute in previous iteration with adjusted index i-step
-              condition = loop_var > loop_min;
-            }
-
-            Stmt conditional_stmt = IfThenElse(condition, task_body);
-
-            if (promoted) {
-              promoted_stmts.push_back(conditional_stmt);
-            } else {
-              non_promoted_stmts.push_back(conditional_stmt);
-            }
-
-          } else if (child->IsSequence() || child->IsControl()) {
-            // For nested sequences or control nodes, recursively process them
-            // They will maintain their own internal structure
-            Stmt child_stmt = build(child.get());
-            if (child_stmt.defined()) {
-              // We don't know if they contain promoted tasks, so put them
-              // in the middle (between non-promoted and promoted)
-              other_stmts.push_back(child_stmt);
-            }
-          }
-        }
-
-        // Combine all statements in order: non-promoted first, then other statements,
-        // then promoted tasks (following the user's example pattern)
-        std::vector<Stmt> all_stmts;
-        all_stmts.insert(all_stmts.end(), non_promoted_stmts.begin(), non_promoted_stmts.end());
-        all_stmts.insert(all_stmts.end(), other_stmts.begin(), other_stmts.end());
-        all_stmts.insert(all_stmts.end(), promoted_stmts.begin(), promoted_stmts.end());
-
-        if (all_stmts.empty()) {
-          return Stmt();
-        } else if (all_stmts.size() == 1) {
-          return all_stmts[0];
-        } else {
-          return SeqStmt(all_stmts);
-        }
-
-      } else if (n->IsControl()) {
-        // For control nodes (nested loops), use regular Rewrite
-        // Promote transformation only applies to tasks in the current loop
-        const ControlNode* control = static_cast<const ControlNode*>(n);
-        Stmt child_stmt = Rewrite(control->child.get());
-        if (!child_stmt.defined()) {
-          return Stmt();
-        }
-        // Reconstruct the control node with rewritten child
-        return For(control->control->loop_var, control->control->min,
-                   control->control->extent, control->control->kind,
-                   child_stmt, control->control->thread_binding,
-                   control->control->annotations);
-
-      } else {
-        LOG(WARNING) << "BuildPromotedLoopBody: Unknown IRStructure type";
-        return Stmt();
-      }
-    };
-
-    return build(node);
-  }
-
   Stmt Rewrite(const IRStructure* node) {
-    if (!node) {
-      return Stmt();
-    }
+    if (!node) return Stmt();
 
     if (node->IsTask()) {
       const TaskNode* task = static_cast<const TaskNode*>(node);
+
+      // Get the task statements (may be multiple)
       if (task->stmts.empty()) {
         return Stmt();
       }
-      // If there's only one statement, return it directly
+
+      // Combine multiple statements into SeqStmt if needed
+      Stmt task_body;
       if (task->stmts.size() == 1) {
-        return task->stmts[0];
-      }
-      // Otherwise, create a SeqStmt
-      return SeqStmt(task->stmts);
-
-    } else if (node->IsControl()) {
-      const ControlNode* control = static_cast<const ControlNode*>(node);
-
-      // Check if there are any promoted tasks in this loop
-      bool has_promoted_tasks = HasPromotedTasks(control->child.get());
-
-      if (has_promoted_tasks) {
-        LOG(INFO) << "IRStructureRewriter: ControlNode has promoted tasks, applying promote transformation";
-
-        // Get For loop information
-        const ForNode* for_node = control->control.get();
-        Var loop_var = for_node->loop_var;
-        PrimExpr loop_min = for_node->min;
-        PrimExpr loop_extent = for_node->extent;
-        PrimExpr loop_step = for_node->step.has_value() ? for_node->step.value() : IntImm(DataType::Int(32), 1);
-
-        // Use original expressions (no simplification)
-
-        // Calculate new loop extent: extent + step
-        PrimExpr new_loop_extent = loop_extent + loop_step;
-
-        LOG(INFO) << "IRStructureRewriter: Promote transformation details:";
-        LOG(INFO) << "  Original loop: for " << loop_var << " in [" << loop_min << ", "
-                  << (loop_min + loop_extent) << ") with step " << loop_step;
-        LOG(INFO) << "  New loop extent: " << new_loop_extent << " (original " << loop_extent << " + step " << loop_step << ")";
-
-        // Collect promoted tasks for logging
-        std::vector<const TaskNode*> promoted_tasks;
-        CollectPromotedTasks(control->child.get(), promoted_tasks);
-        LOG(INFO) << "  Found " << promoted_tasks.size() << " promoted tasks";
-
-        // Build transformed loop body with conditional execution (promote transformation implemented)
-        Stmt transformed_body = BuildPromotedLoopBody(control->child.get(), loop_var, loop_min,
-                                                      loop_step, loop_min + new_loop_extent);
-
-        if (!transformed_body.defined()) {
-          LOG(WARNING) << "Failed to build promoted loop body, using original";
-          Stmt body = Rewrite(control->child.get());
-          if (!body.defined()) {
-            return control->control;
-          }
-          return For(loop_var, loop_min, new_loop_extent, for_node->kind, body,
-                     for_node->thread_binding, for_node->annotations);
-        }
-
-        LOG(INFO) << "IRStructureRewriter: Successfully built promoted loop body";
-        // Create new For loop with extended extent and transformed body
-        return For(loop_var, loop_min, new_loop_extent, for_node->kind, transformed_body,
-                   for_node->thread_binding, for_node->annotations);
+        task_body = task->stmts[0];
       } else {
-        // No promoted tasks, rebuild normally
-        Stmt body = Rewrite(control->child.get());
-        if (!body.defined()) {
-          LOG(WARNING) << "ControlNode body is undefined";
-          return control->control;
-        }
-        // Create a new For loop with the same parameters but updated body
-        return For(control->control->loop_var,
-                   control->control->min,
-                   control->control->extent,
-                   control->control->kind,
-                   body,
-                   control->control->thread_binding,
-                   control->control->annotations);
+        task_body = SeqStmt(task->stmts);
       }
+
+      // Create conditional statement
+      return task_body;
 
     } else if (node->IsSequence()) {
       const SequenceNode* seq = static_cast<const SequenceNode*>(node);
-      std::vector<Stmt> stmts;
-      stmts.reserve(seq->children.size());
 
+      std::vector<Stmt> all_stmts;
       for (const auto& child : seq->children) {
-        Stmt child_stmt = Rewrite(child.get());
-        if (child_stmt.defined()) {
-          stmts.push_back(child_stmt);
-        }
+        all_stmts.push_back(Rewrite(child.get()));
       }
-
-      if (stmts.empty()) {
+      if (all_stmts.empty()) {
         return Stmt();
-      } else if (stmts.size() == 1) {
-        return stmts[0];
-      } else {
-        return SeqStmt(stmts);
       }
-    }
+      if (all_stmts.size() == 1) {
+        return all_stmts[0];
+      }
+      return SeqStmt(all_stmts);
 
-    LOG(FATAL) << "Unknown IRStructure kind";
-    return Stmt();
+    } else if (node->IsControl()) {
+      // For control nodes (nested loops), use regular Rewrite
+      // Promote transformation only applies to tasks in the current loop
+      const ControlNode* control = static_cast<const ControlNode*>(node);
+      Stmt child_stmt = Rewrite(control->child.get());
+      if (!child_stmt.defined()) {
+        return Stmt();
+      }
+      // Reconstruct the control node with rewritten child
+      return For(control->control->loop_var, control->control->min,
+                  control->control->extent, control->control->kind,
+                  child_stmt, control->control->thread_binding,
+                  control->control->annotations);
+
+    } else {
+      LOG(WARNING) << "BuildPromotedLoopBody: Unknown IRStructure type";
+      return Stmt();
+    }
   }
+
 };
 
 // Mutator to update thread extent in AttrStmt nodes
@@ -2850,402 +2644,6 @@ std::unique_ptr<IRStructure> CloneIRStructureWithWarpgroupFilter(
     return new_ctrl;
   }
   return nullptr;
-}
-
-// Apply warpgroup partition to a ScheduleUnit
-// Split tasks into two groups based on warpgroup id and insert conditional branching
-// if tx < original_threads: execute warpgroup 0 tasks, else: execute warpgroup 1 tasks
-// Note: cross-warpgroup dependencies are ignored for now (will be handled later with barriers)
-void ApplyWarpgroupPartition(ScheduleUnit& unit, IterVar thread_var) {
-  if (unit.tasks.size() <= 1) {
-    // No partition needed for single task
-    return;
-  }
-
-  // Check if tasks have mixed warpgroup ids
-  bool has_warpgroup0 = false;
-  bool has_warpgroup1 = false;
-  for (const auto* task : unit.tasks) {
-    int wg_id = task->GetWarpgroupId();
-    if (wg_id == 0) has_warpgroup0 = true;
-    else if (wg_id == 1) has_warpgroup1 = true;
-  }
-
-  // If all tasks belong to the same warpgroup, no partition needed
-  if (!(has_warpgroup0 && has_warpgroup1)) {
-    LOG(INFO) << "All tasks belong to the same warpgroup, skipping partition";
-    return;
-  }
-
-  LOG(INFO) << "Applying warpgroup partition to ScheduleUnit with " << unit.tasks.size() << " tasks";
-
-  // We need to modify the parent SequenceNode's children
-  if (!unit.parent_seq) {
-    LOG(WARNING) << "ScheduleUnit has no parent SequenceNode, cannot apply partition";
-    return;
-  }
-
-  // Check if this unit is inside a ControlNode and the child is a ControlNode
-  if (unit.inside_control_node && unit.control_node) {
-    // Find the ControlNode in parent sequence
-    // The ControlNode should be at position start_idx in parent_seq
-    size_t start_idx = unit.start_idx;
-    if (start_idx >= unit.parent_seq->children.size()) {
-      LOG(WARNING) << "Start index out of bounds";
-      // Fall back to regular TaskNode case
-      unit.inside_control_node = false;
-      unit.control_node = nullptr;
-    } else {
-      IRStructure* child_ptr = unit.parent_seq->children[start_idx].get();
-      if (child_ptr->IsControl()) {
-        // Found ControlNode, process it
-        ControlNode* original_ctrl = static_cast<ControlNode*>(child_ptr);
-
-        // Clone ControlNode for warpgroup 0 and warpgroup 1
-        auto ctrl_wg0 = CloneIRStructureWithWarpgroupFilter(original_ctrl, 0);
-        auto ctrl_wg1 = CloneIRStructureWithWarpgroupFilter(original_ctrl, 1);
-
-        // Check if both clones have actual statements (not just empty tasks)
-        auto has_actual_statements = [](IRStructure* node) -> bool {
-          std::vector<TaskNode*> tasks;
-          CollectTaskNodesFromIRStructure(node, tasks);
-          for (TaskNode* task : tasks) {
-            if (!task->stmts.empty()) {
-              return true;
-            }
-          }
-          return false;
-        };
-
-        bool wg0_has_stmts = has_actual_statements(ctrl_wg0.get());
-        bool wg1_has_stmts = has_actual_statements(ctrl_wg1.get());
-
-        // Use the provided thread index variable from ThreadTagChecker
-        PrimExpr condition;
-        if (thread_var.defined() && thread_var->dom.defined()) {
-          // Extract thread variable and domain
-          Var thread_idx_var = thread_var->var;
-          Range thread_dom = thread_var->dom;
-          // Calculate condition: thread_idx < thread_dom->extent
-          // Assuming threads are doubled: original threads = thread_dom->extent,
-          // after warpgroup partition, total threads = 2 * thread_dom->extent
-          // Condition splits into two warpgroups: tx < original_thread_count
-          PrimExpr original_threads = thread_dom->extent;
-          condition = thread_idx_var < original_threads;
-          LOG(INFO) << "Using thread index variable " << thread_idx_var
-                    << " with original domain " << thread_dom->min << " to " << thread_dom->min + thread_dom->extent
-                    << " (threads will be doubled for warpgroup partition)"
-                    << ", condition: " << condition;
-        } else {
-          LOG(WARNING) << "Thread index variable not properly defined, falling back to default tx < 128";
-          Var tx_var("tx", DataType::Int(32));
-          condition = tx_var < IntImm(DataType::Int(32), 128);
-        }
-
-        // Create IfThenElse statement with ControlNode clones as bodies
-        // We need to convert IRStructure to Stmt
-        std::function<Stmt(IRStructure*)> irstructure_to_stmt;
-        irstructure_to_stmt = [&irstructure_to_stmt](IRStructure* structure) -> Stmt {
-          if (!structure) {
-            return Evaluate(0);
-          }
-
-          if (structure->IsTask()) {
-            TaskNode* task = static_cast<TaskNode*>(structure);
-            if (task->stmts.empty()) {
-              return Evaluate(0);
-            } else if (task->stmts.size() == 1) {
-              return task->stmts[0];
-            } else {
-              return SeqStmt(task->stmts);
-            }
-          } else if (structure->IsSequence()) {
-            SequenceNode* seq = static_cast<SequenceNode*>(structure);
-            std::vector<Stmt> stmts;
-            for (const auto& child : seq->children) {
-              if (child) {
-                Stmt child_stmt = irstructure_to_stmt(child.get());
-                stmts.push_back(child_stmt);
-              }
-            }
-            if (stmts.empty()) {
-              return Evaluate(0);
-            } else if (stmts.size() == 1) {
-              return stmts[0];
-            } else {
-              return SeqStmt(stmts);
-            }
-          } else if (structure->IsControl()) {
-            ControlNode* ctrl = static_cast<ControlNode*>(structure);
-            Stmt body = Evaluate(0);
-            if (ctrl->child) {
-              body = irstructure_to_stmt(ctrl->child.get());
-            }
-            return For(ctrl->control->loop_var, ctrl->control->min,
-                      ctrl->control->extent, ctrl->control->kind,
-                      body, ctrl->control->thread_binding,
-                      ctrl->control->annotations);
-          }
-
-          LOG(WARNING) << "Failed to convert IRStructure to Stmt, returning empty statement";
-          return Evaluate(0);
-        };
-
-        Stmt then_body = wg0_has_stmts ? irstructure_to_stmt(ctrl_wg0.get()) : Evaluate(0);
-        Stmt else_body = wg1_has_stmts ? irstructure_to_stmt(ctrl_wg1.get()) : Evaluate(0);
-
-        // Create IfThenElse statement
-        Stmt if_then_else;
-        if (wg0_has_stmts && wg1_has_stmts) {
-          if_then_else = IfThenElse(condition, then_body, else_body);
-        } else if (wg0_has_stmts) {
-          // Only warpgroup 0 has statements, execute unconditionally
-          if_then_else = then_body;
-        } else if (wg1_has_stmts) {
-          // Only warpgroup 1 has statements, execute unconditionally
-          if_then_else = else_body;
-        } else {
-          LOG(WARNING) << "Both warpgroups have no statements, skipping partition";
-          return;
-        }
-
-        // Create a new TaskNode containing the IfThenElse statement
-        auto new_task_node = std::make_unique<TaskNode>();
-        new_task_node->stmts.push_back(if_then_else);
-
-        // Copy resource usage flags from original tasks (take union)
-        bool uses_cuda_core = false;
-        bool uses_tma_core = false;
-        bool uses_tensor_core = false;
-        int64_t total_latency = 0;
-        int64_t max_ii = 0;
-        for (TaskNode* task : unit.tasks) {
-          uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
-          uses_tma_core = uses_tma_core || task->UsesTMACore();
-          uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
-          total_latency += task->GetLatency();
-          max_ii = std::max(max_ii, task->GetII());
-        }
-        new_task_node->SetUsesCUDACore(uses_cuda_core);
-        new_task_node->SetUsesTMACore(uses_tma_core);
-        new_task_node->SetUsesTensorCore(uses_tensor_core);
-        new_task_node->SetLatency(total_latency);
-        new_task_node->SetII(max_ii);
-        new_task_node->SetWarpgroupId(-1);  // mixed
-
-        // Also copy read/write regions from original tasks
-        for (TaskNode* task : unit.tasks) {
-          auto read_regions = task->GetReadRegions();
-          for (const auto& region : read_regions) {
-            new_task_node->AddReadRegion(region);
-          }
-          auto write_regions = task->GetWriteRegions();
-          for (const auto& region : write_regions) {
-            new_task_node->AddWriteRegion(region);
-          }
-        }
-
-        // Replace the ControlNode with the new conditional task
-        unit.parent_seq->children[start_idx] = std::move(new_task_node);
-
-        // Update the ScheduleUnit
-        unit.tasks.clear();
-        TaskNode* new_task = static_cast<TaskNode*>(unit.parent_seq->children[start_idx].get());
-        unit.tasks.push_back(new_task);
-
-        LOG(INFO) << "Created warpgroup partition for ControlNode: if " << condition
-                  << " execute warpgroup 0, else execute warpgroup 1";
-        LOG(INFO) << "Replaced ControlNode with conditional task";
-        return;
-      } else {
-        LOG(WARNING) << "Expected ControlNode at position " << start_idx << ", but found "
-                     << (child_ptr->IsTask() ? "TaskNode" : "SequenceNode")
-                     << ", falling back to regular TaskNode case";
-        // Fall back to regular TaskNode case
-        unit.inside_control_node = false;
-        unit.control_node = nullptr;
-      }
-    }
-  }
-
-  // Regular TaskNode case (no ControlNode)
-  {
-    // Group tasks by warpgroup id
-    std::vector<TaskNode*> warpgroup0_tasks;
-    std::vector<TaskNode*> warpgroup1_tasks;
-    for (TaskNode* task : unit.tasks) {
-      if (task->GetWarpgroupId() == 0) {
-        warpgroup0_tasks.push_back(task);
-      } else if (task->GetWarpgroupId() == 1) {
-        warpgroup1_tasks.push_back(task);
-      } else {
-        LOG(WARNING) << "Task has invalid warpgroup id " << task->GetWarpgroupId() << ", assigning to warpgroup 0";
-        warpgroup0_tasks.push_back(task);
-      }
-    }
-
-    // Extract the original children from parent sequence
-    size_t start_idx = unit.start_idx;
-    size_t num_tasks = unit.tasks.size();
-
-    // First, move the task children out of parent sequence
-    std::vector<std::unique_ptr<IRStructure>> task_children;
-    task_children.reserve(num_tasks);
-    for (size_t i = 0; i < num_tasks; ++i) {
-      task_children.push_back(std::move(unit.parent_seq->children[start_idx + i]));
-    }
-
-    // Create mapping from TaskNode pointer to its child index
-    std::unordered_map<TaskNode*, size_t> task_to_child_index;
-    for (size_t i = 0; i < num_tasks; ++i) {
-      IRStructure* child_ptr = task_children[i].get();
-      if (child_ptr->IsTask()) {
-        TaskNode* task = static_cast<TaskNode*>(child_ptr);
-        task_to_child_index[task] = i;
-      } else {
-        LOG(FATAL) << "Expected TaskNode child in ScheduleUnit";
-      }
-    }
-
-    // Collect statements for each warpgroup
-    std::vector<Stmt> warpgroup0_stmts;
-    std::vector<Stmt> warpgroup1_stmts;
-
-    for (TaskNode* task : warpgroup0_tasks) {
-      auto it = task_to_child_index.find(task);
-      if (it == task_to_child_index.end()) {
-        LOG(FATAL) << "TaskNode not found in extracted children";
-      }
-      TaskNode* task_node = static_cast<TaskNode*>(task_children[it->second].get());
-      for (const auto& stmt : task_node->stmts) {
-        warpgroup0_stmts.push_back(stmt);
-      }
-    }
-
-    for (TaskNode* task : warpgroup1_tasks) {
-      auto it = task_to_child_index.find(task);
-      if (it == task_to_child_index.end()) {
-        LOG(FATAL) << "TaskNode not found in extracted children";
-      }
-      TaskNode* task_node = static_cast<TaskNode*>(task_children[it->second].get());
-      for (const auto& stmt : task_node->stmts) {
-        warpgroup1_stmts.push_back(stmt);
-      }
-    }
-
-    // Build statements for each warpgroup
-    Stmt then_body;
-    if (warpgroup0_stmts.empty()) {
-      then_body = Evaluate(0);  // Empty statement
-    } else if (warpgroup0_stmts.size() == 1) {
-      then_body = warpgroup0_stmts[0];
-    } else {
-      then_body = SeqStmt(warpgroup0_stmts);
-    }
-
-    Stmt else_body;
-    if (warpgroup1_stmts.empty()) {
-      else_body = Evaluate(0);  // Empty statement
-    } else if (warpgroup1_stmts.size() == 1) {
-      else_body = warpgroup1_stmts[0];
-    } else {
-      else_body = SeqStmt(warpgroup1_stmts);
-    }
-
-    // Use the provided thread index variable from ThreadTagChecker
-    PrimExpr condition;
-    if (thread_var.defined() && thread_var->dom.defined()) {
-      // Extract thread variable and domain
-      Var thread_idx_var = thread_var->var;
-      Range thread_dom = thread_var->dom;
-      // Calculate condition: thread_idx < thread_dom->extent
-      PrimExpr original_threads = thread_dom->extent;
-      condition = thread_idx_var < original_threads;
-      LOG(INFO) << "Using thread index variable " << thread_idx_var
-                << " with original domain " << thread_dom->min << " to " << thread_dom->min + thread_dom->extent
-                << ", condition: " << condition;
-    } else {
-      LOG(WARNING) << "Thread index variable not properly defined, falling back to default tx < 128";
-      Var tx_var("tx", DataType::Int(32));
-      condition = tx_var < IntImm(DataType::Int(32), 128);
-    }
-
-    // Create IfThenElse statement
-    Stmt if_then_else = IfThenElse(condition, then_body, else_body);
-
-    // Create a new TaskNode containing the IfThenElse statement
-    auto new_task_node = std::make_unique<TaskNode>();
-    new_task_node->stmts.push_back(if_then_else);
-
-    // Copy resource usage flags from original tasks (take union)
-    bool uses_cuda_core = false;
-    bool uses_tma_core = false;
-    bool uses_tensor_core = false;
-    int64_t total_latency = 0;
-    int64_t max_ii = 0;
-    for (TaskNode* task : unit.tasks) {
-      uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
-      uses_tma_core = uses_tma_core || task->UsesTMACore();
-      uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
-      total_latency += task->GetLatency();
-      max_ii = std::max(max_ii, task->GetII());
-    }
-    new_task_node->SetUsesCUDACore(uses_cuda_core);
-    new_task_node->SetUsesTMACore(uses_tma_core);
-    new_task_node->SetUsesTensorCore(uses_tensor_core);
-    new_task_node->SetLatency(total_latency);
-    new_task_node->SetII(max_ii);
-    new_task_node->SetWarpgroupId(-1);  // mixed
-
-    // Also copy read/write regions from original tasks
-    for (TaskNode* task : unit.tasks) {
-      auto read_regions = task->GetReadRegions();
-      for (const auto& region : read_regions) {
-        new_task_node->AddReadRegion(region);
-      }
-      auto write_regions = task->GetWriteRegions();
-      for (const auto& region : write_regions) {
-        new_task_node->AddWriteRegion(region);
-      }
-    }
-
-    // Replace the original tasks with the new conditional task
-    for (size_t i = 0; i < num_tasks; ++i) {
-      if (i == 0) {
-        unit.parent_seq->children[start_idx + i] = std::move(new_task_node);
-      } else {
-        unit.parent_seq->children[start_idx + i].reset();
-      }
-    }
-
-    // Clean up empty slots
-    std::vector<std::unique_ptr<IRStructure>> new_children;
-    new_children.reserve(unit.parent_seq->children.size());
-    for (size_t i = 0; i < unit.parent_seq->children.size(); ++i) {
-      if (unit.parent_seq->children[i]) {
-        new_children.push_back(std::move(unit.parent_seq->children[i]));
-      }
-    }
-    unit.parent_seq->children.swap(new_children);
-
-    // Update the ScheduleUnit
-    unit.tasks.clear();
-    if (start_idx < unit.parent_seq->children.size()) {
-      TaskNode* new_task = static_cast<TaskNode*>(unit.parent_seq->children[start_idx].get());
-      unit.tasks.push_back(new_task);
-    } else {
-      unit.start_idx = 0;
-      if (!unit.parent_seq->children.empty()) {
-        TaskNode* new_task = static_cast<TaskNode*>(unit.parent_seq->children[0].get());
-        unit.tasks.push_back(new_task);
-      }
-    }
-
-    LOG(INFO) << "Created warpgroup partition for TaskNodes: if " << condition
-              << " execute " << warpgroup0_stmts.size() << " statements (warpgroup 0), else execute "
-              << warpgroup1_stmts.size() << " statements (warpgroup 1)";
-    LOG(INFO) << "Replaced " << num_tasks << " tasks with 1 conditional task";
-  }
 }
 
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
