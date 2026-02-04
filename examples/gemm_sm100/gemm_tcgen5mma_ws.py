@@ -17,6 +17,7 @@ def gemm(
     out_dtype,
     accum_dtype,
     num_stages,
+    use_tma_store = True
 ):
     M, N, K = T.const("M, N, K")
 
@@ -32,6 +33,7 @@ def gemm(
         C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
         C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
         C_shared = T.alloc_shared((block_M, block_N), out_dtype)
+        C_local_cast = T.alloc_fragment((block_M, block_N), out_dtype)
         loaded = T.alloc_barrier([32] * num_stages)
         consumed = T.alloc_barrier([1] * num_stages)
         tmem_full = T.alloc_barrier([1])
@@ -64,14 +66,17 @@ def gemm(
 
         T.sync_threads()  # TileLang won't generate this if not annotated
         T.copy(C_tmem, C_local)
-        T.copy(C_local, C_shared)
-        T.copy(C_shared, C[by * block_M, bx * block_N])
-
+        if use_tma_store:
+            T.copy(C_local, C_shared)
+            T.copy(C_shared, C[by * block_M, bx * block_N])
+        else:
+            T.copy(C_local, C_local_cast)
+            T.copy(C_local_cast, C[by * block_M, bx * block_N])
     return C
 
 
 def main():
-    M, N, K = 16384, 16384, 16384
+    M, N, K = 8192, 8192, 8192
     block_M, block_N, block_K = 128, 256, 64
     in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
     num_stages = 4

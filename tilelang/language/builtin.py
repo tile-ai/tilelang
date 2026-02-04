@@ -814,8 +814,8 @@ def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr):
         The mbarrier object in shared memory (e.g., Barrier*) or its address.
     """
     if isinstance(mbar, (tir.Buffer, BufferLoad)):
-        mbar_ptr = retrieve_ptr(mbar, access_type="rw")
-    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar_ptr)
+        mbar = retrieve_ptr(mbar, access_type="rw")
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar)
 
 
 def ptx_mma_sm70(
