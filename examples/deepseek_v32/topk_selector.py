@@ -185,9 +185,6 @@ def tl_topk(input, starts, ends, topk):
 
 
 def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
-    batch = 64
-    seq_len = 32 * 1024
-    topk = 2048
     torch.manual_seed(1)
     input = torch.randn(batch, seq_len, dtype=torch.float32).cuda()
     starts = torch.zeros(batch, dtype=torch.int32).cuda()
@@ -243,9 +240,6 @@ def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
 
 
 def run_regression_perf(batch=64, seq_len=32 * 1024, topk=2048):
-    batch = 64
-    seq_len = 32 * 1024
-    topk = 2048
     torch.manual_seed(1)
     input = torch.randn(batch, seq_len, dtype=torch.float32).cuda()
     starts = torch.zeros(batch, dtype=torch.int32).cuda()

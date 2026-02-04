@@ -221,3 +221,27 @@ def make_gemm_fragment_8x8_transposed():
         Fragment: A transposed 8x8 fragment layout
     """
     return _ffi_api.make_gemm_fragment_8x8_transposed()
+
+
+def make_fully_replicated_layout_fragment(buffer: Buffer | BufferLoad | BufferRegion, threads: int):
+    """
+    Create a fully replicated layout for a fragment buffer.
+
+    A fully replicated fragment means all threads hold identical copies of the
+    entire buffer. This is useful for index buffers or masks that need to be
+    accessed uniformly across all threads.
+
+    Args:
+        buffer: Buffer, BufferLoad, or BufferRegion to get shape information
+        threads: Number of threads (replicate extent)
+
+    Returns:
+        Fragment: A fully replicated layout where each thread has a complete copy
+
+    Example:
+        >>> C_local = T.alloc_fragment((2,), T.float32)
+        >>> layout = make_fully_replicated_layout_fragment(C_local, 256)
+        >>> T.annotate_layout({C_local: layout})
+    """
+    _, shape, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_fully_replicated_layout_fragment(list(shape), threads)

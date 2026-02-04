@@ -51,6 +51,9 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
             IRBuilder.name(buffer.name + "_frag", red_frag_in)
             IRBuilder.name(out.name + "_frag", red_frag_out)
 
+            if not clear:
+                copy(out, red_frag_out)
+
             copy(buffer, red_frag_in)
             tir.call_intrin(
                 "handle",
@@ -79,6 +82,9 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
         elif is_fragment(buffer) and is_shared(out):
             red_frag_out = alloc_fragment(out.shape, out.dtype)
             IRBuilder.name(out.name + "_frag", red_frag_out)
+
+            if not clear:
+                copy(out, red_frag_out)
 
             tir.call_intrin(
                 "handle",
