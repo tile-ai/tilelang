@@ -360,12 +360,35 @@ private:
     return {barrier_id, thread_count};
   }
 
+  /*!
+   * \brief Calculate the number of threads that satisfy current constraints.
+   *
+   * This method uses Z3's model enumeration (AllSAT) to precisely count
+   * how many thread IDs satisfy all current constraints. This is essential
+   * for cases like `if (threadIdx.x % 4 == 0)` where const_int_bound only
+   * gives us the range [0, 127] but the actual number of satisfying threads
+   * is 32 (i.e., 0, 4, 8, ..., 124).
+   *
+   * Falls back to range-based calculation if Z3 enumeration fails or returns
+   * an invalid result.
+   */
   size_t CalculateThreadExtent(const IterVar &iv,
                                const arith::ConstIntBound &bound) {
     if (!analyzer_->const_int_bound.IsBound(iv->var)) {
       return 1;
     }
-    return bound->max_value - bound->min_value + 1;
+    auto extent = *as_const_int(iv->dom->extent);
+    // Always use Z3 enumeration to count satisfying values.
+    // This handles constraints like `tx % 4 == 0` that const_int_bound cannot
+    // detect. Z3 enumeration will return the exact count of satisfying values.
+    int64_t z3_count =
+        analyzer_->z3_prover.CountSatisfyingValues(iv->var, extent);
+    if (z3_count > 0) {
+      return static_cast<size_t>(z3_count);
+    }
+
+    // Fallback to range-based calculation if Z3 enumeration failed
+    return static_cast<size_t>(bound->max_value - bound->min_value + 1);
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -430,8 +453,11 @@ private:
  *
  * This checker identifies case (2) - conditions that depend on runtime values.
  */
-class RuntimeDependentConditionChecker : public tir::ExprVisitor {
+class RuntimeDependentConditionChecker : public IRMutatorWithAnalyzer {
 public:
+  explicit RuntimeDependentConditionChecker(arith::Analyzer *analyzer)
+      : IRMutatorWithAnalyzer(analyzer) {}
+
   /*!
    * \brief Check if expression depends on runtime-variable values.
    * \return true if the expression depends on values that cannot be determined
@@ -439,30 +465,42 @@ public:
    *         depends on compile-time known values (constants, threadIdx,
    * blockIdx).
    */
-  bool DependsOnRuntimeValue(const PrimExpr &expr) {
+  bool DependsOnRuntimeValue(const PrimExpr &expr, const IterVar &iv) {
     depends_on_runtime_ = false;
-    VisitExpr(expr);
+    this->VisitExpr(std::move(expr));
+    auto thread_extent = static_cast<int64_t>(*as_const_int(iv->dom->extent));
+    {
+      With<arith::ConstraintContext> ctx(analyzer_, expr);
+      const int warp_size = 32;
+      auto count = analyzer_->z3_prover.CountSatisfyingValues(
+          iv->var, thread_extent, /*min_consecutive=*/warp_size);
+      if (count < 0) {
+        // failed to count satisfying values, return true
+        depends_on_runtime_ = true;
+      }
+    }
     return depends_on_runtime_;
   }
 
 private:
-  void VisitExpr_(const BufferLoadNode *op) final {
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     // Any buffer load introduces runtime dependency
     // (we don't know the buffer contents at compile time)
     depends_on_runtime_ = true;
+    return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
-  void VisitExpr_(const CallNode *op) final {
+  PrimExpr VisitExpr_(const CallNode *op) final {
     // Check tvm_access_ptr and address_of - if used in condition, it's reading
     // memory
     if (op->op.same_as(builtin::tvm_access_ptr()) ||
         op->op.same_as(builtin::address_of())) {
       depends_on_runtime_ = true;
-      return;
+      return IRMutatorWithAnalyzer::VisitExpr_(op);
     }
     // Other calls might also introduce runtime dependency
     // but we'll be conservative and check children
-    tir::ExprVisitor::VisitExpr_(op);
+    return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
 private:
@@ -474,6 +512,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       : sync_scope_(std::move(sync_scope)) {
     scope_.push_back(std::vector<StmtEntry>());
   }
+
   /*! \brief Storage access type */
   enum AccessType : uint8_t {
     kRead,
@@ -524,6 +563,16 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   StorageScope GetScope(Var buffer_var) const {
     return StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
   }
+  IterVar GetThreadVar(const std::string &tag) const {
+    for (const auto &iv : env_threads_) {
+      if (iv->thread_tag == tag) {
+        return iv;
+      }
+    }
+    LOG(FATAL) << "Thread variable " << tag << " not found";
+    return IterVar();
+  }
+
   void VisitExpr_(const BufferLoadNode *op) final {
     Var buf = op->buffer->data;
     buffer_data_to_buffer_.Set(tvm::ffi::GetRef<Var>(buf.get()), op->buffer);
@@ -624,9 +673,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       IterVar iv = Downcast<IterVar>(op->node);
       env_threads_.push_back(iv);
       ICHECK_NE(iv->thread_tag.length(), 0U);
-      // analyzer_.Bind(
-      //     iv->var, Range::FromMinExtent(IntImm(op->value->dtype, 0),
-      //     op->value));
 
       if (!in_device_env_) {
         in_device_env_ = true;
@@ -763,17 +809,23 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       // potential deadlock.
       //
       // If the condition only depends on threadIdx (e.g., `threadIdx.x >=
-      // 512`), ThreadPartialSyncRewriter can compute the exact thread count at
-      // compile time, so the sync can safely remain inside the if.
-      RuntimeDependentConditionChecker checker;
-      bool depends_on_runtime = checker.DependsOnRuntimeValue(op->condition);
+      // 512`), we use Z3 to check if the thread count is a multiple of 32.
+      // If not, ThreadPartialSyncRewriter cannot handle it properly, so we
+      // must also hoist the sync.
+      arith::Analyzer analyzer;
+      ConstrSet constr_set = GetConstrSet();
+      constr_set.Populate(analyzer);
+      RuntimeDependentConditionChecker checker(&analyzer);
+      IterVar tx = GetThreadVar("threadIdx.x");
+      bool depends_on_runtime =
+          checker.DependsOnRuntimeValue(op->condition, tx);
 
       if (depends_on_runtime) {
+        // Condition depends on runtime values - must hoist sync
         // Condition depends on runtime values - must hoist sync
         LOG(WARNING)
             << "[ThreadSync] Hoisting sync from inside if to before if. "
             << "Condition depends on runtime value: " << op->condition;
-
         for (const auto &sync : syncs_in_then) {
           syncs_inserted_.erase(sync);
         }
@@ -784,8 +836,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         // Insert sync before the if-statement itself
         insert_syncs(op);
       }
-      // If condition only depends on threadIdx, ThreadPartialSyncRewriter will
-      // handle it
     }
 
     scope_.back().emplace_back(std::move(s));

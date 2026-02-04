@@ -244,6 +244,9 @@ public:
       Base::VisitStmt(op->body);
     }
   }
+  ConstrSet GetConstrSet() const {
+    return ConstrSet{.constrs_ = constr_stack_};
+  }
   std::vector<Constr> constr_stack_;
 };
 } // namespace tvm::tl
