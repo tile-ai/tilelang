@@ -514,7 +514,8 @@ private:
 };
 
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
-  explicit TileLangThreadSyncPlanner(StorageScope sync_scope, int warp_size = 32)
+  explicit TileLangThreadSyncPlanner(StorageScope sync_scope,
+                                     int warp_size = 32)
       : sync_scope_(std::move(sync_scope)), warp_size_(warp_size) {
     scope_.push_back(std::vector<StmtEntry>());
   }
@@ -1633,8 +1634,10 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   // Get warp size from target, defaulting to 32 if not available
   int warp_size = 32;
   if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
-    warp_size =
-        target.value()->GetAttr<Integer>("thread_warp_size", 32).value().IntValue();
+    warp_size = target.value()
+                    ->GetAttr<Integer>("thread_warp_size", 32)
+                    .value()
+                    .IntValue();
   }
   TileLangThreadSyncPlanner planner(sync_scope, warp_size);
   for (const auto &[_, buffer] : func->buffer_map) {
