@@ -455,8 +455,9 @@ private:
  */
 class RuntimeDependentConditionChecker : public IRMutatorWithAnalyzer {
 public:
-  explicit RuntimeDependentConditionChecker(arith::Analyzer *analyzer)
-      : IRMutatorWithAnalyzer(analyzer) {}
+  explicit RuntimeDependentConditionChecker(arith::Analyzer *analyzer,
+                                            int warp_size = 32)
+      : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size) {}
 
   /*!
    * \brief Check if expression depends on runtime-variable values.
@@ -468,12 +469,16 @@ public:
   bool DependsOnRuntimeValue(const PrimExpr &expr, const IterVar &iv) {
     depends_on_runtime_ = false;
     this->VisitExpr(expr);
-    auto thread_extent = static_cast<int64_t>(*as_const_int(iv->dom->extent));
+    auto extent_opt = as_const_int(iv->dom->extent);
+    ICHECK(extent_opt.has_value())
+        << "DependsOnRuntimeValue: thread extent must be a "
+           "constant, but got: "
+        << iv->dom->extent;
+    int64_t thread_extent = extent_opt.value();
     {
       With<arith::ConstraintContext> ctx(analyzer_, expr);
-      const int warp_size = 32;
       auto count = analyzer_->z3_prover.CountSatisfyingValues(
-          iv->var, thread_extent, /*min_consecutive=*/warp_size);
+          iv->var, thread_extent, /*min_consecutive=*/warp_size_);
       if (count < 0) {
         // failed to count satisfying values, return true
         depends_on_runtime_ = true;
@@ -505,11 +510,12 @@ private:
 
 private:
   bool depends_on_runtime_{false};
+  int warp_size_;
 };
 
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
-  explicit TileLangThreadSyncPlanner(StorageScope sync_scope)
-      : sync_scope_(std::move(sync_scope)) {
+  explicit TileLangThreadSyncPlanner(StorageScope sync_scope, int warp_size = 32)
+      : sync_scope_(std::move(sync_scope)), warp_size_(warp_size) {
     scope_.push_back(std::vector<StmtEntry>());
   }
 
@@ -815,7 +821,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       arith::Analyzer analyzer;
       ConstrSet constr_set = GetConstrSet();
       constr_set.Populate(analyzer);
-      RuntimeDependentConditionChecker checker(&analyzer);
+      RuntimeDependentConditionChecker checker(&analyzer, warp_size_);
       IterVar tx = GetThreadVar("threadIdx.x");
       bool depends_on_runtime =
           checker.DependsOnRuntimeValue(op->condition, tx);
@@ -1219,6 +1225,8 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   // synchronization scope
   StorageScope sync_scope_;
+  // warp size from target
+  int warp_size_;
 
   void insert_syncs(const Object *obj) {
     if (syncs_inserted_.count(obj))
@@ -1622,7 +1630,13 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
   }
-  TileLangThreadSyncPlanner planner(sync_scope);
+  // Get warp size from target, defaulting to 32 if not available
+  int warp_size = 32;
+  if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
+    warp_size =
+        target.value()->GetAttr<Integer>("thread_warp_size", 32).value().IntValue();
+  }
+  TileLangThreadSyncPlanner planner(sync_scope, warp_size);
   for (const auto &[_, buffer] : func->buffer_map) {
     planner.SetBufferDataToBuffer(buffer->data, buffer);
   }
