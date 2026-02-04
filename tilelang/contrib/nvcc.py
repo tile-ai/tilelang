@@ -572,10 +572,19 @@ def have_tma(target):
         return False
     compute_version = get_target_compute_version(target)
     major, minor = parse_compute_version(compute_version)
-    # TMA is supported in Ada Lovelace (9.0) or later architectures.
+    # TMA is supported in Hopper (9.0) or later architectures.
     conditions = [False]
     conditions.append(major >= 9)
     return any(conditions)
+
+
+def have_tmem(target):
+    if target.kind.name != "cuda":
+        return False
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    # Blackwell is supported in Blackwell (10.0) or later architectures.
+    return major >= 10
 
 
 def is_hopper(target):
@@ -584,6 +593,14 @@ def is_hopper(target):
     compute_version = get_target_compute_version(target)
     major, minor = parse_compute_version(compute_version)
     return major == 9 and minor == 0
+
+
+def is_blackwell(target):
+    if target.kind.name != "cuda":
+        return False
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    return major == 10
 
 
 def have_pdl(target):

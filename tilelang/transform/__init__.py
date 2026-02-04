@@ -562,3 +562,20 @@ def LowerLDGSTG():
         The result pass
     """
     return _ffi_api.LowerLDGSTG()  # type: ignore
+
+
+def InjectTmem():
+    """Inject Tensor Memory allocation, usage and destruction
+
+    This pass detects operations that implicitly utilizes Tensor Memory on Blackwell and above
+    architectures, automatically allocates, uses and destroys Tensor Memory.
+
+    Key behaviors:
+    - Injects Tensor Memory allocation and destruction
+    - Replaces and injectst mem-related operators, e.g. tcgen05.mma or tcgen05.ld/st
+
+    Returns:
+        fpass : tvm.transform.Pass
+            The result pass
+    """
+    return _ffi_api.InjectTmem()  # type: ignore
