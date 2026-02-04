@@ -494,23 +494,54 @@ private:
       if (transformed_indices.size() != buffer->shape.size()) {
         // Step 1: Compute linear offset using layout->OutputShape()
         auto output_shape = layout->OutputShape();
-        ICHECK_EQ(transformed_indices.size(), output_shape.size())
-            << "Forward indices size " << transformed_indices.size()
-            << " != OutputShape size " << output_shape.size();
+        
+        // Handle leading dimensions: when indices.size() > layout->InputDim(),
+        // Forward() prepends (indices.size() - InputDim()) leading dimensions
+        // to the output. We need to account for these.
+        size_t num_leading_dims = 0;
+        if (indices.size() > layout->InputDim()) {
+          num_leading_dims = indices.size() - layout->InputDim();
+        }
+        
+        // Extract leading dimensions and layout-transformed part
+        Array<PrimExpr> leading_indices;
+        Array<PrimExpr> layout_indices;
+        for (size_t i = 0; i < transformed_indices.size(); ++i) {
+          if (i < num_leading_dims) {
+            leading_indices.push_back(transformed_indices[i]);
+          } else {
+            layout_indices.push_back(transformed_indices[i]);
+          }
+        }
+        
+        ICHECK_EQ(layout_indices.size(), output_shape.size())
+            << "Forward layout indices size " << layout_indices.size()
+            << " != OutputShape size " << output_shape.size()
+            << " (with " << num_leading_dims << " leading dimensions)";
+        
+        // Compute linear offset from layout-transformed indices
         PrimExpr linear_offset = 0;
         PrimExpr stride = 1;
         for (int i = output_shape.size() - 1; i >= 0; --i) {
-          linear_offset = linear_offset + transformed_indices[i] * stride;
+          linear_offset = linear_offset + layout_indices[i] * stride;
           stride = stride * output_shape[i];
         }
+        
         // Step 2: Decompose linear_offset into buffer->shape dimensions
+        // We need to decompose into (buffer->shape.size() - num_leading_dims) dims
+        size_t target_dims = buffer->shape.size() - num_leading_dims;
         Array<PrimExpr> new_indices;
-        for (int i = buffer->shape.size() - 1; i >= 0; --i) {
-          new_indices.push_back(FloorMod(linear_offset, buffer->shape[i]));
-          linear_offset = FloorDiv(linear_offset, buffer->shape[i]);
+        for (int i = target_dims - 1; i >= 0; --i) {
+          size_t buf_idx = num_leading_dims + i;
+          new_indices.push_back(FloorMod(linear_offset, buffer->shape[buf_idx]));
+          linear_offset = FloorDiv(linear_offset, buffer->shape[buf_idx]);
         }
-        transformed_indices =
-            Array<PrimExpr>{new_indices.rbegin(), new_indices.rend()};
+        
+        // Combine leading dims with decomposed indices
+        transformed_indices = leading_indices;
+        for (auto it = new_indices.rbegin(); it != new_indices.rend(); ++it) {
+          transformed_indices.push_back(*it);
+        }
       }
     }
     return transformed_indices;
