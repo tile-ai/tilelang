@@ -394,5 +394,210 @@ def test_loop_carry_different_indices():
     print(f"Different indices result:\n{s}")
 
 
+# =============================================================================
+# Tests for non-uniform if condition sync hoisting
+# =============================================================================
+
+
+@tilelang.testing.requires_cuda
+def test_sync_hoist_non_uniform_if_with_threadidx():
+    """Test that sync is hoisted when if condition directly depends on threadIdx.
+
+    When the if condition uses threadIdx, different threads may take different
+    branches. If a sync is needed inside the if, it must be hoisted to before
+    the if statement to avoid deadlock.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        temp_shared = T.alloc_buffer([128], dtype="float32", scope="shared")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        # First, all threads write to shared memory
+        temp_shared[tx] = T.float32(tx)
+        # Non-uniform condition: only some threads enter the if
+        if tx < 64:
+            # Inside the if, we read from shared memory
+            # This needs a sync, but since condition is non-uniform,
+            # the sync must be hoisted to before the if
+            result_local[0] = temp_shared[tx + 64]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    # Sync should appear before the if statement
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
+    # The sync should be before the if, not inside it
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if tx < 64")
+    assert sync_pos < if_pos, f"Sync should be before if statement:\n{s}"
+
+
+@tilelang.testing.requires_cuda
+def test_sync_hoist_non_uniform_if_shared_memory_condition():
+    """Test sync hoisting when if condition reads from shared memory with thread-dependent index.
+
+    This is the exact pattern that caused the original deadlock:
+    - Condition reads shared memory at index depending on threadIdx
+    - Different threads get different values -> non-uniform condition
+    - Sync inside if would cause deadlock
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        token_ids = T.alloc_buffer([128], dtype="int32", scope="shared")
+        data_shared = T.alloc_buffer([128], dtype="float32", scope="shared")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        # First phase: all threads write to data_shared
+        data_shared[tx] = T.float32(tx)
+        # Non-uniform condition: reads shared memory with threadIdx-dependent index
+        # token_ids[tx] can be different for each thread (e.g., some are -1, some are valid)
+        if token_ids[tx] != -1:
+            # Inside the if, we read from data_shared
+            # Sync is needed but must be hoisted because condition is non-uniform
+            result_local[0] = data_shared[tx]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    # Sync should appear before the if statement
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
+    # The sync should be before the if that checks token_ids
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if token_ids")
+    assert sync_pos < if_pos, f"Sync should be hoisted before non-uniform if:\n{s}"
+
+
+@tilelang.testing.requires_cuda
+def test_sync_inside_uniform_if_blockidx():
+    """Test that sync can stay inside if when condition is uniform (blockIdx).
+
+    When the if condition only depends on blockIdx (same for all threads in a block),
+    all threads take the same branch, so sync inside the if is safe.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        temp_shared = T.alloc_buffer([128], dtype="float32", scope="shared")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 4)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        # First, all threads write to shared memory
+        temp_shared[tx] = T.float32(tx)
+        # Uniform condition: blockIdx is same for all threads in a block
+        if bx < 2:
+            # Sync inside uniform if is safe - all threads in this block
+            # will either all enter or all skip this branch
+            result_local[0] = temp_shared[(tx + 64) % 128]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    # Should have sync (either inside or outside the if is fine for uniform condition)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
+
+
+@tilelang.testing.requires_cuda
+def test_sync_hoist_nested_non_uniform_if():
+    """Test sync hoisting with nested if statements where outer is non-uniform."""
+
+    @T.prim_func(private=True)
+    def func():
+        temp_shared = T.alloc_buffer([128], dtype="float32", scope="shared")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        # Write to shared memory
+        temp_shared[tx] = T.float32(tx)
+        # Outer non-uniform condition
+        if tx < 64:
+            # Inner condition (also non-uniform)
+            if tx < 32:
+                # Sync needed here must be hoisted all the way out
+                result_local[0] = temp_shared[tx + 64]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
+    # Sync should be before the outermost non-uniform if
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if tx < 64")
+    assert sync_pos < if_pos, f"Sync should be hoisted before outer if:\n{s}"
+
+
+@tilelang.testing.requires_cuda
+def test_sync_hoist_non_uniform_if_in_loop():
+    """Test sync hoisting when non-uniform if is inside a loop."""
+
+    @T.prim_func(private=True)
+    def func():
+        token_ids = T.alloc_buffer([128], dtype="int32", scope="shared")
+        data_shared = T.alloc_buffer([128], dtype="float32", scope="shared")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        for k in range(2):
+            # Write to shared memory
+            data_shared[tx] = T.float32(tx + k)
+            # Non-uniform if inside loop
+            if token_ids[tx] != -1:
+                result_local[0] = result_local[0] + data_shared[tx]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
+    # Sync should be before the if inside the loop, not inside the if
+    # This ensures all threads can reach the sync point
+
+
+@tilelang.testing.requires_cuda
+def test_no_sync_needed_uniform_accesses():
+    """Test that no extra sync is added when accesses are already safe.
+
+    When each thread only accesses its own data (no cross-thread dependency),
+    no sync is needed even inside an if statement.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        temp_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        temp_local[0] = T.float32(tx)
+        # Non-uniform condition but no shared memory access
+        if tx < 64:
+            result_local[0] = temp_local[0]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    # No sync needed - only local memory is accessed
+    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -413,6 +413,111 @@ private:
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
 };
 
+/*!
+ * \brief Check if an expression is "uniform" across all threads.
+ *
+ * An expression is uniform if all threads in the same block will evaluate it
+ * to the same value. This is important for determining whether a sync point
+ * inside an if-statement is safe (all threads reach it) or dangerous (only
+ * some threads reach it, causing deadlock).
+ *
+ * Non-uniform expressions include:
+ * - Direct use of threadIdx.x/y/z
+ * - Shared memory loads where the index depends on threadIdx
+ * - Any expression derived from the above
+ */
+class UniformExprChecker : public tir::ExprVisitor {
+public:
+  bool IsUniform(const PrimExpr &expr) {
+    is_uniform_ = true;
+    VisitExpr(expr);
+    return is_uniform_;
+  }
+
+private:
+  bool IsThreadVar(const VarNode *op) const {
+    // Check if this variable is a thread index by name
+    const std::string &name = op->name_hint;
+    if (name == "threadIdx.x" || name == "threadIdx.y" || name == "threadIdx.z" ||
+        name.find("thread_binding") != std::string::npos) {
+      return true;
+    }
+    // Check thread variables tracked during analysis
+    for (const auto &iv : thread_vars_) {
+      // Check by variable identity
+      if (op == iv->var.get()) {
+        // Check if it's a threadIdx variable by thread_tag
+        if (iv->thread_tag.find("threadIdx") != std::string::npos) {
+          return true;
+        }
+      }
+      // Also check by name for variables that might have been substituted
+      if (op->name_hint == iv->var->name_hint &&
+          iv->thread_tag.find("threadIdx") != std::string::npos) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void VisitExpr_(const VarNode *op) final {
+    if (IsThreadVar(op)) {
+      is_uniform_ = false;
+    }
+    tir::ExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    // Check if it's a shared memory load
+    StorageScope scope =
+        StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    if (scope.rank == StorageRank::kShared) {
+      // Check if the index depends on thread variables
+      for (const auto &idx : op->indices) {
+        UniformExprChecker idx_checker;
+        idx_checker.thread_vars_ = this->thread_vars_;
+        if (!idx_checker.IsUniform(idx)) {
+          // Different threads read different locations, result may differ
+          is_uniform_ = false;
+          break;
+        }
+      }
+    }
+    // Still visit children to check for other non-uniform expressions
+    tir::ExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    // Check tvm_access_ptr for shared memory access
+    if (op->op.same_as(builtin::tvm_access_ptr())) {
+      if (op->args.size() >= 2) {
+        const VarNode *buffer_var = op->args[1].as<VarNode>();
+        if (buffer_var) {
+          StorageScope scope =
+              StorageScope::Create(GetPtrStorageScope(GetRef<Var>(buffer_var)));
+          if (scope.rank == StorageRank::kShared) {
+            // Check if offset depends on thread
+            if (op->args.size() >= 3) {
+              UniformExprChecker offset_checker;
+              offset_checker.thread_vars_ = this->thread_vars_;
+              if (!offset_checker.IsUniform(op->args[2])) {
+                is_uniform_ = false;
+              }
+            }
+          }
+        }
+      }
+    }
+    tir::ExprVisitor::VisitExpr_(op);
+  }
+
+public:
+  Array<IterVar> thread_vars_;
+
+private:
+  bool is_uniform_{true};
+};
+
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
   explicit TileLangThreadSyncPlanner(StorageScope sync_scope)
       : sync_scope_(std::move(sync_scope)) {
@@ -584,10 +689,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         ConstrVisitor::VisitStmt_(op);
       }
       env_threads_.pop_back();
-    } else if (op->attr_key == tvm::tir::attr::hand_threaded) {
-      // skip this pass on blocks that were hand_threaded
-      // this avoids control flow and read/write conflicts
-      // between hand-threaded kernels and automatic threading
     } else {
       ConstrVisitor::VisitStmt_(op);
     }
@@ -628,9 +729,21 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
    * Visits the if-then-else node's condition and both branches to summarize
    * buffer reads, writes, and synchronization events under the condition's
    * constraints.
+   *
+   * IMPORTANT: If syncs are inserted inside an if-statement with a non-uniform
+   * condition (i.e., the condition depends on threadIdx), we must hoist the
+   * sync to before the if-statement. Otherwise, only some threads will reach
+   * the sync point, causing a deadlock.
    */
   void VisitStmt_(const IfThenElseNode *op) final {
     StmtEntry s;
+    // Track syncs inserted before visiting the if body
+    std::unordered_set<const Object *> syncs_before_then;
+    std::unordered_set<const Object *> syncs_before_else;
+    for (const auto &sync : syncs_inserted_) {
+      syncs_before_then.insert(sync);
+    }
+
     {
       auto guard = MakeGuard(op->condition);
       allow_append_ = true;
@@ -658,6 +771,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                         cond_access.end());
       }
     }
+
+    // Track syncs inserted after visiting then branch
+    for (const auto &sync : syncs_inserted_) {
+      syncs_before_else.insert(sync);
+    }
+
     if (op->else_case) {
       auto guard = MakeGuard(tir::Not(op->condition));
       scope_.push_back(std::vector<StmtEntry>());
@@ -667,6 +786,47 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       auto v = Summarize(std::move(scope_.back()), nullptr);
       scope_.pop_back();
       s.access.insert(s.access.end(), v.begin(), v.end());
+    }
+
+    // Check if any syncs were inserted inside the if-then-else
+    std::vector<const Object *> syncs_in_then;
+    std::vector<const Object *> syncs_in_else;
+
+    for (const auto &sync : syncs_inserted_) {
+      if (syncs_before_then.count(sync) == 0 &&
+          syncs_before_else.count(sync) != 0) {
+        // Sync was inserted during then branch processing
+        syncs_in_then.push_back(sync);
+      } else if (syncs_before_else.count(sync) == 0) {
+        // Sync was inserted during else branch processing
+        syncs_in_else.push_back(sync);
+      }
+    }
+
+    bool has_syncs_inside = !syncs_in_then.empty() || !syncs_in_else.empty();
+
+    if (has_syncs_inside) {
+      // Check if the condition is uniform (same for all threads)
+      UniformExprChecker checker;
+      checker.thread_vars_ = env_threads_;
+      bool is_uniform = checker.IsUniform(op->condition);
+
+      if (!is_uniform) {
+        // Non-uniform condition: syncs inside will cause deadlock!
+        // Remove the internal syncs and mark the if-statement itself for sync
+        LOG(WARNING) << "[ThreadSync] Hoisting sync from inside non-uniform if to before if. "
+                     << "condition=" << op->condition;
+
+        for (const auto &sync : syncs_in_then) {
+          syncs_inserted_.erase(sync);
+        }
+        for (const auto &sync : syncs_in_else) {
+          syncs_inserted_.erase(sync);
+        }
+
+        // Insert sync before the if-statement itself
+        insert_syncs(op);
+      }
     }
 
     scope_.back().emplace_back(std::move(s));
