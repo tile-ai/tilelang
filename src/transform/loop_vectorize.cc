@@ -280,6 +280,7 @@ public:
       }
       // vector_size may be greater than local/fragment buffers' vector_size.
       // In such case, we need to re-validate if the indices are invariant
+      // or is vectorizable at the new vector_size boundary
       // at the new vector_size boundary. If not invariant, take GCD.
       for (const auto &info : local_fragment_buffers) {
         if (vector_size_ > info.vector_size && !info.indices.empty()) {
@@ -289,8 +290,12 @@ public:
           for (size_t i = 0; i < info.indices.size(); ++i) {
             elem_offset += info.indices[i] * strides[i];
           }
-          if (!IsExprInvariantInVectorBoundary(
-                  elem_offset, inner_for_->loop_var, vector_size_, analyzer_)) {
+          if (!(IsExprInvariantInVectorBoundary(elem_offset,
+                                                inner_for_->loop_var,
+                                                vector_size_, analyzer_) ||
+                IndiceCanVectorize(elem_offset, inner_for_->loop_var,
+                                   loop_extent_vector_size_, vector_size_,
+                                   analyzer_))) {
             // Not invariant at this vector_size, need to take GCD
             int old_vector_size = vector_size_;
             vector_size_ = arith::ZeroAwareGCD(vector_size_, info.vector_size);
@@ -529,18 +534,14 @@ private:
       return initial_vector_size_;
 
     int buffer_vec_size = loop_extent_vector_size_;
-
     // Transform indices using layout_map if present
     auto transformed_indices = TransformIndices(indices, buffer);
-
     // 1. Compute raw element offset
     Array<PrimExpr> strides = GetBufferStrides(buffer);
-
     PrimExpr elem_offset = 0;
     for (size_t i = 0; i < transformed_indices.size(); ++i) {
       elem_offset += transformed_indices[i] * strides[i];
     }
-
     // 2. Check if current buffer_vec_size works with invariant boundary check
     // In some cases, buffer_vec_size is max (e.g. 128), but
     // IsExprInvariantInVectorBoundary may only be true at a smaller size (e.g.
