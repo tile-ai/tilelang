@@ -48,6 +48,7 @@
 #include <cmath>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <optional>
 
 #include "./common/attr.h"
@@ -120,10 +121,6 @@ bool RegionsOverlap(const Region& a, const Region& b) {
   }
   return true;
 }
-
-
-
-
 
 // Helper function to check if a buffer region is in register memory
 bool IsRegisterRegion(const BufferRegion& region) {
@@ -221,6 +218,47 @@ void CollectAllTaskNodesWithContext(const IRStructure* node,
     // When entering a control node, update the current control context
     CollectAllTaskNodesWithContext(control->child.get(), all_tasks,
                                    const_cast<ControlNode*>(control));
+  }
+}
+
+// Helper function to collect all prefix tasks (consecutive tasks without register region at the beginning of sequences)
+void CollectPrefixTasks(IRStructure* node, std::unordered_set<TaskNode*>& prefix_tasks, ControlNode* current_control_node) {
+  if (!node) return;
+
+  if (node->IsSequence()) {
+    SequenceNode* seq = static_cast<SequenceNode*>(node);
+    // Check if we're inside a ControlNode - prefix optimization is not applied inside ControlNode
+    if (current_control_node == nullptr) {
+      // Find consecutive tasks without register region at the beginning of this sequence
+      bool found_reg = false;
+      for (size_t i = 0; i < seq->children.size(); i++) {
+        if (!seq->children[i]) continue;
+
+        if (seq->children[i]->IsTask()) {
+          TaskNode* task = static_cast<TaskNode*>(seq->children[i].get());
+          if (!found_reg && CountRegisterRegions(task) == 0) {
+            // This is a prefix task (consecutive task without register region at the beginning)
+            prefix_tasks.insert(task);
+          } else {
+            // Found a task with register region or after a task with register region
+            found_reg = true;
+          }
+        } else if (seq->children[i]->IsSequence() || seq->children[i]->IsControl()) {
+          // If we encounter a nested Sequence or Control node, we need to recurse
+          // But this breaks the consecutive sequence at the top level
+          CollectPrefixTasks(seq->children[i].get(), prefix_tasks, current_control_node);
+          // After encountering a non-task node, we can't have more prefix tasks at this level
+          found_reg = true;
+        }
+      }
+    }
+  } else if (node->IsControl()) {
+    ControlNode* ctrl = static_cast<ControlNode*>(node);
+    // When entering a control node, update the current control context
+    CollectPrefixTasks(ctrl->child.get(), prefix_tasks, ctrl);
+  } else if (node->IsTask()) {
+    // Task node outside of a sequence context - not a prefix task
+    return;
   }
 }
 
@@ -430,6 +468,10 @@ void AssignWarpgroupIdsGlobal(IRStructure* root) {
 
   int n = all_tasks.size();
 
+  // Collect all prefix tasks (consecutive tasks without register region at the beginning of sequences)
+  std::unordered_set<TaskNode*> prefix_tasks;
+  CollectPrefixTasks(root, prefix_tasks, nullptr);
+
   // Step 2: Initialize all warpgroup ids to -1 (unassigned)
   for (auto& task_ctx : all_tasks) {
     task_ctx.task->SetWarpgroupId(-1);
@@ -452,11 +494,34 @@ void AssignWarpgroupIdsGlobal(IRStructure* root) {
     components[root_idx].push_back(i);
   }
 
-  // Step 5: Calculate weighted latency for each component
+  // Step 5: Calculate weighted latency for each component that has register regions
   std::vector<ComponentInfo> component_infos;
   for (const auto& kv : components) {
     int root = kv.first;
     const std::vector<int>& indices = kv.second;
+    // Check if this component has any task with register regions
+    bool has_register_region = false;
+    for (int idx : indices) {
+      if (CountRegisterRegions(all_tasks[idx].task) > 0) {
+        has_register_region = true;
+        break;
+      }
+    }
+    // Skip components without any register region only if they are prefix tasks
+    // (consecutive tasks without register region at the beginning of sequences)
+    // Other tasks without register region should still participate in warpgroup specialize
+    if (!has_register_region) {
+      // Check if this component is a prefix task
+      // A component is a prefix task if it contains exactly one task and that task is in prefix_tasks
+      if (indices.size() == 1) {
+        TaskNode* task = all_tasks[indices[0]].task;
+        if (prefix_tasks.find(task) != prefix_tasks.end()) {
+          // This is a prefix task, skip it (it won't participate in warpgroup specialize)
+          continue;
+        }
+      }
+      // If not a prefix task, we should include it in component_infos
+    }
     int64_t total_weighted_latency = 0;
     for (int idx : indices) {
       int64_t latency = all_tasks[idx].task->GetLatency();
@@ -1022,6 +1087,8 @@ private:
   size_t current_child_idx_{0};
   int control_nesting_depth_{0};
   ControlNode* current_control_node_{nullptr};  // Track current ControlNode for promote transformation
+  bool collecting_prefix_unit_{false};  // Whether we're collecting prefix unit (tasks without register regions)
+  bool prefix_unit_finalized_{false};   // Whether prefix unit has been finalized (after first task with register regions)
 
   // Check if two regions refer to the same buffer
   bool SameBuffer(const BufferRegion& a, const BufferRegion& b) const {
@@ -1052,6 +1119,11 @@ private:
       }
     }
     return false;
+  }
+
+  // Check if a task has any register region
+  bool HasRegisterRegion(const TaskNode* task) const {
+    return CountRegisterRegions(task) > 0;
   }
 
   // Check if two TaskNodes have resource dependency (use same hardware resource)
@@ -1227,18 +1299,78 @@ private:
 
     if (node->IsTask()) {
       TaskNode* task = static_cast<TaskNode*>(node);
-      if (!current_unit_) {
-        StartNewUnit();
-        // Set parent sequence and start index for this unit
-        current_unit_->parent_seq = current_seq_;
-        current_unit_->start_idx = current_child_idx_;
+      bool has_reg = HasRegisterRegion(task);
+
+      // Apply prefix optimization only when not inside a ControlNode
+      if (control_nesting_depth_ == 0) {
+        if (!has_reg) {
+          // Task without register region
+          if (collecting_prefix_unit_) {
+            // Continue adding to current prefix unit
+            // Ensure we have a current unit
+            if (!current_unit_) {
+              StartNewUnit();
+              current_unit_->parent_seq = current_seq_;
+              current_unit_->start_idx = current_child_idx_;
+            }
+            current_unit_->tasks.push_back(task);
+          } else if (!prefix_unit_finalized_) {
+            // First task without register region, start a new prefix unit
+            // Finalize any existing unit first
+            FinalizeCurrentUnit();
+            StartNewUnit();
+            current_unit_->parent_seq = current_seq_;
+            current_unit_->start_idx = current_child_idx_;
+            current_unit_->tasks.push_back(task);
+            collecting_prefix_unit_ = true;
+          } else {
+            // Prefix unit already finalized, treat as normal task
+            if (!current_unit_) {
+              StartNewUnit();
+              current_unit_->parent_seq = current_seq_;
+              current_unit_->start_idx = current_child_idx_;
+            }
+            current_unit_->tasks.push_back(task);
+          }
+        } else {
+          // Task with register region
+          if (collecting_prefix_unit_) {
+            // Finalize current prefix unit
+            FinalizeCurrentUnit();
+            collecting_prefix_unit_ = false;
+            prefix_unit_finalized_ = true;
+          } else {
+            // First task with register region marks the end of potential prefix
+            prefix_unit_finalized_ = true;
+          }
+          // Start new unit for this task (or add to existing unit if any)
+          if (!current_unit_) {
+            StartNewUnit();
+            current_unit_->parent_seq = current_seq_;
+            current_unit_->start_idx = current_child_idx_;
+          }
+          current_unit_->tasks.push_back(task);
+        }
+      } else {
+        // Inside ControlNode: no prefix optimization
+        if (!current_unit_) {
+          StartNewUnit();
+          current_unit_->parent_seq = current_seq_;
+          current_unit_->start_idx = current_child_idx_;
+        }
+        current_unit_->tasks.push_back(task);
       }
-      current_unit_->tasks.push_back(task);
     } else if (node->IsSequence()) {
       SequenceNode* seq = static_cast<SequenceNode*>(node);
       // Save previous context
       SequenceNode* prev_seq = current_seq_;
       size_t prev_child_idx = current_child_idx_;
+      bool prev_collecting_prefix_unit = collecting_prefix_unit_;
+      bool prev_prefix_unit_finalized = prefix_unit_finalized_;
+
+      // Reset prefix collection state for this new sequence
+      collecting_prefix_unit_ = false;
+      prefix_unit_finalized_ = false;
 
       // Set new context for this sequence
       current_seq_ = seq;
@@ -1258,10 +1390,16 @@ private:
       // Restore previous context
       current_seq_ = prev_seq;
       current_child_idx_ = prev_child_idx;
+      collecting_prefix_unit_ = prev_collecting_prefix_unit;
+      prefix_unit_finalized_ = prev_prefix_unit_finalized;
     } else if (node->IsControl()) {
       ControlNode* ctrl = static_cast<ControlNode*>(node);
       // Finalize any current unit before entering control node
       FinalizeCurrentUnit();
+      // Prefix optimization is disabled inside ControlNode
+      // Mark prefix unit as finalized so that after control node we don't continue collecting prefix
+      collecting_prefix_unit_ = false;
+      prefix_unit_finalized_ = true;
       // Increase control nesting depth
       control_nesting_depth_++;
       // Set current ControlNode for promote transformation
@@ -1871,10 +2009,12 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
 
   bool has_warpgroup0 = false;
   bool has_warpgroup1 = false;
+  bool has_warpgroup_neutral = false;
   for (TaskNode* task : all_tasks) {
     int wg_id = task->GetWarpgroupId();
     if (wg_id == 0) has_warpgroup0 = true;
     else if (wg_id == 1) has_warpgroup1 = true;
+    else if (wg_id == -1) has_warpgroup_neutral = true;
   }
 
   // If all tasks belong to the same warpgroup, no partition needed
@@ -1893,7 +2033,51 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
 
   LOG(INFO) << "Applying warpgroup partition to entire IRStructure with " << all_tasks.size() << " tasks";
 
-  // Clone IRStructure for warpgroup 0 and warpgroup 1
+  // Helper function to clone IRStructure filtering tasks with warpgroup_id == -1 (neutral tasks)
+  std::function<std::unique_ptr<IRStructure>(IRStructure*)> clone_neutral_filter;
+  clone_neutral_filter = [&clone_neutral_filter](IRStructure* node) -> std::unique_ptr<IRStructure> {
+    if (!node) return nullptr;
+
+    if (node->IsTask()) {
+      TaskNode* task = static_cast<TaskNode*>(node);
+      if (task->GetWarpgroupId() == -1) {
+        return task->Clone();
+      } else {
+        // Create empty task node for tasks with warpgroup id 0 or 1
+        auto new_task = std::make_unique<TaskNode>();
+        // Copy metadata but no statements
+        new_task->SetUsesCUDACore(task->UsesCUDACore());
+        new_task->SetUsesTMACore(task->UsesTMACore());
+        new_task->SetUsesTensorCore(task->UsesTensorCore());
+        new_task->SetReadRegions(task->GetReadRegions());
+        new_task->SetWriteRegions(task->GetWriteRegions());
+        new_task->SetLatency(task->GetLatency());
+        new_task->SetII(task->GetII());
+        new_task->SetStartTime(task->GetStartTime());
+        new_task->SetPromote(task->GetPromote());
+        new_task->SetWarpgroupId(task->GetWarpgroupId());
+        // Empty statements
+        return new_task;
+      }
+    } else if (node->IsSequence()) {
+      SequenceNode* seq = static_cast<SequenceNode*>(node);
+      auto new_seq = std::make_unique<SequenceNode>();
+      for (const auto& child : seq->children) {
+        if (child) {
+          new_seq->children.push_back(clone_neutral_filter(child.get()));
+        } else {
+          new_seq->children.push_back(nullptr);
+        }
+      }
+      return new_seq;
+    } else if (node->IsControl()) {
+      return nullptr;
+    }
+    return nullptr;
+  };
+
+  // Clone IRStructure for warpgroup neutral, 0 and 1
+  auto wg_neutral_structure = has_warpgroup_neutral ? clone_neutral_filter(root) : nullptr;
   auto wg0_structure = CloneIRStructureWithWarpgroupFilter(root, 0);
   auto wg1_structure = CloneIRStructureWithWarpgroupFilter(root, 1);
 
@@ -1909,6 +2093,7 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
     return false;
   };
 
+  bool wg_neutral_has_stmts = wg_neutral_structure ? has_actual_statements(wg_neutral_structure.get()) : false;
   bool wg0_has_stmts = has_actual_statements(wg0_structure.get());
   bool wg1_has_stmts = has_actual_statements(wg1_structure.get());
 
@@ -1977,6 +2162,7 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
     return Evaluate(0);
   };
 
+  Stmt neutral_body = wg_neutral_has_stmts ? irstructure_to_stmt(wg_neutral_structure.get()) : Evaluate(0);
   Stmt then_body = wg0_has_stmts ? irstructure_to_stmt(wg0_structure.get()) : Evaluate(0);
   Stmt else_body = wg1_has_stmts ? irstructure_to_stmt(wg1_structure.get()) : Evaluate(0);
 
@@ -1991,15 +2177,33 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
     // Only warpgroup 1 has statements, execute unconditionally
     if_then_else = else_body;
   } else {
-    LOG(WARNING) << "Both warpgroups have no statements, returning original structure";
-    if (root->IsTask()) {
-      return static_cast<TaskNode*>(root)->Clone();
-    } else if (root->IsSequence()) {
-      return static_cast<SequenceNode*>(root)->Clone();
-    } else if (root->IsControl()) {
-      return static_cast<ControlNode*>(root)->Clone();
+    // Neither warpgroup 0 nor 1 has statements
+    if_then_else = Evaluate(0);
+  }
+
+  // Combine neutral tasks (warpgroup -1) with the if-then-else statement
+  Stmt combined_stmt;
+  if (wg_neutral_has_stmts) {
+    if (!if_then_else.as<EvaluateNode>() || !neutral_body.as<EvaluateNode>()) {
+      // At least one has actual statements
+      std::vector<Stmt> stmts;
+      if (!neutral_body.as<EvaluateNode>()) {
+        stmts.push_back(neutral_body);
+      }
+      if (!if_then_else.as<EvaluateNode>()) {
+        stmts.push_back(if_then_else);
+      }
+      if (stmts.size() == 1) {
+        combined_stmt = stmts[0];
+      } else {
+        combined_stmt = SeqStmt(stmts);
+      }
+    } else {
+      // Both are empty
+      combined_stmt = Evaluate(0);
     }
-    return nullptr;
+  } else {
+    combined_stmt = if_then_else;
   }
 
   // Create appropriate IRStructure based on original node type
@@ -2044,7 +2248,7 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
     auto new_ctrl = std::make_unique<ControlNode>();
     new_ctrl->control = original_ctrl->control;
 
-    // Create a TaskNode to hold the IfThenElse statement as the body
+    // Create a TaskNode to hold the combined statement as the body
     auto body_task_node = std::make_unique<TaskNode>();
     body_task_node->stmts.push_back(if_then_else_stmt);
 
@@ -2089,7 +2293,7 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
     // Create a new SequenceNode with a single TaskNode containing the IfThenElse
     auto new_seq = std::make_unique<SequenceNode>();
     auto new_task_node = std::make_unique<TaskNode>();
-    new_task_node->stmts.push_back(if_then_else);
+    new_task_node->stmts.push_back(combined_stmt);
 
     // Copy resource usage flags from all tasks (take union)
     bool uses_cuda_core = false;
@@ -2131,7 +2335,7 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
   } else {
     // TaskNode or unknown type - create a TaskNode containing the IfThenElse statement
     auto new_task_node = std::make_unique<TaskNode>();
-    new_task_node->stmts.push_back(if_then_else);
+    new_task_node->stmts.push_back(combined_stmt);
 
     // Copy resource usage flags from all tasks (take union)
     bool uses_cuda_core = false;
