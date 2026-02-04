@@ -50,5 +50,39 @@ def test_profiler():
     print(f"event Latency: {event_latency}ms")
 
 
+
+def test_profiler_cudagraph():
+    """Test cudagraph backend for profiling."""
+    kernel = matmul(1, 1024, 1024, 16, 32, 128)
+
+    import torch
+
+    a = torch.randn(1, 1024).cuda().half()
+    b = torch.randn(1024, 1024).cuda().half()
+
+    c = kernel(a, b)
+    ref_c = a @ b
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+
+    # benchmark
+    profiler = kernel.get_profiler()
+
+    # use cudagraph backend
+    cudagraph_latency = profiler.do_bench(backend="cudagraph")
+
+    # use event backend for comparison
+    event_latency = profiler.do_bench(backend="event")
+
+    print(f"cudagraph Latency: {cudagraph_latency}ms")
+    print(f"event Latency: {event_latency}ms")
+
+    # cudagraph latency should be less than or equal to event latency
+    # (it eliminates CPU launch overhead)
+    assert cudagraph_latency <= event_latency * 1.5, (
+        f"cudagraph latency ({cudagraph_latency}ms) should be less than "
+        f"event latency ({event_latency}ms)"
+    )
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

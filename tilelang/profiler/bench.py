@@ -69,7 +69,7 @@ def do_bench(
     _n_repeat: int = 0,
     quantiles: list[float] | None = None,
     fast_flush: bool = True,
-    backend: Literal["event", "cupti"] = "event",
+    backend: Literal["event", "cupti", "cudagraph"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
 ) -> float | list[float]:
     """Benchmark the runtime of a PyTorch function with L2 cache management.
@@ -77,7 +77,7 @@ def do_bench(
     This function provides accurate GPU kernel timing by:
     - Clearing L2 cache between runs for consistent measurements
     - Auto-calculating warmup and repeat counts based on kernel runtime
-    - Supporting multiple profiling backends (CUDA events or CUPTI)
+    - Supporting multiple profiling backends (CUDA events or CUPTI or CUDAGraph)
     - Offering flexible result aggregation (mean/median/min/max/quantiles)
 
     Args:
@@ -88,7 +88,7 @@ def do_bench(
         _n_repeat: Manual override for benchmark iterations (default: 0 = auto)
         quantiles: Performance percentiles to compute (e.g., [0.5, 0.95])
         fast_flush: Use faster L2 cache flush with int32 vs int8 (default: True)
-        backend: Profiler backend - "event" (CUDA events) or "cupti" (default: "event")
+        backend: Profiler backend - "event" (CUDA events) or "cupti" or "cudagraph" (default: "event")
         return_mode: Result aggregation method - "mean", "median", "min", or "max"
 
     Returns:
@@ -131,6 +131,8 @@ def do_bench(
         return _bench_with_cuda_events(fn, cache, n_repeat, quantiles, return_mode)
     elif backend == "cupti":
         return _bench_with_cupti(fn, cache, n_repeat)
+    elif backend == "cudagraph":
+        return _bench_with_cudagraph(fn, cache, n_repeat, quantiles, return_mode)
     else:
         raise ValueError(f"Unknown profiler backend: {backend}")
 
@@ -202,3 +204,70 @@ def _bench_with_cupti(
 
     kernel_time_us = (total_cuda_time - excluded_time) / n_repeat
     return kernel_time_us * 1e-3  # Convert microseconds to milliseconds
+
+def _bench_with_cudagraph(
+    fn: Callable,
+    cache: torch.Tensor,
+    n_repeat: int,
+    quantiles: list[float] | None,
+    return_mode: str,
+) -> float | list[float]:
+    """Benchmark using CUDA graphs for minimal launch overhead."""
+    import torch
+    
+    # Warmup
+    for _ in range(20):
+        fn()
+    torch.cuda.synchronize()
+    
+    # Clear L2 cache
+    cache.zero_()
+    torch.cuda.synchronize()
+    
+    # Estimate kernel time
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    for _ in range(5):
+        fn()
+    end_event.record()
+    torch.cuda.synchronize()
+    estimate_ms = start_event.elapsed_time(end_event) / 5
+    
+    # Calculate number of unroll iterations
+    if estimate_ms == 0:
+        n_unroll = 1000
+    else:
+        n_unroll = max(1, int(n_repeat / estimate_ms))
+    
+    # Create graph with unrolled function calls
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        for _ in range(n_unroll):
+            fn()
+    
+    # Warmup graph replay
+    for _ in range(10):
+        g.replay()
+    torch.cuda.synchronize()
+    
+    # Measure
+    times = []
+    n_retries = 10
+    for _ in range(n_retries):
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+        times.append(start_event.elapsed_time(end_event) / n_unroll)
+    
+    times = torch.tensor(times, dtype=torch.float)
+    
+    if quantiles is not None:
+        quantile_values = torch.quantile(times, torch.tensor(quantiles, dtype=torch.float)).tolist()
+        return quantile_values[0] if len(quantile_values) == 1 else quantile_values
+    
+    return getattr(torch, return_mode)(times).item()
+

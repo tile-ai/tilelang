@@ -99,6 +99,7 @@ class ProfileArgs:
         skip_check: bool = False
         manual_check_prog: Callable = None
         cache_input_tensors: bool = True
+        backend: Profiling backend to use ("event", "cupti", or "cudagraph")
     """
 
     warmup: int = 25
@@ -113,6 +114,7 @@ class ProfileArgs:
     skip_check: bool = False
     manual_check_prog: Callable = None
     cache_input_tensors: bool = True
+    backend: str = "event"
 
     def __hash__(self):
         data = {

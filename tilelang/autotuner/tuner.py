@@ -388,6 +388,7 @@ class AutoTuner:
             rtol = profile_args.rtol
             atol = profile_args.atol
             max_mismatched_ratio = profile_args.max_mismatched_ratio
+            backend = profile_args.backend
 
             profiler = jit_kernel.get_profiler(tensor_supply_type=supply_type)
 
@@ -448,11 +449,11 @@ class AutoTuner:
                     profiler.assert_allclose(
                         ref_prog, input_tensors=self.jit_input_tensors, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio
                     )
-            latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors)
+            latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors, backend= backend)
 
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = ref_input_tensors_supply()
-                self.ref_latency_cache = profiler.do_bench(ref_prog, n_warmup=warmup, n_repeat=rep, input_tensors=self.ref_input_tensors)
+                self.ref_latency_cache = profiler.do_bench(ref_prog, n_warmup=warmup, n_repeat=rep, input_tensors=self.ref_input_tensors, backend=backend)
 
             return latency, self.ref_latency_cache
 
