@@ -279,9 +279,8 @@ public:
                   << ")" << "\n";
       }
       // vector_size may be greater than local/fragment buffers' vector_size.
-      // In such case, we need to re-validate if the indices are invariant
-      // or is vectorizable at the new vector_size boundary
-      // at the new vector_size boundary. If not invariant, take GCD.
+      // In such case, we need to re-validate if the indices are vectorizable
+      // at the new vector_size boundary. If not, take GCD.
       for (const auto &info : local_fragment_buffers) {
         if (vector_size_ > info.vector_size && !info.indices.empty()) {
           // Compute elem_offset from indices and strides
