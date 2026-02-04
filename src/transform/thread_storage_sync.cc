@@ -470,11 +470,11 @@ public:
     depends_on_runtime_ = false;
     this->VisitExpr(expr);
     auto extent_opt = as_const_int(iv->dom->extent);
-    ICHECK(extent_opt.has_value())
+    ICHECK(extent_opt != nullptr)
         << "DependsOnRuntimeValue: thread extent must be a "
            "constant, but got: "
         << iv->dom->extent;
-    int64_t thread_extent = extent_opt.value();
+    int64_t thread_extent = *extent_opt;
     {
       With<arith::ConstraintContext> ctx(analyzer_, expr);
       auto count = analyzer_->z3_prover.CountSatisfyingValues(
