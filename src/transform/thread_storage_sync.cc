@@ -414,109 +414,59 @@ private:
 };
 
 /*!
- * \brief Check if an expression is "uniform" across all threads.
+ * \brief Check if an if-condition depends on runtime-variable values.
  *
- * An expression is uniform if all threads in the same block will evaluate it
- * to the same value. This is important for determining whether a sync point
- * inside an if-statement is safe (all threads reach it) or dangerous (only
- * some threads reach it, causing deadlock).
+ * For sync hoisting decisions, we distinguish two types of non-uniform
+ * conditions:
  *
- * Non-uniform expressions include:
- * - Direct use of threadIdx.x/y/z
- * - Shared memory loads where the index depends on threadIdx
- * - Any expression derived from the above
+ * 1. Conditions that only depend on threadIdx (e.g., `threadIdx.x >= 512`):
+ *    - The number of threads entering the if can be determined at compile time
+ *    - ThreadPartialSyncRewriter can handle this by computing the thread count
+ *    - No need to hoist sync
+ *
+ * 2. Conditions that depend on runtime values (e.g., `shared_mem[tx] != -1`):
+ *    - Cannot determine at compile time how many threads will enter
+ *    - Must hoist sync to before the if to avoid potential deadlock
+ *
+ * This checker identifies case (2) - conditions that depend on runtime values.
  */
-class UniformExprChecker : public tir::ExprVisitor {
+class RuntimeDependentConditionChecker : public tir::ExprVisitor {
 public:
-  bool IsUniform(const PrimExpr &expr) {
-    is_uniform_ = true;
+  /*!
+   * \brief Check if expression depends on runtime-variable values.
+   * \return true if the expression depends on values that cannot be determined
+   *         at compile time (e.g., shared memory loads), false if it only
+   *         depends on compile-time known values (constants, threadIdx,
+   * blockIdx).
+   */
+  bool DependsOnRuntimeValue(const PrimExpr &expr) {
+    depends_on_runtime_ = false;
     VisitExpr(expr);
-    return is_uniform_;
+    return depends_on_runtime_;
   }
 
 private:
-  bool IsThreadVar(const VarNode *op) const {
-    // Check if this variable is a thread index by name
-    const std::string &name = op->name_hint;
-    if (name == "threadIdx.x" || name == "threadIdx.y" ||
-        name == "threadIdx.z" ||
-        name.find("thread_binding") != std::string::npos) {
-      return true;
-    }
-    // Check thread variables tracked during analysis
-    for (const auto &iv : thread_vars_) {
-      // Check by variable identity
-      if (op == iv->var.get()) {
-        // Check if it's a threadIdx variable by thread_tag
-        if (iv->thread_tag.find("threadIdx") != std::string::npos) {
-          return true;
-        }
-      }
-      // Also check by name for variables that might have been substituted
-      if (op->name_hint == iv->var->name_hint &&
-          iv->thread_tag.find("threadIdx") != std::string::npos) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  void VisitExpr_(const VarNode *op) final {
-    if (IsThreadVar(op)) {
-      is_uniform_ = false;
-    }
-    tir::ExprVisitor::VisitExpr_(op);
-  }
-
   void VisitExpr_(const BufferLoadNode *op) final {
-    // Check if it's a shared memory load
-    StorageScope scope =
-        StorageScope::Create(GetPtrStorageScope(op->buffer->data));
-    if (scope.rank == StorageRank::kShared) {
-      // Check if the index depends on thread variables
-      for (const auto &idx : op->indices) {
-        UniformExprChecker idx_checker;
-        idx_checker.thread_vars_ = this->thread_vars_;
-        if (!idx_checker.IsUniform(idx)) {
-          // Different threads read different locations, result may differ
-          is_uniform_ = false;
-          break;
-        }
-      }
-    }
-    // Still visit children to check for other non-uniform expressions
-    tir::ExprVisitor::VisitExpr_(op);
+    // Any buffer load introduces runtime dependency
+    // (we don't know the buffer contents at compile time)
+    depends_on_runtime_ = true;
   }
 
   void VisitExpr_(const CallNode *op) final {
-    // Check tvm_access_ptr for shared memory access
-    if (op->op.same_as(builtin::tvm_access_ptr())) {
-      if (op->args.size() >= 2) {
-        const VarNode *buffer_var = op->args[1].as<VarNode>();
-        if (buffer_var) {
-          StorageScope scope =
-              StorageScope::Create(GetPtrStorageScope(GetRef<Var>(buffer_var)));
-          if (scope.rank == StorageRank::kShared) {
-            // Check if offset depends on thread
-            if (op->args.size() >= 3) {
-              UniformExprChecker offset_checker;
-              offset_checker.thread_vars_ = this->thread_vars_;
-              if (!offset_checker.IsUniform(op->args[2])) {
-                is_uniform_ = false;
-              }
-            }
-          }
-        }
-      }
+    // Check tvm_access_ptr and address_of - if used in condition, it's reading
+    // memory
+    if (op->op.same_as(builtin::tvm_access_ptr()) ||
+        op->op.same_as(builtin::address_of())) {
+      depends_on_runtime_ = true;
+      return;
     }
+    // Other calls might also introduce runtime dependency
+    // but we'll be conservative and check children
     tir::ExprVisitor::VisitExpr_(op);
   }
 
-public:
-  Array<IterVar> thread_vars_;
-
 private:
-  bool is_uniform_{true};
+  bool depends_on_runtime_{false};
 };
 
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
@@ -807,17 +757,22 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     bool has_syncs_inside = !syncs_in_then.empty() || !syncs_in_else.empty();
 
     if (has_syncs_inside) {
-      // Check if the condition is uniform (same for all threads)
-      UniformExprChecker checker;
-      checker.thread_vars_ = env_threads_;
-      bool is_uniform = checker.IsUniform(op->condition);
+      // Check if the condition depends on runtime values (e.g., shared memory
+      // loads). If so, we cannot determine at compile time how many threads
+      // will enter the if, so we must hoist the sync to before the if to avoid
+      // potential deadlock.
+      //
+      // If the condition only depends on threadIdx (e.g., `threadIdx.x >=
+      // 512`), ThreadPartialSyncRewriter can compute the exact thread count at
+      // compile time, so the sync can safely remain inside the if.
+      RuntimeDependentConditionChecker checker;
+      bool depends_on_runtime = checker.DependsOnRuntimeValue(op->condition);
 
-      if (!is_uniform) {
-        // Non-uniform condition: syncs inside will cause deadlock!
-        // Remove the internal syncs and mark the if-statement itself for sync
-        LOG(WARNING) << "[ThreadSync] Hoisting sync from inside non-uniform if "
-                        "to before if. "
-                     << "condition=" << op->condition;
+      if (depends_on_runtime) {
+        // Condition depends on runtime values - must hoist sync
+        LOG(WARNING)
+            << "[ThreadSync] Hoisting sync from inside if to before if. "
+            << "Condition depends on runtime value: " << op->condition;
 
         for (const auto &sync : syncs_in_then) {
           syncs_inserted_.erase(sync);
@@ -829,6 +784,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         // Insert sync before the if-statement itself
         insert_syncs(op);
       }
+      // If condition only depends on threadIdx, ThreadPartialSyncRewriter will
+      // handle it
     }
 
     scope_.back().emplace_back(std::move(s));
