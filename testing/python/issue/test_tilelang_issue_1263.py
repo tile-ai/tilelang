@@ -1,6 +1,7 @@
 import tilelang.testing
 import tilelang.language as T
 
+
 def _test_kernel(M, N):
     dtype = "bfloat16"
 
@@ -19,6 +20,7 @@ def _test_kernel(M, N):
                 id2 = ids2[id]
                 T.copy(KV[id2, :], A)
                 T.clear(B)
+
     return fwd_main
 
 
@@ -39,9 +41,9 @@ def _test_kernel_if_cond(M, N):
                 id = ids[i]
                 id2 = ids2[id]
                 if id2 > 1:
-                    if id < 3:
-                        T.copy(KV[id2, :], A)
-                        T.clear(B)
+                    T.copy(KV[id2, :], A)
+                    T.clear(B)
+
     return fwd_main
 
 

@@ -877,8 +877,9 @@ private:
         for (auto it = loop_var_if_wrappers_.rbegin();
              it != loop_var_if_wrappers_.rend(); ++it) {
           const auto &iw = *it;
-          PrimExpr substituted_condition = Substitute(
-              iw.condition, {{pipeline_loop_->loop_var, normalized_access_index}});
+          PrimExpr substituted_condition =
+              Substitute(iw.condition,
+                         {{pipeline_loop_->loop_var, normalized_access_index}});
           inner = IfThenElse(substituted_condition, inner, Stmt(), iw.span);
         }
         n->body = inner;
@@ -1111,15 +1112,16 @@ private:
           for (const auto &lw : loop_var_let_wrappers) {
             dependent_vars.insert(lw.var.get());
           }
-          bool condition_depends_on_loop =
-              UsesVar(if_then_else->condition, [&dependent_vars](const VarNode *vn) {
+          bool condition_depends_on_loop = UsesVar(
+              if_then_else->condition, [&dependent_vars](const VarNode *vn) {
                 return dependent_vars.count(vn) > 0;
               });
 
           if (condition_depends_on_loop) {
             // If condition depends on loop variable, we need to push it inside
             // each pipeline stage with proper substitution
-            loop_var_if_wrappers.push_back({if_then_else->condition, if_then_else->span});
+            loop_var_if_wrappers.push_back(
+                {if_then_else->condition, if_then_else->span});
           } else {
             // Otherwise, safe to wrap outside the pipeline
             PrimExpr condition = if_then_else->condition;

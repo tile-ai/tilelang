@@ -38,6 +38,7 @@ def _make_kernel_if_cond(M, N):
                     _id = ids[i]
                     T.copy(KV[_id, :], A)
                     T.clear(B)
+
     return fwd_main
 
 
