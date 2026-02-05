@@ -47,7 +47,15 @@ inline MemoryType GetMemoryTypeFromScope(const String& scope) {
 }
 
 // Helper function to compare if two regions are equal
-bool RegionsEqual(const Region& a, const Region& b);
+inline bool RegionsEqual(const Region& a, const Region& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (!tir::is_one(a[i]->min - b[i]->min) || !tir::is_one(a[i]->extent - b[i]->extent)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 // Base class for all IR nodes in scheduling
 class IRStructure {
@@ -201,8 +209,8 @@ public:
   }
 
   // Latency estimation (aggregate from child)
-  int64_t GetLatency() const override { return child ? child->GetLatency() : 0; }
-  int64_t GetII() const override { return child ? child->GetII() : 0; }
+  int64_t GetLatency() const override { return latency_; }
+  int64_t GetII() const override { return ii_; }
 
   // Setters (delegate to child if exists)
   void SetUsesCUDACore(bool value) override { if (child) child->SetUsesCUDACore(value); }
@@ -210,8 +218,8 @@ public:
   void SetUsesTensorCore(bool value) override { if (child) child->SetUsesTensorCore(value); }
   void SetReadRegions(const std::vector<BufferRegion>& regions) override { if (child) child->SetReadRegions(regions); }
   void SetWriteRegions(const std::vector<BufferRegion>& regions) override { if (child) child->SetWriteRegions(regions); }
-  void SetLatency(int64_t latency) override { if (child) child->SetLatency(latency); }
-  void SetII(int64_t ii) override { if (child) child->SetII(ii); }
+  void SetLatency(int64_t latency) override { latency_ = latency; }
+  void SetII(int64_t ii) override { ii_ = ii; }
 
   // Helper methods to add regions (delegate to child)
   void AddReadRegion(const BufferRegion& region) override { if (child) child->AddReadRegion(region); }
@@ -219,6 +227,11 @@ public:
 
   // Clone method
   std::unique_ptr<IRStructure> Clone() const override;
+
+private:
+  // Latency estimation
+  int64_t latency_{0};      // Estimated latency in cycles
+  int64_t ii_{0};           // Initiation interval in cycles
 };
 
 // Sequence node: contains a vector of child IRStructures
@@ -256,6 +269,11 @@ public:
 
   // Clone method
   std::unique_ptr<IRStructure> Clone() const override;
+
+private:
+  // Latency estimation
+  int64_t latency_{0};      // Estimated latency in cycles
+  int64_t ii_{0};           // Initiation interval in cycles
 };
 
 
@@ -311,16 +329,57 @@ struct ComponentInfo {
 };
 
 // Helper function to check if a buffer region is in register memory
-bool IsRegisterRegion(const BufferRegion& region);
+inline bool IsRegisterRegion(const BufferRegion& region) {
+  const Buffer& buffer = region->buffer;
+  String scope = buffer.scope();
+  MemoryType mem_type = GetMemoryTypeFromScope(scope);
+  return mem_type == MemoryType::kRegister;
+}
 
 // Helper function to collect all register regions from an IRStructure node
-std::vector<BufferRegion> CollectRegisterRegions(const IRStructure* node);
+inline std::vector<BufferRegion> CollectRegisterRegions(const IRStructure* node) {
+  std::vector<BufferRegion> reg_regions;
+  // Check read regions
+  for (const auto& region : node->GetReadRegions()) {
+    if (IsRegisterRegion(region)) {
+      reg_regions.push_back(region);
+    }
+  }
+  // Check write regions
+  for (const auto& region : node->GetWriteRegions()) {
+    if (IsRegisterRegion(region)) {
+      reg_regions.push_back(region);
+    }
+  }
+  return reg_regions;
+}
 
 // Helper function to check if two IRStructure nodes use the same register region
-bool UseSameRegisterRegion(const IRStructure* a, const IRStructure* b);
+inline bool UseSameRegisterRegion(const IRStructure* a, const IRStructure* b) {
+  if (!a || !b) return false;
+
+  auto reg_regions_a = CollectRegisterRegions(a);
+  auto reg_regions_b = CollectRegisterRegions(b);
+
+  // For each pair of register regions, check if they refer to the same buffer
+  // If buffer is the same, consider it as the same region (simplified)
+  for (const auto& region_a : reg_regions_a) {
+    for (const auto& region_b : reg_regions_b) {
+      // Check if same buffer
+      if (region_a->buffer.same_as(region_b->buffer)) {
+        // Buffer相同就认为是同一个region
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 // Helper function to count register regions in an IRStructure node
-int CountRegisterRegions(const IRStructure* node);
+inline int CountRegisterRegions(const IRStructure* node) {
+  auto reg_regions = CollectRegisterRegions(node);
+  return static_cast<int>(reg_regions.size());
+}
 
 // Helper function to collect all TaskNodes with context information
 void CollectAllTaskNodesWithContext(const IRStructure* node,

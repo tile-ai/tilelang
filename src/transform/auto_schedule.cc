@@ -68,17 +68,13 @@ using ffi::GetRef;
 std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* root, IterVar thread_var);
 void CollectTaskNodesFromIRStructure(IRStructure* node, std::vector<TaskNode*>& tasks);
 void CollectIRStructureNodes(IRStructure* node, std::vector<IRStructure*>& nodes);
+// Barrier synchronization helper functions
+static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body, PrimExpr thread_count);
+// Barrier dependency analysis functions
+static void AnalyzeAndInsertBarriers(IRStructure* node, int& next_barrier_id);
+static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id);
+static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id);
 
-// Helper function to compare if two regions are equal
-bool RegionsEqual(const Region& a, const Region& b) {
-  if (a.size() != b.size()) return false;
-  for (size_t i = 0; i < a.size(); ++i) {
-    if (!tir::is_one(a[i]->min - b[i]->min) || !tir::is_one(a[i]->extent - b[i]->extent)) {
-      return false;
-    }
-  }
-  return true;
-}
 
 // Helper function to check if two ranges overlap
 bool RangesOverlap(const Range& a, const Range& b) {
@@ -126,63 +122,344 @@ bool RegionsOverlap(const Region& a, const Region& b) {
   return true;
 }
 
-// Helper function to check if a buffer region is in register memory
-bool IsRegisterRegion(const BufferRegion& region) {
-  const Buffer& buffer = region->buffer;
-  String scope = buffer.scope();
-  MemoryType mem_type = GetMemoryTypeFromScope(scope);
-  return mem_type == MemoryType::kRegister;
-}
 
-// Helper function to collect all register regions from an IRStructure
-std::vector<BufferRegion> CollectRegisterRegions(const IRStructure* node) {
-  std::vector<BufferRegion> reg_regions;
-  // Check read regions
-  for (const auto& region : node->GetReadRegions()) {
-    if (IsRegisterRegion(region)) {
-      reg_regions.push_back(region);
-    }
-  }
-  // Check write regions
-  for (const auto& region : node->GetWriteRegions()) {
-    if (IsRegisterRegion(region)) {
-      reg_regions.push_back(region);
-    }
-  }
-  return reg_regions;
-}
 
 // Check if two IRStructures use the same register region
 // Used for warpgroup specialization: different warpgroups cannot share registers
-bool UseSameRegisterRegion(const IRStructure* a, const IRStructure* b) {
-  if (!a || !b) return false;
 
-  auto reg_regions_a = CollectRegisterRegions(a);
-  auto reg_regions_b = CollectRegisterRegions(b);
 
-  // For each pair of register regions, check if they refer to the same buffer
-  // and their regions overlap (conservative: if same buffer, assume overlap)
-  for (const auto& region_a : reg_regions_a) {
-    for (const auto& region_b : reg_regions_b) {
-      // Check if same buffer
-      if (region_a->buffer.same_as(region_b->buffer)) {
-        // If same buffer, check if regions overlap
-        if (RegionsOverlap(region_a->region, region_b->region)) {
-          return true;
+
+
+// Helper functions for barrier insertion (preliminary implementation)
+// These functions implement barrier_arrive/barrier_wait using the underlying
+// ptx_arrive_barrier and mbarrier_wait_parity operations.
+static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
+  return Call(DataType::Handle(), get_mbarrier(), {std::move(barrier_id)});
+}
+
+// Create a barrier_arrive statement for the given barrier ID
+// Equivalent to T.barrier_arrive(barrier_id) in Python
+static Stmt makeBarrierArrive(PrimExpr barrier_id, int cta_id = -1,
+                              const PrimExpr &pred = 1) {
+  Array<PrimExpr> args = {makeGetBarrier(std::move(barrier_id))};
+  if (cta_id != -1) {
+    args.push_back(cta_id);
+    args.push_back(pred);
+  }
+  return Evaluate(
+      Call(DataType::Handle(), builtin::ptx_arrive_barrier(), args));
+}
+
+// Create a barrier_wait statement for the given barrier ID and parity
+// Equivalent to T.barrier_wait(barrier_id, parity) in Python
+static Stmt makeBarrierWait(PrimExpr barrier_id, PrimExpr parity) {
+  auto call = Call(DataType::Handle(), mbarrier_wait_parity(),
+                   {makeGetBarrier(std::move(barrier_id)), std::move(parity)});
+  return Evaluate(call);
+}
+
+// Create a barrier allocation statement with arrive_count
+// Equivalent to T.alloc_barrier(arrive_count) in Python
+static Stmt makeAllocBarrier(PrimExpr arrive_count) {
+  // Note: In the actual implementation, this would allocate a barrier buffer
+  // For now, we'll create a placeholder that will be replaced by actual barrier allocation
+  // The barrier ID will be assigned later
+  return Evaluate(Call(DataType::Handle(), create_list_of_mbarrier(), {arrive_count}));
+}
+
+// Insert barriers between neutral tasks and warpgroup-specific work
+// This ensures neutral tasks complete before any warpgroup-specific work begins
+static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body, PrimExpr thread_count) {
+  // If either body is empty, no barriers needed
+  if (neutral_body.as<EvaluateNode>() && warpgroup_body.as<EvaluateNode>()) {
+    return SeqStmt({neutral_body, warpgroup_body});
+  }
+
+  LOG(WARNING) << "Using preliminary barrier insertion for neutral-to-warpgroup synchronization";
+  LOG(WARNING) << "Proper barrier analysis and insertion needed for shared/global region dependencies";
+
+  // Allocate barrier buffer for neutral-to-warpgroup synchronization
+  // Equivalent to Python: barrier = T.alloc_buffer((thread_count*2,), "uint64", scope="shared.barrier")
+  // Using arrive_count = thread_count * 2 (number of threads * 2 for neutral-to-warpgroup synchronization)
+  Stmt alloc_barrier = makeAllocBarrier(thread_count * IntImm(DataType::Int(32), 2));
+
+  // Use barrier buffer 0 for neutral-to-warpgroup synchronization
+  // Parity 0 for wait, parity 1 for arrive (simplified)
+  Stmt arrive_barrier = makeBarrierArrive(0);
+  Stmt wait_barrier = makeBarrierWait(0, 0);
+
+  // Combine: neutral_body -> arrive_barrier -> wait_barrier -> warpgroup_body
+  std::vector<Stmt> stmts;
+  if (!neutral_body.as<EvaluateNode>()) {
+    stmts.push_back(neutral_body);
+  }
+  stmts.push_back(arrive_barrier);
+  stmts.push_back(wait_barrier);
+  if (!warpgroup_body.as<EvaluateNode>()) {
+    stmts.push_back(warpgroup_body);
+  }
+
+  Stmt sync_body;
+  if (stmts.size() == 1) {
+    sync_body = stmts[0];
+  } else {
+    sync_body = SeqStmt(stmts);
+  }
+
+  // Combine barrier allocation with the synchronization body
+  std::vector<Stmt> all_stmts;
+  all_stmts.push_back(alloc_barrier);
+  all_stmts.push_back(sync_body);
+  return SeqStmt(all_stmts);
+}
+
+// Helper function to insert a statement into TaskNode's stmts, handling IfThenElse if present
+static void InsertStatementIntoTaskNode(TaskNode* task, const Stmt& stmt, bool at_beginning = false) {
+  if (task->stmts.empty()) {
+    // If no statements, just add the statement
+    task->stmts.push_back(stmt);
+    return;
+  }
+
+  // Check if the first statement is an IfThenElse
+  if (const auto* if_node = task->stmts[0].as<IfThenElseNode>()) {
+    // Get the IfThenElse statement
+    Stmt if_stmt = task->stmts[0];
+
+    // Extract then case (always present)
+    Stmt then_case = if_node->then_case;
+
+    // Extract else case (optional)
+    Optional<Stmt> else_case = if_node->else_case;
+
+    // Insert statement into the appropriate case
+    if (at_beginning) {
+      // Insert at beginning of then_case
+      if (const auto* seq_node = then_case.as<SeqStmtNode>()) {
+        // If then_case is a SeqStmt, insert at beginning
+        Array<Stmt> new_seq_stmts;
+        new_seq_stmts.push_back(stmt);
+        for (const auto& s : seq_node->seq) {
+          new_seq_stmts.push_back(s);
         }
+        then_case = SeqStmt(new_seq_stmts);
+      } else {
+        // If then_case is a single statement, create a SeqStmt
+        then_case = SeqStmt({stmt, then_case});
+      }
+    } else {
+      // Insert at end of then_case
+      if (const auto* seq_node = then_case.as<SeqStmtNode>()) {
+        // If then_case is a SeqStmt, append to end
+        Array<Stmt> new_seq_stmts;
+        for (const auto& s : seq_node->seq) {
+          new_seq_stmts.push_back(s);
+        }
+        new_seq_stmts.push_back(stmt);
+        then_case = SeqStmt(new_seq_stmts);
+      } else {
+        // If then_case is a single statement, create a SeqStmt
+        then_case = SeqStmt({then_case, stmt});
       }
     }
+
+    // Create new IfThenElse statement with updated then_case
+    Stmt new_if_stmt;
+    if (else_case.defined()) {
+      new_if_stmt = IfThenElse(if_node->condition, then_case, else_case.value());
+    } else {
+      new_if_stmt = IfThenElse(if_node->condition, then_case);
+    }
+
+    // Replace the old IfThenElse with the new one
+    task->stmts[0] = new_if_stmt;
+  } else {
+    // No IfThenElse, just insert into stmts vector
+    if (at_beginning) {
+      task->stmts.insert(task->stmts.begin(), stmt);
+    } else {
+      task->stmts.push_back(stmt);
+    }
   }
-  return false;
 }
 
-// Helper function to count register regions in an IRStructure
-int CountRegisterRegions(const IRStructure* node) {
-  auto reg_regions = CollectRegisterRegions(node);
-  return static_cast<int>(reg_regions.size());
+// Barrier dependency analysis implementation
+static void AnalyzeAndInsertBarriers(IRStructure* node, int& next_barrier_id) {
+  if (!node) return;
+
+  if (node->IsSequence()) {
+    AnalyzeSequenceNodeBarriers(static_cast<SequenceNode*>(node), next_barrier_id);
+  } else if (node->IsControl()) {
+    AnalyzeControlNodeBarriers(static_cast<ControlNode*>(node), next_barrier_id);
+  }
+  // For TaskNode, nothing to do at this level
 }
 
+static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id) {
+  if (!seq) return;
 
+  // Map from buffer to (task, warpgroup_id) of last write
+  std::unordered_map<Buffer, TaskNode*, ObjectPtrHash, ObjectPtrEqual> last_write_map;
+
+  // Process tasks in sequence order
+  for (auto& child : seq->children) {
+    if (!child || !child->IsTask()) {
+      // If child is SequenceNode or ControlNode, recursively analyze it
+      AnalyzeAndInsertBarriers(child.get(), next_barrier_id);
+      continue;
+    }
+
+    TaskNode* task = static_cast<TaskNode*>(child.get());
+    int wg_id = task->GetWarpgroupId();
+    if (wg_id == -1) continue;
+
+    // Check read regions for dependencies
+    for (const auto& read_region : task->GetReadRegions()) {
+      Buffer buffer = read_region->buffer;
+      auto it = last_write_map.find(buffer);
+      if (it != last_write_map.end()) {
+        TaskNode* last_write_task = it->second;
+        int last_wg_id = last_write_task->GetWarpgroupId();
+        if (last_wg_id == -1) continue;
+
+        // If warpgroup ids differ, insert barrier
+        if (last_wg_id != wg_id) {
+          // Allocate a new barrier ID
+          int barrier_id = next_barrier_id++;
+          LOG(INFO) << "Inserting barrier " << barrier_id << " between task in warpgroup " << last_wg_id
+                    << " and task in warpgroup " << wg_id << " for buffer " << buffer;
+
+          // Insert barrier_arrive at the end of last_write_task's statements
+          Stmt arrive_stmt = makeBarrierArrive(barrier_id);
+          InsertStatementIntoTaskNode(last_write_task, arrive_stmt, false);
+          LOG(INFO) << "Added barrier_arrive(" << barrier_id << ") to task in warpgroup " << last_wg_id;
+
+          // Insert barrier_wait at the beginning of task's statements
+          Stmt wait_stmt = makeBarrierWait(barrier_id, 0); // parity = 0 for non-loop barriers
+          InsertStatementIntoTaskNode(task, wait_stmt, true);
+          LOG(INFO) << "Added barrier_wait(" << barrier_id << ", parity=0) to task in warpgroup " << wg_id;
+        }
+
+        // Remove from map after read (as per user instruction)
+        last_write_map.erase(it);
+      }
+    }
+
+    // Update write regions
+    for (const auto& write_region : task->GetWriteRegions()) {
+      Buffer buffer = write_region->buffer;
+      last_write_map[buffer] = task;
+    }
+  }
+}
+
+static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id) {
+  if (!ctrl || !ctrl->child) return;
+
+  // Get loop information
+  const ForNode* for_node = ctrl->control.get();
+  if (!for_node) return;
+
+  PrimExpr loop_var = for_node->loop_var;
+  PrimExpr loop_start = for_node->min;
+  PrimExpr loop_step = for_node->step.has_value() ? for_node->step.value() : IntImm(DataType::Int(32), 1);
+
+
+  // If child is a SequenceNode, we need special handling for promote/non-promote tasks
+  if (ctrl->child->IsSequence()) {
+    SequenceNode* seq = static_cast<SequenceNode*>(ctrl->child.get());
+
+    // Separate promoted and non-promoted tasks
+    std::vector<TaskNode*> promoted_tasks;
+    std::vector<TaskNode*> non_promoted_tasks;
+
+    // Collect all tasks from the sequence
+    std::vector<TaskNode*> all_tasks;
+    for (auto& child : seq->children) {
+      if (child && child->IsTask()) {
+        TaskNode* task = static_cast<TaskNode*>(child.get());
+        all_tasks.push_back(task);
+      }
+    }
+
+    // Separate by promote flag
+    for (TaskNode* task : all_tasks) {
+      if (task->GetPromote()) {
+        promoted_tasks.push_back(task);
+      } else {
+        non_promoted_tasks.push_back(task);
+      }
+    }
+
+    // Process in order: promoted tasks first, then non-promoted tasks
+    // This matches the software pipelining order
+    std::vector<TaskNode*> ordered_tasks;
+    ordered_tasks.insert(ordered_tasks.end(), promoted_tasks.begin(), promoted_tasks.end());
+    ordered_tasks.insert(ordered_tasks.end(), non_promoted_tasks.begin(), non_promoted_tasks.end());
+
+    // Map from buffer to (task, warpgroup_id, is_promoted)
+    std::unordered_map<Buffer, TaskNode*, ObjectPtrHash, ObjectPtrEqual> last_write_map;
+
+    // Process tasks in the specified order
+    for (TaskNode* task : ordered_tasks) {
+      int wg_id = task->GetWarpgroupId();
+      bool is_promoted = task->GetPromote();
+      if (wg_id == -1) continue;
+
+      // Check read regions for dependencies
+      for (const auto& read_region : task->GetReadRegions()) {
+        Buffer buffer = read_region->buffer;
+        auto it = last_write_map.find(buffer);
+        if (it != last_write_map.end()) {
+          TaskNode* last_write_task = it->second;
+          int last_wg_id = last_write_task->GetWarpgroupId();
+          bool last_is_promoted = last_write_task->GetPromote();
+          if (last_wg_id == -1) continue;
+
+          // If warpgroup ids differ, insert barrier
+          if (last_wg_id != wg_id || last_is_promoted != is_promoted) {
+            // Allocate a new barrier ID
+            int barrier_id = next_barrier_id++;
+
+            // Calculate parity for barrier wait
+            // parity = indexmod(loop_var - loop_start + promote + 1, 2)
+            // where promote is 1 if the waiting task is promoted, 0 otherwise
+            // The waiting task is 'task' (the reading task)
+            int promote_int = is_promoted ? 1 : 0;
+            PrimExpr parity_expr = tvm::indexmod(loop_var - loop_start + IntImm(DataType::Int(32), promote_int + 1), 2);
+
+            LOG(INFO) << "Inserting barrier " << barrier_id << " in loop between task in warpgroup " << last_wg_id
+                      << " and task in warpgroup " << wg_id << " for buffer " << buffer;
+            LOG(INFO) << "  Reading task is " << (is_promoted ? "promoted" : "non-promoted") << " (promote=" << promote_int << ")";
+            LOG(INFO) << "  Writing task was " << (last_is_promoted ? "promoted" : "non-promoted");
+            LOG(INFO) << "  Parity expression: " << parity_expr;
+
+            // Insert barrier_arrive at the end of last_write_task's statements
+            Stmt arrive_stmt = makeBarrierArrive(barrier_id);
+            InsertStatementIntoTaskNode(last_write_task, arrive_stmt, false);
+            LOG(INFO) << "Added barrier_arrive(" << barrier_id << ") to task in warpgroup " << last_wg_id;
+
+            // Insert barrier_wait at the beginning of task's statements
+            Stmt wait_stmt = makeBarrierWait(barrier_id, parity_expr);
+            InsertStatementIntoTaskNode(task, wait_stmt, true);
+            LOG(INFO) << "Added barrier_wait(" << barrier_id << ", parity=" << parity_expr << ") to task in warpgroup " << wg_id;
+          }
+
+          // Remove from map after read (as per user instruction)
+          last_write_map.erase(it);
+        }
+      }
+
+      // Update write regions
+      for (const auto& write_region : task->GetWriteRegions()) {
+        Buffer buffer = write_region->buffer;
+        last_write_map[buffer] = task;
+      }
+    }
+  } else {
+    AnalyzeAndInsertBarriers(ctrl->child.get(), next_barrier_id);
+  }
+}
 
 // Helper function to collect all TaskNodes with context information
 void CollectAllTaskNodesWithContext(const IRStructure* node,
@@ -338,19 +615,11 @@ std::vector<BufferRegion> SequenceNode::GetWriteRegions() const {
 }
 
 int64_t SequenceNode::GetLatency() const {
-  int64_t total = 0;
-  for (const auto& child : children) {
-    if (child) total += child->GetLatency();
-  }
-  return total;
+  return latency_;
 }
 
 int64_t SequenceNode::GetII() const {
-  int64_t max_ii = 0;
-  for (const auto& child : children) {
-    if (child) max_ii = std::max(max_ii, child->GetII());
-  }
-  return max_ii;
+  return ii_;
 }
 
 void SequenceNode::SetUsesCUDACore(bool value) {
@@ -385,17 +654,11 @@ void SequenceNode::SetWriteRegions(const std::vector<BufferRegion>& regions) {
 }
 
 void SequenceNode::SetLatency(int64_t latency) {
-  // Not clear how to distribute latency across children
-  if (!children.empty() && children[0]) {
-    children[0]->SetLatency(latency);
-  }
+  latency_ = latency;
 }
 
 void SequenceNode::SetII(int64_t ii) {
-  // Not clear how to distribute II across children
-  if (!children.empty() && children[0]) {
-    children[0]->SetII(ii);
-  }
+  ii_ = ii;
 }
 
 void SequenceNode::AddReadRegion(const BufferRegion& region) {
@@ -420,6 +683,9 @@ std::unique_ptr<IRStructure> SequenceNode::Clone() const {
       new_seq->children.push_back(nullptr);
     }
   }
+  // Copy latency and II
+  new_seq->SetLatency(GetLatency());
+  new_seq->SetII(GetII());
   return new_seq;
 }
 
@@ -454,6 +720,9 @@ std::unique_ptr<IRStructure> ControlNode::Clone() const {
   if (child) {
     new_ctrl->child = child->Clone();
   }
+  // Copy latency and II
+  new_ctrl->SetLatency(GetLatency());
+  new_ctrl->SetII(GetII());
   return new_ctrl;
 }
 
@@ -1950,6 +2219,11 @@ tvm::transform::Pass AutoSchedule() {
       LOG(INFO) << "IRStructure modified summary:";
       PrintIRStructure(ir_structure.get());
 
+      // Analyze buffer dependencies and insert barriers before warpgroup partition
+      LOG(INFO) << "Analyzing buffer dependencies and inserting barriers...";
+      int next_barrier_id = 1;
+      AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id);
+
       // Apply warpgroup partition to entire IRStructure
       if (thread_var.defined()) {
         LOG(INFO) << "Applying warpgroup partition to entire IRStructure...";
@@ -2206,10 +2480,11 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
 
   // Prepare condition: tx < original_threads
   PrimExpr condition;
+  PrimExpr original_threads;
   if (thread_var.defined() && thread_var->dom.defined()) {
     Var thread_idx_var = thread_var->var;
     Range thread_dom = thread_var->dom;
-    PrimExpr original_threads = thread_dom->extent;
+    original_threads = thread_dom->extent;
     condition = thread_idx_var < original_threads;
     LOG(INFO) << "Using thread index variable " << thread_idx_var
               << " with original domain " << thread_dom->min << " to " << thread_dom->min + thread_dom->extent
@@ -2218,7 +2493,8 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
   } else {
     LOG(WARNING) << "Thread index variable not properly defined, falling back to default tx < 128";
     Var tx_var("tx", DataType::Int(32));
-    condition = tx_var < IntImm(DataType::Int(32), 128);
+    original_threads = IntImm(DataType::Int(32), 128);
+    condition = tx_var < original_threads;
   }
 
   // Convert IRStructure to Stmt for IfThenElse
@@ -2273,9 +2549,10 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
   Stmt then_body = wg0_has_stmts ? irstructure_to_stmt(wg0_structure.get()) : Evaluate(0);
   Stmt else_body = wg1_has_stmts ? irstructure_to_stmt(wg1_structure.get()) : Evaluate(0);
 
-  // Create IfThenElse statement
+  // Create IfThenElse statement with barrier synchronization if both warpgroups have statements
   Stmt if_then_else;
   if (wg0_has_stmts && wg1_has_stmts) {
+    // Both warpgroups exist: insert barriers for cross-warpgroup synchronization
     if_then_else = IfThenElse(condition, then_body, else_body);
   } else if (wg0_has_stmts) {
     // Only warpgroup 0 has statements, execute unconditionally
@@ -2289,10 +2566,14 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
   }
 
   // Combine neutral tasks (warpgroup -1) with the if-then-else statement
+  // Add barrier synchronization between neutral tasks and warpgroup-specific work
   Stmt combined_stmt;
   if (wg_neutral_has_stmts) {
-    if (!if_then_else.as<EvaluateNode>() || !neutral_body.as<EvaluateNode>()) {
-      // At least one has actual statements
+    if (!if_then_else.as<EvaluateNode>() && !neutral_body.as<EvaluateNode>()) {
+      // Both have statements: insert barriers for neutral-to-warpgroup synchronization
+      combined_stmt = InsertBarriersForNeutralSync(neutral_body, if_then_else, original_threads);
+    } else if (!if_then_else.as<EvaluateNode>() || !neutral_body.as<EvaluateNode>()) {
+      // Only one has actual statements
       std::vector<Stmt> stmts;
       if (!neutral_body.as<EvaluateNode>()) {
         stmts.push_back(neutral_body);
