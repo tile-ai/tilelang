@@ -40,10 +40,8 @@ def test_loop_layout_identity():
 
     M, N = 128, 32
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn)
-    tilelang.disable_cache()
     kernel = loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
     code = kernel.get_kernel_source()
-    print(code)
     assert "*(float4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(float4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));" in code
 
 
@@ -108,5 +106,4 @@ def test_annotate_replicate_loop_layout_vec4():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_loop_layout_identity()
+    tilelang.testing.main()
