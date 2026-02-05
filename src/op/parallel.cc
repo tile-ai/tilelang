@@ -648,15 +648,15 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
   }
   DLOG(INFO) << "[compute_loop_layout_from_buffer] ... and get "
              << result->DebugOutput() << '\n';
-  // Try DeReplicate first to reduce replication if possible.
-  Fragment dereplicated_layout = result->DeReplicate();
-  if (ValidateCandidateAgainstFragments(
-          dereplicated_layout, T, /*throw_on_error=*/false,
-          /*check_forward_index=*/false, /*source_buffer=*/buffer)) {
-    DLOG(INFO) << "[compute_loop_layout_from_buffer] DeReplicate success, get "
-               << dereplicated_layout->DebugOutput() << '\n';
-    result = dereplicated_layout;
-  }
+  // Lei: This is a tradeoff, disable it for now.
+  // // Try DeReplicate first to reduce replication if possible.
+  // Fragment dereplicated_layout = candidate_from_buffer->DeReplicate();
+  // if (ValidateCandidateAgainstFragments(
+  //         dereplicated_layout, T, /*throw_on_error=*/false,
+  //         /*check_forward_index=*/false,
+  //         /*source_buffer=*/read_source_buffer)) {
+  //   candidate_from_buffer = dereplicated_layout;
+  // }
   return result;
 }
 
