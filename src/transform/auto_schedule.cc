@@ -65,15 +65,15 @@ using namespace tir;
 using ffi::GetRef;
 
 // Forward declaration
-std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* root, IterVar thread_var, std::vector<Buffer>& barrier_buffers);
+std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* root, IterVar thread_var, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map);
 void CollectTaskNodesFromIRStructure(IRStructure* node, std::vector<TaskNode*>& tasks);
 void CollectIRStructureNodes(IRStructure* node, std::vector<IRStructure*>& nodes);
 // Barrier synchronization helper functions
-static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body, std::vector<Buffer>& barrier_buffers, PrimExpr thread_count);
+static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map, PrimExpr thread_count);
 // Barrier dependency analysis functions
-static void AnalyzeAndInsertBarriers(IRStructure* node, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, PrimExpr thread_count);
-static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, PrimExpr thread_count);
-static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, PrimExpr thread_count);
+static void AnalyzeAndInsertBarriers(IRStructure* node, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map, PrimExpr thread_count);
+static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map, PrimExpr thread_count);
+static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map, PrimExpr thread_count);
 
 
 // Helper function to check if two ranges overlap
@@ -162,22 +162,25 @@ static Stmt makeBarrierWait(PrimExpr barrier_expr, PrimExpr parity) {
 
 // Create a barrier buffer allocation and return the Buffer object along with allocation statement
 // Equivalent to Python: barrier = T.alloc_buffer((arrive_count,), "uint64", scope="shared.barrier")
-static Buffer makeBarrierBuffer(PrimExpr arrive_count, const std::string& name = "barrier") {
+static Buffer makeBarrierBuffer(PrimExpr arrive_count, const std::string& name, Map<ObjectRef, ObjectRef>& barrier_map) {
   // Create buffer shape: (arrive_count,)
-  Array<PrimExpr> shape = {arrive_count};
+  Array<PrimExpr> shape = {1};
 
   // Create buffer data type: uint64
   DataType dtype = DataType::UInt(64);
+  Type ptr_type = PointerType(PrimType(dtype), "shared.barrier");
+  Var handle(name, ptr_type);
+  barrier_map.Set(handle, Array<ObjectRef>{arrive_count});
 
   // Create buffer
-  Buffer buffer = tir::decl_buffer(shape, dtype, name, "shared.barrier");
+  Buffer buffer = Buffer(handle, dtype, shape, {}, PrimExpr(), name, 0, 0, kDefault);
 
   return buffer;
 }
 
 // Insert barriers between neutral tasks and warpgroup-specific work
 // This ensures neutral tasks complete before any warpgroup-specific work begins
-static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body, std::vector<Buffer>& barrier_buffers, PrimExpr thread_count) {
+static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map, PrimExpr thread_count) {
   // If either body is empty, no barriers needed
   if (neutral_body.as<EvaluateNode>() && warpgroup_body.as<EvaluateNode>()) {
     return SeqStmt({neutral_body, warpgroup_body});
@@ -190,7 +193,7 @@ static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
   // Equivalent to Python: barrier = T.alloc_buffer((thread_count*2,), "uint64", scope="shared.barrier")
   // Using arrive_count = thread_count * 2 (number of threads * 2 for neutral-to-warpgroup synchronization)
   PrimExpr arrive_count = thread_count * IntImm(DataType::Int(32), 2);
-  Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "neutral_warpgroup_barrier");
+  Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "neutral_warpgroup_barrier", barrier_map);
   barrier_buffers.push_back(barrier_buffer);
 
   // Create BufferLoad expression for barrier[0]
@@ -295,18 +298,18 @@ static void InsertStatementIntoTaskNode(TaskNode* task, const Stmt& stmt, bool a
 }
 
 // Barrier dependency analysis implementation
-static void AnalyzeAndInsertBarriers(IRStructure* node, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, PrimExpr thread_count) {
+static void AnalyzeAndInsertBarriers(IRStructure* node, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map, PrimExpr thread_count) {
   if (!node) return;
 
   if (node->IsSequence()) {
-    AnalyzeSequenceNodeBarriers(static_cast<SequenceNode*>(node), next_barrier_id, barrier_buffers, thread_count);
+    AnalyzeSequenceNodeBarriers(static_cast<SequenceNode*>(node), next_barrier_id, barrier_buffers, barrier_map, thread_count);
   } else if (node->IsControl()) {
-    AnalyzeControlNodeBarriers(static_cast<ControlNode*>(node), next_barrier_id, barrier_buffers, thread_count);
+    AnalyzeControlNodeBarriers(static_cast<ControlNode*>(node), next_barrier_id, barrier_buffers, barrier_map, thread_count);
   }
   // For TaskNode, nothing to do at this level
 }
 
-static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, PrimExpr thread_count) {
+static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map, PrimExpr thread_count) {
   if (!seq) return;
 
   // Map from buffer to (task, warpgroup_id) of last write
@@ -316,7 +319,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id,
   for (auto& child : seq->children) {
     if (!child || !child->IsTask()) {
       // If child is SequenceNode or ControlNode, recursively analyze it
-      AnalyzeAndInsertBarriers(child.get(), next_barrier_id, barrier_buffers, thread_count);
+      AnalyzeAndInsertBarriers(child.get(), next_barrier_id, barrier_buffers, barrier_map, thread_count);
       continue;
     }
 
@@ -343,7 +346,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id,
 
           // Create barrier buffer with arrive_count based on thread count
           PrimExpr arrive_count = thread_count;
-          Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "barrier_" + std::to_string(barrier_id));
+          Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "barrier_" + std::to_string(barrier_id), barrier_map);
 
           // Collect the barrier buffer to be added to tilelang_root block's alloc_buffers
           barrier_buffers.push_back(barrier_buffer);
@@ -376,7 +379,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id,
   }
 }
 
-static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, PrimExpr thread_count) {
+static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map, PrimExpr thread_count) {
   if (!ctrl || !ctrl->child) return;
 
   // Get loop information
@@ -460,7 +463,7 @@ static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, 
 
             // Create barrier buffer with arrive_count based on thread count
             PrimExpr arrive_count = thread_count;
-            Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "barrier_" + std::to_string(barrier_id));
+            Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "barrier_" + std::to_string(barrier_id), barrier_map);
 
             // Collect the barrier buffer to be added to tilelang_root block's alloc_buffers
             barrier_buffers.push_back(barrier_buffer);
@@ -492,7 +495,7 @@ static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, 
       }
     }
   } else {
-    AnalyzeAndInsertBarriers(ctrl->child.get(), next_barrier_id, barrier_buffers, thread_count);
+    AnalyzeAndInsertBarriers(ctrl->child.get(), next_barrier_id, barrier_buffers, barrier_map, thread_count);
   }
 }
 
@@ -1951,8 +1954,8 @@ private:
 // Mutator to add alloc_buffers to tilelang_root block
 class TilelangRootAllocBufferAdder : public StmtMutator {
 public:
-  explicit TilelangRootAllocBufferAdder(const std::vector<Buffer>& buffers_to_add)
-      : buffers_to_add_(buffers_to_add) {}
+  explicit TilelangRootAllocBufferAdder(const std::vector<Buffer>& buffers_to_add, Map<ObjectRef, ObjectRef>& barrier_map)
+      : buffers_to_add_(buffers_to_add), barrier_map_(barrier_map) {}
 
   Stmt VisitStmt_(const BlockNode* op) override {
     auto block = GetRef<Block>(op);
@@ -1963,15 +1966,18 @@ public:
       for (const auto& buffer : buffers_to_add_) {
         new_alloc_buffers.push_back(buffer);
       }
+      auto new_annotations = op->annotations;
+      new_annotations.Set("barrier_init", barrier_map_);
       // Create new block with updated alloc_buffers
       return Block(op->iter_vars, op->reads, op->writes, op->name_hint, op->body,
-                   op->init, new_alloc_buffers, op->match_buffers, op->annotations);
+                   op->init, new_alloc_buffers, op->match_buffers, new_annotations);
     }
     return StmtMutator::VisitStmt_(op);
   }
 
 private:
   std::vector<Buffer> buffers_to_add_;
+  Map<ObjectRef, ObjectRef>& barrier_map_;
 };
 
 // Visitor to build IRStructure from TIR statements
@@ -2284,15 +2290,16 @@ tvm::transform::Pass AutoSchedule() {
     LOG(INFO) << "Analyzing buffer dependencies and inserting barriers...";
     int next_barrier_id = 1;
     std::vector<Buffer> barrier_buffers;
+    Map<ObjectRef, ObjectRef> barrier_map;
     // Determine thread count for barrier arrive_count calculations
     PrimExpr thread_count = thread_var.defined() ? thread_var->dom->extent : IntImm(DataType::Int(32), 256);
-    AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id, barrier_buffers, thread_count);
+    AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id, barrier_buffers, barrier_map, thread_count);
     LOG(INFO) << "Collected " << barrier_buffers.size() << " barrier buffers";
 
     // Apply warpgroup partition to entire IRStructure
     if (thread_var.defined()) {
       LOG(INFO) << "Applying warpgroup partition to entire IRStructure...";
-      auto partitioned_ir_structure = ApplyWarpgroupPartitionToIRStructure(ir_structure.get(), thread_var, barrier_buffers);
+      auto partitioned_ir_structure = ApplyWarpgroupPartitionToIRStructure(ir_structure.get(), thread_var, barrier_buffers, barrier_map);
       if (partitioned_ir_structure) {
         ir_structure = std::move(partitioned_ir_structure);
         LOG(INFO) << "Warpgroup partition applied successfully";
@@ -2344,7 +2351,7 @@ tvm::transform::Pass AutoSchedule() {
     }
     // Add barrier buffers to tilelang_root block's alloc_buffers
     if (!barrier_buffers.empty()) {
-      TilelangRootAllocBufferAdder adder(barrier_buffers);
+      TilelangRootAllocBufferAdder adder(barrier_buffers, barrier_map);
       final_body = adder(final_body);
     }
 
@@ -2448,7 +2455,7 @@ std::unique_ptr<IRStructure> CloneIRStructureWithWarpgroupFilter(
 }
 
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
-std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* root, IterVar thread_var, std::vector<Buffer>& barrier_buffers) {
+std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* root, IterVar thread_var, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map) {
   if (!root) return nullptr;
 
   // Check if there are tasks with mixed warpgroup ids
@@ -2638,7 +2645,7 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
   if (wg_neutral_has_stmts) {
     if (!if_then_else.as<EvaluateNode>() && !neutral_body.as<EvaluateNode>()) {
       // Both have statements: insert barriers for neutral-to-warpgroup synchronization
-      combined_stmt = InsertBarriersForNeutralSync(neutral_body, if_then_else, barrier_buffers, original_threads);
+      combined_stmt = InsertBarriersForNeutralSync(neutral_body, if_then_else, barrier_buffers, barrier_map, original_threads);
     } else if (!if_then_else.as<EvaluateNode>() || !neutral_body.as<EvaluateNode>()) {
       // Only one has actual statements
       std::vector<Stmt> stmts;
