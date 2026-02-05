@@ -443,7 +443,7 @@ def z3_schedule_loop_python(
 
         # Sort tasks by start time (and by index as tie-breaker)
         task_indices = list(range(n))
-        task_indices.sort(key=lambda idx: (start_times[idx], idx))
+        task_indices.sort(key=lambda idx: (start_times[idx]+promotes[idx]*best_ii, idx))
 
         print(f"[Python Z3 Loop] Scheduling completed. Minimal II = {best_ii}")
         for i in range(n):

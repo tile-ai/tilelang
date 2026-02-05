@@ -258,15 +258,6 @@ public:
   std::unique_ptr<IRStructure> Clone() const override;
 };
 
-// ScheduleUnit: a group of consecutive TaskNodes that can be scheduled together
-struct ScheduleUnit {
-  std::vector<TaskNode*> tasks;  // consecutive TaskNodes
-  SequenceNode* parent_seq{nullptr};  // Parent SequenceNode containing these tasks
-  size_t start_idx{0};  // Starting index in parent_seq->children
-  bool inside_control_node{false};  // Whether this unit is inside a ControlNode (For loop)
-  ControlNode* control_node{nullptr};  // Pointer to containing ControlNode (if inside_control_node is true)
-  // Additional metadata could be added here, e.g., resource usage summary
-};
 
 // Simple Union-Find (Disjoint Set Union) for task grouping
 class TaskUnionFind {
@@ -322,14 +313,14 @@ struct ComponentInfo {
 // Helper function to check if a buffer region is in register memory
 bool IsRegisterRegion(const BufferRegion& region);
 
-// Helper function to collect all register regions from a task
-std::vector<BufferRegion> CollectRegisterRegions(const TaskNode* task);
+// Helper function to collect all register regions from an IRStructure node
+std::vector<BufferRegion> CollectRegisterRegions(const IRStructure* node);
 
-// Helper function to check if two TaskNodes use the same register region
-bool UseSameRegisterRegion(const TaskNode* a, const TaskNode* b);
+// Helper function to check if two IRStructure nodes use the same register region
+bool UseSameRegisterRegion(const IRStructure* a, const IRStructure* b);
 
-// Helper function to count register regions in a task
-int CountRegisterRegions(const TaskNode* task);
+// Helper function to count register regions in an IRStructure node
+int CountRegisterRegions(const IRStructure* node);
 
 // Helper function to collect all TaskNodes with context information
 void CollectAllTaskNodesWithContext(const IRStructure* node,
@@ -341,13 +332,6 @@ void CollectAllTaskNodesWithContext(const IRStructure* node,
 // Goal: balance weighted latency between two warpgroups (0 and 1)
 // Weighted latency = latency * tripcount (tripcount = 100 for non-constant loop extent)
 void AssignWarpgroupIdsGlobal(IRStructure* root);
-
-
-// Apply warpgroup partition to a ScheduleUnit
-// Split tasks into two groups based on warpgroup id and insert conditional branching
-// if tx < 128: execute warpgroup 0 tasks, else: execute warpgroup 1 tasks
-// Note: cross-warpgroup dependencies are ignored for now (will be handled later with barriers)
-void ApplyWarpgroupPartition(ScheduleUnit& unit);
 
 // Helper function to print BufferRegion details
 void PrintBufferRegion(const BufferRegion& region, const std::string& indent) {
@@ -384,54 +368,6 @@ void PrintBufferRegion(const BufferRegion& region, const std::string& indent) {
 }
 
 // Helper function to print ScheduleUnits
-void PrintScheduleUnits(const std::vector<ScheduleUnit>& units) {
-  LOG(INFO) << "ScheduleUnits (" << units.size() << " units):";
-  for (size_t i = 0; i < units.size(); i++) {
-    const auto& unit = units[i];
-    LOG(INFO) << "  Unit " << i << " contains " << unit.tasks.size() << " TaskNodes:";
-    LOG(INFO) << "    Parent Sequence: " << (unit.parent_seq ? "present" : "none")
-              << ", Start index: " << unit.start_idx
-              << ", Inside ControlNode: " << (unit.inside_control_node ? "yes" : "no");
-    for (size_t j = 0; j < unit.tasks.size(); j++) {
-      const TaskNode* task = unit.tasks[j];
-      LOG(INFO) << "    Task " << j << ": uses_cuda_core=" << task->UsesCUDACore()
-                << ", uses_tma_core=" << task->UsesTMACore()
-                << ", uses_tensor_core=" << task->UsesTensorCore()
-                << ", read_regions=" << task->GetReadRegions().size()
-                << ", write_regions=" << task->GetWriteRegions().size()
-                << ", latency=" << task->GetLatency() << " cycles"
-                << ", II=" << task->GetII() << " cycles"
-                << ", warpgroup_id=" << task->GetWarpgroupId();
-
-      // Print statements in this task
-      if (!task->stmts.empty()) {
-        LOG(INFO) << "      Statements (" << task->stmts.size() << "):";
-        for (size_t k = 0; k < task->stmts.size(); ++k) {
-          LOG(INFO) << "        Statement " << k << ":";
-          LOG(INFO) << "          " << task->stmts[k];
-        }
-      }
-
-      // Print read regions if any
-      if (!task->GetReadRegions().empty()) {
-        LOG(INFO) << "      Read regions:";
-        for (size_t k = 0; k < task->GetReadRegions().size(); ++k) {
-          LOG(INFO) << "      Region " << k << ":";
-          PrintBufferRegion(task->GetReadRegions()[k], "        ");
-        }
-      }
-
-      // Print write regions if any
-      if (!task->GetWriteRegions().empty()) {
-        LOG(INFO) << "      Write regions:";
-        for (size_t k = 0; k < task->GetWriteRegions().size(); ++k) {
-          LOG(INFO) << "      Region " << k << ":";
-          PrintBufferRegion(task->GetWriteRegions()[k], "        ");
-        }
-      }
-    }
-  }
-}
 
 // Helper function to print all stmts in IRStructure
 void PrintAllStmts(const IRStructure* node, int indent = 0) {
@@ -449,7 +385,7 @@ void PrintAllStmts(const IRStructure* node, int indent = 0) {
     LOG(INFO) << indent_str << "  Resource usage: CUDA=" << task->UsesCUDACore()
               << ", TMA=" << task->UsesTMACore()
               << ", Tensor=" << task->UsesTensorCore();
-    LOG(INFO) << indent_str << "  Latency: " << task->GetLatency() << " cycles, II: " << task->GetII() << " cycles, warpgroup_id: " << task->GetWarpgroupId();
+    LOG(INFO) << indent_str << "  Latency: " << task->GetLatency() << " cycles, II: " << task->GetII() << " cycles, warpgroup_id: " << task->GetWarpgroupId() << ", promote: " << task->GetPromote();
   } else if (node->IsControl()) {
     const ControlNode* control = static_cast<const ControlNode*>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";
@@ -491,6 +427,7 @@ void PrintIRStructure(const IRStructure* node, int indent = 0) {
     LOG(INFO) << indent_str << "  latency: " << task->GetLatency() << " cycles";
     LOG(INFO) << indent_str << "  II: " << task->GetII() << " cycles";
     LOG(INFO) << indent_str << "  warpgroup_id: " << task->GetWarpgroupId();
+    LOG(INFO) << indent_str << "  promote: " << task->GetPromote();
   } else if (node->IsControl()) {
     const ControlNode* control = static_cast<const ControlNode*>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";

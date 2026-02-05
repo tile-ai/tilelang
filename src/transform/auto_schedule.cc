@@ -37,6 +37,8 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/container/array.h>
 
+#include <unordered_set>
+
 
 #include <utility>
 #include <vector>
@@ -64,6 +66,8 @@ using ffi::GetRef;
 
 // Forward declaration
 std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* root, IterVar thread_var);
+void CollectTaskNodesFromIRStructure(IRStructure* node, std::vector<TaskNode*>& tasks);
+void CollectIRStructureNodes(IRStructure* node, std::vector<IRStructure*>& nodes);
 
 // Helper function to compare if two regions are equal
 bool RegionsEqual(const Region& a, const Region& b) {
@@ -130,17 +134,17 @@ bool IsRegisterRegion(const BufferRegion& region) {
   return mem_type == MemoryType::kRegister;
 }
 
-// Helper function to collect all register regions from a task
-std::vector<BufferRegion> CollectRegisterRegions(const TaskNode* task) {
+// Helper function to collect all register regions from an IRStructure
+std::vector<BufferRegion> CollectRegisterRegions(const IRStructure* node) {
   std::vector<BufferRegion> reg_regions;
   // Check read regions
-  for (const auto& region : task->GetReadRegions()) {
+  for (const auto& region : node->GetReadRegions()) {
     if (IsRegisterRegion(region)) {
       reg_regions.push_back(region);
     }
   }
   // Check write regions
-  for (const auto& region : task->GetWriteRegions()) {
+  for (const auto& region : node->GetWriteRegions()) {
     if (IsRegisterRegion(region)) {
       reg_regions.push_back(region);
     }
@@ -148,9 +152,9 @@ std::vector<BufferRegion> CollectRegisterRegions(const TaskNode* task) {
   return reg_regions;
 }
 
-// Check if two TaskNodes use the same register region
+// Check if two IRStructures use the same register region
 // Used for warpgroup specialization: different warpgroups cannot share registers
-bool UseSameRegisterRegion(const TaskNode* a, const TaskNode* b) {
+bool UseSameRegisterRegion(const IRStructure* a, const IRStructure* b) {
   if (!a || !b) return false;
 
   auto reg_regions_a = CollectRegisterRegions(a);
@@ -172,9 +176,9 @@ bool UseSameRegisterRegion(const TaskNode* a, const TaskNode* b) {
   return false;
 }
 
-// Helper function to count register regions in a task
-int CountRegisterRegions(const TaskNode* task) {
-  auto reg_regions = CollectRegisterRegions(task);
+// Helper function to count register regions in an IRStructure
+int CountRegisterRegions(const IRStructure* node) {
+  auto reg_regions = CollectRegisterRegions(node);
   return static_cast<int>(reg_regions.size());
 }
 
@@ -235,9 +239,9 @@ void CollectPrefixTasks(IRStructure* node, std::unordered_set<TaskNode*>& prefix
         if (!seq->children[i]) continue;
 
         if (seq->children[i]->IsTask()) {
-          TaskNode* task = static_cast<TaskNode*>(seq->children[i].get());
-          if (!found_reg && CountRegisterRegions(task) == 0) {
+          if (!found_reg && CountRegisterRegions(seq->children[i].get()) == 0) {
             // This is a prefix task (consecutive task without register region at the beginning)
+            TaskNode* task = static_cast<TaskNode*>(seq->children[i].get());
             prefix_tasks.insert(task);
           } else {
             // Found a task with register region or after a task with register region
@@ -576,41 +580,39 @@ void AssignWarpgroupIdsGlobal(IRStructure* root) {
 // Builder that collects ScheduleUnits from IRStructure
 class ScheduleUnitBuilder {
 public:
-  std::vector<ScheduleUnit> Build(IRStructure* root) {
-    units_.clear();
-    current_unit_ = nullptr;
-    current_seq_ = nullptr;
-    current_child_idx_ = 0;
-    control_nesting_depth_ = 0;
+  void Build(IRStructure* root) {
+    LOG(INFO) << "[Build] Starting ScheduleUnitBuilder::Build (new recursive version)";
+    scheduled_control_nodes_.clear();
+    LOG(INFO) << "[Build] Cleared scheduled control nodes set";
 
     // Global warpgroup id assignment from the top level
-    // This ensures register region constraints are respected across all ScheduleUnits
     LOG(INFO) << "Performing global warpgroup id assignment...";
     AssignWarpgroupIdsGlobal(root);
 
-    Collect(root);
-    // Finalize the last unit if any
-    FinalizeCurrentUnit();
+    LOG(INFO) << "[Build] Calling ScheduleRecursive on root IRStructure";
+    ScheduleRecursive(root);
+    LOG(INFO) << "[Build] ScheduleRecursive completed";
 
-    // Apply scheduling (Z3-based) to each unit and update IRStructure
-    for (auto& unit : units_) {
-      ApplyScheduling(unit);
-    }
-
-    return std::move(units_);
+    LOG(INFO) << "[Build] Build completed, IRStructure has been scheduled in place";
   }
 
+  // New recursive scheduling function that replaces Collect method
+  // Directly schedules the entire IRStructure tree recursively in place
+  void ScheduleRecursive(IRStructure* node);
+
   // Z3-based scheduler that calls Python implementation via FFI
-  std::vector<TaskNode*> Z3SchedulePython(const std::vector<TaskNode*>& tasks) {
-    size_t n = tasks.size();
+  std::vector<IRStructure*> Z3SchedulePython(const std::vector<IRStructure*>& nodes) {
+    size_t n = nodes.size();
     if (n <= 1) {
       if (n == 1) {
-        tasks[0]->SetStartTime(0);
+        // For TaskNode, set start time
+        if (nodes[0]->IsTask()) {
+          TaskNode* task = static_cast<TaskNode*>(nodes[0]);
+          task->SetStartTime(0);
+        }
       }
-      return tasks;
+      return nodes;
     }
-
-    LOG(INFO) << "Z3SchedulePython: Starting Python-based scheduling for " << n << " tasks";
 
     try {
       // Get the Python-registered function using ffi::Function::GetGlobal
@@ -618,7 +620,7 @@ public:
           tvm::ffi::Function::GetGlobal("tl.transform.z3_schedule_python");
       if (!z3_schedule_func.has_value()) {
         LOG(WARNING) << "Python Z3 scheduler not registered, falling back to topological sort";
-        return tasks;
+        return nodes;
       }
 
       // Prepare input data
@@ -633,22 +635,22 @@ public:
       resource_flags.reserve(n);
 
       for (size_t i = 0; i < n; ++i) {
-        const TaskNode* task = tasks[i];
-        latencies.push_back(task->GetLatency());
-        iis.push_back(task->GetII());
+        const IRStructure* node = nodes[i];
+        latencies.push_back(node->GetLatency());
+        iis.push_back(node->GetII());
 
         // Encode resource flags as bitmask
         int64_t flags = 0;
-        if (task->UsesCUDACore()) flags |= 1;
-        if (task->UsesTMACore()) flags |= 2;
-        if (task->UsesTensorCore()) flags |= 4;
+        if (node->UsesCUDACore()) flags |= 1;
+        if (node->UsesTMACore()) flags |= 2;
+        if (node->UsesTensorCore()) flags |= 4;
         resource_flags.push_back(flags);
       }
 
       // Collect data dependencies
       for (size_t i = 0; i < n; ++i) {
         for (size_t j = i + 1; j < n; ++j) {
-          if (HasDependency(tasks[i], tasks[j])) {
+          if (HasDependency(nodes[i], nodes[j])) {
             data_deps.emplace_back(i, j);
           }
         }
@@ -657,15 +659,11 @@ public:
       // Collect resource dependencies
       for (size_t i = 0; i < n; ++i) {
         for (size_t j = i + 1; j < n; ++j) {
-          if (HasResourceDependency(tasks[i], tasks[j])) {
+          if (HasResourceDependency(nodes[i], nodes[j])) {
             resource_deps.emplace_back(i, j);
           }
         }
       }
-
-      LOG(INFO) << "Z3SchedulePython: Calling Python function with "
-                << data_deps.size() << " data dependencies and "
-                << resource_deps.size() << " resource dependencies";
 
       // Convert vectors to TVM containers
       ffi::Array<int64_t> tvm_latencies;
@@ -703,12 +701,16 @@ public:
 
       if (start_times.size() != n) {
         LOG(WARNING) << "Python Z3 scheduler returned invalid results (size mismatch), falling back to topological sort";
-        return tasks;
+        return nodes;
       }
 
-      // Apply start times to tasks
+      // Apply start times to nodes
       for (size_t i = 0; i < n; ++i) {
-        tasks[i]->SetStartTime(start_times[i]);
+        // Only TaskNode has SetStartTime method
+        if (nodes[i]->IsTask()) {
+          TaskNode* task = static_cast<TaskNode*>(nodes[i]);
+          task->SetStartTime(start_times[i]);
+        }
       }
 
       // Create sorted task list based on start_time (and original index as tie-breaker)
@@ -726,38 +728,40 @@ public:
                   return a.second < b.second;
                 });
 
-      // Create sorted task list
-      std::vector<TaskNode*> sorted_tasks;
-      sorted_tasks.reserve(n);
+      // Create sorted node list
+      std::vector<IRStructure*> sorted_nodes;
+      sorted_nodes.reserve(n);
       for (const auto& p : start_time_with_idx) {
-        sorted_tasks.push_back(tasks[p.second]);
+        sorted_nodes.push_back(nodes[p.second]);
       }
 
-      LOG(INFO) << "Z3SchedulePython: Python scheduling completed successfully";
-      return sorted_tasks;
+      return sorted_nodes;
 
     } catch (const std::exception& e) {
       LOG(WARNING) << "Python Z3 scheduler failed with exception: " << e.what()
                    << ", falling back to topological sort";
-      return tasks;
+      return nodes;
     } catch (...) {
       LOG(WARNING) << "Python Z3 scheduler failed with unknown exception, falling back to topological sort";
-      return tasks;
+      return nodes;
     }
   }
 
   // Z3-based scheduler for loops that calls Python implementation via FFI
   // with distance-aware dependencies
-  std::vector<TaskNode*> Z3SchedulePythonLoop(const std::vector<TaskNode*>& tasks) {
-    size_t n = tasks.size();
+  std::pair<std::vector<IRStructure*>, int64_t> Z3SchedulePythonLoop(const std::vector<IRStructure*>& nodes) {
+    size_t n = nodes.size();
+    int64_t ii = 1; // default II
     if (n <= 1) {
       if (n == 1) {
-        tasks[0]->SetStartTime(0);
+        // Only TaskNode has SetStartTime method
+        if (nodes[0]->IsTask()) {
+          TaskNode* task = static_cast<TaskNode*>(nodes[0]);
+          task->SetStartTime(0);
+        }
       }
-      return tasks;
+      return std::make_pair(nodes, ii);
     }
-
-    LOG(INFO) << "Z3SchedulePythonLoop: Starting Python-based loop scheduling for " << n << " tasks";
 
     try {
       // Get the Python-registered function using ffi::Function::GetGlobal
@@ -765,7 +769,7 @@ public:
           tvm::ffi::Function::GetGlobal("tl.transform.z3_schedule_loop_python");
       if (!z3_schedule_loop_func.has_value()) {
         LOG(WARNING) << "Python Z3 loop scheduler not registered, falling back to topological sort";
-        return tasks;
+        return std::make_pair(nodes, ii);
       }
 
       // Prepare input data
@@ -780,15 +784,15 @@ public:
       resource_flags.reserve(n);
 
       for (size_t i = 0; i < n; ++i) {
-        const TaskNode* task = tasks[i];
-        latencies.push_back(task->GetLatency());
-        iis.push_back(task->GetII());
+        const IRStructure* node = nodes[i];
+        latencies.push_back(node->GetLatency());
+        iis.push_back(node->GetII());
 
         // Encode resource flags as bitmask
         int64_t flags = 0;
-        if (task->UsesCUDACore()) flags |= 1;
-        if (task->UsesTMACore()) flags |= 2;
-        if (task->UsesTensorCore()) flags |= 4;
+        if (node->UsesCUDACore()) flags |= 1;
+        if (node->UsesTMACore()) flags |= 2;
+        if (node->UsesTensorCore()) flags |= 4;
         resource_flags.push_back(flags);
       }
 
@@ -797,7 +801,7 @@ public:
       for (size_t i = 0; i < n; ++i) {
         for (size_t j = 0; j < n; ++j) {
           if (i == j) continue;  // Skip self-dependency
-          if (HasDependency(tasks[i], tasks[j])) {
+          if (HasDependency(nodes[i], nodes[j])) {
             // distance = 0 if i < j, 1 if i > j
             int64_t distance = (i < j) ? 0 : 1;
             data_deps.emplace_back(i, j, distance);
@@ -808,15 +812,11 @@ public:
       // Collect resource dependencies
       for (size_t i = 0; i < n; ++i) {
         for (size_t j = i + 1; j < n; ++j) {
-          if (HasResourceDependency(tasks[i], tasks[j])) {
+          if (HasResourceDependency(nodes[i], nodes[j])) {
             resource_deps.emplace_back(i, j);
           }
         }
       }
-
-      LOG(INFO) << "Z3SchedulePythonLoop: Calling Python loop scheduler with "
-                << data_deps.size() << " data dependencies and "
-                << resource_deps.size() << " resource dependencies";
 
       // Convert vectors to TVM containers
       ffi::Array<int64_t> tvm_latencies;
@@ -855,26 +855,29 @@ public:
 
       ffi::Array<int64_t> start_times = return_val.get<0>();
       ffi::Array<bool> promotes = return_val.get<1>();
+      ii = return_val.get<2>();
 
 
       if (start_times.size() != n || promotes.size() != n) {
         LOG(WARNING) << "Python Z3 loop scheduler returned invalid results (size mismatch), falling back to topological sort";
-        return tasks;
+        return std::make_pair(nodes, ii);
       }
 
-      // Apply start times and promote flags to tasks
+      // Apply start times and promote flags to nodes
       size_t num_promoted = 0;
       for (size_t i = 0; i < n; ++i) {
-        tasks[i]->SetStartTime(start_times[i]);
-        bool promote = promotes[i] != 0;  // Convert int to bool
-        tasks[i]->SetPromote(promote);
-        if (promote) {
-          num_promoted++;
+        // Only TaskNode has SetStartTime and SetPromote methods
+        if (nodes[i]->IsTask()) {
+          TaskNode* task = static_cast<TaskNode*>(nodes[i]);
+          task->SetStartTime(start_times[i]);
+          bool promote = promotes[i] != 0;  // Convert int to bool
+          task->SetPromote(promote);
+          if (promote) {
+            num_promoted++;
+          }
         }
       }
-      LOG(INFO) << "Z3SchedulePythonLoop: " << num_promoted << " tasks marked for promotion";
       if (num_promoted > 0) {
-        LOG(INFO) << "Z3SchedulePythonLoop: Promote flags can be used for loop transformation (software pipelining)";
         // Promote transformation will be applied in IRStructureRewriter
         // For promoted tasks, they should be executed in previous iteration
         // Loop bounds will be extended by step (not II) as per user requirement
@@ -903,23 +906,22 @@ public:
                   return a.second < b.second;
                 });
 
-      // Create sorted task list
-      std::vector<TaskNode*> sorted_tasks;
-      sorted_tasks.reserve(n);
+      // Create sorted node list
+      std::vector<IRStructure*> sorted_nodes;
+      sorted_nodes.reserve(n);
       for (const auto& p : start_time_with_idx) {
-        sorted_tasks.push_back(tasks[p.second]);
+        sorted_nodes.push_back(nodes[p.second]);
       }
 
-      LOG(INFO) << "Z3SchedulePythonLoop: Python loop scheduling completed successfully";
-      return sorted_tasks;
+      return std::make_pair(sorted_nodes, ii);
 
     } catch (const std::exception& e) {
       LOG(WARNING) << "Python Z3 loop scheduler failed with exception: " << e.what()
                    << ", falling back to topological sort";
-      return tasks;
+      return std::make_pair(nodes, ii);
     } catch (...) {
       LOG(WARNING) << "Python Z3 loop scheduler failed with unknown exception, falling back to topological sort";
-      return tasks;
+      return std::make_pair(nodes, ii);
     }
   }
 
@@ -1080,23 +1082,16 @@ public:
 
 
 private:
-  std::vector<ScheduleUnit> units_;
-  ScheduleUnit* current_unit_{nullptr};
   IterVar thread_var_;  // Thread index variable for warpgroup partition
-  SequenceNode* current_seq_{nullptr};
-  size_t current_child_idx_{0};
-  int control_nesting_depth_{0};
-  ControlNode* current_control_node_{nullptr};  // Track current ControlNode for promote transformation
-  bool collecting_prefix_unit_{false};  // Whether we're collecting prefix unit (tasks without register regions)
-  bool prefix_unit_finalized_{false};   // Whether prefix unit has been finalized (after first task with register regions)
+  std::unordered_set<ControlNode*> scheduled_control_nodes_;  // Track already scheduled ControlNodes to avoid duplicate scheduling
 
   // Check if two regions refer to the same buffer
   bool SameBuffer(const BufferRegion& a, const BufferRegion& b) const {
     return a->buffer.same_as(b->buffer);
   }
 
-  // Check if two TaskNodes have data dependency (excluding read-after-read)
-  bool HasDependency(const TaskNode* a, const TaskNode* b) const {
+  // Check if two IRStructures have data dependency (excluding read-after-read)
+  bool HasDependency(const IRStructure* a, const IRStructure* b) const {
     // Check all combinations of accesses
     // a writes, b reads (RAW)
     // a reads, b writes (WAR)
@@ -1121,13 +1116,13 @@ private:
     return false;
   }
 
-  // Check if a task has any register region
-  bool HasRegisterRegion(const TaskNode* task) const {
-    return CountRegisterRegions(task) > 0;
+  // Check if an IRStructure has any register region
+  bool HasRegisterRegion(const IRStructure* node) const {
+    return CountRegisterRegions(node) > 0;
   }
 
-  // Check if two TaskNodes have resource dependency (use same hardware resource)
-  bool HasResourceDependency(const TaskNode* a, const TaskNode* b) const {
+  // Check if two IRStructures have resource dependency (use same hardware resource)
+  bool HasResourceDependency(const IRStructure* a, const IRStructure* b) const {
     // Resource dependencies occur when two tasks use the same hardware resource
     // that cannot be used simultaneously (or has limited throughput)
 
@@ -1158,264 +1153,356 @@ private:
     return false;
   }
 
-  // Apply scheduling (Z3-based) to a ScheduleUnit and update parent SequenceNode
-  void ApplyScheduling(ScheduleUnit& unit) {
-    if (unit.tasks.size() <= 1) {
-      // No reordering needed for single task
-      // Still assign warpgroup id if single task
-      if (!unit.tasks.empty()) {
-        unit.tasks[0]->SetWarpgroupId(0); // assign to warpgroup 0 by default
+  // Helper function to recursively schedule ControlNode internals
+  void ScheduleControlNodeRecursive(ControlNode* ctrl) {
+    if (!ctrl || !ctrl->child) return;
+
+    LOG(INFO) << "[ScheduleControlNodeRecursive] Entering ControlNode at " << ctrl;
+
+    // Check if this ControlNode has already been scheduled
+    if (scheduled_control_nodes_.find(ctrl) != scheduled_control_nodes_.end()) {
+      LOG(INFO) << "[ScheduleControlNodeRecursive] ControlNode at " << ctrl << " already scheduled, skipping";
+      return;
+    }
+    // Mark as scheduled
+    scheduled_control_nodes_.insert(ctrl);
+    LOG(INFO) << "[ScheduleControlNodeRecursive] Marked ControlNode at " << ctrl << " as scheduled";
+
+    // First, recursively schedule any nested ControlNodes inside this ControlNode
+    // If child is a SequenceNode, process its children recursively
+    if (ctrl->child->IsSequence()) {
+      SequenceNode* seq = static_cast<SequenceNode*>(ctrl->child.get());
+      LOG(INFO) << "[ScheduleControlNodeRecursive] Child is SequenceNode with " << seq->children.size() << " children";
+      int control_child_count = 0;
+      for (auto& child : seq->children) {
+        if (child && child->IsControl()) {
+          control_child_count++;
+          LOG(INFO) << "[ScheduleControlNodeRecursive] Found nested ControlNode at " << child.get();
+          ScheduleControlNodeRecursive(static_cast<ControlNode*>(child.get()));
+        }
       }
-      return;
-    }
-
-
-    if (!unit.parent_seq) {
-      // No parent sequence to update (should not happen for tasks from SequenceNode)
-      LOG(WARNING) << "ScheduleUnit has no parent SequenceNode, skipping reorder";
-      return;
-    }
-
-    // Perform Z3-based scheduling using Python implementation
-    // Use loop-aware scheduler if inside control node (loop)
-    std::vector<TaskNode*> sorted_tasks;
-    if (unit.inside_control_node) {
-      LOG(INFO) << "ScheduleUnit is inside control node, using loop-aware scheduler";
-      sorted_tasks = Z3SchedulePythonLoop(unit.tasks);
+      LOG(INFO) << "[ScheduleControlNodeRecursive] Processed " << control_child_count << " nested ControlNodes";
+    } else if (ctrl->child->IsControl()) {
+      // Child is itself a ControlNode (nested loop)
+      LOG(INFO) << "[ScheduleControlNodeRecursive] Child is itself a ControlNode (nested loop) at " << ctrl->child.get();
+      ScheduleControlNodeRecursive(static_cast<ControlNode*>(ctrl->child.get()));
     } else {
-      LOG(INFO) << "ScheduleUnit is not inside control node, using regular scheduler";
-      sorted_tasks = Z3SchedulePython(unit.tasks);
+      LOG(INFO) << "[ScheduleControlNodeRecursive] Child is a TaskNode or other non-ControlNode type";
     }
 
-    // Check if order actually changed
-    bool order_changed = false;
-    for (size_t i = 0; i < sorted_tasks.size(); ++i) {
-      if (sorted_tasks[i] != unit.tasks[i]) {
-        order_changed = true;
-        break;
+    // Now schedule the direct children of this ControlNode
+    // Collect direct child nodes (not recursively)
+    std::vector<IRStructure*> direct_children;
+    if (ctrl->child->IsSequence()) {
+      SequenceNode* seq = static_cast<SequenceNode*>(ctrl->child.get());
+      for (auto& child : seq->children) {
+        if (child) {
+          direct_children.push_back(child.get());
+          LOG(INFO) << "[ScheduleControlNodeRecursive] Adding child type: "
+                    << (child->IsTask() ? "TaskNode" : child->IsControl() ? "ControlNode" : "SequenceNode")
+                    << " at " << child.get();
+        }
       }
+    } else {
+      // Child is a single node (TaskNode or ControlNode)
+      direct_children.push_back(ctrl->child.get());
+      LOG(INFO) << "[ScheduleControlNodeRecursive] Single child type: "
+                << (ctrl->child->IsTask() ? "TaskNode" : ctrl->child->IsControl() ? "ControlNode" : "SequenceNode")
+                << " at " << ctrl->child.get();
     }
+    LOG(INFO) << "[ScheduleControlNodeRecursive] Collected " << direct_children.size() << " direct children";
 
-    if (!order_changed) {
-      // Order unchanged, nothing to do
+    if (direct_children.size() <= 1) {
+      // No need to schedule if only one or zero direct children
+      // Still need to check for promote transformation
+      LOG(INFO) << "[ScheduleControlNodeRecursive] Only " << direct_children.size() << " direct children, skipping scheduling";
+      CheckAndApplyPromoteTransformation(ctrl);
       return;
     }
 
-    // Update unit.tasks to sorted order
-    unit.tasks = std::move(sorted_tasks);
+    // Schedule the direct children using loop-aware scheduler
+    LOG(INFO) << "[ScheduleControlNodeRecursive] Calling Z3SchedulePythonLoop with " << direct_children.size() << " nodes";
+    auto result = Z3SchedulePythonLoop(direct_children);
+    std::vector<IRStructure*> sorted_nodes = result.first;
+    int64_t ii = result.second;
+    LOG(INFO) << "[ScheduleControlNodeRecursive] Z3SchedulePythonLoop returned II=" << ii << " and " << sorted_nodes.size() << " sorted nodes";
 
-    // Reorder children in parent SequenceNode
-    size_t start_idx = unit.start_idx;
-    size_t num_tasks = unit.tasks.size();
+    // Apply promote transformation if any tasks are marked for promotion
+    CheckAndApplyPromoteTransformation(ctrl);
 
-    // Extract the relevant children from parent sequence
-    std::vector<std::unique_ptr<IRStructure>> task_children;
-    task_children.reserve(num_tasks);
-
-    // First, move the task children out of parent sequence
-    for (size_t i = 0; i < num_tasks; ++i) {
-      task_children.push_back(std::move(unit.parent_seq->children[start_idx + i]));
+    // Compute overall latency: II * tripcount
+    int64_t tripcount = 100; // default if not constant
+    if (auto extent_int = ctrl->control.get()->extent.as<IntImm>()) {
+      tripcount = extent_int.value()->value;
     }
+    int64_t overall_latency = ii * tripcount;
+    LOG(INFO) << "ControlNode internal scheduling: II=" << ii << ", tripcount=" << tripcount << ", latency=" << overall_latency;
 
-    // Create a mapping from TaskNode pointer to its index in task_children
-    std::unordered_map<TaskNode*, size_t> task_to_old_index;
-    for (size_t i = 0; i < num_tasks; ++i) {
-      // Each child should be a TaskNode
-      IRStructure* child_ptr = task_children[i].get();
-      if (child_ptr->IsTask()) {
-        TaskNode* task = static_cast<TaskNode*>(child_ptr);
-        task_to_old_index[task] = i;
-      } else {
-        LOG(FATAL) << "Expected TaskNode child in ScheduleUnit";
-      }
-    }
+    // Apply the scheduling result by reordering children if child is a SequenceNode
+    if (ctrl->child->IsSequence()) {
+      SequenceNode* seq = static_cast<SequenceNode*>(ctrl->child.get());
 
-    // Reorder task_children according to sorted_tasks
-    std::vector<std::unique_ptr<IRStructure>> reordered_children;
-    reordered_children.reserve(num_tasks);
-
-    for (TaskNode* task : unit.tasks) {
-      auto it = task_to_old_index.find(task);
-      if (it == task_to_old_index.end()) {
-        LOG(FATAL) << "TaskNode not found in extracted children";
-      }
-      size_t old_idx = it->second;
-      reordered_children.push_back(std::move(task_children[old_idx]));
-    }
-
-    // Move reordered children back to parent sequence
-    for (size_t i = 0; i < num_tasks; ++i) {
-      unit.parent_seq->children[start_idx + i] = std::move(reordered_children[i]);
-    }
-
-    LOG(INFO) << "Reordered " << num_tasks << " TaskNodes in SequenceNode";
-
-    // Apply promote transformation if inside control node (loop)
-    if (unit.inside_control_node) {
-      LOG(INFO) << "ScheduleUnit is inside control node, checking for promoted tasks";
-
-      // Check if any tasks are marked for promotion
-      bool has_promoted_tasks = false;
-      for (TaskNode* task : unit.tasks) {
-        if (task->GetPromote()) {
-          has_promoted_tasks = true;
+      // Check if order actually changed
+      bool order_changed = false;
+      for (size_t i = 0; i < sorted_nodes.size(); ++i) {
+        if (sorted_nodes[i] != direct_children[i]) {
+          order_changed = true;
           break;
         }
       }
 
-      if (has_promoted_tasks) {
-        LOG(INFO) << "Found promoted tasks, applying promote transformation";
+      if (order_changed) {
+        // Create a mapping from IRStructure pointer to its index in seq->children
+        std::unordered_map<IRStructure*, size_t> node_to_old_index;
+        for (size_t i = 0; i < seq->children.size(); ++i) {
+          IRStructure* child_ptr = seq->children[i].get();
+          node_to_old_index[child_ptr] = i;
+        }
 
-        if (unit.control_node) {
-          LOG(INFO) << "ControlNode available, applying promote transformation";
-          ApplyPromoteTransformation(unit.tasks, unit.control_node);
-        } else {
-          LOG(WARNING) << "ControlNode not set in ScheduleUnit, cannot apply promote transformation";
-          LOG(INFO) << "Promote transformation requires access to For loop step information";
+        // Reorder seq->children according to sorted_nodes
+        std::vector<std::unique_ptr<IRStructure>> reordered_children;
+        reordered_children.reserve(seq->children.size());
+
+        for (IRStructure* node : sorted_nodes) {
+          auto it = node_to_old_index.find(node);
+          if (it == node_to_old_index.end()) {
+            LOG(FATAL) << "IRStructure not found in SequenceNode children";
+          }
+          size_t old_idx = it->second;
+          reordered_children.push_back(std::move(seq->children[old_idx]));
+        }
+
+        // Replace seq->children with reordered children
+        seq->children = std::move(reordered_children);
+
+        LOG(INFO) << "Reordered " << sorted_nodes.size() << " children in ControlNode's SequenceNode";
+
+        // For nested scheduling: encapsulate scheduled children as a single SequenceNode
+        // This allows the scheduled unit to be treated as a whole in outer scheduling
+        if (sorted_nodes.size() > 1) {
+          LOG(INFO) << "Encapsulating scheduled children as SequenceNode for nested scheduling";
+
+          // Create a new SequenceNode
+          auto new_seq_node = std::make_unique<SequenceNode>();
+
+          // Move all children into the new SequenceNode
+          for (auto& child : seq->children) {
+            new_seq_node->children.push_back(std::move(child));
+          }
+
+          // Replace the original SequenceNode with the new encapsulated one
+          // Note: seq is a pointer to ctrl->child, which is a unique_ptr
+          // We need to replace ctrl->child with new_seq_node
+          ctrl->child = std::move(new_seq_node);
+
+          LOG(INFO) << "Scheduled children encapsulated as SequenceNode inside ControlNode";
         }
       }
     }
+    LOG(INFO) << "[ScheduleControlNodeRecursive] Completed scheduling for ControlNode at " << ctrl;
   }
 
-  void StartNewUnit() {
-    FinalizeCurrentUnit();
-    units_.emplace_back();
-    current_unit_ = &units_.back();
-    current_unit_->inside_control_node = (control_nesting_depth_ > 0);
-    // Set control_node pointer if inside a ControlNode
-    current_unit_->control_node = current_control_node_;
-  }
+  // Helper to check and apply promote transformation for a ControlNode
+  void CheckAndApplyPromoteTransformation(ControlNode* ctrl) {
+    if (!ctrl || !ctrl->child) return;
 
-  void FinalizeCurrentUnit() {
-    if (current_unit_ && current_unit_->tasks.empty()) {
-      // Remove empty unit
-      units_.pop_back();
+    // Collect all TaskNodes inside the ControlNode (recursively) for promote check
+    std::vector<TaskNode*> tasks;
+    CollectTaskNodesFromIRStructure(ctrl->child.get(), tasks);
+
+    bool has_promoted_tasks = false;
+    for (TaskNode* task : tasks) {
+      if (task->GetPromote()) {
+        has_promoted_tasks = true;
+        break;
+      }
     }
-    current_unit_ = nullptr;
-  }
 
-  void Collect(IRStructure* node) {
-    if (!node) return;
-
-    if (node->IsTask()) {
-      TaskNode* task = static_cast<TaskNode*>(node);
-      bool has_reg = HasRegisterRegion(task);
-
-      // Apply prefix optimization only when not inside a ControlNode
-      if (control_nesting_depth_ == 0) {
-        if (!has_reg) {
-          // Task without register region
-          if (collecting_prefix_unit_) {
-            // Continue adding to current prefix unit
-            // Ensure we have a current unit
-            if (!current_unit_) {
-              StartNewUnit();
-              current_unit_->parent_seq = current_seq_;
-              current_unit_->start_idx = current_child_idx_;
-            }
-            current_unit_->tasks.push_back(task);
-          } else if (!prefix_unit_finalized_) {
-            // First task without register region, start a new prefix unit
-            // Finalize any existing unit first
-            FinalizeCurrentUnit();
-            StartNewUnit();
-            current_unit_->parent_seq = current_seq_;
-            current_unit_->start_idx = current_child_idx_;
-            current_unit_->tasks.push_back(task);
-            collecting_prefix_unit_ = true;
-          } else {
-            // Prefix unit already finalized, treat as normal task
-            if (!current_unit_) {
-              StartNewUnit();
-              current_unit_->parent_seq = current_seq_;
-              current_unit_->start_idx = current_child_idx_;
-            }
-            current_unit_->tasks.push_back(task);
-          }
-        } else {
-          // Task with register region
-          if (collecting_prefix_unit_) {
-            // Finalize current prefix unit
-            FinalizeCurrentUnit();
-            collecting_prefix_unit_ = false;
-            prefix_unit_finalized_ = true;
-          } else {
-            // First task with register region marks the end of potential prefix
-            prefix_unit_finalized_ = true;
-          }
-          // Start new unit for this task (or add to existing unit if any)
-          if (!current_unit_) {
-            StartNewUnit();
-            current_unit_->parent_seq = current_seq_;
-            current_unit_->start_idx = current_child_idx_;
-          }
-          current_unit_->tasks.push_back(task);
-        }
-      } else {
-        // Inside ControlNode: no prefix optimization
-        if (!current_unit_) {
-          StartNewUnit();
-          current_unit_->parent_seq = current_seq_;
-          current_unit_->start_idx = current_child_idx_;
-        }
-        current_unit_->tasks.push_back(task);
-      }
-    } else if (node->IsSequence()) {
-      SequenceNode* seq = static_cast<SequenceNode*>(node);
-      // Save previous context
-      SequenceNode* prev_seq = current_seq_;
-      size_t prev_child_idx = current_child_idx_;
-      bool prev_collecting_prefix_unit = collecting_prefix_unit_;
-      bool prev_prefix_unit_finalized = prefix_unit_finalized_;
-
-      // Reset prefix collection state for this new sequence
-      collecting_prefix_unit_ = false;
-      prefix_unit_finalized_ = false;
-
-      // Set new context for this sequence
-      current_seq_ = seq;
-      current_child_idx_ = 0;
-
-      for (auto& child : seq->children) {
-        Collect(child.get());
-        current_child_idx_++;
-        // If child is a ControlNode, it will have finalized current_unit_
-        // and set it to nullptr. So we need to ensure that after a ControlNode,
-        // we don't continue adding to the previous unit.
-        if (child->IsControl()) {
-          // Already finalized by Collect
-        }
-      }
-
-      // Restore previous context
-      current_seq_ = prev_seq;
-      current_child_idx_ = prev_child_idx;
-      collecting_prefix_unit_ = prev_collecting_prefix_unit;
-      prefix_unit_finalized_ = prev_prefix_unit_finalized;
-    } else if (node->IsControl()) {
-      ControlNode* ctrl = static_cast<ControlNode*>(node);
-      // Finalize any current unit before entering control node
-      FinalizeCurrentUnit();
-      // Prefix optimization is disabled inside ControlNode
-      // Mark prefix unit as finalized so that after control node we don't continue collecting prefix
-      collecting_prefix_unit_ = false;
-      prefix_unit_finalized_ = true;
-      // Increase control nesting depth
-      control_nesting_depth_++;
-      // Set current ControlNode for promote transformation
-      ControlNode* prev_control_node = current_control_node_;
-      current_control_node_ = ctrl;
-      // Process the body of the control node (creates new units internally)
-      Collect(ctrl->child.get());
-      // Restore previous ControlNode
-      current_control_node_ = prev_control_node;
-      // Decrease control nesting depth
-      control_nesting_depth_--;
-      // After control node, current_unit_ should remain nullptr
-      FinalizeCurrentUnit();
+    if (has_promoted_tasks) {
+      LOG(INFO) << "ControlNode has promoted tasks, applying promote transformation";
+      ApplyPromoteTransformation(tasks, ctrl);
     }
   }
+
+
+
+
+
 };
+
+// Implementation of ScheduleRecursive function
+void ScheduleUnitBuilder::ScheduleRecursive(IRStructure* node) {
+  if (!node) return;
+
+  LOG(INFO) << "[ScheduleRecursive] Processing node at " << node
+            << " type: " << (node->IsTask() ? "TaskNode" : node->IsControl() ? "ControlNode" : "SequenceNode");
+
+  if (node->IsTask()) {
+    // TaskNode: no further scheduling needed
+    LOG(INFO) << "[ScheduleRecursive] TaskNode, no scheduling needed";
+    return;
+  } else if (node->IsSequence()) {
+    SequenceNode* seq = static_cast<SequenceNode*>(node);
+    LOG(INFO) << "[ScheduleRecursive] SequenceNode with " << seq->children.size() << " children";
+
+    // First, recursively schedule all children
+    for (size_t i = 0; i < seq->children.size(); ++i) {
+      LOG(INFO) << "[ScheduleRecursive] Recursively scheduling child " << i << " of SequenceNode";
+      ScheduleRecursive(seq->children[i].get());
+    }
+
+    // Now collect child nodes for potential scheduling
+    std::vector<IRStructure*> child_nodes;
+    child_nodes.reserve(seq->children.size());
+    for (const auto& child : seq->children) {
+      child_nodes.push_back(child.get());
+    }
+
+    // Only schedule if there are multiple nodes
+    if (child_nodes.size() > 1) {
+      LOG(INFO) << "[ScheduleRecursive] Scheduling " << child_nodes.size() << " nodes in SequenceNode";
+      std::vector<IRStructure*> sorted_nodes;
+      LOG(INFO) << "[ScheduleRecursive] Not inside control node, using Z3SchedulePython";
+      sorted_nodes = Z3SchedulePython(child_nodes);
+      LOG(INFO) << "[ScheduleRecursive] Z3SchedulePython returned " << sorted_nodes.size() << " sorted nodes";
+
+      // Check if order changed
+      bool order_changed = false;
+      for (size_t i = 0; i < sorted_nodes.size(); ++i) {
+        if (sorted_nodes[i] != child_nodes[i]) {
+          order_changed = true;
+          break;
+        }
+      }
+
+      if (order_changed) {
+        LOG(INFO) << "[ScheduleRecursive] Order changed, reordering children in SequenceNode";
+        // Create mapping from IRStructure pointer to child index
+        std::unordered_map<IRStructure*, size_t> node_to_index;
+        for (size_t i = 0; i < child_nodes.size(); ++i) {
+          node_to_index[child_nodes[i]] = i;
+        }
+
+        // Reorder children according to sorted_nodes
+        std::vector<std::unique_ptr<IRStructure>> reordered_children;
+        reordered_children.reserve(sorted_nodes.size());
+
+        for (IRStructure* sorted_node : sorted_nodes) {
+          auto it = node_to_index.find(sorted_node);
+          if (it == node_to_index.end()) {
+            LOG(FATAL) << "[ScheduleRecursive] IRStructure not found in children mapping";
+          }
+          size_t old_idx = it->second;
+          reordered_children.push_back(std::move(seq->children[old_idx]));
+        }
+
+        // Move reordered children back
+        seq->children = std::move(reordered_children);
+        LOG(INFO) << "[ScheduleRecursive] Reordered " << sorted_nodes.size() << " children in SequenceNode";
+      } else {
+        LOG(INFO) << "[ScheduleRecursive] Order unchanged, no reordering needed";
+      }
+    } else {
+      LOG(INFO) << "[ScheduleRecursive] Single child or empty, no scheduling needed";
+    }
+
+    return;
+  } else if (node->IsControl()) {
+    ControlNode* ctrl = static_cast<ControlNode*>(node);
+    LOG(INFO) << "[ScheduleRecursive] ControlNode (For loop)";
+
+    // First, recursively schedule the body (child) inside the control node
+    if (ctrl->child && !ctrl->child->IsSequence()) {
+      LOG(INFO) << "[ScheduleRecursive] Recursively scheduling ControlNode body";
+      ScheduleRecursive(ctrl->child.get());
+    }
+
+    // Now schedule the ControlNode's internal tasks (if any) as a unit
+    // The body should now be a SequenceNode containing the tasks
+    if (ctrl->child && ctrl->child->IsSequence()) {
+      SequenceNode* seq_body = static_cast<SequenceNode*>(ctrl->child.get());
+      if (seq_body->children.size() > 1) {
+        LOG(INFO) << "[ScheduleRecursive] Scheduling " << seq_body->children.size()
+                  << " nodes inside ControlNode using Z3SchedulePythonLoop";
+
+        // Collect child nodes
+        std::vector<IRStructure*> body_nodes;
+        body_nodes.reserve(seq_body->children.size());
+        for (const auto& child : seq_body->children) {
+          body_nodes.push_back(child.get());
+        }
+
+        // Call loop-aware scheduler
+        auto result = Z3SchedulePythonLoop(body_nodes);
+        std::vector<IRStructure*> sorted_nodes = result.first;
+        int64_t ii = result.second;
+        LOG(INFO) << "[ScheduleRecursive] Z3SchedulePythonLoop returned II=" << ii;
+
+        // Reorder children if order changed
+        bool order_changed = false;
+        for (size_t i = 0; i < sorted_nodes.size(); ++i) {
+          if (sorted_nodes[i] != body_nodes[i]) {
+            order_changed = true;
+            break;
+          }
+        }
+
+        if (order_changed) {
+          LOG(INFO) << "[ScheduleRecursive] Order changed inside ControlNode, reordering";
+          std::unordered_map<IRStructure*, size_t> node_to_index;
+          for (size_t i = 0; i < body_nodes.size(); ++i) {
+            node_to_index[body_nodes[i]] = i;
+          }
+
+          std::vector<std::unique_ptr<IRStructure>> reordered_children;
+          reordered_children.reserve(sorted_nodes.size());
+          for (IRStructure* sorted_node : sorted_nodes) {
+            auto it = node_to_index.find(sorted_node);
+            if (it == node_to_index.end()) {
+              LOG(FATAL) << "[ScheduleRecursive] IRStructure not found in children mapping";
+            }
+            reordered_children.push_back(std::move(seq_body->children[it->second]));
+          }
+          seq_body->children = std::move(reordered_children);
+        }
+
+        // Apply promote transformation if any tasks are marked for promotion
+        CheckAndApplyPromoteTransformation(ctrl);
+
+        // Estimate overall latency: II * tripcount
+        // Get tripcount from For loop extent
+        int64_t tripcount = 100; // default if not constant
+        if (const auto* extent_int = ctrl->control->extent.as<IntImmNode>()) {
+          tripcount = extent_int->value;
+        }
+        int64_t overall_latency = ii * tripcount;
+
+        // Set II and latency on the ControlNode (which delegates to child)
+        ctrl->SetII(overall_latency);
+        ctrl->SetLatency(overall_latency);
+
+        LOG(INFO) << "[ScheduleRecursive] ControlNode scheduled: II=" << ii
+                  << ", tripcount=" << tripcount << ", overall_latency=" << overall_latency;
+      } else {
+        LOG(INFO) << "[ScheduleRecursive] ControlNode body has " << seq_body->children.size()
+                  << " nodes, no internal scheduling needed";
+        // Still check for promote transformation
+        CheckAndApplyPromoteTransformation(ctrl);
+      }
+    } else {
+      LOG(INFO) << "[ScheduleRecursive] ControlNode body is not a SequenceNode or empty";
+      // Still check for promote transformation if there's a child
+      if (ctrl->child) {
+        CheckAndApplyPromoteTransformation(ctrl);
+      }
+    }
+
+    LOG(INFO) << "[ScheduleRecursive] ControlNode processing complete";
+    return;
+  }
+
+  LOG(FATAL) << "[ScheduleRecursive] Unknown IRStructure type";
+}
 
 
 // Rewriter to convert IRStructure back to TIR statements
@@ -1660,7 +1747,8 @@ protected:
 
     LOG(INFO) << "  TaskNode resource usage: CUDA=" << task_node->UsesCUDACore()
               << ", TMA=" << task_node->UsesTMACore()
-              << ", Tensor=" << task_node->UsesTensorCore();
+              << ", Tensor=" << task_node->UsesTensorCore()
+              << ", promote: " << task_node->GetPromote();
 
     root_ = std::move(task_node);
   }
@@ -1856,8 +1944,7 @@ tvm::transform::Pass AutoSchedule() {
       } else {
         LOG(WARNING) << "Could not find thread index variable, warpgroup partition will use default";
       }
-      auto schedule_units = unit_builder.Build(ir_structure.get());
-      PrintScheduleUnits(schedule_units);
+      unit_builder.Build(ir_structure.get());
 
       // Print the modified summary view
       LOG(INFO) << "IRStructure modified summary:";
@@ -1948,6 +2035,26 @@ void CollectTaskNodesFromIRStructure(IRStructure* node, std::vector<TaskNode*>& 
       CollectTaskNodesFromIRStructure(ctrl->child.get(), tasks);
     }
   }
+}
+
+// Helper function to collect all IRStructure nodes (not just TaskNodes) from an IRStructure
+void CollectIRStructureNodes(IRStructure* node, std::vector<IRStructure*>& nodes) {
+  if (!node) return;
+  nodes.push_back(node);
+  if (node->IsSequence()) {
+    SequenceNode* seq = static_cast<SequenceNode*>(node);
+    for (const auto& child : seq->children) {
+      if (child) {
+        CollectIRStructureNodes(child.get(), nodes);
+      }
+    }
+  } else if (node->IsControl()) {
+    ControlNode* ctrl = static_cast<ControlNode*>(node);
+    if (ctrl->child) {
+      CollectIRStructureNodes(ctrl->child.get(), nodes);
+    }
+  }
+  // For TaskNode, no recursion needed
 }
 
 // Helper function to clone IRStructure with warpgroup filter
@@ -2207,173 +2314,45 @@ std::unique_ptr<IRStructure> ApplyWarpgroupPartitionToIRStructure(IRStructure* r
   }
 
   // Create appropriate IRStructure based on original node type
-  if (root->IsControl()) {
-    // For ControlNode, we need to preserve the outer For loop
-    // but filter tasks inside based on warpgroup id
-    const ControlNode* original_ctrl = static_cast<const ControlNode*>(root);
+  auto new_task_node = std::make_unique<TaskNode>();
+  new_task_node->stmts.push_back(combined_stmt);
 
-    // Clone and filter the child of ControlNode for each warpgroup
-    std::unique_ptr<IRStructure> wg0_child = nullptr;
-    std::unique_ptr<IRStructure> wg1_child = nullptr;
-    if (original_ctrl->child) {
-      wg0_child = CloneIRStructureWithWarpgroupFilter(original_ctrl->child.get(), 0);
-      wg1_child = CloneIRStructureWithWarpgroupFilter(original_ctrl->child.get(), 1);
-    }
-
-    // Convert filtered children to Stmt
-    Stmt then_body = wg0_child ? irstructure_to_stmt(wg0_child.get()) : Evaluate(0);
-    Stmt else_body = wg1_child ? irstructure_to_stmt(wg1_child.get()) : Evaluate(0);
-
-    // Create IfThenElse statement
-    Stmt if_then_else_stmt;
-
-    // Check if each warpgroup has actual statements
-    bool wg0_has_stmts = wg0_child ? has_actual_statements(wg0_child.get()) : false;
-    bool wg1_has_stmts = wg1_child ? has_actual_statements(wg1_child.get()) : false;
-
-    if (wg0_has_stmts && wg1_has_stmts) {
-      if_then_else_stmt = IfThenElse(condition, then_body, else_body);
-    } else if (wg0_has_stmts) {
-      // Only warpgroup 0 has statements, execute unconditionally
-      if_then_else_stmt = then_body;
-    } else if (wg1_has_stmts) {
-      // Only warpgroup 1 has statements, execute unconditionally
-      if_then_else_stmt = else_body;
-    } else {
-      LOG(WARNING) << "Both warpgroups have no statements, creating empty statement";
-      if_then_else_stmt = Evaluate(0);
-    }
-
-    // Create new ControlNode with the same For loop parameters
-    auto new_ctrl = std::make_unique<ControlNode>();
-    new_ctrl->control = original_ctrl->control;
-
-    // Create a TaskNode to hold the combined statement as the body
-    auto body_task_node = std::make_unique<TaskNode>();
-    body_task_node->stmts.push_back(if_then_else_stmt);
-
-    // Copy resource usage flags from all tasks (take union)
-    bool uses_cuda_core = false;
-    bool uses_tma_core = false;
-    bool uses_tensor_core = false;
-    int64_t total_latency = 0;
-    int64_t max_ii = 0;
-    for (TaskNode* task : all_tasks) {
-      uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
-      uses_tma_core = uses_tma_core || task->UsesTMACore();
-      uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
-      total_latency += task->GetLatency();
-      max_ii = std::max(max_ii, task->GetII());
-    }
-    body_task_node->SetUsesCUDACore(uses_cuda_core);
-    body_task_node->SetUsesTMACore(uses_tma_core);
-    body_task_node->SetUsesTensorCore(uses_tensor_core);
-    body_task_node->SetLatency(total_latency);
-    body_task_node->SetII(max_ii);
-    body_task_node->SetWarpgroupId(-1);  // mixed
-
-    // Also copy read/write regions from all tasks
-    for (TaskNode* task : all_tasks) {
-      auto read_regions = task->GetReadRegions();
-      for (const auto& region : read_regions) {
-        body_task_node->AddReadRegion(region);
-      }
-      auto write_regions = task->GetWriteRegions();
-      for (const auto& region : write_regions) {
-        body_task_node->AddWriteRegion(region);
-      }
-    }
-
-    new_ctrl->child = std::move(body_task_node);
-    LOG(INFO) << "Created warpgroup partition inside ControlNode: if " << condition
-              << " execute warpgroup 0, else execute warpgroup 1";
-    return new_ctrl;
-
-  } else if (root->IsSequence()) {
-    // Create a new SequenceNode with a single TaskNode containing the IfThenElse
-    auto new_seq = std::make_unique<SequenceNode>();
-    auto new_task_node = std::make_unique<TaskNode>();
-    new_task_node->stmts.push_back(combined_stmt);
-
-    // Copy resource usage flags from all tasks (take union)
-    bool uses_cuda_core = false;
-    bool uses_tma_core = false;
-    bool uses_tensor_core = false;
-    int64_t total_latency = 0;
-    int64_t max_ii = 0;
-    for (TaskNode* task : all_tasks) {
-      uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
-      uses_tma_core = uses_tma_core || task->UsesTMACore();
-      uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
-      total_latency += task->GetLatency();
-      max_ii = std::max(max_ii, task->GetII());
-    }
-    new_task_node->SetUsesCUDACore(uses_cuda_core);
-    new_task_node->SetUsesTMACore(uses_tma_core);
-    new_task_node->SetUsesTensorCore(uses_tensor_core);
-    new_task_node->SetLatency(total_latency);
-    new_task_node->SetII(max_ii);
-    new_task_node->SetWarpgroupId(-1);  // mixed
-
-    // Also copy read/write regions from all tasks
-    for (TaskNode* task : all_tasks) {
-      auto read_regions = task->GetReadRegions();
-      for (const auto& region : read_regions) {
-        new_task_node->AddReadRegion(region);
-      }
-      auto write_regions = task->GetWriteRegions();
-      for (const auto& region : write_regions) {
-        new_task_node->AddWriteRegion(region);
-      }
-    }
-
-    new_seq->children.push_back(std::move(new_task_node));
-    LOG(INFO) << "Created warpgroup partition in SequenceNode: if " << condition
-              << " execute warpgroup 0, else execute warpgroup 1";
-    return new_seq;
-
-  } else {
-    // TaskNode or unknown type - create a TaskNode containing the IfThenElse statement
-    auto new_task_node = std::make_unique<TaskNode>();
-    new_task_node->stmts.push_back(combined_stmt);
-
-    // Copy resource usage flags from all tasks (take union)
-    bool uses_cuda_core = false;
-    bool uses_tma_core = false;
-    bool uses_tensor_core = false;
-    int64_t total_latency = 0;
-    int64_t max_ii = 0;
-    for (TaskNode* task : all_tasks) {
-      uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
-      uses_tma_core = uses_tma_core || task->UsesTMACore();
-      uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
-      total_latency += task->GetLatency();
-      max_ii = std::max(max_ii, task->GetII());
-    }
-    new_task_node->SetUsesCUDACore(uses_cuda_core);
-    new_task_node->SetUsesTMACore(uses_tma_core);
-    new_task_node->SetUsesTensorCore(uses_tensor_core);
-    new_task_node->SetLatency(total_latency);
-    new_task_node->SetII(max_ii);
-    new_task_node->SetWarpgroupId(-1);  // mixed
-
-    // Also copy read/write regions from all tasks
-    for (TaskNode* task : all_tasks) {
-      auto read_regions = task->GetReadRegions();
-      for (const auto& region : read_regions) {
-        new_task_node->AddReadRegion(region);
-      }
-      auto write_regions = task->GetWriteRegions();
-      for (const auto& region : write_regions) {
-        new_task_node->AddWriteRegion(region);
-      }
-    }
-
-    LOG(INFO) << "Created warpgroup partition in TaskNode: if " << condition
-              << " execute warpgroup 0, else execute warpgroup 1";
-
-    return new_task_node;
+  // Copy resource usage flags from all tasks (take union)
+  bool uses_cuda_core = false;
+  bool uses_tma_core = false;
+  bool uses_tensor_core = false;
+  int64_t total_latency = 0;
+  int64_t max_ii = 0;
+  for (TaskNode* task : all_tasks) {
+    uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
+    uses_tma_core = uses_tma_core || task->UsesTMACore();
+    uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
+    total_latency += task->GetLatency();
+    max_ii = std::max(max_ii, task->GetII());
   }
+  new_task_node->SetUsesCUDACore(uses_cuda_core);
+  new_task_node->SetUsesTMACore(uses_tma_core);
+  new_task_node->SetUsesTensorCore(uses_tensor_core);
+  new_task_node->SetLatency(total_latency);
+  new_task_node->SetII(max_ii);
+  new_task_node->SetWarpgroupId(-1);  // mixed
+
+  // Also copy read/write regions from all tasks
+  for (TaskNode* task : all_tasks) {
+    auto read_regions = task->GetReadRegions();
+    for (const auto& region : read_regions) {
+      new_task_node->AddReadRegion(region);
+    }
+    auto write_regions = task->GetWriteRegions();
+    for (const auto& region : write_regions) {
+      new_task_node->AddWriteRegion(region);
+    }
+  }
+
+  LOG(INFO) << "Created warpgroup partition in TaskNode: if " << condition
+            << " execute warpgroup 0, else execute warpgroup 1";
+
+  return new_task_node;
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
