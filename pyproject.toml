@@ -59,7 +59,7 @@ nvcc = [
 
 [build-system]
 requires = [
-    "cython>=3.0.0",
+    "cython>=3.1.0",
     "scikit-build-core",
     "z3-solver>=4.13.0",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
