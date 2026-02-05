@@ -1546,8 +1546,10 @@ private:
           curr_sub.Set(old_curr_var, shared_var);
         } else {
           // For RAW/WAR: use different Var objects to model cross-thread access
-          Var prev_var(std::string(thread_names[idx]) + "1", old_prev_var.dtype());
-          Var curr_var(std::string(thread_names[idx]) + "2", old_curr_var.dtype());
+          Var prev_var(std::string(thread_names[idx]) + "1",
+                       old_prev_var.dtype());
+          Var curr_var(std::string(thread_names[idx]) + "2",
+                       old_curr_var.dtype());
           thread_condition =
               tir::Or(thread_condition, tir::NE(prev_var, curr_var));
           prev_sub.Set(old_prev_var, prev_var);
