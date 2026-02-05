@@ -360,12 +360,35 @@ private:
     return {barrier_id, thread_count};
   }
 
+  /*!
+   * \brief Calculate the number of threads that satisfy current constraints.
+   *
+   * This method uses Z3's model enumeration (AllSAT) to precisely count
+   * how many thread IDs satisfy all current constraints. This is essential
+   * for cases like `if (threadIdx.x % 4 == 0)` where const_int_bound only
+   * gives us the range [0, 127] but the actual number of satisfying threads
+   * is 32 (i.e., 0, 4, 8, ..., 124).
+   *
+   * Falls back to range-based calculation if Z3 enumeration fails or returns
+   * an invalid result.
+   */
   size_t CalculateThreadExtent(const IterVar &iv,
                                const arith::ConstIntBound &bound) {
     if (!analyzer_->const_int_bound.IsBound(iv->var)) {
       return 1;
     }
-    return bound->max_value - bound->min_value + 1;
+    auto extent = *as_const_int(iv->dom->extent);
+    // Always use Z3 enumeration to count satisfying values.
+    // This handles constraints like `tx % 4 == 0` that const_int_bound cannot
+    // detect. Z3 enumeration will return the exact count of satisfying values.
+    int64_t z3_count =
+        analyzer_->z3_prover.CountSatisfyingValues(iv->var, extent);
+    if (z3_count > 0) {
+      return static_cast<size_t>(z3_count);
+    }
+
+    // Fallback to range-based calculation if Z3 enumeration failed
+    return static_cast<size_t>(bound->max_value - bound->min_value + 1);
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -413,11 +436,90 @@ private:
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
 };
 
+/*!
+ * \brief Check if an if-condition depends on runtime-variable values.
+ *
+ * For sync hoisting decisions, we distinguish two types of non-uniform
+ * conditions:
+ *
+ * 1. Conditions that only depend on threadIdx (e.g., `threadIdx.x >= 512`):
+ *    - The number of threads entering the if can be determined at compile time
+ *    - ThreadPartialSyncRewriter can handle this by computing the thread count
+ *    - No need to hoist sync
+ *
+ * 2. Conditions that depend on runtime values (e.g., `shared_mem[tx] != -1`):
+ *    - Cannot determine at compile time how many threads will enter
+ *    - Must hoist sync to before the if to avoid potential deadlock
+ *
+ * This checker identifies case (2) - conditions that depend on runtime values.
+ */
+class RuntimeDependentConditionChecker : public IRMutatorWithAnalyzer {
+public:
+  explicit RuntimeDependentConditionChecker(arith::Analyzer *analyzer,
+                                            int warp_size = 32)
+      : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size) {}
+
+  /*!
+   * \brief Check if expression depends on runtime-variable values.
+   * \return true if the expression depends on values that cannot be determined
+   *         at compile time (e.g., shared memory loads), false if it only
+   *         depends on compile-time known values (constants, threadIdx,
+   * blockIdx).
+   */
+  bool DependsOnRuntimeValue(const PrimExpr &expr, const IterVar &iv) {
+    depends_on_runtime_ = false;
+    this->VisitExpr(expr);
+    auto extent_opt = as_const_int(iv->dom->extent);
+    ICHECK(extent_opt != nullptr)
+        << "DependsOnRuntimeValue: thread extent must be a "
+           "constant, but got: "
+        << iv->dom->extent;
+    int64_t thread_extent = *extent_opt;
+    {
+      With<arith::ConstraintContext> ctx(analyzer_, expr);
+      auto count = analyzer_->z3_prover.CountSatisfyingValues(
+          iv->var, thread_extent, /*min_consecutive=*/warp_size_);
+      if (count < 0) {
+        // failed to count satisfying values, return true
+        depends_on_runtime_ = true;
+      }
+    }
+    return depends_on_runtime_;
+  }
+
+private:
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    // Any buffer load introduces runtime dependency
+    // (we don't know the buffer contents at compile time)
+    depends_on_runtime_ = true;
+    return IRMutatorWithAnalyzer::VisitExpr_(op);
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    // Check tvm_access_ptr and address_of - if used in condition, it's reading
+    // memory
+    if (op->op.same_as(builtin::tvm_access_ptr()) ||
+        op->op.same_as(builtin::address_of())) {
+      depends_on_runtime_ = true;
+      return IRMutatorWithAnalyzer::VisitExpr_(op);
+    }
+    // Other calls might also introduce runtime dependency
+    // but we'll be conservative and check children
+    return IRMutatorWithAnalyzer::VisitExpr_(op);
+  }
+
+private:
+  bool depends_on_runtime_{false};
+  int warp_size_;
+};
+
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
-  explicit TileLangThreadSyncPlanner(StorageScope sync_scope)
-      : sync_scope_(std::move(sync_scope)) {
+  explicit TileLangThreadSyncPlanner(StorageScope sync_scope,
+                                     int warp_size = 32)
+      : sync_scope_(std::move(sync_scope)), warp_size_(warp_size) {
     scope_.push_back(std::vector<StmtEntry>());
   }
+
   /*! \brief Storage access type */
   enum AccessType : uint8_t {
     kRead,
@@ -449,8 +551,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     AccessType type;
     /*! \brief The storage scope */
     StorageScope scope;
-    /*! \brief Whether the access is double buffer write */
-    bool double_buffer_write = false;
     /*! \brief Whether the access is pointer access */
     bool is_pointer_access = false;
     /*! \brief Whether this access originates from an async copy context
@@ -470,6 +570,16 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   StorageScope GetScope(Var buffer_var) const {
     return StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
   }
+  IterVar GetThreadVar(const std::string &tag) const {
+    for (const auto &iv : env_threads_) {
+      if (iv->thread_tag == tag) {
+        return iv;
+      }
+    }
+    LOG(FATAL) << "Thread variable " << tag << " not found";
+    return IterVar();
+  }
+
   void VisitExpr_(const BufferLoadNode *op) final {
     Var buf = op->buffer->data;
     buffer_data_to_buffer_.Set(tvm::ffi::GetRef<Var>(buf.get()), op->buffer);
@@ -561,25 +671,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     ConstrVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const AttrStmtNode *op) override {
-    if (op->attr_key == tvm::tir::attr::double_buffer_write) {
-      ICHECK(double_buffer_write_ == nullptr);
-      double_buffer_write_ = op->node.as<VarNode>();
-      scope_.push_back(std::vector<StmtEntry>());
-      ConstrVisitor::VisitStmt_(op);
-      StmtEntry s;
-      s.stmt = op;
-      s.access = Summarize(std::move(scope_.back()), nullptr);
-      scope_.pop_back();
-      if (!s.access.empty()) {
-        for (AccessEntry &e : s.access) {
-          if (e.type == kWrite && e.buffer.get() == double_buffer_write_) {
-            e.double_buffer_write = true;
-          }
-        }
-        scope_.back().emplace_back(std::move(s));
-      }
-      double_buffer_write_ = nullptr;
-    } else if (op->attr_key == tvm::tir::attr::coproc_scope) {
+    if (op->attr_key == tvm::tir::attr::coproc_scope) {
       IterVar iv = Downcast<IterVar>(op->node);
       env_threads_.push_back(iv);
       ConstrVisitor::VisitStmt_(op);
@@ -588,9 +680,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       IterVar iv = Downcast<IterVar>(op->node);
       env_threads_.push_back(iv);
       ICHECK_NE(iv->thread_tag.length(), 0U);
-      // analyzer_.Bind(
-      //     iv->var, Range::FromMinExtent(IntImm(op->value->dtype, 0),
-      //     op->value));
 
       if (!in_device_env_) {
         in_device_env_ = true;
@@ -604,10 +693,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         ConstrVisitor::VisitStmt_(op);
       }
       env_threads_.pop_back();
-    } else if (op->attr_key == tvm::tir::attr::hand_threaded) {
-      // skip this pass on blocks that were hand_threaded
-      // this avoids control flow and read/write conflicts
-      // between hand-threaded kernels and automatic threading
     } else {
       ConstrVisitor::VisitStmt_(op);
     }
@@ -647,26 +732,22 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
    *
    * Visits the if-then-else node's condition and both branches to summarize
    * buffer reads, writes, and synchronization events under the condition's
-   * constraints. If the condition is not thread-invariant, increments an
-   * internal condition counter for the duration of processing.
+   * constraints.
    *
-   * Behavior and side effects:
-   * - Evaluates the condition expression (using ExtractRealCondition) and
-   * applies it as a constraint while summarizing the then-branch.
-   * - For the else-branch (when present), applies the negated,
-   * analyzer-simplified condition
-   *   (analyzer_.rewrite_simplify(Not(real_condition))) as the constraint.
-   * - Accumulates summarized StmtEntry access information for the then/else
-   * branches and appends a combined StmtEntry for the IfThenElseNode into the
-   * current scope.
-   * - Temporarily toggles allow_append_ and clears curr_stmt_.access during
-   * condition evaluation and branch summarization.
-   * - Modifies internal state: scope_ (push/pop of temporary branch scopes),
-   * curr_stmt_.access, and condition_counter_ (incremented/decremented when the
-   * condition is not thread-invariant).
+   * IMPORTANT: If syncs are inserted inside an if-statement with a non-uniform
+   * condition (i.e., the condition depends on threadIdx), we must hoist the
+   * sync to before the if-statement. Otherwise, only some threads will reach
+   * the sync point, causing a deadlock.
    */
   void VisitStmt_(const IfThenElseNode *op) final {
     StmtEntry s;
+    // Track syncs inserted before visiting the if body
+    std::unordered_set<const Object *> syncs_before_then;
+    std::unordered_set<const Object *> syncs_before_else;
+    for (const auto &sync : syncs_inserted_) {
+      syncs_before_then.insert(sync);
+    }
+
     {
       auto guard = MakeGuard(op->condition);
       allow_append_ = true;
@@ -694,6 +775,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                         cond_access.end());
       }
     }
+
+    // Track syncs inserted after visiting then branch
+    for (const auto &sync : syncs_inserted_) {
+      syncs_before_else.insert(sync);
+    }
+
     if (op->else_case) {
       auto guard = MakeGuard(tir::Not(op->condition));
       scope_.push_back(std::vector<StmtEntry>());
@@ -703,6 +790,59 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       auto v = Summarize(std::move(scope_.back()), nullptr);
       scope_.pop_back();
       s.access.insert(s.access.end(), v.begin(), v.end());
+    }
+
+    // Check if any syncs were inserted inside the if-then-else
+    std::vector<const Object *> syncs_in_then;
+    std::vector<const Object *> syncs_in_else;
+
+    for (const auto &sync : syncs_inserted_) {
+      if (syncs_before_then.count(sync) == 0 &&
+          syncs_before_else.count(sync) != 0) {
+        // Sync was inserted during then branch processing
+        syncs_in_then.push_back(sync);
+      } else if (syncs_before_else.count(sync) == 0) {
+        // Sync was inserted during else branch processing
+        syncs_in_else.push_back(sync);
+      }
+    }
+
+    bool has_syncs_inside = !syncs_in_then.empty() || !syncs_in_else.empty();
+
+    if (has_syncs_inside) {
+      // Check if the condition depends on runtime values (e.g., shared memory
+      // loads). If so, we cannot determine at compile time how many threads
+      // will enter the if, so we must hoist the sync to before the if to avoid
+      // potential deadlock.
+      //
+      // If the condition only depends on threadIdx (e.g., `threadIdx.x >=
+      // 512`), we use Z3 to check if the thread count is a multiple of 32.
+      // If not, ThreadPartialSyncRewriter cannot handle it properly, so we
+      // must also hoist the sync.
+      arith::Analyzer analyzer;
+      ConstrSet constr_set = GetConstrSet();
+      constr_set.Populate(analyzer);
+      RuntimeDependentConditionChecker checker(&analyzer, warp_size_);
+      IterVar tx = GetThreadVar("threadIdx.x");
+      bool depends_on_runtime =
+          checker.DependsOnRuntimeValue(op->condition, tx);
+
+      if (depends_on_runtime) {
+        // Condition depends on runtime values - must hoist sync
+        // Condition depends on runtime values - must hoist sync
+        LOG(WARNING)
+            << "[ThreadSync] Hoisting sync from inside if to before if. "
+            << "Condition depends on runtime value: " << op->condition;
+        for (const auto &sync : syncs_in_then) {
+          syncs_inserted_.erase(sync);
+        }
+        for (const auto &sync : syncs_in_else) {
+          syncs_inserted_.erase(sync);
+        }
+
+        // Insert sync before the if-statement itself
+        insert_syncs(op);
+      }
     }
 
     scope_.back().emplace_back(std::move(s));
@@ -911,13 +1051,15 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
-          if (FindConflict(writes, acc, false)) {
+          // Same-iteration conflict: loop=nullptr
+          if (FindConflict(writes, acc, nullptr)) {
             sync_before_stmt = true;
             break;
           }
         } else if (acc.type == kWrite) {
-          if (FindConflict(reads, acc, false) ||
-              FindConflict(writes, acc, false)) {
+          // Same-iteration conflict: loop=nullptr
+          if (FindConflict(reads, acc, nullptr) ||
+              FindConflict(writes, acc, nullptr)) {
             sync_before_stmt = true;
             break;
           }
@@ -964,12 +1106,22 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         if (has_read_in_scope)
           break;
       }
-      // If there is a loop-carried dependency, insert a single sync
-      // before the loop rather than hoisting a sync into the loop body.
-      // This reduces redundant per-iteration synchronizations for cases
-      // where each iteration touches disjoint regions (e.g., stmatrix
-      // writes to shared.dyn) and only a global ordering before/after the
-      // loop is required.
+      // Loop-carried dependency analysis using symbolic iteration shift.
+      // We compare accesses at iteration i (end of loop, stored in
+      // reads/writes) with accesses at iteration i+1 (beginning of next
+      // iteration). By substituting loop_var -> loop_var + step in the "next
+      // iteration" indices, we can precisely determine if there's a true
+      // dependency.
+      //
+      // Examples:
+      // - A[i] write, A[i] read: No loop-carry (same iteration access)
+      // - A[i] write, A[i+1] read: After shift, comparing A[i] vs A[i+1],
+      // disjoint
+      // - A[i] write, A[i-1] read: After shift, comparing A[i] vs A[i],
+      // conflict!
+      // - A[i%2] write, A[i%2] read: After shift, comparing A[i%2] vs
+      // A[(i+1)%2],
+      //   which are disjoint for modulo buffering
       for (size_t i = 0; i < seq.size(); ++i) {
         const StmtEntry &s = seq[i];
         if (syncs_inserted_.count(s.stmt) != 0)
@@ -979,13 +1131,15 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         bool need_loop_sync = false;
         for (const AccessEntry &acc : s.access) {
           if (acc.type == kRead) {
-            if (FindConflict(writes, acc, true)) {
+            // Loop-carry conflict: pass loop for iteration shift analysis
+            if (FindConflict(writes, acc, loop)) {
               need_loop_sync = true;
               break;
             }
           } else if (acc.type == kWrite) {
-            if (FindConflict(reads, acc, true) ||
-                FindConflict(writes, acc, true)) {
+            // Loop-carry conflict: pass loop for iteration shift analysis
+            if (FindConflict(reads, acc, loop) ||
+                FindConflict(writes, acc, loop)) {
               need_loop_sync = true;
               break;
             }
@@ -1045,12 +1199,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
     }
     head.insert(head.end(), tail.begin(), tail.end());
-    if (loop != nullptr) {
-      // clear double buffer flag after a loop is finished.
-      for (AccessEntry &e : head) {
-        e.double_buffer_write = false;
-      }
-    }
     return head;
   }
   // The syncs inserted before each statement
@@ -1063,14 +1211,13 @@ private:
   }
   /*! \return whether we are in device environment. */
   bool in_device_env() const { return in_device_env_; }
+
   // whether access appending is enabled.
   bool allow_append_{false};
   // Whether we are in device environment
   bool in_device_env_{false};
   // Nesting depth of tma_load/tma_load_im2col calls
   int tma_depth_{0};
-  // The current double buffer write scope.
-  const VarNode *double_buffer_write_{nullptr};
   // the current free stmt entry.
   StmtEntry curr_stmt_;
   // The involving threads
@@ -1079,6 +1226,9 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   // synchronization scope
   StorageScope sync_scope_;
+  // warp size from target
+  int warp_size_;
+
   void insert_syncs(const Object *obj) {
     if (syncs_inserted_.count(obj))
       return;
@@ -1210,16 +1360,33 @@ private:
     }
 
     output << "  Flags: ";
-    output << "double_buffer_write="
-           << (access.double_buffer_write ? "true" : "false");
-    output << ", is_pointer_access="
+    output << "is_pointer_access="
            << (access.is_pointer_access ? "true" : "false");
     output << ", is_async_copy=" << (access.is_async_copy ? "true" : "false");
 
     LOG(WARNING) << output.str();
   }
+  /*!
+   * \brief Check if two access entries conflict, considering loop-carried
+   * dependencies.
+   *
+   * For loop-carry analysis, we use symbolic iteration shift: instead of
+   * treating loop_carry as a simple flag, we substitute loop_var with
+   * loop_var + step in the "next iteration" access indices and check if they
+   * overlap with the "current iteration" access indices.
+   *
+   * This approach can prove that accesses like A[i] and A[i+1] are disjoint
+   * (no loop-carry dependency), while correctly detecting dependencies like
+   * A[i] and A[i-1] (loop-carry dependency with distance 1).
+   *
+   * \param prev The access entry from the previous/current iteration
+   * \param curr The access entry to check against
+   * \param loop The loop node for loop-carry analysis, nullptr for
+   * same-iteration
+   * \return true if the accesses conflict and need synchronization
+   */
   bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
-                    bool loop_carry) {
+                    const ForNode *loop) {
     // Special case: ignore conflicts between async-copy writes (e.g., TMA
     // loads into shared memory). Multiple async writes do not require
     // interspersed barriers among themselves. We still respect conflicts with
@@ -1233,12 +1400,6 @@ private:
       return false;
     }
 
-    // Assumes no race between threads
-    // Same index value means no conflicts
-    // TODO(tqchen) more standard set based testing.
-    bool has_same_index = true;
-    bool range_is_overlap = true;
-
     if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
       // They are not the same indices, should be conflict.
       return true;
@@ -1246,7 +1407,7 @@ private:
 
     if (prev.is_pointer_access || curr.is_pointer_access) {
       // For accesses created via tvm_access_ptr we may still be able to prove
-      // disjointness using their byte ranges.  If both sides expose a touched
+      // disjointness using their byte ranges. If both sides expose a touched
       // interval and we can show they don't overlap, skip the conflict.
       if (prev.is_pointer_access && curr.is_pointer_access &&
           PointerAccessIsDisjoint(prev, curr)) {
@@ -1257,35 +1418,39 @@ private:
       return true;
     }
 
-    for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
-      auto prev_dtype = prev.dtype;
-      auto curr_dtype = curr.dtype;
+    // Build substitution map for loop-carry analysis
+    // For loop-carry, we compare: Iter(i) vs Iter(i+step)
+    // prev represents access at iteration i (end of loop body)
+    // curr represents access at iteration i+step (beginning of next iteration)
+    ffi::Map<Var, PrimExpr> loop_shift_sub;
+    if (loop != nullptr) {
+      // Get loop step, default to 1 if not specified
+      PrimExpr step = make_const(loop->loop_var.dtype(), 1);
+      // Substitute loop_var -> loop_var + step for the "next iteration"
+      loop_shift_sub.Set(loop->loop_var, loop->loop_var + step);
+    }
 
+    // Check if indices are the same (considering loop shift)
+    bool has_same_index = true;
+    for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
       const auto &prev_indice = prev.buffer_indices[i];
-      const auto &curr_indice = curr.buffer_indices[i];
+      PrimExpr curr_indice = curr.buffer_indices[i];
+
+      // For loop-carry, shift the curr index to represent next iteration
+      if (loop != nullptr) {
+        curr_indice = Substitute(curr_indice, loop_shift_sub);
+      }
 
       if (!ExprDeepEqual()(prev_indice, curr_indice)) {
         has_same_index = false;
         break;
       }
     }
+
     if (has_same_index) {
       // Use Z3 to check if prev and curr constraints are equivalent.
       // If equivalent, the same set of threads execute both accesses, so no
       // sync is needed.
-      //
-      // Formally, let P(t) denote the predicate for prev's constraint set and
-      // C(t) denote the predicate for curr's constraint set, where t represents
-      // the thread indices (threadIdx.x, threadIdx.y, threadIdx.z).
-      //
-      // We check bidirectional implication:
-      //   1. P(t) => C(t): Every thread executing prev also executes curr
-      //   2. C(t) => P(t): Every thread executing curr also executes prev
-      //
-      // If both hold, then P(t) <=> C(t), meaning the exact same set of threads
-      // execute both accesses. Combined with has_same_index (same buffer index
-      // expression), this guarantees each thread only accesses locations it
-      // wrote itself, eliminating cross-thread conflicts.
       PrimExpr prev_constr = prev.cset.ToConjunction();
       PrimExpr curr_constr = curr.cset.ToConjunction();
 
@@ -1294,6 +1459,16 @@ private:
         if (iv->dom.defined()) {
           analyzer.Bind(iv->var, iv->dom);
         }
+      }
+      // Add loop variable constraint for loop-carry analysis
+      if (loop != nullptr) {
+        // For loop-carry analysis, we compare iteration i with iteration i+1.
+        // Since i+1 must be a valid iteration, i can only range from min to
+        // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
+        PrimExpr adjusted_extent =
+            loop->extent - make_const(loop->extent.dtype(), 1);
+        analyzer.Bind(loop->loop_var,
+                      Range::FromMinExtent(loop->min, adjusted_extent));
       }
 
       // Check P => C: ¬P ∨ C
@@ -1312,21 +1487,38 @@ private:
       }
     }
 
+    // Indices are different, need to check if they can overlap
+    bool range_is_overlap = true;
+
     for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
       auto prev_dtype = prev.dtype;
       auto curr_dtype = curr.dtype;
 
       const auto &prev_indice = prev.buffer_indices[i];
-      const auto &curr_indice = curr.buffer_indices[i];
+      PrimExpr curr_indice = curr.buffer_indices[i];
+
+      // For loop-carry, shift the curr index to represent next iteration
+      if (loop != nullptr) {
+        curr_indice = Substitute(curr_indice, loop_shift_sub);
+      }
 
       PrimExpr prev_indice_bytes = prev_indice * prev_dtype.bytes();
       PrimExpr curr_indice_bytes = curr_indice * curr_dtype.bytes();
 
-      has_same_index = false;
-
       ConstrSet prev_cset{prev.cset};
       ConstrSet curr_cset{curr.cset};
       arith::Analyzer analyzer;
+
+      // Add loop variable constraint for loop-carry analysis
+      if (loop != nullptr) {
+        // For loop-carry analysis, we compare iteration i with iteration i+1.
+        // Since i+1 must be a valid iteration, i can only range from min to
+        // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
+        PrimExpr adjusted_extent =
+            loop->extent - make_const(loop->extent.dtype(), 1);
+        analyzer.Bind(loop->loop_var,
+                      Range::FromMinExtent(loop->min, adjusted_extent));
+      }
 
       struct ThreadVarInfo {
         const char *name_prev;
@@ -1360,17 +1552,13 @@ private:
           analyzer.Simplify(Substitute(curr_indice_bytes, curr_sub));
 
       // Handle Ramp expressions by creating a new index variable
-      // Check if prev_indice_bytes is a Ramp expression
       if (const RampNode *prev_ramp = prev_indice_bytes.as<RampNode>()) {
-        // Create index variable for prev Ramp
         Var prev_idx("prev_idx", DataType::Int(32));
         analyzer.Bind(prev_idx, Range::FromMinExtent(0, prev_ramp->lanes));
         prev_indice_bytes = prev_ramp->base + prev_idx * prev_ramp->stride;
       }
 
-      // Check if curr_indice_bytes is a Ramp expression
       if (const RampNode *curr_ramp = curr_indice_bytes.as<RampNode>()) {
-        // Create index variable for curr Ramp
         Var curr_idx("curr_idx", DataType::Int(32));
         analyzer.Bind(curr_idx, Range::FromMinExtent(0, curr_ramp->lanes));
         curr_indice_bytes = curr_ramp->base + curr_idx * curr_ramp->stride;
@@ -1392,10 +1580,6 @@ private:
         ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
         provably_disjoint =
             analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
-        if (!provably_disjoint) {
-          // LOG(WARNING) << analyzer.z3_prover.GetModel(
-          //     tir::EQ(prev_indice_bytes, curr_indice_bytes));
-        }
       } else {
         LOG(WARNING) << "Unscalar: " << prev_indice_bytes << "; "
                      << curr_indice_bytes;
@@ -1408,11 +1592,9 @@ private:
               Substitute(curr.touched[i].min() * curr_dtype.bytes(), curr_sub));
           auto curr_max = analyzer.Simplify(
               Substitute(curr.touched[i].max() * curr_dtype.bytes(), curr_sub));
-          // analyzer.z3_prover.SetRLimit(100000000);
           provably_disjoint = analyzer.CanProve(analyzer.Simplify(
               tir::Or(prev_min > curr_max, curr_min > prev_max)));
         } catch (const std::exception &e) {
-          // Log for debugging; fall back to conservative bound check
           LOG(WARNING) << "Exception in conflict detection: " << e.what();
           auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
           auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
@@ -1438,23 +1620,13 @@ private:
       }
     }
 
-    // If this is a read into a double buffer that was previously
-    // swapped out, then it doesn't conflict.
-    if (prev.double_buffer_write && curr.type == kRead && !loop_carry) {
-      return false;
-    }
-
-    // If nothing else allows sharing the same buffer, then they are
-    // in conflict.
-    // if range_is_overlap is true, then they are in conflict, we should return
-    // true. if range_is_overlap is false, then they are not in conflict, we
-    // should return false.
     return range_is_overlap;
   }
+
   bool FindConflict(const std::vector<AccessEntry> &prev,
-                    const AccessEntry &curr, bool loop_carry) {
+                    const AccessEntry &curr, const ForNode *loop) {
     for (const AccessEntry &x : prev) {
-      if (FindConflict(x, curr, loop_carry)) {
+      if (FindConflict(x, curr, loop)) {
         return true;
       }
     }
@@ -1469,7 +1641,15 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
   }
-  TileLangThreadSyncPlanner planner(sync_scope);
+  // Get warp size from target, defaulting to 32 if not available
+  int warp_size = 32;
+  if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
+    warp_size = target.value()
+                    ->GetAttr<Integer>("thread_warp_size", 32)
+                    .value()
+                    .IntValue();
+  }
+  TileLangThreadSyncPlanner planner(sync_scope, warp_size);
   for (const auto &[_, buffer] : func->buffer_map) {
     planner.SetBufferDataToBuffer(buffer->data, buffer);
   }
