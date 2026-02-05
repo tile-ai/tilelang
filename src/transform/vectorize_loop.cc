@@ -470,6 +470,7 @@ public:
       return std::move(var);
     }
   }
+
   // IfThenElse expr
   PrimExpr MutateIfThenElseExpr_(const CallNode *op) {
     PrimExpr cond = this->VisitExpr(op->args[0]);
@@ -498,6 +499,7 @@ public:
       }
     }
   }
+
   // Address of: remove vectorized var from indices to get base address
   // e.g., T.address_of(buf[base + vec]) -> T.address_of(buf[base])
   PrimExpr MutateAddressOfCall_(const CallNode *op) {
@@ -524,6 +526,7 @@ public:
 
     return Call(op->dtype, op->op, {new_load});
   }
+
   // Reinterpret expr
   PrimExpr MutateReinterpretExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::reinterpret()));
@@ -556,8 +559,16 @@ public:
       return tvm::ffi::GetRef<PrimExpr>(op);
     }
     int vector_size = static_cast<int>(*lanes_ptr);
+
     auto dst = VisitExpr(op->args[0]);
     auto src = VisitExpr(op->args[1]);
+
+    // If src is not Ramp/Broadcasted, it must be a scalar or something.
+    // Broadcast to vector size if needed
+    if (src.same_as(op->args[1])) {
+      src = BroadcastTo(src, vector_size, src.dtype().is_scalable_vector());
+    }
+
     // Check if dtype supports this vector size
     auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
     Target target = Target::Current(false);
@@ -571,6 +582,7 @@ public:
     // Return the vectorized atomic op
     return Call(op->dtype, GetVectorizedAtomicOp(vector_size), {dst, src});
   }
+
   // Call
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::if_then_else())) {
@@ -629,6 +641,7 @@ public:
       }
     }
   }
+
   // BufferLoad
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = tvm::ffi::GetRef<BufferLoad>(op);
@@ -646,6 +659,7 @@ public:
 
     return std::move(load);
   }
+
   // Let
   PrimExpr VisitExpr_(const LetNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
@@ -677,6 +691,7 @@ public:
       }
     }
   }
+
   // BufferStore
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = tvm::ffi::GetRef<BufferStore>(op);
@@ -733,6 +748,7 @@ public:
 
     return std::move(store);
   }
+
   // For
   Stmt VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kVectorized) {
@@ -752,6 +768,7 @@ public:
                  op->thread_binding, op->annotations);
     }
   }
+
   // IfThenElse
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     ICHECK(!op->condition.dtype().is_scalable_or_fixed_length_vector());
@@ -771,10 +788,12 @@ public:
       return IfThenElse(condition, then_case, else_case);
     }
   }
+
   // While
   Stmt VisitStmt_(const WhileNode *op) final {
     LOG(FATAL) << "A while loop inside a vectorized loop not supported.";
   }
+
   // LetStmt
   Stmt VisitStmt_(const LetStmtNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);

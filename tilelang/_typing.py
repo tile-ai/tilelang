@@ -33,3 +33,7 @@ BufferLikeTypeTuple = (tir.Buffer, BufferLoad, BufferRegion)
 #   adapted to string.
 DType: TypeAlias = dtype | ir.Type | str | type
 ShapeType: TypeAlias = list[tir.PrimExpr | int] | tuple[tir.PrimExpr | int, ...]
+
+# PrimExpr with adpation to Python basic data types
+# IntImm, FloatImm, Bool: IntImm, Integer: IntImm
+PyPrimExpr: TypeAlias = tir.PrimExpr | int | float | bool

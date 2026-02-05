@@ -4,6 +4,7 @@
  */
 
 #include "utils.h"
+#include "tvm/tir/expr.h"
 
 #include <tvm/tir/builtin.h>
 
@@ -11,6 +12,16 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+bool IsBufferLikeExpr(const PrimExpr &expr) {
+  if (expr.as<BufferLoadNode>() || expr.as<BufferRegionNode>()) {
+    return true;
+  }
+  if (const auto *call = expr.as<CallNode>()) {
+    return (call->op.same_as(RegionOp::Get()));
+  }
+  return false;
+}
 
 BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
   // Case 1: Already a BufferRegion

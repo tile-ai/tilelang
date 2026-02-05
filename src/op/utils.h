@@ -9,6 +9,7 @@
 #include "../target/stubs/cuda.h"
 #include "./operator.h"
 #include "region.h"
+#include "tvm/runtime/base.h"
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/op.h>
 
@@ -24,6 +25,10 @@ TVM_DLL int to_CUtensorMapDataType(DataType dtype);
 template <typename T> Array<T> ReverseArray(Array<T> array) {
   return Array<T>{array.rbegin(), array.rend()};
 }
+
+// Check if an PrimExpr is a buffer-like (BufferRegion/BufferLoad/tl.region)
+// expression.
+TVM_DLL bool IsBufferLikeExpr(const PrimExpr &expr);
 
 // Normalize an argument (BufferRegion/BufferLoad/tl.region)
 // to BufferRegion so ops can uniformly consume regions.
