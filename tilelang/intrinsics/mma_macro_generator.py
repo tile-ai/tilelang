@@ -268,9 +268,9 @@ class TensorCoreIntrinEmitter:
                     mi = tx // micro_size_k
                     mk = tx % micro_size_k
                     if a_transposed:
-                        A_local_buf[i * local_size_a] = A_buf[*A_other, A_base0 + wk + mk, A_base1 + wi + mi]
+                        A_local_buf[i * local_size_a] = A_buf[tuple(A_other) + (A_base0 + wk + mk, A_base1 + wi + mi)]
                     else:
-                        A_local_buf[i * local_size_a] = A_buf[*A_other, A_base0 + wi + mi, A_base1 + wk + mk]
+                        A_local_buf[i * local_size_a] = A_buf[tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)]
 
             return _warp_ld_a_fp64(A_local_buf, A_region, ki, thread_binding, rk)
 
@@ -323,7 +323,11 @@ class TensorCoreIntrinEmitter:
             for i in T.serial(warp_rows):
                 # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
-                A_shared_buf_elem = A_buf[*A_other, A_base0 + wk, A_base1 + wi] if a_transposed else A_buf[*A_other, A_base0 + wi, A_base1 + wk]
+                A_shared_buf_elem = (
+                    A_buf[tuple(A_other) + (A_base0 + wk, A_base1 + wi)]
+                    if a_transposed
+                    else A_buf[tuple(A_other) + (A_base0 + wi, A_base1 + wk)]
+                )
 
                 if ldmatrix_available:
                     T.ptx_ldmatrix(
@@ -340,9 +344,9 @@ class TensorCoreIntrinEmitter:
                     for j in T.serial(local_size_a):
                         mi, mk = mma_load_layout(tx, j)
                         if a_transposed:
-                            A_local_buf[i * local_size_a + j] = A_buf[*A_other, A_base0 + wk + mk, A_base1 + wi + mi]
+                            A_local_buf[i * local_size_a + j] = A_buf[tuple(A_other) + (A_base0 + wk + mk, A_base1 + wi + mi)]
                         else:
-                            A_local_buf[i * local_size_a + j] = A_buf[*A_other, A_base0 + wi + mi, A_base1 + wk + mk]
+                            A_local_buf[i * local_size_a + j] = A_buf[tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)]
 
         return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
@@ -380,9 +384,9 @@ class TensorCoreIntrinEmitter:
                     mi = tx // micro_size_k
                     mk = tx % micro_size_k
                     if b_transposed:
-                        B_local_buf[j * local_size_b] = B_buf[*B_other, B_base0 + wi + mi, B_base1 + wk + mk]
+                        B_local_buf[j * local_size_b] = B_buf[tuple(B_other) + (B_base0 + wi + mi, B_base1 + wk + mk)]
                     else:
-                        B_local_buf[j * local_size_b] = B_buf[*B_other, B_base0 + wk + mk, B_base1 + wi + mi]
+                        B_local_buf[j * local_size_b] = B_buf[tuple(B_other) + (B_base0 + wk + mk, B_base1 + wi + mi)]
 
             return _warp_ld_b_fp64(B_local_buf, B_region, ki, thread_binding, rk)
 
@@ -440,7 +444,11 @@ class TensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = B_buf[*B_other, B_base0 + wi, B_base1 + wk] if b_transposed else B_buf[*B_other, B_base0 + wk, B_base1 + wi]
+                    B_shared_buf_elem = (
+                        B_buf[tuple(B_other) + (B_base0 + wi, B_base1 + wk)]
+                        if b_transposed
+                        else B_buf[tuple(B_other) + (B_base0 + wk, B_base1 + wi)]
+                    )
 
                     T.ptx_ldmatrix(
                         b_dtype,
@@ -459,9 +467,9 @@ class TensorCoreIntrinEmitter:
                     for j in T.serial(local_size_b):
                         mi, mk = mma_load_layout(tx, j)
                         if b_transposed:
-                            B_local_buf[i * local_size_b + j] = B_buf[*B_other, B_base0 + wi + mi, B_base1 + wk + mk]
+                            B_local_buf[i * local_size_b + j] = B_buf[tuple(B_other) + (B_base0 + wi + mi, B_base1 + wk + mk)]
                         else:
-                            B_local_buf[i * local_size_b + j] = B_buf[*B_other, B_base0 + wk + mk, B_base1 + wi + mi]
+                            B_local_buf[i * local_size_b + j] = B_buf[tuple(B_other) + (B_base0 + wk + mk, B_base1 + wi + mi)]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
