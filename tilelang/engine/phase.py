@@ -206,7 +206,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
-    # Lower the barrier.arrive into specific initialization slot
+    # Lower the shared.barrier into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
@@ -241,6 +241,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
+    mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
     mod = tir.transform.Simplify()(mod)

@@ -877,7 +877,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Array<PrimExpr> shape) { return makeLinearLayout(shape); })
       .def("tl.make_gemm_fragment_8x8", []() { return makeGemmFragment8x8(); })
       .def("tl.make_gemm_fragment_8x8_transposed",
-           []() { return makeGemmFragment8x8Transposed(); });
+           []() { return makeGemmFragment8x8Transposed(); })
+      .def("tl.make_fully_replicated_layout_fragment",
+           [](Array<PrimExpr> shape, PrimExpr thread_extent) {
+             return Fragment::FullyReplicated(shape, thread_extent);
+           });
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

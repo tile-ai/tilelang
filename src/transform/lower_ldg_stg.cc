@@ -174,11 +174,6 @@ public:
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *load) final {
-    // Skip if non-predicated lowering is disabled
-    if (!enable_non_predicated_) {
-      return StmtExprMutator::VisitExpr_(load);
-    }
-
     // Skip loads in async scope (will be lowered to cp.async)
     if (in_async_scope_) {
       return StmtExprMutator::VisitExpr_(load);
@@ -186,6 +181,17 @@ public:
 
     // Only handle global memory loads
     if (load->buffer.scope() != "global") {
+      return StmtExprMutator::VisitExpr_(load);
+    }
+
+    // Check if we're in a predicated context (from IfThenElse store pattern)
+    // In this case, we need to use predicated load regardless of
+    // enable_non_predicated_
+    bool use_predicated = current_predicate_.defined();
+
+    // Skip if non-predicated lowering is disabled and we're not in predicated
+    // context
+    if (!enable_non_predicated_ && !use_predicated) {
       return StmtExprMutator::VisitExpr_(load);
     }
 
@@ -208,6 +214,10 @@ public:
           // Check for supported vector widths (32/64/128/256 bits)
           if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
               total_bits == 256) {
+            if (use_predicated) {
+              return LowerToLDGPredicated(load, ramp->base, total_bits,
+                                          current_predicate_.value());
+            }
             return LowerToLDG(load, ramp->base, total_bits);
           }
         }
@@ -216,6 +226,10 @@ public:
       // Single element load (non-Ramp)
       int bits = load->buffer->dtype.bits();
       if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
+        if (use_predicated) {
+          return LowerToLDGPredicated(load, load->indices[0], bits,
+                                      current_predicate_.value());
+        }
         return LowerToLDG(load, load->indices[0], bits);
       }
     }
@@ -302,6 +316,8 @@ private:
   bool in_async_scope_{false};
   bool enable_non_predicated_{false};
   bool enable_predicated_{true};
+  Optional<PrimExpr>
+      current_predicate_; // Track predicate context for nested loads
 
   // Create access pointer for the buffer at given base offset
   PrimExpr CreateAccessPtr(const Buffer &buffer, const PrimExpr &base,
@@ -426,8 +442,15 @@ private:
                             int bits, const PrimExpr &predicate) {
     PrimExpr ptr = CreateAccessPtr(store->buffer, base, 2);
 
-    // Get the value to store
+    // Set predicate context so that nested loads also use predicated version
+    Optional<PrimExpr> old_predicate = current_predicate_;
+    current_predicate_ = predicate;
+
+    // Get the value to store (loads inside will use predicated version)
     PrimExpr value = this->VisitExpr(store->value);
+
+    // Restore old predicate context
+    current_predicate_ = old_predicate;
 
     // Reinterpret value to uint32xN if needed
     DataType store_dtype;

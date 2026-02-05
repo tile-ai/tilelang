@@ -279,8 +279,8 @@ public:
                   << ")" << "\n";
       }
       // vector_size may be greater than local/fragment buffers' vector_size.
-      // In such case, we need to re-validate if the indices are invariant
-      // at the new vector_size boundary. If not invariant, take GCD.
+      // In such case, we need to re-validate if the indices are vectorizable
+      // at the new vector_size boundary. If not, take GCD.
       for (const auto &info : local_fragment_buffers) {
         if (vector_size_ > info.vector_size && !info.indices.empty()) {
           // Compute elem_offset from indices and strides
@@ -289,8 +289,9 @@ public:
           for (size_t i = 0; i < info.indices.size(); ++i) {
             elem_offset += info.indices[i] * strides[i];
           }
-          if (!IsExprInvariantInVectorBoundary(
-                  elem_offset, inner_for_->loop_var, vector_size_, analyzer_)) {
+          if (!IndicesCanVectorize(elem_offset, inner_for_->loop_var,
+                                   inner_for_->extent, vector_size_,
+                                   analyzer_)) {
             // Not invariant at this vector_size, need to take GCD
             int old_vector_size = vector_size_;
             vector_size_ = arith::ZeroAwareGCD(vector_size_, info.vector_size);
@@ -578,9 +579,9 @@ private:
     }
     // 4. Try to find max vectorize size for this buffer
     while (buffer_vec_size > 1 &&
-           !IndiceCanVectorize(elem_offset, inner_for_->loop_var,
-                               inner_for_->extent, buffer_vec_size,
-                               analyzer_)) {
+           !IndicesCanVectorize(elem_offset, inner_for_->loop_var,
+                                inner_for_->extent, buffer_vec_size,
+                                analyzer_)) {
       buffer_vec_size /= 2;
     }
     return buffer_vec_size;
@@ -721,9 +722,10 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
   return false;
 }
 
-bool IndiceCanVectorize(const PrimExpr &expr, Var var,
-                        const PrimExpr &iter_var_size,
-                        int target_vectorized_size, arith::Analyzer *analyzer) {
+bool IndicesCanVectorize(const PrimExpr &expr, Var var,
+                         const PrimExpr &iter_var_size,
+                         int target_vectorized_size,
+                         arith::Analyzer *analyzer) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1)
     return true;

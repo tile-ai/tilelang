@@ -3,7 +3,7 @@ import tilelang.language as T
 from tilelang.autotuner import autotune
 
 from FLA_KDA.fla_chunk_o import chunk_gla_fwd_o_gk
-from test_utils import compare_tensors
+from test_utils_kda import compare_tensors
 
 import torch
 

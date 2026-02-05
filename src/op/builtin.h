@@ -55,6 +55,8 @@ static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
+static constexpr const char *kDisableLoopUnswitching =
+    "tl.disable_loop_unswitching";
 
 /*!
  * \brief Enable lowering non-predicated global load/store to ldg/stg intrinsics
@@ -111,6 +113,9 @@ static constexpr const char *kDisableThreadStorageSync =
  *
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
+
+static constexpr const char *kDisableOutOfBoundWarning =
+    "tl.disable_out_of_bound_warning";
 
 /*!
  * \brief Get the type of the CUDA tensor map
@@ -183,17 +188,17 @@ TVM_DLL const Op &create_tma_descriptor();
 TVM_DLL const Op &create_tma_im2col_descriptor();
 
 /*!
- * \brief Create a list of mbarrier with num_threads
+ * \brief Create a list of mbarrier with arrive_counts for each barrier
  *
- * create_list_of_mbarrier(num_threads0, num_threads1, ...)
+ * create_list_of_mbarrier(arrive_counts0, arrive_counts1, ...)
  *
  */
 TVM_DLL const Op &create_list_of_mbarrier();
 
 /*!
- * \brief Get the mbarrier with barrier_id
+ * \brief Get the mbarrier injected by compiler via barrier_id
  *
- * int64_t* GetMBarrier(barrier_id)
+ * int64_t* get_mbarrier(barrier_id)
  *
  */
 TVM_DLL const Op &get_mbarrier();

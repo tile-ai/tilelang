@@ -1,5 +1,6 @@
 from __future__ import annotations
 import tilelang.language as T
+import itertools
 
 
 def plot_layout(
@@ -212,3 +213,85 @@ def plot_layout(
         svg_path = tmp_directory / f"{name}.svg"
         plt.savefig(svg_path, bbox_inches="tight", format="svg")
         print(f"Saved svg format into {svg_path}")
+
+
+def plot_fragment_tv(
+    frag: T.Fragment,
+    save_directory: str | None = None,
+    name: str = "layout",
+    apply_idx_fn=lambda *args: args,
+    colormap: str = "RdPu",
+    item_scale: float = 0.75,
+    formats: str | list[str] = "png",
+    dpi=80,
+):
+    """
+    Plot fragment in terms of thread and local index mapping.
+    Parameters
+    ----------
+    frag : T.Fragment
+        The fragment object that describes how indices are mapped.
+    save_directory : str | None, optional
+        The directory where the output images will be saved.
+    name : str, optional
+        The base name of the output files (default is "layout").
+    apply_idx_fn : function, optional
+        A function to apply to the source indices for labeling (default is identity).
+    colormap : str, optional
+        The colormap to use for visualization (default is "RdPu").
+    item_scale : float, optional
+        The scale factor for each item in the plot (default is 0.75).
+    formats : str | list[str], optional
+        The formats to save the image in (default is "png").
+    dpi : int, optional
+        The resolution in dots per inch for the saved image (default is 80).
+    """
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    src_shape = [i.value for i in frag.get_input_shape()]
+    num_local_dim = frag.get_output_shape()[0].value
+    num_thread_dim = frag.get_thread_size().value
+    dst_shape = [num_local_dim, num_thread_dim]
+    num_rep = frag.replicate_size.value
+    src_flat_idx = np.zeros(dst_shape, dtype=np.int64)
+    src_idx_str = np.full(dst_shape, "", dtype="<U32")
+    if num_rep > 1:
+        for rep in range(num_rep):
+            for src_idx, item in enumerate(itertools.product(*([range(i) for i in src_shape]))):
+                th = frag.map_forward_thread([rep] + list(item))[0].value
+                dst_idx = frag.map_forward_index([rep] + list(item))[0].value
+                src_flat_idx[dst_idx, th] = src_idx
+                src_idx_str[dst_idx, th] = "(" + ",".join([str(i) for i in apply_idx_fn(*item)]) + ")"
+    else:
+        for src_idx, item in enumerate(itertools.product(*([range(i) for i in src_shape]))):
+            th = frag.map_forward_thread(item)[0].value
+            dst_idx = frag.map_forward_index(item)[0].value
+            src_flat_idx[dst_idx, th] = src_idx
+            src_idx_str[dst_idx, th] = "(" + ",".join([str(i) for i in apply_idx_fn(*item)]) + ")"
+
+    plt.figure(figsize=(item_scale * num_thread_dim, item_scale * num_local_dim))
+    cmap = plt.get_cmap(colormap)
+    plt.pcolormesh(src_flat_idx, cmap=colormap, edgecolors="k", linewidth=0.5)
+    mx = np.max(src_flat_idx) + 1
+    for i in range(num_local_dim):
+        for j in range(num_thread_dim):
+            r, g, b, a = cmap(src_flat_idx[i, j] / mx)
+            light_color = r + g + b < 1.5
+            plt.text(j + 0.5, i + 0.5, src_idx_str[i, j], ha="center", va="center", color="white" if light_color else "black")
+    plt.xticks(np.arange(num_thread_dim) + 0.5, [f"T{i}" for i in range(num_thread_dim)])
+    plt.yticks(np.arange(num_local_dim) + 0.5, [f"I{i}" for i in range(num_local_dim)])
+    plt.gca().invert_yaxis()
+    plt.gca().xaxis.tick_top()
+    plt.tight_layout()
+
+    if save_directory is not None:
+        save_dir = Path(save_directory)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        if isinstance(formats, str):
+            formats = [formats]
+        for fmt in formats:
+            plt.savefig(save_dir / f"{name}.{fmt}", bbox_inches="tight", dpi=dpi)
+        plt.close()

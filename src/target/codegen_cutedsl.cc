@@ -297,38 +297,26 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << ")\n";
   };
 
-  auto print_mbarrier_obj = [&](PrimExpr barrier_id) {
-    std::ostringstream ss;
-    if (barrier_id.as<IntImmNode>()) {
-      // incase the barrier_id is an integer, we need to print the barrier_id as
-      // an integer
-      ss << "(" << mbarrier_name_ << "+" << barrier_id << ")";
-    } else {
-      // otherwise may be a T.get_mbarrier() call or BufferLoad Node
-      // we need to print the barrier_id as a string
-      ss << PrintExpr_(barrier_id);
-    }
-    return ss.str();
-  };
-
   if (op->op.same_as(builtin::ptx_cp_async())) {
+    // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
+    // args[3] = predicate (optional)
+    ICHECK(op->args.size() == 3 || op->args.size() == 4)
+        << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+           "src_access_ptr, bytes, [predicate])";
+
     std::string dst = PrintExpr_(op->args[0]);
-    std::string dst_offset = PrintExpr_(op->args[1]);
-    std::string src = PrintExpr_(op->args[2]);
-    std::string src_offset = PrintExpr_(op->args[3]);
-    std::string size = PrintExpr_(op->args[4]);
-    // use size of argument list to indicate whether or not to use predicated
-    // cp.async
-    if (op->args.size() == 5) {
-      PrintIndent();
-      stream << "tl.cp_async_gs(" << size << ", " << dst << ", " << dst_offset
-             << ", " << src << ", " << src_offset << ")\n";
+    std::string src = PrintExpr_(op->args[1]);
+    std::string size = PrintExpr_(op->args[2]);
+
+    this->PrintIndent();
+    if (op->args.size() == 3) {
+      stream << "tl.cp_async_gs(" << size << ", " << dst << ", " << src
+             << ")\n";
     } else {
-      std::string condition = PrintExpr_(op->args[5]);
+      std::string condition = PrintExpr_(op->args[3]);
       PrintIndent();
       stream << "tl.cp_async_gs_conditional(" << size << ", " << dst << ", "
-             << dst_offset << ", " << src << ", " << src_offset << ", "
-             << condition << ")\n";
+             << src << ", " << condition << ")\n";
     }
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
     print_extern_call_stmt("tl.cp_async_commit");
@@ -347,11 +335,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     if (op->args.size() == 1) {
       PrintIndent();
-      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto mbarrier_obj = PrintExpr_(op->args[0]);
       stream << "tl.mbarrier_arrive(" << mbarrier_obj << ")\n";
     } else if (op->args.size() == 3) {
       PrintIndent();
-      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto mbarrier_obj = PrintExpr_(op->args[0]);
       auto cta_id = PrintExpr_(op->args[1]);
       auto pred = PrintExpr_(op->args[2]);
       stream << "tl.mbarrier_arrive(" << mbarrier_obj << ", " << cta_id << ", "
@@ -363,20 +351,20 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     ICHECK_EQ(op->args.size(), 2);
     PrintIndent();
-    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto mbarrier_obj = PrintExpr_(op->args[0]);
     auto arrive_count = PrintExpr_(op->args[1]);
     stream << "tl.mbarrier_init(" << mbarrier_obj << ", " << arrive_count
            << ")\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
     if (op->args.size() == 2) {
       PrintIndent();
-      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto mbarrier_obj = PrintExpr_(op->args[0]);
       auto transaction_bytes = PrintExpr_(op->args[1]);
       stream << "tl.arrive_and_expect_tx(" << mbarrier_obj << ", "
              << transaction_bytes << ")\n";
     } else if (op->args.size() == 4) {
       PrintIndent();
-      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto mbarrier_obj = PrintExpr_(op->args[0]);
       auto transaction_bytes = PrintExpr_(op->args[1]);
       auto cta_id = PrintExpr_(op->args[2]);
       auto pred = PrintExpr_(op->args[3]);
@@ -395,14 +383,14 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
     ICHECK_EQ(op->args.size(), 2);
     PrintIndent();
-    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto mbarrier_obj = PrintExpr_(op->args[0]);
     auto transaction_bytes = PrintExpr_(op->args[1]);
     stream << "tl.mbarrier_expect_tx(" << mbarrier_obj << ", "
            << transaction_bytes << ")\n";
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     ICHECK_EQ(op->args.size(), 2);
     PrintIndent();
-    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto mbarrier_obj = PrintExpr_(op->args[0]);
     auto phase = PrintExpr_(op->args[1]);
     stream << "tl.mbarrier_wait(" << mbarrier_obj << ", " << phase << ")\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
@@ -428,7 +416,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     }
     auto desc = op->args[0];
     ss << PrintExpr_(desc) << ", ";
-    ss << print_mbarrier_obj(op->args[1]) << ", ";
+    ss << PrintExpr_(op->args[1]) << ", ";
     ss << PrintExpr_(op->args[2]) << ", (";
     for (size_t i = 3; i < op->args.size() - 1; i++) {
       if (i > 3)
@@ -818,7 +806,8 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
       PrintType(op->dtype, stream);
       stream << ", " << constant_size << "), (" << constant_size << ",))\n";
     } else if (scope == "shared.barrier") {
-      ICHECK(false) << "Unsupported scope: " << scope;
+      stream << vid << " = tl.alloc_smem(cutlass.Uint64, size_in_elems="
+             << constant_size << ")\n";
     } else if (scope == "local") {
       stream << vid << " = tl.make_rmem_tensor((" << constant_size << "),";
       PrintType(op->dtype, stream);

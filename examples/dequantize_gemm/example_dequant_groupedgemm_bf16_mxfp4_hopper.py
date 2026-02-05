@@ -489,7 +489,6 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
         sorted_token_ids,
         expert_ids,
     )
-
     print("Tilelang kernel run finished.")
 
     ref_output = ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=block_M)  # Maybe a little bit slow...
@@ -561,9 +560,9 @@ def run_regression_perf(m=4096, n=4096, k=4096, scale_size=32, topk=4, E=32, fas
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--M", type=int, default=16384, help="M")  # From gpt-oss-20b MoE's first gemm
-    parser.add_argument("--N", type=int, default=5760, help="N")
-    parser.add_argument("--K", type=int, default=2944, help="K")
+    parser.add_argument("--M", type=int, default=256, help="M")  # From gpt-oss-20b MoE's first gemm
+    parser.add_argument("--N", type=int, default=256, help="N")
+    parser.add_argument("--K", type=int, default=256, help="K")
     parser.add_argument("--scale_size", type=int, default=32, help="scale size")
     parser.add_argument("--topk", type=int, default=4, help="topk")  # experts activated for each token
     parser.add_argument("--E", type=int, default=32, help="E")  # number of experts

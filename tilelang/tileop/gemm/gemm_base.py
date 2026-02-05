@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -126,7 +128,7 @@ class GemmBase:
         return getattr(self.gemm_node, "mbarPtr", tvm.tir.const(0, T.uint32))
 
     @property
-    def mbar(self) -> tir.Buffer:
+    def mbar(self) -> tir.Buffer | tir.BufferLoad:
         return getattr(self.gemm_node, "mbar", None)
 
     @property

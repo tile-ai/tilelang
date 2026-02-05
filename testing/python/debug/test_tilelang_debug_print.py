@@ -94,7 +94,7 @@ def test_debug_print_register_files():
     debug_print_register_files(16, 16)
 
 
-def debug_print_msg(M=16, N=16):
+def debug_print_msg(M=16, N=16, msg_only=False):
     dtype = T.float16
 
     @T.prim_func
@@ -102,7 +102,10 @@ def debug_print_msg(M=16, N=16):
         with T.Kernel(4, 4, 2, threads=128 * 2) as (bx, by, bz):
             tid = T.get_thread_binding()
             if tid == 0:
-                T.print(bx + by + bz, msg="hello world")
+                if msg_only:
+                    T.print(msg="hello world")
+                else:
+                    T.print(bx + by + bz, msg="hello world")
 
     jit_kernel = tilelang.compile(program)
     profiler = jit_kernel.get_profiler()
@@ -110,7 +113,8 @@ def debug_print_msg(M=16, N=16):
 
 
 def test_debug_print_msg():
-    debug_print_msg(16, 16)
+    debug_print_msg(16, 16, msg_only=True)
+    debug_print_msg(16, 16, msg_only=False)
 
 
 if __name__ == "__main__":

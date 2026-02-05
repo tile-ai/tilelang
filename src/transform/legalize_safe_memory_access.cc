@@ -31,9 +31,16 @@ using arith::IRMutatorWithAnalyzer;
 //    log a warning (local/shared) or handle accordingly (global).
 struct SafeMemChecker : public StmtExprVisitor {
 
+  bool disableOOBWarning = false;
+
   SafeMemChecker(arith::Analyzer *analyzer, bool recursively_collect_conds)
       : analyzer_(analyzer),
-        recursively_collect_conds_(recursively_collect_conds) {}
+        recursively_collect_conds_(recursively_collect_conds) {
+    disableOOBWarning =
+        tvm::transform::PassContext::Current()
+            ->GetConfig(kDisableOutOfBoundWarning, Optional<Bool>())
+            .value_or(false);
+  }
   void VisitExpr_(const BufferLoadNode *op) final {
     // If the buffer is in global scope, we will check its indices and add
     // corresponding bound checks.
@@ -42,7 +49,7 @@ struct SafeMemChecker : public StmtExprVisitor {
     // we are writing TilePrograms. Therefore we only log warnings if there
     // are possible out-of-bounds.
     CheckBufferIndices(op->buffer, op->indices, /*is_load=*/true,
-                       !IsGlobalBuffer(op->buffer));
+                       !disableOOBWarning && !IsGlobalBuffer(op->buffer));
     if (recursively_collect_conds_) {
       StmtExprVisitor::VisitExpr_(op);
     }
@@ -51,7 +58,7 @@ struct SafeMemChecker : public StmtExprVisitor {
   void VisitStmt_(const BufferStoreNode *op) final {
     // Check if the buffer is in global scope
     CheckBufferIndices(op->buffer, op->indices, /*is_load=*/false,
-                       !IsGlobalBuffer(op->buffer));
+                       !disableOOBWarning && !IsGlobalBuffer(op->buffer));
     if (recursively_collect_conds_) {
       StmtExprVisitor::VisitStmt_(op);
     }

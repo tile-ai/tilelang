@@ -67,4 +67,3 @@ def test_rand_1d(M, seed, generator):
 
 if __name__ == "__main__":
     tilelang.testing.main()
-    # test_rand_1d(1024, 42, "curandStateMRG32k3a_t")

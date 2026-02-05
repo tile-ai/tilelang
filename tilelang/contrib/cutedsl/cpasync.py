@@ -18,7 +18,7 @@ BYTES_PER_TENSORMAP = 128
 BYTES_PER_POINTER = 8
 
 
-def cp_async_gs(size, dst, dst_offset, src, src_offset):
+def cp_async_gs(size, dst, src):
     assert size in [16, 8, 4]
     # use CG (cache global) to by pass L1 when loading contiguous 128B.
     mode = nvvm.LoadCacheModifierKind.CG if size == 16 else nvvm.LoadCacheModifierKind.CA
@@ -34,13 +34,13 @@ def cp_async_gs(size, dst, dst_offset, src, src_offset):
         dst_ptr = dst
     else:
         raise ValueError(f"Invalid destination type: {type(dst)}")
-    cp_async_shared_global(dst_ptr + dst_offset, src_ptr + src_offset, size, mode)
+    cp_async_shared_global(dst_ptr, src_ptr, size, mode)
 
 
 @cute.jit
-def cp_async_gs_conditional(size, dst, dst_offset, src, src_offset, cond):
+def cp_async_gs_conditional(size, dst, src, cond):
     if cond:
-        cp_async_gs(size, dst, dst_offset, src, src_offset)
+        cp_async_gs(size, dst, src)
 
 
 @dsl_user_op
