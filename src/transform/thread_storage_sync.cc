@@ -1520,28 +1520,43 @@ private:
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
 
-      struct ThreadVarInfo {
-        const char *name_prev;
-        const char *name_curr;
-      } thread_vars[] = {
-          {"tx1", "tx2"},
-          {"ty1", "ty2"},
-          {"tz1", "tz2"},
-      };
+      // For WAW (Write-after-Write) and RAR (Read-after-Read), we should use
+      // the same thread variables because:
+      // - WAW: doesn't create true data dependency, only need to check if the
+      //   same thread overwrites its own data across iterations
+      // - RAR: no dependency at all
+      // For RAW (Read-after-Write) and WAR (Write-after-Read), we need to use
+      // different thread variables to check cross-thread dependencies.
+      bool same_access_type = (prev.type == kWrite && curr.type == kWrite) ||
+                              (prev.type == kRead && curr.type == kRead);
+
       PrimExpr thread_condition = Bool(false);
       ffi::Map<Var, PrimExpr> prev_sub, curr_sub;
+
+      const char *thread_names[] = {"tx", "ty", "tz"};
       for (unsigned idx = 0; idx != 3; ++idx) {
-        auto &info = thread_vars[idx];
         Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
         Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
-        Var prev_var(info.name_prev, old_prev_var.dtype());
-        Var curr_var(info.name_curr, old_curr_var.dtype());
-        thread_condition =
-            tir::Or(thread_condition, tir::NE(prev_var, curr_var));
-        prev_sub.Set(old_prev_var, prev_var);
-        curr_sub.Set(old_curr_var, curr_var);
+
+        if (same_access_type) {
+          // For WAW/RAR: use a single shared Var object for both prev and curr
+          // This allows the analyzer to see they reference the same thread
+          Var shared_var(thread_names[idx], old_prev_var.dtype());
+          prev_sub.Set(old_prev_var, shared_var);
+          curr_sub.Set(old_curr_var, shared_var);
+        } else {
+          // For RAW/WAR: use different Var objects to model cross-thread access
+          Var prev_var(std::string(thread_names[idx]) + "1", old_prev_var.dtype());
+          Var curr_var(std::string(thread_names[idx]) + "2", old_curr_var.dtype());
+          thread_condition =
+              tir::Or(thread_condition, tir::NE(prev_var, curr_var));
+          prev_sub.Set(old_prev_var, prev_var);
+          curr_sub.Set(old_curr_var, curr_var);
+        }
       }
-      analyzer.EnterConstraint(thread_condition);
+      if (!same_access_type) {
+        analyzer.EnterConstraint(thread_condition);
+      }
       prev_cset.Substitute(prev_sub).Populate(analyzer);
       curr_cset.Substitute(curr_sub).Populate(analyzer);
       bool provably_disjoint = false;
@@ -1581,8 +1596,6 @@ private:
         provably_disjoint =
             analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
       } else {
-        LOG(WARNING) << "Unscalar: " << prev_indice_bytes << "; "
-                     << curr_indice_bytes;
         try {
           auto prev_min = analyzer.Simplify(
               Substitute(prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
@@ -1595,7 +1608,6 @@ private:
           provably_disjoint = analyzer.CanProve(analyzer.Simplify(
               tir::Or(prev_min > curr_max, curr_min > prev_max)));
         } catch (const std::exception &e) {
-          LOG(WARNING) << "Exception in conflict detection: " << e.what();
           auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
           auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
           if (prev_bound.defined() && curr_bound.defined()) {
