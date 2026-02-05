@@ -326,6 +326,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id,
 
     // Check read regions for dependencies
     for (const auto& read_region : task->GetReadRegions()) {
+      if (IsRegisterRegion(read_region)) continue;
       Buffer buffer = read_region->buffer;
       auto it = last_write_map.find(buffer);
       if (it != last_write_map.end()) {
@@ -369,6 +370,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id,
     // Update write regions
     for (const auto& write_region : task->GetWriteRegions()) {
       Buffer buffer = write_region->buffer;
+      if (IsRegisterRegion(write_region)) continue;
       last_write_map[buffer] = task;
     }
   }
@@ -429,6 +431,7 @@ static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, 
 
       // Check read regions for dependencies
       for (const auto& read_region : task->GetReadRegions()) {
+        if (IsRegisterRegion(read_region)) continue;
         Buffer buffer = read_region->buffer;
         auto it = last_write_map.find(buffer);
         if (it != last_write_map.end()) {
@@ -483,6 +486,7 @@ static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, 
 
       // Update write regions
       for (const auto& write_region : task->GetWriteRegions()) {
+        if (IsRegisterRegion(write_region)) continue;
         Buffer buffer = write_region->buffer;
         last_write_map[buffer] = task;
       }
