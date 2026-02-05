@@ -156,8 +156,7 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
   ICHECK(loop_vars.size() <= dst_range.size())
       << "loop_vars.size() = " << loop_vars.size()
-      << ", dst_range.size() = " << dst_range.size() << ", src = " << src->name
-      << ", dst = " << dst->name;
+      << ", dst_range.size() = " << dst_range.size() << ", dst = " << dst->name;
 
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
   Array<PrimExpr> new_args;

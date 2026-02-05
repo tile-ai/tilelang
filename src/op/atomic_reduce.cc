@@ -138,7 +138,7 @@ Array<PrimExpr> AtomicOpBaseNode::MakeIndices(const Array<IterVar> &ivs,
   // Special case: scalar range, when there is one var and one range(0, 1)
   ICHECK(idx == ivs.size() || (idx == 0 && ivs.size() == 1))
       << "Unmatched indices: idx = " << idx << ", ivs.size() = " << ivs.size()
-      << ", src name = " << src->name << ", dst name = " << dst->name;
+      << ", dst name = " << dst->name;
   return indices;
 }
 
@@ -183,8 +183,7 @@ For AtomicOpBaseNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
   ICHECK(loop_vars.size() <= dst_range.size())
       << "loop_vars.size() = " << loop_vars.size()
-      << ", dst_range.size() = " << dst_range.size() << ", src = " << src->name
-      << ", dst = " << dst->name;
+      << ", dst_range.size() = " << dst_range.size() << ", dst = " << dst->name;
 
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
   Array<PrimExpr> new_args;

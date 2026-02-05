@@ -78,7 +78,7 @@ def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
 
-    assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
+    assert src_extent or dst_extent, "Can't deduce atomicmax extents from args"
 
     # If src is BufferLike, we need to first transform it to region
     if src_extent:
@@ -160,7 +160,7 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
 
-    assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
+    assert src_extent or dst_extent, "Can't deduce atomicmin extents from args"
 
     # If src is BufferLike, we need to first transform it to region
     if src_extent:

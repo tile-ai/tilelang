@@ -140,7 +140,7 @@ def get_extent(data: BufferLikeType) -> ShapeType | None:
     If `data` is a Var bound to a let value, the let value is resolved before inspection.
 
     Parameters:
-        data: A Var, Buffer, BuferLoad or BufferRegion to inspect.
+        data: A Var, Buffer, BufferLoad or BufferRegion to inspect.
 
     Returns:
         The shape/extents as a list-like of PrimExpr (Buffer.shape or list of region item extents), or None if the extent cannot be determined.

@@ -357,14 +357,13 @@ def run_tile_atomic_add_expr(M, N, block_M, block_N, dtype=T.float32):
     ref_A = A.clone()
     ref_program(ref_A)
     kernel(A)
-    print(A, ref_A)
     torch.testing.assert_close(A, ref_A, atol=1e-3, rtol=1e-3)
 
 
 @tilelang.jit
 def tile_atomic_add_scalar_program(dtype=T.float32):
     @T.prim_func
-    def atomic_add(A: T.Buffer((1), dtype), B: T.Buffer((1), dtype)):
+    def atomic_add(A: T.Tensor((1), dtype), B: T.Tensor((1), dtype)):
         with T.Kernel(
             1,
         ) as _:
@@ -599,7 +598,6 @@ def run_tile_atomic_max_expr(M, N, block_M, block_N, dtype=T.float32):
     ref_A = A.clone()
     ref_program(ref_A)
     kernel(A)
-    print(A, ref_A)
     torch.testing.assert_close(A, ref_A, atol=1e-3, rtol=1e-3)
 
 
