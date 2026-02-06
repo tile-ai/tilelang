@@ -354,7 +354,6 @@ public:
       return;
     if (IsLoopInvariant(op->condition, loop_var, written_vars,
                         &let_bindings_)) {
-      LOG(INFO) << "Loop Invariant" << ffi::GetRef<IfThenElse>(op);
       found = op;
       // Collect Let-bound variables used in the condition
       LetVarCollector collector(let_bindings_);
