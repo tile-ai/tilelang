@@ -201,8 +201,8 @@ bool UsesLoopVarThroughLetBindings(
         auto it = let_bindings->find(var_node);
         if (it != let_bindings->end()) {
           // Check if the bound expression uses the loop variable
-          if (UsesVar(it->second,
-                      [&](const VarNode *v) { return v == loop_var.get(); })) {
+          if (UsesLoopVarThroughLetBindings(it->second, loop_var,
+                                            let_bindings)) {
             uses_loop_var = true;
           }
         }
@@ -354,6 +354,7 @@ public:
       return;
     if (IsLoopInvariant(op->condition, loop_var, written_vars,
                         &let_bindings_)) {
+      LOG(INFO) << "Loop Invariant" << ffi::GetRef<IfThenElse>(op);
       found = op;
       // Collect Let-bound variables used in the condition
       LetVarCollector collector(let_bindings_);

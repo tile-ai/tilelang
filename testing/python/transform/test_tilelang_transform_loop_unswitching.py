@@ -386,5 +386,19 @@ def test_no_hoist_let_bound_loop_variant():
     _check(before, expected)
 
 
+def test_no_hoist_multiple_let():
+    @tilelang.jit()
+    def get_fused_mapping_kernel(topk_idx: T.Tensor[(1,), T.int32]):
+        with T.Kernel():
+            _tmp1 = T.alloc_shared((1,), "int")
+            for i in T.serial(0, 4, 2):
+                _tmp2 = topk_idx[i]
+                T.assume(0 <= _tmp2 < 1)
+                if _tmp2 != -1:
+                    T.atomic_add(_tmp1[_tmp2], 1)
+
+    get_fused_mapping_kernel.compile()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
