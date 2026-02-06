@@ -21,12 +21,8 @@ def matmul_batched(
 ):
     A_shape = (batch, K, M) if trans_A else (batch, M, K)
     B_shape = (batch, N, K) if trans_B else (batch, K, N)
-    A_shared_shape = (
-        (batch, block_K, block_M) if trans_A else (batch, block_M, block_K)
-    )
-    B_shared_shape = (
-        (batch, block_N, block_K) if trans_B else (batch, block_K, block_N)
-    )
+    A_shared_shape = (batch, block_K, block_M) if trans_A else (batch, block_M, block_K)
+    B_shared_shape = (batch, block_N, block_K) if trans_B else (batch, block_K, block_N)
 
     @T.prim_func
     def main(
@@ -89,10 +85,14 @@ def run_gemm_batched(
         num_threads,
     )
 
-    kernel = tilelang.compile(program, out_idx=[2], pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    kernel = tilelang.compile(
+        program,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        },
+    )
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
