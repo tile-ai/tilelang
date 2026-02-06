@@ -236,7 +236,8 @@ Fragment FragmentNode::DeReplicate() const {
   PrimExpr new_forward_thread = Substitute(forward_thread_, vmap);
   Array<PrimExpr> new_forward_index = {FloorDiv(forward_index_[0], factor)};
   return Fragment(input_size_, new_forward_index, new_forward_thread,
-                  int(*rep_size) / factor, std::nullopt);
+                  int(*rep_size) / factor, std::nullopt)
+      ->BindThreadRange(Range(0, ThreadExtent()));
 }
 
 Fragment FragmentNode::BindThreadRange(Range thread_range) const {
@@ -554,7 +555,8 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
 Fragment Fragment::FullyReplicated(Array<PrimExpr> shape,
                                    PrimExpr thread_extent) {
   return Fragment(shape, {}, ReplicationPlaceholder(), thread_extent,
-                  std::nullopt);
+                  std::nullopt)
+      ->BindThreadRange(Range(0, thread_extent));
 }
 
 // which means the forward_thread is rep_var -> lambda i, rep: rep

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import tilelang.language as T
 from tvm import ir
-from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
+from tvm.tir import PrimExpr, Buffer, op
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
+from tilelang.language.utils import get_extent
 
 _MEMORY_ORDER_ID_MAP = {
     "relaxed": 0,
@@ -57,16 +58,6 @@ def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
         >>> atomic_max(dst_tensor, src_tensor)  # Max entire tensors atomically
     """
 
-    def get_extent(data):
-        if isinstance(data, Var) and T.has_let_value(data):
-            data = T.get_let_value(data)
-        if isinstance(data, Buffer):
-            return data.shape
-        elif isinstance(data, BufferRegion):
-            return [x.extent for x in data.region]
-        else:
-            return None
-
     src_extent = get_extent(value)
     dst_extent = get_extent(dst)
 
@@ -83,15 +74,20 @@ def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
             memory_order_id,
         )
 
+    # When both arguments are Buffer, we can check whether they are structural equal.
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
 
     assert src_extent or dst_extent, "Can't deduce atomicmax extents from args"
+
+    # If src is BufferLike, we need to first transform it to region
+    if src_extent:
+        value = to_buffer_region(value, access_type="r", extents=src_extent)
+
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
-    value = to_buffer_region(value, access_type="r", extents=src_extent)
     dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     if return_prev:
@@ -144,16 +140,6 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
         >>> atomic_min(dst_tensor, src_tensor)  # Min entire tensors atomically
     """
 
-    def get_extent(data):
-        if isinstance(data, Var) and T.has_let_value(data):
-            data = T.get_let_value(data)
-        if isinstance(data, Buffer):
-            return data.shape
-        elif isinstance(data, BufferRegion):
-            return [x.extent for x in data.region]
-        else:
-            return None
-
     src_extent = get_extent(value)
     dst_extent = get_extent(dst)
 
@@ -170,15 +156,20 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
             memory_order_id,
         )
 
+    # When both arguments are Buffer, we can check whether they are structural equal.
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
 
     assert src_extent or dst_extent, "Can't deduce atomicmin extents from args"
+
+    # If src is BufferLike, we need to first transform it to region
+    if src_extent:
+        value = to_buffer_region(value, access_type="r", extents=src_extent)
+
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
-    value = to_buffer_region(value, access_type="r", extents=src_extent)
     dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     if return_prev:
@@ -236,29 +227,10 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
         >>> atomic_add(global_grad, gradients)
     """
 
-    def get_extent(data):
-        """
-        Return the inferred extent (shape) of a buffer-like object.
-
-        If `data` is a Var bound to a let value, the let value is resolved before inspection.
-        Parameters:
-            data: A Var, Buffer, or BufferRegion to inspect.
-
-        Returns:
-            The shape/extents as a list-like of PrimExpr (Buffer.shape or list of region item extents), or None if the extent cannot be determined.
-        """
-        if isinstance(data, Var) and T.has_let_value(data):
-            data = T.get_let_value(data)
-        if isinstance(data, Buffer):
-            return data.shape
-        elif isinstance(data, BufferRegion):
-            return [x.extent for x in data.region]
-        else:
-            return None
-
     src_extent = get_extent(value)
     dst_extent = get_extent(dst)
 
+    # Thread-level atomic add, where both extent can't be inferred
     if dst_extent is None and src_extent is None:
         atomic_add_op = op.Op.get("tl.atomic_add_ret_elem_op") if return_prev else op.Op.get("tl.atomic_add_elem_op")
         return_type = dst.dtype if return_prev else "handle"
@@ -275,15 +247,20 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
                 _MEMORY_ORDER_ID_MAP[memory_order],
             )
 
+    # When both arguments are Buffer, we can check whether they are structural equal.
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
 
     assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
+
+    # If src is BufferLike, we need to first transform it to region
+    if src_extent:
+        value = to_buffer_region(value, access_type="r", extents=src_extent)
+
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
-    value = to_buffer_region(value, access_type="r", extents=src_extent)
     dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     # Note: tile-region-based atomic operations don't support return_prev yet

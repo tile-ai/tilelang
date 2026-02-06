@@ -31,15 +31,19 @@ AtomicMax::AtomicMax(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
       << "AtomicMax expects at least 2 arguments (src, dst), got "
       << args.size();
   ObjectPtr<AtomicMaxNode> node = tvm::ffi::make_object<AtomicMaxNode>();
-  Array<Range> rgs[2];
-  Buffer bf[2];
-  for (int i = 0; i < 2; i++) {
-    auto region = NormalizeToBufferRegion(args[i]);
-    rgs[i] = region->region;
-    bf[i] = region->buffer;
+
+  if (IsBufferLikeExpr(args[0])) {
+    auto region = NormalizeToBufferRegion(args[0]);
+    node->src = region->buffer;
+    node->src_range = region->region;
+  } else {
+    node->src_value = args[0];
   }
-  std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
-  std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
+
+  auto region = NormalizeToBufferRegion(args[1]);
+  node->dst = region->buffer;
+  node->dst_range = region->region;
+
   node->annotations = annotations;
   data_ = std::move(node);
 }
@@ -63,15 +67,19 @@ AtomicMin::AtomicMin(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
       << "AtomicMin expects at least 2 arguments (src, dst), got "
       << args.size();
   ObjectPtr<AtomicMinNode> node = tvm::ffi::make_object<AtomicMinNode>();
-  Array<Range> rgs[2];
-  Buffer bf[2];
-  for (int i = 0; i < 2; i++) {
-    auto region = NormalizeToBufferRegion(args[i]);
-    rgs[i] = region->region;
-    bf[i] = region->buffer;
+
+  if (IsBufferLikeExpr(args[0])) {
+    auto region = NormalizeToBufferRegion(args[0]);
+    node->src = region->buffer;
+    node->src_range = region->region;
+  } else {
+    node->src_value = args[0];
   }
-  std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
-  std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
+
+  auto region = NormalizeToBufferRegion(args[1]);
+  node->dst = region->buffer;
+  node->dst_range = region->region;
+
   node->annotations = annotations;
   data_ = std::move(node);
 }
@@ -93,14 +101,23 @@ const Op &AtomicMinNode::GetElemOp() const { return atomic_min_elem_op(); }
 Array<IterVar> AtomicOpBaseNode::MakeIterVars() const {
   Array<IterVar> loop_vars;
   size_t idx = 0;
-  for (size_t i = 0; i < src_range.size(); i++) {
-    if (is_one(src_range[i]->extent))
+  // Make IterVars according to dst, not src
+  // Since src may be a scalar Expr
+  for (size_t i = 0; i < dst_range.size(); i++) {
+    if (is_one(dst_range[i]->extent))
       continue;
-    Var var = Var(std::string{char('i' + idx)}, src_range[i]->extent->dtype);
+    Var var = Var(std::string{char('i' + idx)}, dst_range[i]->extent->dtype);
     idx++;
     loop_vars.push_back(
-        {Range(0, src_range[i]->extent), var, IterVarType::kDataPar});
+        {Range(0, dst_range[i]->extent), var, IterVarType::kDataPar});
   }
+
+  // If is scalar, create a dummy loop var
+  if (loop_vars.empty()) {
+    Var var = Var("i");
+    loop_vars.push_back({Range(0, 1), var, IterVarType::kDataPar});
+  }
+
   return loop_vars;
 }
 
@@ -117,9 +134,11 @@ Array<PrimExpr> AtomicOpBaseNode::MakeIndices(const Array<IterVar> &ivs,
       idx++;
     }
   }
-  ICHECK(idx == ivs.size())
-      << "idx = " << idx << ", ivs.size() = " << ivs.size()
-      << "src name = " << src->name << ", dst name = " << dst->name;
+
+  // Special case: scalar range, when there is one var and one range(0, 1)
+  ICHECK(idx == ivs.size() || (idx == 0 && ivs.size() == 1))
+      << "Unmatched indices: idx = " << idx << ", ivs.size() = " << ivs.size()
+      << ", dst name = " << dst->name;
   return indices;
 }
 
@@ -156,41 +175,45 @@ PrimExpr AtomicOpBaseNode::MakePredicate(arith::Analyzer *analyzer,
 
 For AtomicOpBaseNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
-  bool is_scalar = loop_vars.empty();
-  if (is_scalar) {
-    return For(Var("i"), 0, 1, ForKind::kSerial,
-               BufferStore(dst, BufferLoad(src, {0}), {0}));
-  }
+  ICHECK(!loop_vars.empty()) << "MakeIterVars in AtomicOp should not return "
+                                "empty vars (at least 1 var)";
 
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
 
-  ICHECK(loop_vars.size() <= src_range.size())
-      << "loop_vars.size() = " << loop_vars.size()
-      << ", src_range.size() = " << src_range.size() << ", src = " << src->name
-      << ", dst = " << dst->name;
-
   ICHECK(loop_vars.size() <= dst_range.size())
       << "loop_vars.size() = " << loop_vars.size()
-      << ", dst_range.size() = " << dst_range.size() << ", src = " << src->name
-      << ", dst = " << dst->name;
+      << ", dst_range.size() = " << dst_range.size() << ", dst = " << dst->name;
 
-  Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
-
   Array<PrimExpr> new_args;
 
-  // Load source value and cast to dst dtype if needed
-  PrimExpr src_value = BufferLoad(src, src_indices);
-  if (src->dtype != dst->dtype)
-    src_value = Cast(dst->dtype, src_value);
+  // Src arg to be passed to the Call atomic operation
+  PrimExpr src_value_arg;
+
+  // If src is a Buffer
+  if (!src_value.defined()) {
+    ICHECK(loop_vars.size() <= src_range.size())
+        << "loop_vars.size() = " << loop_vars.size()
+        << ", src_range.size() = " << src_range.size()
+        << ", src = " << src->name << ", dst = " << dst->name;
+
+    Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
+    // Load source value
+    src_value_arg = BufferLoad(src, src_indices);
+  } else {
+    src_value_arg = src_value;
+  }
+  // Cast to dst dtype if needed
+  if (src_value_arg->dtype != dst->dtype)
+    src_value_arg = Cast(dst->dtype, src_value_arg);
 
   // Build a pointer to destination element using tvm_access_ptr
   PrimExpr dst_ptr = Call(DataType::Handle(), builtin::address_of(),
                           {BufferLoad(dst, dst_indices)});
 
   new_args.push_back(dst_ptr);
-  new_args.push_back(src_value);
+  new_args.push_back(src_value_arg);
   new_args.push_back(GetMemoryOrder());
 
   // Use the appropriate elem_op based on the derived type (via virtual call)

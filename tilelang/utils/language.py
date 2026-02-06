@@ -2,6 +2,7 @@ from __future__ import annotations
 from tilelang._typing import BufferLikeType
 from tvm.tir import Buffer, BufferLoad, BufferRegion, PrimExpr
 from tilelang.language.utils import region as _make_region_call
+from tilelang.language.utils import get_buffer_region_from_load
 from functools import reduce
 from tvm import IRModule, DataType
 from tvm.tir import PrimFunc
@@ -171,39 +172,6 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
     assert len(ir_module.get_global_vars()) == 1, "The optimized module should only have one global variable for default schedule."
     func = list(ir_module.functions.values())[0]
     return func
-
-
-def get_buffer_region_from_load(buffer_load: tir.BufferLoad, extents: list[PrimExpr] | None = None) -> tir.BufferRegion | None:
-    """
-    Get the buffer region from a buffer load.
-
-    May encounter buffer load like C[0:128, 0:32], ref to pull request
-    for buffer wise op: https://github.com/apache/tvm/pull/14693
-    convert load to region
-    """
-    buffer, indices = buffer_load.buffer, buffer_load.indices
-    regions = []
-    found_ramp: bool = False
-
-    if extents is not None:
-        assert len(extents) == len(indices), "extents should have the same length as indices"
-    for i, indice in enumerate(indices):
-        if isinstance(indice, tir.Ramp):
-            assert extents is None, "extents should be provided for BufferLoad with Ramp indices"
-            regions.append(ir.Range.from_min_extent(indice.base, indice.lanes))
-            found_ramp = True
-        elif isinstance(indice, tir.PrimExpr):
-            if extents is not None:
-                regions.append(ir.Range.from_min_extent(indice, extents[i]))
-                found_ramp = True
-            else:
-                regions.append(ir.Range.from_min_extent(indice, 1))
-        else:
-            raise ValueError(f"Unsupported type: {type(indice)} for index {i}")
-    if found_ramp:
-        return tir.BufferRegion(buffer, regions)
-    else:
-        return None
 
 
 def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list[PrimExpr] | None = None) -> PrimExpr | BufferRegion:

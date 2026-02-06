@@ -10,6 +10,7 @@
 #include <tvm/arith/iter_affine_map.h>
 
 #include "../support/ffi_aliases.h"
+#include "layout.h"
 
 namespace tvm {
 namespace tl {
@@ -65,6 +66,28 @@ Map<Var, Range> ToVMap(const Array<IterVar> &ivs);
  *
  */
 Array<IterVar> ToIterVars(const Map<Var, Range> &vmap);
+
+/*!
+ * \brief Check whether the threads that access elements of a smaller fragment
+ *        are a subset of the threads that access elements of a larger fragment.
+ *
+ * This function ensures that if the small fragment's layout corresponds to the
+ * loop itself, accessing the large fragment's elements is valid. Additionally,
+ * if small is updated to large, the originally valid access remains valid.
+ *
+ * \param small_frag The smaller fragment to check
+ * \param large_frag The larger fragment to check against
+ * \param small_frag_indices The indices used to access small_frag
+ * \param large_frag_indices The indices used to access large_frag
+ * \param analyzer The analyzer for simplification
+ * \param check_forward_index Whether to also check physical index equality
+ * \return true if small_frag's threads are contained in large_frag's threads
+ */
+bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
+                           Array<PrimExpr> small_frag_indices,
+                           Array<PrimExpr> large_frag_indices,
+                           arith::Analyzer &analyzer,
+                           bool check_forward_index = false);
 
 } // namespace tl
 } // namespace tvm

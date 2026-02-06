@@ -26,6 +26,11 @@ struct LetWrapper {
   PrimExpr value;
 };
 
+struct IfWrapper {
+  PrimExpr condition;
+  Span span;
+};
+
 /*!
  * \brief Collector to find all buffers used in a statement.
  *
@@ -303,16 +308,20 @@ public:
    * \param pipeline_loop The original loop to be software pipelined.
    * \param pipeline_info The pipeline annotation information.
    * \param loop_var_let_wrappers Let wrappers that depend on the loop var.
+   * \param loop_var_if_wrappers If wrappers with conditions that depend on
+   * the loop var.
    */
   PipelineRewriter(Map<Var, Buffer> buffer_data_to_buffer,
                    const Array<Buffer> &pipeline_allocs,
                    const Array<Buffer> &local_allocs, const For &pipeline_loop,
                    const PipelineInfo &pipeline_info,
-                   const std::vector<LetWrapper> &loop_var_let_wrappers)
+                   const std::vector<LetWrapper> &loop_var_let_wrappers,
+                   const std::vector<IfWrapper> &loop_var_if_wrappers)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), local_allocs_(local_allocs),
         pipeline_loop_(pipeline_loop), pipeline_info_(pipeline_info),
-        loop_var_let_wrappers_(loop_var_let_wrappers) {}
+        loop_var_let_wrappers_(loop_var_let_wrappers),
+        loop_var_if_wrappers_(loop_var_if_wrappers) {}
 
   Stmt BuildPipeline() {
     // Step 1: Analyze accesses to the buffers in the pipeline and compute the
@@ -860,6 +869,22 @@ private:
         n->body = inner;
       }
 
+      // Similarly, handle If-wrappers whose conditions depend on the
+      // pipeline loop var.
+      if (!loop_var_if_wrappers_.empty()) {
+        BlockNode *n = new_block.CopyOnWrite();
+        Stmt inner = n->body;
+        for (auto it = loop_var_if_wrappers_.rbegin();
+             it != loop_var_if_wrappers_.rend(); ++it) {
+          const auto &iw = *it;
+          PrimExpr substituted_condition =
+              Substitute(iw.condition,
+                         {{pipeline_loop_->loop_var, normalized_access_index}});
+          inner = IfThenElse(substituted_condition, inner, Stmt(), iw.span);
+        }
+        n->body = inner;
+      }
+
       if (pipeline_info_[block].async) {
         auto &local_state = async_states_local[stage];
         local_state.producer_head = normalized_access_index;
@@ -924,6 +949,7 @@ private:
   Array<Block> ordered_stmts_;
   std::map<int, AsyncStateGlobal> async_states;
   std::vector<LetWrapper> loop_var_let_wrappers_;
+  std::vector<IfWrapper> loop_var_if_wrappers_;
 };
 
 /*!
@@ -1055,6 +1081,7 @@ private:
     const SeqStmtNode *pipeline_body_seq = nullptr;
     std::vector<std::function<Stmt(Stmt)>> rewrap_fns;
     std::vector<LetWrapper> loop_var_let_wrappers;
+    std::vector<IfWrapper> loop_var_if_wrappers;
     auto append_attr_wrapper = [&rewrap_fns](const AttrStmtNode *attr) {
       Any node = attr->node;
       String attr_key = attr->attr_key;
@@ -1077,12 +1104,33 @@ private:
           ICHECK(!if_then_else->else_case.defined())
               << "InjectSoftwarePipeline: Can't handle the body of the loop "
                  "because the IfThenElse node has an else branch";
-          PrimExpr condition = if_then_else->condition;
-          Span span = if_then_else->span;
-          rewrap_fns.emplace_back(
-              [condition = std::move(condition), span](Stmt body) -> Stmt {
-                return IfThenElse(condition, body, Stmt(), span);
+
+          // Check if the condition depends on the loop variable or any
+          // transitively dependent variables (similar to LetStmt handling)
+          std::unordered_set<const VarNode *> dependent_vars;
+          dependent_vars.insert(op->loop_var.get());
+          for (const auto &lw : loop_var_let_wrappers) {
+            dependent_vars.insert(lw.var.get());
+          }
+          bool condition_depends_on_loop = UsesVar(
+              if_then_else->condition, [&dependent_vars](const VarNode *vn) {
+                return dependent_vars.count(vn) > 0;
               });
+
+          if (condition_depends_on_loop) {
+            // If condition depends on loop variable, we need to push it inside
+            // each pipeline stage with proper substitution
+            loop_var_if_wrappers.push_back(
+                {if_then_else->condition, if_then_else->span});
+          } else {
+            // Otherwise, safe to wrap outside the pipeline
+            PrimExpr condition = if_then_else->condition;
+            Span span = if_then_else->span;
+            rewrap_fns.emplace_back(
+                [condition = std::move(condition), span](Stmt body) -> Stmt {
+                  return IfThenElse(condition, body, Stmt(), span);
+                });
+          }
           current = if_then_else->then_case;
           continue;
         }
@@ -1235,7 +1283,8 @@ private:
 
     PipelineRewriter rewriter(buffer_data_to_buffer_, pipeline_allocs,
                               local_allocs, tvm::ffi::GetRef<For>(op),
-                              pipeline_info, loop_var_let_wrappers);
+                              pipeline_info, loop_var_let_wrappers,
+                              loop_var_if_wrappers);
     Stmt pipeline = rewriter.BuildPipeline();
 
     // Store the buffer remapping for updating outer block alloc_buffers

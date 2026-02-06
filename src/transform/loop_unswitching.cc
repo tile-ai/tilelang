@@ -201,8 +201,8 @@ bool UsesLoopVarThroughLetBindings(
         auto it = let_bindings->find(var_node);
         if (it != let_bindings->end()) {
           // Check if the bound expression uses the loop variable
-          if (UsesVar(it->second,
-                      [&](const VarNode *v) { return v == loop_var.get(); })) {
+          if (UsesLoopVarThroughLetBindings(it->second, loop_var,
+                                            let_bindings)) {
             uses_loop_var = true;
           }
         }
