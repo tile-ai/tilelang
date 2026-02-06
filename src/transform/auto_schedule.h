@@ -480,6 +480,12 @@ void PrintIRStructure(const IRStructure* node, int indent = 0) {
     for (auto &stmt: task->stmts) {
       LOG(INFO) << indent_str << "  stmt: " << stmt;
     }
+    for (auto &region: task->GetReadRegions()) {
+      LOG(INFO) << indent_str << "  Read Region: " << region;
+    }
+    for (auto &region: task->GetWriteRegions()) {
+      LOG(INFO) << indent_str << "  Write Region: " << region;
+    }
     LOG(INFO) << indent_str << "  uses_cuda_core: " << task->UsesCUDACore();
     LOG(INFO) << indent_str << "  uses_tma_core: " << task->UsesTMACore();
     LOG(INFO) << indent_str << "  uses_tensor_core: " << task->UsesTensorCore();

@@ -360,7 +360,7 @@ def z3_schedule_loop_python(
 
             # Create solver for feasibility check
             solver = z3.Solver()
-            solver.set("timeout", 100000)
+            solver.set("timeout", 10000)
 
             start_vars = [z3.Int(f"start_{i}") for i in range(n)]
             pro_vars = [z3.Bool(f"pro_{i}") for i in range(n)]

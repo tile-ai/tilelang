@@ -363,10 +363,10 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id,
           Stmt wait_stmt = makeBarrierWait(barrier_load, 0); // parity = 0 for non-loop barriers
           InsertStatementIntoTaskNode(task, wait_stmt, true);
           LOG(INFO) << "Added barrier_wait for barrier " << barrier_id << ", parity=0 to task in warpgroup " << wg_id;
+          // Remove from map after read (as per user instruction)
+          last_write_map.erase(it);
         }
 
-        // Remove from map after read (as per user instruction)
-        last_write_map.erase(it);
       }
     }
 
@@ -480,10 +480,10 @@ static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, 
             Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
             InsertStatementIntoTaskNode(task, wait_stmt, true);
             LOG(INFO) << "Added barrier_wait for barrier " << barrier_id << ", parity=" << parity_expr << " to task in warpgroup " << wg_id;
+            // Remove from map after read (as per user instruction)
+            last_write_map.erase(it);
           }
 
-          // Remove from map after read (as per user instruction)
-          last_write_map.erase(it);
         }
       }
 
@@ -1883,11 +1883,8 @@ public:
 
   Stmt VisitStmt_(const AttrStmtNode* op) final {
     if (op->attr_key == tir::attr::thread_extent) {
-      auto iter_var = Downcast<IterVar>(op->node);
-      if (iter_var->thread_tag == "threadIdx.x") {
-        // Save the thread IterVar
-        thread_iv_ = iter_var;
-
+      auto thread_iv_ = Downcast<IterVar>(op->node);
+      if (thread_iv_->thread_tag == "threadIdx.x") {
         // Visit the body first (to update any references)
         AttrStmt attr_stmt = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
 
@@ -1899,7 +1896,8 @@ public:
         Range new_dom = Range::FromMinExtent(thread_iv_->dom->min, updated_thread_extent_);
 
         // Update the AttrStmt with new IterVar and value
-        attr_stmt.CopyOnWrite()->node = iter_var;
+        thread_iv_.CopyOnWrite()->dom = new_dom;
+        attr_stmt.CopyOnWrite()->node = thread_iv_;
         attr_stmt.CopyOnWrite()->value = updated_thread_extent_;
 
         // Clear the saved reference
