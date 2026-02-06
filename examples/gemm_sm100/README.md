@@ -40,19 +40,19 @@ import tilelang.language as T
 
 @T.prim_func
 def main(
-    A: T.Tensor((M, K), "bfloat16"),
-    B: T.Tensor((N, K), "bfloat16"),
-    C: T.Tensor((M, N), "bfloat16"),
+    A: T.Tensor((M, K), T.bfloat16),
+    B: T.Tensor((N, K), T.bfloat16),
+    C: T.Tensor((M, N), T.bfloat16),
 ):
     with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
         # 1. Allocate memory buffers
-        A_shared = T.alloc_shared((block_M, block_K), "bfloat16")  # A matrix shared memory
-        B_shared = T.alloc_shared((block_N, block_K), "bfloat16")  # B matrix shared memory
-        C_tmem = T.alloc_tmem([block_M, block_N], "float")         # TCGEN5MMA output to Tensor Memory
+        A_shared = T.alloc_shared((block_M, block_K), T.bfloat16)  # A matrix shared memory
+        B_shared = T.alloc_shared((block_N, block_K), T.bfloat16)  # B matrix shared memory
+        C_tmem = T.alloc_tmem([block_M, block_N], T.float)         # TCGEN5MMA output to Tensor Memory
         mbar = T.alloc_barrier(1)                                 # mbarrier synchronization primitive
 
-        C_local = T.alloc_fragment((block_M, block_N), "float")   # Register storage
-        C_shared = T.alloc_shared((block_M, block_N), "bfloat16") # Output shared memory
+        C_local = T.alloc_fragment((block_M, block_N), T.float)   # Register storage
+        C_shared = T.alloc_shared((block_M, block_N), T.bfloat16) # Output shared memory
 
         # 2. Main computation loop
         for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=1):
@@ -103,4 +103,3 @@ latency = profiler.do_bench()
 print(f"Latency: {latency} ms")
 print(f"Performance: {2 * M * N * K / (latency/1e3) / 1e12:.2f} TFLOPS")
 ```
-

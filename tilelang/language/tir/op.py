@@ -117,7 +117,7 @@ def call_cpacked_lowered(*args, span=None):
     return _tvm_op.call_cpacked_lowered(*args, span=span)
 
 
-def call_intrin(dtype, func_name, *args, span=None):
+def call_intrin(dtype, func_name, *args, annotations=None, span=None):
     """Build expression by calling an intrinsic function.
 
     Intrinsics can be overloaded with multiple data types via
@@ -142,7 +142,7 @@ def call_intrin(dtype, func_name, *args, span=None):
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.call_intrin(dtype, func_name, *args, span=span)
+    return _tvm_op.call_intrin(dtype, func_name, *args, annotations=annotations, span=span)
 
 
 def call_pure_extern(dtype, func_name, *args, span=None):
@@ -724,8 +724,7 @@ def tvm_load_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout):
     return _tvm_op.tvm_load_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout)
 
 
-def tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c,
-                 index_c):
+def tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c):
     """TVM intrinsic for tensor core mma_sync operators
 
     Parameters
@@ -759,12 +758,10 @@ def tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, 
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b,
-                                fragment_c, index_c)
+    return _tvm_op.tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c)
 
 
-def tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c,
-                  index_c):
+def tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c):
     """TVM intrinsic for tensor core bmma_sync operators
 
     Parameters
@@ -798,8 +795,7 @@ def tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b,
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b,
-                                 fragment_c, index_c)
+    return _tvm_op.tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c)
 
 
 def tvm_fill_fragment(fragment, m, n, k, index, value):
@@ -1107,7 +1103,6 @@ def ptx_wgmma_ss(
 def ptx_wgmma_rs(
     dtype,
     wgmma_prefix,
-    a_is_k_major,
     b_is_k_major,
     a_dtype_abbrv,
     b_dtype_abbrv,
@@ -1122,12 +1117,10 @@ def ptx_wgmma_rs(
     scale_in_a,
     scale_in_b,
 ):
-
     return call_intrin(
         dtype,
         _tvm_op.Op.get("tl.ptx_wgmma_rs"),
         wgmma_prefix,
-        a_is_k_major,
         b_is_k_major,
         a_dtype_abbrv,
         b_dtype_abbrv,
@@ -1141,6 +1134,115 @@ def ptx_wgmma_rs(
         scale_out,
         scale_in_a,
         scale_in_b,
+    )
+
+
+def ptx_tcgen05_mma_ss(
+    kind_dtype,
+    desc_a,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    C_offset,
+    desc_val,
+    scale_out,
+    mask0,
+    mask1,
+    mask2,
+    mask3,
+    enable_ws=False,
+    ws=None,
+    warp_specialized=None,
+    variant=None,
+):
+    """TVM intrinsic for tcgen05.mma shared-memory × shared-memory instructions.
+
+    Expects 13 or 14 positional arguments:
+    (kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
+     desc_val, scale_out, mask0, mask1, mask2, mask3[, enable_ws]).
+    Aliases: you can also pass `ws` or `warp_specialized` (booleans) instead of `enable_ws`.
+    Alternatively, use `variant="ws"` (or "default").
+    - kind_dtype: instruction kind selector (e.g., T.float16 for kind::f16,
+      "tf32" for kind::tf32, "int8" for kind::i8, "float8_e4m3" for kind::f8f6f4).
+    """
+    # Aliases precedence: if either `ws` or `warp_specialized` is provided, they override enable_ws
+    if ws is not None:
+        enable_ws = bool(ws)
+    if warp_specialized is not None:
+        enable_ws = bool(warp_specialized)
+    if variant is not None:
+        if isinstance(variant, str):
+            v = variant.lower()
+            if v in ("ws", "warp_specialized", "warp-specialized"):
+                enable_ws = True
+            elif v in ("default", "std", "ss"):
+                enable_ws = False
+            else:
+                raise ValueError(f"ptx_tcgen05_mma_ss: unknown variant: {variant}")
+        else:
+            # Treat non-string as truthy flag
+            enable_ws = bool(variant)
+
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ss"),
+        kind_dtype,
+        desc_a,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        C_offset,
+        desc_val,
+        scale_out,
+        mask0,
+        mask1,
+        mask2,
+        mask3,
+        enable_ws,
+    )
+
+
+def ptx_tcgen05_mma_ts(
+    kind_dtype,
+    A_ptr,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    C_offset,
+    desc_val,
+    scale_out,
+    mask0,
+    mask1,
+    mask2,
+    mask3,
+):
+    """TVM intrinsic for tcgen05.mma tensor-memory × shared-memory instructions.
+
+    Expects 13 positional arguments:
+    (kind_dtype, A_ptr, A_offset, desc_b, B_offset, C_ptr, C_offset,
+     desc_val, scale_out, mask0, mask1, mask2, mask3).
+    - kind_dtype: instruction kind selector (e.g., T.float16 for kind::f16,
+      "tf32" for kind::tf32, "int8" for kind::i8, "float8_e4m3" for kind::f8f6f4).
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ts"),
+        kind_dtype,
+        A_ptr,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        C_offset,
+        desc_val,
+        scale_out,
+        mask0,
+        mask1,
+        mask2,
+        mask3,
     )
 
 
@@ -1238,8 +1340,7 @@ def ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, sme
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr,
-                                smem_offset)
+    return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset)
 
 
 def ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes):
@@ -1274,8 +1375,7 @@ def ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, by
     return _tvm_op.ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes)
 
 
-def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes,
-                      barrier_id):
+def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id):
     """TVM intrinsic for ptx async copy from global to shared memory using cp.async.bulk
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk
 
@@ -1307,8 +1407,7 @@ def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offse
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset,
-                                     bytes, barrier_id)
+    return _tvm_op.ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id)
 
 
 def ptx_commit_group():
@@ -1893,7 +1992,7 @@ def infinity(dtype: str, span: Span | None = None) -> Any:
     value : tvm.Expr
         The infinity value of dtype.
     """
-    return _tvm_op.infinity(dtype, span)
+    return call_intrin(dtype, _tvm_op.Op.get("tl.infinity"), dtype, span=span)
 
 
 def reinterpret(dtype, value, span: Span | None = None) -> Any:
@@ -2844,8 +2943,7 @@ def q_multiply_shift_per_axis(
     z : PrimExpr
         The result.
     """
-    return _tvm_op.q_multiply_shift_per_axis(x, y, ls, rs, q, is_lshift_required,
-                                             is_rshift_required)
+    return _tvm_op.q_multiply_shift_per_axis(x, y, ls, rs, q, is_lshift_required, is_rshift_required)
 
 
 def shift_left(x, y, span=None):
@@ -3195,8 +3293,7 @@ def TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint, dt
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint,
-                                            dtype_bits_hint)
+    return _tvm_op.TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint, dtype_bits_hint)
 
 
 def TVMBackendFreeWorkspace(device_type, device_id, ptr):

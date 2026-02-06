@@ -8,11 +8,13 @@ import tilelang.language as T
 from tilelang import tvm as tvm
 from tvm import DataType
 from tilelang.intrinsics.mma_layout import (
-    make_mma_swizzle_layout as make_swizzle_layout,)
+    make_mma_swizzle_layout as make_swizzle_layout,
+)
 import numpy as np
 
 from tilelang.intrinsics.mma_macro_generator import (
-    INT4TensorCoreIntrinEmitter,)
+    INT4TensorCoreIntrinEmitter,
+)
 from tilelang.transform import simplify_prim_func
 
 torch.manual_seed(42)
@@ -86,9 +88,9 @@ def bitnet_158_int8xint2_prefill(
     Create a TVM GPU prim_func implementing a block-tiled matrix multiply that multiplies dense A by compressed/interleaved low‑precision B (2-bit packed into int8 storage), decoding B to int8 on-chip and accumulating into C.
 
     The returned prim_func expects:
-    - A: shape (M, K) with dtype `in_dtype` ("float16" or "int8").
+    - A: shape (M, K) with dtype `in_dtype` (T.float16 or T.int8).
     - B: compressed storage with shape (N, K/4) and int8 storage layout (packing 4 2-bit elements per byte).
-    - C: output buffer shape (M, N) with dtype `out_dtype` ("float16", "float32", or "int32").
+    - C: output buffer shape (M, N) with dtype `out_dtype` (T.float16, T.float32, or T.int32).
 
     Details:
     - Builds a tiled, pipelined kernel using shared memory and warp-level MMA intrinsics (INT4TensorCoreIntrinEmitter). B is loaded from compressed storage, decoded to int8 in threads (via decode_i2u_to_i8s / decode_i2s_to_i8s), and dequantized into a shared buffer used by the MMA emitter.
@@ -96,15 +98,15 @@ def bitnet_158_int8xint2_prefill(
       - block_row_warps, block_col_warps: number of warps per block in row/col.
       - warp_row_tiles, warp_col_tiles: tiles per warp.
       - chunk: K-sized chunk per block (block_K).
-      - micro sizes are fixed (16x16x16, except micro_k=32 when accum_dtype == "int32").
+      - micro sizes are fixed (16x16x16, except micro_k=32 when accum_dtype == T.int32).
     - Uses 2-stage pipelining by default to overlap loads and compute and applies a swizzle layout to improve L2 behavior.
     - Assertions: raises AssertionError if in_dtype or out_dtype are not among supported values.
 
     Parameters:
         M, N, K (int): Global matrix dimensions.
-        in_dtype (str): Input and decoded B element dtype; "float16" or "int8".
-        out_dtype (str): Output C dtype; one of "float16", "float32", "int32".
-        accum_dtype (str): Accumulator dtype used by MMA (e.g., "int32").
+        in_dtype (str): Input and decoded B element dtype; T.float16 or T.int8.
+        out_dtype (str): Output C dtype; one of T.float16, T.float32, T.int32.
+        accum_dtype (str): Accumulator dtype used by MMA (e.g., T.int32).
         fast_decoding (bool): If True, enable the fast decoding path (affects which device decode is used).
         block_row_warps (int): Warps in block row dimension.
         block_col_warps (int): Warps in block column dimension.
@@ -116,18 +118,18 @@ def bitnet_158_int8xint2_prefill(
         T.prim_func: A TVM prim_func implementing the described GPU kernel suitable for compilation and execution.
     """
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if accum_dtype == "int32":
+    if accum_dtype == T.int32:
         micro_size_k = 32
 
     num_elems_per_byte = 4
@@ -136,7 +138,7 @@ def bitnet_158_int8xint2_prefill(
     local_size_compressed = local_size // num_elems_per_byte
 
     shared_scope = "shared.dyn"
-    storage_dtype = "int8"
+    storage_dtype = T.int8
 
     # Pipeline Stage
     stage = 2
@@ -181,38 +183,36 @@ def bitnet_158_int8xint2_prefill(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, storage_dtype),
-            C: T.Buffer((M, N), out_dtype),
+        A: T.Buffer(A_shape, in_dtype),
+        B: T.Buffer(B_shape, storage_dtype),
+        C: T.Buffer((M, N), out_dtype),
     ):
         """
-            GPU kernel entry that performs a blocked, pipelined matrix multiplication A @ B.T writing into C.
+        GPU kernel entry that performs a blocked, pipelined matrix multiplication A @ B.T writing into C.
 
-            This kernel:
-            - Loads tiles of A and a compressed/interleaved representation of B from global memory into shared memory.
-            - Decodes B's packed low-precision format (storage_dtype, e.g., 2-bit packed) into element values of `in_dtype` in shared memory via an external decode routine.
-            - Uses Warp/MMA tiled fragments and an INT4/INT2-capable MMA emitter to compute accumulation across K in a pipelined fashion with configurable stages.
-            - Writes accumulated tile results from shared memory back to global C with the expected block/micro-tile indexing.
+        This kernel:
+        - Loads tiles of A and a compressed/interleaved representation of B from global memory into shared memory.
+        - Decodes B's packed low-precision format (storage_dtype, e.g., 2-bit packed) into element values of `in_dtype` in shared memory via an external decode routine.
+        - Uses Warp/MMA tiled fragments and an INT4/INT2-capable MMA emitter to compute accumulation across K in a pipelined fashion with configurable stages.
+        - Writes accumulated tile results from shared memory back to global C with the expected block/micro-tile indexing.
 
-            Parameters:
-                A: Input matrix buffer of shape A_shape and element type `in_dtype`. Represents the MxK activations.
-                B: Compressed/interleaved weight buffer of shape B_shape and storage type `storage_dtype`. Must contain B in the packed low-precision layout expected by the decode routine used by this kernel.
-                C: Output buffer of shape (M, N) and type `out_dtype`; receives the resulting matrix (accumulated values are produced in `accum_dtype` and stored into C).
+        Parameters:
+            A: Input matrix buffer of shape A_shape and element type `in_dtype`. Represents the MxK activations.
+            B: Compressed/interleaved weight buffer of shape B_shape and storage type `storage_dtype`. Must contain B in the packed low-precision layout expected by the decode routine used by this kernel.
+            C: Output buffer of shape (M, N) and type `out_dtype`; receives the resulting matrix (accumulated values are produced in `accum_dtype` and stored into C).
 
-            Side effects:
-                Writes results into C. Calls external device decode functions to expand B from its packed representation into shared memory before computation.
+        Side effects:
+            Writes results into C. Calls external device decode functions to expand B from its packed representation into shared memory before computation.
         """
         with T.Kernel(
-                T.ceildiv(N, block_N),
-                T.ceildiv(M, block_M),
-                threads=threads,
-                prelude=decode_i2s_to_i8s,
+            T.ceildiv(N, block_N),
+            T.ceildiv(M, block_M),
+            threads=threads,
+            prelude=decode_i2s_to_i8s,
         ) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype, scope=shared_scope)
-            B_dequantize_shared = T.alloc_shared(
-                B_dequantize_shared_shape, in_dtype, scope=shared_scope)
+            B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
             A_frag = T.alloc_local((warp_rows * fragement_size_a), in_dtype)
             B_frag = T.alloc_local((warp_cols * fragement_size_b), in_dtype)
@@ -221,12 +221,14 @@ def bitnet_158_int8xint2_prefill(
             B_local = T.alloc_local([local_size_compressed], storage_dtype)
             B_dequantize_local = T.alloc_local([local_size], in_dtype)
 
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
+            thread_bindings = T.get_thread_binding(0)
 
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_dequantize_shared: make_swizzle_layout(B_dequantize_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_dequantize_shared: make_swizzle_layout(B_dequantize_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)
@@ -234,7 +236,6 @@ def bitnet_158_int8xint2_prefill(
             T.clear(C_frag)
 
             for ko in T.Pipelined((K // block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -243,12 +244,9 @@ def bitnet_158_int8xint2_prefill(
                 for j, k in T.Parallel(block_N, block_K // num_elems_per_byte):
                     B_shared[j, k] = B[bx * block_N + j, ko * (block_K // num_elems_per_byte) + k]
 
-                for i in T.serial(block_N * block_K // num_elems_per_byte //
-                                  (threads * local_size_compressed)):
+                for i in T.serial(block_N * block_K // num_elems_per_byte // (threads * local_size_compressed)):
                     for v in T.vectorized(0, local_size_compressed):
-                        index = (
-                            i * threads * local_size_compressed +
-                            thread_bindings * local_size_compressed + v)
+                        index = i * threads * local_size_compressed + thread_bindings * local_size_compressed + v
                         vi, vj = T.index_to_coordinates(index, B_shared_shape)
                         B_local[v] = B_shared[vi, vj]
 
@@ -260,12 +258,11 @@ def bitnet_158_int8xint2_prefill(
                     )
 
                     for v in T.vectorized(0, local_size):
-                        index = (i * threads * local_size + thread_bindings * local_size + v)
+                        index = i * threads * local_size + thread_bindings * local_size + v
                         vi, vj = T.index_to_coordinates(index, B_dequantize_shared_shape)
                         B_dequantize_shared[vi, vj] = B_dequantize_local[v]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_frag,
@@ -320,12 +317,12 @@ def general_compress(lowprecision_weight, source_bits=4, storage_dtype=np.int8):
 
 
 # interleave weight numpy implementation
-def interleave_weight(qweight, nbits=4, target_dtype="float16"):
-    assert target_dtype in ["float16", "int8"]
+def interleave_weight(qweight, nbits=4, target_dtype=T.float16):
+    assert target_dtype in [T.float16, T.int8]
     # reinterpret the data type of qweight to int32
     qweight = qweight.view(np.int32)
     new_qweight = np.zeros_like(qweight)
-    bits_stride = 8 if target_dtype == "int8" else 16
+    bits_stride = 8 if target_dtype == T.int8 else 16
     mask = (1 << nbits) - 1  # for 4bit the val is 0x0000000f
     num_groups = 32 // bits_stride
     elems_per_group = bits_stride // nbits
@@ -335,7 +332,7 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
             shift = (offset % num_groups) * bits_stride + (offset // num_groups) * nbits
             new_qweight |= ((qweight >> (nbits * offset)) & mask) << shift
 
-    if nbits == 1 and target_dtype == "int8":
+    if nbits == 1 and target_dtype == T.int8:
         # special handling for 1b interleave
         n16_weight = new_qweight & np.int32(0xF0F00F0F)
         n16_weight |= ((new_qweight & np.int32(0x000000F0)) >> 4) << 16
@@ -343,12 +340,12 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
         n16_weight |= ((new_qweight & np.int32(0x000F0000)) >> 16) << 4
         n16_weight |= ((new_qweight & np.int32(0x0F000000)) >> 24) << 12
         return n16_weight.view(np.int8)
-    elif nbits == 2 and target_dtype == "float16":
+    elif nbits == 2 and target_dtype == T.float16:
         n8_weight = new_qweight & np.int32(0xFF0000FF)
         n8_weight |= ((new_qweight & np.int32(0x0000FF00)) >> 8) << 16
         n8_weight |= ((new_qweight & np.int32(0x00FF0000)) >> 16) << 8
         return n8_weight.view(np.int8)
-    elif nbits == 1 and target_dtype == "float16":
+    elif nbits == 1 and target_dtype == T.float16:
         n8_weight = new_qweight & 0xF000000F
         n8_weight |= ((new_qweight & 0x000000F0) >> 4) << 8
         n8_weight |= ((new_qweight & 0x00000F00) >> 8) << 16
@@ -360,13 +357,7 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
     return new_qweight.view(np.int8)
 
 
-def assert_bitnet_158_int8xint2_prefill_correctness(M,
-                                                    N,
-                                                    K,
-                                                    in_dtype,
-                                                    out_dtype,
-                                                    accum_dtype,
-                                                    fast_decoding=True):
+def assert_bitnet_158_int8xint2_prefill_correctness(M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding=True):
     program = bitnet_158_int8xint2_prefill(M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding)
     print(program)
     kernel = tilelang.compile(program)
@@ -391,4 +382,4 @@ def assert_bitnet_158_int8xint2_prefill_correctness(M,
 
 
 if __name__ == "__main__":
-    assert_bitnet_158_int8xint2_prefill_correctness(256, 256, 256, "int8", "int32", "int32")
+    assert_bitnet_158_int8xint2_prefill_correctness(256, 256, 256, T.int8, T.int32, T.int32)

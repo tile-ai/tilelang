@@ -17,7 +17,6 @@
 #include <utility>
 
 #include "../op/builtin.h"
-#include "../op/sync.h"
 #include "./common/collector.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"

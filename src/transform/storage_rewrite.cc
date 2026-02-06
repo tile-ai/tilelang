@@ -544,7 +544,7 @@ public:
       }
       return it->second->alloc_var;
     } else {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
   }
   PrimExpr VisitExpr_(const CallNode *op) final {
@@ -679,7 +679,7 @@ private:
     return !scope.tag.empty() && scope.tag != ".dyn" &&
            scope.tag != ".barrier" && scope.tag != ".workspace" &&
            scope.tag != ".vtcm" && scope.tag != ".var" &&
-           scope.tag != ".descriptor";
+           scope.tag.find(".descriptor") != 0;
   }
 
   // Allocate entry of node.
@@ -865,7 +865,7 @@ private:
     ICHECK_NE(e->const_nbits, 0U);
     MemoryInfo info;
     if (e->scope.tag != ".barrier" && e->scope.tag != ".var" &&
-        e->scope.tag != ".descriptor") {
+        e->scope.tag.find(".descriptor") != 0) {
       info = GetMemoryInfo(e->scope.to_string());
     }
     uint64_t total_bits = e->const_nbits;
@@ -978,8 +978,8 @@ private:
           ICHECK(alloc_info.count(var));
           const AllocEntry &entry = alloc_info.at(var);
           const AllocateNode *alloc = entry.alloc;
-          auto storage_scope =
-              StorageScope::Create(GetPtrStorageScope(GetRef<Var>(var)));
+          auto storage_scope = StorageScope::Create(
+              GetPtrStorageScope(tvm::ffi::GetRef<Var>(var)));
           StorageEntry *dst_entry = nullptr;
           // inplace detection
           if (detect_inplace) {
@@ -1425,9 +1425,30 @@ public:
   void
   OnArrayDeclaration(const Var &buffer, DataType element_dtype, PrimExpr extent,
                      BufferVarInfo::DeclarationLocation declaration_location) {
-    ICHECK(info_map_.find(buffer.get()) == info_map_.end())
-        << "Array declaration of " << buffer->name_hint
-        << " occurred multiple times.";
+    auto it = info_map_.find(buffer.get());
+    if (it != info_map_.end()) {
+      // The same buffer var may appear in more than one Allocate due to
+      // upstream transforms (e.g., storage planning/merging). Treat repeated
+      // declarations as benign and merge metadata instead of erroring.
+      BufferVarInfo &existing = it->second;
+      // Prefer a concrete element dtype if the previous one was a handle.
+      if (existing.element_dtype.is_handle() && !element_dtype.is_handle()) {
+        existing.element_dtype =
+            element_dtype == DataType::Bool()
+                ? DataType::Int(8).with_lanes(element_dtype.lanes())
+                : element_dtype;
+      }
+      // If extent was previously unknown (0) and a concrete extent is
+      // provided now, record it.
+      if (!existing.extent.defined() || is_zero(existing.extent)) {
+        existing.extent = extent;
+      }
+      // Merge declaration locations (bitwise OR of flags).
+      existing.declaration_location =
+          static_cast<BufferVarInfo::DeclarationLocation>(
+              existing.declaration_location | declaration_location);
+      return;
+    }
 
     if (element_dtype == DataType::Bool()) {
       element_dtype = DataType::Int(8).with_lanes(element_dtype.lanes());
@@ -1732,7 +1753,7 @@ public:
     Var var = (it == rewrite_map_.end()) ? op->var : it->second.new_buffer_var;
     if (var.same_as(op->var) && value.same_as(op->value) &&
         body.same_as(op->body)) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     }
     return LetStmt(var, value, body);
   }
@@ -1985,10 +2006,10 @@ Pass StorageRewrite() {
   return CreatePrimFuncPass(pass_func, 0, "tir.StorageRewrite", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.StorageRewrite", StorageRewrite);
-});
+}
 
 Pass PointerValueTypeRewrite() {
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
@@ -1997,11 +2018,11 @@ Pass PointerValueTypeRewrite() {
   return CreatePrimFuncPass(pass_func, 0, "tl.PointerValueTypeRewrite", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.PointerValueTypeRewrite",
                         PointerValueTypeRewrite);
-});
+}
 
 } // namespace transform
 } // namespace tl

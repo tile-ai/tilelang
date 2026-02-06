@@ -1,4 +1,5 @@
 import tilelang.testing
+from tilelang import language as T
 
 
 def alloc_var(
@@ -6,12 +7,10 @@ def alloc_var(
     block_N,
     dtype,
 ):
-    import tilelang.language as T
-
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared([block_N], dtype)
@@ -34,11 +33,11 @@ def run_alloc_var(
 
     kernel = tilelang.compile(program, out_idx=[1])
     code = kernel.get_kernel_source()
-    assert "tmp =" in code
+    assert "tmp =" in code or "tmp[0] =" in code
 
 
 def test_alloc_var():
-    run_alloc_var(1024, 128, "float16")
+    run_alloc_var(1024, 128, T.float16)
 
 
 def alloc_var_add(
@@ -50,8 +49,8 @@ def alloc_var_add(
 
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared([block_N], dtype)
@@ -74,11 +73,11 @@ def run_alloc_var_add(
 
     kernel = tilelang.compile(program, out_idx=[1])
     code = kernel.get_kernel_source()
-    assert "tmp =" in code
+    assert "tmp =" in code or "tmp[0] =" in code
 
 
 def test_alloc_var_add():
-    run_alloc_var_add(1024, 128, "float16")
+    run_alloc_var_add(1024, 128, T.float16)
 
 
 def alloc_var_with_initializer(
@@ -91,8 +90,8 @@ def alloc_var_with_initializer(
 
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             tmp = T.alloc_var(dtype, init_value)
@@ -113,12 +112,13 @@ def run_alloc_var_with_initializer(
 
     kernel = tilelang.compile(program, out_idx=[1])
     code = kernel.get_kernel_source()
-    print(code)
     assert f"= {init_value};" in code
 
 
+# TODO(Gong): ROCm is not supported yet, disable for now
+@tilelang.testing.requires_cuda
 def test_alloc_var_with_initializer():
-    run_alloc_var_with_initializer(256, 64, "int32", 5)
+    run_alloc_var_with_initializer(256, 64, T.int32, 5)
 
 
 def alloc_multi_vars_with_initializer(
@@ -130,8 +130,8 @@ def alloc_multi_vars_with_initializer(
 
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             tmp0 = T.alloc_var(dtype, 1)
@@ -151,14 +151,15 @@ def run_alloc_multi_vars_with_initializer(
     program = alloc_multi_vars_with_initializer(N, block_N, dtype)
 
     kernel = tilelang.compile(program, out_idx=[1])
-    code = kernel.get_kernel_source()
-    print(code)
+    code = kernel.get_kernel_source(kernel_only=True)
     assert code.count("= 1;") == 1
     assert code.count("= 2;") == 1
 
 
+# TODO(Gong): ROCm is not supported yet, disable for now
+@tilelang.testing.requires_cuda
 def test_alloc_multi_vars_with_initializer():
-    run_alloc_multi_vars_with_initializer(256, 64, "int32")
+    run_alloc_multi_vars_with_initializer(256, 64, T.int32)
 
 
 if __name__ == "__main__":

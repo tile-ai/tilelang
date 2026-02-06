@@ -6,12 +6,11 @@ import tilelang.testing
 
 @tilelang.jit
 def get_ld_kernel(scope, sem, na, nc):
-
     @T.prim_func
     def main(x: T.Tensor((32), "int32"), y: T.Tensor((32), "int32")):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
-            reg = T.alloc_var('int32')
+            reg = T.alloc_var("int32")
             T.ld(x[tx], reg, scope=scope, sem=sem, na=na, nc=nc)
             y[tx] = reg
 
@@ -20,7 +19,6 @@ def get_ld_kernel(scope, sem, na, nc):
 
 @tilelang.jit
 def get_st_kernel(scope, sem, na):
-
     @T.prim_func
     def main(x: T.Tensor((32), "int32")):
         with T.Kernel(1, threads=32):
@@ -38,6 +36,7 @@ def _test_ld_options(scope, sem, na, nc):
     assert torch.equal(x, y)
 
 
+@tilelang.testing.requires_distributed
 @tilelang.testing.requires_cuda
 def test_ld_options():
     # ld.acquire.sys.global.s32 / u64
@@ -66,6 +65,7 @@ def _test_st_options(scope, sem, na):
     assert x.equal(torch.arange(32, device="cuda"))
 
 
+@tilelang.testing.requires_distributed
 @tilelang.testing.requires_cuda
 def test_st_options():
     # st.relaxed.sys.global.s32

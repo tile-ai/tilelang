@@ -212,12 +212,12 @@ const Op &FcollectBlock();
 const Op &CpengineCpAsync();
 
 /*!
- * \brief tvm intrinsics for getting the rank of the current process
+ * \brief tvm intrinsics for getting the rank
  */
 const Op &get_rank();
 
 /*!
- * \brief tvm intrinsics for getting the number of processes
+ * \brief tvm intrinsics for getting the total number of ranks
  */
 const Op &get_num_ranks();
 
@@ -227,8 +227,12 @@ const Op &get_num_ranks();
 const Op &get_remote_base_ptr();
 
 /*!
- * \brief tvm intrinsics for getting the uintptr_t of a pointer
+ * \brief tvm intrinsics for getting uintptr_t
  */
 const Op &get_uintptr_t();
+
+// Note: put, get, wait are TileOperators defined in remote_copy.h
+// Note: wait_eq is defined in sync.h
+
 } // namespace tl
 } // namespace tvm

@@ -10,6 +10,7 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 #include <unordered_map>
+#include <vector>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -17,8 +18,11 @@
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
+#include "../op/utils.h"
+#include "../target/utils.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
+#include "layout_reducer.h"
 #include "loop_partition.h"
 
 namespace tvm {
@@ -102,55 +106,6 @@ private:
   }
 
   Map<Buffer, Layout> layout_remap_;
-};
-class BufferGemmCollector : public StmtExprVisitor {
-public:
-  BufferGemmCollector() { Clear(); }
-
-  void Clear() { buffer_var_gemm_.clear(); }
-
-  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
-
-  Array<Var> GetBufferVarGemm() { return buffer_var_gemm_; }
-
-private:
-  void VisitStmt_(const EvaluateNode *op) {
-    const CallNode *call_node = op->value.as<CallNode>();
-    // Value of EvaluateNode may not be a call
-    if (!call_node) {
-      return;
-    }
-    auto call = Downcast<Call>(call_node);
-    if (call->op.same_as(Gemm::Get())) {
-      auto srcA_buffer_access_ptr = Downcast<Call>(call->args[0]);
-      ICHECK(srcA_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto srcA_buffer_var = Downcast<Var>(srcA_buffer_access_ptr->args[1]);
-      auto srcB_buffer_access_ptr = Downcast<Call>(call->args[1]);
-      ICHECK(srcB_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto srcB_buffer_var = Downcast<Var>(srcB_buffer_access_ptr->args[1]);
-      auto dst_buffer_access_ptr = Downcast<Call>(call->args[2]);
-      ICHECK(dst_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto dst_buffer_var = Downcast<Var>(dst_buffer_access_ptr->args[1]);
-      buffer_var_gemm_.push_back(srcA_buffer_var);
-      buffer_var_gemm_.push_back(srcB_buffer_var);
-      buffer_var_gemm_.push_back(dst_buffer_var);
-    } else if (call->op.same_as(GemmSP::Get())) {
-      auto srcA_buffer_access_ptr = Downcast<Call>(call->args[0]);
-      ICHECK(srcA_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto srcA_buffer_var = Downcast<Var>(srcA_buffer_access_ptr->args[1]);
-      auto srcB_buffer_access_ptr = Downcast<Call>(call->args[1]);
-      ICHECK(srcB_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto srcB_buffer_var = Downcast<Var>(srcB_buffer_access_ptr->args[1]);
-      auto dst_buffer_access_ptr = Downcast<Call>(call->args[2]);
-      ICHECK(dst_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      auto dst_buffer_var = Downcast<Var>(dst_buffer_access_ptr->args[1]);
-      buffer_var_gemm_.push_back(srcA_buffer_var);
-      buffer_var_gemm_.push_back(srcB_buffer_var);
-      buffer_var_gemm_.push_back(dst_buffer_var);
-    }
-  }
-
-  Array<Var> buffer_var_gemm_;
 };
 
 /*!
@@ -253,11 +208,6 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
-    // For TMA 1D, we should collect the buffers which are not used in GEMM and
-    // do not need swizzle
-    BufferGemmCollector collector;
-    collector.Collect(f->body);
-    substituter.buffer_var_gemm_ = collector.GetBufferVarGemm();
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -301,6 +251,9 @@ private:
         layout_map_.Set(buffer, layout);
       }
     }
+    // Begin a new workspace collection frame for this block scope
+    workspace_stack_.emplace_back();
+
     auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
     for (size_t i = 0; i < block->alloc_buffers.size(); i++) {
@@ -309,9 +262,13 @@ private:
         block_ptr->alloc_buffers.Set(i, buffer_remap_[buffer]);
       }
     }
-    for (const auto &buffer : workspaces_)
-      block_ptr->alloc_buffers.push_back(buffer);
-    workspaces_.clear();
+    // Attach any workspaces requested within this block to its alloc_buffers
+    if (!workspace_stack_.empty()) {
+      for (const auto &buffer : workspace_stack_.back()) {
+        block_ptr->alloc_buffers.push_back(buffer);
+      }
+      workspace_stack_.pop_back();
+    }
     return block;
   }
 
@@ -350,8 +307,9 @@ private:
       if (!load_expr.same_as(access_ptr_call->args[0])) {
         auto node = access_ptr_call.CopyOnWrite();
         node->args.Set(0, load_expr);
-        access_ptr_call = Call(access_ptr_call->dtype, access_ptr_call->op,
-                               {load_expr}, access_ptr_call->span);
+        access_ptr_call =
+            Call(access_ptr_call->dtype, access_ptr_call->op, {load_expr},
+                 access_ptr_call->annotations, access_ptr_call->span);
       }
       BufferLoad load = Downcast<BufferLoad>(access_ptr_call->args[0]);
       Array<PrimExpr> indices = load->indices;
@@ -421,7 +379,7 @@ private:
       }
       result.rewritten = true;
       result.expr = Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
-                         access_ptr_call->span);
+                         access_ptr_call->annotations, access_ptr_call->span);
       return result;
     } else {
       LOG(FATAL) << "Invalid access op for permuted layout: " << access_ptr;
@@ -435,7 +393,7 @@ private:
       return expr;
     }
     if (const auto *var_node = expr.as<VarNode>()) {
-      Var var = GetRef<Var>(var_node);
+      Var var = tvm::ffi::GetRef<Var>(var_node);
       auto it = let_bindings_.find(var);
       if (it != let_bindings_.end()) {
         return it->second;
@@ -518,7 +476,8 @@ private:
       if (!load_expr.same_as(address_of_call->args[0])) {
         auto call_node = call.CopyOnWrite();
         call_node->args.Set(5, Call(address_of_call->dtype, address_of_call->op,
-                                    {load_expr}, address_of_call->span));
+                                    {load_expr}, address_of_call->annotations,
+                                    address_of_call->span));
         address_of_call = Downcast<Call>(call->args[5]);
         access_ptr = call->args[5];
       }
@@ -611,7 +570,7 @@ private:
       let_bindings_.erase(op->var);
     }
     if (value.same_as(op->value) && body.same_as(op->body)) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = value;
@@ -652,13 +611,21 @@ private:
     if (call && call->op.as<GlobalVarNode>())
       return Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
-    auto tile_op = ParseOperator(GetRef<Stmt>(op), buffer_data_to_buffer_);
+    auto tile_op = ParseOperator(tvm::ffi::GetRef<Stmt>(op));
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
-      workspaces_.push_back(workspace);
+      // Record workspace under the innermost block scope so its lifetime
+      // covers the statements that requested it and does not sink into
+      // subsequently created inner blocks (e.g., GEMM macro blocks).
+      if (!workspace_stack_.empty()) {
+        workspace_stack_.back().push_back(workspace);
+      } else {
+        // Fallback: create a temporary frame (should be rare)
+        workspace_stack_.emplace_back(Array<Buffer>{workspace});
+      }
       return workspace.access_ptr(2); // write
     };
 
@@ -676,9 +643,15 @@ private:
       thread_bounds = Range::FromMinExtent(0, 1);
     }
 
+    // Convert let_bindings_ to Map<Var, PrimExpr> for LowerArgs
+    Map<Var, PrimExpr> let_var_to_expr;
+    for (const auto &[var, expr] : let_bindings_) {
+      let_var_to_expr.Set(var, expr);
+    }
+
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  layout_map_, buffer_remap_, buffer_var_gemm_},
+                  layout_map_, buffer_remap_, let_var_to_expr},
         analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
@@ -696,6 +669,163 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
+  /**
+   * @brief Handle a Parallel For node, lowering it based on the layout
+   * annotation.
+   *
+   * This method checks if the For node has a parallel_loop_layout annotation.
+   * If the For node is a parallel loop (ForKind::kParallel):
+   * - It must have the parallel_loop_layout annotation, otherwise an error is
+   *   raised.
+   * - The loop is partitioned and vectorized based on the annotated layout.
+   * - If a predicate annotation exists, the loop is wrapped with an IfThenElse.
+   *
+   * Special handling for reducers and local buffers:
+   * - If the loop stores into local buffers, thread partitioning is skipped.
+   * - If the loop only manipulates local buffers, thread partitioning is
+   * skipped.
+   * - If reducers are present, vectorization is skipped.
+   * - Vectorization is only applied if non-local buffers or vectorizable casts
+   *   are present.
+   *
+   * @return Stmt The lowered statement.
+   */
+  Stmt VisitStmt_(const ForNode *op) final {
+    // Extract reducer info from annotations
+    Map<Var, ReducerInfo> reducer_info;
+    if (op->annotations.count(attr::kReducerInfo)) {
+      reducer_info = op->annotations.Get(attr::kReducerInfo)
+                         ->as<Map<Var, ReducerInfo>>()
+                         .value();
+    }
+
+    // First visit the body
+    For for_node = Downcast<For>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+
+    // Only process parallel loops
+    if (op->kind != ForKind::kParallel) {
+      return for_node;
+    }
+
+    // For nested parallel loops, the annotation is placed on the outermost
+    // loop. Inner parallel loops without annotation should be skipped here -
+    // they will be processed as part of the outer loop's partitioning.
+    if (!op->annotations.count(attr::kParallelLoopLayout)) {
+      return for_node;
+    }
+
+    auto loop_layout = Downcast<Fragment>(
+        op->annotations.Get(attr::kParallelLoopLayout).value());
+
+    // Get predicate if it exists
+    Optional<PrimExpr> predicate;
+    if (op->annotations.count(attr::kParallelLoopPredicate)) {
+      predicate = Downcast<PrimExpr>(
+          op->annotations.Get(attr::kParallelLoopPredicate).value());
+    }
+
+    auto root = tvm::ffi::GetRef<For>(op);
+
+    // Check if the loop stores into local buffers.
+    // For example:
+    //   for i in T.Parallel(1024):
+    //     A_local[i] = A_global[i]
+    // Here, A_local is a register-local buffer held independently by each
+    // thread, so explicit thread binding is not required.
+    bool store_into_local = false;
+    PostOrderVisit(root, [&](const ObjectRef &obj) {
+      if (const auto *store = obj.as<BufferStoreNode>()) {
+        if (IsLocalBuffer(store->buffer)) {
+          store_into_local = true;
+        }
+      }
+    });
+
+    // Check if the loop only manipulates "local" buffers.
+    // for i in T.Parallel(1024):
+    //     A_local[i] = B_local[i]
+    // This indicates register usage and justifies skipping thread binding.
+    bool local_register_only = true;
+    PostOrderVisit(root, [&](const ObjectRef &obj) {
+      if (const auto *store = obj.as<BufferStoreNode>()) {
+        if (!IsLocalBuffer(store->buffer)) {
+          local_register_only = false;
+        }
+      } else if (const auto *load = obj.as<BufferLoadNode>()) {
+        if (!IsLocalBuffer(load->buffer)) {
+          local_register_only = false;
+        }
+      }
+    });
+
+    // Determine if this is a true parallel loop requiring thread partitioning.
+    // Skip partitioning for loops that only operate on local/register buffers.
+    bool parallel_loop = !local_register_only && !store_into_local;
+
+    // Check if there are non-local buffer accesses (for vectorization decision)
+    bool has_non_local = false;
+    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+      if (const auto *load = obj.as<BufferLoadNode>()) {
+        if (!IsLocalBuffer(load->buffer) && !IsFragmentBuffer(load->buffer)) {
+          has_non_local = true;
+        }
+      } else if (const auto *store = obj.as<BufferStoreNode>()) {
+        if (!IsLocalBuffer(store->buffer) && !IsFragmentBuffer(store->buffer)) {
+          has_non_local = true;
+        }
+      }
+    });
+
+    // Check if reducers are present in the loop body
+    // Workaround: if reducer is presented, don't vectorize loop
+    // Best solution should be isolate reduction axis out of vectorization
+    //
+    // Note: reducer_info stores original buffer data vars, but after visiting
+    // the body, buffers may have been remapped via var_remap_. We need to find
+    // the original var to check against reducer_info.
+    bool has_reducer = false;
+    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+      if (!has_reducer) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          Var data_var = store->buffer->data;
+          // Find the original var if it was remapped
+          // var_remap_ maps old_var -> new_var, so we need reverse lookup
+          Var original_var = data_var;
+          for (const auto &[old_var, new_var] : var_remap_) {
+            if (new_var.same_as(data_var)) {
+              original_var = old_var;
+              break;
+            }
+          }
+          has_reducer = reducer_info.count(original_var) != 0;
+        }
+      }
+    });
+
+    // Check if vectorizable cast operations exist
+    bool has_cast_operations = false;
+    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+      if (const auto *cast = obj.as<CastNode>()) {
+        DataType from_ty = cast->value.dtype();
+        DataType target_ty = cast->dtype;
+        if (IsCudaVectorizableCast(from_ty, target_ty) &&
+            TargetIsCuda(Target::Current())) {
+          has_cast_operations = true;
+        }
+      }
+    });
+
+    // Decide whether to vectorize:
+    // - Only if there are non-local buffers or vectorizable casts
+    // - AND no reducers are present
+    bool should_vectorize =
+        (has_non_local || has_cast_operations) && !has_reducer;
+
+    // Lower the parallel loop using the common function
+    return LowerParallelLoop(for_node, loop_layout, thread_var_->var, analyzer_,
+                             predicate, parallel_loop, should_vectorize);
+  }
+
   Target target_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Layout> layout_map_;
@@ -706,7 +836,8 @@ private:
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
   size_t thread_block_size_ = 0;
-  Array<Buffer> workspaces_;
+  // Stack of per-Block workspace buffers gathered while visiting children
+  std::vector<Array<Buffer>> workspace_stack_;
   // For ptx Node, we need to remap the buffer and indices
   // By access CallNode instead of BufferLoad Node.
   bool is_ptx_{false};
@@ -716,7 +847,6 @@ private:
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
   bool has_tma_{false};
-  Array<Var> buffer_var_gemm_;
 };
 
 namespace transform {
@@ -730,10 +860,10 @@ tvm::transform::Pass LowerTileOp() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerTileOp", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerTileOp", LowerTileOp);
-});
+}
 } // namespace transform
 
 } // namespace tl

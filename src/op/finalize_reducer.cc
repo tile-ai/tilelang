@@ -12,6 +12,7 @@
 #include <tvm/tir/op_attr_types.h>
 
 #include "../target/utils.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
@@ -29,12 +30,15 @@ using namespace tir;
  * @param args TL operator arguments: expects at least two elements where
  *             `args[0]` is an access pointer identifying the reducer variable
  * and `args[1]` is an integer encoding a `ReducerOpType` (e.g., Sum/Max/Min).
- * @param vmap Mapping from variables to Buffers used to look up the reducer
- * Buffer.
  */
-FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args, BufferMap vmap) {
-  auto node = make_object<FinalizeReducerOpNode>();
-  node->reducer = vmap[GetVarFromAccessPtr(args[0])];
+FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
+                                     Map<String, ObjectRef> annotations) {
+  auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
+  // Normalize any supported region expression
+  // (BufferRegion/BufferLoad/tl.region) to a BufferRegion, then take the
+  // underlying Buffer as reducer.
+  auto region = NormalizeToBufferRegion(args[0]);
+  node->reducer = region->buffer;
   node->op = (ReducerOpType)*as_const_int(args[1]);
   data_ = std::move(node);
 }
@@ -95,7 +99,8 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
   int reducing_threads = extent;
   std::stringstream ss;
   auto thread_offset = T.thread_bounds->min;
-  if (TargetIsHopper(T.target) || TargetIsSm100(T.target)) {
+  if (TargetIsHopper(T.target) || TargetIsSm100(T.target) ||
+      TargetIsSM120(T.target)) {
     auto all_threads = T.thread_bounds->extent;
     ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
        << ", " << thread_offset << ", " << all_threads << ">::run_hopper";
@@ -152,15 +157,15 @@ LayoutMap FinalizeReducerOpNode::InferLayout(const LayoutInferArgs &T,
  * @return TileOperator A TileOperator that contains a deep copy of this node.
  */
 TileOperator FinalizeReducerOpNode::Clone() const {
-  auto node = make_object<FinalizeReducerOpNode>(*this);
+  auto node = tvm::ffi::make_object<FinalizeReducerOpNode>(*this);
   return TileOperator(node);
 }
 
-TIR_REGISTER_TL_OP(FinalizeReducerOp, finalize_reducer)
+TIR_REGISTER_TL_TILE_OP(FinalizeReducerOp, finalize_reducer)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ FinalizeReducerOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { FinalizeReducerOpNode::RegisterReflection(); }
 } // namespace tl
 } // namespace tvm

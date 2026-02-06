@@ -8,15 +8,14 @@ import torch.multiprocessing
 from tilelang.distributed import init_dist
 
 tilelang.disable_cache()
-os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
+os.environ["NCCL_DEBUG"] = "WARN"  # silence NCCL log
 
 
 def kernel_(M, num_rank, block_M, threads):
-
     @T.prim_func
     def main(
-            dst: T.Tensor((M), "bfloat16"),
-            src: T.Tensor((M), "bfloat16"),
+        dst: T.Tensor((M), "bfloat16"),
+        src: T.Tensor((M), "bfloat16"),
     ):
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as (bx):
             rank = T.alloc_local([1], "uint64")
@@ -31,7 +30,8 @@ def kernel_(M, num_rank, block_M, threads):
                 dst=T.address_of(dst[warp_start]),
                 size=warp_copy_size,
                 dst_pe=rank[0] ^ 1,
-                unroll_factor=4)
+                unroll_factor=4,
+            )
 
     return main
 
@@ -44,12 +44,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     allocator = tilelang.get_allocator(
-        size=2**25,
-        device="cuda",
-        is_distributed=True,
-        local_rank=local_rank,
-        num_local_ranks=num_local_ranks,
-        group=group)
+        size=2**25, device="cuda", is_distributed=True, local_rank=local_rank, num_local_ranks=num_local_ranks, group=group
+    )
     kernel = tilelang.compile(kernel_(M, num_ranks, BLOCK_M, threads))
     kernel.initialize(allocator=allocator)
     if local_rank == 0:
@@ -80,9 +76,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--num-processes', type=int, default=2, help='Number of processes to spawn (default: 2)')
-    parser.add_argument('--M', type=int, default=65536, help='M dimension')
+    parser.add_argument("--num-processes", type=int, default=2, help="Number of processes to spawn (default: 2)")
+    parser.add_argument("--M", type=int, default=65536, help="M dimension")
     args = parser.parse_args()
     num_processes = args.num_processes
 

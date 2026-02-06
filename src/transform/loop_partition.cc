@@ -28,6 +28,9 @@
 
 #include <utility>
 
+#include "../op/utils.h"
+#include "loop_vectorize.h"
+
 namespace tvm {
 namespace tl {
 
@@ -93,7 +96,8 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   }
   for (int i = 0; i < old_loop_depth; i++) {
     const ForNode *loop = body.as<ForNode>();
-    ICHECK(loop != nullptr);
+    ICHECK(loop != nullptr)
+        << "No extra statements are allowed between nested parallel loops.";
     vmap.Set(loop->loop_var, indices[i]);
     loop_mins.push_back(loop->min);
     loop_extents.push_back(loop->extent);
@@ -173,7 +177,7 @@ private:
       if (as_const_int(analyzer->Simplify(node->extent)) == nullptr) {
         return StmtExprMutator::VisitStmt_(node);
       }
-      For new_for = GetRef<For>(node);
+      For new_for = tvm::ffi::GetRef<For>(node);
       auto for_ptr = new_for.CopyOnWrite();
       for_ptr->annotations.Set(tir::attr::pragma_unroll_explicit, Bool(false));
       for_ptr->kind = ForKind::kUnrolled;
@@ -217,14 +221,14 @@ public:
 
 private:
   void VisitExpr_(const BufferLoadNode *op) final {
-    if (op->buffer.scope() == "local.fragment") {
+    if (IsFragmentBuffer(op->buffer)) {
       has_fragment_ = true;
     }
     StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    if (op->buffer.scope() == "local.fragment") {
+    if (IsFragmentBuffer(op->buffer)) {
       has_fragment_ = true;
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -264,6 +268,32 @@ For LoopPragmaUnroll(For stmt) {
   LoopPramaUnroller unroller;
   For unrolled = Downcast<For>(unroller(std::move(stmt)));
   return unrolled;
+}
+
+Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
+                       arith::Analyzer *analyzer, Optional<PrimExpr> predicate,
+                       bool parallel_loop, bool should_vectorize) {
+  // Save analyzer state to prevent conflicted bindings during vectorization
+  auto saved_analyzer = analyzer->Clone();
+
+  For result_loop = loop;
+
+  // Step 1: Partition the loop based on the layout (if this is a parallel loop)
+  if (parallel_loop) {
+    result_loop = PartitionLoop(result_loop, thread_var, analyzer, loop_layout);
+  }
+
+  // Step 2: Vectorize the loop (if requested)
+  if (should_vectorize) {
+    result_loop = VectorizeLoop(result_loop, saved_analyzer.get());
+  }
+
+  // Step 3: Wrap with predicate if provided and this is a parallel loop
+  if (predicate.defined() && parallel_loop) {
+    return IfThenElse(predicate.value(), result_loop);
+  }
+
+  return result_loop;
 }
 
 } // namespace tl

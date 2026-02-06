@@ -17,7 +17,7 @@ def is_pow_of_2(n):
 def hadamard(b, n, dtype):
     assert is_pow_of_2(n), "n must be a power of 2"
     assert 2 <= n <= 32768, "n must be in [2, 32768]"
-    elem_size = {'float32': 4, 'float16': 2, 'bfloat16': 2}[dtype]
+    elem_size = {T.float32: 4, T.float16: 2, T.bfloat16: 2}[dtype]
 
     logN = int(math.log2(n))
     threads = [0, 1, 1, 1, 2, 4, 8, 16, 32, 32, 128, 256, 256, 256, 256, 256][logN]
@@ -40,23 +40,21 @@ def hadamard(b, n, dtype):
     # print(f'{exchange_round=}')
 
     @T.macro
-    def warp_shfl(local: T.Tensor((thread_elem,), dtype), buf: T.Tensor((thread_elem,), dtype),
-                  round: int):
+    def warp_shfl(local: T.Tensor((thread_elem,), dtype), buf: T.Tensor((thread_elem,), dtype), round: int):
         tx = T.get_thread_binding(0)
         for i in T.serial(round):
             tx_stride = 1 << i
             another_tx = tx ^ tx_stride
-            sign = (
-                tx >> i
-            ) & 1  # get i-th lowest bit of tx, which determines the operation type for shared[tx, :]
+            sign = (tx >> i) & 1  # get i-th lowest bit of tx, which determines the operation type for shared[tx, :]
 
             for j in T.Pipelined(thread_elem, num_stages=1):
                 buf[j] = T.tvm_warp_shuffle(
-                    0xffffffff,  # mask of all threads
+                    0xFFFFFFFF,  # mask of all threads
                     local[j],
                     another_tx % warp_size,
                     warp_size,
-                    warp_size)
+                    warp_size,
+                )
                 local[j] = T.if_then_else(sign == 0, local[j] + buf[j], buf[j] - local[j])
 
     @T.prim_func
@@ -78,10 +76,8 @@ def hadamard(b, n, dtype):
                 for j in T.serial(chunknum):
                     chunkbase = j * chunksize
                     for k in T.serial(chunksize // 2):
-                        local[chunkbase +
-                              k] = local[chunkbase + k] + local[chunkbase + k + chunksize // 2]
-                        local[chunkbase + k + chunksize //
-                              2] = local[chunkbase + k] - 2 * local[chunkbase + k + chunksize // 2]
+                        local[chunkbase + k] = local[chunkbase + k] + local[chunkbase + k + chunksize // 2]
+                        local[chunkbase + k + chunksize // 2] = local[chunkbase + k] - 2 * local[chunkbase + k + chunksize // 2]
 
             # 3. Hadamard inside warp, n<=512
             # In warp level, we rely on warp shuffle to exchange data inside each warp, without using shared memory
@@ -131,28 +127,27 @@ def ref_program(x: torch.Tensor):
     assert x.ndim == 2
     dim = x.shape[-1]
     assert is_pow_of_2(dim)
-    return F.linear(
-        x, torch.tensor(scipy.linalg.hadamard(dim, dtype=float), dtype=x.dtype, device=x.device))
+    return F.linear(x, torch.tensor(scipy.linalg.hadamard(dim, dtype=float), dtype=x.dtype, device=x.device))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=64, help='Batch size')
-    parser.add_argument('--dim', type=int, default=32768, help='Dimension')
+    parser.add_argument("--batch", type=int, default=64, help="Batch size")
+    parser.add_argument("--dim", type=int, default=32768, help="Dimension")
     args = parser.parse_args()
 
     B, D = args.batch, args.dim
-    x = torch.randn((B, D), device='cuda')
-    kernel = hadamard(B, D, 'float32')
+    x = torch.randn((B, D), device="cuda")
+    kernel = hadamard(B, D, T.float32)
     y = kernel(x)
     y_ref = ref_program(x)
     torch.testing.assert_close(y, y_ref, atol=1e-2, rtol=1e-2)
-    print('All tests passed.')
+    print("All tests passed.")
 
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
     latency = profiler.do_bench(warmup=100)
     print("Tile-lang: {:.2f} ms".format(latency))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

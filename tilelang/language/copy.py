@@ -1,4 +1,5 @@
 """The language interface for tl programs."""
+
 from __future__ import annotations
 
 from typing import Literal
@@ -8,11 +9,13 @@ from tvm import ir, tir
 from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
 
 
-def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
-         dst: tir.Buffer | tir.BufferLoad,
-         coalesced_width: int | None = None,
-         disable_tma: bool = False,
-         eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None):
+def copy(
+    src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
+    dst: tir.Buffer | tir.BufferLoad,
+    coalesced_width: int | None = None,
+    disable_tma: bool = False,
+    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+):
     """Copy data between memory regions.
 
     Args:
@@ -47,8 +50,7 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
     # Combine the nested if statements into a single if statement as suggested by SIM102
-    if (src_extent is None and dst_extent is None and isinstance(src, tir.BufferLoad) and
-            isinstance(dst, tir.BufferLoad)):
+    if src_extent is None and dst_extent is None and isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
         # check if the case is like this:
         # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
         # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
@@ -83,19 +85,20 @@ def copy(src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
         eviction_policy = 0
     else:
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
-    return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,
-                           disable_tma, eviction_policy)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width, disable_tma, eviction_policy)
 
 
-def c2d_im2col(img: tir.Buffer,
-               col: tir.Buffer,
-               nhw_step: tir.PrimExpr,
-               c_step: tir.PrimExpr,
-               kernel: int,
-               stride: int,
-               dilation: int,
-               pad: int,
-               eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None):
+def c2d_im2col(
+    img: tir.Buffer,
+    col: tir.Buffer,
+    nhw_step: tir.PrimExpr,
+    c_step: tir.PrimExpr,
+    kernel: int,
+    stride: int,
+    dilation: int,
+    pad: int,
+    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+):
     """Perform im2col transformation for 2D convolution.
 
     Args:
@@ -115,6 +118,16 @@ def c2d_im2col(img: tir.Buffer,
         eviction_policy = 0
     else:
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
-    return tir.call_intrin("handle", tir.op.Op.get("tl.c2d_im2col"), img.access_ptr("r"),
-                           col.access_ptr("w"), nhw_step, c_step, kernel, stride, dilation, pad,
-                           eviction_policy)
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.c2d_im2col"),
+        img.access_ptr("r"),
+        col.access_ptr("w"),
+        nhw_step,
+        c_step,
+        kernel,
+        stride,
+        dilation,
+        pad,
+        eviction_policy,
+    )

@@ -5,14 +5,14 @@ import tilelang.language as T
 import torch
 
 
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     num_stages = 0
 
     @T.prim_func
     def matmul(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
             A_local = T.alloc_local((block_M, block_K), dtype)
@@ -31,7 +31,6 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             # )
 
             for ko in T.Pipelined(K // block_K, num_stages=num_stages):
-
                 T.copy(A[by * block_M, ko * block_K], A_local)
 
                 # Or Copy with Parallel
@@ -62,14 +61,13 @@ def test_matmul_codegen():
 
 
 def test_matmul_compile():
-
-    def matmul_jit_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+    def matmul_jit_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
         # a simple kernel just for jit test
         @T.prim_func
         def matmul(
-                A: T.Tensor((M, K), dtype),
-                B: T.Tensor((K, N), dtype),
-                C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((K, N), dtype),
+            C: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
                 A_local = T.alloc_local((block_M, block_K), dtype)
@@ -103,9 +101,9 @@ def test_matmul_compile():
     block_M, block_N, block_K = M // 4, N // 4, K // 4
     cpu_func = matmul_jit_test(M, N, K, block_M, block_N, block_K)
     with tvm.target.Target("c"):
-        complied_fun = tilelang.compile(cpu_func, -1, execution_backend="ctypes")
+        complied_fun = tilelang.compile(cpu_func, -1, execution_backend="cython")
 
-    in_dtype = "float16"
+    in_dtype = T.float16
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype))
     B = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype))
 

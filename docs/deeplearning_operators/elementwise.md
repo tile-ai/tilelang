@@ -8,7 +8,7 @@
 :class: myclass1 myclass2
 :name: a-tip-reference
 
-   This document is still **experimental** and may be incomplete.  
+   This document is still **experimental** and may be incomplete.
    Suggestions and improvements are highly encouraged—please submit a PR!
 :::
 
@@ -24,7 +24,7 @@ Please note that this tutorial does not delve deeply into the design principles 
 ## Elementwise add in TileLang
 
 ```python
-def elementwise_add(N, threads=256, dtype="bfloat16"):
+def elementwise_add(N, threads=256, dtype=T.bfloat16):
 
     @T.prim_func
     def main(A: T.Tensor((N), dtype), B: T.Tensor((N), dtype), C: T.Tensor((N), dtype)):
@@ -43,7 +43,7 @@ Those familiar with CUDA programming might wonder where `threadIdx` fits into th
 The program can be compiled using the following code:
 
 ```python
-program = elementwise_add(1024, threads=256, dtype="bfloat16")
+program = elementwise_add(1024, threads=256, dtype=T.bfloat16)
 kernel = tilelang.compile(program, out_idx=-1, target="cuda", execution_backend="cython")
 ```
 Launching the kernel is straightforward, just call it directly like a function:
@@ -89,7 +89,7 @@ def elementwise_add(
 In the compilation process above, a fixed shape was used. However, in practical usage, we often want the kernel to support dynamic shapes. So, how can we compile a kernel in TileLang to handle dynamic shapes? In TileLang, we can replace the target size with a dynamic symbolic value, making the dimension dynamic. The following example illustrates this:
 
 ```python
-program = elementwise_add(T.dynamic("N"), threads=256, dtype="bfloat16")
+program = elementwise_add(T.dynamic("N"), threads=256, dtype=T.bfloat16)
 kernel = tilelang.compile(program, out_idx=-1, target="cuda", execution_backend="cython")
 ```
 
@@ -102,7 +102,7 @@ TileLang automatically incorporates boundary-checking conditions; however, this 
 When compiling the example below, let's set `N` to 2047:
 
 ```python
-def elementwise_add(N, num_per_thread=8, threads=256, dtype="bfloat16"):
+def elementwise_add(N, num_per_thread=8, threads=256, dtype=T.bfloat16):
 
     @T.prim_func
     def main(A: T.Tensor((N), dtype), B: T.Tensor((N), dtype), C: T.Tensor((N), dtype)):
@@ -176,7 +176,7 @@ While TileLang incorporates various optimizations for the aforementioned case, i
 In such scenarios, explicitly specifying the number of elements computed per thread can help "guide" TileLang's code generation process, leading to implementations that are more closely aligned with the intended design.
 
 ```python
-def elementwise_add(N, num_per_thread=8, threads=256, dtype="bfloat16"):
+def elementwise_add(N, num_per_thread=8, threads=256, dtype=T.bfloat16):
 
     @T.prim_func
     def main(A: T.Tensor((N), dtype), B: T.Tensor((N), dtype), C: T.Tensor((N), dtype)):
@@ -212,7 +212,7 @@ Aha, this CUDA code aligns closely with conventional programming practices, maki
 But what happens if we provide additional hints to TileLang? For instance, by explicitly specifying register copies using the `T.copy(...)` operation. The example below demonstrates a vector addition implementation. Unlike the previous examples, this code explicitly loads data into registers before performing computations.
 
 ```python
-def elementwise_add(N, NUM_ELE_PER_THREAD=8, threads=256, dtype="bfloat16"):
+def elementwise_add(N, NUM_ELE_PER_THREAD=8, threads=256, dtype=T.bfloat16):
 
     @T.prim_func
     def main(A: T.Tensor((N), dtype), B: T.Tensor((N), dtype), C: T.Tensor((N), dtype)):
@@ -280,8 +280,8 @@ To evaluate complexity, one could implement the same elementwise addition operat
 
 ```c++
 template<int NUM_ELE_PER_THREAD=8>
-__global__ void elementwise_add(nv_bfloat16* C, 
-                                 const nv_bfloat16* A, 
+__global__ void elementwise_add(nv_bfloat16* C,
+                                 const nv_bfloat16* A,
                                  const nv_bfloat16* B,
                                  int N) {
   using namespace cute;

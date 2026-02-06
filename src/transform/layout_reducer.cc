@@ -14,6 +14,7 @@
 #include "../layout/layout.h"
 #include "../op/fill.h"
 #include "../op/finalize_reducer.h"
+#include "../op/region.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "layout_reducer.h"
 
@@ -212,8 +213,7 @@ private:
         const auto &buffer = opt_buffer.value();
         Fragment f;
         if (info->rep == ReducerRepType::ALL) {
-          f = Fragment(buffer->shape, {}, ReplicationPlaceholder(),
-                       thread_extent, std::nullopt);
+          f = Fragment::FullyReplicated(buffer->shape, thread_extent);
         } else if (info->rep == ReducerRepType::NONE) {
           PrimExpr flatten_idx = InputPlaceholder(0);
           for (int i = 1; i < buffer->shape.size(); ++i)
@@ -275,22 +275,61 @@ private:
     auto op = op_ref.CopyOnWrite();
     if (op->op.same_as(Fill::Get())) {
       ICHECK(!op->args.empty());
-      if (auto arg0_call = op->args[0].as<Call>();
-          arg0_call &&
-          arg0_call.value()->op.same_as(builtin::tvm_access_ptr())) {
-        ICHECK(arg0_call.value()->args.size() > 1);
-        if (auto var = arg0_call.value()->args[1].as<Var>();
-            var && reducer_info_map_.count(var.value())) {
-          ICHECK(inside_reducer_range_.count(var.value()) == 0)
+      if (auto arg0_call = op->args[0].as<Call>()) {
+        // tl.region(...) — extract buffer var from its first arg
+        if (arg0_call.value()->op.same_as(RegionOp::Get())) {
+          ICHECK(!arg0_call.value()->args.empty());
+          if (auto bl = arg0_call.value()->args[0].as<BufferLoadNode>()) {
+            Var var = bl->buffer->data;
+            if (reducer_info_map_.count(var)) {
+              ICHECK(inside_reducer_range_.count(var) == 0)
+                  << "T.fill on reducer must be enclosed with a "
+                     "T.finalize_reducer before next.";
+              inside_reducer_range_.Set(var,
+                                        reducer_info_map_.Get(var).value());
+            }
+          }
+        }
+        // builtin.tvm_access_ptr(...) — existing path (legacy)
+        if (arg0_call.value()->op.same_as(builtin::tvm_access_ptr())) {
+          ICHECK(arg0_call.value()->args.size() > 1);
+          if (auto var = arg0_call.value()->args[1].as<Var>();
+              var && reducer_info_map_.count(var.value())) {
+            ICHECK(inside_reducer_range_.count(var.value()) == 0)
+                << "T.fill on reducer must be enclosed with a "
+                   "T.finalize_reducer "
+                   "before next.";
+            inside_reducer_range_.Set(
+                var.value(), reducer_info_map_.Get(var.value()).value());
+          }
+        }
+      } else if (auto bl = op->args[0].as<BufferLoadNode>()) {
+        Var var = bl->buffer->data;
+        if (reducer_info_map_.count(var)) {
+          ICHECK(inside_reducer_range_.count(var) == 0)
               << "T.fill on reducer must be enclosed with a T.finalize_reducer "
                  "before next.";
-          inside_reducer_range_.Set(var.value(),
-                                    reducer_info_map_.Get(var.value()).value());
+          inside_reducer_range_.Set(var, reducer_info_map_.Get(var).value());
         }
       }
     } else if (op->op.same_as(FinalizeReducerOp::Get())) {
       ICHECK(op->args.size() == 1);
-      auto var = GetVarFromAccessPtr(op->args[0]);
+      Var var;
+      if (auto bl = op->args[0].as<BufferLoadNode>()) {
+        var = bl->buffer->data;
+      } else if (auto reg_call = op->args[0].as<Call>()) {
+        if (reg_call.value()->op.same_as(RegionOp::Get())) {
+          if (auto bl2 = reg_call.value()->args[0].as<BufferLoadNode>()) {
+            var = bl2->buffer->data;
+          } else {
+            LOG(FATAL) << "tl.region expects BufferLoad as first arg";
+          }
+        } else {
+          var = GetVarFromAccessPtr(op->args[0]);
+        }
+      } else {
+        var = GetVarFromAccessPtr(op->args[0]);
+      }
       ICHECK(inside_reducer_range_.count(var) == 1)
           << "T.finalize_reducer must have a pairing T.fill ahead of it, "
              "enclosing a reduction range.";
@@ -362,10 +401,10 @@ tvm::transform::Pass LayoutReducer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutReducer", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LayoutReducer", LayoutReducer);
-});
+}
 
 } // namespace tl
 } // namespace tvm

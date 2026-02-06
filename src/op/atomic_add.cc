@@ -5,11 +5,12 @@
  */
 
 #include "./atomic_add.h"
-#include "./region.h"
+#include "utils.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
+#include "../layout/layout.h"
 #include "../target/utils.h"
 #include "../transform/atomicadd_vectorize.h"
 #include "../transform/common/loop_fusion_utils.h"
@@ -23,48 +24,36 @@ namespace tl {
 using namespace tir;
 
 /**
- * @brief Construct an AtomicAdd operator from call arguments and a buffer map.
+ * @brief Construct an AtomicAdd operator from call arguments and annotations.
  *
  * Builds the internal AtomicAddNode, extracts the source and destination
- * regions and their backing Buffers from the first two call-style expressions
- * in `args` (via RegionOp), and stores them along with their ranges. If a third
- * argument is provided, it is interpreted as an integer immediate and stored as
- * the node's coalesced width.
+ * regions and their backing Buffers from the first two region-style expressions
+ * in `args` (BufferLoad/BufferRegion), and stores them along with their
+ * ranges. Annotations are copied directly from the Call node.
  *
  * @param args Call-style PrimExprs where:
  *             - args[0] is the source region call,
- *             - args[1] is the destination region call,
- *             - args[2] (optional) is an IntImm specifying coalesced width.
- * @param vmap Mapping from buffers used by RegionOp to concrete Buffer objects.
- *
+ *             - args[1] is the destination region call.
+ * @param annotations Map containing optional keys:
+ *             - "use_tma": whether to use TMA for memory operations
+ *             - "memory_order": memory order for atomic operations
  * Notes:
- * - The constructor checks that args[0] and args[1] are CallNodes.
+ * - The constructor checks that args[0] and args[1] are region-compatible.
  * - The constructed node is stored in this->data_.
  */
-AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<AtomicAddNode> node = make_object<AtomicAddNode>();
+AtomicAdd::AtomicAdd(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
   for (int i = 0; i < 2; i++) {
-    auto expr = args[i];
-    auto call = expr.as<CallNode>();
-    ICHECK(call);
-    auto region = RegionOp(call->args, vmap);
-    rgs[i] = region->GetRanges();
-    bf[i] = region->GetBuffer();
+    auto region = NormalizeToBufferRegion(args[i]);
+    rgs[i] = region->region;
+    bf[i] = region->buffer;
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
-  if (args.size() >= 3) {
-    node->use_tma = Downcast<IntImm>(args[2]);
-  }
-  node->memory_order = IntImm(0);
-  if (args.size() >= 4) {
-    node->memory_order = Downcast<IntImm>(args[3]);
-  }
-  if (args.size() >= 5) {
-    node->coalesced_width = Downcast<IntImm>(args[4]);
-  }
+  // Copy annotations from the Call node
+  node->annotations = annotations;
   data_ = std::move(node);
 }
 
@@ -78,7 +67,7 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A TileOperator owning the cloned AtomicAddNode.
  */
 TileOperator AtomicAddNode::Clone() const {
-  auto op = make_object<AtomicAddNode>(*this);
+  auto op = tvm::ffi::make_object<AtomicAddNode>(*this);
   if (par_op_.defined()) {
     op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
   }
@@ -272,24 +261,24 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
+  Array<PrimExpr> new_args;
+
+  // Optional bounds predicates for src and dst
   PrimExpr src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
   PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
 
-  Array<PrimExpr> new_args;
-
+  // Load source value and cast to dst dtype if needed
   PrimExpr src_value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
     src_value = Cast(dst->dtype, src_value);
-  if (src_predicate.defined())
-    src_value = if_then_else(src_predicate, src_value, make_zero(dst->dtype));
 
-  PrimExpr dst_value = BufferLoad(dst, dst_indices);
-  if (dst_predicate.defined())
-    dst_value = if_then_else(dst_predicate, dst_value, make_zero(dst->dtype));
+  // Build a pointer to destination element using tvm_access_ptr
+  PrimExpr dst_ptr = Call(DataType::Handle(), builtin::address_of(),
+                          {BufferLoad(dst, dst_indices)});
 
-  new_args.push_back(dst_value);
+  new_args.push_back(dst_ptr);
   new_args.push_back(src_value);
-  new_args.push_back(memory_order);
+  new_args.push_back(GetMemoryOrder());
 
   Call atomicadd_call =
       tvm::tir::Call(dst->dtype, atomicadd_elem_op(), new_args);
@@ -297,13 +286,14 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Stmt body = tvm::tir::Evaluate(atomicadd_call);
 
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
-    Map<String, ObjectRef> annotations = {};
-    if (coalesced_width.defined()) {
-      annotations.Set("coalesced_width", coalesced_width);
+    Map<String, ObjectRef> loop_annotations;
+    if (annotations.count(attr::kCoalescedWidth)) {
+      loop_annotations.Set(attr::kCoalescedWidth,
+                           annotations.Get(attr::kCoalescedWidth).value());
     }
 
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body, std::nullopt, annotations);
+               ForKind::kParallel, body, std::nullopt, loop_annotations);
   }
   return Downcast<For>(body);
 }
@@ -330,7 +320,7 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
                                      InferLevel level) const {
   if (T.layout_map.count(src) && T.layout_map.count(dst)) {
-    if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
+    if (IsFragmentBuffer(src) && IsFragmentBuffer(dst)) {
       const FragmentNode *src_layout = T.layout_map[src].as<FragmentNode>();
       const FragmentNode *dst_layout = T.layout_map[dst].as<FragmentNode>();
       if (src_layout && dst_layout) {
@@ -382,7 +372,7 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
  */
 Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
-  if (use_tma->value != 0) {
+  if (GetUseTMA()) {
     Array<PrimExpr> src_indices, dst_indices;
     PrimExpr src_size, dst_size;
     std::tie(src_indices, src_size) = ReturnIndicesAndSize(0);
@@ -436,14 +426,14 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       StmtExprVisitor::VisitStmt_(op);
     }
     void VisitStmt_(const BufferStoreNode *op) final {
-      if (op->buffer.scope() == "local.fragment") {
+      if (IsFragmentBuffer(op->buffer)) {
         indice_map.Set(op->buffer, op->indices);
         writes.insert(op->buffer);
       }
       StmtExprVisitor::VisitStmt_(op);
     }
     void VisitExpr_(const BufferLoadNode *op) final {
-      if (op->buffer.scope() == "local.fragment") {
+      if (IsFragmentBuffer(op->buffer)) {
         indice_map.Set(op->buffer, op->indices);
       }
       StmtExprVisitor::VisitExpr_(op);
@@ -478,7 +468,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     int best_rank = -1;
     for (auto kv : C.indice_map) {
       const Buffer &buf = kv.first;
-      if (buf.scope() != "local.fragment")
+      if (!IsFragmentBuffer(buf))
         continue;
       if (!args.layout_map.count(buf))
         continue;
@@ -492,7 +482,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     int sm = GetArchInt(target);
     auto plan = planner.Plan(loop, sm);
     int vec = std::max(plan.vector_size, 1);
-    if (auto cw = loop->annotations.Get("coalesced_width")) {
+    if (auto cw = loop->annotations.Get(attr::kCoalescedWidth)) {
       if (const auto *imm = cw->as<IntImmNode>()) {
         int expected = imm->value;
         ICHECK_GT(expected, 0);
@@ -544,12 +534,12 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return vectorized_thread_loop;
 }
 
-TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
+TIR_REGISTER_TL_TILE_OP(AtomicAdd, atomicadd)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ AtomicAddNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { AtomicAddNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

@@ -1,6 +1,6 @@
 import ctypes
 
-lib = ctypes.CDLL('./libnvshmem_example.so')
+lib = ctypes.CDLL("./libnvshmem_example.so")
 
 lib.run_simple_shift.restype = ctypes.c_int
 

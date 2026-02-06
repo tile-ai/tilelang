@@ -2,7 +2,7 @@
 
 That would be awesome if you want to contribute something to TileLang!
 
-### Table of Contents  <!-- omit in toc --> <!-- markdownlint-disable heading-increment -->
+## Table of Contents  <!-- omit in toc --> <!-- markdownlint-disable heading-increment -->
 
 - [Report Bugs](#report-bugs)
 - [Ask Questions](#ask-questions)
@@ -80,6 +80,8 @@ in the main directory. This installation is removable by:
 ```bash
 python3 -m pip uninstall tilelang
 ```
+
+We also recommend installing TileLang in a more manual way for better control over the build process, by compiling the C++ extensions first and set the `PYTHONPATH`. See [Working from Source via `PYTHONPATH`](https://tilelang.com/get_started/Installation.html#working-from-source-via-pythonpath) for detailed instructions.
 
 ## Lint Check
 

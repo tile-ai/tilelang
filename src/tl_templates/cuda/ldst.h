@@ -6,6 +6,8 @@
 enum class Semantic { WEAK, VOLATILE, ACQUIRE, RELEASE, RELAXED };
 enum class Scope { CTA, GPU, SYS };
 
+namespace tl {
+
 #ifndef TL_ALWAYS_FALSE_V_DEFINED
 #define TL_ALWAYS_FALSE_V_DEFINED
 template <class> inline constexpr bool always_false_v = false;
@@ -18,25 +20,27 @@ template <typename T> struct is_bfloat16 : std::false_type {};
 template <> struct is_bfloat16<__nv_bfloat16> : std::true_type {};
 #endif
 
+} // namespace tl
+
 // Detect cutlass bfloat16_t
 namespace cutlass {
 struct bfloat16_t;
 }
-template <> struct is_bfloat16<cutlass::bfloat16_t> : std::true_type {};
+template <> struct tl::is_bfloat16<cutlass::bfloat16_t> : std::true_type {};
 
 template <typename T>
-inline constexpr bool is_bfloat16_v = is_bfloat16<T>::value;
+inline constexpr bool is_bfloat16_v = tl::is_bfloat16<T>::value;
 
 // Fallback template for unsupported configurations
 template <Semantic semantic, Scope scope, bool na> struct StImpl {
   template <typename T> TL_DEVICE static void execute(T *ptr, T value) {
-    static_assert(always_false_v<T>, "tl::st: unsupported configuration. ");
+    static_assert(tl::always_false_v<T>, "tl::st: unsupported configuration. ");
   }
 };
 
 template <Semantic semantic, Scope scope, bool nc, bool na> struct LdImpl {
   template <typename T> TL_DEVICE static void execute(const T *ptr, T &value) {
-    static_assert(always_false_v<T>, "tl::ld: unsupported configuration. ");
+    static_assert(tl::always_false_v<T>, "tl::ld: unsupported configuration. ");
   }
 };
 

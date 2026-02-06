@@ -1,13 +1,13 @@
 # TileScale: Tile-based AI Compute at All Scales
 
-TileScale is a distributed extension of TileLang. It expands TileLang's tile-level programming to multi-GPU, multi-node, and even distributed chip architecture scopes, with some new feature designs like tile-level communication and hierarchical programming introduced. 
+TileScale is a distributed extension of TileLang. It expands TileLang's tile-level programming to multi-GPU, multi-node, and even distributed chip architecture scopes, with some new feature designs like tile-level communication and hierarchical programming introduced.
 
-TileScale is a distributed-native domain-specific language (DSL) and compiler stack designed for deep learning on next-generation distributed architectures. 
+TileScale is a distributed-native domain-specific language (DSL) and compiler stack designed for deep learning on next-generation distributed architectures.
 As AI model entering the "scaling-law" era, modern AI infrastructure is also scaling the computation across both intra-chip and inter-chip scopes. On one side, current large AI models are already executing on multiple GPUs or even multiple nodes connected by the high-performance links like NVLink or InfiniBand. On the other side, a bunch of next-gen AI accelerators are embracing new chip architectures—such as 3D IC, near/in-memory computing, wafer-scale accelerators, etc., which are all in distributed form inner the chip for better scalability. Together, these trends are shaping modern AI compute systems into a hybrid, multi-level of "distributed architecture".
 
 TileScale is the first programming and compiler stack to unify these intra-chip and inter-chip compute resources into a unified, hierarchical, distributed architecture, which virtualizes the whole distributed system as a unified "mega-device" to users. To facilitate programming, TileScale provides a set of consistent tile-level primitives across all hardware layers for compute, memory, and communication. Thus, users can just write tile-level computing logic or flow at certain layers of interest, then TileScale automatically compiles and optimizes the scheduling of computation, communication, memory access, and their overlap. The goal of TileScale is to define an open, streamlined programming model for future distributed architectures and systems, addressing the emerging needs of modern AI computation, such as fine-grained computation and communication overlap, flexible parallel mechanisms, dataflow computation, NUMA programming, etc.
 
-#### The full technical white-paper is coming soon.
+## The full technical white-paper is coming soon.
 
 ## Hierarchical Distributed Architecture (HDA)
 Unlike traditional GPU SIMT programming, which assumes thread-level computation on a single device, TileScale is designed to manage compute, memory, and communication across all hierarchical scales, from threads and PEs to dies, chips, and nodes. It introduces a unified virtual device architecture, called Hierarchical Distributed Architecture (HDA), to abstract these distributed systems.
@@ -32,16 +32,15 @@ At each layer, the associated memory may be shared among all units or distribute
 Following the hierarchical hardware architecture, TileScale exposes a hierarchical programming interface. The fundamental unit of computation in TileScale is at the *tile* granularity. TileScale provides consistent tile-level compute, memory, and communication operators corresponding to each hardware scales.
 <div align="center">    <img src="./images/interface.png" alt="TileScale Programming Interface" width=80% />
 </div>
-  
-* *Compute*: A compute primitive takes input tensor tiles at certain memory layer and produces output tensor tiles. The same compute primitive can be used at different scale level, which will be translated to different implementations. A primitive at a high-level scale can be implemented by the lower-level-scale primitives. For example, a block-scale operator can be implemented by a group of warp-scale or thread-scale primitives.
-  
-* *Memory*: The memory primitives are used to copy data tiles at certain memory layer, as well as to copy data tile between different memory layers.
-  
-* *Communicate*: The communication primitives are used to transfer data tiles between compute units over the network, as well as to manage the synchronization. TileScale provides both basic peer-to-peer communication primitives as well as the collective communication primitives like AllReduce, All2All, etc., at a specific scale level.
+
+- *Compute*: A compute primitive takes input tensor tiles at certain memory layer and produces output tensor tiles. The same compute primitive can be used at different scale level, which will be translated to different implementations. A primitive at a high-level scale can be implemented by the lower-level-scale primitives. For example, a block-scale operator can be implemented by a group of warp-scale or thread-scale primitives.
+
+- *Memory*: The memory primitives are used to copy data tiles at certain memory layer, as well as to copy data tile between different memory layers.
+
+- *Communicate*: The communication primitives are used to transfer data tiles between compute units over the network, as well as to manage the synchronization. TileScale provides both basic peer-to-peer communication primitives as well as the collective communication primitives like AllReduce, All2All, etc., at a specific scale level.
 
 A primitive for a certain scale level may have multiple implementations. For example, a copy primitive could be implemented using TMA or LSU, while a remote copy across GPUs might be implemented using copy engines, TMA, or LSU. TileScale provides default implementations for each primitive, along with a compilation process to tune the best implementation. Users can also specify particular implementations through arguments in the tile primitives.
-With this hierarchical interface, user can easily customize the computation at certain scale level. For example, we can leverage the DSMEM feature to implement a general cluster-scale GEMM primitive. 
-  
+With this hierarchical interface, user can easily customize the computation at certain scale level. For example, we can leverage the DSMEM feature to implement a general cluster-scale GEMM primitive.
 
 ## System Overview and Design
 <div align="center">    <img src="./images/overview.png" alt="TileScale system overview" width=50% />
@@ -60,7 +59,7 @@ The layout and partition dimensions are either automatically inferred through a 
 </div>
 
 ### Parallel task scheduling
-TileScale introduces a *T.Scale* primitive to control which hardware scale the current computations are conducted on. 
+TileScale introduces a *T.Scale* primitive to control which hardware scale the current computations are conducted on.
 It follows the SPMD (Single Program Multiple Data) programming model that scale the specified computation to all parallel units at this level.
 For example, the following *T.gemm* represents a warp GEMM, which executes on all warps in parallel.
 ```python
@@ -81,18 +80,18 @@ with T.Kernel(
         T.gemm(A, B, C)
 ```
 #### Task(warp) specialization
-Additionally, the T.Scale primitive can also return the rank and the total number of ranks of the current scale level. This allows you to easily leverage the rank index for task specialization, such as warp specialization or any other scale-level specialization. 
+Additionally, the T.Scale primitive can also return the rank and the total number of ranks of the current scale level. This allows you to easily leverage the rank index for task specialization, such as warp specialization or any other scale-level specialization.
 
 ```python
 # warp specialize example
 with T.Scale("warpgroup") as wg_id, wg_num:
     if wg_id == 0:
-        # do something 
+        # do something
     else:
         # do other thing
 ```
 #### MPI-style programming
-Combined with the communication primitives, you can also implement MPI-like programs if a communication channel exists across those ranks. For those compute units without hardware links, TileScale can also implement software channels by passing data through lower-level memory. 
+Combined with the communication primitives, you can also implement MPI-like programs if a communication channel exists across those ranks. For those compute units without hardware links, TileScale can also implement software channels by passing data through lower-level memory.
 ```python
 # communication example: send data to neighbor GPU
 with T.Scale("device") as dev_id, dev_num:
@@ -100,7 +99,7 @@ with T.Scale("device") as dev_id, dev_num:
     T.barrier()
 ```
 
-## Example: 
+## Example:
 ```python
 # Example of GEMM
 # 4-GPU Tensor Parallelism, using L2 to communicate
@@ -119,12 +118,12 @@ def gemm(
             A_global = T.view(A, layout=T.FullCol)
             B_global = T.view(B, layout=T.FullRow)
             C_global = T.view(C, layout=T.Replica)
-            
+
         with T.Scale("block"):
             A_local = T.alloc((block_M, block_K), dtype, level="l0")
             B_local = T.alloc((block_K, block_N), dtype, level="l0")
             C_local = T.alloc((block_M, block_N), accum_dtype, level="l0")
-            T.clear(C_local)   
+            T.clear(C_local)
 
             for k in T.Pipelined(T.ceildiv(A_global.shape[1], block_K), num_stages=3):
                 with T.Scale("warpgroup") as wg_id, wg_num:
@@ -134,7 +133,7 @@ def gemm(
                     T.copy(A_local_wg, A_global[by * block_M, k * block_K])
                     T.copy(B_local_wg, B_global[k * block_K, bx * block_N])
                     T.gemm(A_local_wg, B_local_wg, C_local_wg)
-                    
+
                     # Allreduce C_local_wg through software-defined channel on L1
                     T.allreduce(C_local_wg)
             T.copy(C_global[by * block_M, bx * block_N], C_local)
@@ -142,7 +141,7 @@ def gemm(
         with T.Scale("device") as dev_id, dev_num:
             # Allreduce C on L2
             T.allreduce(C_global)
-            
+
 ```
 ```python
 # Example of FlashMLA
@@ -156,8 +155,8 @@ def flash_mla(
         Output: T.Tensor([batch, heads, dim], dtype),
 ):
     with T.Kernel(
-        device=(4), 
-        block=(batch, heads // min(block_H, kv_group_num), 
+        device=(4),
+        block=(batch, heads // min(block_H, kv_group_num),
         threads=256)
     ):
         with T.Scale("device"):
@@ -182,8 +181,8 @@ def flash_mla(
             scores_scale = T.alloc([block_H], accum_dtype, level="l0")
             scores_sum = T.alloc([block_H], accum_dtype, level="l0")
             logsum = T.alloc([block_H], accum_dtype, level="l0")
-            
-            cur_kv_head = by // (kv_group_num // block_H)  
+
+            cur_kv_head = by // (kv_group_num // block_H)
 
             T.copy(Q_shared, Q_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
             T.copy(Q_pe_shared, Q_pe_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
@@ -199,7 +198,7 @@ def flash_mla(
 
                 T.gemm(Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
                 T.gemm(Q_pe_shared, K_pe_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-                
+
                 T.copy(scores_max_prev, scores_max)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -217,7 +216,7 @@ def flash_mla(
                     T.copy(acc_s_cast_local[:, block_N // 2:block_N], acc_s_local, dst=(wg_id + 1) % wg_num)
                     # Or, you can use high level cooperative primitive
                     # T.allgather(acc_s_local), and Cast ...
-                
+
                 for i in T.Parallel(block_H):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
                 for i, j in T.Parallel(block_H, dim):

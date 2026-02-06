@@ -7,14 +7,15 @@ from tilelang.utils.tensor import torch_assert_close
 
 @tilelang.jit(out_idx=[1, 2])
 def per_token_cast_to_fp8(M, N, blk_m):
-    dtype = "float"
+    dtype = T.float
     group_size = 128
     fp8_min = -448.0
     fp8_max = 448.0
 
     @T.prim_func
-    def per_token_cast(X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), "float8_e4m3"),
-                       X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype)):
+    def per_token_cast(
+        X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), T.float8_e4m3fn), X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype)
+    ):
         with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (bx, by):
             row = bx
             row_g_id = by
@@ -22,18 +23,9 @@ def per_token_cast_to_fp8(M, N, blk_m):
             y_amax_local = T.alloc_fragment((blk_m,), dtype)
             y_s_local = T.alloc_fragment((blk_m,), dtype)
             y_q_local = T.alloc_fragment((blk_m, group_size), dtype)
-            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "float8_e4m3")
+            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
 
-            T.annotate_layout({
-                y_local:
-                    T.Fragment(
-                        y_local.shape,
-                        forward_thread_fn=lambda i, j: (i // (blk_m // 4)) * 32 + j % 32),
-            })
-
-            T.copy(
-                X[row * blk_m:(row + 1) * blk_m, row_g_id * group_size:(row_g_id + 1) * group_size],
-                y_local)
+            T.copy(X[row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size], y_local)
             T.reduce_absmax(y_local, y_amax_local, dim=1)
             for i in T.Parallel(blk_m):
                 y_amax_local[i] = T.max(y_amax_local[i], 1e-4)
@@ -43,9 +35,7 @@ def per_token_cast_to_fp8(M, N, blk_m):
             T.copy(y_q_local, y_q_local_fp8)
             for i in T.Parallel(blk_m):
                 X_amax[row * blk_m + i, row_g_id] = y_s_local[i]
-            T.copy(
-                y_q_local_fp8, X_fp8[row * blk_m:(row + 1) * blk_m,
-                                     row_g_id * group_size:(row_g_id + 1) * group_size])
+            T.copy(y_q_local_fp8, X_fp8[row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size])
 
     return per_token_cast
 
@@ -102,16 +92,32 @@ def main(M=8192, N=8192, blk_m=8):
     print("Tile-lang: {:.2f} ms".format(latency))
 
     from tilelang.profiler import do_bench
-    from example_triton_cast_to_fp8 import per_token_group_quant_fp8
 
-    def run_triton():
-        x_fp8_triton_, x_amax_triton_ = per_token_group_quant_fp8(
-            x, 128, 1e-4, dtype=torch.float8_e4m3fn, column_major_scales=False)
-        return x_fp8_triton_, x_amax_triton_
+    # Triton fp8e4nv is only supported on Hopper (SM90) and later
+    major, _ = torch.cuda.get_device_capability()
+    if major >= 9:
+        from example_triton_cast_to_fp8 import per_token_group_quant_fp8
 
-    x_fp8_triton, x_amax_triton = run_triton()
-    latency = do_bench(run_triton)
-    print("Triton: {:.2f} ms".format(latency))
+        def run_triton():
+            x_fp8_triton_, x_amax_triton_ = per_token_group_quant_fp8(x, 128, 1e-4, dtype=torch.float8_e4m3fn, column_major_scales=False)
+            return x_fp8_triton_, x_amax_triton_
+
+        x_fp8_triton, x_amax_triton = run_triton()
+        latency = do_bench(run_triton)
+        print("Triton: {:.2f} ms".format(latency))
+    else:
+        print("Triton fp8e4nv benchmark skipped (requires SM90+)")
+
+
+def run_regression_perf(M=8192, N=8192, blk_m=8):
+    kernel = per_token_cast_to_fp8(M, N, blk_m)
+    x = torch.randn(M, N, device="cuda", dtype=torch.float32)
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(x)
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

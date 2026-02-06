@@ -13,15 +13,13 @@ repos:
     hooks:
       - id: check-symlinks
       - id: destroyed-symlinks
-      # FIXME: enable these hooks
-      # - id: trailing-whitespace
-      # - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
       - id: check-added-large-files
       - id: check-merge-conflict
         fail_fast: true
-      # FIXME: enable these hooks
-      # - id: check-executables-have-shebangs
-      # - id: check-shebang-scripts-are-executable
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
       - id: detect-private-key
       - id: check-yaml
       - id: check-toml
@@ -32,39 +30,30 @@ repos:
         args: [--ignore-case]
         files: ^docs/spelling_wordlist\.txt$
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v21.1.2  # sync with requirements-lint.txt
+    rev: v21.1.7  # sync with requirements-lint.txt
     hooks:
       - id: clang-format
-        exclude: |
-          (?ix)(
-            ^.+\.(cu|cuh)$|
-            ^.+\.json$
-          )
+        types_or: [c++, c]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.1  # sync with requirements-lint.txt
+    rev: v0.14.9  # sync with requirements-lint.txt
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
-  - repo: https://github.com/google/yapf
-    rev: v0.43.0  # sync with requirements-lint.txt
-    hooks:
-      - id: yapf
-        name: yapf-multiproc-bugfix
-        # yapf is not multiprocess safe, so we run a dummy yapf first.
-        args: [--in-place, docs/conf.py]
-        always_run: true
-        pass_filenames: false
-      - id: yapf
-        args: [--recursive, --in-place]
+      - id: ruff-format
+        args: [--exit-non-zero-on-format]
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.1  # sync with requirements-lint.txt
     hooks:
       - id: codespell
         additional_dependencies: [".[toml]"]
-        args: ["-L", "HDA"]
         exclude: |
           (?x)(
             ^.+\.(cpp|hpp|cxx|cc|c|h|cu|cuh)$|
             ^.+\.svg$|
             ^.*\brequirements\b.*\.txt$
           )
+  - repo: https://github.com/jackdewinter/pymarkdown
+    rev: v0.9.33
+    hooks:
+      - id: pymarkdown
+        args: ["--config", ".pymarkdown", "fix"]

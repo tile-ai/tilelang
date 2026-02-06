@@ -212,5 +212,9 @@ TIR_DEFINE_TL_BUILTIN(get_uintptr_t)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// Note: put, get, wait are implemented as TileOperators in remote_copy.cc
+// Note: wait_eq is defined in sync.cc (simple builtin) and remote_copy.cc uses
+// it
+
 } // namespace tl
 } // namespace tvm

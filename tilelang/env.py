@@ -10,32 +10,34 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 # SETUP ENVIRONMENT VARIABLES
-CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
+CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
-COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE = (
-    "Composable Kernel is not installed or found in the expected path")
+COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE = "Composable Kernel is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
-TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expected path")
+TL_TEMPLATE_NOT_FOUND_MESSAGE = "TileLang is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
-TVM_LIBRARY_NOT_FOUND_MESSAGE = ("TVM is not installed or found in the expected path")
+TVM_LIBRARY_NOT_FOUND_MESSAGE = "TVM is not installed or found in the expected path"
 
 TL_ROOT = os.path.dirname(os.path.abspath(__file__))
-TL_LIBS = [TL_ROOT, os.path.join(TL_ROOT, 'lib')]
+# Only expose the internal lib directory to sys.path to avoid shadowing
+# common top-level module names (e.g., utils, analysis) from user projects.
+TL_LIBS = [os.path.join(TL_ROOT, "lib")]
 TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
 
 DEV = False
-THIRD_PARTY_ROOT = os.path.join(TL_ROOT, '3rdparty')
+THIRD_PARTY_ROOT = os.path.join(TL_ROOT, "3rdparty")
 if not os.path.exists(THIRD_PARTY_ROOT):
     DEV = True
     tl_dev_root = os.path.dirname(TL_ROOT)
 
-    dev_lib_root = os.path.join(tl_dev_root, 'build')
-    TL_LIBS = [dev_lib_root, os.path.join(dev_lib_root, 'tvm')]
-    THIRD_PARTY_ROOT = os.path.join(tl_dev_root, '3rdparty')
-    logger.warning(f'Loading tilelang libs from dev root: {dev_lib_root}')
+    dev_lib_root = os.path.join(tl_dev_root, "build")
+    # In dev builds, place artifacts under build/lib and point search path there
+    # to avoid adding the entire build root to sys.path.
+    TL_LIBS = [os.path.join(dev_lib_root, "lib"), os.path.join(dev_lib_root, "tvm")]
+    THIRD_PARTY_ROOT = os.path.join(tl_dev_root, "3rdparty")
+    logger.warning(f"Loading tilelang libs from dev root: {dev_lib_root}")
 
-assert TL_LIBS and all(
-    os.path.exists(i) for i in TL_LIBS), f'tilelang lib root do not exists: {TL_LIBS}'
+assert TL_LIBS and all(os.path.exists(i) for i in TL_LIBS), f"tilelang lib root do not exists: {TL_LIBS}"
 
 for lib in TL_LIBS:
     if lib not in sys.path:
@@ -48,7 +50,7 @@ def _find_cuda_home() -> str:
     Adapted from https://github.com/pytorch/pytorch/blob/main/torch/utils/cpp_extension.py
     """
     # Guess #1
-    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if cuda_home is None:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
@@ -66,15 +68,15 @@ def _find_cuda_home() -> str:
 
         else:
             # Guess #3
-            if sys.platform == 'win32':
-                cuda_homes = glob.glob('C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*.*')
-                cuda_home = '' if len(cuda_homes) == 0 else cuda_homes[0]
+            if sys.platform == "win32":
+                cuda_homes = glob.glob("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*.*")
+                cuda_home = "" if len(cuda_homes) == 0 else cuda_homes[0]
             else:
                 # Linux/macOS
-                if os.path.exists('/usr/local/cuda'):
-                    cuda_home = '/usr/local/cuda'
-                elif os.path.exists('/opt/nvidia/hpc_sdk/Linux_x86_64'):
-                    cuda_home = '/opt/nvidia/hpc_sdk/Linux_x86_64'
+                if os.path.exists("/usr/local/cuda"):
+                    cuda_home = "/usr/local/cuda"
+                elif os.path.exists("/opt/nvidia/hpc_sdk/Linux_x86_64"):
+                    cuda_home = "/opt/nvidia/hpc_sdk/Linux_x86_64"
 
             # Validate found path
             if cuda_home is None or not os.path.exists(cuda_home):
@@ -85,13 +87,13 @@ def _find_cuda_home() -> str:
 
 def _find_rocm_home() -> str:
     """Find the ROCM install path."""
-    rocm_home = os.environ.get('ROCM_PATH') or os.environ.get('ROCM_HOME')
+    rocm_home = os.environ.get("ROCM_PATH") or os.environ.get("ROCM_HOME")
     if rocm_home is None:
         rocmcc_path = shutil.which("hipcc")
         if rocmcc_path is not None:
             rocm_home = os.path.dirname(os.path.dirname(rocmcc_path))
         else:
-            rocm_home = '/opt/rocm'
+            rocm_home = "/opt/rocm"
             if not os.path.exists(rocm_home):
                 rocm_home = None
     return rocm_home if rocm_home is not None else ""
@@ -100,6 +102,7 @@ def _find_rocm_home() -> str:
 # Cache control
 class CacheState:
     """Class to manage global kernel caching state."""
+
     _enabled = True
 
     @classmethod
@@ -196,12 +199,6 @@ class EnvVar:
         # os.environ[self.key] = value
 
 
-# Cache control API (wrap CacheState)
-enable_cache = CacheState.enable
-disable_cache = CacheState.disable
-is_cache_enabled = CacheState.is_enabled
-
-
 # Utility function for environment variables with defaults
 # Assuming EnvVar and CacheState are defined elsewhere
 class Environment:
@@ -232,36 +229,103 @@ class Environment:
     TILELANG_TMP_DIR = EnvVar("TILELANG_TMP_DIR", os.path.join(TILELANG_CACHE_DIR.get(), "tmp"))
 
     # Kernel Build options
-    TILELANG_PRINT_ON_COMPILATION = EnvVar("TILELANG_PRINT_ON_COMPILATION",
-                                           "1")  # print kernel name on compile
-    TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE", "0")  # clear cache automatically if set
+    TILELANG_PRINT_ON_COMPILATION = EnvVar("TILELANG_PRINT_ON_COMPILATION", "1")  # print kernel name on compile
+    TILELANG_DISABLE_CACHE = EnvVar(
+        "TILELANG_DISABLE_CACHE", "0"
+    )  # disable kernel cache, usually for unit testing / debugging, high priority
+    TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE", "0")  # DEPRECATED! clear cache automatically if set
+
+    # Kernel selection options
+    # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
+    TILELANG_USE_GEMM_V1 = EnvVar("TILELANG_USE_GEMM_V1", "0")
 
     # Auto-tuning settings
-    TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES",
-                                                "0.9")  # percent of CPUs used
-    TILELANG_AUTO_TUNING_CPU_COUNTS = EnvVar("TILELANG_AUTO_TUNING_CPU_COUNTS",
-                                             "-1")  # -1 means auto
-    TILELANG_AUTO_TUNING_MAX_CPU_COUNT = EnvVar("TILELANG_AUTO_TUNING_MAX_CPU_COUNT",
-                                                "-1")  # -1 means no limit
+    TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
+    TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9")  # percent of CPUs used
+    TILELANG_AUTO_TUNING_CPU_COUNTS = EnvVar("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1")  # -1 means auto
+    TILELANG_AUTO_TUNING_MAX_CPU_COUNT = EnvVar("TILELANG_AUTO_TUNING_MAX_CPU_COUNT", "-1")  # -1 means no limit
+
+    # Compilation defaults (for jit, autotune, compile)
+    # These allow overriding default compilation parameters via environment variables
+    TILELANG_DEFAULT_TARGET = EnvVar("TILELANG_TARGET", "auto")
+    TILELANG_DEFAULT_EXECUTION_BACKEND = EnvVar("TILELANG_EXECUTION_BACKEND", "auto")
+    TILELANG_DEFAULT_VERBOSE = EnvVar("TILELANG_VERBOSE", "0")
 
     # TVM integration
     SKIP_LOADING_TILELANG_SO = EnvVar("SKIP_LOADING_TILELANG_SO", "0")
     TVM_IMPORT_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
 
-    # Distributed settings
-    USE_DISTRIBUTED = EnvVar("TILELANG_USE_DISTRIBUTED", "0").get().lower() in ("1", "true", "on")
-    USE_NVSHMEM = EnvVar("TILELANG_USE_NVSHMEM", "0").get().lower() in ("1", "true", "on")
-    if USE_DISTRIBUTED:
-        if EnvVar("NVSHMEM_SRC", None).get() is not None:
-            NVSHMEM_SRC = EnvVar("NVSHMEM_SRC", None).get()
+    # NVSHMEM paths - auto-detect from pip-installed nvidia-nvshmem-cu12 or NVSHMEM_HOME
+    _nvshmem_include_dir: str | None = None
+    _nvshmem_lib_path: str | None = None
+
+    @property
+    def USE_NVSHMEM(self) -> bool:
+        """Return True if NVSHMEM is enabled (dynamically reads env var)."""
+        return os.environ.get("TILELANG_USE_NVSHMEM", "0").lower() in ("1", "true", "on")
+
+    @property
+    def USE_DISTRIBUTED(self) -> bool:
+        """Return True if distributed mode is enabled (dynamically reads env var)."""
+        return os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in ("1", "true", "on")
+
+    @property
+    def NVSHMEM_INCLUDE_DIR(self) -> str | None:
+        """Get NVSHMEM include directory, auto-detecting if needed."""
+        if self._nvshmem_include_dir is None and self.USE_DISTRIBUTED:
+            self._nvshmem_include_dir, self._nvshmem_lib_path = Environment._find_nvshmem_paths()
+        return self._nvshmem_include_dir
+
+    @property
+    def NVSHMEM_LIB_PATH(self) -> str | None:
+        """Get NVSHMEM library path, auto-detecting if needed."""
+        if self._nvshmem_lib_path is None and self.USE_DISTRIBUTED:
+            self._nvshmem_include_dir, self._nvshmem_lib_path = Environment._find_nvshmem_paths()
+        return self._nvshmem_lib_path
+
+    @staticmethod
+    def _find_nvshmem_paths():
+        """Find NVSHMEM include and library paths from source build, env vars, or pip package."""
+        include_dir = None
+        lib_path = None
+
+        # First priority: NVSHMEM_HOME or NVSHMEM_SRC environment variables
+        nvshmem_home = os.environ.get("NVSHMEM_HOME", "")
+        if nvshmem_home and os.path.exists(nvshmem_home):
+            include_dir = os.path.join(nvshmem_home, "include")
+            lib_path = os.path.join(nvshmem_home, "lib")
         else:
-            NVSHMEM_SRC = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "..", "3rdparty", "nvshmem_src")
-        NVSHMEM_INCLUDE_DIR: str = NVSHMEM_SRC + "/build/src/include"
-        NVSHMEM_LIB_PATH: str = NVSHMEM_SRC + "/build/src/lib"
-    else:
-        NVSHMEM_INCLUDE_DIR = None
-        NVSHMEM_LIB_PATH = None
+            nvshmem_src = os.environ.get("NVSHMEM_SRC", "")
+            if nvshmem_src and os.path.exists(nvshmem_src):
+                include_dir = os.path.join(nvshmem_src, "build/src/include")
+                lib_path = os.path.join(nvshmem_src, "build/src/lib")
+
+        # Second priority: Check 3rdparty/nvshmem_src in the project
+        if include_dir is None:
+            # Check relative to THIRD_PARTY_ROOT
+            nvshmem_3rdparty = os.path.join(THIRD_PARTY_ROOT, "nvshmem_src")
+            if os.path.exists(nvshmem_3rdparty):
+                candidate_inc = os.path.join(nvshmem_3rdparty, "build/src/include")
+                candidate_lib = os.path.join(nvshmem_3rdparty, "build/src/lib")
+                if os.path.exists(candidate_inc) and os.path.exists(candidate_lib):
+                    include_dir = candidate_inc
+                    lib_path = candidate_lib
+
+        # Third priority: pip-installed nvidia-nvshmem-cu12 (but has header compatibility issues)
+        if include_dir is None:
+            try:
+                import nvidia.nvshmem
+
+                nvshmem_pip_home = nvidia.nvshmem.__path__[0]
+                pip_include = os.path.join(nvshmem_pip_home, "include")
+                pip_lib = os.path.join(nvshmem_pip_home, "lib")
+                if os.path.exists(pip_include) and os.path.exists(pip_lib):
+                    include_dir = pip_include
+                    lib_path = pip_lib
+            except ImportError:
+                pass
+
+        return include_dir, lib_path
 
     def _initialize_torch_cuda_arch_flags(self) -> None:
         """
@@ -278,7 +342,7 @@ class Environment:
 
     # Cache control API (wrap CacheState)
     def is_cache_enabled(self) -> bool:
-        return CacheState.is_enabled()
+        return not self.is_cache_globally_disabled() and CacheState.is_enabled()
 
     def enable_cache(self) -> None:
         CacheState.enable()
@@ -286,12 +350,43 @@ class Environment:
     def disable_cache(self) -> None:
         CacheState.disable()
 
+    def is_cache_globally_disabled(self) -> bool:
+        return self.TILELANG_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
+
+    def is_autotune_cache_disabled(self) -> bool:
+        return self.TILELANG_AUTO_TUNING_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
+
     def is_print_on_compilation_enabled(self) -> bool:
         return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
+
+    def use_gemm_v1(self) -> bool:
+        """Return True if GEMM v1 should be used based on env.
+
+        Controlled by `TILELANG_USE_GEMM_V1`. Truthy values are one of
+        {"1", "true", "yes", "on"} (case-insensitive).
+        """
+        return str(self.TILELANG_USE_GEMM_V1).lower() in ("1", "true", "yes", "on")
+
+    def get_default_target(self) -> str:
+        """Get default compilation target from environment."""
+        return self.TILELANG_DEFAULT_TARGET
+
+    def get_default_execution_backend(self) -> str:
+        """Get default execution backend from environment."""
+        return self.TILELANG_DEFAULT_EXECUTION_BACKEND
+
+    def get_default_verbose(self) -> bool:
+        """Get default verbose flag from environment."""
+        return self.TILELANG_DEFAULT_VERBOSE.lower() in ("1", "true", "yes", "on")
 
 
 # Instantiate as a global configuration object
 env = Environment()
+
+# Cache control API (wrap env, which is managed by CacheState and Environment Variables jointly)
+enable_cache = env.enable_cache  # CacheState.enable
+disable_cache = env.disable_cache  # CacheState.disable
+is_cache_enabled = env.is_cache_enabled  # CacheState.is_enabled
 
 # Export CUDA_HOME and ROCM_HOME, both are static variables
 # after initialization.
@@ -312,19 +407,18 @@ def prepend_pythonpath(path):
 if env.TVM_IMPORT_PYTHON_PATH is not None:
     prepend_pythonpath(env.TVM_IMPORT_PYTHON_PATH)
 else:
-    tvm_path = os.path.join(THIRD_PARTY_ROOT, "tvm")
+    tvm_path = os.path.join(THIRD_PARTY_ROOT, "tvm", "python")
     assert os.path.exists(tvm_path), tvm_path
     if tvm_path not in sys.path:
-        tvm_python_binding = os.path.join(tvm_path, 'python')
-        prepend_pythonpath(tvm_python_binding)
-        env.TVM_IMPORT_PYTHON_PATH = tvm_python_binding
-
-    if os.environ.get("TVM_LIBRARY_PATH") is None:
-        os.environ['TVM_LIBRARY_PATH'] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
+        prepend_pythonpath(tvm_path)
+        env.TVM_IMPORT_PYTHON_PATH = tvm_path
+# By default, the built TVM-related libraries are stored in TL_LIBS.
+if os.environ.get("TVM_LIBRARY_PATH") is None:
+    os.environ["TVM_LIBRARY_PATH"] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
 
 # Initialize CUTLASS paths
 if os.environ.get("TL_CUTLASS_PATH", None) is None:
-    cutlass_inc_path = os.path.join(THIRD_PARTY_ROOT, 'cutlass', 'include')
+    cutlass_inc_path = os.path.join(THIRD_PARTY_ROOT, "cutlass", "include")
     if os.path.exists(cutlass_inc_path):
         os.environ["TL_CUTLASS_PATH"] = env.CUTLASS_INCLUDE_DIR = cutlass_inc_path
     else:
@@ -332,7 +426,7 @@ if os.environ.get("TL_CUTLASS_PATH", None) is None:
 
 # Initialize COMPOSABLE_KERNEL paths
 if os.environ.get("TL_COMPOSABLE_KERNEL_PATH", None) is None:
-    ck_inc_path = os.path.join(THIRD_PARTY_ROOT, 'composable_kernel', 'include')
+    ck_inc_path = os.path.join(THIRD_PARTY_ROOT, "composable_kernel", "include")
     if os.path.exists(ck_inc_path):
         os.environ["TL_COMPOSABLE_KERNEL_PATH"] = env.COMPOSABLE_KERNEL_INCLUDE_DIR = ck_inc_path
     else:
@@ -345,6 +439,9 @@ if os.environ.get("TL_TEMPLATE_PATH", None) is None:
         os.environ["TL_TEMPLATE_PATH"] = env.TILELANG_TEMPLATE_PATH = tl_template_path
     else:
         logger.warning(TL_TEMPLATE_NOT_FOUND_MESSAGE)
+
+# NVSHMEM paths are now lazily initialized via properties in Environment class
+# when USE_DISTRIBUTED is enabled. No need for eager initialization here.
 
 # Export static variables after initialization.
 CUTLASS_INCLUDE_DIR = env.CUTLASS_INCLUDE_DIR

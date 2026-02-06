@@ -23,6 +23,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+using namespace ffi;
 using namespace arith;
 
 struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
@@ -62,8 +63,8 @@ struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
                 "branch",
                 refl::DefaultValue(false));
   }
-  static constexpr const char *_type_key = "tl.transform.SimplifyConfig";
-  TVM_FFI_DECLARE_FINAL_OBJECT_INFO(SimplifyConfigNode, BaseAttrsNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.transform.SimplifyConfig",
+                                    SimplifyConfigNode, BaseAttrsNode);
 
   RewriteSimplifier::Extension GetEnabledExtensions() const {
     RewriteSimplifier::Extension flags = RewriteSimplifier::kNone;
@@ -209,12 +210,11 @@ CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
 
 class SimplifyConfig : public Attrs {
 public:
-  TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(SimplifyConfig, Attrs,
-                                            SimplifyConfigNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimplifyConfig, Attrs,
+                                                SimplifyConfigNode);
 };
-TVM_FFI_STATIC_INIT_BLOCK({ SimplifyConfigNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { SimplifyConfigNode::RegisterReflection(); }
 
-TVM_REGISTER_NODE_TYPE(SimplifyConfigNode);
 TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 
 class StmtSimplifier : public IRMutatorWithAnalyzer {
@@ -240,37 +240,42 @@ public:
     simplifier.MarkBufferMapShapes(func);
     func.CopyOnWrite()->body = simplifier(func->body);
 
-    // Begin to remove useless var and buffer
-    // First get used buffers
-    simplifier.used_buffers_ = CollectUsedBuffers(func);
+    // Optionally remove unused buffer parameters
+    if (simplify_arguments) {
+      // First get used buffers
+      simplifier.used_buffers_ = CollectUsedBuffers(func);
 
-    bool param_updated = false;
-    Array<Var> new_params;
-    Map<Var, Buffer> new_buffer_map;
-    // Check whether each buffer is used
-    for (const auto &var : func->params) {
-      if (func->buffer_map.find(var) != func->buffer_map.end()) {
-        if (simplifier.used_buffers_.find(func->buffer_map[var].get()) !=
-            simplifier.used_buffers_.end()) {
-          new_params.push_back(var);
-          new_buffer_map.Set(var, func->buffer_map[var]);
-        } else if (simplifier.used_in_buffer_def_.find(
-                       func->buffer_map[var]->data.get()) !=
-                   simplifier.used_in_buffer_def_.end()) {
-          new_params.push_back(var);
-          new_buffer_map.Set(var, func->buffer_map[var]);
+      bool param_updated = false;
+      Array<Var> new_params;
+      Map<Var, Buffer> new_buffer_map;
+      // Check whether each buffer is used
+      for (const auto &var : func->params) {
+        if (func->buffer_map.find(var) != func->buffer_map.end()) {
+          if (simplifier.used_buffers_.find(func->buffer_map[var].get()) !=
+              simplifier.used_buffers_.end()) {
+            new_params.push_back(var);
+            new_buffer_map.Set(var, func->buffer_map[var]);
+          } else if (simplifier.used_in_buffer_def_.find(
+                         func->buffer_map[var]->data.get()) !=
+                     simplifier.used_in_buffer_def_.end()) {
+            new_params.push_back(var);
+            new_buffer_map.Set(var, func->buffer_map[var]);
+          } else {
+            param_updated = true;
+          }
         } else {
-          param_updated = true;
+          // Non-buffer parameters (e.g., scalars) are always retained
+          new_params.push_back(var);
         }
       }
-    }
 
-    if (param_updated) {
-      return PrimFunc(new_params, func.CopyOnWrite()->body, func->ret_type,
-                      new_buffer_map, func->attrs, func->span);
-    } else {
-      return func;
+      if (param_updated) {
+        return PrimFunc(new_params, func.CopyOnWrite()->body, func->ret_type,
+                        new_buffer_map, func->attrs, func->span);
+      }
     }
+    // Either no change to params or argument simplification disabled
+    return func;
   }
 
 private:
@@ -391,7 +396,7 @@ private:
     if (can_inline && !used_in_buffer_def) {
       return body;
     } else if (value.same_as(op->value) && body.same_as(op->body)) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = std::move(value);
@@ -460,6 +465,16 @@ private:
     return std::move(store);
   }
 
+  Stmt VisitStmt_(const AttrStmtNode *op) override {
+    if (op->attr_key == "tl.assume") {
+      PrimExpr condition = this->VisitExpr(Downcast<PrimExpr>(op->node));
+      auto n = CopyOnWrite(op);
+      n->node = std::move(condition);
+      return Parent::VisitStmt_(n.get());
+    }
+    return Parent::VisitStmt_(op);
+  }
+
 private:
   bool ArrayDeepEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs) {
     if (lhs.size() != rhs.size()) {
@@ -522,10 +537,10 @@ tvm::transform::Pass Simplify(bool simplify_arguments = true) {
   return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.Simplify", Simplify);
-});
+}
 
 } // namespace tl
 } // namespace tvm

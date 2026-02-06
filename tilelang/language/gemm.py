@@ -1,4 +1,5 @@
 """The language interface for tl programs."""
+
 from __future__ import annotations
 
 from tilelang.primitives.gemm.base import GemmWarpPolicy
@@ -79,8 +80,7 @@ def gemm(
                 shape.append(r.extent)
             return shape
         else:
-            raise ValueError(
-                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
 
     def retrieve_stride(object: tir.Buffer | tir.BufferRegion) -> list[int]:
         if isinstance(object, tir.Buffer):
@@ -107,8 +107,7 @@ def gemm(
                 stride *= s
             return strides
         else:
-            raise ValueError(
-                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
 
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
@@ -122,12 +121,14 @@ def gemm(
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
     if len(A_shape) > 2:
         for i in range(len(A_shape) - 2):
-            assert A_shape[i] == 1, \
+            assert A_shape[i] == 1, (
                 "current only support A as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
     if len(B_shape) > 2:
         for i in range(len(B_shape) - 2):
-            assert B_shape[i] == 1, \
+            assert B_shape[i] == 1, (
                 "current only support B as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
 
     M, N = C_shape
     K = A_shape[-2] if transpose_A else A_shape[-1]
@@ -171,8 +172,7 @@ def gemm(
                 offset += indices[i] * strides[i]
             return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
-            raise ValueError(
-                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
 
     def retrieve_offset(object: tir.Buffer | tir.BufferRegion) -> tir.PrimExpr:
         """Retrieve the offset of the buffer or buffer region."""
@@ -191,8 +191,7 @@ def gemm(
                 indices.append(r.min)
             return indices
         else:
-            raise ValueError(
-                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
 
     A_offset = retrieve_offset(A)
     B_offset = retrieve_offset(B)
@@ -206,9 +205,29 @@ def gemm(
     Cptr = retrieve_ptr(C, "rw")
     mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else tir.const(0, "uint32")
     C_coords = [r.min for r in C.region] if isinstance(C, tir.BufferRegion) else [0, 0]
-    return tir.call_intrin("handle", tir.op.Op.get("tl.gemm"), Aptr, Bptr, Cptr, transpose_A,
-                           transpose_B, M, N, K, policy, clear_accum, stride_a, stride_b, offset_a,
-                           offset_b, k_pack, wg_wait, mbarptr, C_coords[0], C_coords[1])
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.gemm"),
+        Aptr,
+        Bptr,
+        Cptr,
+        transpose_A,
+        transpose_B,
+        M,
+        N,
+        K,
+        policy,
+        clear_accum,
+        stride_a,
+        stride_b,
+        offset_a,
+        offset_b,
+        k_pack,
+        wg_wait,
+        mbarptr,
+        C_coords[0],
+        C_coords[1],
+    )
 
 
 # experimental currently, for fast compilation
@@ -279,8 +298,7 @@ def gemm_v2(
                 shape.append(r.extent)
             return shape
         else:
-            raise ValueError(
-                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
 
     def retrieve_stride(object: tir.Buffer | tir.BufferRegion) -> list[int]:
         if isinstance(object, tir.Buffer):
@@ -307,8 +325,7 @@ def gemm_v2(
                 stride *= s
             return strides
         else:
-            raise ValueError(
-                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
 
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
@@ -322,12 +339,14 @@ def gemm_v2(
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
     if len(A_shape) > 2:
         for i in range(len(A_shape) - 2):
-            assert A_shape[i] == 1, \
+            assert A_shape[i] == 1, (
                 "current only support A as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
     if len(B_shape) > 2:
         for i in range(len(B_shape) - 2):
-            assert B_shape[i] == 1, \
+            assert B_shape[i] == 1, (
                 "current only support B as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
 
     M, N = C_shape
     K = A_shape[-2] if transpose_A else A_shape[-1]
@@ -371,8 +390,7 @@ def gemm_v2(
                 offset += indices[i] * strides[i]
             return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
-            raise ValueError(
-                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
 
     def retrieve_offset(object: tir.Buffer | tir.BufferRegion) -> tir.PrimExpr:
         """Retrieve the offset of the buffer or buffer region."""
@@ -391,8 +409,7 @@ def gemm_v2(
                 indices.append(r.min)
             return indices
         else:
-            raise ValueError(
-                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
 
     A_offset = retrieve_offset(A)
     B_offset = retrieve_offset(B)

@@ -27,8 +27,8 @@ def gemv_simt(
 ):
     assert n_partition is not None, "n_partition must be provided"
     assert reduce_thread is not None, (
-        "reduce_thread must be provided currently, as related bitblas.gpu.gemv.GEMV"
-        "sch_outer_reduction_with_config is not implemented")
+        "reduce_thread must be provided currently, as related bitblas.gpu.gemv.GEMVsch_outer_reduction_with_config is not implemented"
+    )
 
     assert isinstance(N, int) and isinstance(K, int), "Do not support dynamic N and K Currently"
 
@@ -46,20 +46,19 @@ def gemv_simt(
     C_shape = (M, N)
 
     dp4a_size = 4
-    use_dp4a = in_dtype == "int8" and accum_dtype == "int32"
+    use_dp4a = in_dtype == T.int8 and accum_dtype == T.int32
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            Bias: T.Tensor(Bias_shape, out_dtype),
-            C: T.Tensor(C_shape, out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        Bias: T.Tensor(Bias_shape, out_dtype),
+        C: T.Tensor(C_shape, out_dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(N, n_partition), M, threads=(reduce_thread, n_partition)) as (
-                    bx,
-                    by,
-                ):
+        with T.Kernel(T.ceildiv(N, n_partition), M, threads=(reduce_thread, n_partition)) as (
+            bx,
+            by,
+        ):
             A_local = T.alloc_local((micro_size_k,), in_dtype)
             B_local = T.alloc_local((micro_size_k,), in_dtype)
             accum_res = T.alloc_local((1,), accum_dtype)
@@ -88,13 +87,12 @@ def gemv_simt(
                         )
                 else:
                     for ki in T.serial(micro_size_k):
-                        accum_res[0] += A_local[ki].astype(accum_dtype) * B_local[ki].astype(
-                            accum_dtype)
+                        accum_res[0] += A_local[ki].astype(accum_dtype) * B_local[ki].astype(accum_dtype)
 
             with T.attr(
-                    T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
-                    "reduce_scope",
-                    T.reinterpret(T.uint64(0), dtype="handle"),
+                T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                "reduce_scope",
+                T.reinterpret(T.uint64(0), dtype="handle"),
             ):
                 T.evaluate(
                     T.tvm_thread_allreduce(
@@ -104,11 +102,11 @@ def gemv_simt(
                         reduced_accum_res[0],
                         kr,
                         dtype="handle",
-                    ))
+                    )
+                )
             if kr == 0:
                 if with_bias:
-                    C[by,
-                      bx * n_partition + ni] = reduced_accum_res[0] + Bias[bx * n_partition + ni]
+                    C[by, bx * n_partition + ni] = reduced_accum_res[0] + Bias[bx * n_partition + ni]
                 else:
                     C[by, bx * n_partition + ni] = reduced_accum_res[0]
 
@@ -166,8 +164,8 @@ def evaluate_gemv_simt(
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 9)
 def test_gemv_simt():
-    evaluate_gemv_simt(1, 1024, 1024, "float8_e4m3", "float32", "float32", with_bias=False)
-    evaluate_gemv_simt(1, 1024, 1024, "float8_e5m2", "float32", "float32", with_bias=False)
+    evaluate_gemv_simt(1, 1024, 1024, T.float8_e4m3fn, T.float32, T.float32, with_bias=False)
+    evaluate_gemv_simt(1, 1024, 1024, T.float8_e5m2, T.float32, T.float32, with_bias=False)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 This directory contains examples demonstrating distributed computing capabilities using TileLang.
 
-For example, 
+For example,
 ```
 ./tilelang/distributed/launch.sh examples/distributed/example_allgather.py
 ```
@@ -11,7 +11,7 @@ For example,
 
 Before running the examples, you need to build NVSHMEM library for device-side code generation.
 
-```bash 
+```bash
 export NVSHMEM_SRC="your_custom_nvshmem_dir" # default to 3rdparty/nvshmem_src
 cd tilelang/distributed
 source build_nvshmem.sh

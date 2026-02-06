@@ -12,76 +12,13 @@
 #include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
+#include "tcgen5_meta.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-struct TCGEN5MMAMeta {
-  int atom_m, atom_n, atom_k;
-};
-
-// Return {is_success, meta}
-static inline std::pair<bool, TCGEN5MMAMeta>
-GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-// TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
-#define FAIL                                                                   \
-  return { false, TCGEN5MMAMeta{0, 0, 0} }
-#define SUCCESS(atom_m, atom_n, atom_k)                                        \
-  return {                                                                     \
-    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
-  }
-  std::vector<int> ws_valid_atom_ns = {256, 128, 64};
-  if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
-      (c_dtype.is_float() && c_dtype.bits() == 32)) {
-    if (K % 16 != 0)
-      FAIL;
-    if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 16);
-      FAIL;
-    } else if (M % 64 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 16);
-      FAIL;
-    } else if (M % 32 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 16);
-      FAIL;
-    } else {
-      FAIL;
-    }
-  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e5m2()) &&
-             (c_dtype.is_float() && c_dtype.bits() == 32)) {
-    if (K % 32 != 0)
-      FAIL;
-    if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32);
-      FAIL;
-    } else if (M % 64 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 32);
-      FAIL;
-    } else if (M % 32 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 32);
-      FAIL;
-    } else {
-      FAIL;
-    }
-  }
-  FAIL;
-#undef FAIL
-#undef SUCCESS
-}
 
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
@@ -104,49 +41,55 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
  *      (optional) kPack (Int), (optional) wg_wait (Int)]
- * @param vmap Mapping from access pointer vars to Buffer objects used to
- *   resolve the Buffer corresponding to each pointer argument.
  *
  * @note If `kPack` is provided it must be 1; otherwise the constructor
  *       fails with an ICHECK (runtime assertion). No other validation is
  *       performed here.
  */
-Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+// NormalizeToBufferRegion moved to src/op/utils.{h,cc}
 
-  node->Aptr = args[0];
-  node->Bptr = args[1];
-  node->Cptr = args[2];
-  node->A = vmap[GetVarFromAccessPtr(node->Aptr)];
-  node->B = vmap[GetVarFromAccessPtr(node->Bptr)];
-  node->C = vmap[GetVarFromAccessPtr(node->Cptr)];
-  node->trans_A = args[3].as<Bool>().value();
-  node->trans_B = args[4].as<Bool>().value();
-  node->M = args[5].as<IntImm>().value()->value;
-  node->N = args[6].as<IntImm>().value()->value;
-  node->K = args[7].as<IntImm>().value()->value;
-  node->policy = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
-  node->clear_accum = args[9].as<PrimExpr>().value();
-  node->stride_A = args[10].as<IntImm>().value()->value;
-  node->stride_B = args[11].as<IntImm>().value()->value;
-  node->offset_A = args[12].as<IntImm>().value()->value;
-  node->offset_B = args[13].as<IntImm>().value()->value;
+// MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
+
+Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
+
+  node->aRegion_ = NormalizeToBufferRegion(args[0]);
+  node->bRegion_ = NormalizeToBufferRegion(args[1]);
+  node->cRegion_ = NormalizeToBufferRegion(args[2]);
+
+  node->a_ = node->aRegion_->buffer;
+  node->b_ = node->bRegion_->buffer;
+  node->c_ = node->cRegion_->buffer;
+  node->transA_ = args[3].as<Bool>().value();
+  node->transB_ = args[4].as<Bool>().value();
+  node->m_ = args[5].as<IntImm>().value()->value;
+  node->n_ = args[6].as<IntImm>().value()->value;
+  node->k_ = args[7].as<IntImm>().value()->value;
+  node->policy_ = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
+  node->clearAccum_ = args[9].as<PrimExpr>().value();
+  node->strideA_ = args[10].as<IntImm>().value()->value;
+  node->strideB_ = args[11].as<IntImm>().value()->value;
+  node->offsetA_ = args[12].as<IntImm>().value()->value;
+  node->offsetB_ = args[13].as<IntImm>().value()->value;
   if (args.size() > 14) {
-    node->kPack = args[14].as<IntImm>().value()->value;
-    if (node->kPack != 1 && node->kPack != 2) {
+    node->kPack_ = args[14].as<IntImm>().value()->value;
+    if (node->kPack_ != 1 && node->kPack_ != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
   if (args.size() > 15) {
-    node->wg_wait = args[15].as<IntImm>().value()->value;
+    node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
-  node->mbarptr = args[16];
-  if (node->mbarptr.as<CallNode>()) {
-    node->mbar = vmap[GetVarFromAccessPtr(node->mbarptr)];
-  } else {
-    node->mbar = std::nullopt;
+  if (args.size() > 16) {
+    if (const auto *load = args[16].as<BufferLoadNode>()) {
+      node->mbarRegion_ =
+          NormalizeToBufferRegion(Downcast<BufferLoad>(args[16]));
+      node->mbar_ = node->mbarRegion_->buffer;
+    } else {
+      node->mbar_ = std::nullopt;
+    }
   }
-  node->C_coords = Array<PrimExpr>(
+  node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
   data_ = std::move(node);
 }
@@ -160,46 +103,45 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A Gemm operator that owns a copy of this node.
  */
 TileOperator GemmNode::Clone() const {
-  auto op = make_object<GemmNode>(*this);
+  auto op = tvm::ffi::make_object<GemmNode>(*this);
   return Gemm(op);
 }
 
-bool GemmNode::AllowTCGEN5MMA(Target target) const {
+bool GemmNode::allowTcgen5Mma(Target target) const {
   return TargetIsSm100(target) &&
-         ((A.scope() == "shared.dyn" || A.scope() == "shared" ||
-           A.scope() == "shared.tmem") &&
-          (B.scope() == "shared.dyn" || B.scope() == "shared") &&
-          C.scope() == "shared.tmem") &&
-         GetTCGEN5MMAMeta(M, N, K, A->dtype, C->dtype).first;
+         ((a_.scope() == "shared.dyn" || a_.scope() == "shared" ||
+           a_.scope() == "shared.tmem") &&
+          (b_.scope() == "shared.dyn" || b_.scope() == "shared") &&
+          c_.scope() == "shared.tmem") &&
+         GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype).first;
 }
 
-bool GemmNode::AllowWGMMA(int block_size, Target target) const {
+bool GemmNode::allowWgmma(int block_size, Target target) const {
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
 
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
   return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
-         TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0) &&
-         CheckWGMMA();
+         TargetIsHopper(target) && (this->m_ >= 64) && (num_warps % 4 == 0) &&
+         checkWgmma();
 }
 
-GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
-  bool allow_tcgen5mma = AllowTCGEN5MMA(target);
-  bool allow_wgmma = AllowWGMMA(block_size, target);
-  if (allow_tcgen5mma) {
+GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
+  if (allowTcgen5Mma(target)) {
     return GemmInst::kTCGEN5MMA;
-  } else if (allow_wgmma) {
+  } else if (allowWgmma(block_size, target)) {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
   } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else {
-    ICHECK(0) << "Unsupported target for gemm: " << target->str();
+    ICHECK(0) << "Unsupported target for gemm: " << target;
+    return GemmInst::kMMA;
   }
 }
 
-std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
+std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
     int M, int N, int block_size, Target target, GemmInst gemm_inst) const {
   int num_warps = block_size / TargetGetWarpSize(target);
   if (gemm_inst == GemmInst::kTCGEN5MMA) {
@@ -208,7 +150,10 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
 
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
-  constexpr int kNPerWarp = 8;  // Columns processed by a single warp
+  int kNPerWarp = 8;            // Columns processed by a single warp
+  if (TargetIsVolta(target)) {
+    kNPerWarp = 16;
+  }
   ICHECK(M % kMPerWarp == 0)
       << "M must be divisible by " << kMPerWarp << ", but got " << M;
   ICHECK(N % kNPerWarp == 0)
@@ -408,51 +353,40 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
  * @return true if WGMMA is supported for the current buffers, dtypes, and
  *         transpose/shape constraints; false otherwise.
  */
-bool GemmNode::CheckWGMMA() const {
-  if (B.scope() != "shared.dyn" && B.scope() != "shared") {
+bool GemmNode::checkWgmma() const {
+  if (b_.scope() != "shared.dyn" && b_.scope() != "shared") {
     return false;
   }
 
-  if (C->dtype == DataType::Float(16)) {
-    if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
-      return K % 16 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
+  if (c_->dtype == DataType::Float(16)) {
+    if (a_->dtype == DataType::Float(16) && b_->dtype == DataType::Float(16))
+      return k_ % 16 == 0;
+    else if (a_->dtype.is_float8() && b_->dtype.is_float8())
+      return (!transA_) && transB_ && k_ % 32 == 0;
     else
       return false;
-  } else if (C->dtype == DataType::Float(32)) {
-    if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
-      return K % 16 == 0;
-    else if (A->dtype == DataType::BFloat(16) &&
-             B->dtype == DataType::BFloat(16))
-      return K % 16 == 0;
-    else if (A->dtype == DataType::Float(32) && B->dtype == DataType::Float(32))
-      return (!trans_A) && trans_B && K % 8 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
-      return (!trans_A) && trans_B && K % 32 == 0;
+  } else if (c_->dtype == DataType::Float(32)) {
+    if (a_->dtype == DataType::Float(16) && b_->dtype == DataType::Float(16))
+      return k_ % 16 == 0;
+    else if (a_->dtype == DataType::BFloat(16) &&
+             b_->dtype == DataType::BFloat(16))
+      return k_ % 16 == 0;
+    else if (a_->dtype == DataType::Float(32) &&
+             b_->dtype == DataType::Float(32))
+      return (!transA_) && transB_ && k_ % 8 == 0;
+    else if (a_->dtype.is_float8() && b_->dtype.is_float8())
+      return (!transA_) && transB_ && k_ % 32 == 0;
     else
       return false;
-  } else if (C->dtype == DataType::Int(32)) {
-    if (A->dtype == DataType::Int(8) && B->dtype == DataType::Int(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::Int(8) && B->dtype == DataType::UInt(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::Int(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::UInt(8))
-      return (!trans_A) && trans_B && K % 32 == 0;
+  } else if (c_->dtype == DataType::Int(32)) {
+    if (a_->dtype == DataType::Int(8) && b_->dtype == DataType::Int(8))
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype == DataType::Int(8) && b_->dtype == DataType::UInt(8))
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype == DataType::UInt(8) && b_->dtype == DataType::Int(8))
+      return (!transA_) && transB_ && k_ % 32 == 0;
+    else if (a_->dtype == DataType::UInt(8) && b_->dtype == DataType::UInt(8))
+      return (!transA_) && transB_ && k_ % 32 == 0;
     else
       return false;
   } else {
@@ -476,8 +410,8 @@ bool GemmNode::CheckWGMMA() const {
  */
 static int GetArchInt(Target target) {
   int arch_int = 0;
-  auto s = target->GetAttr<String>("arch");
-  ICHECK(s.defined());
+  auto s = target->GetAttr<tvm::ffi::String>("arch");
+  ICHECK(s.has_value());
   std::string arch = s.value();
   if (arch.rfind("sm_", 0) == 0) {
     arch_int = std::stoi(arch.substr(3));
@@ -502,56 +436,66 @@ static int GetArchInt(Target target) {
  */
 Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
-  GemmInst gemm_inst = GetGemmInst(block_size, T.target);
+  GemmInst gemm_inst = getGemmInst(block_size, T.target);
   auto [warp_m, warp_n] =
-      policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
+      policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
+
+  // Build access pointers from regions locally
+  PrimExpr Aptr =
+      MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Bptr =
+      MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Cptr =
+      MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
 
   std::stringstream ss;
   std::string op_name;
 
   if (gemm_inst == GemmInst::kTCGEN5MMA) {
     auto [can_use_tcgen5mma, meta] =
-        GetTCGEN5MMAMeta(M, N, K, A->dtype, C->dtype);
+        GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype);
     ICHECK(can_use_tcgen5mma);
-    ICHECK(B.scope() == "shared.dyn" || B.scope() == "shared");
-    ICHECK(C.scope() == "shared.tmem");
-    ICHECK(mbar.has_value()) << "mbar must be provided for TCGEN5MMA";
-    if (A.scope() == "shared.tmem") {
+    ICHECK(b_.scope() == "shared.dyn" || b_.scope() == "shared");
+    ICHECK(c_.scope() == "shared.tmem");
+    ICHECK(mbar_.has_value()) << "mbar must be provided for TCGEN5MMA";
+    if (a_.scope() == "shared.tmem") {
       op_name = "tl::tcgen5mma_gemm_ts";
-    } else if (A.scope() == "shared.dyn" || A.scope() == "shared") {
+    } else if (a_.scope() == "shared.dyn" || a_.scope() == "shared") {
       op_name = "tl::tcgen5mma_gemm_ss";
     } else {
       ICHECK(0)
           << "Unsupported A scope for TCGEN5MMA: "
-          << A.scope(); // If this is triggered, it means Tilelang has bugs.
+          << a_.scope(); // If this is triggered, it means Tilelang has bugs.
     }
-    ICHECK(wg_wait == -1)
+    ICHECK(wgWait_ == -1)
         << "Currently only wg_wait == -1 is supported for TCGEN5MMA. Please "
            "use "
            "wg_wait = -1 and manually synchronize with mbarrier.";
 
     std::string accum_dtype = "";
-    if (C->dtype.is_float()) {
-      if (C->dtype.bits() == 32) {
+    if (c_->dtype.is_float()) {
+      if (c_->dtype.bits() == 32) {
         accum_dtype = "float";
       }
     }
     ICHECK(!accum_dtype.empty())
-        << "Unsupported C dtype for TCGEN5MMA: " << C->dtype;
-    ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
+        << "Unsupported C dtype for TCGEN5MMA: " << c_->dtype;
+    ss << op_name << "<" << m_ << ", " << n_ << ", " << k_ << ", ";
     ss << meta.atom_m << ", " << meta.atom_n << ", " << meta.atom_k << ", ";
-    ss << trans_A << ", " << trans_B << ", ";
+    ss << transA_ << ", " << transB_ << ", ";
     ss << accum_dtype;
     ss << ">";
 
-    auto C_buffer = T.buffer_remap.count(C) ? T.buffer_remap[C] : C;
+    auto C_buffer = T.buffer_remap.count(c_) ? T.buffer_remap[c_] : c_;
     Array<PrimExpr> new_args;
+    auto mbarPtr =
+        MakeAccessPtrFromRegion(mbarRegion_, /*rw*/ 3, /*require_2d*/ true);
     new_args.push_back(StringImm(ss.str()));
     new_args.push_back(Aptr);
     new_args.push_back(Bptr);
-    new_args.push_back(BufferLoad(C_buffer, C_coords));
-    new_args.push_back(mbarptr);
-    new_args.push_back(clear_accum);
+    new_args.push_back(BufferLoad(C_buffer, cCoords_));
+    new_args.push_back(mbarPtr);
+    new_args.push_back(clearAccum_);
     auto new_call = Call(DataType::Handle(), builtin::call_extern(), new_args);
 
     // Since TCGEN5MMA atoms provided by CUTLASS always have an internal
@@ -576,47 +520,49 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
   }
 
-  if (A.scope() == "local.fragment") {
-    ICHECK(B.scope() != "local.fragment");
+  if (IsFragmentBuffer(a_)) {
+    ICHECK(!IsFragmentBuffer(b_));
+    ICHECK(!transA_)
+        << "gemm_rs requires the A operand to be in non-transposed layout.";
     op_name = "tl::gemm_rs";
-  } else if (B.scope() == "local.fragment") {
+  } else if (IsFragmentBuffer(b_)) {
     op_name = "tl::gemm_sr";
   } else {
     op_name = "tl::gemm_ss";
   }
-  ICHECK(C.scope() == "local.fragment");
+  ICHECK(IsFragmentBuffer(c_));
 
-  ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
+  ss << op_name << "<" << m_ << ", " << n_ << ", " << k_ << ", ";
   ss << warp_m << ", " << warp_n << ", ";
-  ss << trans_A << ", " << trans_B;
-  auto clear_accum_bool = clear_accum.as<Bool>();
+  ss << transA_ << ", " << transB_;
+  auto clear_accum_bool = clearAccum_.as<Bool>();
   ICHECK(clear_accum_bool.has_value())
-      << "clear_accum must be a constant Bool type, got " << clear_accum;
+      << "clear_accum must be a constant Bool type, got " << clearAccum_;
   ss << ", " << bool(clear_accum_bool.value());
   if (TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) {
-    ss << ", " << stride_A << ", " << stride_B;
-    ss << ", " << offset_A << ", " << offset_B;
+    ss << ", " << strideA_ << ", " << strideB_;
+    ss << ", " << offsetA_ << ", " << offsetB_;
   }
   if (TargetIsCDNA(T.target)) {
     // for cdna gemm, we need to specify kPack
-    ss << ", " << kPack;
+    ss << ", " << kPack_;
   } else if (TargetIsHopper(T.target)) {
     ss << ", " << (gemm_inst == GemmInst::kWGMMA ? "true" : "false");
   }
 
   // Emit wg_wait if necessary
   if (TargetIsHopper(T.target)) {
-    if (wg_wait != 0) {
-      ss << ", " << wg_wait;
+    if (wgWait_ != 0) {
+      ss << ", " << wgWait_;
     }
   } else if (TargetIsSm100(T.target)) {
     // NOTE On sm100, only the leading thread issues the TCGEN5MMA instruction
     // but all threads need to wait, so we emit another statement for cases
     // where wg_wait == 0.
-    ICHECK(wg_wait == 0 || wg_wait == -1)
+    ICHECK(wgWait_ == 0 || wgWait_ == -1)
         << "wg_wait must be 0 or -1 for Sm100";
   } else {
-    ICHECK(wg_wait == 0)
+    ICHECK(wgWait_ == 0)
         << "wg_wait must be 0 for non-Hopper and non-Sm100 targets";
   }
   ss << ">";
@@ -652,151 +598,152 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   LayoutMap results;
   auto thread_range = T.thread_bounds;
   auto block_size = *as_const_int(thread_range->extent);
-  GemmInst gemm_inst = GetGemmInst(block_size, T.target);
+  GemmInst gemm_inst = getGemmInst(block_size, T.target);
   auto [warp_m, warp_n] =
-      policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
+      policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
   if (TargetIsVolta(T.target)) {
-    ICHECK(C.scope() == "local.fragment")
+    ICHECK(IsFragmentBuffer(c_))
         << "Volta gemm only supports C in local.fragment scope, got "
-        << C.scope();
-    auto fragment =
-        makeGemmVoltaFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment->BindThreadRange(thread_range));
-    if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      int dim_A = A->shape.size();
-      results.Set(A, makeGemmVoltaABLayout(*as_const_int(A->shape[dim_A - 2]),
-                                           *as_const_int(A->shape[dim_A - 1]),
-                                           true, !trans_A));
-    } else if (A.scope() == "local.fragment") {
-      ICHECK(trans_A == false);
-      auto fragment = makeGemmVoltaFragmentA(M, N, K, M / warp_m, N / warp_n);
-      results.Set(A, fragment->BindThreadRange(thread_range));
+        << c_.scope();
+    auto fragment = makeGemmVoltaFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
+                                           c_->dtype.bits());
+    results.Set(c_, fragment->BindThreadRange(thread_range));
+    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+      int dim_A = a_->shape.size();
+      results.Set(a_, makeGemmVoltaABLayout(*as_const_int(a_->shape[dim_A - 2]),
+                                            *as_const_int(a_->shape[dim_A - 1]),
+                                            true, !transA_));
+    } else if (IsFragmentBuffer(a_)) {
+      ICHECK(transA_ == false);
+      auto fragment =
+          makeGemmVoltaFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n);
+      results.Set(a_, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
 
-    ICHECK(B.scope() == "shared" || B.scope() == "shared.dyn");
-    int dim_B = B->shape.size();
-    results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[dim_B - 2]),
-                                         *as_const_int(B->shape[dim_B - 1]),
-                                         false, trans_B));
+    ICHECK(b_.scope() == "shared" || b_.scope() == "shared.dyn");
+    int dim_B = b_->shape.size();
+    results.Set(b_, makeGemmVoltaABLayout(*as_const_int(b_->shape[dim_B - 2]),
+                                          *as_const_int(b_->shape[dim_B - 1]),
+                                          false, transB_));
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) ||
              TargetIsSM120(T.target) ||
              (TargetIsSm100(T.target) && gemm_inst == GemmInst::kMMA)) {
-    ICHECK(C.scope() == "local.fragment")
-        << "MMA only supports C in local.fragment scope, got " << C.scope();
+    ICHECK(IsFragmentBuffer(c_))
+        << "MMA only supports C in local.fragment scope, got " << c_.scope();
 
     auto fragment =
-        makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment->BindThreadRange(thread_range));
+        makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n, c_->dtype.bits());
+    results.Set(c_, fragment->BindThreadRange(thread_range));
 
-    if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      int dim_A = A->shape.size();
-      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
-      results.Set(A,
+    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+      int dim_A = a_->shape.size();
+      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
+      results.Set(a_,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   A->dtype.bits(), !trans_A));
-    } else if (A.scope() == "local.fragment") {
-      auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
-                                        A->dtype.bits(), trans_A);
-      results.Set(A, fragment->BindThreadRange(thread_range));
+                                   a_->dtype.bits(), !transA_));
+    } else if (IsFragmentBuffer(a_)) {
+      auto fragment = makeGemmFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
+                                        a_->dtype.bits(), transA_);
+      results.Set(a_, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
-    if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      int dim_B = B->shape.size();
-      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
-      results.Set(B,
+    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+      int dim_B = b_->shape.size();
+      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
+      results.Set(b_,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   B->dtype.bits(), trans_B));
-    } else if (B.scope() == "local.fragment") {
+                                   b_->dtype.bits(), transB_));
+    } else if (IsFragmentBuffer(b_)) {
       auto fragment =
-          makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
-      results.Set(B, fragment->BindThreadRange(thread_range));
+          makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);
+      results.Set(b_, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
   } else if (TargetIsHopper(T.target)) {
-    ICHECK(C.scope() == "local.fragment")
+    ICHECK(IsFragmentBuffer(c_))
         << (gemm_inst == GemmInst::kWGMMA ? "WGMMA " : "MMA ")
-        << "only supports C in local.fragment scope, got " << C.scope();
-    auto fragment =
-        gemm_inst == GemmInst::kWGMMA
-            ? makeGemmFragmentCHopper(M, N, M / warp_m, N / warp_n,
-                                      C->dtype.bits())
-            : makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment->BindThreadRange(thread_range));
-    if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      int dim_A = A->shape.size();
-      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
+        << "only supports C in local.fragment scope, got " << c_.scope();
+    auto fragment = gemm_inst == GemmInst::kWGMMA
+                        ? makeGemmFragmentCHopper(m_, n_, m_ / warp_m,
+                                                  n_ / warp_n, c_->dtype.bits())
+                        : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
+                                            c_->dtype.bits());
+    results.Set(c_, fragment->BindThreadRange(thread_range));
+    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+      int dim_A = a_->shape.size();
+      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
       const int64_t continuity =
-          trans_A ? 4 * mat_continuous / warp_m : mat_continuous;
+          transA_ ? 4 * mat_continuous / warp_m : mat_continuous;
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       A->dtype.bits(), !trans_A)
+                                       a_->dtype.bits(), !transA_)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 A->dtype.bits(), !trans_A);
-      results.Set(A, ABLayout);
+                                 a_->dtype.bits(), !transA_);
+      results.Set(a_, ABLayout);
     } else {
-      auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
-                                        A->dtype.bits(), trans_A);
-      results.Set(A, fragment->BindThreadRange(thread_range));
+      auto fragment = makeGemmFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
+                                        a_->dtype.bits(), transA_);
+      results.Set(a_, fragment->BindThreadRange(thread_range));
     }
-    if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      int dim_B = B->shape.size();
-      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
+    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+      int dim_B = b_->shape.size();
+      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
       const int64_t continuity =
-          trans_B ? mat_continuous : mat_continuous / warp_n;
+          transB_ ? mat_continuous : mat_continuous / warp_n;
 
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       B->dtype.bits(), trans_B)
+                                       b_->dtype.bits(), transB_)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 B->dtype.bits(), trans_B);
-      results.Set(B, ABLayout);
+                                 b_->dtype.bits(), transB_);
+      results.Set(b_, ABLayout);
     } else {
       auto fragment =
-          makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
-      results.Set(B, fragment->BindThreadRange(thread_range));
+          makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);
+      results.Set(b_, fragment->BindThreadRange(thread_range));
     }
   } else if (gemm_inst == GemmInst::kTCGEN5MMA) {
-    ICHECK(C.scope() == "shared.tmem")
-        << "TCGEN5MMA only supports C in shared.tmem scope, got " << C.scope();
-    ICHECK(A.scope() == "shared.dyn" || A.scope() == "shared")
+    ICHECK(c_.scope() == "shared.tmem")
+        << "TCGEN5MMA only supports C in shared.tmem scope, got " << c_.scope();
+    ICHECK(a_.scope() == "shared.dyn" || a_.scope() == "shared")
         << "Current TCGEN5MMA only supports A in shared.dyn scope";
     auto [can_use_tcgen5mma, meta] =
-        GetTCGEN5MMAMeta(M, N, K, A->dtype, C->dtype);
+        GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype);
     ICHECK(can_use_tcgen5mma);
     {
-      int dim_A = A->shape.size();
-      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
-      results.Set(A, makeGemmABLayoutSm100(mat_stride, mat_continuous,
-                                           mat_continuous, A->dtype.bits(),
-                                           trans_A ? 1 : 2));
+      int dim_A = a_->shape.size();
+      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
+      results.Set(a_, makeGemmABLayoutSm100(mat_stride, mat_continuous,
+                                            mat_continuous, a_->dtype.bits(),
+                                            transA_ ? 1 : 2));
     }
     {
-      int dim_B = B->shape.size();
-      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
+      int dim_B = b_->shape.size();
+      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
       const int64_t continuity = mat_continuous;
-      results.Set(B,
+      results.Set(b_,
                   makeGemmABLayoutSm100(mat_stride, mat_continuous, continuity,
-                                        B->dtype.bits(), trans_B ? 2 : 1));
+                                        b_->dtype.bits(), transB_ ? 2 : 1));
     }
     {
       Layout res;
-      IterVar i = make_itervar("i", M);
-      IterVar j = make_itervar("j", N);
-      ICHECK(M % meta.atom_m == 0);
+      IterVar i = make_itervar("i", m_);
+      IterVar j = make_itervar("j", n_);
+      ICHECK(m_ % meta.atom_m == 0);
       PrimExpr atom_idx = FloorDiv(i, meta.atom_m) +
-                          FloorDiv(j, meta.atom_n) * (M / meta.atom_m);
+                          FloorDiv(j, meta.atom_n) * (m_ / meta.atom_m);
       PrimExpr ai = FloorMod(i, meta.atom_m); // "ai" means "atom_i"
       PrimExpr aj = FloorMod(j, meta.atom_n);
       if (meta.atom_m == 128) {
@@ -822,40 +769,41 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       } else {
         ICHECK(0);
       }
-      results.Set(C, res);
+      results.Set(c_, res);
     }
   } else if (TargetIsCDNA(T.target)) {
-    ICHECK(C.scope() == "local.fragment")
+    ICHECK(IsFragmentBuffer(c_))
         << "CDNA gemm (FMMA) only supports C in local.fragment scope, got "
-        << C.scope();
-    auto fragment =
-        makeGemmFragmentCCDNA(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment->BindThreadRange(thread_range));
+        << c_.scope();
+    auto fragment = makeGemmFragmentCCDNA(m_, n_, m_ / warp_m, n_ / warp_n,
+                                          c_->dtype.bits());
+    results.Set(c_, fragment->BindThreadRange(thread_range));
 
-    if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      int dim_A = A->shape.size();
+    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+      int dim_A = a_->shape.size();
       auto shared_layout = makeGemmABLayoutCDNA(
-          *as_const_int(A->shape[dim_A - 2]),
-          *as_const_int(A->shape[dim_A - 1]), A->dtype.bits(), kPack);
-      results.Set(A, shared_layout);
-    } else if (A.scope() == "local.fragment") {
-      auto fragment = makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n,
-                                            A->dtype.bits(), kPack, trans_A);
-      results.Set(A, fragment->BindThreadRange(thread_range));
+          *as_const_int(a_->shape[dim_A - 2]),
+          *as_const_int(a_->shape[dim_A - 1]), a_->dtype.bits(), kPack_);
+      results.Set(a_, shared_layout);
+    } else if (IsFragmentBuffer(a_)) {
+      auto fragment =
+          makeGemmFragmentACDNA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
+                                a_->dtype.bits(), kPack_, transA_);
+      results.Set(a_, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
-    if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      int dim_B = B->shape.size();
+    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+      int dim_B = b_->shape.size();
       auto shared_layout = makeGemmABLayoutCDNA(
-          *as_const_int(B->shape[dim_B - 2]),
-          *as_const_int(B->shape[dim_B - 1]), B->dtype.bits(), kPack);
+          *as_const_int(b_->shape[dim_B - 2]),
+          *as_const_int(b_->shape[dim_B - 1]), b_->dtype.bits(), kPack_);
 
-      results.Set(B, shared_layout);
-    } else if (B.scope() == "local.fragment") {
+      results.Set(b_, shared_layout);
+    } else if (IsFragmentBuffer(b_)) {
       auto fragment =
-          makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
-      results.Set(B, fragment->BindThreadRange(thread_range));
+          makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);
+      results.Set(b_, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
@@ -866,7 +814,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   return results;
 }
 
-TIR_REGISTER_TL_OP(Gemm, gemm)
+TIR_REGISTER_TL_TILE_OP(Gemm, gemm)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -874,18 +822,17 @@ TIR_REGISTER_TL_OP(Gemm, gemm)
 TVM_REGISTER_OP("tl.GemmWarpPolicy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   GemmNode::RegisterReflection();
   GemmWarpPolicyNode::RegisterReflection();
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",
                         [](GemmWarpPolicy policy, int M, int N, int block_size,
                            Target target, GemmInst gemm_inst) {
-                          policy->ComputeWarpPartition(M, N, block_size, target,
+                          policy->computeWarpPartition(M, N, block_size, target,
                                                        gemm_inst);
-                          return;
                         });
-});
+}
 
 } // namespace tl
 } // namespace tvm

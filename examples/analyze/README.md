@@ -21,9 +21,9 @@ M = N = K = 1024
 
 def kernel(block_M=128, block_N=128, block_K=32, num_stages=3, thread_num=128):
     @T.prim_func
-    def main(A: T.Tensor((M, K), "float16"),
-             B: T.Tensor((N, K), "float16"),
-             C: T.Tensor((M, N), "float")):
+    def main(A: T.Tensor((M, K), T.float16),
+             B: T.Tensor((N, K), T.float16),
+             C: T.Tensor((M, N), T.float)):
         # ... (kernel definition)
     return main
 
@@ -40,9 +40,9 @@ from tilelang.carver.arch import CUDA
 
 def kernel(N=64, C=256, H=512, W=512, F=512, K=3, block_M=64, block_N=128):
     @T.prim_func
-    def main(data: T.Tensor((N, H, W, C), "float16"),
-             kernel: T.Tensor((K, K, C, F), "float16"),
-             out: T.Tensor((N, (H-K+1), (W-K+1), F), "float")):
+    def main(data: T.Tensor((N, H, W, C), T.float16),
+             kernel: T.Tensor((K, K, C, F), T.float16),
+             out: T.Tensor((N, (H-K+1), (W-K+1), F), T.float)):
         # ... (convolution kernel definition)
     return main
 
@@ -64,10 +64,10 @@ class AnalysisResult:
 ```
 ### `Analyzer` Class Methods
 #### `analysis(fn, device)`
-* ​Parameters:
-    * fn: TVM IRModule or PrimFunc
-    * device: Device configuration object
-* Returns: AnalysisResult
+- ​Parameters:
+  - fn: TVM IRModule or PrimFunc
+  - device: Device configuration object
+- Returns: AnalysisResult
 #### Supported Architectures
 ```python
 # Extendable to custom hardware via: "compute_capability": (cores_per_SM, clock_GHz, flops_per_cycle, max_SM_count)

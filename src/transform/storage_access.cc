@@ -29,6 +29,7 @@
 #include <string>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -38,10 +39,11 @@ using namespace tir;
 
 void TileLangStorageAccessVisitor::VisitExpr_(const BufferLoadNode *op) {
   Var buf = op->buffer->data;
-  buffer_data_to_buffer_.Set(GetRef<Var>(buf.get()), op->buffer);
+  buffer_data_to_buffer_.Set(tvm::ffi::GetRef<Var>(buf.get()), op->buffer);
   StorageScope scope = GetScope(buf);
   if (Enabled(buf.get(), scope)) {
-    ICHECK(allow_append_) << GetRef<BufferLoad>(op) << " " << scope.to_string();
+    ICHECK(allow_append_) << tvm::ffi::GetRef<BufferLoad>(op) << " "
+                          << scope.to_string();
     AccessEntry e;
     e.threads = env_threads();
     e.thread_range = this->ComputeThreadRange(e.threads);
@@ -65,7 +67,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const BufferStoreNode *op) {
   curr_stmt_.stmt = op;
 
   Var buf = op->buffer->data;
-  buffer_data_to_buffer_.Set(GetRef<Var>(buf.get()), op->buffer);
+  buffer_data_to_buffer_.Set(tvm::ffi::GetRef<Var>(buf.get()), op->buffer);
   StorageScope scope = GetScope(buf);
   if (Enabled(buf.get(), scope)) {
     AccessEntry e;
@@ -252,7 +254,11 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   this->VisitExpr(op->condition);
   PrimExpr real_condition = ExtractRealCondition(op->condition);
 
-  curr_stmt_.access.clear();
+  // Preserve accesses collected from the condition expression so they
+  // participate in dependency analysis. Otherwise, a write to shared memory
+  // immediately followed by an if-condition reading that memory would not
+  // trigger a sync before the if-statement.
+  std::vector<AccessEntry> cond_access = std::move(curr_stmt_.access);
   allow_append_ = false;
 
   scope_.push_back(std::vector<StmtEntry>());
@@ -265,6 +271,11 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   s.stmt = op;
   s.access = Summarize(std::move(scope_.back()), nullptr);
   scope_.pop_back();
+  // Merge the condition's access summary into the if-statement's access list
+  // so the planner can insert a sync before the if when necessary.
+  if (!cond_access.empty()) {
+    s.access.insert(s.access.begin(), cond_access.begin(), cond_access.end());
+  }
   if (op->else_case) {
     scope_.push_back(std::vector<StmtEntry>());
     {
@@ -287,12 +298,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const WhileNode *op) {
   if (!is_thread_invariant) {
     ++condition_counter_;
   }
-
-  allow_append_ = true;
   this->VisitExpr(op->condition);
-  curr_stmt_.access.clear();
-  allow_append_ = false;
-
   scope_.push_back(std::vector<StmtEntry>());
   this->VisitStmt(op->body);
   StmtEntry s;
@@ -306,14 +312,32 @@ void TileLangStorageAccessVisitor::VisitStmt_(const WhileNode *op) {
 }
 
 void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
+  // Mark async TMA load context so that tvm_access_ptr within the call
+  // can be tagged accordingly.
+  auto is_tma_load = [&]() {
+    if (auto opt = op->op.as<Op>()) {
+      const Op &call_op = opt.value();
+      return call_op.same_as(tl::tma_load()) ||
+             call_op.same_as(tl::tma_load_im2col());
+    }
+    return false;
+  }();
+  if (is_tma_load) {
+    tma_depth_++;
+    for (const auto &a : op->args) {
+      this->VisitExpr(a);
+    }
+    tma_depth_--;
+    return;
+  }
   if (op->op.same_as(builtin::address_of())) {
     ICHECK_EQ(op->args.size(), 1U);
     if (auto load = op->args[0].as<BufferLoadNode>()) {
       Buffer buffer = load->buffer;
       DataType dtype = buffer->dtype;
       const VarNode *buffer_var = buffer->data.as<VarNode>();
-      buffer_data_to_buffer_.Set(GetRef<Var>(buffer_var), buffer);
-      StorageScope scope = GetScope(GetRef<Var>(buffer_var));
+      buffer_data_to_buffer_.Set(tvm::ffi::GetRef<Var>(buffer_var), buffer);
+      StorageScope scope = GetScope(tvm::ffi::GetRef<Var>(buffer_var));
       Array<Range> buffer_ranges;
       // from indices to buffer indices
       ICHECK(buffer->shape.size() == load->indices.size());
@@ -351,17 +375,18 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
     PrimExpr offset = op->args[2];
     PrimExpr extent = op->args[3];
     const IntImmNode *flag = op->args[4].as<IntImmNode>();
-    StorageScope scope = GetScope(GetRef<Var>(buffer_var));
+    StorageScope scope = GetScope(tvm::ffi::GetRef<Var>(buffer_var));
     // The buffer scope.
     if (Enabled(buffer_var, scope)) {
       ICHECK(allow_append_);
       Array<Range> buffer_ranges;
-      if (buffer_data_to_buffer_.find(GetRef<Var>(buffer_var)) ==
+      if (buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(buffer_var)) ==
           buffer_data_to_buffer_.end()) {
         // cannot find buffer map, use the default buffer
         buffer_ranges = {Range::FromMinExtent(offset, extent)};
       } else {
-        Buffer buffer = buffer_data_to_buffer_.at(GetRef<Var>(buffer_var));
+        Buffer buffer =
+            buffer_data_to_buffer_.at(tvm::ffi::GetRef<Var>(buffer_var));
         auto buffer_shape = buffer->shape;
         // convert 1d offset to multi-dimensional index
         auto linear_to_indices = [this](PrimExpr offset,
@@ -392,7 +417,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
       e.threads = env_threads();
       e.thread_range = this->ComputeThreadRange(e.threads);
       e.dtype = dtype;
-      e.buffer = GetRef<Var>(buffer_var);
+      e.buffer = tvm::ffi::GetRef<Var>(buffer_var);
       e.buffer_ranges = buffer_ranges;
       e.is_pointer_access = true;
       e.touched = {
@@ -400,10 +425,12 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
       e.scope = scope;
       if (flag->value & 1) {
         e.type = kRead;
+        e.is_async_copy = (tma_depth_ > 0);
         curr_stmt_.access.emplace_back(e);
       }
       if (flag->value & 2) {
         e.type = kWrite;
+        e.is_async_copy = (tma_depth_ > 0);
         curr_stmt_.access.emplace_back(e);
       }
     }

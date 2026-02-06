@@ -3,13 +3,16 @@ import tilelang.language as T
 from typing import Literal, Callable
 from tilelang.common import TransformKind
 from tvm import DataType
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var
+from tvm import tir
+from tvm.ir import Range
+from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
+from tilelang import tvm as tvm
 from tvm.runtime import convert
 from .utils import (
     mma_store_index_map,
     get_ldmatrix_offset,
 )
-from tilelang.utils import is_fragment
+from tilelang.utils import is_fragment, get_buffer_region_from_load
 from tilelang.intrinsics.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
     shared_16x8_to_mma_32x4_layout_sr_b,
@@ -19,8 +22,10 @@ from tilelang.intrinsics.mma_layout import (
     shared_16x32_to_mma_32x16_layout_sr_b,
     mma_load_a_32x4_to_shared_16x8_layout,
     mma_load_b_32x4_to_shared_16x8_layout,
+    mma_load_b_32x8_to_shared_16x16_layout,
     mma_load_a_32x16_to_shared_16x32_layout,
     mma_load_b_32x16_to_shared_16x32_layout,
+    mma_load_a_32x8_to_shared_16x16_layout,
 )
 
 lift = convert
@@ -40,10 +45,14 @@ class TensorCoreIntrinEmitter:
         "float16": "fp16",
         "bfloat16": "bf16",
         "float32": "fp32",
+        "float64": "fp64",
         "int8": "int8",
         "int32": "int32",
         "float8_e4m3": "e4m3",
+        "float8_e4m3fn": "e4m3",
+        "float8_e4m3fnuz": "e4m3",
         "float8_e5m2": "e5m2",
+        "float8_e5m2fnuz": "e5m2",
     }
 
     # Represent the thread binding in the form of (tx, warp_n, warp_m)
@@ -51,9 +60,9 @@ class TensorCoreIntrinEmitter:
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -78,6 +87,11 @@ class TensorCoreIntrinEmitter:
         self.warp_col_tiles = warp_col_tiles
         self.chunk = chunk
         self._initialize_k_dim(a_dtype)
+        # For FP64, MMA shape is m8n8k4; adjust instance dims early
+        if DataType(a_dtype).bits == 64:
+            # Override default M/N dims for fp64 MMA
+            self.M_DIM = 8
+            # n_dim will be set to 8 in _initialize_micro_size via k_dim==4
         self._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
         self._initialize_micro_size(self.M_DIM, self.k_dim)
         self._initialize_local_size(self.M_DIM, self.n_dim, self.k_dim, self.WARP_SIZE)
@@ -94,7 +108,7 @@ class TensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype="float16"):
+    def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         self.k_dim = 256 // a_dtype.bits
@@ -105,12 +119,21 @@ class TensorCoreIntrinEmitter:
         self.local_size_out = (m_dim * n_dim) // warp_size
 
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
-        self.a_dtype_abbrv = self.dtype_abbrv[a_dtype]
-        self.b_dtype_abbrv = self.dtype_abbrv[b_dtype]
-        self.accum_dtype_abbrv = self.dtype_abbrv[accum_dtype]
+        self.a_dtype_abbrv = self._get_dtype_abbrv(a_dtype)
+        self.b_dtype_abbrv = self._get_dtype_abbrv(b_dtype)
+        self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
+
+    def _get_dtype_abbrv(self, dtype: str) -> str:
+        try:
+            return self.dtype_abbrv[dtype]
+        except KeyError as err:
+            raise ValueError(f"Unsupported dtype: {dtype}") from err
 
     def _initialize_mma_prefix(self, k_dim: int = 16):
-        if k_dim == 8:
+        if k_dim == 4:
+            # fp64
+            self.mma_prefix = "m8n8k4"
+        elif k_dim == 8:
             # typically used for tfloat32
             self.mma_prefix = "m16n8k8"
         elif k_dim == 16:
@@ -125,22 +148,31 @@ class TensorCoreIntrinEmitter:
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
         warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
-        assert warp_row_tiles >= 16, f"warp_row_tiles must be greater than 16, got {warp_row_tiles}"
-        assert warp_row_tiles % 16 == 0, f"warp_row_tiles must be divisible by 16, got {warp_row_tiles}"
-        assert warp_col_tiles >= 8, f"warp_col_tiles must be greater than 8, got {warp_col_tiles}"
-        assert warp_col_tiles % 8 == 0, f"warp_col_tiles must be divisible by 8, got {warp_col_tiles}"
-
-        self.warp_rows = warp_row_tiles // m_dim
-
-        if warp_col_tiles % 16 == 0:
-            self.n_dim = 16
-            self.micro_size_y = 16
-            self.warp_cols = warp_col_tiles // 16
-        else:
-            # must be divisible by 8
+        # For fp64 (k_dim==4), micro tile is 8x8, otherwise keep 16x{8|16}
+        if k_dim == 4:
+            # fp64 path: m_dim must be 8, n_dim 8
+            assert m_dim == 8, f"For fp64 MMA, m_dim must be 8, got {m_dim}"
             self.n_dim = 8
             self.micro_size_y = 8
+            self.warp_rows = warp_row_tiles // m_dim
             self.warp_cols = warp_col_tiles // 8
+        else:
+            assert warp_row_tiles >= 16, f"warp_row_tiles must be greater than 16, got {warp_row_tiles}"
+            assert warp_row_tiles % 16 == 0, f"warp_row_tiles must be divisible by 16, got {warp_row_tiles}"
+            assert warp_col_tiles >= 8, f"warp_col_tiles must be greater than 8, got {warp_col_tiles}"
+            assert warp_col_tiles % 8 == 0, f"warp_col_tiles must be divisible by 8, got {warp_col_tiles}"
+
+            self.warp_rows = warp_row_tiles // m_dim
+
+            if warp_col_tiles % 16 == 0:
+                self.n_dim = 16
+                self.micro_size_y = 16
+                self.warp_cols = warp_col_tiles // 16
+            else:
+                # must be divisible by 8
+                self.n_dim = 8
+                self.micro_size_y = 8
+                self.warp_cols = warp_col_tiles // 8
 
         self.micro_size_x = m_dim
         self.micro_size_k = k_dim
@@ -158,17 +190,19 @@ class TensorCoreIntrinEmitter:
             return self.thread_var
 
     def get_store_index_map(self, inverse: bool = False) -> IndexMap:
+        from .utils import mma_store_index_map, mma_store_index_map_fp64
+
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
-        index_map = IndexMap.from_func(mma_store_index_map, index_dtype="int32")
+        if DataType(self.accum_dtype).bits == 64:
+            index_map = IndexMap.from_func(mma_store_index_map_fp64, index_dtype=T.int32)
+        else:
+            index_map = IndexMap.from_func(mma_store_index_map, index_dtype=T.int32)
         if not inverse:
             return index_map
         inverse_index_map = index_map.inverse([warp_size, local_size_c])
         return inverse_index_map
 
-    def extract_thread_binding(
-            self,
-            thread_id: PrimExpr,
-            is_m_first: bool | None = None) -> tuple[PrimExpr, PrimExpr, PrimExpr]:
+    def extract_thread_binding(self, thread_id: PrimExpr, is_m_first: bool | None = None) -> tuple[PrimExpr, PrimExpr, PrimExpr]:
         """
         is_m_first: True if the thread binding is in the form of (tx, warp_n, warp_m)
         which represents [warp_size, block_row_warps (split n), block_col_warps (split m)]
@@ -197,11 +231,45 @@ class TensorCoreIntrinEmitter:
             )
             return lane_id, warp_n, warp_m
 
-    def ldmatrix_a(self,
-                   A_local_buf: Buffer,
-                   A_shared_buf: Buffer,
-                   ki: PrimExpr,
-                   rk: PrimExpr | None = 0):
+    def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
+        # Fast path for fp64: no ldmatrix support, do direct per-lane loads
+        if DataType(self.a_dtype).bits == 64:
+            warp_row_tiles = self.warp_row_tiles
+            warp_rows = self.warp_rows
+            chunk = self.chunk
+            micro_size_x = self.micro_size_x  # 8
+            micro_size_k = self.micro_size_k  # 4
+            local_size_a = self.local_size_a  # 1
+            a_transposed = self.a_transposed
+
+            thread_binding = self.get_thread_binding()
+            # legalize shared buffer to region
+            A_region = self._legalize_to_buffer_region(A_shared_buf)
+            A_buf = A_region.buffer
+            A_base0 = A_region.region[-2].min
+            A_base1 = A_region.region[-1].min
+
+            @T.macro
+            def _warp_ld_a_fp64(
+                A_local_buf,
+                A_shared_buf,
+                ki,
+                thread_binding,
+                rk=0,
+            ):
+                tx, _, warp_m = self.extract_thread_binding(thread_binding)
+                for i in T.serial(warp_rows):
+                    wi = warp_m * warp_row_tiles + i * micro_size_x
+                    wk = rk * chunk + ki * micro_size_k
+                    mi = tx // micro_size_k
+                    mk = tx % micro_size_k
+                    if a_transposed:
+                        A_local_buf[i * local_size_a] = A_buf[A_base0 + wk + mk, A_base1 + wi + mi]
+                    else:
+                        A_local_buf[i * local_size_a] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
+
+            return _warp_ld_a_fp64(A_local_buf, A_region, ki, thread_binding, rk)
+
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         chunk = self.chunk
@@ -219,12 +287,21 @@ class TensorCoreIntrinEmitter:
         if not ldmatrix_available:
             if DataType(a_dtype).bits == 8:
                 mma_load_layout = mma_load_a_32x16_to_shared_16x32_layout
+            elif DataType(a_dtype).bits == 16:
+                mma_load_layout = mma_load_a_32x8_to_shared_16x16_layout
             elif DataType(a_dtype).bits == 32:
                 mma_load_layout = mma_load_a_32x4_to_shared_16x8_layout
             else:
                 raise ValueError(f"Unsupported dtype: {a_dtype}")
 
         thread_binding = self.get_thread_binding()
+
+        # legalize shared buffer to region
+        A_region = self._legalize_to_buffer_region(A_shared_buf)
+        A_buf = A_region.buffer
+        A_base0 = A_region.region[-2].min
+        A_base1 = A_region.region[-1].min
+        A_stride_last = A_buf.shape[-1]
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -234,14 +311,14 @@ class TensorCoreIntrinEmitter:
             thread_binding,
             rk=0,
         ):
-            stride = A_shared_buf.shape[-1]
+            stride = A_stride_last
             tx, _, warp_m = self.extract_thread_binding(thread_binding)
             trans = self.a_transposed
 
             for i in T.serial(warp_rows):
                 # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
-                A_shared_buf_elem = A_shared_buf[wk, wi] if a_transposed else A_shared_buf[wi, wk]
+                A_shared_buf_elem = A_buf[A_base0 + wk, A_base1 + wi] if a_transposed else A_buf[A_base0 + wi, A_base1 + wk]
 
                 if ldmatrix_available:
                     T.ptx_ldmatrix(
@@ -257,15 +334,52 @@ class TensorCoreIntrinEmitter:
                 else:
                     for j in T.serial(local_size_a):
                         mi, mk = mma_load_layout(tx, j)
-                        A_local_buf[i * local_size_a + j] = A_shared_buf[wk + mk, wi + mi]
+                        if a_transposed:
+                            A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wk + mk, A_base1 + wi + mi]
+                        else:
+                            A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
 
-        return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
+        return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
-    def ldmatrix_b(self,
-                   B_local_buf: Buffer,
-                   B_shared_buf: Buffer,
-                   ki: PrimExpr,
-                   rk: PrimExpr | None = 0):
+    def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
+        # Fast path for fp64: no ldmatrix support, do direct per-lane loads
+        if DataType(self.b_dtype).bits == 64:
+            warp_col_tiles = self.warp_col_tiles
+            warp_cols = self.warp_cols
+            chunk = self.chunk
+            micro_size_y = self.micro_size_y  # 8
+            micro_size_k = self.micro_size_k  # 4
+            local_size_b = self.local_size_b  # 1
+            b_transposed = self.b_transposed
+            thread_binding = self.get_thread_binding()
+
+            # legalize shared buffer to region
+            B_region = self._legalize_to_buffer_region(B_shared_buf)
+            B_buf = B_region.buffer
+            B_base0 = B_region.region[-2].min
+            B_base1 = B_region.region[-1].min
+
+            @T.macro
+            def _warp_ld_b_fp64(
+                B_local_buf,
+                B_shared_buf,
+                ki,
+                thread_binding,
+                rk=0,
+            ):
+                tx, warp_n, _ = self.extract_thread_binding(thread_binding)
+                for j in T.serial(warp_cols):
+                    wi = warp_n * warp_col_tiles + j * micro_size_y
+                    wk = rk * chunk + ki * micro_size_k
+                    mi = tx // micro_size_k
+                    mk = tx % micro_size_k
+                    if b_transposed:
+                        B_local_buf[j * local_size_b] = B_buf[B_base0 + wi + mi, B_base1 + wk + mk]
+                    else:
+                        B_local_buf[j * local_size_b] = B_buf[B_base0 + wk + mk, B_base1 + wi + mi]
+
+            return _warp_ld_b_fp64(B_local_buf, B_region, ki, thread_binding, rk)
+
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         chunk = self.chunk
@@ -275,7 +389,14 @@ class TensorCoreIntrinEmitter:
         b_dtype = self.b_dtype
         b_transposed = self.b_transposed
         thread_binding = self.get_thread_binding()
-        replicate_b = (self.n_dim == 16)
+
+        # legalize shared buffer to region
+        B_region = self._legalize_to_buffer_region(B_shared_buf)
+        B_buf = B_region.buffer
+        B_base0 = B_region.region[-2].min
+        B_base1 = B_region.region[-1].min
+        B_stride_last = B_buf.shape[-1]
+        replicate_b = self.n_dim == 16
         # ldmatrix cannot be used for int8 + trans case.
         ldmatrix_available = not (DataType(b_dtype).bits != 16 and not b_transposed)
 
@@ -285,6 +406,8 @@ class TensorCoreIntrinEmitter:
         if not ldmatrix_available:
             if DataType(b_dtype).bits == 8:
                 mma_load_layout = mma_load_b_32x16_to_shared_16x32_layout
+            elif DataType(b_dtype).bits == 16:
+                mma_load_layout = mma_load_b_32x8_to_shared_16x16_layout
             elif DataType(b_dtype).bits == 32:
                 mma_load_layout = mma_load_b_32x4_to_shared_16x8_layout
             else:
@@ -298,7 +421,7 @@ class TensorCoreIntrinEmitter:
             thread_binding,
             rk=0,
         ):
-            stride = B_shared_buf.shape[-1]
+            stride = B_stride_last
             tx, warp_n, _ = self.extract_thread_binding(thread_binding)
             trans = not b_transposed
 
@@ -310,8 +433,7 @@ class TensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = B_shared_buf[wi, wk] if b_transposed else B_shared_buf[wk,
-                                                                                               wi]
+                    B_shared_buf_elem = B_buf[B_base0 + wi, B_base1 + wk] if b_transposed else B_buf[B_base0 + wk, B_base1 + wi]
 
                     T.ptx_ldmatrix(
                         b_dtype,
@@ -329,15 +451,14 @@ class TensorCoreIntrinEmitter:
                     # must be transposed.
                     for j in T.serial(local_size_b):
                         mi, mk = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = B_shared_buf[wk + mk, wi + mi]
+                        if b_transposed:
+                            B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wi + mi, B_base1 + wk + mk]
+                        else:
+                            B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wk + mk, B_base1 + wi + mi]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
-    def mma(self,
-            A_local_buf: Buffer,
-            B_local_buf: Buffer,
-            C_local_buf: Buffer,
-            k_inner: PrimExpr | None = 0):
+    def mma(self, A_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr | None = 0):
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
@@ -348,7 +469,7 @@ class TensorCoreIntrinEmitter:
         accum_dtype = self.accum_dtype
         accum_dtype_abbrv = self.accum_dtype_abbrv
         mma_prefix = self.mma_prefix
-        replicate_b = (self.n_dim == 16)
+        replicate_b = self.n_dim == 16
 
         a_is_fragment = is_fragment(A_local_buf)
         b_is_fragment = is_fragment(B_local_buf)
@@ -388,8 +509,7 @@ class TensorCoreIntrinEmitter:
                         B_local_buf.data,
                         b_local_stride + j * local_size_b + lift(local_size_b) // 2,
                         C_local_buf.data,
-                        i * warp_cols * local_size_out + j * local_size_out +
-                        lift(local_size_out) // 2,
+                        i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
                         T.bool(False),  # saturate
                     )
 
@@ -424,14 +544,13 @@ class TensorCoreIntrinEmitter:
                         local_id = local_id_o * 2 + local_id_i
                         row, col = T.meta_var(mma_store_index_map(tx, local_id))
                         if C_buf_dims == 2:
-                            C_buf[(warp_m * warp_rows + i) * M_DIM + row,
-                                  (warp_n * warp_cols + j) * n_dim +
-                                  col] = C_local_buf[i * (warp_cols * local_size_out) +
-                                                     j * local_size_out + local_id]
+                            C_buf[(warp_m * warp_rows + i) * M_DIM + row, (warp_n * warp_cols + j) * n_dim + col] = C_local_buf[
+                                i * (warp_cols * local_size_out) + j * local_size_out + local_id
+                            ]
                         else:
-                            C_buf[warp_m * warp_rows + i, warp_n * warp_cols + j, row,
-                                  col] = C_local_buf[i * (warp_cols * local_size_out) +
-                                                     j * local_size_out + local_id]
+                            C_buf[warp_m * warp_rows + i, warp_n * warp_cols + j, row, col] = C_local_buf[
+                                i * (warp_cols * local_size_out) + j * local_size_out + local_id
+                            ]
 
         @T.macro
         def _warp_stmatrix_global(C_local_buf, C_buf, thread_binding):
@@ -444,15 +563,15 @@ class TensorCoreIntrinEmitter:
                         C_buf[
                             (pid_m * BLOCK_M + warp_m * warp_rows + i) * M_DIM + row,
                             (pid_n * BLOCK_N + warp_n * warp_cols + j) * n_dim + col,
-                        ] = C_local_buf[i * warp_cols * local_size_out + j * local_size_out +
-                                        local_id]
+                        ] = C_local_buf[i * warp_cols * local_size_out + j * local_size_out + local_id]
 
-        return (_warp_stmatrix_global(C_local_buf, C_buf, thread_binding)
-                if is_global else _warp_stmatrix_shared(C_local_buf, C_buf, thread_binding))
+        return (
+            _warp_stmatrix_global(C_local_buf, C_buf, thread_binding)
+            if is_global
+            else _warp_stmatrix_shared(C_local_buf, C_buf, thread_binding)
+        )
 
-    def make_mma_load_layout(self,
-                             local_buf: Buffer,
-                             matrix: Literal["A", "B"] = "A") -> T.Fragment:
+    def make_mma_load_layout(self, local_buf: Buffer, matrix: Literal["A", "B"] = "A") -> T.Fragment:
         """
         Create a layout function for storing MMA results into a fragment buffer.
         This layout is used in conjunction with `inverse_mma_store_layout` to
@@ -475,6 +594,7 @@ class TensorCoreIntrinEmitter:
             If `local_buf` is not detected to be a fragment buffer.
         """
         from tilelang.utils import is_fragment
+
         assert matrix in ["A", "B"], "matrix should be either A or B"
         matrix_is_a: bool = matrix == "A"
         matrix_is_b: bool = matrix == "B"
@@ -511,11 +631,9 @@ class TensorCoreIntrinEmitter:
         # so the b matrix expected a transposed basic layout
         transform_func: Callable = None
         if matrix_is_a:
-            transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
-                j, i)
+            transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(j, i)
         elif matrix_is_b:
-            transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(
-                j, i)
+            transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(j, i)
         else:
             raise ValueError(f"Unsupported matrix {matrix}")
 
@@ -531,7 +649,7 @@ class TensorCoreIntrinEmitter:
             self.block_col_warps,
         )
 
-        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
 
         def forward_thread(i: int, j: int) -> int:
             """
@@ -562,31 +680,19 @@ class TensorCoreIntrinEmitter:
         replicate = block_col_warps if matrix_is_a else block_row_warps
 
         if is_sr_axis_order:
-            warp_fragment = base_fragment.repeat([warp_s, warp_r],
-                                                 repeat_on_thread=False,
-                                                 lower_dim_first=False)
+            warp_fragment = base_fragment.repeat([warp_s, warp_r], repeat_on_thread=False, lower_dim_first=False)
             if matrix_is_a:
-                block_fragment = warp_fragment.repeat([block_s, 1],
-                                                      repeat_on_thread=True,
-                                                      lower_dim_first=True).replicate(replicate)
+                block_fragment = warp_fragment.repeat([block_s, 1], repeat_on_thread=True, lower_dim_first=True).replicate(replicate)
             elif matrix_is_b:
-                block_fragment = warp_fragment.replicate(replicate).repeat([block_s, 1],
-                                                                           repeat_on_thread=True,
-                                                                           lower_dim_first=True)
+                block_fragment = warp_fragment.replicate(replicate).repeat([block_s, 1], repeat_on_thread=True, lower_dim_first=True)
             else:
                 raise ValueError(f"Unsupported matrix type {matrix}")
         else:
-            warp_fragment = base_fragment.repeat([warp_r, warp_s],
-                                                 repeat_on_thread=False,
-                                                 lower_dim_first=True)
+            warp_fragment = base_fragment.repeat([warp_r, warp_s], repeat_on_thread=False, lower_dim_first=True)
             if matrix_is_a:
-                block_fragment = warp_fragment.repeat([1, block_s],
-                                                      repeat_on_thread=True,
-                                                      lower_dim_first=True).replicate(replicate)
+                block_fragment = warp_fragment.repeat([1, block_s], repeat_on_thread=True, lower_dim_first=True).replicate(replicate)
             elif matrix_is_b:
-                block_fragment = warp_fragment.replicate(replicate).repeat([1, block_s],
-                                                                           repeat_on_thread=True,
-                                                                           lower_dim_first=True)
+                block_fragment = warp_fragment.replicate(replicate).repeat([1, block_s], repeat_on_thread=True, lower_dim_first=True)
             else:
                 raise ValueError(f"Unsupported matrix type {matrix}")
 
@@ -617,8 +723,9 @@ class TensorCoreIntrinEmitter:
         from tilelang.utils import is_fragment
 
         shape = local_buf.shape
+        assert is_fragment(local_buf), f"local_buf {local_buf} must be a fragment, but got {local_buf.scope()}"
         inverse_mma_store_layout = self.get_store_index_map(inverse=True)
-        assert is_fragment(local_buf), "local_buf must be a fragment"
+
         micro_size_x, micro_size_y = self.micro_size_x, self.micro_size_y
         local_size_out = self.local_size_out
         block_row_warps, block_col_warps = self.block_row_warps, self.block_col_warps
@@ -663,6 +770,33 @@ class TensorCoreIntrinEmitter:
             forward_index_fn=forward_index,
         )
 
+    @staticmethod
+    def _legalize_to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
+        """
+        Convert Buffer/BufferRegion/BufferLoad to a BufferRegion.
+
+        - Buffer -> full-region BufferRegion covering entire shape
+        - BufferRegion -> returned as-is
+        - BufferLoad -> best-effort convert via get_buffer_region_from_load;
+        if scalar, fall back to 1-sized ranges at given indices
+        """
+        if isinstance(obj, BufferRegion):
+            return obj
+        if isinstance(obj, Buffer):
+            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+            ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
+            return BufferRegion(obj, ranges)
+        if isinstance(obj, BufferLoad):
+            region = get_buffer_region_from_load(obj)
+            if region is not None:
+                return region
+            # Fallback: scalar load -> 1-sized ranges at indices
+            mins = [idx for idx in obj.indices]
+            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
+            return BufferRegion(obj.buffer, ranges)
+        raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
+
 
 class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
     """
@@ -672,9 +806,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
 
     def __init__(
         self,
-        a_dtype: str = "float16",
-        b_dtype: str = "float16",
-        accum_dtype: str = "float16",
+        a_dtype: str = T.float16,
+        b_dtype: str = T.float16,
+        accum_dtype: str = T.float16,
         a_transposed: bool = False,
         b_transposed: bool = False,
         block_row_warps: int = 2,
@@ -705,7 +839,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         )
         self._initialize_transform_kind(transform_kind_a, transform_kind_b)
 
-    def _initialize_k_dim(self, a_dtype="float16"):
+    def _initialize_k_dim(self, a_dtype=T.float16):
         self.k_dim = 256 // DataType(a_dtype).bits
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
@@ -781,10 +915,12 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         ".b16",
                         A_local_buf.data,
                         i * local_size_a,
-                        T.address_of(A_shared_buf[
-                            warp_m * warp_row_tiles + i * micro_size_x,
-                            rk * chunk + ki * micro_size_k,
-                        ]),
+                        T.address_of(
+                            A_shared_buf[
+                                warp_m * warp_row_tiles + i * micro_size_x,
+                                rk * chunk + ki * micro_size_k,
+                            ]
+                        ),
                         get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
                     )
             elif transform_kind_a == TransformKind.InterWarpTransform:
@@ -846,10 +982,8 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                             warp_m * warp_rows + j,
                             rk * (chunk // micro_size_k) + ki,
                         )
-                        rii, rjj = (tx * local_size_a +
-                                    local_id) // micro_size_k, (tx * local_size_a + local_id) % (
-                                        micro_size_k)
-                        A_local_buf[j * local_size_a + local_id] = (A_shared_buf[ri, rj, rii, rjj])
+                        rii, rjj = (tx * local_size_a + local_id) // micro_size_k, (tx * local_size_a + local_id) % (micro_size_k)
+                        A_local_buf[j * local_size_a + local_id] = A_shared_buf[ri, rj, rii, rjj]
             else:
                 raise ValueError("Unsupported TransformKind for Input A")
 
@@ -958,12 +1092,11 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                             warp_n * warp_cols + j,
                             rk * (chunk // micro_size_k) + ki,
                         )
-                        rii, rjj = (tx * local_size_dequantize +
-                                    local_id) // (micro_size_k // num_elems_per_byte), (
-                                        tx * local_size_dequantize + local_id) % (
-                                            micro_size_k // num_elems_per_byte)
-                        B_local_buf[j * local_size_dequantize + local_id] = (
-                            B_shared_buf[ri, rj, rii, rjj])
+                        rii, rjj = (
+                            (tx * local_size_dequantize + local_id) // (micro_size_k // num_elems_per_byte),
+                            (tx * local_size_dequantize + local_id) % (micro_size_k // num_elems_per_byte),
+                        )
+                        B_local_buf[j * local_size_dequantize + local_id] = B_shared_buf[ri, rj, rii, rjj]
             else:
                 raise ValueError("Unsupported TransformKind for Input B")
 
@@ -1022,7 +1155,6 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
 
 
 class INT4TensorCoreIntrinEmitter(TensorCoreIntrinEmitter):
-
     def mma(self, A_local_buf, B_local_buf, C_local_buf):
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
@@ -1125,9 +1257,7 @@ class INT4TensorCoreIntrinEmitter(TensorCoreIntrinEmitter):
 
 
 class INT4TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitterWithLadderTransform):
-
     def mma(self, A_local_buf, B_local_buf, C_local_buf):
-
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
@@ -1136,7 +1266,7 @@ class INT4TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitterWith
         a_dtype_abbrv = "int4"
         b_dtype_abbrv = "int4"
         accum_dtype = self.accum_dtype
-        accum_dtype_abbrv = "int32"
+        accum_dtype_abbrv = T.int32
         mma_prefix = "m16n8k32"
 
         @T.macro

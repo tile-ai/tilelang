@@ -14,7 +14,9 @@ cd examples
 python -m pytest -n 4 . --verbose --color=yes --durations=0 --showlocals --cache-clear
 cd ..
 
-# Run pytest in parallel (4 workers) for all tests in the testing/python directory
+# Run pytest in parallel (4 workers) for all tests in the testing/python directory.
+# IMPORTANT: CuTeDSL backend currently requires GEMM v1 (TILELANG_USE_GEMM_V1=1).
+# Do NOT export it globally here, or you'll silently change the default GEMM selection
+# for unrelated tests. Run the CuTeDSL JIT tests in a separate pytest invocation.
 cd testing/python
 python -m pytest -n 4 . --verbose --color=yes --durations=0 --showlocals --cache-clear
-cd ..

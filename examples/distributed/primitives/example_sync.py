@@ -7,7 +7,7 @@ import torch.multiprocessing
 from tilelang.distributed import init_dist
 
 tilelang.disable_cache()
-os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
+os.environ["NCCL_DEBUG"] = "WARN"  # silence NCCL log
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
@@ -16,12 +16,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     allocator = tilelang.get_allocator(
-        size=2**25,
-        device="cuda",
-        is_distributed=True,
-        local_rank=local_rank,
-        num_local_ranks=num_local_ranks,
-        group=group)
+        size=2**25, device="cuda", is_distributed=True, local_rank=local_rank, num_local_ranks=num_local_ranks, group=group
+    )
 
     dst = tilelang.tensor((M), torch.float32, allocator=allocator)
     srcs = tilelang.tensor((M), torch.float32, allocator=allocator, return_peers=True)
@@ -39,9 +35,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--num-processes', type=int, default=2, help='Number of processes to spawn (default: 2)')
-    parser.add_argument('--M', type=int, default=65536, help='M dimension')
+    parser.add_argument("--num-processes", type=int, default=2, help="Number of processes to spawn (default: 2)")
+    parser.add_argument("--M", type=int, default=65536, help="M dimension")
     args = parser.parse_args()
     num_processes = args.num_processes
 

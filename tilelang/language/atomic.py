@@ -1,13 +1,11 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
-"""Atomic operations for tilelang."""
+"""Atomic operations exposed on the TileLang language surface."""
+
 from __future__ import annotations
 
 import tilelang.language as T
-from tvm import ir, tir
+from tvm import ir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
-from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
-from tilelang.utils.language import get_buffer_region_from_load
+from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 
 _MEMORY_ORDER_ID_MAP = {
     "relaxed": 0,
@@ -19,10 +17,7 @@ _MEMORY_ORDER_ID_MAP = {
 }
 
 
-def atomic_max(dst: Buffer,
-               value: PrimExpr,
-               memory_order: str | None = None,
-               return_prev: bool = False) -> PrimExpr:
+def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:
     """
     Perform an atomic maximum on the value stored at dst with an optional memory-order.
 
@@ -60,15 +55,18 @@ def atomic_max(dst: Buffer,
     return_type = dst.dtype if return_prev else "handle"
 
     if memory_order is None:
-        return T.call_extern(return_type, func_name, dst, value)
+        return T.call_extern(return_type, func_name, T.address_of(dst), value)
     else:
-        return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
+        return T.call_extern(
+            return_type,
+            func_name,
+            T.address_of(dst),
+            value,
+            _MEMORY_ORDER_ID_MAP[memory_order],
+        )
 
 
-def atomic_min(dst: Buffer,
-               value: PrimExpr,
-               memory_order: str | None = None,
-               return_prev: bool = False) -> PrimExpr:
+def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:
     """
     Atomically update the value at dst to the minimum of its current value and value.
 
@@ -108,16 +106,18 @@ def atomic_min(dst: Buffer,
     return_type = dst.dtype if return_prev else "handle"
 
     if memory_order is None:
-        return T.call_extern(return_type, func_name, dst, value)
+        return T.call_extern(return_type, func_name, T.address_of(dst), value)
     else:
-        return T.call_extern(return_type, func_name, dst, value, _MEMORY_ORDER_ID_MAP[memory_order])
+        return T.call_extern(
+            return_type,
+            func_name,
+            T.address_of(dst),
+            value,
+            _MEMORY_ORDER_ID_MAP[memory_order],
+        )
 
 
-def atomic_add(dst: Buffer,
-               value: PrimExpr,
-               memory_order: str | None = None,
-               return_prev: bool = False,
-               use_tma: bool = False) -> PrimExpr:
+def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False, use_tma: bool = False) -> PrimExpr:
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
 
@@ -189,11 +189,17 @@ def atomic_add(dst: Buffer,
         func_name = "AtomicAddRet" if return_prev else "AtomicAdd"
         return_type = dst.dtype if return_prev else "handle"
 
+        # Pass destination by pointer to match device signature
         if memory_order is None:
-            return T.call_extern(return_type, func_name, dst, value)
+            return T.call_extern(return_type, func_name, T.address_of(dst), value)
         else:
-            return T.call_extern(return_type, func_name, dst, value,
-                                 _MEMORY_ORDER_ID_MAP[memory_order])
+            return T.call_extern(
+                return_type,
+                func_name,
+                T.address_of(dst),
+                value,
+                _MEMORY_ORDER_ID_MAP[memory_order],
+            )
 
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
@@ -201,37 +207,24 @@ def atomic_add(dst: Buffer,
     assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    extent = max(src_extent, dst_extent)
+    src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
-    def _to_region(data, access_type):
-        if isinstance(data, tir.Var) and T.has_let_value(data):
-            data = T.get_let_value(data)
-        if isinstance(data, tir.Buffer):
-            return buffer_to_tile_region(data, access_type)
-        elif isinstance(data, tir.BufferRegion):
-            return buffer_region_to_tile_region(data, access_type, extent)
-        elif isinstance(data, tir.BufferLoad):
-            region = get_buffer_region_from_load(data)
-            if region is None:
-                return buffer_load_to_tile_region(data, access_type, extent)
-            return buffer_region_to_tile_region(region, access_type, extent)
-        else:
-            return buffer_load_to_tile_region(data, access_type, extent)
-
-    value = _to_region(value, "r")
-    dst = _to_region(dst, "w")
+    value = to_buffer_region(value, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     # Note: tile-region-based atomic operations don't support return_prev yet
     # This would need to be implemented in the tile runtime
     if return_prev:
-        raise NotImplementedError(
-            "return_prev is not supported for tile-region-based atomic operations")
+        raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
-    if memory_order is None:
-        return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst, use_tma, 0)
-    else:
-        return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst, use_tma,
-                             _MEMORY_ORDER_ID_MAP[memory_order])
+    # Build annotations dict
+    ann = {}
+    if use_tma:
+        ann["use_tma"] = 1
+    if memory_order is not None:
+        ann["memory_order"] = _MEMORY_ORDER_ID_MAP[memory_order]
+
+    return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, annotations=ann if ann else None)
 
 
 def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:
@@ -346,7 +339,7 @@ def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
         >>> counter = T.Tensor([1], "int64", name="counter")
         >>> current_count = atomic_load(counter, memory_order="relaxed")
     """
-    return T.call_extern(src.dtype, "AtomicLoad", src, _MEMORY_ORDER_ID_MAP[memory_order])
+    return T.call_extern(src.dtype, "AtomicLoad", T.address_of(src), _MEMORY_ORDER_ID_MAP[memory_order])
 
 
 def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> PrimExpr:
@@ -399,4 +392,4 @@ def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> P
         >>> log_counter = T.Tensor([1], "int64", name="log_counter")
         >>> atomic_store(log_counter, 0)  # Reset counter atomically
     """
-    return T.call_extern("handle", "AtomicStore", dst, src, _MEMORY_ORDER_ID_MAP[memory_order])
+    return T.call_extern("handle", "AtomicStore", T.address_of(dst), src, _MEMORY_ORDER_ID_MAP[memory_order])

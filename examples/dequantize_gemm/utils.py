@@ -34,8 +34,7 @@ def torch_convert_bit_twiddling(tensor):
             mask1 = 0b1000000000000000
             mask2 = 0b0000000110000000
             mask3 = 0b0000000001000000
-            bf16 = ((val_concat << 1) & mask1) | ((val_concat >> 3) & mask2) | (
-                (val_concat >> 7) & mask3)
+            bf16 = ((val_concat << 1) & mask1) | ((val_concat >> 3) & mask2) | ((val_concat >> 7) & mask3)
         bf16_new = torch.tensor([bf16], dtype=torch.uint16, device=val0.device).view(torch.bfloat16)
         # Add bias for change from fp4 to bf16
         bf16_new = bf16_new.item() * (2**126)
@@ -104,5 +103,5 @@ def print_bit(name, val):
         val (torch.Tensor): A scalar PyTorch tensor (numeric) whose 32-bit binary representation will be shown.
     """
     val_cpu = val.cpu().item()
-    binary_repr = f'{val_cpu:032b}'
+    binary_repr = f"{val_cpu:032b}"
     print(name, binary_repr)

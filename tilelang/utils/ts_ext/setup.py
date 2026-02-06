@@ -5,6 +5,7 @@ import torch
 
 try:
     from torch.utils.cpp_extension import _get_torch_lib_dir
+
     torch_lib_dir = _get_torch_lib_dir()
 except Exception:
     torch_lib_dir = os.path.join(os.path.dirname(torch.__file__), "lib")

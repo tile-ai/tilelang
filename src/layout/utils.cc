@@ -5,7 +5,13 @@
  */
 
 #include "utils.h"
+#include "tvm/arith/iter_affine_map.h"
+#include "tvm/ffi/container/map.h"
+#include "tvm/node/functor.h"
+#include "tvm/node/repr_printer.h"
+#include "tvm/node/structural_equal.h"
 
+#include <sstream>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 
@@ -98,7 +104,9 @@ Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
           << " and " << expected_lower_factor;
       results.emplace_back(
           mark, expected_lower_factor,
-          FloorDiv(splits[lowest]->lower_factor, expected_lower_factor), 1);
+          analyzer->Simplify(
+              FloorDiv(splits[lowest]->lower_factor, expected_lower_factor)),
+          1);
       expected_lower_factor = splits[lowest]->lower_factor;
     } else {
       used[j] = true;
@@ -109,12 +117,115 @@ Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
   bool match_full_iter =
       analyzer->CanProveEqual(expected_lower_factor, mark->extent);
   if (!match_full_iter) {
-    results.emplace_back(mark, expected_lower_factor,
-                         FloorDiv(mark->extent, expected_lower_factor), 1);
+    results.emplace_back(
+        mark, expected_lower_factor,
+        analyzer->Simplify(FloorDiv(mark->extent, expected_lower_factor)), 1);
   }
   return results;
 }
 
+struct IterExprPP {
+  // std::vector<std::pair<std::string, PrimExpr>> marks;
+  ffi::Map<ffi::String, PrimExpr> marks;
+  std::string data;
+
+  IterExprPP(const PrimExpr &expr) { data = Visit(expr); }
+
+  IterExprPP(const IterMark &mark) { data = Visit_(mark.get()); }
+
+  std::string Visit(const PrimExpr &expr) {
+    if (auto *sum = expr.as<IterSumExprNode>()) {
+      return Visit_(sum);
+    } else if (auto *split = expr.as<IterSplitExprNode>()) {
+      return Visit_(split);
+    } else if (auto *var = expr.as<VarNode>()) {
+      return var->name_hint;
+    } else {
+      std::stringstream ss;
+      ss << "<UNKNOWN: " << expr << ">";
+      return ss.str();
+    }
+  }
+
+  std::string Visit_(const IterMarkNode *op) {
+    std::stringstream ss;
+    ss << "(";
+    ss << Visit(op->source);
+    ss << ")";
+    auto res = ss.str();
+    marks.Set(res, op->extent);
+    return res;
+  }
+
+  std::string Visit_(const IterSumExprNode *op) {
+    std::stringstream ss;
+    bool first = true;
+    for (const auto args : op->args) {
+      if (!first) {
+        ss << " + ";
+      } else {
+        first = false;
+      }
+      ss << Visit_(args.get());
+    }
+    return ss.str();
+  }
+
+  std::string Visit_(const IterSplitExprNode *op) {
+    std::stringstream ss;
+    ss << Visit_(op->source.get());
+    if (!is_one(op->lower_factor)) {
+      ss << " / " << op->lower_factor;
+    }
+    ss << " % " << op->extent;
+    if (!is_one(op->scale)) {
+      ss << " * " << op->scale;
+    }
+    return ss.str();
+  }
+
+  friend std::ostream &operator<<(std::ostream &os, const IterExprPP &pp) {
+    os << "IterExpr(\n";
+    os << "  expr=" << pp.data << "\n";
+    os << "  iter_mark_extents=";
+    if (pp.marks.empty()) {
+      os << "{}\n";
+    } else {
+      os << "{\n";
+      for (const auto &[k, v] : pp.marks) {
+        os << "    " << k << ": " << v << ",\n";
+      }
+      os << "  }\n";
+    }
+    os << ")";
+    return os;
+  }
+};
+
+TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
+    .clear_dispatch<IterMarkNode>()
+    .set_dispatch<IterMarkNode>([](const ObjectRef &obj, ReprPrinter *p) {
+      auto *node = static_cast<const IterMarkNode *>(obj.get());
+      IterExprPP pp(tvm::ffi::GetRef<IterMark>(node));
+      p->stream << pp;
+    })
+    .clear_dispatch<IterSumExprNode>()
+    .set_dispatch<IterSumExprNode>([](const ObjectRef &obj, ReprPrinter *p) {
+      auto *node = static_cast<const IterSumExprNode *>(obj.get());
+      IterExprPP pp(tvm::ffi::GetRef<IterSumExpr>(node));
+      p->stream << pp;
+    })
+    .clear_dispatch<IterSplitExprNode>()
+    .set_dispatch<IterSplitExprNode>([](const ObjectRef &obj, ReprPrinter *p) {
+      auto *node = static_cast<const IterSplitExprNode *>(obj.get());
+      IterExprPP pp(tvm::ffi::GetRef<IterSplitExpr>(node));
+      p->stream << pp;
+    });
+
+// Heuristic: detect per-iterator gaps ("unused" pieces) even when the iterator
+// appears in fused forms across multiple index expressions. We first normalize
+// every index into IterSumExpr, collect all splits per source Var, then
+// consolidate them to avoid misclassifying a used split as unused.
 Array<IterSplitExpr> DivideUnusedIterators(const Array<PrimExpr> &exprs,
                                            const Array<IterVar> input_iters,
                                            Analyzer *analyzer) {
@@ -123,35 +234,40 @@ Array<IterSplitExpr> DivideUnusedIterators(const Array<PrimExpr> &exprs,
   });
   IterMarkSplitCollector collector;
   collector.Collect(iter_sum);
+
+  std::unordered_map<IterMark, std::vector<IterSplitExpr>, StructuralHash,
+                     StructuralEqual>
+      mark_splits;
+  std::vector<IterMark> mark_order;
+
+  // Step. 1: force add all input_iters to marks (some may not appear in
+  // collector)
+  for (auto &iter : input_iters) {
+    IterMark mark(iter->var, iter->dom->extent);
+    mark_splits[mark] = {};
+    mark_order.push_back(mark);
+  }
+
+  // Step. 2: add all collected marks and their splits
+  for (auto &mark : collector.visited_) {
+    if (!mark_splits.count(mark)) {
+      mark_splits[mark] = {};
+      mark_order.push_back(mark);
+    }
+    for (const auto &splits : collector.mark2splits_[mark]) {
+      mark_splits[mark].push_back(splits);
+    }
+  }
+
   Array<IterSplitExpr> results;
-
-  for (const IterMark &mark : collector.visited_) {
-    if (!mark->source.as<Var>()) {
-      std::ostringstream oss;
-      oss << "Not a normalized iterator: " << mark;
-      throw NormalizeIterException(oss.str());
-    }
+  // Step. 3: process marks in order and collect complement
+  for (const auto &mark : mark_order) {
+    const auto &existing_splits = mark_splits.at(mark);
+    auto complement_splits = get_unused_iters(mark, existing_splits, analyzer);
+    results.insert(results.end(), complement_splits.rbegin(),
+                   complement_splits.rend());
   }
 
-  for (const IterVar &iter : input_iters) {
-    IterMark iv_mark;
-    for (const IterMark &mark : collector.visited_) {
-      if (mark->source.as<Var>()->same_as(iter->var)) { // NOLINT(*)
-        iv_mark = mark;
-        break;
-      }
-    }
-    if (iv_mark.defined()) {
-      auto splits =
-          get_unused_iters(iv_mark, collector.mark2splits_[iv_mark], analyzer);
-      // Put the small axis last
-      results.insert(results.end(), splits.rbegin(), splits.rend());
-    } else if (!is_one(iter->dom->extent)) {
-      auto mark = IterMark(iter->var, iter->dom->extent);
-      auto split = IterSplitExpr(mark, 1, iter->dom->extent, 1);
-      results.push_back(split);
-    }
-  }
   return results;
 }
 
@@ -189,7 +305,7 @@ public:
 
   IterMark Mutate(const IterMark &mark) {
     if (auto *op = mark->source.as<IterSumExprNode>()) {
-      return IterMark(Mutate(GetRef<IterSumExpr>(op)), mark->extent);
+      return IterMark(Mutate(tvm::ffi::GetRef<IterSumExpr>(op)), mark->extent);
     } else {
       return mark;
     }

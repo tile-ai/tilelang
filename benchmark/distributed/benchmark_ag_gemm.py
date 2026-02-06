@@ -1,4 +1,4 @@
-'''Bugfix first:
+"""Bugfix first:
 Triton-distributed/python/triton_dist/kernels/nvidia/allgather_gemm.py:566
 ```python
 M = M_per_rank * ctx.num_ranks
@@ -7,9 +7,9 @@ should be:
 ```python
 M = M_per_rank * num_ranks
 ```
-'''
+"""
 
-#TODO: further tune the performance
+# TODO: further tune the performance
 
 import argparse
 import torch
@@ -27,36 +27,27 @@ tilelang.disable_cache()
 
 @tilelang.jit(
     out_idx=-1,
-    pass_configs={"tl.disable_rdc": True}
-    #FIXME: https://github.com/tile-ai/tilelang/issues/659
+    pass_configs={"tl.disable_rdc": True},
+    # FIXME: https://github.com/tile-ai/tilelang/issues/659
 )
-def matmut_transpose(rank,
-                     num_ranks,
-                     M,
-                     N_per_rank,
-                     K,
-                     block_M,
-                     block_N,
-                     block_K,
-                     dtype="float16",
-                     threads=256,
-                     persistent=False) -> tilelang.JITKernel:
+def matmut_transpose(
+    rank, num_ranks, M, N_per_rank, K, block_M, block_N, block_K, dtype="float16", threads=256, persistent=False
+) -> tilelang.JITKernel:
     accum_dtype = "float32"
     signal_dtype = "uint64"  # NVSHMEM requires uint64 for signal
 
     assert M % block_M == 0 and N_per_rank % block_N == 0 and K % block_K == 0
-    M_blocks, N_blocks, K_stages = T.ceildiv(M, block_M), T.ceildiv(N_per_rank,
-                                                                    block_N), T.ceildiv(K, block_K)
+    M_blocks, N_blocks, K_stages = T.ceildiv(M, block_M), T.ceildiv(N_per_rank, block_N), T.ceildiv(K, block_K)
     M_blocks_per_rank = M_blocks // num_ranks
 
     sm_num = driver.get_num_sms()  # Get # of SMs for persistent kernel
 
     @T.prim_func
     def nonpersistent_kernel(
-            A: T.Tensor((M, K), dtype),  # type: ignore
-            B: T.Tensor((N_per_rank, K), dtype),  # type: ignore
-            signal: T.Tensor((num_ranks), signal_dtype),  # type: ignore
-            C: T.Tensor((M, N_per_rank), dtype),  # type: ignore
+        A: T.Tensor((M, K), dtype),  # type: ignore
+        B: T.Tensor((N_per_rank, K), dtype),  # type: ignore
+        signal: T.Tensor((num_ranks), signal_dtype),  # type: ignore
+        C: T.Tensor((M, N_per_rank), dtype),  # type: ignore
     ):
         with T.Kernel(N_blocks, M_blocks, threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -81,10 +72,10 @@ def matmut_transpose(rank,
 
     @T.prim_func
     def persistent_kernel(
-            A: T.Tensor((M, K), dtype),  # type: ignore
-            B: T.Tensor((N_per_rank, K), dtype),  # type: ignore
-            signal: T.Tensor((num_ranks), signal_dtype),  # type: ignore
-            C: T.Tensor((M, N_per_rank), dtype),  # type: ignore
+        A: T.Tensor((M, K), dtype),  # type: ignore
+        B: T.Tensor((N_per_rank, K), dtype),  # type: ignore
+        signal: T.Tensor((num_ranks), signal_dtype),  # type: ignore
+        C: T.Tensor((M, N_per_rank), dtype),  # type: ignore
     ):
         with T.Kernel(sm_num, threads=threads) as (block_id):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -145,9 +136,10 @@ def overlapped_ag_gemm(
         block_K=64,
         dtype=dtype,
         threads=threads,
-        persistent=persistent)
+        persistent=persistent,
+    )
     if RANK == 0 and args.print_source:
-        print('We currently use cp-engine for producer, print consumer kernel code only...')
+        print("We currently use cp-engine for producer, print consumer kernel code only...")
         print(consumer.get_kernel_source())
 
     ag_buffer = pynvshmem.nvshmem_create_tensor_list_intra_node(
@@ -164,14 +156,13 @@ def overlapped_ag_gemm(
     gemm_stream.wait_stream(current_stream)
 
     with torch.cuda.stream(ag_stream):
-        ag_buffer[rank][rank * M_per_rank:(rank + 1) * M_per_rank, :].copy_(A)
+        ag_buffer[rank][rank * M_per_rank : (rank + 1) * M_per_rank, :].copy_(A)
         pynvshmem.write64_on_stream(signal_buffer[rank], 1, ag_stream)
-        pynvshmem.nvshmemx_barrier_all_on_stream(
-            ag_stream.cuda_stream)  # Ensure visible to all ranks
+        pynvshmem.nvshmemx_barrier_all_on_stream(ag_stream.cuda_stream)  # Ensure visible to all ranks
         rank_orders = [(rank + i) % num_ranks for i in range(1, num_ranks)]
         for src_rank in rank_orders:
-            dst = ag_buffer[rank][src_rank * M_per_rank:(src_rank + 1) * M_per_rank, :]
-            src = ag_buffer[src_rank][src_rank * M_per_rank:(src_rank + 1) * M_per_rank, :]
+            dst = ag_buffer[rank][src_rank * M_per_rank : (src_rank + 1) * M_per_rank, :]
+            src = ag_buffer[src_rank][src_rank * M_per_rank : (src_rank + 1) * M_per_rank, :]
             dst.copy_(src)
             pynvshmem.write64_on_stream(signal_buffer[src_rank], 1, ag_stream)
 
@@ -188,19 +179,17 @@ def parse_args():
     parser.add_argument("--M", type=int, default=8192)
     parser.add_argument("--N", type=int, default=49152)
     parser.add_argument("--K", type=int, default=12288)
-    parser.add_argument(
-        "--dtype", type=str, default="float16", choices=["float16", "float32", "bfloat16"])
+    parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "float32", "bfloat16"])
     parser.add_argument("--threads", type=int, default=256, help="number of threads in a block")
-    parser.add_argument(
-        "--persistent", action='store_true', default=False, help="use persistent GEMM consumers")
+    parser.add_argument("--persistent", action="store_true", default=False, help="use persistent GEMM consumers")
     parser.add_argument("--print_source", action="store_true", help="print kernel source code")
     parser.add_argument("--warmup", type=int, default=5, help="number of warmup iterations")
     parser.add_argument("--repeat", type=int, default=10, help="number of repeat iterations")
     return parser.parse_args()
 
 
-if __name__ == '__main__':
-    assert torch.cuda.get_device_capability()[0] >= 9, '❗This benchmark requires sm_90 or higher'
+if __name__ == "__main__":
+    assert torch.cuda.get_device_capability()[0] >= 9, "❗This benchmark requires sm_90 or higher"
 
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node AG-GEMM"
@@ -231,12 +220,10 @@ if __name__ == '__main__':
     # Benchmark Triton-dist (overlapped)
     ag_intranode_stream = torch.cuda.Stream(priority=-1)
 
-    ctx = create_ag_gemm_context(
-        A, B, RANK, PE_num, max_M=M, for_correctness=False, ag_intranode_stream=ag_intranode_stream)
+    ctx = create_ag_gemm_context(A, B, RANK, PE_num, max_M=M, for_correctness=False, ag_intranode_stream=ag_intranode_stream)
 
     def triton_ag_gemm(persistent, autotune):
-        return ag_gemm(
-            A, B, ctx=ctx, rank=RANK, num_ranks=PE_num, persistent=persistent, autotune=autotune)
+        return ag_gemm(A, B, ctx=ctx, rank=RANK, num_ranks=PE_num, persistent=persistent, autotune=autotune)
 
     dist.barrier(TP_GROUP)
     triton_ag_gemm = partial(triton_ag_gemm, persistent=False, autotune=False)
@@ -257,8 +244,7 @@ if __name__ == '__main__':
     print(f"rank {RANK} tilelang AG-GEMM avg time: {tl_t} ms")
 
     # Check correctness
-    assert torch.allclose(
-        tl_out, torch_out, atol=1e-2, rtol=1e-2), f'max error: {(tl_out - torch_out).abs().max()}'
+    assert torch.allclose(tl_out, torch_out, atol=1e-2, rtol=1e-2), f"max error: {(tl_out - torch_out).abs().max()}"
     print(f"rank {RANK} check passed.✅")
 
     dist.destroy_process_group()

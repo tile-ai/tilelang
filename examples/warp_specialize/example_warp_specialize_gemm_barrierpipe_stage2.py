@@ -1,12 +1,13 @@
 import tilelang
 import tilelang.language as T
 
+tilelang.disable_cache()
+
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 @tilelang.jit(out_idx=[2])
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     num_stages = 2
     mbarrier_list = [128, 128] * num_stages
 
@@ -30,19 +31,13 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
             for ko in range(T.ceildiv(K, block_K)):
                 with T.ws(1):
-                    T.mbarrier_wait_parity(
-                        mbarrier=ko % num_stages + num_stages,
-                        parity=((ko // num_stages) % num_stages) ^ 1)
-                    T.copy(A[by * block_M:(by + 1) * block_M, ko * block_K:(ko + 1) * block_K],
-                           A_shared[ko % num_stages, :, :])
-                    T.copy(B[ko * block_K:(ko + 1) * block_K, bx * block_N:(bx + 1) * block_N],
-                           B_shared[ko % num_stages, :, :])
+                    T.mbarrier_wait_parity(mbarrier=ko % num_stages + num_stages, parity=((ko // num_stages) % num_stages) ^ 1)
+                    T.copy(A[by * block_M : (by + 1) * block_M, ko * block_K : (ko + 1) * block_K], A_shared[ko % num_stages, :, :])
+                    T.copy(B[ko * block_K : (ko + 1) * block_K, bx * block_N : (bx + 1) * block_N], B_shared[ko % num_stages, :, :])
                     T.mbarrier_arrive(mbarrier=ko % num_stages)
                 with T.ws(0):
-                    T.mbarrier_wait_parity(
-                        mbarrier=ko % num_stages, parity=(ko // num_stages) % num_stages)
-                    T.gemm(A_shared[ko % num_stages, :, :], B_shared[ko % num_stages, :, :],
-                           C_local)
+                    T.mbarrier_wait_parity(mbarrier=ko % num_stages, parity=(ko // num_stages) % num_stages)
+                    T.gemm(A_shared[ko % num_stages, :, :], B_shared[ko % num_stages, :, :], C_local)
                     T.mbarrier_arrive(mbarrier=ko % num_stages + num_stages)
 
             with T.ws(0):
@@ -52,10 +47,13 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
 
 def main(M=16384, N=16384, K=16384):
+    tilelang.disable_cache()
     block_M = 128
     block_N = 128
     block_K = 64
     jit_kernel = matmul(M, N, K, block_M, block_N, block_K)
+
+    print(jit_kernel.get_kernel_source())
 
     import torch
 
@@ -82,6 +80,16 @@ def main(M=16384, N=16384, K=16384):
     latency = profiler.do_bench()
 
     print(f"Latency: {latency} ms")
+
+
+def run_regression_perf(M=16384, N=16384, K=16384):
+    tilelang.disable_cache()
+    block_M = 128
+    block_N = 128
+    block_K = 64
+    jit_kernel = matmul(M, N, K, block_M, block_N, block_K)
+    profiler = jit_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

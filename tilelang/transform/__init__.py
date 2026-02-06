@@ -80,8 +80,20 @@ def FrontendLegalize():
     return _ffi_api.FrontendLegalize()  # type: ignore
 
 
+def LegalizeNegativeIndex():
+    """Legalize negative indices in buffer loads.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LegalizeNegativeIndex()  # type: ignore
+
+
 def InjectAssumes():
-    """Inject Assumes
+    """Inject Assumes for natural shape boundary conditions. And convert Assumes in Evaluate(Call(...)) form
+    (tvm builtin assume call) to AttrNode form.
 
     Returns:
     -------
@@ -99,19 +111,7 @@ def LowerHopperIntrin():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return (_ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f
-           )  # type: ignore
-
-
-def LowerCpengineIntrin():
-    """LowerCpengineIntrin
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.LowerCpengineIntrin()  # type: ignore
+    return _ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f  # type: ignore
 
 
 def WarpSpecializedPipeline():
@@ -304,6 +304,21 @@ def SplitHostDevice():
     return _ffi_api.SplitHostDevice()  # type: ignore
 
 
+def AnnotateReadOnlyParams():
+    """Annotate read-only handle parameters for PrimFuncs.
+
+    Adds attribute `tl.readonly_param_indices` listing param indices that are
+    never written, enabling CUDA codegen to emit `const` qualifiers to unlock
+    read-only cache loads.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AnnotateReadOnlyParams()  # type: ignore
+
+
 def VectorizeLoop(enable_vectorize: bool = True):
     """VectorizeLoop
 
@@ -341,18 +356,6 @@ def LowerDeviceStorageAccessInfo():
     return _ffi_api.LowerDeviceStorageAccessInfo()  # type: ignore
 
 
-def LoopVectorizeDynamic():
-    """Try to vectorize loop with dynamic shape.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    ----
-    """
-    return _ffi_api.LoopVectorizeDynamic()  # type: ignore
-
-
 def ConfigIndexBitwidth():
     """Config index bitwidth.
 
@@ -377,8 +380,7 @@ def FlattenBuffer():
 
 
 def EliminateStorageSyncForMBarrier():
-    """EliminateStorageSyncForMBarrier
-    """
+    """EliminateStorageSyncForMBarrier"""
     return _ffi_api.EliminateStorageSyncForMBarrier()  # type: ignore
 
 
@@ -390,19 +392,16 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_by
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge,
-                                                 align_bytes)  # type: ignore
+    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge, align_bytes)  # type: ignore
 
 
 def LowerL2Persistent():
-    """LowerL2Persistent
-    """
+    """LowerL2Persistent"""
     return _ffi_api.LowerL2Persistent()  # type: ignore
 
 
 def PersistThreadblock():
-    """PersistThreadblock
-    """
+    """PersistThreadblock"""
     return _ffi_api.PersistThreadblock()  # type: ignore
 
 
@@ -421,9 +420,23 @@ def AlignDynamicSharedMemoryAllocations(align_bytes: int = 16):
 
 
 def LowerSharedBarrier():
-    """LowerSharedBarrier
-    """
+    """LowerSharedBarrier"""
     return _ffi_api.LowerSharedBarrier()  # type: ignore
+
+
+def PlanAndUpdateBufferAllocationLocation():
+    """Plan and update buffer allocation locations within PrimFuncs.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.PlanAndUpdateBufferAllocationLocation()  # type: ignore
+
+
+def HoistNonRestrictParams():
+    return _ffi_api.HoistNonRestrictParams()  # type: ignore
 
 
 def StorageRewrite():
@@ -438,20 +451,17 @@ def StorageRewrite():
 
 
 def LowerOpaqueBlock():
-    """LowerOpaqueBlock
-    """
+    """LowerOpaqueBlock"""
     return _ffi_api.LowerOpaqueBlock()  # type: ignore
 
 
 def LowerThreadAllreduce():
-    """LowerThreadAllreduce
-    """
+    """LowerThreadAllreduce"""
     return _ffi_api.LowerThreadAllreduce()  # type: ignore
 
 
 def LowerIntrin():
-    """LowerIntrin
-    """
+    """LowerIntrin"""
     return _ffi_api.LowerIntrin()  # type: ignore
 
 
@@ -469,8 +479,7 @@ def LowerDeviceKernelLaunch():
 
 
 def LowerSharedTmem():
-    """LowerSharedTmem
-    """
+    """LowerSharedTmem"""
     return _ffi_api.LowerSharedTmem()  # type: ignore
 
 

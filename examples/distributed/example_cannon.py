@@ -11,7 +11,6 @@ tilelang.disable_cache()
 
 
 def cannon(MESH, M, N, K, block_M, block_N, block_K, dtype="float16", specialize=False):
-
     M_local = T.ceildiv(M, MESH)
     N_local = T.ceildiv(N, MESH)
     K_local = T.ceildiv(K, MESH)
@@ -22,13 +21,13 @@ def cannon(MESH, M, N, K, block_M, block_N, block_K, dtype="float16", specialize
 
     @T.prim_func
     def main(
-            A: T.Tensor((2, M_local, K_local), dtype),
-            B: T.Tensor((2, N_local, K_local), dtype),
-            A_signal_to: T.Tensor((T.ceildiv(M, block_M),), "uint64"),
-            A_signal_from: T.Tensor((T.ceildiv(M, block_M),), "uint64"),
-            B_signal_to: T.Tensor((T.ceildiv(N, block_N),), "uint64"),
-            B_signal_from: T.Tensor((T.ceildiv(N, block_N),), "uint64"),
-            C: T.Tensor((M_local, N_local), dtype),
+        A: T.Tensor((2, M_local, K_local), dtype),
+        B: T.Tensor((2, N_local, K_local), dtype),
+        A_signal_to: T.Tensor((T.ceildiv(M, block_M),), "uint64"),
+        A_signal_from: T.Tensor((T.ceildiv(M, block_M),), "uint64"),
+        B_signal_to: T.Tensor((T.ceildiv(N, block_N),), "uint64"),
+        B_signal_from: T.Tensor((T.ceildiv(N, block_N),), "uint64"),
+        C: T.Tensor((M_local, N_local), dtype),
     ):
         grid_size = T.min(sm_num, total_tiles)
         A_rows_per_block = T.ceildiv(M_local, grid_size)
@@ -72,16 +71,23 @@ def cannon(MESH, M, N, K, block_M, block_N, block_K, dtype="float16", specialize
                         T.address_of(A[(ko + 1) % 2, A_rows_per_block * block_id, 0]),
                         T.address_of(A[ko % 2, A_rows_per_block * block_id, 0]),
                         A_rows_per_block * K_local * dtype_map[dtype].itemsize,
-                        T.address_of(A_signal_to[0]), 1, T.Amo.SIGNAL_ADD, a_peer_to[0])
+                        T.address_of(A_signal_to[0]),
+                        1,
+                        T.Amo.SIGNAL_ADD,
+                        a_peer_to[0],
+                    )
                 if block_id < T.ceildiv(N_local, B_cols_per_block):
                     T.putmem_signal_nbi_block(
                         T.address_of(B[(ko + 1) % 2, B_cols_per_block * block_id, 0]),
                         T.address_of(B[ko % 2, B_cols_per_block * block_id, 0]),
                         B_cols_per_block * K_local * dtype_map[dtype].itemsize,
-                        T.address_of(B_signal_to[0]), 1, T.Amo.SIGNAL_ADD, b_peer_to[0])
+                        T.address_of(B_signal_to[0]),
+                        1,
+                        T.Amo.SIGNAL_ADD,
+                        b_peer_to[0],
+                    )
 
                 for w in T.serial(waves):
-
                     bx = (grid_size * w + block_id) // T.ceildiv(N_local, block_N)
                     by = (grid_size * w + block_id) % T.ceildiv(N_local, block_N)
 
@@ -122,13 +128,13 @@ def cannon(MESH, M, N, K, block_M, block_N, block_K, dtype="float16", specialize
     # TODO: fix correctness
     @T.prim_func
     def main_specialize(
-            A: T.Tensor((2, M_local, K_local), dtype),
-            B: T.Tensor((2, N_local, K_local), dtype),
-            A_signal_to: T.Tensor((T.ceildiv(M, block_M),), "uint64"),
-            A_signal_from: T.Tensor((T.ceildiv(M, block_M),), "uint64"),
-            B_signal_to: T.Tensor((T.ceildiv(N, block_N),), "uint64"),
-            B_signal_from: T.Tensor((T.ceildiv(N, block_N),), "uint64"),
-            C: T.Tensor((M_local, N_local), dtype),
+        A: T.Tensor((2, M_local, K_local), dtype),
+        B: T.Tensor((2, N_local, K_local), dtype),
+        A_signal_to: T.Tensor((T.ceildiv(M, block_M),), "uint64"),
+        A_signal_from: T.Tensor((T.ceildiv(M, block_M),), "uint64"),
+        B_signal_to: T.Tensor((T.ceildiv(N, block_N),), "uint64"),
+        B_signal_from: T.Tensor((T.ceildiv(N, block_N),), "uint64"),
+        C: T.Tensor((M_local, N_local), dtype),
     ):
         # 0-compute blocks: compute
         # compute_blocks-grid_size: copy
@@ -172,21 +178,26 @@ def cannon(MESH, M, N, K, block_M, block_N, block_K, dtype="float16", specialize
                             total_tiles * ko,
                         )
                     T.putmem_signal_nbi_block(
-                        T.address_of(A[(ko + 1) % 2, A_rows_per_block * (block_id - compute_blocks),
-                                       0]),
+                        T.address_of(A[(ko + 1) % 2, A_rows_per_block * (block_id - compute_blocks), 0]),
                         T.address_of(A[ko % 2, A_rows_per_block * (block_id - compute_blocks), 0]),
                         A_rows_per_block * K_local * dtype_map[dtype].itemsize,
-                        T.address_of(A_signal_to[0]), 1, T.Amo.SIGNAL_ADD, a_peer_to[0])
+                        T.address_of(A_signal_to[0]),
+                        1,
+                        T.Amo.SIGNAL_ADD,
+                        a_peer_to[0],
+                    )
                     T.putmem_signal_nbi_block(
-                        T.address_of(B[(ko + 1) % 2, B_cols_per_block * (block_id - compute_blocks),
-                                       0]),
+                        T.address_of(B[(ko + 1) % 2, B_cols_per_block * (block_id - compute_blocks), 0]),
                         T.address_of(B[ko % 2, B_cols_per_block * (block_id - compute_blocks), 0]),
                         B_cols_per_block * K_local * dtype_map[dtype].itemsize,
-                        T.address_of(B_signal_to[0]), 1, T.Amo.SIGNAL_ADD, b_peer_to[0])
+                        T.address_of(B_signal_to[0]),
+                        1,
+                        T.Amo.SIGNAL_ADD,
+                        b_peer_to[0],
+                    )
 
                 if block_id < compute_blocks:
                     for w in T.serial(waves):
-
                         bx = (compute_blocks * w + block_id) // T.ceildiv(N_local, block_N)
                         by = (compute_blocks * w + block_id) % T.ceildiv(N_local, block_N)
 
@@ -256,11 +267,7 @@ if __name__ == "__main__":
     K_local = math.ceil(K / MESH)
 
     func = cannon(MESH, M, N, K, block_M, block_N, block_K, args.dtype, specialize)
-    kernel = tilelang.compile(
-        func, pass_configs={
-            "tl.disable_tma_lower": True,
-            "tl.disable_warp_specialized": True
-        })
+    kernel = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 
     # Get CUDA Source
     if RANK == 0:
@@ -281,11 +288,9 @@ if __name__ == "__main__":
         b_scatter_list = []
         for r in range(WORLD_SIZE):
             rr, cc = divmod(r, MESH)
-            c_tile = C[M_local * rr:M_local * (rr + 1), N_local * cc:N_local * (cc + 1)]
-            a_tile = A[M_local * rr:M_local * (rr + 1),
-                       K_local * ((cc + rr) % MESH):K_local * ((cc + rr) % MESH + 1)]
-            b_tile = B[N_local * cc:N_local * (cc + 1),
-                       K_local * ((cc + rr) % MESH):K_local * ((cc + rr) % MESH + 1)]
+            c_tile = C[M_local * rr : M_local * (rr + 1), N_local * cc : N_local * (cc + 1)]
+            a_tile = A[M_local * rr : M_local * (rr + 1), K_local * ((cc + rr) % MESH) : K_local * ((cc + rr) % MESH + 1)]
+            b_tile = B[N_local * cc : N_local * (cc + 1), K_local * ((cc + rr) % MESH) : K_local * ((cc + rr) % MESH + 1)]
 
             c_scatter_list.append(c_tile.contiguous())
             a_scatter_list.append(a_tile.contiguous())
@@ -320,7 +325,7 @@ if __name__ == "__main__":
         dist.barrier()
         if r == RANK:
             if torch.allclose(C_tilelang, ref, rtol=1e-2, atol=1e-2):
-                print('-' * 100)
+                print("-" * 100)
                 print(f"[Rank {RANK}] ✅ Tilelang and Torch match")
             else:
                 abs_error = torch.abs(C_tilelang - ref)
@@ -330,7 +335,7 @@ if __name__ == "__main__":
                 max_rel_error = rel_error.max().item()
                 mismatch_ratio = (abs_error > (1e-2 + 1e-2 * torch.abs(ref))).float().mean().item()
 
-                print('-' * 100)
+                print("-" * 100)
                 print(f"[Rank {RANK}] ❌ Tilelang and Torch mismatch")
                 print(f"[Rank {RANK}] ref:\n{ref}")
                 print(f"[Rank {RANK}] tilelang:\n{C_tilelang}")
@@ -381,8 +386,7 @@ def reduce_local_time(local_time):
 
 
 total_flops = 2 * M * N * K
-avg_time = reduce_local_time(
-    bench(kernel, A, B, A_signal_to, A_signal_from, B_signal_to, B_signal_from, C_tilelang))
+avg_time = reduce_local_time(bench(kernel, A, B, A_signal_to, A_signal_from, B_signal_to, B_signal_from, C_tilelang))
 
 if RANK == 0:
     print(f"avg time of RANK {RANK}: {avg_time} ms")

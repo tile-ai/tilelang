@@ -13,7 +13,6 @@ DTYPE_MAP = {
 
 
 class AllToAllContext:
-
     def __init__(
         self,
         max_m: int,

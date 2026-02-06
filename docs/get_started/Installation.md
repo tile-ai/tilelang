@@ -15,7 +15,7 @@ We currently provide three methods to install **TileScale**:
 
 ```bash
 docker pull nvcr.io/nvidia/pytorch:25.03-py3
-docker run --name tilescale --ipc=host --network=host --privileged --cap-add=SYS_ADMIN --shm-size=10g --gpus=all -it nvcr.io/nvidia/pytorch:25.03-py3 /bin/bash	
+docker run --name tilescale --ipc=host --network=host --privileged --cap-add=SYS_ADMIN --shm-size=10g --gpus=all -it nvcr.io/nvidia/pytorch:25.03-py3 /bin/bash
 echo -n > /etc/pip/constraint.txt
 bash Miniconda3-latest-Linux-x86_64.sh # install conda
 conda install -c conda-forge libstdcxx-ng
@@ -44,7 +44,7 @@ Verify that **TileScale** is working correctly:
 python -c "import tilelang; print(tilelang.__version__)"
 ```
 
-You can now run TileScale examples and develop your applications. 
+You can now run TileScale examples and develop your applications.
 
 **Example Usage:**
 
@@ -55,12 +55,11 @@ cd /home/tilelang
 TILELANG_USE_DISTRIBUTED=1 python examples/distributed/example_allgather_gemm_overlapped.py
 ```
 
-
 ## To use NVSHMEM APIs
 
 Before running the examples using NVSHMEM APIs (e.g., [example_allgather.py](../../examples/distributed/example_allgather.py)), you need to build NVSHMEM library for device-side code generation.
 
-```bash 
+```bash
 pip install mpich  # building NVSHMEM needs MPI
 export NVSHMEM_SRC="your_custom_nvshmem_dir" # default to 3rdparty/nvshmem_src
 cd tilelang/distributed

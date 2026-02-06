@@ -10,21 +10,31 @@
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/stmt_functor.h>
 
+#include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/parallel.h"
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm/tir/stmt.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<ReduceOpNode> node = make_object<ReduceOpNode>();
-  node->src = vmap[GetVarFromAccessPtr(args[0])];
-  node->dst = vmap[GetVarFromAccessPtr(args[1])];
+// NormalizeToBufferRegion moved to src/op/utils.{h,cc}
+
+// MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
+
+ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<ReduceOpNode> node = tvm::ffi::make_object<ReduceOpNode>();
+  // Accept BufferRegion/BufferLoad for src/dst
+  node->srcRegion_ = NormalizeToBufferRegion(args[0]);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1]);
+  node->src = node->srcRegion_->buffer;
+  node->dst = node->dstRegion_->buffer;
   std::string reduce_type = args[2].as<StringImm>().value()->value;
   node->dim = args[3].as<IntImm>().value()->value;
   node->type = ReduceType(reduce_type);
@@ -33,12 +43,12 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
 }
 
 TileOperator ReduceOpNode::Clone() const {
-  auto op = make_object<ReduceOpNode>(*this);
+  auto op = tvm::ffi::make_object<ReduceOpNode>(*this);
   return ReduceOp(op);
 }
 
 TileOperator CumSumOpNode::Clone() const {
-  auto op = make_object<CumSumOpNode>(*this);
+  auto op = tvm::ffi::make_object<CumSumOpNode>(*this);
   return CumSumOp(op);
 }
 
@@ -85,6 +95,7 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
     return make_zero(dst->dtype);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
+    return PrimExpr();
   }
 }
 
@@ -103,7 +114,7 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &lhs,
   } else if (type->isMin()) {
     return Min(lhs, rhs);
   } else if (type->isAbsMax()) {
-    return Max(Max(lhs, rhs), -Min(lhs, rhs));
+    return Max(tvm::abs(lhs), tvm::abs(rhs));
   } else if (type->isBitAnd()) {
     return lhs & rhs;
   } else if (type->isBitOr()) {
@@ -185,6 +196,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto dst_scope = this->dst.scope();
 
   if (src_scope == "local.fragment" && dst_scope == "local.fragment") {
+
     Buffer src_buffer = get_buffer(this->src);
     Buffer dst_buffer = get_buffer(this->dst);
     Fragment src_layout = T.layout_map[this->src].as<Fragment>().value();
@@ -297,7 +309,8 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         std::stringstream ss;
 
         auto thread_offset = T.thread_bounds->min;
-        if (TargetIsHopper(T.target) || TargetIsSm100(T.target)) {
+        if (TargetIsHopper(T.target) || TargetIsSm100(T.target) ||
+            TargetIsSM120(T.target)) {
           auto all_threads = T.thread_bounds->extent;
           ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
              << reducing_threads << ", " << (*scale) << ", " << thread_offset
@@ -359,70 +372,6 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return body;
   }
 
-  auto is_shared_scope = [](const std::string &scope) {
-    return scope == "shared" || scope == "shared.dyn";
-  };
-
-  if (is_shared_scope(src_scope) && is_shared_scope(dst_scope)) {
-    Buffer src_buffer = get_buffer(this->src);
-    Buffer dst_buffer = get_buffer(this->dst);
-
-    size_t src_dim = src_buffer->shape.size();
-    size_t dst_dim = dst_buffer->shape.size();
-    bool is_1d_reduce = (src_dim == dst_dim && dst_dim == 1);
-    if (!is_1d_reduce) {
-      ICHECK_EQ(src_dim, dst_dim + 1) << "Reduce dimension mismatch.";
-    } else {
-      ICHECK_EQ(dst_dim, 1U) << "Expect scalar layout for 1D reduce.";
-    }
-
-    auto thread_extent = as_const_int(T.thread_bounds->extent);
-    ICHECK(thread_extent)
-        << "Shared-memory reduce requires static thread extent.";
-    int threads = *thread_extent;
-
-    if (TargetIsCuda(T.target)) {
-      ICHECK_EQ(threads % 32, 0)
-          << "Shared reduce expects blockDim.x to be a multiple of 32 on CUDA.";
-    } else if (TargetIsRocm(T.target)) {
-      ICHECK_EQ(threads % 64, 0)
-          << "Shared reduce expects blockDim.x to be a multiple of 64 on HIP.";
-    }
-
-    bool use_abs = this->type->isAbsSum() || this->type->isAbsMax();
-    bool need_accumulate =
-        (!this->clear) && (this->type->isSum() || this->type->isAbsSum() ||
-                           this->type->isBitAnd() || this->type->isBitOr() ||
-                           this->type->isBitXor());
-
-    PrimExpr reduce_extent = src_buffer->shape[this->dim];
-    PrimExpr tail_extent = make_const(DataType::Int(32), 1);
-    for (size_t i = this->dim + 1; i < src_dim; ++i) {
-      tail_extent = analyzer->Simplify(tail_extent * src_buffer->shape[i]);
-    }
-
-    PrimExpr total_dest = make_const(DataType::Int(32), 1);
-    for (size_t i = 0; i < dst_dim; ++i) {
-      total_dest = analyzer->Simplify(total_dest * dst_buffer->shape[i]);
-    }
-
-    std::stringstream ss;
-    std::string reducer = this->MakeCodegenReducer();
-    ss << "tl::SharedReduceWarp<" << reducer << ", " << threads << ", "
-       << (use_abs ? "true" : "false") << ", "
-       << (need_accumulate ? "true" : "false") << ">::run";
-
-    Array<PrimExpr> call_args = {StringImm(ss.str()),
-                                 src_buffer.access_ptr(1),
-                                 dst_buffer.access_ptr(3),
-                                 cast(DataType::Int(32), total_dest),
-                                 cast(DataType::Int(32), reduce_extent),
-                                 cast(DataType::Int(32), tail_extent),
-                                 this->MakeInitValue()};
-
-    return Evaluate(Call(dst_buffer->dtype, builtin::call_extern(), call_args));
-  }
-
   LOG(FATAL) << "Reduce for buffers in scope (" << src_scope << ", "
              << dst_scope << ") is not implemented.";
   return Stmt();
@@ -432,7 +381,8 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
                                     InferLevel level) const {
   if (level >= InferLevel::kStrict)
     return {};
-  if (src.scope() == "local.fragment" && dst.scope() == "local.fragment" &&
+
+  if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
       T.layout_map.count(src)) {
     auto src_layout = T.layout_map[src].as<Fragment>().value();
 
@@ -452,10 +402,40 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
     }
     auto thd = src_layout->ForwardThread(
         fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
+
+    // Ensure the thread count is divisible by the replicate extent.
+    // Otherwise, we cannot infer a valid fragment<->fragment layout.
+    {
+      arith::Analyzer analyzer;
+      PrimExpr num_threads = T.thread_bounds->extent;
+      // Though the dest_buffer_rep_extent will be compressed at
+      // CondenseReplicateVar, we need to check the divisibility here to avoid
+      // the issue that the thread count is not divisible by the replicate
+      // extent.
+      if (!analyzer.CanProve(FloorMod(num_threads, dest_buffer_rep_extent) ==
+                             0) &&
+          !analyzer.CanProve(FloorMod(dest_buffer_rep_extent, num_threads) ==
+                             0)) {
+        ICHECK(false) << "ReduceOp fragment layout inference failed: "
+                         "num_threads % replicate_extent != 0. "
+                      << "This mapping requires the block's thread count to be "
+                         "divisible by the "
+                      << "replicate extent. "
+                      << "Try one of: (1) choose a thread block size divisible "
+                         "by replicate_extent; "
+                      << "(2) pick a different reduce dimension or adjust the "
+                         "source fragment layout; "
+                      << "Details: num_threads=" << num_threads
+                      << ", replicate_extent=" << indice_rep_extent
+                      << ", src=" << src << ", dst=" << dst;
+      }
+    }
+
     Fragment dst_layout =
         Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, std::nullopt)
             ->CondenseReplicateVar()
             ->BindThreadRange(T.thread_bounds);
+
     if (!T.layout_map.count(dst))
       return {{dst, dst_layout}};
     else {
@@ -500,30 +480,47 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
   return {};
 }
 
-TIR_REGISTER_TL_OP(ReduceOp, reduce)
+TIR_REGISTER_TL_TILE_OP(ReduceOp, reduce)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
+// Normalize "Buffer" to BufferRegion. Use the shape of the buffer as the
+// ranges.
+static BufferRegion ConvertBufferToBufferRegion(const Buffer &buf) {
+  Array<Range> ranges;
+  for (PrimExpr extent : buf->shape) {
+    ranges.push_back(Range(IntImm(extent->dtype, 0), extent));
+  }
+  return BufferRegion(buf, ranges);
+}
+
+CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   /// CumSum constructor arguments:
   /// - src: input buffer
   /// - dst: output buffer
   /// - dim: dimension to cumsum
   /// - reverse: whether to cumsum in reverse order
   CHECK_EQ(args.size(), 4);
-  ObjectPtr<CumSumOpNode> node = make_object<CumSumOpNode>();
-  node->src = vmap[GetVarFromAccessPtr(args[0])];
-  node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  ObjectPtr<CumSumOpNode> node = tvm::ffi::make_object<CumSumOpNode>();
+  // node->src = vmap[GetVarFromAccessPtr(args[0])];
+  // node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  node->srcRegion_ = NormalizeToBufferRegion(args[0]);
+  node->dstRegion_ = NormalizeToBufferRegion(args[1]);
+  node->src = node->srcRegion_->buffer;
+  node->dst = node->dstRegion_->buffer;
   node->dim = args[2].as<IntImm>().value()->value;
   node->reverse = args[3].as<Bool>().value();
-  CHECK_LT(node->dim, static_cast<int>(node->src->shape.size()));
+  CHECK_LT(node->dim, static_cast<int>(node->src->shape.size()))
+      << "The dim of cumsum should be less than the number of dimensions. Got "
+         "dim="
+      << node->dim << ", but src has " << node->src->shape.size() << " dims.";
+
   data_ = std::move(node);
 }
 
 Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (this->src.scope() == "local.fragment" &&
-      this->dst.scope() == "local.fragment") {
+  if (IsFragmentBuffer(this->src) && IsFragmentBuffer(this->dst)) {
     LOG(FATAL) << "CumSum for fragment not implemented, please raise an issue "
                   "if you need this feature.";
   } else if (this->src.scope() == "shared.dyn" ||
@@ -532,19 +529,29 @@ Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     std::stringstream ss;
     auto threads = T.thread_bounds->extent;
     Array<PrimExpr> args;
-    int ndim = static_cast<int>(src->shape.size());
+
+    // Build access pointers from regions locally
+    PrimExpr srcPtr = MakeAccessPtrFromRegion(srcRegion_, 1);
+    PrimExpr dstPtr = MakeAccessPtrFromRegion(dstRegion_, 2);
+
+    // Use region extents instead of buffer shape for correct slice handling
+    Array<PrimExpr> src_extents;
+    for (const auto &range : srcRegion_->region) {
+      src_extents.push_back(range->extent);
+    }
+    int ndim = static_cast<int>(src_extents.size());
+
     if (ndim == 1) {
       ICHECK_EQ(dim, 0) << "Cumulative sum over a 1D buffer only supports dim "
                            "= 0.";
       ss << "tl::CumSum1D<" << threads << ", " << (reverse ? "true" : "false")
          << ">::run";
-      args = {StringImm(ss.str()), src.access_ptr(1), dst.access_ptr(3),
-              src->shape[0]};
+      args = {StringImm(ss.str()), srcPtr, dstPtr, src_extents[0]};
     } else if (ndim == 2) {
       ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
          << (reverse ? "true" : "false") << ">::run";
-      args = {StringImm(ss.str()), src.access_ptr(1), dst.access_ptr(3),
-              src->shape[0], src->shape[1]};
+      args = {StringImm(ss.str()), srcPtr, dstPtr, src_extents[0],
+              src_extents[1]};
     } else {
       LOG(FATAL) << "CumSum currently supports only 1D or 2D buffers, got "
                  << ndim << "D.";
@@ -560,12 +567,49 @@ Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
 LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &T,
                                     InferLevel level) const {
-  return {};
+  // Only infer layout in strict mode
+  if (level != InferLevel::kStrict) {
+    return {};
+  }
+
+  LayoutMap result_map;
+
+  auto make_linear_layout = [](const Buffer &buf) -> Layout {
+    return makeLinearLayout(buf->shape);
+  };
+
+  auto check_or_set_linear_layout = [&](const Buffer &buf) {
+    if (!IsSharedBuffer(buf))
+      return;
+
+    Layout linear_layout = make_linear_layout(buf);
+    if (T.layout_map.count(buf)) {
+      // Check if existing layout is linear
+      Layout existing = T.layout_map.Get(buf).value().as<Layout>().value();
+      ICHECK(StructuralEqual()(existing, linear_layout))
+          << "CumSum requires linear layout for shared buffer " << buf->name
+          << ", but got non-linear layout.";
+    } else {
+      result_map.Set(buf, linear_layout);
+    }
+  };
+
+  check_or_set_linear_layout(src);
+  check_or_set_linear_layout(dst);
+
+  return result_map;
 }
 
-TIR_REGISTER_TL_OP(CumSumOp, cumsum)
+TIR_REGISTER_TL_TILE_OP(CumSumOp, cumsum)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ReduceOpNode::RegisterReflection();
+  CumSumOpNode::RegisterReflection();
+  ReduceTypeNode::RegisterReflection();
+}
+
 } // namespace tl
 } // namespace tvm

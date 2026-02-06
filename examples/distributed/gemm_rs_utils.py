@@ -79,16 +79,13 @@ class ReduceScatter2DContext:
         for buf in self.signal_bufs:
             assert buf.shape[0] >= 2 * self.world_size
 
-        self.scatter_signal_bufs = [buf[:self.world_size] for buf in self.signal_bufs]
-        self.rs_per_node_signal_bufs = [
-            buf[self.world_size:self.world_size * 2] for buf in self.signal_bufs
-        ]
+        self.scatter_signal_bufs = [buf[: self.world_size] for buf in self.signal_bufs]
+        self.rs_per_node_signal_bufs = [buf[self.world_size : self.world_size * 2] for buf in self.signal_bufs]
 
         for node_id in range(self.nnodes):
             self.scatter_signal_buf_list_for_each_node.append(
-                self.scatter_signal_bufs[self.local_rank][node_id *
-                                                          self.local_world_size:(node_id + 1) *
-                                                          self.local_world_size])
+                self.scatter_signal_bufs[self.local_rank][node_id * self.local_world_size : (node_id + 1) * self.local_world_size]
+            )
 
     def reset_barriers(self) -> int:
         # self.scatter_signal_bufs[self.local_rank].fill_(0)
@@ -101,9 +98,7 @@ class ReduceScatter2DContext:
         M_per_node = M_per_rank * self.local_world_size
         M_start = node_id * M_per_node
         M_end = M_start + M_per_node
-        scatter_bufs_intra_node = [
-            self.scatter_bufs[i][M_start:M_end] for i in range(self.local_world_size)
-        ]
+        scatter_bufs_intra_node = [self.scatter_bufs[i][M_start:M_end] for i in range(self.local_world_size)]
         return scatter_bufs_intra_node, self.scatter_signal_buf_list_for_each_node[node_id]
 
     @property
@@ -131,36 +126,32 @@ class ReduceScatter2DContext:
         return self.scatter_signal_bufs[self.local_rank]
 
 
-def create_reduce_scater_2d_ctx(max_M,
-                                N,
-                                rank,
-                                world_size,
-                                local_world_size,
-                                dtype,
-                                overlap_with_gemm=True,
-                                num_reduction_sms=15) -> ReduceScatter2DContext:
+def create_reduce_scater_2d_ctx(
+    max_M, N, rank, world_size, local_world_size, dtype, overlap_with_gemm=True, num_reduction_sms=15
+) -> ReduceScatter2DContext:
     """
-        for num_reduction_sms: tunable param, 16 are enough for H800
-            For H800, we overlap local reduce and inter-node p2p with intra-node scatter.
-            The reduction kernel bandwidth is not a bottleneck if it exceeds 450GB, so only a few SMs are needed.
-            For machines with higher intra_node bandwidth(e.g. H100), we may need to increase the number of SMs or redesign overlapping.
+    for num_reduction_sms: tunable param, 16 are enough for H800
+        For H800, we overlap local reduce and inter-node p2p with intra-node scatter.
+        The reduction kernel bandwidth is not a bottleneck if it exceeds 450GB, so only a few SMs are needed.
+        For machines with higher intra_node bandwidth(e.g. H100), we may need to increase the number of SMs or redesign overlapping.
     """
     assert world_size % local_world_size == 0
     assert max_M % world_size == 0
 
     scatter_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([max_M, N], dtype)
 
-    rs_per_node_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node(
-        [max_M // local_world_size, N], dtype)
+    rs_per_node_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([max_M // local_world_size, N], dtype)
 
-    p2p_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([max_M // local_world_size, N],
-                                                               dtype)
+    p2p_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([max_M // local_world_size, N], dtype)
 
     # signal_buf: scatter_signal | rs_per_node_signal
     num_signal_bufs = 2
-    signal_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([
-        world_size * num_signal_bufs,
-    ], SIGNAL_DTYPE)
+    signal_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node(
+        [
+            world_size * num_signal_bufs,
+        ],
+        SIGNAL_DTYPE,
+    )
 
     # TODO: implement barrier_all_on_stream
     # barrier_all_on_stream(None, torch.cuda.current_stream())
@@ -187,7 +178,8 @@ def create_reduce_scater_2d_ctx(max_M,
         p2p_stream=p2p_stream,
         num_sync_sms=num_sync_sms,
         num_p2p_sms=num_p2p_sms,
-        num_reduction_sms=num_reduction_sms)
+        num_reduction_sms=num_reduction_sms,
+    )
     return ctx
 
 
@@ -211,14 +203,7 @@ class GEMMReduceScatterTensorParallelContext:
     GROUP_M: int = 8
     stages: int = 3
 
-    def update(self,
-               rs_stream,
-               output_dtype=None,
-               BLOCK_M=128,
-               BLOCK_N=256,
-               BLOCK_K=64,
-               GROUP_M=8,
-               stages=3):
+    def update(self, rs_stream, output_dtype=None, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8, stages=3):
         self.rs_stream = rs_stream
         self.output_dtype = output_dtype
         self.BLOCK_M = BLOCK_M
@@ -233,20 +218,10 @@ class GEMMReduceScatterTensorParallelContext:
         return self.gemm_out_bufs[local_rank][:M]
 
 
-def create_gemm_rs_context(max_M,
-                           N,
-                           rank,
-                           world_size,
-                           local_world_size,
-                           output_dtype,
-                           rs_stream,
-                           BLOCK_M=128,
-                           BLOCK_N=256,
-                           BLOCK_K=64,
-                           GROUP_M=8,
-                           stages=3) -> GEMMReduceScatterTensorParallelContext:
-    rs_ctx = create_reduce_scater_2d_ctx(
-        max_M, N, rank, world_size, local_world_size, output_dtype, overlap_with_gemm=True)
+def create_gemm_rs_context(
+    max_M, N, rank, world_size, local_world_size, output_dtype, rs_stream, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8, stages=3
+) -> GEMMReduceScatterTensorParallelContext:
+    rs_ctx = create_reduce_scater_2d_ctx(max_M, N, rank, world_size, local_world_size, output_dtype, overlap_with_gemm=True)
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     num_gemm_sms = NUM_SMS - rs_ctx.num_rs_sms
     gemm_out_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([max_M, N], output_dtype)
@@ -260,5 +235,6 @@ def create_gemm_rs_context(max_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         GROUP_M=GROUP_M,
-        stages=stages)
+        stages=stages,
+    )
     return ctx

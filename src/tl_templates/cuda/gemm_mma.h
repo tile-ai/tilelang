@@ -8,7 +8,6 @@
 #include <cute/underscore.hpp>
 
 #include "common.h"
-#include "cuda_fp8.h"
 #include "intrin.h"
 
 namespace cute::tl_mma {
@@ -51,6 +50,7 @@ TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
 TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(float, float, float, SM80_16x8x8_F32TF32TF32F32_TN)
 TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
 TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 #elif __CUDA_ARCH_LIST__ >= 1000
@@ -64,6 +64,7 @@ TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
 TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(float, float, float, SM80_16x8x8_F32TF32TF32F32_TN)
 TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
 TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 #elif __CUDA_ARCH_LIST__ >= 900
@@ -76,6 +77,7 @@ TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
 TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(float, float, float, SM80_16x8x8_F32TF32TF32F32_TN)
 TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
 TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 #elif __CUDA_ARCH_LIST__ >= 890
@@ -88,6 +90,7 @@ TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
 TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(float, float, float, SM80_16x8x8_F32TF32TF32F32_TN)
 TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
 TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 #elif __CUDA_ARCH_LIST__ >= 800
@@ -96,6 +99,7 @@ TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
 TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
 TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(float, float, float, SM80_16x8x8_F32TF32TF32F32_TN)
 TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
 TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 #elif __CUDA_ARCH_LIST__ >= 750
@@ -263,16 +267,18 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           typename C_type_raw>
 class GemmTensorOp {
 public:
+  using A_type_cute = typename tl::to_cute_type<A_type_raw>::type;
+  using B_type_cute = typename tl::to_cute_type<B_type_raw>::type;
   using A_type =
-      typename std::conditional<std::is_same<A_type_raw, float>::value,
-                                tfloat32_t, A_type_raw>::type;
+      typename std::conditional<std::is_same<A_type_cute, float>::value,
+                                tfloat32_t, A_type_cute>::type;
   using B_type =
-      typename std::conditional<std::is_same<B_type_raw, float>::value,
-                                tfloat32_t, A_type_raw>::type;
+      typename std::conditional<std::is_same<B_type_cute, float>::value,
+                                tfloat32_t, B_type_cute>::type;
   using C_type = C_type_raw;
 
-  using Instruction =
-      DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n, N>;
+  using Instruction = DispatchInstruction<A_type_raw, B_type_raw, C_type_raw,
+                                          num_warp_m, num_warp_n, N>;
 
   using OperandATraits = OperandTraits<sizeof_bits<A_type>::value, M, K,
                                        !trans_A, num_warp_m, lda>;

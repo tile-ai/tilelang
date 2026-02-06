@@ -1,4 +1,8 @@
 from __future__ import annotations
+
+
+import torch
+
 from platform import mac_ver
 from typing import Literal
 from tilelang import tvm as tvm
@@ -6,7 +10,6 @@ from tilelang import _ffi_api
 from tvm.target import Target
 from tvm.contrib import rocm
 from tilelang.contrib import nvcc
-import torch
 
 SUPPORTED_TARGETS: dict[str, str] = {
     "auto": "Auto-detect CUDA/HIP/Metal based on availability.",
@@ -16,6 +19,7 @@ SUPPORTED_TARGETS: dict[str, str] = {
     "llvm": "LLVM CPU target (accepts standard TVM LLVM options).",
     "webgpu": "WebGPU target for browser/WebGPU runtimes.",
     "c": "C source backend.",
+    "cutedsl": "CuTe DSL GPU target.",
 }
 
 
@@ -57,17 +61,41 @@ def check_metal_availability() -> bool:
     if not mac_release:
         return False
     # todo: check torch version?
-    return arch == 'arm64'
+    return arch == "arm64"
 
 
-def determine_target(target: str | Target | Literal["auto"] = "auto",
-                     return_object: bool = False) -> str | Target:
+def normalize_cutedsl_target(target: str | Target | None) -> Target | None:
+    if target is None:
+        return None
+
+    if isinstance(target, Target):
+        if target.kind.name == "cuda" and "cutedsl" in target.keys:
+            return target
+        return None
+
+    if target.startswith("cutedsl"):
+        cuda_target_str = target.replace("cutedsl", "cuda", 1)
+
+        try:
+            temp_target = Target(cuda_target_str)
+
+            target_dict = dict(temp_target.export())
+            target_dict["keys"] = list(set(target_dict["keys"]) | {"cutedsl"})
+
+            return Target(target_dict)
+        except Exception:
+            return None
+
+    return None
+
+
+def determine_target(target: str | Target | Literal["auto"] | None = "auto", return_object: bool = False) -> str | Target:
     """
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 
     Args:
-        target (str | Target | Literal["auto"]): User-specified target.
-            - If "auto", the system will automatically detect whether CUDA or HIP is available.
+        target (str | Target | Literal["auto"] | None): User-specified target.
+            - If "auto" or None, the system will automatically detect whether CUDA or HIP is available.
             - If a string or Target, it is directly validated.
 
     Returns:
@@ -77,6 +105,9 @@ def determine_target(target: str | Target | Literal["auto"] = "auto",
         ValueError: If no CUDA or HIP is available and the target is "auto".
         AssertionError: If the target is invalid.
     """
+    # Treat None as "auto"
+    if target is None:
+        target = "auto"
 
     return_var: str | Target = target
 
@@ -90,54 +121,55 @@ def determine_target(target: str | Target | Literal["auto"] = "auto",
 
         # Determine the target based on availability
         if is_cuda_available:
-            return_var = "cuda"
+            if torch.cuda.is_available() and (cap := torch.cuda.get_device_capability(0)):
+                return_var = Target({"kind": "cuda", "arch": f"sm_{nvcc.get_target_arch(cap)}"})
+            else:
+                return_var = "cuda"
         elif is_hip_available:
             return_var = "hip"
         elif check_metal_availability():
             return_var = "metal"
         else:
             raise ValueError("No CUDA or HIP or MPS available on this system.")
-    else:
-        # Validate the target if it's not "auto"
-        if isinstance(target, Target):
-            return_var = target
-        elif isinstance(target, str):
-            normalized_target = target.strip()
-            if not normalized_target:
-                raise AssertionError(f"Target {target} is not supported")
-            try:
-                Target(normalized_target)
-            except Exception as err:
-                examples = ", ".join(f"`{name}`" for name in SUPPORTED_TARGETS)
-                raise AssertionError(
-                    f"Target {target} is not supported. Supported targets include: {examples}. "
-                    "Pass additional options after the base name, e.g. `cuda -arch=sm_80`."
-                ) from err
-            return_var = normalized_target
-        else:
-            raise AssertionError(f"Target {target} is not supported")
 
+    else:
+        possible_cutedsl_target = normalize_cutedsl_target(target)
+        if possible_cutedsl_target is not None:
+            try:
+                from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available  # lazy
+
+                check_cutedsl_available()
+            except ImportError as e:
+                raise AssertionError(f"CuTeDSL backend is not available. Please install tilelang-cutedsl package. {str(e)}") from e
+
+            return_var = possible_cutedsl_target
+        else:
+            # Validate the target if it's not "auto"
+            if isinstance(target, Target):
+                return_var = target
+            elif isinstance(target, str):
+                normalized_target = target.strip()
+                if not normalized_target:
+                    raise AssertionError(f"Target {target} is not supported")
+                try:
+                    Target(normalized_target)
+                except Exception as err:
+                    examples = ", ".join(f"`{name}`" for name in SUPPORTED_TARGETS)
+                    raise AssertionError(
+                        f"Target {target} is not supported. Supported targets include: {examples}. "
+                        "Pass additional options after the base name, e.g. `cuda -arch=sm_80`."
+                    ) from err
+                return_var = normalized_target
+            else:
+                raise AssertionError(f"Target {target} is not supported")
+
+    if isinstance(return_var, Target):
+        return return_var
     if return_object:
         if isinstance(return_var, Target):
             return return_var
         return Target(return_var)
     return return_var
-
-
-def parse_device(device: str | torch.device | int) -> int:
-    if isinstance(device, str):
-        if device.startswith("cuda"):
-            return torch.cuda.current_device()
-        elif device == "cpu":
-            return -1
-        else:
-            raise ValueError(f"unknown device string: {device}")
-    elif isinstance(device, torch.device):
-        return device.index if device.type == "cuda" else -1
-    elif isinstance(device, int):
-        return device
-    else:
-        raise TypeError("device must be str|torch.device|int")
 
 
 def target_is_cuda(target: Target) -> bool:
@@ -190,3 +222,52 @@ def target_has_bulk_copy(target: Target) -> bool:
 
 def target_get_warp_size(target: Target) -> int:
     return _ffi_api.TargetGetWarpSize(target)
+
+
+def parse_device(device: str | torch.device | int | None) -> int:
+    """
+    Parse a device specification and return the device index.
+
+    Args:
+        device: Device specification. Can be:
+            - None: Returns current CUDA device index
+            - int: Returns the device index directly
+            - str: Parses strings like "cuda", "cuda:0", "0"
+            - torch.device: Extracts the device index
+
+    Returns:
+        int: The device index
+
+    Raises:
+        ValueError: If the device specification is invalid
+    """
+    if device is None:
+        if torch.cuda.is_available():
+            return torch.cuda.current_device()
+        return 0
+
+    if isinstance(device, int):
+        return device
+
+    if isinstance(device, torch.device):
+        if device.type != "cuda":
+            raise ValueError(f"Only CUDA devices are supported, got {device.type}")
+        return device.index if device.index is not None else 0
+
+    if isinstance(device, str):
+        device = device.strip().lower()
+        if device == "cuda" or device == "gpu":
+            if torch.cuda.is_available():
+                return torch.cuda.current_device()
+            return 0
+        if device.startswith("cuda:"):
+            try:
+                return int(device[5:])
+            except ValueError as e:
+                raise ValueError(f"Invalid device specification: {device}") from e
+        try:
+            return int(device)
+        except ValueError as e:
+            raise ValueError(f"Invalid device specification: {device}") from e
+
+    raise ValueError(f"Invalid device type: {type(device)}")

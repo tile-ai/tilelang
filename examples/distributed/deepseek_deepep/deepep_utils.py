@@ -30,7 +30,7 @@ class Config:
         # 1 sm for send, 1 sm for recv in each channel
 
     @staticmethod
-    def get_dispatch_config(num_ranks: int) -> 'Config':
+    def get_dispatch_config(num_ranks: int) -> "Config":
         """
         Get a recommended dispatch config.
 
@@ -56,11 +56,11 @@ class Config:
             144: Config(num_sms, 32, 720, 12, 128),
             160: Config(num_sms, 28, 720, 12, 128),
         }
-        assert num_ranks in config_map, f'Unsupported number of EP ranks: {num_ranks}'
+        assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
         return config_map[num_ranks]
 
     @staticmethod
-    def get_combine_config(num_ranks: int) -> 'Config':
+    def get_combine_config(num_ranks: int) -> "Config":
         """
         Get a recommended combine config.
 
@@ -86,33 +86,31 @@ class Config:
             144: Config(num_sms, 2, 720, 8, 128),
             160: Config(num_sms, 2, 720, 8, 128),
         }
-        assert num_ranks in config_map, f'Unsupported number of EP ranks: {num_ranks}'
+        assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
         return config_map[num_ranks]
 
 
 # Only necessary in inter-node cases
-def set_rdma_env_args(num_qps_per_rank: int = 24,
-                      allow_nvlink_for_low_latency_mode: bool = True,
-                      allow_mnnvl: bool = False):
-    os.environ['NVSHMEM_DISABLE_P2P'] = '0' if allow_nvlink_for_low_latency_mode else '1'
-    os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'
-    os.environ['NVSHMEM_IBGDA_NUM_RC_PER_PE'] = f'{num_qps_per_rank}'
+def set_rdma_env_args(num_qps_per_rank: int = 24, allow_nvlink_for_low_latency_mode: bool = True, allow_mnnvl: bool = False):
+    os.environ["NVSHMEM_DISABLE_P2P"] = "0" if allow_nvlink_for_low_latency_mode else "1"
+    os.environ["NVSHMEM_IB_ENABLE_IBGDA"] = "1"
+    os.environ["NVSHMEM_IBGDA_NUM_RC_PER_PE"] = f"{num_qps_per_rank}"
 
     # Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
-    nvshmem_qp_depth = int(os.environ.get('NVSHMEM_QP_DEPTH', '1024'))
-    os.environ['NVSHMEM_QP_DEPTH'] = str(nvshmem_qp_depth)
+    nvshmem_qp_depth = int(os.environ.get("NVSHMEM_QP_DEPTH", "1024"))
+    os.environ["NVSHMEM_QP_DEPTH"] = str(nvshmem_qp_depth)
 
     # Reduce gpu memory usage
     # 6 default teams + 1 extra team
-    os.environ['NVSHMEM_MAX_TEAMS'] = '7'
+    os.environ["NVSHMEM_MAX_TEAMS"] = "7"
     # Disable NVLink SHArP
-    os.environ['NVSHMEM_DISABLE_NVLS'] = '1'
+    os.environ["NVSHMEM_DISABLE_NVLS"] = "1"
     # NOTES: NVSHMEM initialization requires at least 256 MiB
-    os.environ['NVSHMEM_CUMEM_GRANULARITY'] = f'{2 ** 29}'
+    os.environ["NVSHMEM_CUMEM_GRANULARITY"] = f"{2**29}"
 
     if not allow_mnnvl:
         # Disable multi-node NVLink detection
-        os.environ['NVSHMEM_DISABLE_MNNVL'] = '1'
+        os.environ["NVSHMEM_DISABLE_MNNVL"] = "1"
 
 
 def unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
@@ -147,10 +145,10 @@ def gen_inputs(num_tokens: int, hidden: int, num_topk: int, num_experts: int, nu
     assert num_topk <= num_experts, "num_topk must be less than or equal to num_experts"
     assert num_experts % num_ranks == 0, "num_experts must be divisible by num_ranks"
 
-    x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-    scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device='cuda').abs() + 1
+    x = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
+    scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device="cuda").abs() + 1
     topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1]
-    topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device='cuda')
+    topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device="cuda")
     rank_idx = topk_idx // (num_experts // num_ranks)
     rank_idx.masked_fill_(topk_idx == -1, -1)
     inplace_unique(rank_idx, num_ranks)
@@ -192,7 +190,7 @@ def ep_bench(fn, warmup: int = 50, rep: int = 50, post_fn=None):
 
     # Flush L2 cache with 256 MB data
     torch.cuda.synchronize()
-    cache = torch.empty(int(256e6 // 4), dtype=torch.int, device='cuda')
+    cache = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
 
     # Warmup
     for _ in range(warmup):
@@ -248,8 +246,5 @@ std::tuple<int, std::vector<int>> wait_for_counters_ready(
 """
 
 ep_ext = load_inline(
-    name="ep_ext",
-    cpp_sources=_src,
-    functions=["wait_for_counters_ready"],
-    extra_cflags=["-O3", "-march=native"],
-    verbose=False)
+    name="ep_ext", cpp_sources=_src, functions=["wait_for_counters_ready"], extra_cflags=["-O3", "-march=native"], verbose=False
+)

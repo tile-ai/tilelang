@@ -28,9 +28,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -50,68 +50,6 @@ def matmul(
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
-
-
-def run_gemm(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtypeAccum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages=3,
-    num_threads=128,
-):
-    program = matmul(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtypeAccum,
-        num_stages,
-        num_threads,
-    )
-
-    stramp = "&*(XS)"
-
-    @tvm.register_func("tilelang_callback_cuda_postproc", override=True)
-    def tilelang_callback_cuda_postproc(code, _):
-        code = f"// {stramp}\n" + code
-        return code
-
-    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="cython")
-
-    kernel_source = matmul_kernel.get_kernel_source()
-
-    assert stramp in kernel_source, f"Expected {stramp} in the kernel source"
-
-
-def test_gemm_f16f16f16_nn():
-    run_gemm(
-        512,
-        1024,
-        768,
-        False,
-        False,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        256,
-        32,
-        2,
-    )
 
 
 def matmu_jit_kernel(
@@ -138,9 +76,9 @@ def matmu_jit_kernel(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -208,6 +146,7 @@ def run_gemm_jit_kernel(
 
     def ref_program(A, B):
         import torch
+
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(out_dtype)
         return C
@@ -225,9 +164,9 @@ def test_gemm_jit_kernel():
         768,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         256,
         32,
@@ -235,19 +174,9 @@ def test_gemm_jit_kernel():
     )
 
 
-def run_cython_kernel_do_bench(M,
-                               N,
-                               K,
-                               trans_A,
-                               trans_B,
-                               in_dtype,
-                               out_dtype,
-                               dtypeAccum,
-                               block_M,
-                               block_N,
-                               block_K,
-                               num_stages=3,
-                               num_threads=128):
+def run_cython_kernel_do_bench(
+    M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
+):
     program = matmul(
         M,
         N,
@@ -265,45 +194,26 @@ def run_cython_kernel_do_bench(M,
     )
 
     cython_matmul_kernel = tilelang.compile(program, execution_backend="cython")
-    ctypes_matmul_kernel = tilelang.compile(program, execution_backend="ctypes")
 
     cython_profiler = cython_matmul_kernel.get_profiler()
-    ctypes_profiler = ctypes_matmul_kernel.get_profiler()
 
     cython_latency = cython_profiler.do_bench(func=cython_matmul_kernel)
     print(f"cython Latency: {cython_latency} ms")
-
-    # assert ctypes_latency is not None
 
     tvm_latency = cython_profiler.do_bench()
     print(f"TVM Latency: {tvm_latency} ms")
 
     assert tvm_latency is not None
-
-    ctypes_latency = ctypes_profiler.do_bench(func=ctypes_matmul_kernel)
-    print(f"ctypes Latency: {ctypes_latency} ms")
-
     assert cython_latency is not None
 
 
 def test_cython_kernel_do_bench():
-    run_cython_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128,
-                               256, 32, 2)
+    run_cython_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
-def run_cython_kernel_multi_stream(M,
-                                   N,
-                                   K,
-                                   trans_A,
-                                   trans_B,
-                                   in_dtype,
-                                   out_dtype,
-                                   dtypeAccum,
-                                   block_M,
-                                   block_N,
-                                   block_K,
-                                   num_stages=3,
-                                   num_threads=128):
+def run_cython_kernel_multi_stream(
+    M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
+):
     program = matmul(
         M,
         N,
@@ -342,23 +252,12 @@ def run_cython_kernel_multi_stream(M,
 
 
 def test_cython_kernel_multi_stream():
-    run_cython_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16",
-                                   128, 256, 32, 2)
+    run_cython_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
-def run_cython_dynamic_shape(M,
-                             N,
-                             K,
-                             trans_A,
-                             trans_B,
-                             in_dtype,
-                             out_dtype,
-                             dtypeAccum,
-                             block_M,
-                             block_N,
-                             block_K,
-                             num_stages=3,
-                             num_threads=128):
+def run_cython_dynamic_shape(
+    M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
+):
     program = matmul(
         M,
         N,
@@ -398,36 +297,20 @@ def run_cython_dynamic_shape(M,
     matmul_kernel(tensor_a, tensor_b, tensor_c)
 
     tensor_ref_c = torch.matmul(tensor_a.to(torch.float), tensor_b.to(torch.float)).to(out_dtype)
-    tilelang.testing.torch_assert_close(
-        tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+    tilelang.testing.torch_assert_close(tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_cython_dynamic_shape():
-    run_cython_dynamic_shape(
-        T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_cython_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
-    run_cython_dynamic_shape(
-        T.dynamic("m"), T.dynamic("n"), 768, False, False, "float16", "float16", "float16", 128,
-        256, 32, 2)
+    run_cython_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
-    run_cython_dynamic_shape(
-        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16",
-        "float16", 128, 256, 32, 2)
+    run_cython_dynamic_shape(T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
-def run_cython_dynamic_shape_with_out_idx(M,
-                                          N,
-                                          K,
-                                          trans_A,
-                                          trans_B,
-                                          in_dtype,
-                                          out_dtype,
-                                          dtypeAccum,
-                                          block_M,
-                                          block_N,
-                                          block_K,
-                                          num_stages=3,
-                                          num_threads=128):
+def run_cython_dynamic_shape_with_out_idx(
+    M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
+):
     program = matmul(
         M,
         N,
@@ -467,13 +350,11 @@ def run_cython_dynamic_shape_with_out_idx(M,
 
     tensor_ref_c = torch.matmul(tensor_a.to(torch.float), tensor_b.to(torch.float)).to(out_dtype)
 
-    tilelang.testing.torch_assert_close(
-        tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+    tilelang.testing.torch_assert_close(tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_cython_dynamic_shape_with_out_idx():
-    run_cython_dynamic_shape_with_out_idx(
-        T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_cython_dynamic_shape_with_out_idx(T.dynamic("m"), 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
 def matmul_int_variable(
@@ -498,10 +379,10 @@ def matmul_int_variable(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
-            offset: T.int32,
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
+        offset: T.int32,
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -525,10 +406,10 @@ def matmul_int_variable(
     return main
 
 
-def run_matmul_int_variable(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype,
-                            out_dtype, dtypeAccum, num_stages, threads):
-    program = matmul_int_variable(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype,
-                                  out_dtype, dtypeAccum, num_stages, threads)
+def run_matmul_int_variable(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, num_stages, threads):
+    program = matmul_int_variable(
+        M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, num_stages, threads
+    )
     matmul_kernel = tilelang.compile(program, execution_backend="cython", out_idx=2)
 
     in_dtype = map_torch_type(in_dtype)
@@ -544,8 +425,7 @@ def run_matmul_int_variable(M, N, K, block_M, block_N, block_K, trans_A, trans_B
 
 
 def test_matmul_int_variable():
-    run_matmul_int_variable(1024, 1024, 1024, 128, 128, 32, False, False, "float16", "float16",
-                            "float32", 0, 128)
+    run_matmul_int_variable(1024, 1024, 1024, 128, 128, 32, False, False, T.float16, T.float16, T.float32, 0, 128)
 
 
 def matmul_float_variable(
@@ -570,10 +450,10 @@ def matmul_float_variable(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
-            offset: T.float32,
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
+        offset: T.float32,
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -597,10 +477,10 @@ def matmul_float_variable(
     return main
 
 
-def run_matmul_float_variable(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype,
-                              out_dtype, dtypeAccum, num_stages, threads):
-    program = matmul_float_variable(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype,
-                                    out_dtype, dtypeAccum, num_stages, threads)
+def run_matmul_float_variable(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, num_stages, threads):
+    program = matmul_float_variable(
+        M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, num_stages, threads
+    )
     matmul_kernel = tilelang.compile(program, execution_backend="cython", out_idx=2)
 
     in_dtype = map_torch_type(in_dtype)
@@ -616,8 +496,7 @@ def run_matmul_float_variable(M, N, K, block_M, block_N, block_K, trans_A, trans
 
 
 def test_matmul_float_variable():
-    run_matmul_float_variable(1024, 1024, 1024, 128, 128, 32, False, False, "float16", "float16",
-                              "float32", 0, 128)
+    run_matmul_float_variable(1024, 1024, 1024, 128, 128, 32, False, False, T.float16, T.float16, T.float32, 0, 128)
 
 
 if __name__ == "__main__":

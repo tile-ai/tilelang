@@ -16,7 +16,8 @@ tilelang.testing.set_random_seed(42)
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def native_sparse_attention(
     batch,
     heads,
@@ -25,18 +26,18 @@ def native_sparse_attention(
     scale=None,
     block_size=64,  # Tile size for attention computation
     groups=1,  # Grouped query attention (GQA) groups
-    selected_blocks=16  # Number of blocks to select per attention head
+    selected_blocks=16,  # Number of blocks to select per attention head
 ):
     if scale is None:
-        scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+        scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
     # Modified shapes for inference (q has seq_len=1)a
     q_shape = [batch, 1, heads, dim]  # Changed seq_len to 1
     kv_shape = [batch, seq_len, head_kv, dim]
     block_indices_shape = [batch, 1, head_kv, selected_blocks]  # Changed seq_len to 1
-    block_indices_dtype = "int32"
-    dtype = "float16"
-    accum_dtype = "float"
+    block_indices_dtype = T.int32
+    dtype = T.float16
+    accum_dtype = T.float32
     block_S = block_size
     block_T = min(128, tilelang.math.next_power_of_2(dim))
 
@@ -53,12 +54,11 @@ def native_sparse_attention(
 
     @T.prim_func
     def native_sparse_attention(
-            Q: T.Tensor(q_shape, dtype),  # [batch, 1, heads, dim] 
-            K: T.Tensor(kv_shape, dtype),  # [batch, seq_len, head_kv, dim]
-            V: T.Tensor(kv_shape, dtype),  # Same shape as K
-            BlockIndices: T.Tensor(block_indices_shape,
-                                   block_indices_dtype),  # Selected block indices
-            Output: T.Tensor(q_shape, dtype),  # Output attention tensor
+        Q: T.Tensor(q_shape, dtype),  # [batch, 1, heads, dim]
+        K: T.Tensor(kv_shape, dtype),  # [batch, seq_len, head_kv, dim]
+        V: T.Tensor(kv_shape, dtype),  # Same shape as K
+        BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),  # Selected block indices
+        Output: T.Tensor(q_shape, dtype),  # Output attention tensor
     ):
         with T.Kernel(1, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             # Shared memory allocations for tile storage
@@ -82,7 +82,7 @@ def native_sparse_attention(
 
             NS = S
             # Copy Q for the single position
-            T.copy(Q[i_b, 0, i_h * G:(i_h + 1) * G, :], Q_shared)  # Changed i_t to 0
+            T.copy(Q[i_b, 0, i_h * G : (i_h + 1) * G, :], Q_shared)  # Changed i_t to 0
 
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -93,16 +93,11 @@ def native_sparse_attention(
                 i_s = BlockIndices[i_b, 0, i_h, i] * BS  # Get block offset
                 if i_s >= 0:  # Skip invalid/padding blocks
                     # Load current key block to shared memory
-                    T.copy(K[i_b, i_s:i_s + BS, i_h, :], K_shared)
+                    T.copy(K[i_b, i_s : i_s + BS, i_h, :], K_shared)
 
                     # Compute QK^T attention scores
                     T.clear(acc_s)
-                    T.gemm(
-                        Q_shared,
-                        K_shared,
-                        acc_s,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
                     # Online softmax with numerical stability
                     # 1. Compute max for scaling
@@ -122,15 +117,14 @@ def native_sparse_attention(
                     T.copy(acc_s, acc_s_cast)
 
                     # Accumulate attention-weighted values
-                    T.copy(V[i_b, i_s:i_s + BS, i_h, i_v * BV:(i_v + 1) * BV], V_shared)
+                    T.copy(V[i_b, i_s : i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared)
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             # Final normalization and output
             for i, j in T.Parallel(G, BV):
                 acc_o[i, j] /= logsum[i]  # Normalize by logsum
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[i_b, 0, i_h * G:(i_h + 1) * G,
-                                    i_v * BV:(i_v + 1) * BV])  # Changed i_t to 0
+            T.copy(O_shared, Output[i_b, 0, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV])  # Changed i_t to 0
 
     return native_sparse_attention
 
@@ -149,21 +143,21 @@ def main():
         selected_blocks=S,
     )
 
-    Q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+    Q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device="cuda").requires_grad_(True)
+    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
 
-    mask = torch.randint(0, 2, (B, SEQ_LEN, groups), device='cuda')
-    DO = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device='cuda')
+    mask = torch.randint(0, 2, (B, SEQ_LEN, groups), device="cuda")
+    DO = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device="cuda")
 
-    block_indices = torch.full((B, SEQ_LEN_Q, H, S), SEQ_LEN, dtype=torch.long, device='cuda')
+    block_indices = torch.full((B, SEQ_LEN_Q, H, S), SEQ_LEN, dtype=torch.long, device="cuda")
     for b in range(B):
         for t in range(SEQ_LEN_Q):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
-                block_indices[b, t, h, :len(i_i)] = i_i
+                block_indices[b, t, h, : len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
-    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN_Q, H), device='cuda')
+    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN_Q, H), device="cuda")
 
     out = kernel(Q, K, V, block_indices.to(torch.int32))
 
@@ -176,6 +170,39 @@ def main():
         block_size=block_size,
     )
     torch.testing.assert_close(ref, out, atol=1e-2, rtol=1e-2)
+
+
+def run_regression_perf():
+    B, SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 16, 1, 32, torch.float16
+    groups = HQ // H
+    SEQ_LEN_Q = 1
+    kernel = native_sparse_attention(
+        batch=B,
+        heads=HQ,
+        seq_len=SEQ_LEN,
+        dim=D,
+        block_size=block_size,
+        groups=HQ // H,
+        selected_blocks=S,
+    )
+
+    Q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device="cuda").requires_grad_(True)
+    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    block_indices = torch.full((B, SEQ_LEN_Q, H, S), SEQ_LEN, dtype=torch.long, device="cuda")
+    for b in range(B):
+        for t in range(SEQ_LEN_Q):
+            for h in range(H):
+                i_i = torch.randperm(max(1, (t // block_size)))[:S]
+                block_indices[b, t, h, : len(i_i)] = i_i
+    block_indices = block_indices.sort(-1)[0]
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(Q, K, V, block_indices.to(torch.int32))
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

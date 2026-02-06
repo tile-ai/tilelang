@@ -5,7 +5,7 @@ import tilelang.language as T
 
 
 def rms_norm_splitk(M, N, blk_m, blk_k):
-    dtype = "float"
+    dtype = T.float
 
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
@@ -22,7 +22,7 @@ def rms_norm_splitk(M, N, blk_m, blk_k):
                     A_local[i, j] += A_shared[i, j] * A_shared[i, j]
             T.reduce_sum(A_local, A_powsum, dim=1)
             for i in T.Parallel(blk_m):
-                A_powsum[i] = T.rsqrt(A_powsum[i] / N) + 1e-12
+                A_powsum[i] = T.rsqrt(A_powsum[i] / N + 1e-12)
 
             for k in range(num_k_step):
                 # reverse, better cache hit rate
@@ -35,7 +35,7 @@ def rms_norm_splitk(M, N, blk_m, blk_k):
 
 
 def rms_norm(M, N, blk_m):
-    dtype = "float"
+    dtype = T.float
 
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
@@ -45,16 +45,16 @@ def rms_norm(M, N, blk_m):
             A_local = T.alloc_fragment((blk_m, N), dtype)
             A_powsum = T.alloc_fragment((blk_m,), dtype)
 
-            T.copy(A[bx * blk_m:(bx + 1) * blk_m, :], A_shared)
+            T.copy(A[bx * blk_m : (bx + 1) * blk_m, :], A_shared)
             T.copy(A_shared, A_local)
             for i, j in T.Parallel(blk_m, N):
                 A_pow_local[i, j] = A_local[i, j] * A_local[i, j]
             T.reduce_sum(A_pow_local, A_powsum, dim=1)
             for i in T.Parallel(blk_m):
-                A_powsum[i] = T.rsqrt(A_powsum[i] / N) + 1e-12
+                A_powsum[i] = T.rsqrt(A_powsum[i] / N + 1e-12)
             for i, j in T.Parallel(blk_m, N):
                 A_local[i, j] *= A_powsum[i]
-            T.copy(A_local, B[bx * blk_m:(bx + 1) * blk_m, :])
+            T.copy(A_local, B[bx * blk_m : (bx + 1) * blk_m, :])
 
     return main
 

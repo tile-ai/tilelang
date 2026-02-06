@@ -1,9 +1,7 @@
 """Rasteration Plan For L2 Cache Locality"""
-from __future__ import annotations
 
 
 class Rasterization:
-
     panel_width_ = None
 
     def __init__(self) -> None:
@@ -19,7 +17,6 @@ class Rasterization:
 
 
 class NoRasterization(Rasterization):
-
     def __init__(self) -> None:
         super().__init__()
 

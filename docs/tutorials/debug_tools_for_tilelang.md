@@ -12,7 +12,6 @@ A Tile Language program (hereafter referred to as a *program*) is transformed in
 2. The program undergoes multiple *Passes* for transformation and optimization (the *lower* stage, see `tilelang/engine/lower.py`), finally producing an intermediate representation (e.g., LLVM or C for CPU, CUDA for NVIDIA GPUs, etc.).
 3. The generated code is compiled by the respective compiler (e.g., nvcc) into a hardware-executable file.
 
-
 ```{figure} ../_static/img/overview.png
 :width: 300
 :alt: Overview of the compilation process
@@ -22,9 +21,9 @@ A Tile Language program (hereafter referred to as a *program*) is transformed in
 
 During this process, users may encounter roughly three categories of issues:
 
-* **Generation issues**: The Tile Language program fails to generate a valid hardware-executable file (i.e., errors during the lowering process).
-* **Correctness issues**: The resulting executable runs, but produces incorrect results.
-* **Performance issues**: The executable runs with performance significantly below the expected theoretical hardware limits.
+- **Generation issues**: The Tile Language program fails to generate a valid hardware-executable file (i.e., errors during the lowering process).
+- **Correctness issues**: The resulting executable runs, but produces incorrect results.
+- **Performance issues**: The executable runs with performance significantly below the expected theoretical hardware limits.
 
 This tutorial focuses on the first two issues—how to debug generation and correctness problems. Performance tuning often requires using vendor-provided profiling tools (e.g., **Nsight Compute**, **rocProf**, etc.) for further hardware-level analysis, which we will address in future materials.
 
@@ -51,7 +50,6 @@ func = matmul(1024, 1024, 1024, 128, 128, 32)
 ## Debugging Generation Issues
 
 TileLang essentially performs *progressive lowering*. For example, a `T.copy` may first be expanded into `T.Parallel` (see the pass `LowerTileOP`), which is then expanded again, eventually resulting in lower-level statements that can be translated to CUDA C code.
-
 
 ```{figure} ../_static/img/ir_transform_diagram.png
 :width: 400
@@ -169,6 +167,31 @@ The output messages will include something like:
 
 ```text
 msg='hello world' BlockIdx=(0, 0, 0), ThreadIdx=(0, 0, 0): 0
+```
+
+### Visual Layout Inference For TileLang
+ The **Visual Layout Inference** tool automatically generates visual diagrams that illustrate the mapping between logical indices, thread IDs, and register file locations.
+
+When TileLang performs layout inference, it determines how fragment buffers are distributed across threads. The visual layout tool captures this information and generates:
+1. **Textual output**: A human-readable description of the layout mapping
+2. **Visual diagrams**: Color-coded plots showing the thread-to-data mapping
+
+The visual layout inference tool is controlled through the `TL_LAYOUT_VISUALIZATION_ENABLE` and `TL_LAYOUT_VISUALIZATION_FORMATS` pass configuration. By default, `TL_LAYOUT_VISUALIZATION_ENABLE` is **disabled** to avoid performance overhead during compilation.
+
+When enabled, `TL_LAYOUT_VISUALIZATION_FORMATS` accepts string values to control output formats:
+- "txt": Text output only (same as default)
+- "all": Generates all formats (TXT, PDF, PNG, SVG)
+- "png": Generate PNG format only
+- "pdf": Generate PDF format only
+- "svg": Generate SVG format only
+- "txt,svg": Generate multiple formats (comma-separated) in addition to text output
+
+The output messages of "txt" will include something like:
+```
+C_local inferenced layout:
+  Shape: [32, 32] -> [8]
+  Thread: _j // 16 * 64 + _i // 16 * 32 + _i % 8 * 4 + _j % 8 // 2
+  Index:  [_j % 16 // 8 * 4 + _i % 16 // 8 * 2 + _j % 2]
 ```
 
 ## Conclusion

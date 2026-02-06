@@ -1,4 +1,4 @@
-from tilelang import tvm as tvm
+from tilelang import language as T
 import tilelang.testing
 import tilelang
 import torch
@@ -27,13 +27,11 @@ def matmul_kernel_jit(
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
-    import tilelang.language as T
-
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -95,7 +93,6 @@ def run_gemm_kernel_jit(
         B = B.T
 
     def ref_program(A, B):
-        import torch
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -113,9 +110,9 @@ def test_gemm_f16f16f16_nn_kernel_jit():
         768,
         False,
         False,
-        "float16",
-        "float16",
-        "float16",
+        T.float16,
+        T.float16,
+        T.float16,
         128,
         128,
         32,

@@ -7,7 +7,6 @@ import tilelang.language as T
 
 @tilelang.jit
 def get_kernel(reduce_op: str, dtype: str):
-
     assert reduce_op in ["sum", "max", "min", "bitand", "bitor"]
 
     @T.prim_func
@@ -33,16 +32,16 @@ def get_kernel(reduce_op: str, dtype: str):
 
 
 def test_warp_reduce_sum():
-    a = torch.randn((32,), dtype=torch.float32, device='cuda')
-    kernel = get_kernel('sum', 'float32')
+    a = torch.randn((32,), dtype=torch.float32, device="cuda")
+    kernel = get_kernel("sum", T.float32)
     ref = torch.full_like(a, a.sum())
     kernel(a)
     torch.testing.assert_close(a, ref)
 
 
 def test_warp_reduce_max():
-    a = torch.randn((32,), dtype=torch.float32, device='cuda')
-    kernel = get_kernel("max", 'float32')
+    a = torch.randn((32,), dtype=torch.float32, device="cuda")
+    kernel = get_kernel("max", T.float32)
     print(kernel.get_kernel_source())
     ref = torch.full_like(a, a.max())
     kernel(a)
@@ -50,16 +49,16 @@ def test_warp_reduce_max():
 
 
 def test_warp_reduce_min():
-    a = torch.randn((32,), dtype=torch.float32, device='cuda')
-    kernel = get_kernel("min", 'float32')
+    a = torch.randn((32,), dtype=torch.float32, device="cuda")
+    kernel = get_kernel("min", T.float32)
     ref = torch.full_like(a, a.min())
     kernel(a)
     torch.testing.assert_close(a, ref)
 
 
 def test_warp_reduce_bitand():
-    a = torch.randint(0, 100, size=(32,), dtype=torch.int32, device='cuda')
-    kernel = get_kernel("bitand", 'int32')
+    a = torch.randint(0, 100, size=(32,), dtype=torch.int32, device="cuda")
+    kernel = get_kernel("bitand", T.int32)
     ref_val = a[0]
     for i in range(1, a.shape[0]):
         ref_val = ref_val & a[i]
@@ -69,8 +68,8 @@ def test_warp_reduce_bitand():
 
 
 def test_warp_reduce_bitor():
-    a = torch.randint(0, 100, size=(32,), dtype=torch.int32, device='cuda')
-    kernel = get_kernel("bitor", 'int32')
+    a = torch.randint(0, 100, size=(32,), dtype=torch.int32, device="cuda")
+    kernel = get_kernel("bitor", T.int32)
     ref_val = a[0]
     for i in range(1, a.shape[0]):
         ref_val = ref_val | a[i]

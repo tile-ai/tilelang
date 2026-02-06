@@ -5,6 +5,7 @@ import torch.multiprocessing
 import example_put_warp
 
 
+@tilelang.testing.requires_distributed
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_example_put_warp():

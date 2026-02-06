@@ -15,13 +15,14 @@
 # specific language governing permissions and limitations
 # under the License.
 """Utility for ROCm backend"""
+
 # ruff: noqa
 import re
 import subprocess
 import os
 from os.path import join, exists
 
-import tvm.ffi
+import tvm_ffi
 from tvm.base import py_str
 import tvm.runtime
 import tvm.target
@@ -100,7 +101,7 @@ def rocm_link(in_file, out_file, lld=None):
         raise RuntimeError(msg)
 
 
-@tvm.ffi.register_func("tvm_callback_rocm_link", override=True)
+@tvm_ffi.register_global_func("tvm_callback_rocm_link", override=True)
 def callback_rocm_link(obj_bin):
     """Links object file generated from LLVM to HSA Code Object
 
@@ -124,7 +125,7 @@ def callback_rocm_link(obj_bin):
     return cobj_bin
 
 
-@tvm.ffi.register_func("tvm_callback_rocm_bitcode_path", override=True)
+@tvm_ffi.register_global_func("tvm_callback_rocm_bitcode_path", override=True)
 def callback_rocm_bitcode_path(rocdl_dir=None):
     """Utility function to find ROCm device library bitcodes
 
@@ -226,7 +227,7 @@ def have_matrixcore(compute_version=None):
     return False
 
 
-@tvm.ffi.register_func("tvm_callback_rocm_get_arch", override=True)
+@tvm_ffi.register_global_func("tvm_callback_rocm_get_arch", override=True)
 def get_rocm_arch(rocm_path="/opt/rocm"):
     """Utility function to get the AMD GPU architecture
 
@@ -255,9 +256,11 @@ def get_rocm_arch(rocm_path="/opt/rocm"):
             gpu_arch = match.group(1)
         return gpu_arch
     except subprocess.CalledProcessError:
-        print(f"Unable to execute rocminfo command, \
+        print(
+            f"Unable to execute rocminfo command, \
                 please ensure ROCm is installed and you have an AMD GPU on your system.\
-                    using default {gpu_arch}.")
+                    using default {gpu_arch}."
+        )
         return gpu_arch
 
 

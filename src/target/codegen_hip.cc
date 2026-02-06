@@ -828,6 +828,16 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::__ldg())) {
+    // HIP fallback: regular load
+    const BufferLoadNode *bl = op->args[0].as<BufferLoadNode>();
+    ICHECK(bl) << "T.__ldg expects a BufferLoad as the first argument.";
+    ICHECK_EQ(bl->indices.size(), 1)
+        << "T.__ldg currently supports flattened 1D buffer accesses.";
+    const BufferNode *buffer = bl->buffer.get();
+    PrimExpr base = bl->indices[0];
+    auto buffer_ref = this->GetBufferRef(op->dtype, buffer, base);
+    os << buffer_ref;
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);
@@ -928,7 +938,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float32", "float"},
         {"float64", "double"},
         {"float16x4", "float16x4"},
-        {"bfloat16x4", "bfloat16x4"},
+        {"bfloat16x4", "bfloat16x4_vec"},
         {"float32x4", "float32x4"},
         {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
         {"float8_e4m3fnuzx8", "long"},
@@ -959,8 +969,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
                                     "A_ptr, B_ptr, C_ptr>, but got "
                                  << op->args.size();
     auto op_instance = Downcast<StringImm>(op->args[0]);
-    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
-                          op->args, true, os);
+    this->PrintCallExtern(GetType(tvm::ffi::GetRef<PrimExpr>(op)),
+                          op_instance->value, op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "tl_gemm_sp is not supported on HIP";
   } else if (op->op.same_as(tl::loop_break())) {
@@ -1190,9 +1200,9 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       if (op->value < 0) {
         temp << "-";
       }
-      temp << ((op->dtype.bits() == 32) ? "HIPRT_INF_F" : "HIPRT_INF");
+      temp << ((op->dtype.bits() == 32) ? "HUGE_VALF" : "HUGE_VAL");
     } else if (std::isnan(op->value)) {
-      temp << ((op->dtype.bits() == 32) ? "HIPRT_NAN_F" : "HIPRT_NAN");
+      temp << ((op->dtype.bits() == 32) ? "NAN" : "NAN");
     } else {
       temp << std::scientific << op->value;
       if (op->dtype.bits() == 32)
@@ -1309,9 +1319,15 @@ void CodeGenTileLangHIP::AddFunction(const PrimFunc &f) {
   ReserveKeywordsAsUnique();
 
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-  ICHECK(global_symbol.defined())
+  ICHECK(global_symbol.has_value())
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
   bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
+  std::unordered_set<const VarNode *> non_restrict;
+  if (auto opt =
+          f->GetAttr<ffi::Array<tir::Var>>(tl::attr::kNonRestrictParams)) {
+    for (const tir::Var &v : opt.value())
+      non_restrict.insert(v.get());
+  }
 
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
@@ -1346,7 +1362,7 @@ void CodeGenTileLangHIP::AddFunction(const PrimFunc &f) {
         }
       }
 
-      if (no_alias) {
+      if (no_alias && !non_restrict.count(v.get())) {
         PrintRestrict(v, stream);
       }
     } else {

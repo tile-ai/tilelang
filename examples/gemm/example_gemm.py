@@ -3,13 +3,12 @@ import tilelang.language as T
 
 
 @tilelang.jit(out_idx=[-1])
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-
+def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def gemm(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -56,6 +55,12 @@ def main():
     latency = profiler.do_bench(backend="cupti")
     # latency = profiler.do_bench()
     print(f"tilelang Latency: {latency}ms")
+
+
+def run_regression_perf():
+    kernel = matmul(1024, 1024, 1024, 128, 128, 32)
+    profiler = kernel.get_profiler()
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

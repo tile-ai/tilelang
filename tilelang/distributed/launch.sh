@@ -13,7 +13,7 @@ export NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT:=23}
 
 # set nccl log level
 export NCCL_DEBUG=${NCCL_DEBUG:="WARN"}  # set env var. `NCCL_DEBUG` to expected NCCL log level
-# Choices: [VERSION, WARN(default), INFO, TRACE], 
+# Choices: [VERSION, WARN(default), INFO, TRACE],
 
 # set launch configurations
 nproc_per_node=${GPUS:=$(nvidia-smi --list-gpus | wc -l)}  # set env var. `GPUS` to # of GPUs per node

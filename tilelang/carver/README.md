@@ -1,12 +1,12 @@
 # Carver: A Tile-Structure Based Hint Recommend Framework for Machine Learning Compilers
 
-**Carver** is a lightweight framework for generating and ranking tile configurations (also known as **tiling strategies**, **blocking schemes**, or **scheduling hints**) for common GPU, CPU, and accelerator backends. It helps you explore efficient mappings of loops for operations such as matrix multiplication, elementwise transforms, and other reduction-oriented kernels. 
+**Carver** is a lightweight framework for generating and ranking tile configurations (also known as **tiling strategies**, **blocking schemes**, or **scheduling hints**) for common GPU, CPU, and accelerator backends. It helps you explore efficient mappings of loops for operations such as matrix multiplication, elementwise transforms, and other reduction-oriented kernels.
 
-Carver combines hardware architecture information, user-defined tile structures, and built-in heuristics to recommend tiling strategies (or "hints"). The recommended hints are easily adaptable to multiple backends, including [TVM](https://tvm.apache.org/), [triton](https://github.com/openai/triton), [tilelang](https://github.com/LeiYanggh/tilelang) (or other domain-specific compilers).
+Carver combines hardware architecture information, user-defined tile structures, and built-in heuristics to recommend tiling strategies (or "hints"). The recommended hints are easily adaptable to multiple backends, including [TVM](https://tvm.apache.org/), [triton](https://github.com/openai/triton), [tilelang](https://github.com/tile-ai/tilelang) (or other domain-specific compilers).
 
 ---
 
-### Key Features
+## Key Features
 - **Unified Tiling Framework**: Generate tile candidates for multiple backends under a unified API.
 - **Architecture-Specific Modeling**: Take into account architecture constraints (e.g., CUDA `smem_cap`, warp size, CPU cache structure, etc.) when generating hints.
 - **Flexible Templates**: High-level templates (like `MatmulTemplate`, `GeneralReductionTemplate`, `ElementwiseTemplate`) let you concisely specify kernel structures.
@@ -33,8 +33,8 @@ arch = CUDA("nvidia/geforce-rtx-4090")
 #         for k in Reduce(1024):
 #             ...
 carve_template = carver.GeneralReductionTemplate(
-    structure="SSR",          
-    shape=[1024, 1024, 1024], 
+    structure="SSR",
+    shape=[1024, 1024, 1024],
     dtype="float16",
 ).with_arch(arch)
 
@@ -71,7 +71,6 @@ for hint in hints:
 A tile structure composed of S and R can simulate various cases. For example, structure `SS` represents a 2D element-wise operation, while `SSR` can represent a general matrix multiplication.
 
 We can specialize more advanced templates to provide finer-grained information, such as `MatmulTemplate`.
-
 
 ### Matmul Template
 
@@ -190,8 +189,6 @@ You might interpret this in **Triton** as:
 
 This helps quickly test multiple configurations without manually guessing.
 
-
-
 ## Supported Templates
 
 Carver abstracts common loop patterns through templates:
@@ -203,8 +200,6 @@ Carver abstracts common loop patterns through templates:
 
 You can also create your own specialized templates if you have unique loop structures or constraints. For instance, you might define specialized templates for convolution, flash attention, etc.
 
-
 ## TODO Items
 
 - [ ] **Adapt to tile language**: Provide ready-made scheduling calls or wrappers for [tilelang](https://github.com/LeiYanggh/tilelang) to streamline end-to-end integration.
-

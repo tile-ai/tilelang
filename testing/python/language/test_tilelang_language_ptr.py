@@ -6,8 +6,7 @@ import tilelang.language as T
 from tilelang.utils import map_torch_type
 
 
-def matmul_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-
+def matmul_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def main(
         a_ptr: T.ptr,
@@ -40,7 +39,7 @@ def matmul_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype
     return main
 
 
-def run_matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+def run_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     program = matmul_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
     jit_kernel = tl.compile(program, target="cuda", execution_backend="cython")
 

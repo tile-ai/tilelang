@@ -1,5 +1,4 @@
 """TVMScript parser overrides tailored for TileLang."""
-from __future__ import annotations
 
 from functools import partial
 
@@ -8,7 +7,6 @@ from tvm.script.parser._core import dispatch, doc
 from tvm.tir import BufferLoad, Var
 
 from tvm.script.parser.tir import parser as tvm_tir_parser
-from tilelang.language.tir.ir import SerialStepSpec
 
 
 def _get_node_span(node: doc.AST) -> tuple[int, int, int, int]:
@@ -61,8 +59,12 @@ def tilelang_visit_assign(self, node: doc.Assign) -> None:  # pylint: disable=un
             lhs.ctx = load_ctx
             lhs_value = self.eval_expr(lhs)
             lhs.ctx = store_ctx
-            if (isinstance(lhs_value, BufferLoad) and lhs_value.buffer.scope() == "local.var" and
-                    len(lhs_value.indices) == 1 and lhs_value.indices[0] == 0):
+            if (
+                isinstance(lhs_value, BufferLoad)
+                and lhs_value.buffer.scope() == "local.var"
+                and len(lhs_value.indices) == 1
+                and lhs_value.indices[0] == 0
+            ):
                 T.buffer_store(lhs_value.buffer, rhs, indices=[0])
                 continue
 
@@ -109,8 +111,12 @@ def tilelang_visit_aug_assign(self, node: doc.AugAssign) -> None:  # pylint: dis
         lhs.ctx = load_ctx
         lhs_value = self.eval_expr(lhs)
         lhs.ctx = store_ctx
-        if (isinstance(lhs_value, BufferLoad) and lhs_value.buffer.scope() == "local.var" and
-                len(lhs_value.indices) == 1 and lhs_value.indices[0] == 0):
+        if (
+            isinstance(lhs_value, BufferLoad)
+            and lhs_value.buffer.scope() == "local.var"
+            and len(lhs_value.indices) == 1
+            and lhs_value.indices[0] == 0
+        ):
             T.buffer_store(lhs_value.buffer, rhs, indices=[0])
             return
 
@@ -134,8 +140,12 @@ def tilelang_visit_ann_assign(self, node: doc.AnnAssign) -> None:  # pylint: dis
         lhs.ctx = load_ctx
         lhs_value = self.eval_expr(lhs)
         lhs.ctx = store_ctx
-        if (isinstance(lhs_value, BufferLoad) and lhs_value.buffer.scope() == "local.var" and
-                len(lhs_value.indices) == 1 and lhs_value.indices[0] == 0):
+        if (
+            isinstance(lhs_value, BufferLoad)
+            and lhs_value.buffer.scope() == "local.var"
+            and len(lhs_value.indices) == 1
+            and lhs_value.indices[0] == 0
+        ):
             T.buffer_store(lhs_value.buffer, rhs, indices=[0])
             return
 
@@ -143,64 +153,3 @@ def tilelang_visit_ann_assign(self, node: doc.AnnAssign) -> None:  # pylint: dis
     frame = T.LetStmt(rhs, var=ann_var)
     frame.add_callback(partial(frame.__exit__, None, None, None))
     frame.__enter__()
-
-
-# Override For to support stepped serial: T.serial(start, end, step)
-@dispatch.register(token="tir", type_name="For")
-def tilelang_visit_for(self, node: doc.For) -> None:  # pylint: disable=unused-argument
-    """Override `For` to add support for T.serial(start, end, step).
-
-    When the iterable is a SerialStepSpec, lower it to a unit-step loop over
-    t in [0, floor_div(|end-start|, step)] and bind the loop variable using a
-    Let to `start + t*step` (inclusive semantics).
-    """
-    iter_val = self.eval_expr(node.iter)
-
-    # Fast path: fall back to TVM default behavior when not a SerialStepSpec
-    if not isinstance(iter_val, SerialStepSpec):
-        if not isinstance(iter_val, T.frame.ForFrame):
-            self.report_error(
-                node.iter,
-                "Expect the for loop to be one of the following: "
-                "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding",
-            )
-        with self.var_table.with_frame(), iter_val as iters:
-            self.eval_assign(
-                target=node.target, source=iters, bind_value=tvm_tir_parser.bind_for_value)
-            self.visit_body(node.body)
-        return
-
-    # Stepped inclusive serial: require positive integer step
-    start = iter_val.start
-    end = iter_val.stop
-    step = iter_val.step
-    annotations = iter_val.annotations
-
-    # Normalize step to Python int if possible, otherwise expect IntImm-like
-    if isinstance(step, int):
-        step_val = step
-    else:
-        step_val = getattr(step, "value", None)
-        if step_val is None:
-            self.report_error(node.iter, "T.serial step must be an integer or IntImm")
-            return
-
-    if step_val <= 0:
-        self.report_error(node.iter, "T.serial step must be a positive integer")
-        return
-
-    # Use tvm.tir.floordiv via builder ops from tilelang.tir.ir if available
-    # Avoid importing op wrappers; compute using arithmetic to keep it simple.
-    # We construct: T.ceildiv((end - start), step)
-    extent = T.ceildiv(end - start, step_val)  # type: ignore[operator]
-
-    for_frame = T.serial(0, extent, annotations=annotations)
-    with self.var_table.with_frame(), for_frame as t:
-        # Bind loop target as Let var: i = start + t * step
-        stepped_index = start + t * step_val  # type: ignore[operator]
-        self.eval_assign(
-            target=node.target,
-            source=stepped_index,
-            bind_value=tvm_tir_parser.bind_assign_value,
-        )
-        self.visit_body(node.body)

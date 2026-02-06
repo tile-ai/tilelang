@@ -5,19 +5,15 @@ import triton.language as tl
 import argparse
 from einops import rearrange, einsum
 import torch.nn.functional as F
-
 import math
 import time
 from heuristic import num_splits_heuristic
+from tilelang.profiler import do_bench
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4]\
-        for num_stages in [1, 2, 3, 4, 7]
-    ],
-    key=['BLOCK_H', 'BLOCK_N', 'BLOCK_D'],
+    configs=[triton.Config({}, num_warps=num_warps, num_stages=num_stages) for num_warps in [1, 2, 4] for num_stages in [1, 2, 3, 4, 7]],
+    key=["BLOCK_H", "BLOCK_N", "BLOCK_D"],
 )
 @triton.jit
 def _split_kernel(
@@ -79,16 +75,11 @@ def _split_kernel(
         loop_range = blocks_per_split
 
     q_ptr += batch_idx * stride_q_b + head_idx_q * stride_q_h
-    k_cache_ptr += batch_idx * stride_k_b + head_idx_kv * stride_k_h + offs_n[
-        None, :] * stride_k_s + offs_d[:, None] * stride_k_d
-    v_cache_ptr += batch_idx * stride_v_b + head_idx_kv * stride_v_h + offs_n[:,
-                                                                              None] * stride_v_s + offs_d[
-                                                                                  None, :] * stride_v_d
+    k_cache_ptr += batch_idx * stride_k_b + head_idx_kv * stride_k_h + offs_n[None, :] * stride_k_s + offs_d[:, None] * stride_k_d
+    v_cache_ptr += batch_idx * stride_v_b + head_idx_kv * stride_v_h + offs_n[:, None] * stride_v_s + offs_d[None, :] * stride_v_d
     mask_ptr += batch_idx * stride_mask_b + head_idx_kv * stride_mask_h
 
-    q = tl.load(
-        q_ptr + offs_h[:, None] * stride_q_h + offs_d[None, :] * stride_q_d,
-        mask=offs_h[:, None] < gqa_group_size)
+    q = tl.load(q_ptr + offs_h[:, None] * stride_q_h + offs_d[None, :] * stride_q_d, mask=offs_h[:, None] < gqa_group_size)
     start = blocks_per_split * split_idx + tl.minimum(split_idx, remaining_blocks)
     for i in range(loop_range):
         block_idx = tl.load(mask_ptr + (start + i) * stride_mask_s)
@@ -119,23 +110,18 @@ def _split_kernel(
     acc = acc * l_recip
     acc = acc.to(o_partial_ptr.dtype.element_ty)
 
-    lse_partial_ptr += batch_idx * stride_lse_b + (
-        head_idx_q + offs_h) * stride_lse_h + split_idx * stride_lse_split
+    lse_partial_ptr += batch_idx * stride_lse_b + (head_idx_q + offs_h) * stride_lse_h + split_idx * stride_lse_split
     tl.store(lse_partial_ptr, m_i, mask=offs_h < gqa_group_size)
 
-    o_partial_ptr += batch_idx * stride_o_b + (
-        head_idx_q +
-        offs_h[:, None]) * stride_o_h + split_idx * stride_o_split + offs_d[None, :] * stride_o_d
+    o_partial_ptr += (
+        batch_idx * stride_o_b + (head_idx_q + offs_h[:, None]) * stride_o_h + split_idx * stride_o_split + offs_d[None, :] * stride_o_d
+    )
     tl.store(o_partial_ptr, acc, mask=offs_h[:, None] < gqa_group_size)
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4]\
-        for num_stages in [1, 2, 3, 4, 7]
-    ],
-    key=['BLOCK_D'],
+    configs=[triton.Config({}, num_warps=num_warps, num_stages=num_stages) for num_warps in [1, 2, 4] for num_stages in [1, 2, 3, 4, 7]],
+    key=["BLOCK_D"],
 )
 @triton.jit
 def _merge_kernel(
@@ -163,18 +149,15 @@ def _merge_kernel(
     offs_d = tl.arange(0, BLOCK_D)
 
     lse_offsets = lse_partial_ptr + batch_idx * lse_partial_stride_b + head_idx * lse_partial_stride_h
-    lse = tl.load(
-        lse_offsets + offs_splits * lse_partial_stride_split,
-        mask=offs_splits < num_splits,
-        other=float("-inf"))
+    lse = tl.load(lse_offsets + offs_splits * lse_partial_stride_split, mask=offs_splits < num_splits, other=float("-inf"))
 
     lse_max = tl.max(lse)
 
     o_offsets = o_partial_ptr + batch_idx * o_partial_stride_b + head_idx * o_partial_stride_h
     o_partial = tl.load(
-        o_offsets + offs_splits[:, None] * o_partial_stride_split +
-        offs_d[None, :] * o_partial_stride_d,
-        mask=offs_splits[:, None] < num_splits)
+        o_offsets + offs_splits[:, None] * o_partial_stride_split + offs_d[None, :] * o_partial_stride_d,
+        mask=offs_splits[:, None] < num_splits,
+    )
     sumexp_normalized_splitk = tl.exp(lse - lse_max)
     sumexp_normalized = tl.sum(sumexp_normalized_splitk, axis=0)
     numerator_normalized = tl.sum(o_partial * sumexp_normalized_splitk[:, None], axis=0)
@@ -209,19 +192,13 @@ def block_sparse_flash_decode_gqa_indice_triton(
     num_m_blocks = 1 * (heads // heads_kv + block_H - 1) // block_H
     num_n_blocks = max_selected_blocks
 
-    size_one_kv_head = max_selected_blocks * block_size * (
-        dim + dim_v) * 2  #kv_seqlen * (dim + dim_v) * 2
+    size_one_kv_head = max_selected_blocks * block_size * (dim + dim_v) * 2  # kv_seqlen * (dim + dim_v) * 2
     total_mblocks = batch * heads_kv * num_m_blocks
     num_sm = 64
     # num_sm = self.num_sm
     num_splits = num_splits_heuristic(
-        total_mblocks,
-        num_sm,
-        num_n_blocks,
-        num_m_blocks,
-        size_one_kv_head,
-        is_causal_or_local=True,
-        max_splits=128)
+        total_mblocks, num_sm, num_n_blocks, num_m_blocks, size_one_kv_head, is_causal_or_local=True, max_splits=128
+    )
 
     # print("num_splits:", num_splits, "num_blocks:", num_n_blocks)
 
@@ -295,24 +272,18 @@ def block_sparse_flash_decode_gqa_indice_triton(
     return output
 
 
-def ref_program_torch(query, key, value, block_indices, cache_seqlens, max_cache_seqlen, num_blocks,
-                      block_size):
-
+def ref_program_torch(query, key, value, block_indices, cache_seqlens, max_cache_seqlen, num_blocks, block_size):
     batch, heads, dim = query.shape
     heads_kv = key.shape[2]
     dim_v = value.shape[-1]
     num_head_groups = query.shape[1] // key.shape[2]
     scale = dim**0.5
-    key = rearrange(key, 'b n h d -> b h n d')  # [batch_size, heads_kv, seqlen_kv, dim]
-    value = rearrange(value, 'b n h d -> b h n d')  # [batch_size, heads_kv, seqlen_kv, dim]
+    key = rearrange(key, "b n h d -> b h n d")  # [batch_size, heads_kv, seqlen_kv, dim]
+    value = rearrange(value, "b n h d -> b h n d")  # [batch_size, heads_kv, seqlen_kv, dim]
 
-    query = rearrange(
-        query, 'b (h g) d -> b g h d',
-        g=num_head_groups)  # [batch_size, num_head_groups, heads_kv, dim]
+    query = rearrange(query, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, heads_kv, dim]
 
-    scores = einsum(
-        query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
+    scores = einsum(query, key, "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
 
     sparse_mask = torch.zeros_like(scores)
     # Assign mask values based on block_indices
@@ -321,42 +292,33 @@ def ref_program_torch(query, key, value, block_indices, cache_seqlens, max_cache
             valid_indices = block_indices[b, h]  # Extract indices for this batch and head
             for idx in valid_indices:
                 if idx >= 0:
-                    sparse_mask[b, :, h, idx * block_size:(idx + 1) * block_size] = 1
-    scores = scores.masked_fill(sparse_mask == 0, float('-inf'))
+                    sparse_mask[b, :, h, idx * block_size : (idx + 1) * block_size] = 1
+    scores = scores.masked_fill(sparse_mask == 0, float("-inf"))
 
-    range_len = torch.arange(scores.shape[-1], device='cuda').unsqueeze(0)
+    range_len = torch.arange(scores.shape[-1], device="cuda").unsqueeze(0)
     cache_seqlens_expanded = cache_seqlens.unsqueeze(1)
     pad_mask = range_len >= cache_seqlens_expanded
     pad_mask = pad_mask[:, None, None, :]
-    scores = scores.masked_fill(pad_mask, float('-inf'))
-    attention = F.softmax(
-        scores / scale, dim=-1)  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
+    scores = scores.masked_fill(pad_mask, float("-inf"))
+    attention = F.softmax(scores / scale, dim=-1)  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
 
-    out = einsum(attention, value,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, heads_kv, dim]
-    out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
+    out = einsum(attention, value, "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, heads_kv, dim]
+    out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 
 
 def ref_program_fa(query, key, value, cache_seqlens):
     # latency reference
     # from flash_attn_interface import flash_attn_with_kvcache # fa3
-    from flash_attn import flash_attn_with_kvcache  #fa2
+    from flash_attn import flash_attn_with_kvcache  # fa2
+
     query = query.unsqueeze(1)
     output = flash_attn_with_kvcache(query, key, value, cache_seqlens=cache_seqlens)
     output = output.squeeze(1)
     return output
 
 
-def main(batch=64,
-         heads=32,
-         heads_kv=8,
-         max_cache_seqlen=8192,
-         dim=128,
-         dim_v=128,
-         sparse_ratio=0.8,
-         block_size=32):
-
+def main(batch=64, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=128, sparse_ratio=0.8, block_size=32):
     batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
     sparse_ratio = sparse_ratio
     block_size = block_size
@@ -369,34 +331,29 @@ def main(batch=64,
     dtype = torch.float16
     block_H = 64
 
-    Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
-    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
-    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device='cuda')
-    cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device='cuda')
+    Q = torch.randn((batch, heads, dim), dtype=dtype, device="cuda")
+    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device="cuda")
+    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device="cuda")
+    cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device="cuda")
     # cache_seqlens = torch.full((batch,), max_cache_seqlen, dtype=torch.int32, device='cuda')
     # Ensure at least one element equals cache_seqlen
-    random_index = torch.randint(0, batch, (1,), device='cuda').item()  # Select a random index
-    cache_seqlens[
-        random_index] = max_cache_seqlen  # Assign cache_seqlen to ensure at least one occurrence
+    random_index = torch.randint(0, batch, (1,), device="cuda").item()  # Select a random index
+    cache_seqlens[random_index] = max_cache_seqlen  # Assign cache_seqlen to ensure at least one occurrence
 
     print("cache_seqlens: ", cache_seqlens)
 
     max_valid_num_blocks = torch.ceil(cache_seqlens / block_size).int()
     print("max_valid_num_blocks: ", max_valid_num_blocks)
     # Initialize block_indices with -1 (for padding blocks)
-    block_indices = torch.full((batch, heads_kv, max_selected_blocks),
-                               -1,
-                               dtype=torch.int32,
-                               device='cuda')
+    block_indices = torch.full((batch, heads_kv, max_selected_blocks), -1, dtype=torch.int32, device="cuda")
 
     # Assign valid indices while ensuring no duplicates within each batch-group
     for b in range(batch):
         max_valid_block = max_valid_num_blocks[b].item()  # Max valid blocks for this batch
         if max_valid_block > 0:  # Ensure there's at least one valid block
             for h in range(heads_kv):
-                valid_indices = torch.randperm(
-                    max_valid_block, device='cuda', dtype=torch.int32)[:max_selected_blocks]
-                block_indices[b, h, :len(valid_indices)] = valid_indices
+                valid_indices = torch.randperm(max_valid_block, device="cuda", dtype=torch.int32)[:max_selected_blocks]
+                block_indices[b, h, : len(valid_indices)] = valid_indices
 
     # Sort indices within each batch-group for consistency
     block_indices, _ = block_indices.sort(dim=-1, descending=True)
@@ -408,8 +365,7 @@ def main(batch=64,
     max_num_blocks = torch.max(max_valid_num_blocks).item()
     print("max_num_blocks: ", max_num_blocks)
 
-    ref = ref_program_torch(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, max_num_blocks,
-                            block_size)
+    ref = ref_program_torch(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, max_num_blocks, block_size)
 
     triton_out = block_sparse_flash_decode_gqa_indice_triton(
         Q,
@@ -423,8 +379,7 @@ def main(batch=64,
     )
 
     print("max difference: ", torch.max(torch.abs(ref - triton_out)))
-    assert torch.allclose(
-        ref, triton_out, atol=1e-2), "Output mismatch between Triton and reference implementation"
+    assert torch.allclose(ref, triton_out, atol=1e-2), "Output mismatch between Triton and reference implementation"
     print("Passed the ref test!")
 
     # Measure performance
@@ -466,15 +421,13 @@ def main(batch=64,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=64, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--heads_kv', type=int, default=8, help='heads_kv')
-    parser.add_argument(
-        '--max_cache_seqlen', type=int, default=8192, help='kvcache sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--dim_v', type=int, default=128, help='dim_v')
-    parser.add_argument('--sparse_ratio', type=float, default=0.8, help='sparse ratio')
-    parser.add_argument('--block_size', type=int, default=32, help='block_size')
+    parser.add_argument("--batch", type=int, default=64, help="batch size")
+    parser.add_argument("--heads", type=int, default=32, help="heads")
+    parser.add_argument("--heads_kv", type=int, default=8, help="heads_kv")
+    parser.add_argument("--max_cache_seqlen", type=int, default=8192, help="kvcache sequence length")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--dim_v", type=int, default=128, help="dim_v")
+    parser.add_argument("--sparse_ratio", type=float, default=0.8, help="sparse ratio")
+    parser.add_argument("--block_size", type=int, default=32, help="block_size")
     args = parser.parse_args()
-    main(args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v,
-         args.sparse_ratio, args.block_size)
+    main(args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v, args.sparse_ratio, args.block_size)

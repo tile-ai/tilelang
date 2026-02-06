@@ -8,6 +8,7 @@ import importlib.metadata
 
 cuda_python_version = importlib.metadata.version("cuda-python")
 from packaging import version
+
 if version.parse(cuda_python_version) >= version.parse("12.8.0"):
     from cuda.bindings import driver as cuda
     from cuda.bindings import runtime as cudart
@@ -75,8 +76,9 @@ def write32_on_stream(tensor: torch.Tensor, value: int, stream: torch.cuda.Strea
         stream (torch.cuda.Stream | None): The CUDA stream to use for the operation.
             If None, the current stream will be used.
     """
-    assert isinstance(tensor, torch.Tensor) and tensor.dtype in (torch.int32, torch.uint32), \
+    assert isinstance(tensor, torch.Tensor) and tensor.dtype in (torch.int32, torch.uint32), (
         f"tensor must be a torch.Tensor with 32-bit dtype, but got {tensor.dtype}"
+    )
     assert tensor.numel() == 1, "tensor must have exactly one element"
     if stream is None:
         stream = torch.cuda.current_stream()
@@ -97,8 +99,9 @@ def write64_on_stream(tensor: torch.Tensor, value: int, stream: torch.cuda.Strea
         stream (torch.cuda.Stream | None): The CUDA stream to use for the operation.
             If None, the current stream will be used.
     """
-    assert isinstance(tensor, torch.Tensor) and tensor.dtype in (torch.int64, torch.uint64), \
+    assert isinstance(tensor, torch.Tensor) and tensor.dtype in (torch.int64, torch.uint64), (
         f"tensor must be a torch.Tensor with 64-bit dtype, but got {tensor.dtype}"
+    )
     assert tensor.numel() == 1, "tensor must have exactly one element"
     if stream is None:
         stream = torch.cuda.current_stream()

@@ -35,35 +35,10 @@ PrimExpr BarrierBlocksOpNode::get_offset(const BufferLoadNode *load) const {
   }                                                                            \
   TVM_REGISTER_OP("tl." #OpName)                                               \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)
-
-TIR_DEFINE_TL_BUILTIN(init_barrier_gpu)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(arrive_barrier_gpu)
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(wait_barrier_gpu)
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(wait_eq).set_num_inputs(2).set_attr<TCallEffectKind>(
-    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(sync_barrier_gpu)
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TIR_DEFINE_TL_BUILTIN(sync_grid).set_num_inputs(1).set_attr<TCallEffectKind>(
-    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
-
-BarrierBlocksOp::BarrierBlocksOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<BarrierBlocksOpNode> node = make_object<BarrierBlocksOpNode>();
+BarrierBlocksOp::BarrierBlocksOp(Array<PrimExpr> args,
+                                 Map<String, ObjectRef> annotations) {
+  ObjectPtr<BarrierBlocksOpNode> node =
+      tvm::ffi::make_object<BarrierBlocksOpNode>();
   node->local_bar_addr = args[0];
   node->need_fence = bool(args[1].as<IntImmNode>()->value);
   const auto *call = node->local_bar_addr.as<CallNode>();
@@ -77,7 +52,6 @@ BarrierBlocksOp::BarrierBlocksOp(Array<PrimExpr> args, BufferMap vmap) {
   node->local_bar = load->buffer;
   node->local_indices = load->indices;
   data_ = std::move(node);
-  (void)vmap;
 }
 
 Stmt BarrierBlocksOpNode::Lower(const LowerArgs &T,
@@ -117,7 +91,7 @@ LayoutMap BarrierBlocksOpNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TileOperator BarrierBlocksOpNode::Clone() const {
-  auto node = make_object<BarrierBlocksOpNode>(*this);
+  auto node = tvm::ffi::make_object<BarrierBlocksOpNode>(*this);
   return BarrierBlocksOp(node);
 }
 
@@ -135,14 +109,13 @@ PrimExpr BarrierBlocksOpNode::MakeLocalBarAddr(const LowerArgs &T) const {
               {BufferLoad(buffer, local_indices)});
 }
 
-WaitOp::WaitOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<WaitOpNode> node = make_object<WaitOpNode>();
+WaitOp::WaitOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<WaitOpNode> node = tvm::ffi::make_object<WaitOpNode>();
   node->relation = args[0].as<IntImmNode>()->value;
   node->addr = args[1];
   node->expected = args[2];
   node->peer = args[3];
   data_ = std::move(node);
-  (void)vmap;
 }
 
 bool WaitOpNode::is_distributed() const {
@@ -187,17 +160,37 @@ LayoutMap WaitOpNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TileOperator WaitOpNode::Clone() const {
-  auto node = make_object<WaitOpNode>(*this);
+  auto node = tvm::ffi::make_object<WaitOpNode>(*this);
   return WaitOp(node);
 }
 
-TIR_REGISTER_TL_OP(BarrierBlocksOp, barrier_blocks)
+TIR_REGISTER_TL_TILE_OP(BarrierBlocksOp, barrier_blocks)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_REGISTER_TL_OP(WaitOp, wait)
+TIR_REGISTER_TL_TILE_OP(WaitOp, wait)
     .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(init_barrier_gpu)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(arrive_barrier_gpu)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(wait_barrier_gpu)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(sync_barrier_gpu)
+    .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -210,8 +203,8 @@ TIR_DEFINE_TL_BUILTIN(fence_gpu).set_num_inputs(0).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(fence_sys).set_num_inputs(0).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ BarrierBlocksOpNode::RegisterReflection(); });
-TVM_FFI_STATIC_INIT_BLOCK({ WaitOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { BarrierBlocksOpNode::RegisterReflection(); }
+TVM_FFI_STATIC_INIT_BLOCK() { WaitOpNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

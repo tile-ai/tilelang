@@ -65,21 +65,24 @@ public:
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
+  void VisitExpr_(const MinNode *op, std::ostream &os) final;
+  void VisitExpr_(const MaxNode *op, std::ostream &os) final;
   void VisitStmt_(const EvaluateNode *op) final;
   void VisitStmt_(const AllocateNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
+  void VisitStmt_(const BufferStoreNode *op) final;
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const GlobalVar &gvar, const PrimFunc &f);
-  void PrintFunctionSignature(const String &function_name, const PrimFunc &func,
-                              std::ostream &os);
+  void PrintFunctionSignature(const ffi::String &function_name,
+                              const PrimFunc &func, std::ostream &os);
 
 protected:
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;
-  void PrintCallExtern(Type ret_type, String global_symbol,
-                       const Array<PrimExpr> &args, bool skip_first_arg,
+  void PrintCallExtern(Type ret_type, ffi::String global_symbol,
+                       const ffi::Array<PrimExpr> &args, bool skip_first_arg,
                        std::ostream &os) final; // NOLINT(*)
 
 private:
@@ -99,6 +102,8 @@ private:
   std::string vid_global_barrier_state_;
   // Global barrier expected node.
   std::string vid_global_barrier_expect_;
+  // Global curand state
+  std::string curand_philox_state;
 
   // whether enable fp16
   bool enable_fp16_{false};
@@ -120,14 +125,25 @@ private:
   bool need_math_constants_h_{false};
   // whether need mma.h
   bool need_mma_h_{false};
+  // whether need tl mma instruction header
+  bool need_mma_instruction_h_{false};
+  // whether need tl wgmma instruction header
+  bool need_wgmma_instruction_h_{false};
+  // whether need tl tcgen05mma instruction header
+  bool need_tcgen05mma_instruction_h_{false};
+  // whether need tl mma_sm70 instruction header
+  bool need_mma_sm70_instruction_h_{false};
+  // whether need tcgen_05 common header
+  bool need_tcgen05_common_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
   // whether need cooperative_groups.h
   bool need_cooperative_groups_{false};
+  // whether need curand_kernel.h
+  bool need_curand_kernel_h_{false};
   // whether need distributed.h
   bool use_distributed_{use_distributed()};
   // whether need nvshmem.h
-
   bool use_nvshmem_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
@@ -147,6 +163,7 @@ private:
 
   std::unordered_map<const VarNode *, std::string> fragment_shapes;
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
+  std::unordered_map<const VarNode *, IntImm> unroll_factor;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,

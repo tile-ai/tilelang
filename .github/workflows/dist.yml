@@ -1,5 +1,6 @@
 name: Dist
 on:
+  workflow_dispatch:
   schedule:
     # gemini said this is 6:00 china time
     - cron: "0 22 * * *"
@@ -28,6 +29,18 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
+env:
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+  UV_INDEX_STRATEGY: "unsafe-best-match"
+  UV_HTTP_TIMEOUT: "600"
+  XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
+  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
+  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
+
 jobs:
   build-wheels:
     name: Build wheels for Python ${{ matrix.python-version }} on ${{ matrix.target.runner }} with ${{ matrix.target.toolkit }}
@@ -37,39 +50,41 @@ jobs:
     strategy:
       matrix:
         target:
-          - { runner: ubuntu-latest, toolkit: "CUDA-12.1" }
-          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
-          - { runner: macos-latest, toolkit: "Metal" }
+          # NOTE(wt): Temporarily disable ARM and MacOS, as NVSHMEM only supports x86 (?)
+          - { runner: ubuntu-latest, toolkit: "CUDA-12.8" }
+          # - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
+          - { runner: ubuntu-latest, toolkit: "Nightly-CUDA-13.0" }
+          # - { runner: ubuntu-24.04-arm, toolkit: "Nightly-CUDA-13.0" }
+          # - { runner: macos-latest, toolkit: "Metal" }
         python-version:
-          - "3.8"
-          # TVM is built with Python 3.8 Limited API, it should work with all Python >= 3.8.
-          # - "3.9"
-          # - "3.10"
-          # - "3.11"
-          # - "3.12"
-          # - "3.13"
-          # - "3.14"
+          # Wheels are built with Python 3.8 Limited API, they should work with all Python >= 3.8.
+          # Only build wheels against Python 3.8 Limited API to save CI resources.
+          - "3.9"
       fail-fast: false
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
     env:
-      NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
+      IS_RELEASE: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]') }}
+      NO_VERSION_LABEL: "OFF"
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
           submodules: recursive
 
-      # NB: CIBW builds wheels in containers on Linux
-      - name: Setup ccache (macOS only)
-        if: runner.os == 'macOS'
+      - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
+          max-size: "200MB"
           create-symlink: true
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.target.toolkit }}
           evict-old-files: "7d"
+          append-timestamp: false
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+          restore-keys: |
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+            wheel-${{ runner.os }}-${{ runner.arch }}
 
       - name: Set CIBW_BUILD
         run: |
@@ -80,21 +95,81 @@ jobs:
 
           if [[ "${{ matrix.target.toolkit }}" == *"CUDA"* ]]; then
             CUDA_VERSION="${{ matrix.target.toolkit }}"
-            CUDA_VERSION="${CUDA_VERSION#CUDA-}"
+            CUDA_VERSION="${CUDA_VERSION##*-}"
+            CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
+            CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+            if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
+              # Use torch nightly builds
+              export UV_INDEX="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
+            else
+              export UV_INDEX="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
+              echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+            fi
+            echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          fi
+
+          if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
+            if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
+              # Avoid using same file name for different toolkit.
+              echo "NO_GIT_VERSION=ON" | tee -a "${GITHUB_ENV}"
+            else
+              echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
+            fi
+          fi
+
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            HOST_CCACHE_DIR="$(ccache --get-config cache_dir)"
+            # Install torch for tilescale_ext._C build, then setup ccache
+            echo "CIBW_BEFORE_BUILD_LINUX=pip install torch --no-cache-dir && dnf install -y ccache && ccache -o cache_dir=/host${HOST_CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
           fi
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v3.2
+        uses: pypa/cibuildwheel@v3.3
         with:
           package-dir: .
           output-dir: wheelhouse
           config-file: "{package}/pyproject.toml"
 
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          activate-environment: true
+
+      - name: Test built wheels
+        # Skip CUDA wheel tests on GitHub-hosted runners (no CUDA available)
+        # Tests should be run on self-hosted runners with CUDA or during release validation
+        if: ${{ !contains(matrix.target.toolkit, 'CUDA') || contains(matrix.target.runner, 'self-hosted') }}
+        run: |
+          for WHEEL in wheelhouse/*.whl; do
+            echo "Testing wheel: ${WHEEL}"
+            (
+              set -e
+              uv venv --python=3.12 test-venv
+              source test-venv/bin/activate
+
+              uv pip install --upgrade pip setuptools wheel
+              if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
+                uv pip install --prerelease=allow -v torch
+              fi
+
+              uv pip install -v "${WHEEL}"
+              (
+                set -e
+                cd /
+                uv run --no-project -- python -c "import tilelang; print(tilelang.__version__)"
+              )
+              deactivate
+              rm -rf test-venv
+            )
+          done
+
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
           path: wheelhouse/*.whl
@@ -102,14 +177,14 @@ jobs:
 
   list-artifacts:
     name: List artifacts
-    # Not PR to save artifact storage, as wheels are only needed for releases.
-    if: github.event_name != 'pull_request'
+    # Not PR to save artifact storage, as artifacts are only needed for releases.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
     runs-on: ubuntu-latest
     needs: [build-wheels]
     timeout-minutes: 15
     steps:
       - name: Download built wheels
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           pattern: wheels-*
           path: dist
@@ -119,7 +194,7 @@ jobs:
         run: ls -lh dist/*
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: artifacts
           path: dist/*

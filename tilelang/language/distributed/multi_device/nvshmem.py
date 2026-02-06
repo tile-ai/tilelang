@@ -95,13 +95,6 @@ def getmem(*args):
 
 
 def putmem_block(*args):
-    """Put data from local memory to remote memory at block granularity.
-    Args:
-        dest: Symmetric address of the destination data object.
-        src: Symmetric address of the object containing the data to be copied.
-        nelems: Number of elements to be transferred (in bytes).
-        pe: The PE ID of the destination PE.
-    """
     return tir.call_intrin("handle", tir.op.Op.get("tl.PutmemBlock"), *args)
 
 
@@ -156,8 +149,7 @@ def putmem_signal_nbi_block(dest, src, nelems, sig_addr, signal, sig_op, pe):
         sig_op: The type of update to be performed on the remote signal data object.
         pe: The PE ID of the destination PE.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.PutmemSignalNbiBlock"), dest, src, nelems,
-                           sig_addr, signal, sig_op, pe)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.PutmemSignalNbiBlock"), dest, src, nelems, sig_addr, signal, sig_op, pe)
 
 
 def putmem_signal_warp(*args):
@@ -179,15 +171,9 @@ def signal_op(sig_addr, signal, sig_op, pe):
     return tir.call_intrin("handle", tir.op.Op.get("tl.SignalOp"), sig_addr, signal, sig_op, pe)
 
 
-def signal_wait_until(sig_addr, cmp, cmp_val):
-    """Waits until the signal at `sig_addr` reaches the specified `signal` value on the specified PE.
-    Args:
-        sig_addr (uint64_t*): Symmetric address of the signal word to be waited on.
-        cmp: The comparison operation to be performed on the signal value.
-        cmp_val (uint64_t): The value to compare against the signal value.
-    """
-    # Actually nvshmem_signal_wait_until returns a uint64_t* value, but we simply ignore it
-    return tir.call_intrin("handle", tir.op.Op.get("tl.SignalWaitUntil"), sig_addr, cmp, cmp_val)
+def signal_wait_until(*args):
+    # TODO: handle return value(which is uint*64)?
+    return tir.call_intrin("int32", tir.op.Op.get("tl.SignalWaitUntil"), *args)
 
 
 def broadcast(*args):

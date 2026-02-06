@@ -20,6 +20,8 @@
 debug/
 build/
 *dist/
+dist*/
+!distributed*/
 wheelhouse/
 __pycache__
 nnfusion.tar.gz
@@ -110,3 +112,24 @@ nvshmem_src/
 # CMake
 cmake-build/
 cmake-build-*/
+
+# Git version for sdist
+.git_commit.txt
+
+# pre-commit cache
+.pre-commit-cache/*
+
+# host checks logs
+maint/host_checks/logs/*
+
+# ncu
+*.ncu-rep
+
+# csv
+*.csv
+
+# clang-tidy
+/run-clang-tidy.py
+
+# perf regression test
+.perf_regression/

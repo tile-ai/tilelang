@@ -1,4 +1,5 @@
 """The profiler and convert to torch utils"""
+
 from __future__ import annotations
 
 import torch
@@ -7,7 +8,6 @@ from .base import BaseKernelAdapter
 
 
 class TorchDLPackKernelAdapter(BaseKernelAdapter):
-
     def _convert_torch_func(self) -> callable:
         torch_func = to_pytorch_func(self.mod)
 

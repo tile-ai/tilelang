@@ -8,7 +8,13 @@ from libc.stdlib cimport malloc, free
 from tvm import tir
 from tilelang.utils.tensor import map_torch_type
 from tilelang.env import env
-if env.USE_NVSHMEM:
+
+def _use_nvshmem():
+    """Check if NVSHMEM is enabled in the environment."""
+    val = str(env.USE_NVSHMEM).lower()
+    return val in ("1", "true", "yes", "on")
+
+if _use_nvshmem():
     import pynvshmem
 
 cdef class CythonKernelWrapper:
@@ -35,7 +41,8 @@ cdef class CythonKernelWrapper:
         self.params = params
         self.lib = lib
         # Convert TVM types to native Python types during initialization
-        self.param_dtypes = [param.dtype for param in params]
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        self.param_dtypes = [param.torch_dtype() for param in params]
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
         self.get_current_device = torch.cuda.current_device
@@ -85,8 +92,8 @@ cdef class CythonKernelWrapper:
                 tensor_device = tensor.device
                 device_type_match = device.type == tensor_device.type
                 device_index_match = (
-                    tensor_device.index is None or 
-                    device.index is None or 
+                    tensor_device.index is None or
+                    device.index is None or
                     tensor_device.index == device.index
                 )
                 if not (device_type_match and device_index_match):
@@ -118,7 +125,7 @@ cdef class CythonKernelWrapper:
                     f"expected {len(shape_list)} dimensions, "
                     f"got {tensor.dim()}"
                 )
-                
+
             # Check each dimension
             for shape_idx, expected_shape in shape_list:
                 actual_shape = tensor.shape[shape_idx]
@@ -178,7 +185,7 @@ cdef class CythonKernelWrapper:
             )
 
         # Use current CUDA stream if none specified
-        if stream == -1: 
+        if stream == -1:
             if torch.cuda.is_available():
                 try:
                     stream = torch._C._cuda_getCurrentRawStream(torch.cuda.current_device())
@@ -215,7 +222,7 @@ cdef class CythonKernelWrapper:
                         f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
                         f"Expected shape: {shape}"
                     )
-                if env.USE_NVSHMEM:
+                if _use_nvshmem():
                     tensor = pynvshmem.nvshmem_create_tensor(shape, dtype)
                 else:
                     tensor = torch.empty(*shape, dtype=dtype, device=device)
@@ -244,7 +251,7 @@ cdef class CythonKernelWrapper:
             torch.int64: ctypes.c_int64,
             torch.bool: ctypes.c_bool,
         }
-        
+
         call_args = []
         for i, tensor in enumerate(tensor_list):
             if isinstance(tensor, torch.Tensor):
@@ -257,6 +264,8 @@ cdef class CythonKernelWrapper:
                     if dtype not in dtype_to_ctype:
                         raise ValueError(f"Unsupported tensor dtype: {dtype}")
                     call_args.append(dtype_to_ctype[dtype](tensor))
+            elif tensor is None:
+                call_args.append(ctypes.c_void_p(0))
             else:
                 raise ValueError(f"Unsupported tensor type: {type(tensor)}")
 
@@ -271,9 +280,9 @@ cdef class CythonKernelWrapper:
         # Add dynamic dimension values to kernel arguments
         for _, (ref_id, buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
             if ref_id == 0:
-                call_args.append(tensor_list[buffer_idx].shape[shape_idx])
+                call_args.append(ctypes.c_int64(tensor_list[buffer_idx].shape[shape_idx]))
             else:
-                call_args.append(tensor_list[buffer_idx].stride(shape_idx))
+                call_args.append(ctypes.c_int64(tensor_list[buffer_idx].stride(shape_idx)))
 
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))
@@ -289,4 +298,3 @@ cdef class CythonKernelWrapper:
             return tensor_list[self.result_idx[0]]
         else:
             return [tensor_list[i] for i in self.result_idx]
-    

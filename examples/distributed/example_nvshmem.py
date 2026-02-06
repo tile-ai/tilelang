@@ -29,11 +29,10 @@ extern "C" __global__ void __launch_bounds__(128) main_kernel(short* __restrict_
 
 
 def dist_test(M, N, block_M, block_N, dtype="int16"):
-
     @T.prim_func
     def main(
-            A: T.Buffer((M, N), dtype),
-            B: T.Buffer((M, N), dtype),
+        A: T.Buffer((M, N), dtype),
+        B: T.Buffer((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), dtype)

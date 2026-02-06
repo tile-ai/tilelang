@@ -16,6 +16,7 @@
 #include "../target/utils.h"
 #include "builtin.h"
 #include "distributed.h"
+#include "operator.h"
 #include "parallel.h"
 
 namespace tvm {
@@ -50,8 +51,8 @@ PrimExpr PutOpNode::MakeRemappedAddress(const LowerArgs &T,
   return MakeAddress(remapped, indices);
 }
 
-PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<PutOpNode> node = make_object<PutOpNode>();
+PutOp::PutOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<PutOpNode> node = tvm::ffi::make_object<PutOpNode>();
   node->src_addr = args[0];
   node->dst_addr = args[1];
   ICHECK(node->src_addr.as<CallNode>()) << "src_addr must be a call node";
@@ -80,7 +81,6 @@ PutOp::PutOp(Array<PrimExpr> args, BufferMap vmap) {
   node->scope = args[5].as<StringImm>().value()->value;
   node->enable_aggressive_vectorize = bool(args[6].as<IntImm>().value()->value);
   data_ = std::move(node);
-  (void)vmap;
 }
 
 bool PutOpNode::is_distributed() const {
@@ -129,7 +129,7 @@ LayoutMap PutOpNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TileOperator PutOpNode::Clone() const {
-  auto node = make_object<PutOpNode>(*this);
+  auto node = tvm::ffi::make_object<PutOpNode>(*this);
   return PutOp(node);
 }
 
@@ -160,8 +160,8 @@ PrimExpr GetOpNode::MakeRemappedAddress(const LowerArgs &T,
   return MakeAddress(remapped, indices);
 }
 
-GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<GetOpNode> node = make_object<GetOpNode>();
+GetOp::GetOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<GetOpNode> node = tvm::ffi::make_object<GetOpNode>();
   node->src_addr = args[0];
   node->dst_addr = args[1];
   ICHECK(node->src_addr.as<CallNode>()) << "src_addr must be a call node";
@@ -190,7 +190,6 @@ GetOp::GetOp(Array<PrimExpr> args, BufferMap vmap) {
   node->scope = args[5].as<StringImm>().value()->value;
   node->enable_aggressive_vectorize = bool(args[6].as<IntImm>().value()->value);
   data_ = std::move(node);
-  (void)vmap;
 }
 
 bool GetOpNode::is_distributed() const {
@@ -241,12 +240,12 @@ LayoutMap GetOpNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TileOperator GetOpNode::Clone() const {
-  auto node = make_object<GetOpNode>(*this);
+  auto node = tvm::ffi::make_object<GetOpNode>(*this);
   return GetOp(node);
 }
 
-StOp::StOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<StOpNode> node = make_object<StOpNode>();
+StOp::StOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<StOpNode> node = tvm::ffi::make_object<StOpNode>();
   node->dst = args[0];
   ICHECK(node->dst.as<CallNode>()) << "dst must be a call node";
   ICHECK(node->dst.as<CallNode>()->op.same_as(builtin::address_of()))
@@ -258,7 +257,6 @@ StOp::StOp(Array<PrimExpr> args, BufferMap vmap) {
   node->na = args[4].as<IntImm>().value()->value;
   node->dst_pe = args[5];
   data_ = std::move(node);
-  (void)vmap;
 }
 
 bool StOpNode::is_distributed() const {
@@ -309,12 +307,12 @@ LayoutMap StOpNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TileOperator StOpNode::Clone() const {
-  auto node = make_object<StOpNode>(*this);
+  auto node = tvm::ffi::make_object<StOpNode>(*this);
   return StOp(node);
 }
 
-LdOp::LdOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<LdOpNode> node = make_object<LdOpNode>();
+LdOp::LdOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<LdOpNode> node = tvm::ffi::make_object<LdOpNode>();
   node->src = args[0];
   ICHECK(node->src.as<CallNode>()) << "src must be a call node";
   ICHECK(node->src.as<CallNode>()->op.same_as(builtin::address_of()))
@@ -327,7 +325,6 @@ LdOp::LdOp(Array<PrimExpr> args, BufferMap vmap) {
   node->nc = args[5].as<IntImm>().value()->value;
   node->src_pe = args[6];
   data_ = std::move(node);
-  (void)vmap;
 }
 
 bool LdOpNode::is_distributed() const {
@@ -378,30 +375,30 @@ LayoutMap LdOpNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TileOperator LdOpNode::Clone() const {
-  auto node = make_object<LdOpNode>(*this);
+  auto node = tvm::ffi::make_object<LdOpNode>(*this);
   return LdOp(node);
 }
 
-TIR_REGISTER_TL_OP(PutOp, put)
+TIR_REGISTER_TL_TILE_OP(PutOp, put)
     .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_REGISTER_TL_OP(GetOp, get)
+TIR_REGISTER_TL_TILE_OP(GetOp, get)
     .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_REGISTER_TL_OP(StOp, st).set_num_inputs(6).set_attr<TCallEffectKind>(
+TIR_REGISTER_TL_TILE_OP(StOp, st).set_num_inputs(6).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
-TIR_REGISTER_TL_OP(LdOp, ld).set_num_inputs(7).set_attr<TCallEffectKind>(
+TIR_REGISTER_TL_TILE_OP(LdOp, ld).set_num_inputs(7).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ PutOpNode::RegisterReflection(); });
-TVM_FFI_STATIC_INIT_BLOCK({ GetOpNode::RegisterReflection(); });
-TVM_FFI_STATIC_INIT_BLOCK({ StOpNode::RegisterReflection(); });
-TVM_FFI_STATIC_INIT_BLOCK({ LdOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { PutOpNode::RegisterReflection(); }
+TVM_FFI_STATIC_INIT_BLOCK() { GetOpNode::RegisterReflection(); }
+TVM_FFI_STATIC_INIT_BLOCK() { StOpNode::RegisterReflection(); }
+TVM_FFI_STATIC_INIT_BLOCK() { LdOpNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

@@ -72,16 +72,13 @@ class ReduceScatter2DContext:
         for buf in self.signal_bufs:
             assert buf.shape[0] >= 2 * self.world_size
 
-        self.scatter_signal_bufs = [buf[:self.world_size] for buf in self.signal_bufs]
-        self.rs_per_node_signal_bufs = [
-            buf[self.world_size:self.world_size * 2] for buf in self.signal_bufs
-        ]
+        self.scatter_signal_bufs = [buf[: self.world_size] for buf in self.signal_bufs]
+        self.rs_per_node_signal_bufs = [buf[self.world_size : self.world_size * 2] for buf in self.signal_bufs]
 
         for node_id in range(self.nnodes):
             self.scatter_signal_buf_list_for_each_node.append(
-                self.scatter_signal_bufs[self.local_rank][node_id *
-                                                          self.local_world_size:(node_id + 1) *
-                                                          self.local_world_size])
+                self.scatter_signal_bufs[self.local_rank][node_id * self.local_world_size : (node_id + 1) * self.local_world_size]
+            )
 
     def reset_barriers(self):
         self.signal_bufs[self.local_rank].fill_(0)
@@ -93,9 +90,7 @@ class ReduceScatter2DContext:
         M_per_node = M_per_rank * self.local_world_size
         M_start = node_id * M_per_node
         M_end = M_start + M_per_node
-        scatter_bufs_intra_node = [
-            self.scatter_bufs[i][M_start:M_end] for i in range(self.local_world_size)
-        ]
+        scatter_bufs_intra_node = [self.scatter_bufs[i][M_start:M_end] for i in range(self.local_world_size)]
         return scatter_bufs_intra_node, self.scatter_signal_buf_list_for_each_node[node_id]
 
     @property
@@ -123,50 +118,29 @@ class ReduceScatter2DContext:
         return self.scatter_signal_bufs[self.local_rank]
 
 
-def create_reduce_scater_2d_ctx(max_M,
-                                N,
-                                rank,
-                                world_size,
-                                local_world_size,
-                                dtype,
-                                allocator,
-                                overlap_with_gemm=True,
-                                num_reduction_sms=15) -> ReduceScatter2DContext:
+def create_reduce_scater_2d_ctx(
+    max_M, N, rank, world_size, local_world_size, dtype, allocator, overlap_with_gemm=True, num_reduction_sms=15
+) -> ReduceScatter2DContext:
     """
-        for num_reduction_sms: tunable param, 16 are enough for H800
-            For H800, we overlap local reduce and inter-node p2p with intra-node scatter.
-            The reduction kernel bandwidth is not a bottleneck if it exceeds 450GB, so only a few SMs are needed.
-            For machines with higher intra_node bandwidth(e.g. H100), we may need to increase the number of SMs or redesign overlapping.
+    for num_reduction_sms: tunable param, 16 are enough for H800
+        For H800, we overlap local reduce and inter-node p2p with intra-node scatter.
+        The reduction kernel bandwidth is not a bottleneck if it exceeds 450GB, so only a few SMs are needed.
+        For machines with higher intra_node bandwidth(e.g. H100), we may need to increase the number of SMs or redesign overlapping.
     """
     assert world_size % local_world_size == 0
     assert max_M % world_size == 0
 
     scatter_bufs = tilelang.tensor((max_M, N), dtype, allocator=allocator, return_peers=True)
-    rs_per_node_bufs = tilelang.tensor((max_M // local_world_size, N),
-                                       dtype,
-                                       allocator=allocator,
-                                       return_peers=True)
-    p2p_bufs = tilelang.tensor((max_M // local_world_size, N),
-                               dtype,
-                               allocator=allocator,
-                               return_peers=True)
+    rs_per_node_bufs = tilelang.tensor((max_M // local_world_size, N), dtype, allocator=allocator, return_peers=True)
+    p2p_bufs = tilelang.tensor((max_M // local_world_size, N), dtype, allocator=allocator, return_peers=True)
 
     # signal_buf: scatter_signal | rs_per_node_signal
     num_signal_bufs = 2
-    signal_bufs = tilelang.tensor((world_size * num_signal_bufs),
-                                  dtype=torch.uint32,
-                                  allocator=allocator,
-                                  return_peers=True)
-    symm_barriers = tilelang.tensor((local_world_size,),
-                                    torch.int32,
-                                    allocator=allocator,
-                                    return_peers=True)
+    signal_bufs = tilelang.tensor((world_size * num_signal_bufs), dtype=torch.uint32, allocator=allocator, return_peers=True)
+    symm_barriers = tilelang.tensor((local_world_size,), torch.int32, allocator=allocator, return_peers=True)
     symm_barriers[rank] = 0
 
-    counter_signal_buf = tilelang.tensor((local_world_size),
-                                         dtype=torch.uint32,
-                                         allocator=allocator,
-                                         return_peers=True)
+    counter_signal_buf = tilelang.tensor((local_world_size), dtype=torch.uint32, allocator=allocator, return_peers=True)
 
     dist.barrier()
 
@@ -191,29 +165,21 @@ def create_reduce_scater_2d_ctx(max_M,
         reduction_stream=reduction_stream,
         num_sync_sms=num_sync_sms,
         num_p2p_sms=num_p2p_sms,
-        num_reduction_sms=num_reduction_sms)
+        num_reduction_sms=num_reduction_sms,
+    )
     return ctx
 
 
 @tilelang.jit
-def kernel_ring_reduce_tma(M_per_rank,
-                           N,
-                           block_M,
-                           block_N,
-                           begin_idx,
-                           num_splits,
-                           threads,
-                           persistent=False,
-                           dtype="float16",
-                           accum_dtype="float"):
-
+def kernel_ring_reduce_tma(
+    M_per_rank, N, block_M, block_N, begin_idx, num_splits, threads, persistent=False, dtype="float16", accum_dtype="float"
+):
     @T.prim_func
     def _kernel_ring_reduce_tma(
-            C: T.Tensor((M_per_rank * num_splits, N), dtype),
-            output: T.Tensor((M_per_rank, N), dtype),
+        C: T.Tensor((M_per_rank * num_splits, N), dtype),
+        output: T.Tensor((M_per_rank, N), dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(M_per_rank, block_M), T.ceildiv(N, block_N), threads=threads) as (bx, by):
+        with T.Kernel(T.ceildiv(M_per_rank, block_M), T.ceildiv(N, block_N), threads=threads) as (bx, by):
             data_shared = T.alloc_shared((block_M, block_N), dtype)
             init_shared = T.alloc_shared((block_M, block_N), dtype)
             data_local = T.alloc_fragment((block_M, block_N), dtype)
@@ -233,10 +199,7 @@ def kernel_ring_reduce_tma(M_per_rank,
     return _kernel_ring_reduce_tma
 
 
-def _wait_eq_cuda(signal_tensor: torch.Tensor,
-                  signal: int,
-                  stream: Optional[torch.cuda.Stream] = None,
-                  require_i64=False):
+def _wait_eq_cuda(signal_tensor: torch.Tensor, signal: int, stream: Optional[torch.cuda.Stream] = None, require_i64=False):
     stream = stream or torch.cuda.current_stream()
     if signal_tensor.dtype in (torch.int32, torch.uint32):
         (err,) = cuda.cuStreamWaitValue32(
@@ -258,11 +221,13 @@ def _wait_eq_cuda(signal_tensor: torch.Tensor,
         raise Exception(f"Unsupported signal dtype {signal_tensor.dtype}")
 
 
-def intra_node_scatter(input_intra_node,
-                       scatter_bufs_intra_node: List[torch.Tensor],
-                       scatter_signal_buf_intra_node: torch.Tensor,
-                       local_rank,
-                       overlap_with_gemm=True):
+def intra_node_scatter(
+    input_intra_node,
+    scatter_bufs_intra_node: List[torch.Tensor],
+    scatter_signal_buf_intra_node: torch.Tensor,
+    local_rank,
+    overlap_with_gemm=True,
+):
     M, N = input_intra_node.shape
     local_world_size = len(scatter_bufs_intra_node)
     M_per_rank = M // local_world_size
@@ -275,10 +240,8 @@ def intra_node_scatter(input_intra_node,
         # print(f"scatter_signal_buf_intra_node[remote_local_rank]: {scatter_signal_buf_intra_node[remote_local_rank]}")
         if overlap_with_gemm:
             _wait_eq_cuda(scatter_signal_buf_intra_node[remote_local_rank], 1, stream)
-        src = input_intra_node[remote_local_rank * M_per_rank:(remote_local_rank + 1) *
-                               M_per_rank, :]
-        dst = scatter_bufs_intra_node[remote_local_rank][local_rank * M_per_rank:(local_rank + 1) *
-                                                         M_per_rank, :]
+        src = input_intra_node[remote_local_rank * M_per_rank : (remote_local_rank + 1) * M_per_rank, :]
+        dst = scatter_bufs_intra_node[remote_local_rank][local_rank * M_per_rank : (local_rank + 1) * M_per_rank, :]
         with torch.cuda.stream(stream):
             dst.copy_(src)
 
@@ -292,21 +255,15 @@ def ring_reduce_tma(
 ):
     total_M, N = input.shape
     M_per_split = total_M // num_splits
-    assert output.shape[
-        0] == M_per_split and total_M % num_splits == 0, f"{output.shape}, {total_M}, {num_splits}"
+    assert output.shape[0] == M_per_split and total_M % num_splits == 0, f"{output.shape}, {total_M}, {num_splits}"
 
     def alloc_fn(size, alignment, stream):
         return torch.empty(size, device="cuda", dtype=torch.int8)
 
     if num_sms == -1:
         ring_reduce_tma_func = kernel_ring_reduce_tma(
-            M_per_split,
-            N,
-            block_M=64,
-            block_N=64,
-            begin_idx=begin_idx,
-            num_splits=num_splits,
-            threads=128)
+            M_per_split, N, block_M=64, block_N=64, begin_idx=begin_idx, num_splits=num_splits, threads=128
+        )
         # if begin_idx == 0:
         #     print(ring_reduce_tma_func.get_kernel_source())
         ring_reduce_tma_func(input, output, stream=torch.cuda.current_stream().cuda_stream)
@@ -345,9 +302,7 @@ def ring_reduce(
         raise NotImplementedError("Only Hopper ring reduce is implemented now.")
 
 
-def reduce_scatter_for_each_node(input: torch.Tensor,
-                                 ctx: ReduceScatter2DContext,
-                                 output: Optional[torch.Tensor] = None):
+def reduce_scatter_for_each_node(input: torch.Tensor, ctx: ReduceScatter2DContext, output: Optional[torch.Tensor] = None):
     world_size = ctx.world_size
     local_world_size = ctx.local_world_size
     local_rank = ctx.local_rank
@@ -364,18 +319,14 @@ def reduce_scatter_for_each_node(input: torch.Tensor,
     stream = torch.cuda.current_stream()
     for n in range(0, nnodes):
         cur_node_id = (node_id + n + 1) % nnodes
-        input_intra_node = input[cur_node_id * M_per_node:(cur_node_id + 1) * M_per_node]
-        scatter_bufs_intra_node, scatter_signal_buf_intra_node = ctx.get_scatter_bufs_and_signal_for_each_node(
-            input, cur_node_id)
+        input_intra_node = input[cur_node_id * M_per_node : (cur_node_id + 1) * M_per_node]
+        scatter_bufs_intra_node, scatter_signal_buf_intra_node = ctx.get_scatter_bufs_and_signal_for_each_node(input, cur_node_id)
         intra_node_scatter(
-            input_intra_node,
-            scatter_bufs_intra_node,
-            scatter_signal_buf_intra_node,
-            local_rank,
-            overlap_with_gemm=ctx.overlap_with_gemm)
+            input_intra_node, scatter_bufs_intra_node, scatter_signal_buf_intra_node, local_rank, overlap_with_gemm=ctx.overlap_with_gemm
+        )
 
         # ring reduce intra node
-        rs_buf_cur_node = rs_per_node_buf[M_per_rank * cur_node_id:(cur_node_id + 1) * M_per_rank]
+        rs_buf_cur_node = rs_per_node_buf[M_per_rank * cur_node_id : (cur_node_id + 1) * M_per_rank]
         # nvshmem_barrier_all_on_stream(stream)
         reduction_stream.wait_stream(stream)
         with torch.cuda.stream(reduction_stream):
@@ -385,7 +336,8 @@ def reduce_scatter_for_each_node(input: torch.Tensor,
                 reduce_out_buf,
                 local_rank,
                 local_world_size,
-                num_sms=-1 if n == nnodes - 1 else num_reduction_sms)
+                num_sms=-1 if n == nnodes - 1 else num_reduction_sms,
+            )
 
             # inter node p2p
             if nnodes > 1:
@@ -408,12 +360,10 @@ def reduce_scatter_for_each_node(input: torch.Tensor,
     stream.wait_stream(reduction_stream)
     if nnodes == 1:
         return output
-    return p2p_buf[:M_per_rank * nnodes]
+    return p2p_buf[: M_per_rank * nnodes]
 
 
-def reduce_scatter_multi_node(input: torch.Tensor,
-                              ctx: ReduceScatter2DContext,
-                              output: Optional[torch.Tensor] = None):
+def reduce_scatter_multi_node(input: torch.Tensor, ctx: ReduceScatter2DContext, output: Optional[torch.Tensor] = None):
     """
     A hierarchical reduce-scatter implementation that overlaps the intra-node scatter
     with the local reduce and the inter-node p2p(after reduce). It also provides a rank-wise
@@ -443,9 +393,7 @@ def reduce_scatter_multi_node(input: torch.Tensor,
     return output
 
 
-def reduce_scatter_2d_op(input: torch.Tensor,
-                         ctx: ReduceScatter2DContext,
-                         output: Optional[torch.Tensor] = None):
+def reduce_scatter_2d_op(input: torch.Tensor, ctx: ReduceScatter2DContext, output: Optional[torch.Tensor] = None):
     M, N = input.shape
     assert input.dtype == ctx.dtype
     assert ctx.max_M >= M and ctx.N == N

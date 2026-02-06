@@ -19,28 +19,24 @@ else:
 
 
 def internode_gather(M, local_world_size, block_M, threads):
-
     @T.prim_func
     def main(
-            dst: T.Tensor((M), "float32"),
-            src: T.Tensor((M), "float32"),
+        dst: T.Tensor((M), "float32"),
+        src: T.Tensor((M), "float32"),
     ):
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as (bx):
             rank = T.alloc_local([1], "uint64")
             rank[0] = (T.get_pe() + local_world_size) % (2 * local_world_size)  # 2 nodes
-            T.putmem_nbi_block(
-                T.address_of(dst[bx * block_M]), T.address_of(src[bx * block_M]), block_M * 4,
-                rank[0])
+            T.putmem_nbi_block(T.address_of(dst[bx * block_M]), T.address_of(src[bx * block_M]), block_M * 4, rank[0])
 
     return main
 
 
 def intranode_gather(M, world_size, block_M, threads):
-
     @T.prim_func
     def main(
-            dst: T.Tensor((M * world_size), "float32"),
-            src: T.Tensor((M * 2), "float32"),
+        dst: T.Tensor((M * world_size), "float32"),
+        src: T.Tensor((M * 2), "float32"),
     ):
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as (bx):
             rank = T.alloc_local([1], "uint64")
@@ -68,24 +64,19 @@ def intranode_gather(M, world_size, block_M, threads):
     return main
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     tilelang.disable_cache()
 
     M = 2
     K = 12288
-    #for 2 node(16 GPUs), world_size=16,rank is 0-15,local rank is 0-7
-    WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP, LC_GROUP = init_distributed(
-        return_tp_group=True, return_lc_group=True)
-    local_world_size = int(os.environ.get('LOCAL_WORLD_SIZE', 1))
+    # for 2 node(16 GPUs), world_size=16,rank is 0-15,local rank is 0-7
+    WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP, LC_GROUP = init_distributed(return_tp_group=True, return_lc_group=True)
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 
     allocator = tilelang.get_allocator(
-        size=2**25,
-        device="cuda",
-        is_distributed=True,
-        local_rank=LOCAL_RANK,
-        num_local_ranks=local_world_size,
-        group=LC_GROUP)
+        size=2**25, device="cuda", is_distributed=True, local_rank=LOCAL_RANK, num_local_ranks=local_world_size, group=LC_GROUP
+    )
     print(local_world_size, LOCAL_RANK)
 
     # Each rank sends the local_tensor to ranks of other nodes with the same local_rank
@@ -99,7 +90,7 @@ if __name__ == '__main__':
         print(interkernel.get_kernel_source())
     src = pynvshmem.nvshmem_create_tensor([M], torch.float32)
     dst = pynvshmem.nvshmem_create_tensor([M], torch.float32)
-    input_data = torch.ones([M], dtype=torch.float32, device='cuda') * RANK
+    input_data = torch.ones([M], dtype=torch.float32, device="cuda") * RANK
     src.copy_(input_data)
 
     pynvshmem.nvshmem_barrier_all()
@@ -119,20 +110,14 @@ if __name__ == '__main__':
     src_intra = tilelang.tensor((M * 2), torch.float32, allocator=allocator).normal_()
     dst_intra = tilelang.tensor((M * WORLD_SIZE), torch.float32, allocator=allocator)
     if RANK < WORLD_SIZE / 2:
-        cudart.cudaMemcpy(src_intra.data_ptr(), src.data_ptr(), M * 4,
-                          cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice)
-        cudart.cudaMemcpy(src_intra.data_ptr() + M * 4, dst.data_ptr(), M * 4,
-                          cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice)
+        cudart.cudaMemcpy(src_intra.data_ptr(), src.data_ptr(), M * 4, cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice)
+        cudart.cudaMemcpy(src_intra.data_ptr() + M * 4, dst.data_ptr(), M * 4, cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice)
     else:
-        cudart.cudaMemcpy(src_intra.data_ptr(), dst.data_ptr(), M * 4,
-                          cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice)
-        cudart.cudaMemcpy(src_intra.data_ptr() + M * 4, src.data_ptr(), M * 4,
-                          cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice)
+        cudart.cudaMemcpy(src_intra.data_ptr(), dst.data_ptr(), M * 4, cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice)
+        cudart.cudaMemcpy(src_intra.data_ptr() + M * 4, src.data_ptr(), M * 4, cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice)
 
     env.USE_NVSHMEM = False
-    intrakernel = tilelang.compile(
-        intranode_gather(M, WORLD_SIZE, M, 128),
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_RDC: True})
+    intrakernel = tilelang.compile(intranode_gather(M, WORLD_SIZE, M, 128), pass_configs={tilelang.PassConfigKey.TL_DISABLE_RDC: True})
     intrakernel.initialize(allocator=allocator)
     if LOCAL_RANK == 0:
         print(intrakernel.get_kernel_source())

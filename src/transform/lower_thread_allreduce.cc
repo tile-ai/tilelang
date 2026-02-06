@@ -39,6 +39,7 @@
 namespace tvm {
 namespace tl {
 using namespace tir;
+using namespace ffi;
 
 using runtime::StorageRank;
 using runtime::StorageScope;
@@ -944,11 +945,11 @@ tvm::transform::Pass LowerThreadAllreduce() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerThreadAllreduce", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerThreadAllreduce",
                         LowerThreadAllreduce);
-});
+}
 
 } // namespace transform
 } // namespace tl

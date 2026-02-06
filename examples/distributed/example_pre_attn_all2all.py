@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 import pynvshmem
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 from tilelang.distributed import init_distributed, dtype_map
 import argparse
@@ -44,13 +45,7 @@ def torch_sequence_all_to_all_reference(data_src, group):
     output_list = []
     for _ in range(world_size):
         # Receive [BATCH_SIZE, HEADS_PER_PE, SEQ_PER_PE, HEAD_DIM] from each PE
-        recv_data = torch.empty(
-            batch_size,
-            heads_per_pe,
-            seq_per_pe,
-            head_dim,
-            dtype=data_src.dtype,
-            device=data_src.device)
+        recv_data = torch.empty(batch_size, heads_per_pe, seq_per_pe, head_dim, dtype=data_src.dtype, device=data_src.device)
         output_list.append(recv_data)
 
     # Step 3: Execute all_to_all
@@ -59,8 +54,7 @@ def torch_sequence_all_to_all_reference(data_src, group):
     # Step 4: Reorganize received data
     # output_list[pe_idx] contains data from PE pe_idx
     # Need to arrange by sequence dimension
-    result = torch.empty(
-        batch_size, heads_per_pe, seq_len, head_dim, dtype=data_src.dtype, device=data_src.device)
+    result = torch.empty(batch_size, heads_per_pe, seq_len, head_dim, dtype=data_src.dtype, device=data_src.device)
 
     for pe_idx in range(world_size):
         seq_start = pe_idx * seq_per_pe
@@ -86,12 +80,12 @@ def sequence_parallel_all_to_all(PE_num, BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DI
 
     @T.prim_func
     def main(
-            # Input: [BATCH_SIZE, NUM_HEADS, SEQ_PER_PE, HEAD_DIM]
-            data_src: T.Tensor((BATCH_SIZE, NUM_HEADS, SEQ_PER_PE, HEAD_DIM), dtype),
-            # Output: [BATCH_SIZE, HEADS_PER_PE, SEQ_LEN, HEAD_DIM]
-            data_dst: T.Tensor((BATCH_SIZE, HEADS_PER_PE, SEQ_LEN, HEAD_DIM), dtype),
-            # Sync signals
-            signal: T.Tensor((PE_num,), "uint64"),
+        # Input: [BATCH_SIZE, NUM_HEADS, SEQ_PER_PE, HEAD_DIM]
+        data_src: T.Tensor((BATCH_SIZE, NUM_HEADS, SEQ_PER_PE, HEAD_DIM), dtype),
+        # Output: [BATCH_SIZE, HEADS_PER_PE, SEQ_LEN, HEAD_DIM]
+        data_dst: T.Tensor((BATCH_SIZE, HEADS_PER_PE, SEQ_LEN, HEAD_DIM), dtype),
+        # Sync signals
+        signal: T.Tensor((PE_num,), "uint64"),
     ):
         # Grid: (batch*head, target_pe)
         with T.Kernel(NUM_BLOCKS_X, PE_num, threads=128) as (bx, target_pe):
@@ -116,7 +110,10 @@ def sequence_parallel_all_to_all(PE_num, BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DI
                 # Single block transfer for entire [SEQ_PER_PE, HEAD_DIM] data
                 T.putmem_nbi_block(
                     T.address_of(data_dst[batch_idx, head_idx, dst_seq_start, 0]),
-                    T.address_of(data_src[batch_idx, src_head_idx, 0, 0]), transfer_size, target_pe)
+                    T.address_of(data_src[batch_idx, src_head_idx, 0, 0]),
+                    transfer_size,
+                    target_pe,
+                )
 
             # Memory fence
             T.fence()
@@ -127,7 +124,8 @@ def sequence_parallel_all_to_all(PE_num, BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DI
                     T.address_of(signal[mype[0]]),
                     1,
                     10,  # NVSHMEM_SIGNAL_ADD
-                    target_pe)
+                    target_pe,
+                )
                 T.fence()
                 for k in T.serial(PE_num):
                     T.signal_wait_until(T.address_of(signal[k]), 0, NUM_BLOCKS_X)
@@ -165,8 +163,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
     parser.add_argument("--seq_len", type=int, default=256, help="Sequence length")
-    parser.add_argument(
-        "--num_heads", type=int, default=16, help="Number of attention heads,combine QKV")
+    parser.add_argument("--num_heads", type=int, default=16, help="Number of attention heads,combine QKV")
     parser.add_argument("--head_dim", type=int, default=64, help="Head dimension")
     parser.add_argument("--dtype", default="float16", help="Data type")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations")
@@ -175,6 +172,7 @@ def parse_args():
     return parser.parse_args()
 
 
+@tilelang.testing.requires_distributed
 def test_all_to_all_with_golden_reference():
     args = parse_args()
 
@@ -200,13 +198,8 @@ def test_all_to_all_with_golden_reference():
         print(f"Heads per PE: {HEADS_PER_PE}")
 
     # Compile TileLang kernel
-    func = sequence_parallel_all_to_all(PE_num, args.batch_size, args.num_heads, args.seq_len,
-                                        args.head_dim, args.dtype)
-    kernel = tilelang.compile(
-        func, pass_configs={
-            "tl.disable_tma_lower": True,
-            "tl.disable_warp_specialized": True
-        })
+    func = sequence_parallel_all_to_all(PE_num, args.batch_size, args.num_heads, args.seq_len, args.head_dim, args.dtype)
+    kernel = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 
     if RANK == 0:
         print("\nTileLang Kernel Source:")
@@ -216,9 +209,7 @@ def test_all_to_all_with_golden_reference():
     dtype_torch = dtype_map[args.dtype]
 
     # Create input data (same for both implementations)
-    input_data = torch.rand([args.batch_size, args.num_heads, SEQ_PER_PE, args.head_dim],
-                            dtype=dtype_torch,
-                            device='cuda')
+    input_data = torch.rand([args.batch_size, args.num_heads, SEQ_PER_PE, args.head_dim], dtype=dtype_torch, device="cuda")
 
     print(f"PE {RANK} Input shape: {input_data.shape}")
     print(f"PE {RANK} Input sample: {input_data[0, 0, 0, :3]}")
@@ -233,10 +224,8 @@ def test_all_to_all_with_golden_reference():
     # === Test 2: TileLang NVSHMEM Implementation ===
     def tilelang_all_to_all():
         # Create NVSHMEM tensors
-        data_src = pynvshmem.nvshmem_create_tensor(
-            [args.batch_size, args.num_heads, SEQ_PER_PE, args.head_dim], dtype_torch)
-        data_dst = pynvshmem.nvshmem_create_tensor(
-            [args.batch_size, HEADS_PER_PE, args.seq_len, args.head_dim], dtype_torch)
+        data_src = pynvshmem.nvshmem_create_tensor([args.batch_size, args.num_heads, SEQ_PER_PE, args.head_dim], dtype_torch)
+        data_dst = pynvshmem.nvshmem_create_tensor([args.batch_size, HEADS_PER_PE, args.seq_len, args.head_dim], dtype_torch)
         signal = pynvshmem.nvshmem_create_tensor([PE_num], torch.uint64)
 
         # Initialize data
@@ -246,7 +235,7 @@ def test_all_to_all_with_golden_reference():
 
         # Execute kernel
         kernel(data_src, data_dst, signal)
-        #pynvshmem.nvshmem_barrier_all()
+        # pynvshmem.nvshmem_barrier_all()
 
         return data_dst
 

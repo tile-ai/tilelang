@@ -8,24 +8,24 @@ pass_configs = {
 
 
 def convert_to_uint16(x):
-    hval = T.Cast("float16", x)
-    bits_uint = T.reinterpret("uint16", hval)
+    hval = T.Cast(T.float16, x)
+    bits_uint = T.reinterpret(T.uint16, hval)
     bits_uint = T.if_then_else(x < 0, ~bits_uint & (0xFFFF), bits_uint | (0x8000))
     return bits_uint >> 8
 
 
 def convert_to_uint32(x):
-    bits_uint = T.reinterpret("uint32", x)
+    bits_uint = T.reinterpret(T.uint32, x)
     bits_uint = T.if_then_else(
         x < 0,
-        ~bits_uint & T.Cast("uint32", (0xFFFFFFFF)),
-        bits_uint | T.Cast("uint32", (0x80000000)),
+        ~bits_uint & T.Cast(T.uint32, (0xFFFFFFFF)),
+        bits_uint | T.Cast(T.uint32, (0x80000000)),
     )
     return bits_uint
 
 
 @tilelang.jit(pass_configs=pass_configs)
-def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
+def tl_topk_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
     batch = T.dynamic("batch")
     seq_len = T.dynamic("seq_len")
     RADIX = 1 << 8
@@ -42,20 +42,20 @@ def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
         with T.Kernel(batch, threads=BLOCK_SIZE) as (bx):
             tx = T.get_thread_binding()
 
-            s_threshold_bin_id = T.alloc_shared([1], "int32")
-            s_histogram = T.alloc_shared([RADIX + 1], "int32")
-            s_num_input = T.alloc_shared([2], "int32")
-            s_input_idx = T.alloc_shared([2, SMEM_INPUT_SIZE], "int32")
+            s_threshold_bin_id = T.alloc_shared([1], T.int32)
+            s_histogram = T.alloc_shared([RADIX + 1], T.int32)
+            s_num_input = T.alloc_shared([2], T.int32)
+            s_input_idx = T.alloc_shared([2, SMEM_INPUT_SIZE], T.int32)
 
-            l_threshold_bin_id = T.alloc_var("int32")
-            l_new_topk = T.alloc_var("int32")
-            l_num_input = T.alloc_var("int32")
-            l_bin_id32 = T.alloc_var("int32")
-            l_val = T.alloc_var("int32")
-            l_start_pos = T.alloc_var("int32")
-            l_start_idx = T.alloc_var("int32")
-            l_end_idx = T.alloc_var("int32")
-            l_out_pos = T.alloc_var("int32")
+            l_threshold_bin_id = T.alloc_var(T.int32)
+            l_new_topk = T.alloc_var(T.int32)
+            l_num_input = T.alloc_var(T.int32)
+            l_bin_id32 = T.alloc_var(T.int32)
+            l_val = T.alloc_var(T.int32)
+            l_start_pos = T.alloc_var(T.int32)
+            l_start_idx = T.alloc_var(T.int32)
+            l_end_idx = T.alloc_var(T.int32)
+            l_out_pos = T.alloc_var(T.int32)
 
             l_new_topk = topk
             l_start_idx = starts[bx]
@@ -99,7 +99,7 @@ def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
                 input_idx = s * BLOCK_SIZE + tx
                 if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
                     bin_id = convert_to_uint16(input[bx, input_idx])
-                    l_bin_id32 = T.Cast("int32", bin_id)
+                    l_bin_id32 = T.Cast(T.int32, bin_id)
                     if l_bin_id32 > l_threshold_bin_id:
                         # need a pos = T.atomic_add(s_histogram[bin_id32+1], 1)
                         pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True)
@@ -127,9 +127,9 @@ def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
                 l_num_input = s_num_input[r_idx]
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     if s * BLOCK_SIZE + tx < l_num_input:
-                        l_bin_id32 = T.Cast("int32", ((
-                            convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >>
-                            (24 - round * 8)) & 0xFF))
+                        l_bin_id32 = T.Cast(
+                            T.int32, ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
+                        )
                         T.atomic_add(s_histogram[l_bin_id32], 1)
                 T.sync_threads()
                 # cumsum
@@ -156,23 +156,20 @@ def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     T.sync_threads()
                     if s * BLOCK_SIZE + tx < l_num_input:
-                        l_bin_id32 = T.Cast("int32", ((
-                            convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >>
-                            (24 - round * 8)) & 0xFF))
+                        l_bin_id32 = T.Cast(
+                            T.int32, ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF)
+                        )
                         if l_bin_id32 > l_threshold_bin_id:
-                            pos = T.atomic_add(
-                                s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
+                            pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
                             index[bx, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
                         elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
                             if round == 3:
-                                l_out_pos = T.atomic_add(
-                                    s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
+                                l_out_pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
                                 if l_out_pos < topk:
                                     index[bx, l_out_pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
                             else:
                                 pos = T.atomic_add(s_num_input[r_idx ^ 1], 1, return_prev=True)
-                                s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx,
-                                                                          s * BLOCK_SIZE + tx]
+                                s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
 
     return tl_topk_kernel
 
@@ -186,7 +183,6 @@ def tl_topk(input, starts, ends, topk):
 
 
 def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
-
     batch = 64
     seq_len = 32 * 1024
     topk = 2048
@@ -212,8 +208,7 @@ def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
         set_ref = set(ref_np)
         set_trt = set(trt_np)
         intersection = set_ref & set_trt
-        print("selected/all:", len(intersection), "/", len(set_ref), "=",
-              len(intersection) / len(set_ref))
+        print("selected/all:", len(intersection), "/", len(set_ref), "=", len(intersection) / len(set_ref))
 
     # Performance test with CUDA events
 
@@ -243,6 +238,36 @@ def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
     torch.cuda.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print(f"Average torch.topk time: {elapsed_time_ms / n_iters:.3f} ms")
+
+
+def run_regression_perf(batch=64, seq_len=32 * 1024, topk=2048):
+    batch = 64
+    seq_len = 32 * 1024
+    topk = 2048
+    torch.manual_seed(1)
+    input = torch.randn(batch, seq_len, dtype=torch.float32).cuda()
+    starts = torch.zeros(batch, dtype=torch.int32).cuda()
+    ends = torch.ones(batch, dtype=torch.int32).cuda() * seq_len
+
+    indexes = tl_topk(input, starts, ends, topk)
+
+    indexes_ref = torch.topk(input, topk, dim=-1)[1]
+
+    for i in range(batch):
+        ref_np = indexes_ref[i].cpu().to(torch.int32).numpy()
+        trt_np = indexes[i].cpu().to(torch.int32).numpy()
+
+        set_ref = set(ref_np)
+        set_trt = set(trt_np)
+        intersection = set_ref & set_trt
+        print("selected/all:", len(intersection), "/", len(set_ref), "=", len(intersection) / len(set_ref))
+
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        tl_topk(input, starts, ends, topk)
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

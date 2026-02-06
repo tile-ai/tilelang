@@ -3,6 +3,7 @@ import tilelang.testing
 import example_intranode
 
 
+@tilelang.testing.requires_distributed
 @tilelang.testing.requires_cuda
 def test_intranode(monkeypatch):
     monkeypatch.setattr("sys.argv", ["example_intranode.py"])  # optionally add testing params here

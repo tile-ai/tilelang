@@ -10,6 +10,9 @@
 #include <cutlass/numeric_types.h>
 #include <math_constants.h>
 
+#include <cutlass/bfloat16.h>
+#include <cutlass/float8.h>
+
 using cutlass::bfloat16_t;
 using cutlass::half_t;
 using cutlass::tfloat32_t;
@@ -93,10 +96,20 @@ TL_DEVICE unsigned __pack_nv_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
-// Pack four char values
+// Pack four char values.
 TL_DEVICE int make_int(signed char x0, signed char x1, signed char x2,
                        signed char x3) {
   return (x3 << 24) | (x2 << 16) | (x1 << 8) | x0;
+}
+
+// Pack eight char values.
+TL_DEVICE int2 make_int2(signed char x0, signed char x1, signed char x2,
+                         signed char x3, signed char y0, signed char y1,
+                         signed char y2, signed char y3) {
+  int2 result;
+  result.x = make_int(x0, x1, x2, x3);
+  result.y = make_int(y0, y1, y2, y3);
+  return result;
 }
 
 // Pack sixteen char values.
@@ -111,6 +124,70 @@ TL_DEVICE int4_t make_int4(signed char x0, signed char x1, signed char x2,
   result.y = make_int(y0, y1, y2, y3);
   result.z = make_int(z0, z1, z2, z3);
   result.w = make_int(w0, w1, w2, w3);
+  return result;
+}
+
+TL_DEVICE int4_t make_int4(short x0, short x1, short y0, short y1, short z0,
+                           short z1, short w0, short w1) {
+  int4_t result;
+  *((short2 *)&result.x) = make_short2(x0, x1);
+  *((short2 *)&result.y) = make_short2(y0, y1);
+  *((short2 *)&result.z) = make_short2(z0, z1);
+  *((short2 *)&result.w) = make_short2(w0, w1);
+  return result;
+}
+
+// Pack four char values.
+TL_DEVICE unsigned int make_uint(unsigned char x0, unsigned char x1,
+                                 unsigned char x2, unsigned char x3) {
+  return (x3 << 24) | (x2 << 16) | (x1 << 8) | x0;
+}
+
+// Pack eight char values.
+TL_DEVICE uint2 make_uint2(unsigned char x0, unsigned char x1, unsigned char x2,
+                           unsigned char x3, unsigned char y0, unsigned char y1,
+                           unsigned char y2, unsigned char y3) {
+  uint2 result;
+  result.x = make_uint(x0, x1, x2, x3);
+  result.y = make_uint(y0, y1, y2, y3);
+  return result;
+}
+
+// Pack sixteen char values.
+TL_DEVICE uint4 make_uint4(unsigned char x0, unsigned char x1, unsigned char x2,
+                           unsigned char x3, unsigned char y0, unsigned char y1,
+                           unsigned char y2, unsigned char y3, unsigned char z0,
+                           unsigned char z1, unsigned char z2, unsigned char z3,
+                           unsigned char w0, unsigned char w1, unsigned char w2,
+                           unsigned char w3) {
+  uint4 result;
+  result.x = make_uint(x0, x1, x2, x3);
+  result.y = make_uint(y0, y1, y2, y3);
+  result.z = make_uint(z0, z1, z2, z3);
+  result.w = make_uint(w0, w1, w2, w3);
+  return result;
+}
+
+TL_DEVICE uint4 make_uint4(unsigned short x0, unsigned short x1,
+                           unsigned short y0, unsigned short y1,
+                           unsigned short z0, unsigned short z1,
+                           unsigned short w0, unsigned short w1) {
+  uint4 result;
+  *((ushort2 *)&result.x) = make_ushort2(x0, x1);
+  *((ushort2 *)&result.y) = make_ushort2(y0, y1);
+  *((ushort2 *)&result.z) = make_ushort2(z0, z1);
+  *((ushort2 *)&result.w) = make_ushort2(w0, w1);
+  return result;
+}
+
+// Pack eight int values.
+TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
+                                   int z1, int w0, int w1) {
+  longlong4 result;
+  *((int2 *)&result.x) = make_int2(x0, x1);
+  *((int2 *)&result.y) = make_int2(y0, y1);
+  *((int2 *)&result.z) = make_int2(z0, z1);
+  *((int2 *)&result.w) = make_int2(w0, w1);
   return result;
 }
 
@@ -264,6 +341,138 @@ union GmmaDescriptor {
   }
 };
 
+union Tcgen05SMemDescriptor {
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor() noexcept : desc_(0) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor(uint64_t desc) noexcept
+      : desc_(desc) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor(
+      Tcgen05SMemDescriptor const &t) noexcept
+      : desc_(t.desc_) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor(
+      Tcgen05SMemDescriptor &&t) noexcept
+      : desc_(t.desc_) {}
+
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor &
+  operator=(Tcgen05SMemDescriptor const &t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor &
+  operator=(Tcgen05SMemDescriptor &&t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  uint64_t desc_;
+  uint32_t reg32_[2];
+
+  // Bitfield implementation avoids the need for shifts in assignment
+  struct {
+    // start_address, bit [0,14), 4LSB not included
+    uint16_t start_address_ : 14, : 2; // 14 bits [0,14), 2 bits unused
+    // leading dimension byte offset, bit [16,30), 4LSB not included
+    uint16_t leading_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
+    // stride dimension byte offset, bit [32,46), 4LSB not included
+    uint16_t stride_byte_offset_ : 14,
+        version_ : 2; // 14 bits [0,14), 2 bits [14,16)
+    // base_offset, bit [49,52). leading_byte_offset_mode, bit [52,53).
+    uint8_t : 1, base_offset_ : 3, lbo_mode_ : 1,
+        : 3; // 1 bit unused, 3 bits [1,4), 1 bit [4,5), 3 bits unused
+    // layout type, bit [61,64), SWIZZLE_NONE matrix descriptor = 0,
+    // SWIZZLE_128B matrix descriptor = 2, SWIZZLE_64B descriptor = 4,
+    // SWIZZLE_32B descriptor = 6, SWIZZLE_128B_BASE32B = 1, N/A = 3, N/A = 5,
+    // N/A = 7
+    uint8_t : 5, layout_type_ : 3; // 6 bits unused, 3 bits [5,8)
+  } bitfield;
+  // Separate the field, as we may only update one part of desc
+  struct {
+    uint32_t lo;
+    uint32_t hi;
+  } words;
+
+  CUTE_HOST_DEVICE constexpr operator uint64_t() const noexcept {
+    return desc_;
+  }
+  template <typename T>
+  CUTE_HOST_DEVICE constexpr Tcgen05SMemDescriptor
+  operator+(const T &offset) const {
+    Tcgen05SMemDescriptor ret;
+    // Address addition is in units of 16 bytes (4 LSB not encoded)
+    ret.reg32_[0] = reg32_[0] + (uint32_t(offset) >> 4);
+    ret.reg32_[1] = reg32_[1];
+    return ret;
+  }
+};
+
+//
+// Tcgen05 instruction descriptor (wraps cute::UMMA::InstrDescriptor layout)
+//
+union Tcgen05InstrDescriptor {
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor() noexcept : desc_(0) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor(uint32_t desc) noexcept
+      : desc_(desc) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor(
+      Tcgen05InstrDescriptor const &t) noexcept
+      : desc_(t.desc_) {}
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor(
+      Tcgen05InstrDescriptor &&t) noexcept
+      : desc_(t.desc_) {}
+
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor &
+  operator=(Tcgen05InstrDescriptor const &t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  CUTE_HOST_DEVICE constexpr Tcgen05InstrDescriptor &
+  operator=(Tcgen05InstrDescriptor &&t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  uint32_t desc_;
+  uint16_t reg16_[2];
+
+  // Bitfield implementation mirrors cute::UMMA::InstrDescriptor
+  struct {
+    // bit [ 0, 2) : Sparse meta data id2
+    uint16_t sparse_id2_ : 2,
+        // bit [ 2, 3) : 0 = dense. 1 = sparse. Only valid for
+        // F32F16/S8/MXF8F6F4
+        sparse_flag_ : 1,
+        // bit [ 3, 4) : 0 = no saturate. 1 = saturate. Only valid for S8
+        saturate_ : 1,
+        // bit [ 4, 6) : 0 = F16. 1 = F32, 2 = S32
+        c_format_ : 2,
+        // padding
+        : 1,
+        // bit [ 7,10) : see UMMA format encoding
+        a_format_ : 3,
+        // bit [10,13) : see UMMA format encoding
+        b_format_ : 3,
+        // bit [13,14) : 0 = no negate. 1 = negate
+        a_negate_ : 1,
+        // bit [14,15) : 0 = no negate. 1 = negate
+        b_negate_ : 1,
+        // bit [15,16) : 0 = K-major. 1 = MN-major
+        a_major_ : 1;
+
+    // Upper 16 bits
+    uint16_t b_major_ : 1, // bit [16,17)
+        n_dim_ : 6,        // bit [17,23) : 3 LSBs not included
+        : 1,               // padding
+        m_dim_ : 5,        // bit [24,29) : 4 LSBs not included
+        : 1,               // padding
+        max_shift_ : 2;    // bit [30,32)
+  } bitfield;
+
+  // Decay to a uint32_t
+  CUTE_HOST_DEVICE constexpr explicit operator uint32_t() const noexcept {
+    return desc_;
+  }
+};
+
 // Any
 template <typename T> TL_DEVICE bool Any(T *a, int size) {
   for (int i = 0; i < size; i++) {
@@ -296,12 +505,15 @@ template <int y = 1, typename T> TL_DEVICE T pow_of_int(T x) {
 // Thread partial barrier synchronization
 // https://docs.nvidia.com/cuda/parallel-thread-execution/#memory-consistency-model
 TL_DEVICE void __sync_thread_partial(int barrier_id = 0, int thread_count = 0) {
+  // In contrast to TileLang, here we support runtime determined barrier_id and
+  // thread_count.`
   asm volatile("bar.sync %0, %1;" : : "r"(barrier_id), "r"(thread_count));
 }
+
 template <int layout_type = 0, int leading_byte_offset = 0,
           int stride_byte_offset = 0, typename T>
-TL_DEVICE void initialize_descriptor(GmmaDescriptor &descriptor,
-                                     T *start_address) {
+TL_DEVICE void initialize_wgmma_descriptor(GmmaDescriptor &descriptor,
+                                           T *start_address) {
   descriptor.bitfield.start_address_ =
       cute::cast_smem_ptr_to_uint(start_address) >> 4;
   descriptor.bitfield.layout_type_ = layout_type;
@@ -311,10 +523,58 @@ TL_DEVICE void initialize_descriptor(GmmaDescriptor &descriptor,
 }
 
 template <typename T>
+TL_DEVICE void
+initialize_tcgen05_descriptor(Tcgen05SMemDescriptor &descriptor,
+                              T *start_address, int leading_byte_offset,
+                              int stride_byte_offset, int base_offset,
+                              bool leading_is_absolute, int swizzle_mode) {
+
+  descriptor.bitfield.start_address_ =
+      static_cast<uint16_t>(cast_smem_ptr_to_uint(start_address) >> 4);
+  descriptor.bitfield.leading_byte_offset_ = leading_byte_offset;
+  descriptor.bitfield.stride_byte_offset_ = stride_byte_offset;
+  descriptor.bitfield.version_ = 1;
+  descriptor.bitfield.base_offset_ = base_offset & 0x7;
+  descriptor.bitfield.lbo_mode_ = leading_is_absolute ? 1 : 0;
+  descriptor.bitfield.layout_type_ = swizzle_mode & 0x7;
+}
+
+template <typename T>
 TL_DEVICE void increase_descriptor_offset(GmmaDescriptor &descriptor,
                                           T offset) {
   descriptor.reg32_[0] += (offset >> 4);
 }
+
+// and add the desired implicit conversion from bfloat16_t.
+struct float_e4m3_t : public cute::float_e4m3_t {
+  using cute::float_e4m3_t::float_e4m3_t;
+  CUTLASS_HOST_DEVICE
+  float_e4m3_t() = default;
+
+  CUTLASS_HOST_DEVICE
+  explicit float_e4m3_t(__nv_bfloat16 x)
+      : float_e4m3_t(static_cast<float>(x)) {}
+};
+
+struct float_e5m2_t : public cute::float_e5m2_t {
+  using cute::float_e5m2_t::float_e5m2_t;
+  CUTLASS_HOST_DEVICE
+  float_e5m2_t() = default;
+
+  CUTLASS_HOST_DEVICE
+  explicit float_e5m2_t(__nv_bfloat16 x)
+      : float_e5m2_t(static_cast<float>(x)) {}
+};
+
+template <typename T> struct to_cute_type {
+  using type = T;
+};
+template <> struct to_cute_type<tl::float_e4m3_t> {
+  using type = cute::float_e4m3_t;
+};
+template <> struct to_cute_type<tl::float_e5m2_t> {
+  using type = cute::float_e5m2_t;
+};
 
 } // namespace tl
 
@@ -322,3 +582,91 @@ namespace cutlass {
 TL_DEVICE
 bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
 } // namespace cutlass
+
+//
+// Type-safe warp shuffle helpers for 16-bit float types
+// These wrappers avoid relying on implicit conversions that may be disallowed
+// (e.g., converting float -> cutlass::bfloat16_t) by explicitly promoting to
+// float for the shuffle and then down-converting.
+//
+namespace tl {
+
+// Generic passthroughs
+template <typename T>
+TL_DEVICE T shfl_xor_sync(unsigned mask, T val, int laneMask) {
+  return __shfl_xor_sync(mask, val, laneMask);
+}
+
+template <typename T>
+TL_DEVICE T shfl_down_sync(unsigned mask, T val, int delta) {
+  return __shfl_down_sync(mask, val, delta);
+}
+
+template <typename T>
+TL_DEVICE T shfl_up_sync(unsigned mask, T val, int delta) {
+  return __shfl_up_sync(mask, val, delta);
+}
+
+template <typename T> TL_DEVICE T shfl_sync(unsigned mask, T val, int srcLane) {
+  return __shfl_sync(mask, val, srcLane);
+}
+
+// Specializations for cutlass::half_t
+template <>
+TL_DEVICE half_t shfl_xor_sync(unsigned mask, half_t val, int laneMask) {
+  float f = static_cast<float>(val);
+  float r = __shfl_xor_sync(mask, f, laneMask);
+  return half_t(r);
+}
+
+template <>
+TL_DEVICE half_t shfl_down_sync(unsigned mask, half_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_down_sync(mask, f, delta);
+  return half_t(r);
+}
+
+template <>
+TL_DEVICE half_t shfl_up_sync(unsigned mask, half_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_up_sync(mask, f, delta);
+  return half_t(r);
+}
+
+template <> TL_DEVICE half_t shfl_sync(unsigned mask, half_t val, int srcLane) {
+  float f = static_cast<float>(val);
+  float r = __shfl_sync(mask, f, srcLane);
+  return half_t(r);
+}
+
+// Specializations for cutlass::bfloat16_t
+template <>
+TL_DEVICE bfloat16_t shfl_xor_sync(unsigned mask, bfloat16_t val,
+                                   int laneMask) {
+  float f = static_cast<float>(val);
+  float r = __shfl_xor_sync(mask, f, laneMask);
+  return bfloat16_t(r);
+}
+
+template <>
+TL_DEVICE bfloat16_t shfl_down_sync(unsigned mask, bfloat16_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_down_sync(mask, f, delta);
+  return bfloat16_t(r);
+}
+
+template <>
+TL_DEVICE bfloat16_t shfl_up_sync(unsigned mask, bfloat16_t val, int delta) {
+  float f = static_cast<float>(val);
+  float r = __shfl_up_sync(mask, f, delta);
+  return bfloat16_t(r);
+}
+
+template <>
+TL_DEVICE bfloat16_t shfl_sync(unsigned mask, bfloat16_t val, int srcLane) {
+  float f = static_cast<float>(val);
+  float r = __shfl_sync(mask, f, srcLane);
+  return bfloat16_t(r);
+}
+
+} // namespace tl

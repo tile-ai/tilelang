@@ -1,4 +1,5 @@
 """The language interface for tl programs."""
+
 from __future__ import annotations
 
 from tvm import tir
@@ -40,8 +41,7 @@ def clear(buffer: tir.Buffer | tir.Var):
         elif isinstance(buffer_region, tir.BufferLoad):
             region = get_buffer_region_from_load(buffer_region)
             if region is None:
-                raise ValueError(
-                    f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")
+                raise ValueError(f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")
             return fill(region, 0)
         else:
             raise ValueError(f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")

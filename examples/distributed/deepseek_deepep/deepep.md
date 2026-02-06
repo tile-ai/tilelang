@@ -20,13 +20,11 @@ The table below shows a latency and bandwidth comparison for DeepEP and TileScal
 | DeepEP      | 1.0045             | 328.97                    | 1.1552            | 287.14                   |
 | TileScale   | 1.0720             | 308.25                    | 1.0809            | 306.86                   |
 
-
 # Intra-node Introduction
 
 This example implements DeepEP’s intra‑node (NVLink) dispatch/combine using TileScale kernels.
 z
 The intra‑node path lives under `intranode/` and provides a minimal public API that mirrors DeepEP’s behavior for NVLink‑connected ranks.
-
 
 ## Overview
 
@@ -34,7 +32,6 @@ The intra‑node path lives under `intranode/` and provides a minimal public API
 - Topology: experts are evenly partitioned across ranks (`num_experts % num_ranks == 0`).
 - Datatypes: inputs are `torch.bfloat16`; routing `topk_idx` is `torch.int64`; `topk_weights` is `torch.float32`.
 - Channels: each channel uses 2 SMs (send/recv). With default `num_sms=20`, there are `num_channels=10`.
-
 
 ## Public API (intranode)
 
@@ -63,7 +60,6 @@ Convenience wrapper used by examples/tests:
   - Exposes the interface for the functions above via methods: `get_dispatch_layout`, `dispatch`, `combine`.
   - Manages TileScale allocator, symmetric buffers, and recommended kernel configs.
 
-
 ## Core Data Structures and Handle
 
 - `rank_prefix_matrix` (num_ranks × num_ranks): cumulative per‑rank token counts; used to compute global offsets for receiver writes.
@@ -82,7 +78,6 @@ Dispatch returns the handle:
 `(rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)`
 which can be reused for cached re‑dispatch and is required by the combine stage.
 
-
 ## Kernel Responsibilities (high level)
 
 - Layout
@@ -97,13 +92,11 @@ which can be reused for cached re‑dispatch and is required by the combine stag
   - `cached_notify_combine_kernel`: recalculates `send_head` expectations and zeros `channel_head_idx`/`channel_tail_idx` for the combine round.
   - `combine_kernel`: senders return expert outputs; receivers reduce by sum per token. `recv_topk_weights` is the sum of returned weights per token. Requires `hidden % 8 == 0` for vectorized access on the receiver side.
 
-
 ## Configuration and Tuning
 
 - `utils.Config` provides recommended values for `num_max_nvl_chunked_send_tokens` and `num_max_nvl_chunked_recv_tokens` per `num_ranks`. These control per‑round trunk sizes and receiver buffer depth per channel.
 - `EPBuffer.num_sms` controls total SMs assigned to high‑throughput kernels. Channels = `num_sms // 2` (one send SM + one recv SM per channel).
 - `expert_alignment` pads per‑local‑expert MoE receive counters up to the specified multiple, which can be used to size per‑expert workspace.
-
 
 ## Execution Flow (non‑cached)
 
@@ -137,7 +130,6 @@ which can be reused for cached re‑dispatch and is required by the combine stag
 
 6) Cached re‑dispatch (optional)
 - For repeated communication with the same layout, pass `handle` back into `EPBuffer.dispatch(x, handle, ...)` to skip layout/notify work and return only `recv_x`.
-
 
 ## Usage
 
@@ -174,7 +166,6 @@ recv_x, recv_topk_idx, recv_topk_weights, per_expert_counts, handle = buf.dispat
 reduced_x, reduced_weights = buf.combine(expert_out, handle, recv_topk_weights)
 ```
 
-
 ## Notes and Limits
 
 - Intra‑node only: ranks must be NVLink‑visible; current code asserts `num_ranks <= 8` and `num_experts % num_ranks == 0`.
@@ -184,7 +175,6 @@ reduced_x, reduced_weights = buf.combine(expert_out, handle, recv_topk_weights)
 - Ensure `topk_idx` is contiguous, 2D, and `torch.int64`.
 - Set `TILELANG_USE_DISTRIBUTED=1` to enable TileScale’s distributed runtime.
 
-
 ## Files
 
 - `intranode/__init__.py` — re‑exports `get_dispatch_layout`, `intranode_dispatch`, `intranode_combine`.
@@ -193,7 +183,6 @@ reduced_x, reduced_weights = buf.combine(expert_out, handle, recv_topk_weights)
 - `intranode/combine.py` — notify for combine and main combine kernel; host orchestration.
 - `buffer.py` — EPBuffer wrapper: allocator and symmetric buffers, public methods.
 - `utils.py` — recommended configs and MoE counter helpers.
-
 
 ## Implementation Notes
 

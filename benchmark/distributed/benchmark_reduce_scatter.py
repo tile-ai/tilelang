@@ -11,13 +11,13 @@ from tilelang.distributed import init_distributed, dtype_map, perf_fn
 
 tilelang.disable_cache()
 
-#TODO: Bench on 4/8 H100
-#TODO: split N?
-'''init_nvshmem_by_torch_process_group(_TP_GROUP)
+# TODO: Bench on 4/8 H100
+# TODO: split N?
+"""init_nvshmem_by_torch_process_group(_TP_GROUP)
 Note: Minor numerical differences exist between Triton/TileLang and Torch (~1e-2)
 due to the order reductions are handled in different implementations.
 (No error when #PE = 2)
-'''
+"""
 
 
 def reducescatter(PE_num, M, N, dtype="float16", threads=128):
@@ -27,8 +27,8 @@ def reducescatter(PE_num, M, N, dtype="float16", threads=128):
 
     @T.prim_func
     def pull_reduce(
-            A: T.Tensor((M, N), dtype),  # type: ignore
-            B: T.Tensor((M_per_rank, N), dtype),  # type: ignore
+        A: T.Tensor((M, N), dtype),  # type: ignore
+        B: T.Tensor((M_per_rank, N), dtype),  # type: ignore
     ):
         with T.Kernel(M_per_rank // block_M, threads=threads) as (bx):
             mype = T.get_pe()
@@ -42,15 +42,17 @@ def reducescatter(PE_num, M, N, dtype="float16", threads=128):
                 T.getmem_nbi_block(
                     T.address_of(A_shared[peer, 0, 0]),
                     T.address_of(A[mype * M_per_rank + bx * block_M, 0]),
-                    block_M * N * dtype_map[dtype].itemsize, peer)
+                    block_M * N * dtype_map[dtype].itemsize,
+                    peer,
+                )
             base = mype * M_per_rank + bx * block_M
-            T.copy(A[base:base + block_M, :], A_shared[mype, :, :])
+            T.copy(A[base : base + block_M, :], A_shared[mype, :, :])
 
             T.fence()  # Ensure reduce happens after all IO
 
             T.copy(A_shared, A_local)
             T.reduce_sum(A_local, A_local_sum, dim=0)
-            T.copy(A_local_sum, B[bx * block_M:bx * block_M + block_M, :])
+            T.copy(A_local_sum, B[bx * block_M : bx * block_M + block_M, :])
 
     return pull_reduce
 
@@ -59,8 +61,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--M", type=int, default=8192)
     parser.add_argument("--N", type=int, default=16384)
-    parser.add_argument(
-        "--dtype", type=str, default="float16", choices=["float16", "float32", "bfloat16"])
+    parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "float32", "bfloat16"])
     parser.add_argument("--threads", type=int, default=128, help="number of threads in a block")
     parser.add_argument("--print_source", action="store_true", help="print kernel source code")
     parser.add_argument("--warmup", type=int, default=5, help="number of warmup iterations")
@@ -68,8 +69,8 @@ def parse_args():
     return parser.parse_args()
 
 
-if __name__ == '__main__':
-    assert torch.cuda.get_device_capability()[0] >= 9, '❗This benchmark requires sm_90 or higher'
+if __name__ == "__main__":
+    assert torch.cuda.get_device_capability()[0] >= 9, "❗This benchmark requires sm_90 or higher"
 
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node RS"
@@ -83,7 +84,7 @@ if __name__ == '__main__':
     nelems = M * PE_num
 
     func = reducescatter(PE_num, M, N, dtype=dtype, threads=threads)
-    kernel = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True}, target='cuda')
+    kernel = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True}, target="cuda")
 
     # Get CUDA Source
     if RANK == 0 and args.print_source:
@@ -142,8 +143,7 @@ if __name__ == '__main__':
     print(f"rank {RANK} tilelang reduce_scatter avg time: {tl_t} ms")
 
     # Check correctness
-    assert torch.allclose(
-        tl_out, torch_out, atol=1e-2, rtol=1e-2), f'max error: {(tt_out - torch_out).abs().max()}'
+    assert torch.allclose(tl_out, torch_out, atol=1e-2, rtol=1e-2), f"max error: {(tt_out - torch_out).abs().max()}"
     print(f"rank {RANK} check passed.✅")
 
     dist.destroy_process_group()

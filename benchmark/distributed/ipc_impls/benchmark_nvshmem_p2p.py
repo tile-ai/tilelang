@@ -12,15 +12,14 @@ import torch.distributed as dist
 from tilelang.distributed import init_distributed, perf_fn
 import pynvshmem
 
-os.environ['NCCL_DEBUG'] = 'WARN'
+os.environ["NCCL_DEBUG"] = "WARN"
 
 
 def nvshmem_kernel_push(size, threads):
-
     @T.prim_func
     def nvshmem_push(
-            dst: T.Tensor((size), "float32"),  # type: ignore
-            src: T.Tensor((size), "float32"),  # type: ignore
+        dst: T.Tensor((size), "float32"),  # type: ignore
+        src: T.Tensor((size), "float32"),  # type: ignore
     ):
         with T.Kernel(1, threads=threads):
             T.putmem_block(
@@ -35,11 +34,10 @@ def nvshmem_kernel_push(size, threads):
 
 
 def nvshmem_kernel_pull(size, threads):
-
     @T.prim_func
     def nvshmem_pull(
-            dst: T.Tensor((size), "float32"),  # type: ignore
-            src: T.Tensor((size), "float32"),  # type: ignore
+        dst: T.Tensor((size), "float32"),  # type: ignore
+        src: T.Tensor((size), "float32"),  # type: ignore
     ):
         with T.Kernel(1, threads=threads):
             T.getmem_block(
@@ -53,8 +51,7 @@ def nvshmem_kernel_pull(size, threads):
     return nvshmem_pull
 
 
-def benchmark_nvshmem_bw(rank: int, num_ranks: int, group: dist.ProcessGroup, size: int,
-                         args: argparse.Namespace):
+def benchmark_nvshmem_bw(rank: int, num_ranks: int, group: dist.ProcessGroup, size: int, args: argparse.Namespace):
     assert num_ranks == 2, "this benchmark only supports 2 ranks"
     assert args.threads % 32 == 0, "threads must be divisible by 32"
 
@@ -90,10 +87,8 @@ def benchmark_nvshmem_bw(rank: int, num_ranks: int, group: dist.ProcessGroup, si
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--warmup", type=int, default=10, help="number of warmup iterations (default: 10)")
-    parser.add_argument(
-        "--repeat", type=int, default=50, help="number of repeat iterations (default: 50)")
+    parser.add_argument("--warmup", type=int, default=10, help="number of warmup iterations (default: 10)")
+    parser.add_argument("--repeat", type=int, default=50, help="number of repeat iterations (default: 50)")
     parser.add_argument("--threads", type=int, default=128, help="Threads per block (default: 128)")
     args = parser.parse_args()
 
@@ -102,8 +97,6 @@ if __name__ == "__main__":
         size = 2**log_size
         push_bw, pull_bw = benchmark_nvshmem_bw(rank, num_ranks, group, size, args)
         if rank == 0:
-            print(
-                f"size={size*4} bytes, nvshmem push bw: {push_bw:.4f} GB/s, nvshmem pull bw: {pull_bw:.4f} GB/s"
-            )
+            print(f"size={size * 4} bytes, nvshmem push bw: {push_bw:.4f} GB/s, nvshmem pull bw: {pull_bw:.4f} GB/s")
 
     dist.destroy_process_group()

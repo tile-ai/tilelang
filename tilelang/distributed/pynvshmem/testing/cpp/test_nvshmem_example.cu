@@ -3,7 +3,7 @@
 #include <nvshmem.h>
 #include <nvshmemx.h>
 
-__global__ void simple_shift(int *destination) 
+__global__ void simple_shift(int *destination)
 {
     int mype = nvshmem_my_pe();
     int npes = nvshmem_n_pes();
@@ -12,7 +12,7 @@ __global__ void simple_shift(int *destination)
     nvshmem_int_p(destination, mype, peer);
 }
 
-extern "C" int run_simple_shift() 
+extern "C" int run_simple_shift()
 {
     int mype_node, msg = -1;
     cudaStream_t stream;
@@ -34,6 +34,6 @@ extern "C" int run_simple_shift()
     nvshmem_free(destination);
     nvshmem_finalize();
     cudaStreamDestroy(stream);
-    
+
     return msg;
 }

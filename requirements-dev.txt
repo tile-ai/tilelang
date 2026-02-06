@@ -1,5 +1,6 @@
 # Requirements to run local build with `--no-build-isolation` or other developments
 
+apache-tvm-ffi~=0.1.0,>=0.1.6
 build
 cmake>=3.26
 cython>=3.0.0
@@ -8,9 +9,9 @@ packaging
 scikit-build-core
 setuptools>=61
 torch
-tabulate
 cuda-python>=12.0.0
 wheel
+z3-solver>=4.13.0
 
 auditwheel; platform_system == 'Linux'
 patchelf; platform_system == 'Linux'

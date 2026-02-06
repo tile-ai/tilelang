@@ -2,9 +2,8 @@
 
 #include "common.h"
 
+extern "C" extern __constant__ uint64_t meta_data[1024];
 namespace tl {
-
-extern "C" extern __device__ uint64_t meta_data[1024];
 
 TL_DEVICE uint64_t get_rank() { return meta_data[0]; }
 
@@ -19,3 +18,10 @@ template <typename dtype_t> TL_DEVICE uint64_t get_uintptr_t(dtype_t *ptr) {
 }
 
 } // namespace tl
+
+TL_DEVICE void print_table() {
+  std::printf("Table base address: %llu\n", meta_data);
+  for (int i = 0; i < 10; i++) {
+    std::printf("meta_data[%d] = %llu\n", i, meta_data[i]);
+  }
+}

@@ -2,7 +2,24 @@
 
 #include "common.h"
 
+#ifndef __CUDACC_RTC__
+#include <cstdint>
+#include <type_traits>
+#endif
+
 namespace tl {
+
+// Select a wider accumulator type for improved numerical accuracy.
+// Default: accumulate in the same type. Specialize FP16/BF16 to float.
+template <typename T> struct AccType {
+  using type = T;
+};
+template <> struct AccType<half_t> {
+  using type = float;
+};
+template <> struct AccType<bfloat16_t> {
+  using type = float;
+};
 
 struct SumOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
@@ -40,53 +57,6 @@ struct BitXorOp {
   }
 };
 
-template <class Reducer, int Threads, bool UseAbs, bool NeedAccumulate>
-struct SharedReduceWarp {
-  template <typename T>
-  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
-                            int total_dest, int reduce_extent, int tail,
-                            T init_value) {
-    if (total_dest <= 0 || reduce_extent <= 0)
-      return;
-    constexpr int kWarpSize = 32;
-    static_assert(Threads % kWarpSize == 0,
-                  "SharedReduceWarp expects blockDim.x to be a multiple of "
-                  "warp size on CUDA.");
-    const int tid = threadIdx.x;
-    const int warp_id = tid / kWarpSize;
-    const int lane = tid % kWarpSize;
-    const int num_warps = Threads / kWarpSize;
-    for (int dest_idx = warp_id; dest_idx < total_dest; dest_idx += num_warps) {
-      const int prefix = tail == 1 ? dest_idx : dest_idx / tail;
-      const int suffix = tail == 1 ? 0 : dest_idx % tail;
-      const int src_base = (prefix * reduce_extent) * tail + suffix;
-      const int dst_index = prefix * tail + suffix;
-
-      T partial = init_value;
-      for (int rv = lane; rv < reduce_extent; rv += kWarpSize) {
-        T val = src[src_base + rv * tail];
-        if constexpr (UseAbs) {
-          val = val < T(0) ? -val : val;
-        }
-        partial = Reducer()(partial, val);
-      }
-
-      unsigned mask = __activemask();
-      for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
-        T other = __shfl_down_sync(mask, partial, offset);
-        partial = Reducer()(partial, other);
-      }
-
-      if (lane == 0) {
-        if constexpr (NeedAccumulate) {
-          partial = Reducer()(dst[dst_index], partial);
-        }
-        dst[dst_index] = partial;
-      }
-    }
-  }
-};
-
 template <class Reducer, int threads, int scale, int thread_offset = 0,
           int all_threads = threads>
 struct AllReduce {
@@ -102,7 +72,7 @@ struct AllReduce {
       __syncthreads();
       x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
     } else {
-      x = Reducer()(x, T(__shfl_xor_sync(uint32_t(-1), x, offset)));
+      x = Reducer()(x, tl::shfl_xor_sync(uint32_t(-1), x, offset));
     }
     if constexpr (offset == scale) {
       return x;
@@ -122,7 +92,7 @@ struct AllReduce {
       asm volatile("bar.sync %0, %1;" : : "r"(2), "r"(all_threads));
       x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
     } else {
-      x = Reducer()(x, T(__shfl_xor_sync(uint32_t(-1), x, offset)));
+      x = Reducer()(x, tl::shfl_xor_sync(uint32_t(-1), x, offset));
     }
     if constexpr (offset == scale) {
       return x;
@@ -159,7 +129,7 @@ template <int threads, bool reverse = false> struct CumSum1D {
 
 #pragma unroll
         for (int off = 1; off < SEG; off <<= 1) {
-          T n = (T)__shfl_down_sync(MASK, val, off);
+          T n = (T)tl::shfl_down_sync(MASK, val, off);
           if (lane < SEG - off)
             val += n;
         }
@@ -234,7 +204,7 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
 
 #pragma unroll
           for (int off = 1; off < SEG; off <<= 1) {
-            T n = (T)__shfl_down_sync(MASK, val, off);
+            T n = tl::shfl_down_sync(MASK, val, off);
             if (lane < SEG - off)
               val += n;
           }
@@ -244,10 +214,10 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
           if (real_col < W)
             dst[real_row * W + real_col] = val;
 
-          T segSum = (T)__shfl_sync(MASK, val, (T)0);
+          T segSum = tl::shfl_sync(MASK, val, 0);
           if (lane == 0)
             carry = segSum;
-          carry = (T)__shfl_sync(MASK, carry, (T)0);
+          carry = tl::shfl_sync(MASK, carry, 0);
         }
       } else {
         for (int seg = 0; seg * SEG < W; ++seg) {
@@ -260,7 +230,7 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
 
 #pragma unroll
           for (int off = 1; off < SEG; off <<= 1) {
-            T n = (T)__shfl_up_sync(MASK, val, off);
+            T n = tl::shfl_up_sync(MASK, val, off);
             if (lane >= off)
               val += n;
           }
@@ -270,17 +240,15 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
           if (real_col < W)
             dst[real_row * W + real_col] = val;
 
-          T segSum = (T)__shfl_sync(MASK, val, SEG - 1);
+          T segSum = tl::shfl_sync(MASK, val, SEG - 1);
           if (lane == SEG - 1)
             carry = segSum;
-          carry = (T)__shfl_sync(MASK, carry, SEG - 1);
+          carry = tl::shfl_sync(MASK, carry, SEG - 1);
         }
       }
     }
   }
 };
-
-// TileScale extra
 
 template <typename T, typename ReduceOp>
 TL_DEVICE T warp_reduce(T value, ReduceOp op) {

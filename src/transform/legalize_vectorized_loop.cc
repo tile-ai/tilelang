@@ -73,7 +73,7 @@ private:
     // Change the loop kind from vectorized to serial
     for_node.CopyOnWrite()->kind = ForKind::kSerial;
     // Apply vectorization transformation to the loop
-    return VectorizeLoop(for_node);
+    return VectorizeLoop(for_node, analyzer_);
   }
 };
 
@@ -89,11 +89,11 @@ tvm::transform::Pass LegalizeVectorizedLoop() {
 }
 
 // Register the pass globally so it can be used in the compilation pipeline
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LegalizeVectorizedLoop",
                         LegalizeVectorizedLoop);
-});
+}
 
 } // namespace tl
 } // namespace tvm

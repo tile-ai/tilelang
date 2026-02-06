@@ -5,7 +5,8 @@ from tvm import DataType
 import tilelang.language as T
 from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
-    TensorCoreIntrinEmitter,)
+    TensorCoreIntrinEmitter,
+)
 from tilelang.transform import simplify_prim_func
 from tilelang.utils.tensor import map_torch_type
 
@@ -38,21 +39,26 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "float8_e4m3",
-        "float8_e5m2",
-        "int8",
+        T.float16,
+        T.float8_e4m3fn,
+        T.float8_e5m2,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    is_float8 = in_dtype in ["float8_e4m3", "float8_e5m2"]
-    if out_dtype == "int32" or is_float8:
+    is_float8 = in_dtype in [
+        T.float8_e4m3fn,
+        T.float8_e5m2,
+        T.float8_e4m3fn,
+        T.float8_e5m2fnuz,
+    ]
+    if out_dtype == T.int32 or is_float8:
         micro_size_k = 32
 
     # This is a debug config
@@ -60,7 +66,7 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 32
     warp_col_tiles = 32
-    chunk = 32 if in_dtype == "float16" else 64
+    chunk = 32 if in_dtype == T.float16 else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -105,12 +111,11 @@ def tl_matmul(
 
     @T.prim_func
     def gemm_fp8_intrinsic(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
@@ -118,10 +123,12 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)
@@ -129,7 +136,6 @@ def tl_matmul(
             T.clear(C_local)
 
             for ko in T.Pipelined((K // block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -139,7 +145,6 @@ def tl_matmul(
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -215,8 +220,22 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 def main():
-    assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3", "float32", "float32")
-    assert_tl_matmul_correctness(128, 128, 128, "float8_e5m2", "float32", "float32")
+    assert_tl_matmul_correctness(128, 128, 128, T.float8_e4m3fn, T.float32, T.float32)
+    assert_tl_matmul_correctness(128, 128, 128, T.float8_e5m2, T.float32, T.float32)
+
+
+def run_regression_perf():
+    M, N, K = 4096, 4096, 4096
+    out_dtype, accum_dtype = "float32", "float32"
+    in_dtype = T.float8_e4m3fn
+    kernel_e4m3 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
+    latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")
+    in_dtype = T.float8_e5m2
+    kernel_e5m2 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    profiler_e5m2 = kernel_e5m2.get_profiler(tilelang.TensorSupplyType.Integer)
+    latency_e5m2 = profiler_e5m2.do_bench(backend="cupti")
+    return (latency_e4m3 + latency_e5m2) / 2
 
 
 if __name__ == "__main__":

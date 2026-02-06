@@ -15,7 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 """Wrapping functions to bridge frameworks with DLPack support to TVM"""
-from tvm.runtime import ndarray
+
+from tvm import runtime
 
 
 def convert_func(tvm_func, tensor_type, to_dlpack_func):
@@ -45,13 +46,9 @@ def convert_func(tvm_func, tensor_type, to_dlpack_func):
 
     def adapt_tensor(arg):
         if isinstance(arg, tensor_type):
-            if arg.dtype in {
-                    torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2,
-                    torch.float8_e5m2fnuz
-            }:
-                return ndarray.from_dlpack(to_dlpack_func(arg.view(torch.int8)))._create_view(
-                    arg.shape, dtype=float8_dtype_map[arg.dtype])
-            return ndarray.from_dlpack(to_dlpack_func(arg))
+            if arg.dtype in {torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz}:
+                return runtime.from_dlpack(to_dlpack_func(arg.view(torch.int8)))._create_view(arg.shape, dtype=float8_dtype_map[arg.dtype])
+            return runtime.from_dlpack(to_dlpack_func(arg))
         return arg
 
     def _wrapper(*args):
@@ -59,23 +56,3 @@ def convert_func(tvm_func, tensor_type, to_dlpack_func):
         return tvm_func(*args)
 
     return _wrapper
-
-
-def to_pytorch_func(tvm_func):
-    """Convert a tvm function into one that accepts PyTorch tensors
-
-    Parameters
-    ----------
-    tvm_func: Function
-        Built tvm function operating on arrays
-
-    Returns
-    -------
-    wrapped_func: Function
-        Wrapped tvm function that operates on PyTorch tensors
-    """
-    # pylint: disable=import-outside-toplevel
-    import torch
-    import torch.utils.dlpack
-
-    return convert_func(tvm_func, torch.Tensor, torch.utils.dlpack.to_dlpack)

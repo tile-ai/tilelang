@@ -1,4 +1,5 @@
 """The language interface for tl programs."""
+
 from __future__ import annotations
 
 from tvm import tir
@@ -8,23 +9,23 @@ from enum import Enum
 
 
 def get_rank():
-    """Get the rank of the current process.
-    """
+    """Get the rank of the current process."""
     return tir.call_intrin("uint64", tir.op.Op.get("tl.get_rank"))
 
 
 def get_num_ranks():
-    """Get the number of processes.
-    """
+    """Get the number of processes."""
     return tir.call_intrin("uint64", tir.op.Op.get("tl.get_num_ranks"))
 
 
-def put_warp(src: PrimExpr,
-             dst: PrimExpr,
-             size: PrimExpr,
-             dst_pe: PrimExpr | IntImm | None = -1,
-             unroll_factor: int = 4,
-             enable_aggressive_vectorize: bool = False):
+def put_warp(
+    src: PrimExpr,
+    dst: PrimExpr,
+    size: PrimExpr,
+    dst_pe: PrimExpr | IntImm | None = -1,
+    unroll_factor: int = 4,
+    enable_aggressive_vectorize: bool = False,
+):
     """Put to a remote buffer with unrolled loop.
 
     Args:
@@ -43,16 +44,19 @@ def put_warp(src: PrimExpr,
             Whether to enable aggressive vectorization.
             If True, the compiler with try to vectorize the copy via int4.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, unroll_factor,
-                           "warp", enable_aggressive_vectorize)
+    return tir.call_intrin(
+        "handle", tir.op.Op.get("tl.tileop.put"), src, dst, size, dst_pe, unroll_factor, "warp", enable_aggressive_vectorize
+    )
 
 
-def get_warp(src: PrimExpr,
-             dst: PrimExpr,
-             size: PrimExpr,
-             src_pe: PrimExpr | IntImm | None = -1,
-             unroll_factor: int = 4,
-             enable_aggressive_vectorize: bool = False):
+def get_warp(
+    src: PrimExpr,
+    dst: PrimExpr,
+    size: PrimExpr,
+    src_pe: PrimExpr | IntImm | None = -1,
+    unroll_factor: int = 4,
+    enable_aggressive_vectorize: bool = False,
+):
     """Get from a remote buffer with unrolled loop.
 
     Args:
@@ -71,8 +75,9 @@ def get_warp(src: PrimExpr,
             Whether to enable aggressive vectorization.
             If True, the compiler with try to vectorize the copy via int4.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, unroll_factor,
-                           "warp", enable_aggressive_vectorize)
+    return tir.call_intrin(
+        "handle", tir.op.Op.get("tl.tileop.get"), src, dst, size, src_pe, unroll_factor, "warp", enable_aggressive_vectorize
+    )
 
 
 def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | IntImm | None = -1):
@@ -90,7 +95,7 @@ def put_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, dst_pe: PrimExpr | I
             -1 by default, which means local copy.
     """
     return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.put"), src, dst, size, dst_pe, 0, "block", True
+        "handle", tir.op.Op.get("tl.tileop.put"), src, dst, size, dst_pe, 0, "block", True
     )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
@@ -109,7 +114,7 @@ def get_block(src: PrimExpr, dst: PrimExpr, size: PrimExpr, src_pe: PrimExpr | I
             -1 by default, which means local copy.
     """
     return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.get"), src, dst, size, src_pe, 0, "block", True
+        "handle", tir.op.Op.get("tl.tileop.get"), src, dst, size, src_pe, 0, "block", True
     )  # NOTE: unroll_factor is not needed because currently we implement block-level comm based on NVSHMEM-style copy
 
 
@@ -122,41 +127,31 @@ class BinaryRelation(Enum):
     LT = 5
 
 
-def wait_eq(barrier: PrimExpr, expected: PrimExpr):
-    """Wait until *barrier == expected* for GPU-level synchronization.
-    # todo: have different semantic compared to 3 fns below currently
-    Args:
-        barrier: The barrier to wait at
-        expected: The expected value to wait for
-    """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_eq"), address_of(barrier), expected)
+def wait_eq(value: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until value == expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.wait"), BinaryRelation.EQ.value, address_of(value), expected, peer)
 
 
-def wait_ne(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
-    """Wait until *ptr != expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.NE.value,
-                           address_of(ptr), expected, peer)
+def wait_ne(value: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until value != expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.wait"), BinaryRelation.NE.value, address_of(value), expected, peer)
 
 
-def wait_ge(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
-    """Wait until *ptr >= expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GE.value,
-                           address_of(ptr), expected, peer)
+def wait_ge(value: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until value >= expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.wait"), BinaryRelation.GE.value, address_of(value), expected, peer)
 
 
-def wait_le(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
-    """Wait until *ptr <= expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LE.value,
-                           address_of(ptr), expected, peer)
+def wait_le(value: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until value <= expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.wait"), BinaryRelation.LE.value, address_of(value), expected, peer)
 
 
-def wait_gt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
-    """Wait until *ptr > expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.GT.value,
-                           address_of(ptr), expected, peer)
+def wait_gt(value: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until value > expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.wait"), BinaryRelation.GT.value, address_of(value), expected, peer)
 
 
-def wait_lt(ptr: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
-    """Wait until *ptr < expected"""
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait"), BinaryRelation.LT.value,
-                           address_of(ptr), expected, peer)
+def wait_lt(value: PrimExpr, expected: PrimExpr, peer: PrimExpr | None = -1):
+    """Wait until value < expected"""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.wait"), BinaryRelation.LT.value, address_of(value), expected, peer)

@@ -7,9 +7,13 @@
 #include "./transform/common/attr.h"
 #include "op/builtin.h"
 #include "tvm/ffi/any.h"
+#include <tvm/ffi/object.h>
+
+#include "support/ffi_aliases.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/script/ir_builder/tir/ir.h>
+#include <tvm/tir/analysis.h>
 
 #include <utility>
 
@@ -37,22 +41,28 @@ static ForFrame MakeIterVarFrame(const std::string &name, const PrimExpr &dom) {
   using namespace tvm::tir;
   Var var = Var(name, dom->dtype);
   // Create a frame that represents a loop over the given domain.
-  ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
+  ObjectPtr<ForFrameNode> n = tvm::ffi::make_object<ForFrameNode>();
   n->vars.push_back(var);
   n->doms.push_back(Range(0, dom));
   n->f_make_for_loop = [](const Array<Var> &vars, const Array<Range> &doms,
-                          const Stmt &body) -> Stmt {
+                          const Array<Optional<PrimExpr>> &steps,
+                          Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), 1);
     ICHECK_EQ(doms.size(), 1);
-    return For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body);
+    Optional<PrimExpr> step =
+        !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
+    return For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body,
+               /*thread_binding=*/std::nullopt,
+               /*annotations=*/tvm::ffi::Map<tvm::ffi::String, tvm::ffi::Any>{},
+               /*step=*/step);
   };
   return ForFrame(n);
 }
 
 ForFrame ParallelFor(const Array<PrimExpr> &extents,
-                     const Map<String, ObjectRef> &annotations) {
+                     const Map<String, tvm::ffi::Any> &annotations) {
   using namespace tvm::tir;
-  ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
+  ObjectPtr<ForFrameNode> n = tvm::ffi::make_object<ForFrameNode>();
   n->vars.reserve(extents.size());
   n->doms.reserve(extents.size());
   for (const auto &extent : extents) {
@@ -60,16 +70,19 @@ ForFrame ParallelFor(const Array<PrimExpr> &extents,
     n->vars.push_back(Var("v", extent.dtype()));
     n->doms.push_back(Range(make_const(dtype, 0), extent));
   }
-  n->f_make_for_loop = [annotations](const Array<Var> &vars,
-                                     const Array<Range> &doms,
-                                     Stmt body) -> Stmt {
+  n->f_make_for_loop =
+      [annotations](const Array<Var> &vars, const Array<Range> &doms,
+                    const Array<Optional<PrimExpr>> &steps, Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), doms.size());
     int n = vars.size();
     for (int i = n - 1; i >= 0; --i) {
       Range dom = doms[i];
       Var var = vars[i];
+      Optional<PrimExpr> step =
+          i < steps.size() ? steps[i] : Optional<PrimExpr>(std::nullopt);
       body = For(var, dom->min, dom->extent, ForKind::kParallel, body,
-                 /*thread_binding=*/std::nullopt, /*annotations=*/annotations);
+                 /*thread_binding=*/std::nullopt, /*annotations=*/annotations,
+                 /*step=*/step);
     }
     return body;
   };
@@ -82,28 +95,30 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
                       const Array<Array<PrimExpr>> &sync,
                       const Array<Array<PrimExpr>> &groups) {
   using namespace tvm::tir;
-  ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
+  ObjectPtr<ForFrameNode> n = tvm::ffi::make_object<ForFrameNode>();
   DataType dtype = stop.dtype();
   n->vars.push_back(Var("v", dtype));
   n->doms.push_back(Range(std::move(start), stop));
   n->f_make_for_loop = [=](const Array<Var> &vars, const Array<Range> &doms,
+                           const Array<Optional<PrimExpr>> &steps,
                            Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), doms.size());
     int n = vars.size();
     ICHECK(n == 1);
-    Map<String, ObjectRef> anno;
+    Map<String, tvm::ffi::Any> anno;
     if (num_stages > 0)
       anno.Set("num_stages", PrimExpr(num_stages));
     if (!order.empty())
       anno.Set("tl_pipeline_order", order);
     if (!stages.empty())
       anno.Set("tl_pipeline_stage", stages);
-    if (!sync.empty())
-      anno.Set("tl_pipeline_sync", sync);
     if (!groups.empty())
       anno.Set("tl_pipeline_group", groups);
+    Optional<PrimExpr> step =
+        !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
     body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body,
-               /*thread_binding=*/std::nullopt, /*annotations=*/anno);
+               /*thread_binding=*/std::nullopt, /*annotations=*/anno,
+               /*step=*/step);
     return body;
   };
   return ForFrame(n);
@@ -113,7 +128,7 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
                        const PrimExpr &index, PrimExpr group_size) {
   using namespace tvm::tir;
   ICHECK(!domain.empty());
-  ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
+  ObjectPtr<ForFrameNode> n = tvm::ffi::make_object<ForFrameNode>();
   n->vars.reserve(domain.size());
   n->doms.reserve(domain.size());
   PrimExpr domain_size = domain[0];
@@ -142,9 +157,10 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
   grouped_domain.push_back(group_size);
 
   n->f_make_for_loop = [=](const Array<Var> &vars, const Array<Range> &doms,
-                           const Stmt &body) -> Stmt {
+                           const Array<Optional<PrimExpr>> &steps,
+                           Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), doms.size());
-    Map<String, ObjectRef> anno;
+    Map<String, tvm::ffi::Any> anno;
     Array<PrimExpr> idxs(grouped_domain.size(), PrimExpr());
     PrimExpr rem = loop_var * wave_size + index;
 
@@ -165,8 +181,11 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     if (analyzer.CanProveGreaterEqual(waves, 2)) {
       new_body = SeqStmt({out_if, body});
     }
-    Stmt outer =
-        For(loop_var, 0, waves, ForKind::kSerial, new_body, std::nullopt, anno);
+    Optional<PrimExpr> step =
+        !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
+    Stmt outer = For(loop_var, 0, waves, ForKind::kSerial, new_body,
+                     /*thread_binding=*/std::nullopt, /*annotations=*/anno,
+                     /*step=*/step);
     for (int i = 0; i < vars.size() - 1; ++i) {
       outer = tvm::tir::LetStmt(vars[i], idxs[i + 1], outer);
     }
@@ -193,8 +212,8 @@ public:
         "frames", &KernelLaunchFrameNode::frames);
   }
 
-  static constexpr const char *_type_key = "tl.KernelLaunchFrame";
-  TVM_DECLARE_FINAL_OBJECT_INFO(KernelLaunchFrameNode, TIRFrameNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.KernelLaunchFrame",
+                                    KernelLaunchFrameNode, TIRFrameNode);
 
 public:
   TVM_DLL void EnterWithScope() final {
@@ -218,14 +237,20 @@ public:
  */
 class KernelLaunchFrame : public TIRFrame {
 public:
-  TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(KernelLaunchFrame, TIRFrame,
-                                                    KernelLaunchFrameNode);
+  explicit KernelLaunchFrame(ObjectPtr<KernelLaunchFrameNode> data)
+      : TIRFrame(::tvm::ffi::UnsafeInit{}) {
+    ICHECK(data != nullptr);
+    data_ = std::move(data);
+  }
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(KernelLaunchFrame, TIRFrame,
+                                                KernelLaunchFrameNode);
 };
 
 KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
                                const Optional<Array<PrimExpr>> &block_size_opt,
                                const Map<String, ffi::Any> &attrs) {
-  ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
+  ObjectPtr<KernelLaunchFrameNode> n =
+      tvm::ffi::make_object<KernelLaunchFrameNode>();
 
   // If the kernel is a CPU kernel, we don't need to launch any threads.
   bool is_cpu_kernel_frame =
@@ -289,16 +314,14 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   return KernelLaunchFrame(n);
 }
 
-TVM_REGISTER_NODE_TYPE(KernelLaunchFrameNode);
-
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("tl.Parallel", ParallelFor)
       .def("tl.Pipelined", PipelinedFor)
       .def("tl.Persistent", PersistentFor)
       .def("tl.KernelLaunch", KernelLaunch);
-});
+}
 
 class WarpSpecializeFrameNode : public TIRFrameNode {
 public:
@@ -310,8 +333,8 @@ public:
         "frames", &WarpSpecializeFrameNode::frames);
   }
 
-  static constexpr const char *_type_key = "tl.WarpSpecializeFrame";
-  TVM_DECLARE_FINAL_OBJECT_INFO(WarpSpecializeFrameNode, TIRFrameNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.WarpSpecializeFrame",
+                                    WarpSpecializeFrameNode, TIRFrameNode);
 
 public:
   TVM_DLL void EnterWithScope() final {
@@ -330,15 +353,20 @@ public:
 
 class WarpSpecializeFrame : public TIRFrame {
 public:
-  TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(WarpSpecializeFrame,
-                                                    TIRFrame,
-                                                    WarpSpecializeFrameNode);
+  explicit WarpSpecializeFrame(ObjectPtr<WarpSpecializeFrameNode> data)
+      : TIRFrame(::tvm::ffi::UnsafeInit{}) {
+    ICHECK(data != nullptr);
+    data_ = std::move(data);
+  }
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(WarpSpecializeFrame, TIRFrame,
+                                                WarpSpecializeFrameNode);
 };
 
 WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
                                    const PrimExpr &thread_idx,
                                    int warp_group_size = 128) {
-  ObjectPtr<WarpSpecializeFrameNode> n = make_object<WarpSpecializeFrameNode>();
+  ObjectPtr<WarpSpecializeFrameNode> n =
+      tvm::ffi::make_object<WarpSpecializeFrameNode>();
   PrimExpr condition;
   std::vector<int> warp_groups;
   warp_groups.reserve(warp_group_ids.size());
@@ -376,13 +404,14 @@ WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
   return WarpSpecializeFrame(n);
 }
 
-TVM_REGISTER_NODE_TYPE(WarpSpecializeFrameNode);
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.WarpSpecialize", WarpSpecialize);
+  refl::GlobalDef()
+      .def("tl.WarpSpecialize", WarpSpecialize)
+      .def("tl.SideEffect", SideEffect);
   KernelLaunchFrameNode::RegisterReflection();
   WarpSpecializeFrameNode::RegisterReflection();
-});
+}
 
 } // namespace tl
 } // namespace tvm

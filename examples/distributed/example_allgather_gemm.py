@@ -8,16 +8,15 @@ from tilelang.distributed import init_distributed
 
 
 def allgather_gemm(PE_num, M, N, K, block_M, block_N, block_K, dtype="float16"):
-
     accum_dtype = "float"
 
     @T.prim_func
     def main(
-            A: T.Buffer((M, K), dtype),
-            A_ag: T.Buffer((M * PE_num, K), dtype),
-            B: T.Buffer((K, N), dtype),
-            signal: T.Buffer((PE_num,), "uint64"),
-            C: T.Buffer((M * PE_num, N), dtype),
+        A: T.Buffer((M, K), dtype),
+        A_ag: T.Buffer((M * PE_num, K), dtype),
+        B: T.Buffer((K, N), dtype),
+        signal: T.Buffer((PE_num,), "uint64"),
+        C: T.Buffer((M * PE_num, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -36,8 +35,14 @@ def allgather_gemm(PE_num, M, N, K, block_M, block_N, block_K, dtype="float16"):
             for k in T.serial(PE_num - 1):
                 peer[0] = (mype[0] + 1 + k) % npes[0]
                 T.putmem_signal_nbi_block(
-                    T.address_of(A_ag[mype[0] * M, 0]), T.address_of(A[0, 0]),
-                    block_M * block_K * 2, T.address_of(signal[k]), k + 1, 9, peer[0])
+                    T.address_of(A_ag[mype[0] * M, 0]),
+                    T.address_of(A[0, 0]),
+                    block_M * block_K * 2,
+                    T.address_of(signal[k]),
+                    k + 1,
+                    9,
+                    peer[0],
+                )
             for k in T.serial(PE_num - 1):
                 T.signal_wait_until(T.address_of(signal[k]), 0, k + 1)
 
@@ -60,13 +65,7 @@ RANK = int(os.environ.get("RANK", 0))
 WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
 PE_num = WORLD_SIZE
 func = allgather_gemm(PE_num, M, N, K, block_M, block_N, block_K)
-kernel = tilelang.compile(
-    func,
-    out_idx=-1,
-    pass_configs={
-        "tl.disable_tma_lower": True,
-        "tl.disable_warp_specialized": True
-    })
+kernel = tilelang.compile(func, out_idx=-1, pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 
 # Get CUDA Source
 if RANK == 0:
@@ -90,9 +89,9 @@ def ref_program(A, B):
 C_ref = ref_program(A_tensor, B_tensor)
 print("C_ref:", C_ref)
 
-#profiler.init_distributed()
+# profiler.init_distributed()
 A_local = pynvshmem.nvshmem_create_tensor([M, K], dtype)
-A_local[:].copy_(A_tensor[M * RANK:M * (RANK + 1), :])
+A_local[:].copy_(A_tensor[M * RANK : M * (RANK + 1), :])
 
 A_ag_local = pynvshmem.nvshmem_create_tensor([M * PE_num, K], dtype)
 A_ag_local.fill_(0)

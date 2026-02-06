@@ -5,20 +5,12 @@ import tilelang.language as T
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 @tilelang.jit(out_idx=[2])
-def matmul_warp_specialize_copy_1_gemm_0(M,
-                                         N,
-                                         K,
-                                         block_M,
-                                         block_N,
-                                         block_K,
-                                         dtype="float16",
-                                         accum_dtype="float"):
-
+def matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
@@ -81,6 +73,29 @@ def main(M=16384, N=16384, K=16384):
     latency = profiler.do_bench()
 
     print(f"Latency: {latency} ms")
+
+
+def run_regression_perf(M=16384, N=16384, K=16384):
+    block_M = 128
+    block_N = 128
+    block_K = 64
+
+    jit_kernel = matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K)
+
+    import torch
+
+    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+
+    c = jit_kernel(a, b)
+
+    ref_c = a @ b
+
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+
+    profiler = jit_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

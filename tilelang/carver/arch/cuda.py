@@ -78,7 +78,6 @@ hopper_tensorcore_supported = ada_tensorcore_supported
 # instead of assuming both a and b share the same dtype.
 # As the tensorcore may supports float8_e4m3 * float8_e5m2
 def is_tensorcore_supported_precision(in_dtype: str, accum_dtype: str, arch: TileDevice) -> bool:
-
     if is_volta_arch(arch):
         return (in_dtype, accum_dtype) in volta_tensorcore_supported
     elif is_ampere_arch(arch):
@@ -92,7 +91,6 @@ def is_tensorcore_supported_precision(in_dtype: str, accum_dtype: str, arch: Til
 
 
 class TensorInstruction:
-
     def __init__(
         self,
         name: str,
@@ -104,7 +102,6 @@ class TensorInstruction:
 
 
 class CUDA(TileDevice):
-
     def __init__(self, target: Target | str):
         if isinstance(target, str):
             target = tvm.target.Target(target)
@@ -148,12 +145,12 @@ class CUDA(TileDevice):
 
 
 __all__ = [
-    'is_cuda_arch',
-    'is_volta_arch',
-    'is_ampere_arch',
-    'is_ada_arch',
-    'is_hopper_arch',
-    'is_tensorcore_supported_precision',
-    'has_mma_support',
+    "is_cuda_arch",
+    "is_volta_arch",
+    "is_ampere_arch",
+    "is_ada_arch",
+    "is_hopper_arch",
+    "is_tensorcore_supported_precision",
+    "has_mma_support",
     "CUDA",
 ]

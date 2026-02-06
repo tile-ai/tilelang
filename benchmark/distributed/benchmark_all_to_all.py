@@ -13,19 +13,18 @@ tilelang.disable_cache()
 
 
 def all_to_all(max_m, hidden, num_tot_experts, WORLD_SIZE, threads=128, dtype="float16"):
-
     scale_dtype = "float"
     EXPERTS_PER_RANK = num_tot_experts // WORLD_SIZE
 
     @T.prim_func
     def main(
-            send_buf: T.Tensor((max_m, hidden), dtype),  # type: ignore
-            recv_buf: T.Tensor((WORLD_SIZE * max_m * 2, hidden), dtype),  # type: ignore
-            scale_send_buf: T.Tensor((max_m), scale_dtype),  # type: ignore
-            scale_recv_buf: T.Tensor((WORLD_SIZE * max_m * 2), scale_dtype),  # type: ignore
-            split_send_buf: T.Tensor((num_tot_experts), "int32"),  # type: ignore
-            split_recv_buf: T.Tensor((num_tot_experts * 2), "int32"),  # type: ignore
-            signal_buf: T.Tensor((WORLD_SIZE * 2), "uint64"),  # type: ignore
+        send_buf: T.Tensor((max_m, hidden), dtype),  # type: ignore
+        recv_buf: T.Tensor((WORLD_SIZE * max_m * 2, hidden), dtype),  # type: ignore
+        scale_send_buf: T.Tensor((max_m), scale_dtype),  # type: ignore
+        scale_recv_buf: T.Tensor((WORLD_SIZE * max_m * 2), scale_dtype),  # type: ignore
+        split_send_buf: T.Tensor((num_tot_experts), "int32"),  # type: ignore
+        split_recv_buf: T.Tensor((num_tot_experts * 2), "int32"),  # type: ignore
+        signal_buf: T.Tensor((WORLD_SIZE * 2), "uint64"),  # type: ignore
     ):
         with T.Kernel(WORLD_SIZE, threads=threads) as (bx):
             peer = bx
@@ -63,17 +62,14 @@ def all_to_all(max_m, hidden, num_tot_experts, WORLD_SIZE, threads=128, dtype="f
 
 
 class TilelangAllToAll:
-
     def __init__(self, ctx: AllToAllContext):
         self.ctx = ctx
-        self.func = all_to_all(
-            ctx.max_m, ctx.hidden, ctx.num_tot_experts, ctx.WORLD_SIZE, threads=128)
+        self.func = all_to_all(ctx.max_m, ctx.hidden, ctx.num_tot_experts, ctx.WORLD_SIZE, threads=128)
         self.kernel = tilelang.compile(self.func, pass_configs={"tl.disable_tma_lower": True})
         if self.ctx.rank == 0:
             print(self.kernel.get_kernel_source())
 
-    def __call__(self, send_tensor: torch.Tensor, send_split_cumsum: torch.Tensor,
-                 send_scale: torch.Tensor | None):
+    def __call__(self, send_tensor: torch.Tensor, send_split_cumsum: torch.Tensor, send_scale: torch.Tensor | None):
         """
         low-latency all-to-all communication
         """
@@ -161,7 +157,6 @@ def calc_gather_index(
     row_end: int,
     BLOCK_SIZE: int = 1024,
 ):
-
     @triton.jit
     def _kernel(
         scatter_index: torch.Tensor,
@@ -202,8 +197,7 @@ def calc_gather_index(
 
 
 def calc_scatter_index_stable(choosed_experts: torch.Tensor):
-    return (choosed_experts.flatten().argsort(stable=True).argsort().int().view(
-        choosed_experts.shape))
+    return choosed_experts.flatten().argsort(stable=True).argsort().int().view(choosed_experts.shape)
 
 
 def main():
@@ -227,7 +221,6 @@ def main():
     )
 
     def perf_triton(input: torch.Tensor, scale_tensor: torch.Tensor, exp_indices: torch.Tensor):
-
         # prepare the indexes
         splits_gpu_cur_rank = torch.bincount(exp_indices.view(-1), minlength=args.G).to(torch.int32)
         split_cumsum = splits_to_cumsum(splits_gpu_cur_rank)
@@ -237,20 +230,17 @@ def main():
         # calculate the gather idx accordingly
         gather_idx_cur_rank, _ = calc_gather_index(scatter_idx_cur_rank, 0, token_num * args.topk)
         # use torch native scatter forward(will not be included in the e2e time measurement)
-        scattered_input = torch.empty(
-            input.size(0) * args.topk, input.size(1), dtype=input.dtype, device=input.device)
+        scattered_input = torch.empty(input.size(0) * args.topk, input.size(1), dtype=input.dtype, device=input.device)
         scattered_scale_tensor = torch.empty(
             (scale_tensor.size(0) * args.topk),
             dtype=scale_tensor.dtype,
             device=scale_tensor.device,
         )
         scattered_input.copy_(torch.index_select(input, dim=0, index=gather_idx_cur_rank))
-        scattered_scale_tensor.copy_(
-            torch.index_select(scale_tensor, dim=0, index=gather_idx_cur_rank))
+        scattered_scale_tensor.copy_(torch.index_select(scale_tensor, dim=0, index=gather_idx_cur_rank))
 
         def fwd():
-            return fast_all_to_all(all_to_all_ctx, scattered_input, split_cumsum,
-                                   scattered_scale_tensor if args.with_scale else None)
+            return fast_all_to_all(all_to_all_ctx, scattered_input, split_cumsum, scattered_scale_tensor if args.with_scale else None)
 
         torch.cuda._sleep(1000000000)
         # warmup
@@ -269,21 +259,22 @@ def main():
 
         # 1. dispatch
         dispatch_splits, dispatch_token, dispatch_scale = fast_all_to_all(
-            all_to_all_ctx, scattered_input, split_cumsum,
-            scattered_scale_tensor if args.with_scale else None)
+            all_to_all_ctx, scattered_input, split_cumsum, scattered_scale_tensor if args.with_scale else None
+        )
         dispatch_token, dispatch_scale = all_to_all_post_process(
-            all_to_all_ctx, dispatch_splits, dispatch_token,
-            dispatch_scale if args.with_scale else None)
+            all_to_all_ctx, dispatch_splits, dispatch_token, dispatch_scale if args.with_scale else None
+        )
 
         # 2. compute: moe_compute(dispatch_token, dispatch_scale, moe_weight, ...)
         # ...
 
         # 3. combine
         combine_splits, combine_token, combine_scale = fast_all_to_all(
-            all_to_all_ctx, dispatch_token, splits_to_cumsum(dispatch_splits), dispatch_scale)
+            all_to_all_ctx, dispatch_token, splits_to_cumsum(dispatch_splits), dispatch_scale
+        )
         combine_token, combine_scale = all_to_all_post_process(
-            all_to_all_ctx, combine_splits, combine_token,
-            combine_scale if args.with_scale else None)
+            all_to_all_ctx, combine_splits, combine_token, combine_scale if args.with_scale else None
+        )
 
         # 3.1. reduce: [num_tokens_local_rank * topk] => [num_tokens_local_rank]
         combine_reduced_out = torch.zeros_like(input)
@@ -293,8 +284,7 @@ def main():
         torch.testing.assert_close(combine_reduced_out, input * args.topk, rtol=1e-2, atol=1e-2)
 
         tilelang_all_to_all = TilelangAllToAll(all_to_all_ctx)
-        tilelang_all_to_all(scattered_input, split_cumsum,
-                            scattered_scale_tensor if args.with_scale else None)
+        tilelang_all_to_all(scattered_input, split_cumsum, scattered_scale_tensor if args.with_scale else None)
 
         # torch.testing.assert_close(tilelang_out[1], dispatch_token, rtol=1e-2, atol=1e-2)
         # torch.testing.assert_close(tilelang_scale, dispatch_scale, rtol=1e-2, atol=1e-2)
@@ -307,8 +297,7 @@ def main():
     exp_indices = generate_random_exp_indices(token_num, args.G, args.topk)
     assert exp_indices.size(0) == token_num and exp_indices.size(1) == args.topk
     exp_indices = exp_indices.to("cuda")
-    input = (
-        torch.rand(token_num, args.N, dtype=torch.float32).to(dtype_map[args.dtype]).to("cuda"))
+    input = torch.rand(token_num, args.N, dtype=torch.float32).to(dtype_map[args.dtype]).to("cuda")
     scale_tensor = torch.rand(token_num, dtype=torch.float32).to("cuda")
 
     torch.cuda.synchronize()

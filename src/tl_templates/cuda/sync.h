@@ -184,11 +184,13 @@ TL_DEVICE void barrier_blocks(int offset, int rank, int num_ranks) {
 #undef FINISHED_SUM_TAG
 }
 
-template <typename T> TL_DEVICE void wait_eq(void *ptr, T val) {
+template <typename P, typename T> TL_DEVICE void wait_eq(P ptr, T val) {
+  static_assert(std::is_same_v<P, uint64_t> || std::is_pointer_v<P>,
+                "P must be a pointer or uint64_t");
   T *flag_ptr = reinterpret_cast<T *>(ptr);
 // Spin-loop
 #pragma unroll 1
-  while (ld_acquire(flag_ptr) != val)
+  while (ld_volatile_global(flag_ptr) != val)
     ;
 }
 

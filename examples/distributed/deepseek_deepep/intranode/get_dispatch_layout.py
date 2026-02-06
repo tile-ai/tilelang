@@ -15,8 +15,8 @@ from typing import Tuple
 
 # TODO(wt): Add async functionality
 def get_dispatch_layout(
-        topk_idx: torch.Tensor, num_experts: int,
-        num_ranks: int) -> Tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    topk_idx: torch.Tensor, num_experts: int, num_ranks: int
+) -> Tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Calculate the layout required for later communication.
 
     Arguments:
@@ -42,9 +42,9 @@ def get_dispatch_layout(
     # Allocate tensors
     # TODO(wt): Wait on previous events and allocate on comm stream when adding async functionality
     num_tokens, num_topk = topk_idx.shape
-    num_tokens_per_rank = torch.empty(num_ranks, dtype=torch.int32, device='cuda')
-    num_tokens_per_expert = torch.empty(num_experts, dtype=torch.int32, device='cuda')
-    is_token_in_rank = torch.empty((num_tokens, num_ranks), dtype=torch.bool, device='cuda')
+    num_tokens_per_rank = torch.empty(num_ranks, dtype=torch.int32, device="cuda")
+    num_tokens_per_expert = torch.empty(num_experts, dtype=torch.int32, device="cuda")
+    is_token_in_rank = torch.empty((num_tokens, num_ranks), dtype=torch.bool, device="cuda")
 
     # Launch the kernel
     kernel = get_dispatch_layout_kernel(num_topk, num_experts, num_ranks)
@@ -72,14 +72,14 @@ def get_dispatch_layout_kernel(
     num_sms = T.ceildiv(num_experts, experts_per_sm) + T.ceildiv(num_ranks, ranks_per_sm)
     experts_per_rank = num_experts // num_ranks
 
-    num_tokens = T.dynamic('num_tokens')
+    num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
     def get_dispatch_layout_main(
-            topk_idx: T.Tensor([num_tokens, num_topk], "int64"),  # type: ignore
-            num_tokens_per_rank: T.Tensor([num_ranks], "int32"),  # type: ignore
-            num_tokens_per_expert: T.Tensor([num_experts], "int32"),  # type: ignore
-            is_token_in_rank: T.Tensor([num_tokens, num_ranks], "bool"),  # type: ignore
+        topk_idx: T.Tensor([num_tokens, num_topk], "int64"),  # type: ignore
+        num_tokens_per_rank: T.Tensor([num_ranks], "int32"),  # type: ignore
+        num_tokens_per_expert: T.Tensor([num_experts], "int32"),  # type: ignore
+        is_token_in_rank: T.Tensor([num_tokens, num_ranks], "bool"),  # type: ignore
     ):
         with T.Kernel(num_sms, threads=threads) as bx:
             tx = T.get_thread_binding()

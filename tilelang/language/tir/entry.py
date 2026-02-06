@@ -7,9 +7,7 @@ from tvm.tir.function import PrimFunc
 from tvm.script.parser._core import parse, scan_macro, utils
 
 
-def prim_func(func: Callable | None = None,
-              private: bool = False,
-              check_well_formed: bool = False) -> PrimFunc | Callable:
+def prim_func(func: Callable | None = None, private: bool = False, check_well_formed: bool = False) -> PrimFunc | Callable:
     """The parsing method for tir prim func, by using `@prim_func` as decorator.
 
     Parameters
@@ -91,12 +89,12 @@ def macro(*args, hygienic: bool = True) -> Callable:
 
 
         @T.prim_func
-        def use1(A: T.Buffer((1024,), "int32"), B: T.Buffer((), "int32")) -> None:
+        def use1(A: T.Buffer((1024,), T.int32), B: T.Buffer((), T.int32)) -> None:
             for x_value in T.serial(10):
                 static_capture(A, B)    ### Produces B[()] = A[128]
 
         @T.prim_func
-        def use2(A: T.Buffer((1024,), "int32"), B: T.Buffer((), "int32")) -> None:
+        def use2(A: T.Buffer((1024,), T.int32), B: T.Buffer((), T.int32)) -> None:
             for x_value in T.serial(10):
                 dynamic_capture(A, B)   ### Produces B[()] = A[x_value]
         ```
@@ -113,8 +111,7 @@ def macro(*args, hygienic: bool = True) -> Callable:
     if len(args) == 1 and inspect.isfunction(args[0]):
         return _decorator(args[0])
 
-    raise ValueError(
-        "Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])")
+    raise ValueError("Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])")
 
 
 setattr(macro, "dispatch_token", "tir")  # noqa: B010

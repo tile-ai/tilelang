@@ -52,7 +52,6 @@ def get_package_version():
 
 
 def pathlib_wrapper(func):
-
     def wrapper(*kargs, **kwargs):
         include_dirs, library_dirs, libraries = func(*kargs, **kwargs)
         return map(str, include_dirs), map(str, library_dirs), map(str, libraries)
@@ -110,10 +109,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
         libraries=libraries,
         dlink=True,
         dlink_libraries=["nvshmem_device", "cudart_static"],
-        extra_compile_args={
-            "cxx": cxx_flags,
-            "nvcc": ["-rdc=true"]
-        },
+        extra_compile_args={"cxx": cxx_flags, "nvcc": ["-rdc=true"]},
         extra_link_args=ld_flags,
     )
 

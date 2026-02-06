@@ -50,6 +50,7 @@ class ProducerUsedBufferFinder : public StmtExprVisitor {
 public:
   auto FindProducerusedBuffer(const Stmt &stmt) {
     producer_buffers_.clear();
+    let_var_to_expr_.clear();
     std::unordered_set<const BufferNode *> last_producer_buffers_;
     for (;;) {
       VisitStmt(stmt);
@@ -68,6 +69,28 @@ public:
     for (const auto &buffer : usage.buffer_use_count_) {
       producer_buffers_.insert(buffer.first);
     }
+    // Also collect buffers through let bindings
+    CollectBuffersFromExpr(expr);
+  }
+
+  // Collect buffers from expression, following let bindings
+  void CollectBuffersFromExpr(const PrimExpr &expr) {
+    PostOrderVisit(expr, [this](const ObjectRef &node) {
+      if (auto bl = node.as<BufferLoadNode>()) {
+        producer_buffers_.insert(bl->buffer.get());
+      } else if (auto var_node = node.as<VarNode>()) {
+        auto var = tvm::ffi::GetRef<Var>(var_node);
+        auto it = let_var_to_expr_.find(var.get());
+        if (it != let_var_to_expr_.end()) {
+          CollectBuffersFromExpr(it->second);
+        }
+      }
+    });
+  }
+
+  void VisitStmt_(const LetStmtNode *op) final {
+    let_var_to_expr_[op->var.get()] = op->value;
+    StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
@@ -102,15 +125,15 @@ public:
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
       for (auto arg : op->args) {
-        if (auto buffer_load = arg.as<BufferLoadNode>()) {
-          producer_buffers_.insert(buffer_load->buffer.get());
-        }
+        // Collect buffers from args, including through let bindings
+        CollectBuffersFromExpr(arg);
       }
     }
   }
 
 private:
   std::unordered_set<const BufferNode *> producer_buffers_;
+  std::unordered_map<const VarNode *, PrimExpr> let_var_to_expr_;
 };
 
 class WarpSpecializedRoleMarker : public StmtVisitor {
@@ -138,13 +161,10 @@ public:
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
-      if (call->op.same_as(loop_break()) || call->op.same_as(wait_eq()))
+      if (call->op.same_as(loop_break())) {
         role = Role::kBoth;
-      if (call->op.same_as(get_clock()))
-        role = Role::kBoth;
+      }
     }
-    // NOTE(wt): We should have set the role for barrier ops (on device and
-    // system level) to kBoth, but some issue exists in warp-specialized cases
     SetRole(op, role);
   }
 
@@ -162,7 +182,7 @@ public:
 
     // Check reads from global
     Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ GetRef<Stmt>(op));
+                /*body*/ tvm::ffi::GetRef<Stmt>(op));
     auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto reads = access[0];
     Role role = Role::kProducer;
@@ -514,7 +534,7 @@ private:
     annotations.Set(String("stmt_group"), Integer(1));
     auto original_node = (op->body).as<SeqStmtNode>();
     if (!original_node) {
-      return GetRef<For>(op);
+      return tvm::ffi::GetRef<For>(op);
     }
     Array<Stmt> new_body;
     int cur_id = 0;
@@ -598,7 +618,7 @@ public:
   WSCodeEmitter(bool is_emitting_producer, const IterVar &thread_iv,
                 Map<Var, Buffer> buffer_data_to_buffer,
                 const WarpSpecializedRoleMarker &marker,
-                bool mbarrier_only = false, bool only_has_wgmma = false)
+                bool mbarrier_only = false)
       : is_emitting_producer_(is_emitting_producer),
         buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         marker_(marker), thread_var_(thread_iv->var),
@@ -649,7 +669,7 @@ private:
     if (role == Role::kBoth) {
       return StmtMutator::VisitStmt_(op);
     } else if ((role == Role::kProducer) == is_emitting_producer_) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     } else {
       return Evaluate(0);
     }
@@ -767,11 +787,7 @@ private:
             int pattern_idx = map.release[i][j];
             PrimExpr release_barrier_id =
                 stage_ + num_barriers_ + num_stages_ * pattern_idx;
-            if (only_has_wgmma_)
-              block_stmt.push_back(makeArriveBarrier(
-                  release_barrier_id, 0, EQ(FloorMod(thread_var_, 128), 0)));
-            else
-              block_stmt.push_back(makeArriveBarrier(release_barrier_id));
+            block_stmt.push_back(makeArriveBarrier(release_barrier_id));
             for (int s = 0; s < num_stages_; s++) {
               released_barrier_.insert(s + num_barriers_ +
                                        num_stages_ * pattern_idx);
@@ -1116,7 +1132,6 @@ private:
   bool mbarrier_only_ = false;
   PipelineInfo pipeline_info_;
   friend class WarpSpecializedRewriter;
-  bool only_has_wgmma_ = false;
   bool has_simt_copy_ = false;
 };
 
@@ -1184,38 +1199,6 @@ private:
     return for_node;
   }
 
-  /**
-   * @brief Rewrite a BlockRealize for warp specialization, inserting barriers
-   * and emitting producer/consumer bodies.
-   *
-   * This visitor handles BlockRealize nodes when a thread IterVar (thread_iv_)
-   * is defined and warp-specialization is applicable. It:
-   * - Determines producer/consumer roles via WarpSpecializedRoleMarker and
-   *   returns the original block if no producer is detected.
-   * - If warp specialization is disabled, emits only mbarrier initialization
-   * and the mbarrier-only transformed body.
-   * - Otherwise, detects WgMMA usage for the block body and constructs separate
-   *   WSCodeEmitter instances for producer and consumer paths (propagating the
-   *   WgMMA flag to the consumer emitter).
-   * - Generates producer/consumer code, applies register hint calls
-   * (set_max_nreg) when available, and rewrites thread indices with
-   * ThreadIdxRewriter to partition threads between producer and consumer roles.
-   * - Computes and initializes a list of mbarrier handles with per-barrier
-   *   arrive thread counts (taking SIMT-copy and WgMMA cases into account).
-   * - Wraps the transformed body in an IfThenElse that dispatches producer vs
-   *   consumer based on thread index, and annotates the region with the
-   *   "kWarpSpecializationScope" attribute that contains producer/consumer
-   *   thread extents.
-   *
-   * Side effects:
-   * - May update member state: only_has_wgmma_, updated_thread_extent_,
-   *   need_update_thread_extent_.
-   * - May abort via ICHECK if invariants (e.g., matching barrier counts) are
-   *   violated.
-   *
-   * @return The possibly rewritten BlockRealize statement (original when no
-   *         warp-specialization is applied or thread_iv_ is undefined).
-   */
   Stmt VisitStmt_(const BlockRealizeNode *op) final {
     BlockRealize block_realize =
         Downcast<BlockRealize>(StmtExprMutator::VisitStmt_(op));
@@ -1249,7 +1232,6 @@ private:
       block_realize.CopyOnWrite()->block = block;
       return block_realize;
     }
-    only_has_wgmma_ = WgMMACollector::HasWgMMA(block->body);
     WSCodeEmitter producer(true, thread_iv_, buffer_data_to_buffer_, marker);
     WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker,
                            false);
@@ -1309,7 +1291,6 @@ private:
   bool need_update_thread_extent_ = false;
   bool disable_warp_specialized_ = false;
   bool disable_shuffle_elect_ = false;
-  bool only_has_wgmma_ = false;
 };
 
 using namespace tir::transform;
@@ -1326,7 +1307,7 @@ tvm::transform::Pass WarpSpecialized() {
       return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized,
                                                  disable_shuffle_elect);
     } else {
-      ObjectRef node = String("default");
+      auto node = ffi::String("default");
       f.CopyOnWrite()->body =
           AttrStmt(node, attr::kCustomWarpSpecialization, 1, f->body);
       return f;
@@ -1335,10 +1316,10 @@ tvm::transform::Pass WarpSpecialized() {
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.WarpSpecialized", WarpSpecialized);
-});
+}
 
 } // namespace tl
 } // namespace tvm

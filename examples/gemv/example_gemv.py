@@ -17,15 +17,14 @@ def naive_gemv(
     K: int,
     BLOCK_N: int,
     BLOCK_K: int,
-    dtype: str = "float16",
-    accum_dtype: str = "float",
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
-
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N)) as bn:
             tn = T.get_thread_binding(0)  # tn = threadIdx.x
@@ -38,8 +37,7 @@ def naive_gemv(
                     A_shared[tk] = A[bk * BLOCK_K + tk]
                     B_shared[tn, tk] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk]
                 for tk in T.serial(BLOCK_K):
-                    C_reg[0] += A_shared[tk].astype(accum_dtype) * B_shared[tn,
-                                                                            tk].astype(accum_dtype)
+                    C_reg[0] += A_shared[tk].astype(accum_dtype) * B_shared[tn, tk].astype(accum_dtype)
             C[bn * BLOCK_N + tn] = C_reg[0]
 
     return main
@@ -51,15 +49,14 @@ def naive_splitk_gemv(
     K: int,
     BLOCK_N: int,
     BLOCK_K: int,
-    dtype: str = "float16",
-    accum_dtype: str = "float",
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
-
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, BLOCK_K)) as bn:
             tn = T.get_thread_binding(0)
@@ -88,16 +85,16 @@ def splitk_gemv(
     BLOCK_N: int,
     BLOCK_K: int,
     reduce_threads: int,
-    dtype: str = "float16",
-    accum_dtype: str = "float",
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
     TILE_K = T.ceildiv(BLOCK_K, reduce_threads)
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -127,8 +124,8 @@ def splitk_gemv_vectorized(
     K: int,
     BLOCK_N: int,
     reduce_threads: int,
-    dtype: str = "float16",
-    accum_dtype: str = "float",
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
     MAX_TRANSACTION_SIZE_IN_BITS = 128
     TILE_K = MAX_TRANSACTION_SIZE_IN_BITS // DataType(dtype).bits
@@ -136,9 +133,9 @@ def splitk_gemv_vectorized(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -168,8 +165,8 @@ def splitk_gemv_vectorized_tvm(
     K: int,
     BLOCK_N: int,
     reduce_threads: int,
-    dtype: str = "float16",
-    accum_dtype: str = "float",
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float,
 ):
     MAX_TRANSACTION_SIZE_IN_BITS = 128
     TILE_K = MAX_TRANSACTION_SIZE_IN_BITS // DataType(dtype).bits
@@ -177,9 +174,9 @@ def splitk_gemv_vectorized_tvm(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -197,9 +194,9 @@ def splitk_gemv_vectorized_tvm(
                     C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
             C_reduced = T.alloc_local((1,), accum_dtype)
             with T.attr(
-                    T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
-                    "reduce_scope",
-                    T.reinterpret(T.uint64(0), dtype="handle"),
+                T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                "reduce_scope",
+                T.reinterpret(T.uint64(0), dtype="handle"),
             ):
                 T.evaluate(
                     T.tvm_thread_allreduce(
@@ -209,7 +206,8 @@ def splitk_gemv_vectorized_tvm(
                         C_reduced[0],
                         tk,
                         dtype="handle",
-                    ))
+                    )
+                )
 
             C[bn * BLOCK_N + tn] = C_reduced[0]
 
@@ -218,10 +216,8 @@ def splitk_gemv_vectorized_tvm(
 
 def get_block_template_configs():
     iter_params = dict(
-        block_M=[2, 4, 8, 32, 64, 128],
-        block_N=[2, 4, 8, 32, 64, 128],
-        num_stages=[0, 1, 2, 3, 4],
-        threads=[32, 64, 128, 256])
+        block_M=[2, 4, 8, 32, 64, 128], block_N=[2, 4, 8, 32, 64, 128], num_stages=[0, 1, 2, 3, 4], threads=[32, 64, 128, 256]
+    )
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
@@ -237,18 +233,11 @@ def get_block_template_configs():
     },
     out_idx=[2],
 )
-def gemv_alloc_reducer(M,
-                       N,
-                       block_M=128,
-                       block_N=128,
-                       num_stages=2,
-                       threads=256,
-                       dtype: str = "float16",
-                       accum_dtype: str = "float"):
-
+def gemv_alloc_reducer(
+    M, N, block_M=128, block_N=128, num_stages=2, threads=256, dtype: T.dtype = T.float16, accum_dtype: T.dtype = T.float
+):
     @T.prim_func
-    def main(a: T.Tensor((M, N), dtype), x: T.Tensor(N, dtype), o: T.Tensor(M,
-                                                                            dtype)):  # type: ignore
+    def main(a: T.Tensor((M, N), dtype), x: T.Tensor(N, dtype), o: T.Tensor(M, dtype)):  # type: ignore
         with T.Kernel(T.ceildiv(M, block_M), threads=threads) as i0_m:
             o_reducer = T.alloc_reducer(block_M, accum_dtype, replication="all")
             T.clear(o_reducer)
@@ -287,17 +276,17 @@ def get_autotuned_kernel(
     BLOCK_N=None,
     reduce_threads=None,
 ):
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
     MAX_TRANSACTION_SIZE_IN_BITS = 128
     TILE_K = MAX_TRANSACTION_SIZE_IN_BITS // DataType(dtype).bits
     BLOCK_K = reduce_threads * TILE_K
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -315,9 +304,9 @@ def get_autotuned_kernel(
                     C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
             C_reduced = T.alloc_local((1,), accum_dtype)
             with T.attr(
-                    T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
-                    "reduce_scope",
-                    T.reinterpret(T.uint64(0), dtype="handle"),
+                T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                "reduce_scope",
+                T.reinterpret(T.uint64(0), dtype="handle"),
             ):
                 T.evaluate(
                     T.tvm_thread_allreduce(
@@ -327,21 +316,22 @@ def get_autotuned_kernel(
                         C_reduced[0],
                         tk,
                         dtype="handle",
-                    ))
+                    )
+                )
 
             C[bn * BLOCK_N + tn] = C_reduced[0]
 
     return main
 
 
-def check_correctness_and_bench(kernel, N, K, bench_ref=True):
+def check_correctness_and_bench(kernel, N, K, do_bench=True):
     profiler = kernel.get_profiler()
     profiler.assert_allclose(lambda x, y: x @ y.T, atol=1e-2, rtol=1e-2)
-    if bench_ref:
+    if do_bench:
         latency = profiler.do_bench(lambda x, y: x @ y.T, warmup=50)
         print(f"Torch Latency: {latency} ms")
-    latency = profiler.do_bench(kernel, warmup=50)
-    print(f"TileLang Latency: {latency} ms\n")
+        latency = profiler.do_bench(kernel, warmup=50)
+        print(f"TileLang Latency: {latency} ms\n")
 
 
 def main(do_bench: bool = True):
@@ -350,16 +340,16 @@ def main(do_bench: bool = True):
     parser.add_argument("--k", type=int, default=1024, help="Matrix dimension K")
     args, _ = parser.parse_known_args()
     N, K = args.n, args.k
-    check_correctness_and_bench(naive_gemv(N, K, 128, 128), N, K)
-    check_correctness_and_bench(naive_splitk_gemv(N, K, 32, 32), N, K)
-    check_correctness_and_bench(splitk_gemv(N, K, 32, 32, 32), N, K)
-    check_correctness_and_bench(splitk_gemv_vectorized(N, K, 2, 32), N, K)
-    check_correctness_and_bench(splitk_gemv_vectorized_tvm(N, K, 2, 32), N, K)
-    check_correctness_and_bench(gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K)
+    check_correctness_and_bench(naive_gemv(N, K, 128, 128), N, K, do_bench=do_bench)
+    check_correctness_and_bench(naive_splitk_gemv(N, K, 32, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(splitk_gemv(N, K, 32, 32, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(splitk_gemv_vectorized(N, K, 2, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(splitk_gemv_vectorized_tvm(N, K, 2, 32), N, K, do_bench=do_bench)
+    check_correctness_and_bench(gemv_alloc_reducer(N, K, block_M=128, block_N=128), N, K, do_bench=do_bench)
 
     print("Test passed!")
 
-    if not do_bench:
+    if do_bench:
         best_result = get_autotuned_kernel(N, K)
         best_config = best_result.config
         kernel = splitk_gemv_vectorized_tvm(N, K, **best_config)
@@ -372,6 +362,24 @@ def main(do_bench: bool = True):
         profiler = kernel.get_profiler()
         tilelang_tile_latency = profiler.do_bench(kernel, warmup=500)
         print(f"TileLang BlockReduce Latency: {tilelang_tile_latency} ms\n")
+
+
+def run_regression_perf():
+    N, K = 4096, 4096
+    latency = 0.0
+    kernel_list = [
+        naive_gemv(N, K, 128, 128),
+        naive_splitk_gemv(N, K, 32, 32),
+        splitk_gemv(N, K, 32, 32, 32),
+        splitk_gemv_vectorized(N, K, 2, 32),
+        splitk_gemv_vectorized_tvm(N, K, 2, 32),
+        gemv_alloc_reducer(N, K, block_M=128, block_N=128),
+    ]
+    for kernel in kernel_list:
+        profiler = kernel.get_profiler()
+        # Benchmark the TileLang kernel itself, not the PyTorch reference.
+        latency += profiler.do_bench(backend="cupti")
+    return latency / len(kernel_list)
 
 
 if __name__ == "__main__":

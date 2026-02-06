@@ -11,7 +11,6 @@ tilelang.disable_cache()
 
 
 def all_to_all(PE_num, TOKEN_NUM, TOPK, HIDDEN, EXPERT_NUM, dtype="float16"):
-
     EXPERTS_PER_RANK = EXPERT_NUM // PE_num
 
     @T.prim_func
@@ -37,8 +36,8 @@ def all_to_all(PE_num, TOKEN_NUM, TOPK, HIDDEN, EXPERT_NUM, dtype="float16"):
             m_end[0] = splits_cumsum[(peer + 1) * EXPERTS_PER_RANK]
 
             T.putmem_nbi_block(
-                T.address_of(data_dst[0, 0]), T.address_of(data_src[m_start[0], 0]),
-                (m_end[0] - m_start[0]) * HIDDEN * 2, peer)
+                T.address_of(data_dst[0, 0]), T.address_of(data_src[m_start[0], 0]), (m_end[0] - m_start[0]) * HIDDEN * 2, peer
+            )
 
             T.fence()
 
@@ -119,7 +118,7 @@ split_cumsum = splits_to_cumsum(splits_gpu_cur_rank)
 # print("split_cumsum:", split_cumsum)
 
 data_src = pynvshmem.nvshmem_create_tensor([args.M * args.topk, args.N], torch.float16)
-data_src[:].copy_(ref_tensor[args.M * args.topk * RANK:args.M * args.topk * (RANK + 1), :])
+data_src[:].copy_(ref_tensor[args.M * args.topk * RANK : args.M * args.topk * (RANK + 1), :])
 
 splits_cumsum = pynvshmem.nvshmem_create_tensor([args.G + 1], torch.int32)
 splits_cumsum[:].copy_(split_cumsum)

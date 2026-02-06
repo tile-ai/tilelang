@@ -17,6 +17,7 @@
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "builtin.h"
+#include "utils.h"
 
 namespace tvm {
 namespace tl {
@@ -51,38 +52,18 @@ using namespace tir;
  * value].
  *             - args[0]: destination access (BufferLoad or pointer expression).
  *             - args[1]: value to fill (scalar or vector).
- * @param vmap Mapping from buffer variables to Buffer objects; used to resolve
- * the destination when args[0] is not a BufferLoad.
  *
  * Notes:
  * - The constructor enforces constraints (e.g., stride == 1 ramps, constant
  * lanes) and will terminate (via CHECK/ICHECK) if inputs are unsupported or out
  * of bounds.
  */
-Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<FillNode> node = make_object<FillNode>();
+Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
 
-  if (args[0]->IsInstance<BufferLoadNode>()) {
-    auto buffer_load = Downcast<BufferLoad>(args[0]);
-    for (const auto &index : buffer_load->indices) {
-      if (const auto *ramp = index.as<RampNode>()) {
-        CHECK(ramp->stride.as<IntImmNode>()->value == 1)
-            << "Only stride 1 ramps are supported";
-        const auto *lanes = ramp->lanes.as<IntImmNode>();
-        CHECK(lanes)
-            << "Scalable vectors not supported in BufferRegion conversion";
-        node->region.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
-      } else {
-        node->region.push_back(Range::FromMinExtent(index, 1));
-      }
-    }
-    node->dst = buffer_load->buffer;
-  } else {
-    node->dst = vmap[GetVarFromAccessPtr(args[0])];
-    for (int i = 0; i < node->dst->shape.size(); i++) {
-      node->region.push_back(Range(0, node->dst->shape[i]));
-    }
-  }
+  BufferRegion region = NormalizeToBufferRegion(args[0]);
+  node->dst = region->buffer;
+  node->region = region->region;
 
   if (args[1]->dtype != node->dst->dtype) {
     node->value = Cast(node->dst->dtype, args[1]);
@@ -95,14 +76,19 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
       << " != " << node->dst->shape.size();
   for (int i = 0; i < node->region.size(); i++) {
     // bound check if region is static
-    if (node->region[i]->min.as<IntImm>()) {
-      int64_t min = Downcast<IntImm>(node->region[i]->min)->value;
+    if (const auto *min_imm = node->region[i]->min.as<IntImmNode>()) {
+      int64_t min = min_imm->value;
       ICHECK_GE(min, 0) << "region[" << i << "] = " << min << " < 0";
     }
-    if (node->region[i]->extent.as<IntImm>()) {
-      int64_t extent = Downcast<IntImm>(node->region[i]->extent)->value;
-      ICHECK_LE(extent, Downcast<IntImm>(node->dst->shape[i])->value)
-          << "region[" << i << "] = " << extent << " > " << node->dst->shape[i];
+    if (const auto *extent_imm = node->region[i]->extent.as<IntImmNode>()) {
+      // Only perform the upper-bound check when the destination shape
+      // extent is also statically known. If the shape is symbolic (e.g., Var),
+      // skip this static check to avoid invalid downcasts.
+      if (const auto *shape_imm = node->dst->shape[i].as<IntImmNode>()) {
+        ICHECK_LE(extent_imm->value, shape_imm->value)
+            << "region[" << i << "] = " << extent_imm->value << " > "
+            << node->dst->shape[i];
+      }
     }
   }
   data_ = std::move(node);
@@ -117,7 +103,7 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A TileOperator that owns the copied FillNode.
  */
 TileOperator FillNode::Clone() const {
-  auto op = make_object<FillNode>(*this);
+  auto op = tvm::ffi::make_object<FillNode>(*this);
   return Fill(op);
 }
 
@@ -140,7 +126,8 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   for (int i = 0; i < ndim; i++) {
     Var var = Var(std::string{char('i' + i)}, region[i]->extent->dtype);
     loop_vars.push_back({region[i], var, IterVarType::kDataPar});
-    dst_indices.push_back(var);
+    // Offset the loop induction variable by region min to honor sliced regions
+    dst_indices.push_back(region[i]->min + var);
   }
   Stmt body = BufferStore(dst, value, dst_indices);
   for (int i = ndim - 1; i >= 0; i--) {
@@ -169,32 +156,41 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * @return Stmt The lowered TIR statement implementing the fill.
  */
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (dst.scope() == "local.fragment") {
+  if (IsFragmentBuffer(dst)) {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                         false, T.buffer_remap},
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
-    auto vectorized_thread_loop = VectorizeLoop(thread_loop);
+    auto vectorized_thread_loop = VectorizeLoop(thread_loop, analyzer);
     if (par_op->GetPredicate(T.thread_var).defined()) {
       return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
                         vectorized_thread_loop);
     }
     return vectorized_thread_loop;
-  } else if (dst.scope() == "local") {
+  } else if (IsLocalBuffer(dst) || IsLocalVarBuffer(dst)) {
     auto init_loop = MakeSIMTLoop(analyzer);
-    auto vectorized_thread_loop = VectorizeLoop(init_loop);
+    auto vectorized_thread_loop = VectorizeLoop(init_loop, analyzer);
     return vectorized_thread_loop;
-  } else if (dst.scope() == "shared.dyn" || dst.scope() == "shared" ||
-             dst.scope() == "global") {
+  } else if (IsSharedBuffer(dst) || IsGlobalBuffer(dst)) {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                         false, T.buffer_remap},
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
-    auto vectorized_thread_loop = VectorizeLoop(thread_loop);
+    auto vectorized_thread_loop = VectorizeLoop(thread_loop, analyzer);
     if (par_op->GetPredicate(T.thread_var).defined()) {
       return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
                         vectorized_thread_loop);
@@ -202,6 +198,7 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return vectorized_thread_loop;
   } else {
     LOG(FATAL) << "Unsupported scope " << dst.scope();
+    return Stmt();
   }
 }
 
@@ -221,12 +218,12 @@ LayoutMap FillNode::InferLayout(const LayoutInferArgs &T,
   return {};
 }
 
-TIR_REGISTER_TL_OP(Fill, fill)
+TIR_REGISTER_TL_TILE_OP(Fill, fill)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ FillNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { FillNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

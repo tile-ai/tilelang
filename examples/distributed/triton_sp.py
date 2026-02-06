@@ -97,8 +97,7 @@ def store_v4_b32_cond(ptr, val0, val1, val2, val3, mask, _semantic=None):
         }
         """,
         constraints=("=r,l,r,r,r,r,r"),  # no use output
-        args=[ptr, val0, val1, val2, val3,
-              mask.to(tl.int32, _semantic=_semantic)],
+        args=[ptr, val0, val1, val2, val3, mask.to(tl.int32, _semantic=_semantic)],
         dtype=tl.int32,
         is_pure=False,
         pack=1,
@@ -125,7 +124,7 @@ def _matmul_launch_metadata(grid, kernel, args):
         bytes_per_elem = args["c_ptr"].element_size()
     else:
         bytes_per_elem = 1 if args["FP8_OUTPUT"] else 2
-    ret[f"flops{bytes_per_elem * 8}"] = 2. * M * N * K
+    ret[f"flops{bytes_per_elem * 8}"] = 2.0 * M * N * K
     ret["bytes"] = bytes_per_elem * (M * K + N * K + M * N)
     return ret
 
@@ -138,13 +137,12 @@ def _kernel_consumer_gemm_persistent_repr(proxy):
     c_dtype = proxy.signature["c_ptr"].lstrip("*")
     BM, BN, BK = constexprs["BLOCK_SIZE_M"], constexprs["BLOCK_SIZE_N"], constexprs["BLOCK_SIZE_K"]
 
-    return f"cutlass_triton3x_sm{cap_major}{cap_minor}_a2a_consumer_gemm_persistent_tensorop_{a_dtype}_{b_dtype}_{c_dtype}_{BM}x{BN}x{BK}_ntn"
+    return (
+        f"cutlass_triton3x_sm{cap_major}{cap_minor}_a2a_consumer_gemm_persistent_tensorop_{a_dtype}_{b_dtype}_{c_dtype}_{BM}x{BN}x{BK}_ntn"
+    )
 
 
-@triton.jit(
-    do_not_specialize=["sp_rank"],
-    launch_metadata=_matmul_launch_metadata,
-    repr=_kernel_consumer_gemm_persistent_repr)
+@triton.jit(do_not_specialize=["sp_rank"], launch_metadata=_matmul_launch_metadata, repr=_kernel_consumer_gemm_persistent_repr)
 def matmul_kernel_descriptor_persistent(
     a_ptr,
     b_ptr,
@@ -176,13 +174,10 @@ def matmul_kernel_descriptor_persistent(
 
     tl.static_assert(K % sp_size == 0, f"K {K} must be divisible by sp_size {sp_size}")
     K_per_sp_rank: tl.constexpr = K // sp_size
-    tl.static_assert(
-        K_per_sp_rank % BLOCK_SIZE_K == 0,
-        f"K_per_sp_rank {K_per_sp_rank} must be divisible by BLOCK_SIZE_K {BLOCK_SIZE_K}")
+    tl.static_assert(K_per_sp_rank % BLOCK_SIZE_K == 0, f"K_per_sp_rank {K_per_sp_rank} must be divisible by BLOCK_SIZE_K {BLOCK_SIZE_K}")
     k_tiles: tl.constexpr = K // BLOCK_SIZE_K
 
-    tl.static_assert(A2A_TILE_N % BLOCK_SIZE_K == 0,
-                     f"A2A_TILE_N {A2A_TILE_N} must be divisible by BLOCK_SIZE_N {BLOCK_SIZE_K}")
+    tl.static_assert(A2A_TILE_N % BLOCK_SIZE_K == 0, f"A2A_TILE_N {A2A_TILE_N} must be divisible by BLOCK_SIZE_N {BLOCK_SIZE_K}")
     NUM_K_PER_TILE: tl.constexpr = A2A_TILE_N // BLOCK_SIZE_K
     # This is used for k-swizzle
     # k_tiles_per_rank: tl.constexpr = K_per_sp_rank // BLOCK_SIZE_K
@@ -212,10 +207,8 @@ def matmul_kernel_descriptor_persistent(
     tile_id_c = start_pid - NUM_GEMM_SMS
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
-    for tile_id in tl.range(
-            start_pid, num_tiles, NUM_GEMM_SMS, flatten=False, warp_specialize=WARP_SPECIALIZE):
-        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M,
-                                    NUM_GEMM_SMS)
+    for tile_id in tl.range(start_pid, num_tiles, NUM_GEMM_SMS, flatten=False, warp_specialize=WARP_SPECIALIZE):
+        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_GEMM_SMS)
         offs_am = pid_m * BLOCK_SIZE_M
         offs_bn = pid_n * BLOCK_SIZE_N
 
@@ -235,12 +228,12 @@ def matmul_kernel_descriptor_persistent(
             if ki % NUM_K_PER_TILE == 0:
                 for chunk_id in range(chunk_beg, chunk_end + 1):
                     token = dl.wait(
-                        gemm_barrier_ptr + chunk_id * (k_tiles // NUM_K_PER_TILE) +
-                        ki // NUM_K_PER_TILE,
+                        gemm_barrier_ptr + chunk_id * (k_tiles // NUM_K_PER_TILE) + ki // NUM_K_PER_TILE,
                         1,
                         scope="gpu",
                         semantic="acquire",
-                        waitValue=1)
+                        waitValue=1,
+                    )
                     a_desc = dl.consume_token(a_desc, token)
             offs_k = ki * BLOCK_SIZE_K
             a = a_desc.load([offs_am, offs_k])
@@ -248,15 +241,13 @@ def matmul_kernel_descriptor_persistent(
             accumulator = tl.dot(a, b.T, accumulator)
 
         tile_id_c += NUM_GEMM_SMS
-        pid_m, pid_n = _compute_pid(tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M,
-                                    NUM_GEMM_SMS)
+        pid_m, pid_n = _compute_pid(tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_GEMM_SMS)
         offs_cm = pid_m * BLOCK_SIZE_M
         offs_cn = pid_n * BLOCK_SIZE_N
 
         if HAS_BIAS:
             offs_bias_n = tl.arange(0, BLOCK_SIZE_N)
-            bias_data = tl.load(
-                bias_ptr + offs_cn + offs_bias_n, mask=(offs_cn + offs_bias_n < N)).to(tl.float32)
+            bias_data = tl.load(bias_ptr + offs_cn + offs_bias_n, mask=(offs_cn + offs_bias_n < N)).to(tl.float32)
             accumulator = accumulator + bias_data[None, :]
 
         if EPILOGUE_SUBTILE:
@@ -272,15 +263,7 @@ def matmul_kernel_descriptor_persistent(
             c_desc.store([offs_cm, offs_cn], c)
 
 
-def matmul_descriptor_persistent(sp_rank,
-                                 sp_size,
-                                 a,
-                                 b,
-                                 bias,
-                                 c,
-                                 gemm_barrier,
-                                 gemm_config: triton.Config,
-                                 warp_specialize: bool = False):
+def matmul_descriptor_persistent(sp_rank, sp_size, a, b, bias, c, gemm_barrier, gemm_config: triton.Config, warp_specialize: bool = False):
     # Check constraints.
     assert a.shape[1] == b.shape[1], "Incompatible dimensions"  # b is transposed
     assert a.dtype == b.dtype, "Incompatible dtypes"
@@ -295,8 +278,7 @@ def matmul_descriptor_persistent(sp_rank,
     triton.set_allocator(alloc_fn)
 
     def grid(META):
-        return (min(META["NUM_GEMM_SMS"],
-                    triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"])),)
+        return (min(META["NUM_GEMM_SMS"], triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"])),)
 
     matmul_kernel_descriptor_persistent[grid](
         a,
@@ -350,8 +332,7 @@ def kernel_all2all_push_intra_node_nvl(
 
     if FUSE_SYNC:
         tl.static_assert(SUPPORT_ATOMIC, "FUSE_SYNC requires SUPPORT_ATOMIC to be True")
-        barrier_all_intra_node_atomic_cas_block(sp_rank, rank, sp_size,
-                                                intra_node_sync_buf_ptr + pid * sp_size)
+        barrier_all_intra_node_atomic_cas_block(sp_rank, rank, sp_size, intra_node_sync_buf_ptr + pid * sp_size)
 
     for i in tl.static_range(sp_size + 1):
         tl.store(cum_seqlen_gpu_ptr + i, cum_seqlen_cpu_tuple[i])
@@ -363,13 +344,11 @@ def kernel_all2all_push_intra_node_nvl(
     offs_n = tl.arange(0, BLOCK_N // VEC)
 
     if sp_size <= NUM_COMM_SM:
-        tl.static_assert(NUM_COMM_SM % sp_size == 0,
-                         f"NUM_COMM_SM {NUM_COMM_SM} must be divisible by sp_size {sp_size}")
+        tl.static_assert(NUM_COMM_SM % sp_size == 0, f"NUM_COMM_SM {NUM_COMM_SM} must be divisible by sp_size {sp_size}")
         NUM_SM_PER_SP: tl.constexpr = NUM_COMM_SM // sp_size
         NUM_SP_PER_SM: tl.constexpr = 1
     else:
-        tl.static_assert(sp_size % NUM_COMM_SM == 0,
-                         f"sp_size {sp_size} must be divisible by NUM_COMM_SM {NUM_COMM_SM}")
+        tl.static_assert(sp_size % NUM_COMM_SM == 0, f"sp_size {sp_size} must be divisible by NUM_COMM_SM {NUM_COMM_SM}")
         NUM_SM_PER_SP: tl.constexpr = 1
         NUM_SP_PER_SM: tl.constexpr = sp_size // NUM_COMM_SM
 
@@ -384,8 +363,8 @@ def kernel_all2all_push_intra_node_nvl(
         remote_seq_len = seq_end - seq_beg
         num_tile_m = tl.cdiv(remote_seq_len, BLOCK_M)
         tl.static_assert(
-            local_head * head_dim % BLOCK_N == 0,
-            f"local_head * head_dim {local_head * head_dim} must be divisible by BLOCK_N {BLOCK_N}")
+            local_head * head_dim % BLOCK_N == 0, f"local_head * head_dim {local_head * head_dim} must be divisible by BLOCK_N {BLOCK_N}"
+        )
         num_tile_n = local_head * head_dim // BLOCK_N
 
         for tile_id_m_outer_n_tail in range(0, tl.cdiv(num_tile_m, GROUP_SIZE_M) * num_tile_n):
@@ -398,32 +377,32 @@ def kernel_all2all_push_intra_node_nvl(
                     attn_mask_m = attn_offs_m < seq_end
                     attn_offs_n = tile_id_n_tail * BLOCK_N + offs_n * VEC
                     data0, data1, data2, data3 = load_v4_b32_cond(
-                        attn_out_ptr + attn_offs_m[:, None] * local_head * head_dim +
-                        attn_offs_n[None, :],
-                        mask=attn_mask_m[:, None])
+                        attn_out_ptr + attn_offs_m[:, None] * local_head * head_dim + attn_offs_n[None, :], mask=attn_mask_m[:, None]
+                    )
 
                     out_offs_m = tile_id_m_tail * BLOCK_M + offs_m
                     out_mask_m = out_offs_m < remote_seq_len
                     out_offs_n = sp_rank * local_head * head_dim + tile_id_n_tail * BLOCK_N + offs_n * VEC
                     store_v4_b32_cond(
-                        remote_a2a_out_ptr + out_offs_m[:, None] * global_head * head_dim +
-                        out_offs_n[None, :],
+                        remote_a2a_out_ptr + out_offs_m[:, None] * global_head * head_dim + out_offs_n[None, :],
                         data0,
                         data1,
                         data2,
                         data3,
-                        mask=out_mask_m[:, None])
+                        mask=out_mask_m[:, None],
+                    )
 
                     if not SKIP_BARRIER:
                         __syncthreads()
-                        notify_barrier_ptr = remote_barrier_ptr + tile_id_m_tail * num_tile_n * sp_size + sp_rank * num_tile_n + tile_id_n_tail
+                        notify_barrier_ptr = (
+                            remote_barrier_ptr + tile_id_m_tail * num_tile_n * sp_size + sp_rank * num_tile_n + tile_id_n_tail
+                        )
                         thread_idx = tid(0)
                         if thread_idx == 0:
                             st(notify_barrier_ptr, 1, scope="sys", semantic="release")
 
 
 class SpUlysessOAll2AllGemmKernel:
-
     def __init__(
         self,
         world_group: torch.distributed.ProcessGroup,
@@ -492,14 +471,13 @@ class SpUlysessOAll2AllGemmKernel:
     def init_symm_buffer(self):
         max_local_seq = self.max_seqlen // self.sp_size
         self._comm_output_buffer = nvshmem_create_tensor(
-            [self.max_num_comm_buf, self.max_batch, max_local_seq, self.num_head * self.head_dim],
-            self.input_dtype)
+            [self.max_num_comm_buf, self.max_batch, max_local_seq, self.num_head * self.head_dim], self.input_dtype
+        )
         self._barrier_buffer = nvshmem_create_tensor(
-            [triton.cdiv(self.max_batch * self.max_seqlen, self.BLOCK_SIZE_M) * self.num_head],
-            torch.int32)
+            [triton.cdiv(self.max_batch * self.max_seqlen, self.BLOCK_SIZE_M) * self.num_head], torch.int32
+        )
         self._barrier_buffer.zero_()
-        self._intra_node_sync_buffer = nvshmem_create_tensor([self.sp_size * self.max_sms],
-                                                             torch.int32)
+        self._intra_node_sync_buffer = nvshmem_create_tensor([self.sp_size * self.max_sms], torch.int32)
         self._intra_node_sync_buffer.zero_()
         self._sp_group_sync_buffer = nvshmem_create_tensor([self.world_size], torch.int32)
         self._sp_group_sync_buffer.zero_()
@@ -525,30 +503,31 @@ class SpUlysessOAll2AllGemmKernel:
         stream = torch.cuda.current_stream() if stream is None else stream
         sp_local_rank = self.local_rank % self.sp_size
         with torch.cuda.stream(stream):
-            barrier_all_intra_node_atomic_cas_block[(1,)](sp_local_rank, self.rank, self.sp_size,
-                                                          self._sp_group_sync_buffer)
+            barrier_all_intra_node_atomic_cas_block[(1,)](sp_local_rank, self.rank, self.sp_size, self._sp_group_sync_buffer)
 
     def reset_cusum_seq_lens(self, local_seqlen, seq_lens_cpu=None):
         if seq_lens_cpu is None:
             seq_lens_cpu = [local_seqlen] * self.sp_size
         else:
             seq_lens_cpu = seq_lens_cpu.tolist()
-        assert local_seqlen == seq_lens_cpu[
-            self.local_rank % self.
-            sp_size], f"local_seqlen {local_seqlen} != seq_lens_cpu[{self.local_rank % self.sp_size}]={seq_lens_cpu[self.local_rank % self.sp_size]}"
+        assert local_seqlen == seq_lens_cpu[self.local_rank % self.sp_size], (
+            f"local_seqlen {local_seqlen} != seq_lens_cpu[{self.local_rank % self.sp_size}]={seq_lens_cpu[self.local_rank % self.sp_size]}"
+        )
         cum_seqlen_cpu = [0] + list(itertools.accumulate(seq_lens_cpu))
         self._cum_seq_len_cpu_tuple = tuple(cum_seqlen_cpu)
 
-    def forward(self,
-                inputs: torch.Tensor,
-                weight: torch.Tensor,
-                seq_lens_cpu: Optional[torch.Tensor] = None,
-                bias: Optional[torch.Tensor] = None,
-                output: Optional[torch.Tensor] = None,
-                a2a_output: Optional[torch.Tensor] = None,
-                transpose_weight: bool = False,
-                num_comm_sms: int = -1,
-                sm_margin: int = 0):
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        weight: torch.Tensor,
+        seq_lens_cpu: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        output: Optional[torch.Tensor] = None,
+        a2a_output: Optional[torch.Tensor] = None,
+        transpose_weight: bool = False,
+        num_comm_sms: int = -1,
+        sm_margin: int = 0,
+    ):
         if num_comm_sms == -1:
             num_comm_sms = self.world_size
         assert num_comm_sms >= 0, "num_comm_sms must be non-negative"
@@ -582,7 +561,7 @@ class SpUlysessOAll2AllGemmKernel:
 
         self.reset_cusum_seq_lens(local_seqlen=local_seq_len, seq_lens_cpu=seq_lens_cpu)
 
-        gemm_input_a = self._comm_output_buffer.view(-1)[:M * K].view([M, K])
+        gemm_input_a = self._comm_output_buffer.view(-1)[: M * K].view([M, K])
 
         cur_stream = torch.cuda.current_stream()
 
@@ -618,46 +597,42 @@ class SpUlysessOAll2AllGemmKernel:
         )
 
         if output is None:
-            output = torch.empty([bs, local_seq_len, N],
-                                 device=inputs.device,
-                                 dtype=self.output_dtype)
+            output = torch.empty([bs, local_seq_len, N], device=inputs.device, dtype=self.output_dtype)
 
         assert len(output.shape) == 3, f"output must be 4D tensor, got {len(output)}D"
-        assert output.shape[
-            0] == bs, f"output batch size {output.shape[0]} must be equal to input batch size {bs}"
-        assert output.shape[
-            1] == local_seq_len, f"output seq_len {output.shape[1]} must be equal to local_seq_len {local_seq_len}"
-        assert output.shape[
-            2] == N, f"output head {output.shape[2]} must be equal to output size {N}"
+        assert output.shape[0] == bs, f"output batch size {output.shape[0]} must be equal to input batch size {bs}"
+        assert output.shape[1] == local_seq_len, f"output seq_len {output.shape[1]} must be equal to local_seq_len {local_seq_len}"
+        assert output.shape[2] == N, f"output head {output.shape[2]} must be equal to output size {N}"
         assert output.is_contiguous(), f"output must be contiguous, got {output.shape}"
 
-        assert self.max_gemm_sms - num_comm_sms - sm_margin > 0, f"max_gemm_sms {self.max_gemm_sms} - num_comm_sms {num_comm_sms} - sm_margin {sm_margin} must be greater than 0"
+        assert self.max_gemm_sms - num_comm_sms - sm_margin > 0, (
+            f"max_gemm_sms {self.max_gemm_sms} - num_comm_sms {num_comm_sms} - sm_margin {sm_margin} must be greater than 0"
+        )
         gemm_config = triton.Config(
             {
-                'BLOCK_SIZE_M': self.BLOCK_SIZE_M,
-                'BLOCK_SIZE_N': self.BLOCK_SIZE_N,
-                'BLOCK_SIZE_K': self.BLOCK_SIZE_K,
-                'GROUP_SIZE_M': self.GROUP_SIZE_M,
-                'A2A_TILE_M': self.A2A_TILE_M,
-                'A2A_TILE_N': self.A2A_TILE_N,
-                'NUM_GEMM_SMS': self.max_gemm_sms - num_comm_sms - sm_margin
+                "BLOCK_SIZE_M": self.BLOCK_SIZE_M,
+                "BLOCK_SIZE_N": self.BLOCK_SIZE_N,
+                "BLOCK_SIZE_K": self.BLOCK_SIZE_K,
+                "GROUP_SIZE_M": self.GROUP_SIZE_M,
+                "A2A_TILE_M": self.A2A_TILE_M,
+                "A2A_TILE_N": self.A2A_TILE_N,
+                "NUM_GEMM_SMS": self.max_gemm_sms - num_comm_sms - sm_margin,
             },
             num_stages=self.num_stages,
-            num_warps=self.num_warps)
+            num_warps=self.num_warps,
+        )
 
         with torch.cuda.stream(self.compute_stream):
-            matmul_descriptor_persistent(self.sp_rank, self.sp_size, gemm_input_a, weight, bias,
-                                         output, self._barrier_buffer, gemm_config,
-                                         self.warp_specialize)
+            matmul_descriptor_persistent(
+                self.sp_rank, self.sp_size, gemm_input_a, weight, bias, output, self._barrier_buffer, gemm_config, self.warp_specialize
+            )
 
         if a2a_output is not None:
-            assert a2a_output.shape == (
-                bs, local_seq_len, local_head * self.sp_size, head_dim
-            ), f"a2a_output shape {a2a_output.shape} must be equal to (bs, local_seq_len, local_head * self.sp_size, head_dim) ({bs}, {local_seq_len}, {local_head * self.sp_size}, {head_dim})"
-            assert a2a_output.is_contiguous(
-            ), f"a2a_output must be contiguous, got {a2a_output.shape}"
-            a2a_output.copy_(
-                gemm_input_a.view(bs, local_seq_len, local_head * self.sp_size * head_dim))
+            assert a2a_output.shape == (bs, local_seq_len, local_head * self.sp_size, head_dim), (
+                f"a2a_output shape {a2a_output.shape} must be equal to (bs, local_seq_len, local_head * self.sp_size, head_dim) ({bs}, {local_seq_len}, {local_head * self.sp_size}, {head_dim})"
+            )
+            assert a2a_output.is_contiguous(), f"a2a_output must be contiguous, got {a2a_output.shape}"
+            a2a_output.copy_(gemm_input_a.view(bs, local_seq_len, local_head * self.sp_size * head_dim))
             ret = (output, a2a_output)
         else:
             ret = (output,)
@@ -701,7 +676,7 @@ class SpUlysessOAll2AllGemmKernel:
         self.reset_cusum_seq_lens(local_seqlen=local_seq_len, seq_lens_cpu=seq_lens_cpu)
 
         assert comm_buf_idx < self.max_num_comm_buf, f"comm_buf_idx {comm_buf_idx} must be less than num_comm_buf {self.max_num_comm_buf}"
-        gemm_input_a = self._comm_output_buffer[comm_buf_idx].view(-1)[:M * K].view([M, K])
+        gemm_input_a = self._comm_output_buffer[comm_buf_idx].view(-1)[: M * K].view([M, K])
 
         cur_stream = torch.cuda.current_stream()
 

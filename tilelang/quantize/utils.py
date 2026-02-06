@@ -1,6 +1,7 @@
 def gen_quant4(k, n, groupsize=-1):
     import torch
     import torch.nn as nn
+
     maxq = 2**4
     w = torch.randn((k, n), dtype=torch.half, device="cpu")
 
@@ -48,6 +49,7 @@ def gen_quant4(k, n, groupsize=-1):
 
 def general_compress(lowprecision_weight, source_bits=4, storage_dtype=None):
     import torch
+
     if storage_dtype is None:
         storage_dtype = torch.int8
     elems_per_byte = 8 // source_bits
@@ -56,11 +58,11 @@ def general_compress(lowprecision_weight, source_bits=4, storage_dtype=None):
     int8_weight = torch.zeros(
         (*lowprecision_weight.shape[:-1], lowprecision_weight.shape[-1] // elems_per_byte),
         dtype=torch.int8,
-        device=lowprecision_weight.device)
+        device=lowprecision_weight.device,
+    )
     for j in range(lowprecision_weight.shape[-1] // elems_per_byte):
         for k in range(elems_per_byte):
-            int8_weight[..., j] |= (lowprecision_weight[..., j * elems_per_byte + k] <<
-                                    (source_bits * k)).to(torch.int8)
+            int8_weight[..., j] |= (lowprecision_weight[..., j * elems_per_byte + k] << (source_bits * k)).to(torch.int8)
 
     return int8_weight.to(storage_dtype)
 
@@ -82,6 +84,7 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
         interleave_weight(qweight, 4, "float16")
     """
     import torch
+
     assert target_dtype in ["float16", "int8"]
     # reinterpret the data type of qweight to int32
     qweight = qweight.view(torch.int32)

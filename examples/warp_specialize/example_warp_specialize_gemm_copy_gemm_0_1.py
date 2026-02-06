@@ -5,26 +5,20 @@ import tilelang.language as T
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 @tilelang.jit(
-    out_idx=[2], pass_configs={
+    out_idx=[2],
+    pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    })
-def matmul_warp_specialize_copy_1_gemm_0(M,
-                                         N,
-                                         K,
-                                         block_M,
-                                         block_N,
-                                         block_K,
-                                         dtype="float16",
-                                         accum_dtype="float"):
-
+    },
+)
+def matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     warp_group_num = 2
     threads = 128 * warp_group_num
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):

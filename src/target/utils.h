@@ -30,6 +30,9 @@ bool TargetHasTmem(Target target);
 bool TargetHasBulkCopy(Target target);
 int TargetGetWarpSize(Target target);
 
+bool IsCudaVectorizableFP8(DataType dtype);
+bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty);
+
 } // namespace tl
 } // namespace tvm
 

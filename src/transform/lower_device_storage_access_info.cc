@@ -45,7 +45,7 @@ public:
   Stmt VisitStmt_(const AllocateNode *op) final {
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer_var));
     if (!scope.tag.empty() && scope.tag != ".dyn" && scope.tag != ".var" &&
-        scope.tag != ".barrier" && scope.tag != ".descriptor") {
+        scope.tag != ".barrier" && scope.tag.find(".descriptor") != 0) {
       auto info = GetMemoryInfo(GetPtrStorageScope(op->buffer_var));
       ICHECK(info.defined())
           << "Cannot find memory info of " << scope.to_string();
@@ -143,11 +143,11 @@ Pass LowerDeviceStorageAccessInfo() {
                             {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerDeviceStorageAccessInfo",
                         LowerDeviceStorageAccessInfo);
-});
+}
 
 } // namespace transform
 } // namespace tl

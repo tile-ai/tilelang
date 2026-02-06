@@ -13,11 +13,10 @@ def ref_program(A, B, BlockMask, block_M, block_N, block_K):
             accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=A.device)
             for k in range(K // block_K):
                 if torch.any(BlockMask[i, j, k]):
-                    accu += A[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
-                        torch.float32) @ B[k * block_K:(k + 1) * block_K,
-                                           j * block_N:(j + 1) * block_N].to(torch.float32)
-            ref_c[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) * block_N] = (
-                accu.to(torch.float16))
+                    accu += A[i * block_M : (i + 1) * block_M, k * block_K : (k + 1) * block_K].to(torch.float32) @ B[
+                        k * block_K : (k + 1) * block_K, j * block_N : (j + 1) * block_N
+                    ].to(torch.float32)
+            ref_c[i * block_M : (i + 1) * block_M, j * block_N : (j + 1) * block_N] = accu.to(torch.float16)
     return ref_c
 
 
@@ -32,18 +31,17 @@ def blocksparse_matmul_global(
     num_stages,
     thread_num,
     enable_rasteration,
-    dtype="float16",
-    accum_dtype="float",
+    dtype=T.float16,
+    accum_dtype=T.float32,
 ):
-
     block_mask_shape = (M // block_M, N // block_N, K // block_K, condition_dim)
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            BlockMask: T.Tensor(block_mask_shape, "bool"),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        BlockMask: T.Tensor(block_mask_shape, "bool"),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -77,18 +75,17 @@ def blocksparse_matmul_shared(
     num_stages,
     thread_num,
     enable_rasteration,
-    dtype="float16",
-    accum_dtype="float",
+    dtype=T.float16,
+    accum_dtype=T.float32,
 ):
-
     block_mask_shape = (M // block_M, N // block_N, K // block_K, condition_dim)
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            BlockMask: T.Tensor(block_mask_shape, "bool"),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        BlockMask: T.Tensor(block_mask_shape, "bool"),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -127,18 +124,17 @@ def blocksparse_matmul_local(
     num_stages,
     thread_num,
     enable_rasteration,
-    dtype="float16",
-    accum_dtype="float",
+    dtype=T.float16,
+    accum_dtype=T.float32,
 ):
-
     block_mask_shape = (M // block_M, N // block_N, K // block_K, condition_dim)
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            BlockMask: T.Tensor(block_mask_shape, "bool"),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        BlockMask: T.Tensor(block_mask_shape, "bool"),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -237,7 +233,8 @@ def run_block_sparse_matmul_shared(M=1024, N=1024, K=1024, sparsity=0.5, conditi
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     # Create block mask with desired sparsity
     mask_shape = (M // block_M, N // block_N, K // block_K)
     block_mask = torch.rand(mask_shape).cuda() > sparsity
@@ -284,7 +281,8 @@ def run_block_sparse_matmul_local(M=1024, N=1024, K=1024, sparsity=0.5, conditio
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     # Create block mask with desired sparsity
     mask_shape = (M // block_M, N // block_N, K // block_K)
     block_mask = torch.rand(mask_shape).cuda() > sparsity

@@ -11,9 +11,10 @@ import tilelang
 import tilelang.language as T
 from typing import Optional, Tuple
 from deepep_utils import Config, ep_ext  # noqa: F403
+import tvm_ffi
 
 # tilelang.disable_cache()
-os.environ['NCCL_DEBUG'] = 'WARN'  # silence NCCL log
+os.environ["NCCL_DEBUG"] = "WARN"  # silence NCCL log
 
 
 # notify_dispatch is responsible for:
@@ -30,26 +31,26 @@ def notify_dispatch_kernel(
     num_local_experts = num_experts // num_ranks
     num_warps = threads // 32
 
-    num_tokens = T.dynamic('num_tokens')
+    num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
     def notify_dispatch_main(
-            rank: T.int32,
-            num_tokens_per_rank: T.Tensor((num_ranks,), 'int32'),
-            num_tokens_per_expert: T.Tensor((num_experts,), 'int32'),
-            is_token_in_rank: T.Tensor((num_tokens, num_ranks), 'bool'),
-            moe_recv_counter_mapped: T.Tensor((1,), 'int32'),
-            moe_recv_expert_counter_mapped: T.Tensor((num_local_experts,), 'int32'),
-            per_rank_buffer: T.Tensor((num_ranks, num_ranks), 'int32'),
-            per_expert_buffer: T.Tensor((num_ranks, num_local_experts), 'int32'),
-            barrier_signal: T.Tensor((num_ranks,), 'int32'),
-            rank_prefix_matrix: T.Tensor((num_ranks, num_ranks), 'int32'),
-            channel_prefix_matrix: T.Tensor((num_ranks, num_channels), 'int32'),
-            # 4 symm buffers to be zeroed
-            channel_start_offset: T.Tensor([num_channels, num_ranks], "int32"),
-            channel_end_offset: T.Tensor([num_channels, num_ranks], "int32"),
-            channel_head_idx: T.Tensor([num_channels, num_ranks], "int32"),
-            channel_tail_idx: T.Tensor([num_channels, num_ranks], "int32"),
+        rank: T.int32,
+        num_tokens_per_rank: T.Tensor((num_ranks,), "int32"),
+        num_tokens_per_expert: T.Tensor((num_experts,), "int32"),
+        is_token_in_rank: T.Tensor((num_tokens, num_ranks), "bool"),
+        moe_recv_counter_mapped: T.Tensor((1,), "int32"),
+        moe_recv_expert_counter_mapped: T.Tensor((num_local_experts,), "int32"),
+        per_rank_buffer: T.Tensor((num_ranks, num_ranks), "int32"),
+        per_expert_buffer: T.Tensor((num_ranks, num_local_experts), "int32"),
+        barrier_signal: T.Tensor((num_ranks,), "int32"),
+        rank_prefix_matrix: T.Tensor((num_ranks, num_ranks), "int32"),
+        channel_prefix_matrix: T.Tensor((num_ranks, num_channels), "int32"),
+        # 4 symm buffers to be zeroed
+        channel_start_offset: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_end_offset: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_head_idx: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_tail_idx: T.Tensor([num_channels, num_ranks], "int32"),
     ):
         with T.Kernel(num_ranks + 1, threads=threads) as bx:
             tx = T.get_thread_binding()
@@ -64,10 +65,7 @@ def notify_dispatch_kernel(
                 if tx < num_ranks:
                     T.st(per_rank_buffer[rank, tx], num_tokens_per_rank[tx], dst_pe=tx)
                     for i in T.serial(num_local_experts):
-                        T.st(
-                            per_expert_buffer[rank, i],
-                            num_tokens_per_expert[tx * num_local_experts + i],
-                            dst_pe=tx)
+                        T.st(per_expert_buffer[rank, i], num_tokens_per_expert[tx * num_local_experts + i], dst_pe=tx)
 
                 T.barrier_blocks(barrier_signal)
 
@@ -80,7 +78,7 @@ def notify_dispatch_kernel(
 
                 # Sum per-expert cnts
                 if tx < num_local_experts:
-                    sum = T.alloc_local([1], 'int32')
+                    sum = T.alloc_local([1], "int32")
                     sum[0] = 0
                     for i in T.serial(0, num_ranks):
                         sum[0] += per_expert_buffer[i, tx]
@@ -106,12 +104,12 @@ def notify_dispatch_kernel(
                     # todo: this is a workaround, as TVM has a bug when calculating safe ceildiv for tir.Var
                     token_start_idx = T.min(num_tokens_per_channel * channel_id, num_tokens)
                     token_end_idx = T.min(token_start_idx + num_tokens_per_channel, num_tokens)
-                    cnt = T.alloc_var('int32')
+                    cnt = T.alloc_var("int32")
                     cnt = 0
                     for i in T.serial(token_start_idx + lane_id, token_end_idx, 32):
                         cnt += is_token_in_rank[i, dst_rank]
                     cnt = T.warp_reduce_sum(cnt)
-                    if T.elect_one_sync():
+                    if T.shuffle_elect(32):
                         channel_prefix_matrix[dst_rank, channel_id] = cnt
                 T.sync_threads()
 
@@ -149,7 +147,7 @@ def notify_dispatch(
     channel_tail_idx: torch.Tensor,
     # allocator
     allocator,
-    comm_stream=None,
+    comm_stream: torch.cuda.Stream = None,
 ):
     kernel = notify_dispatch_kernel(
         num_ranks,
@@ -159,8 +157,8 @@ def notify_dispatch(
     )
     kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
 
-    rank_prefix_matrix = torch.empty([num_ranks, num_ranks], dtype=torch.int32, device='cuda')
-    channel_prefix_matrix = torch.empty([num_ranks, num_channels], dtype=torch.int32, device='cuda')
+    rank_prefix_matrix = torch.empty([num_ranks, num_ranks], dtype=torch.int32, device="cuda")
+    channel_prefix_matrix = torch.empty([num_ranks, num_channels], dtype=torch.int32, device="cuda")
 
     # clear buffers and counters
     moe_recv_counter.fill_(-1)
@@ -182,27 +180,22 @@ def notify_dispatch(
         channel_end_offset,
         channel_head_idx,
         channel_tail_idx,
-        stream=comm_stream.cuda_stream,
-        skip_tensor_validation=True  # reduce runtime overhead
     )
-
-    num_recv_tokens, num_recv_tokens_per_expert_list = ep_ext.wait_for_counters_ready(
-        moe_recv_counter, moe_recv_expert_counter)
+    num_recv_tokens, num_recv_tokens_per_expert_list = ep_ext.wait_for_counters_ready(moe_recv_counter, moe_recv_expert_counter)
     return num_recv_tokens, num_recv_tokens_per_expert_list, rank_prefix_matrix, channel_prefix_matrix
 
 
 # cached_notify_dispatch only needs to clear symm buffers
 @tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 def cached_notify_dispatch_kernel(num_ranks: int, num_channels: int):
-
     @T.prim_func
     def cached_notify_dispatch_main(
-            barrier_signal: T.Tensor((num_ranks,), 'int32'),
-            # 4 symm buffers to be zeroed
-            channel_start_offset: T.Tensor([num_channels, num_ranks], "int32"),
-            channel_end_offset: T.Tensor([num_channels, num_ranks], "int32"),
-            channel_head_idx: T.Tensor([num_channels, num_ranks], "int32"),
-            channel_tail_idx: T.Tensor([num_channels, num_ranks], "int32"),
+        barrier_signal: T.Tensor((num_ranks,), "int32"),
+        # 4 symm buffers to be zeroed
+        channel_start_offset: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_end_offset: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_head_idx: T.Tensor([num_channels, num_ranks], "int32"),
+        channel_tail_idx: T.Tensor([num_channels, num_ranks], "int32"),
     ):
         with T.Kernel(1, threads=128):
             T.sync_blocks(barrier_signal)
@@ -232,22 +225,23 @@ def cached_notify_dispatch(
     comm_stream=None,
 ):
     kernel = cached_notify_dispatch_kernel(num_ranks, num_channels)
-    kernel.initialize(
-        allocator=allocator, stream=comm_stream.cuda_stream)  # we still comm on barrier_signal
-    kernel(
-        barrier_signal,
-        channel_start_offset,
-        channel_end_offset,
-        channel_head_idx,
-        channel_tail_idx,
-        stream=comm_stream.cuda_stream,
-        skip_tensor_validation=True)  # reduce runtime overhead
+    kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
+    with torch.cuda.stream(comm_stream):
+        kernel(
+            barrier_signal,
+            channel_start_offset,
+            channel_end_offset,
+            channel_head_idx,
+            channel_tail_idx,
+        )
 
 
-@tilelang.jit(pass_configs={
-    "tl.disable_tma_lower": True,  # enable TMA later
-    "tl.disable_warp_specialized": True
-})
+@tilelang.jit(
+    pass_configs={
+        "tl.disable_tma_lower": True,  # enable TMA later
+        "tl.disable_warp_specialized": True,
+    }
+)
 def dispatch_kernel(
     num_ranks,
     num_max_send_tokens,  # config.num_max_nvl_chunked_send_tokens
@@ -256,7 +250,7 @@ def dispatch_kernel(
     num_topk,
     num_experts,
     num_sms,
-    dtype: str = 'bfloat16',
+    dtype: str = "bfloat16",
 ):
     threads = 768  # 24 warps
     TMABytesPerWarp = 8192
@@ -269,17 +263,17 @@ def dispatch_kernel(
     num_warps = threads // 32  # 24
     num_warps_per_rank = num_warps // num_ranks  # 3
 
-    num_tokens = T.dynamic('num_tokens')
-    num_recv_tokens = T.dynamic('num_recv_tokens')
+    num_tokens = T.dynamic("num_tokens")
+    num_recv_tokens = T.dynamic("num_recv_tokens")
 
     @T.prim_func
     def dispatch_main(
         rank: T.int32,
         # output
         recv_x: T.Tensor((num_recv_tokens, hidden), dtype),
-        recv_src_idx: T.Tensor((num_recv_tokens,), 'int32'),
-        recv_topk_idx: T.Tensor((num_recv_tokens, num_topk), 'int64'),
-        recv_topk_weights: T.Tensor((num_recv_tokens, num_topk), 'float'),
+        recv_src_idx: T.Tensor((num_recv_tokens,), "int32"),
+        recv_topk_idx: T.Tensor((num_recv_tokens, num_topk), "int64"),
+        recv_topk_weights: T.Tensor((num_recv_tokens, num_topk), "float"),
         recv_channel_offset: T.Tensor([num_ranks, num_channels], "int32"),
         send_head: T.Tensor([num_tokens, num_ranks], "int32"),
         # input
@@ -297,14 +291,10 @@ def dispatch_kernel(
         channel_head_idx: T.Tensor([num_channels, num_ranks], "int32"),
         channel_tail_idx: T.Tensor([num_channels, num_ranks], "int32"),
         # channel data buffers, stored on the receiver side
-        channel_x_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens, hidden],
-                                    dtype),
-        channel_src_idx_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens],
-                                          "int32"),
-        channel_topk_idx_buffers: T.Tensor(
-            [num_channels, num_ranks, num_recv_buffer_tokens, num_topk], "int64"),
-        channel_topk_weights_buffers: T.Tensor(
-            [num_channels, num_ranks, num_recv_buffer_tokens, num_topk], "float32"),
+        channel_x_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens, hidden], dtype),
+        channel_src_idx_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens], "int32"),
+        channel_topk_idx_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens, num_topk], "int64"),
+        channel_topk_weights_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens, num_topk], "float32"),
         # channel_x_scales_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens, num_scales], "float32"),
     ):
         with T.Kernel(num_sms, threads=threads) as bx:
@@ -318,65 +308,53 @@ def dispatch_kernel(
 
                 # send offset by `-value-1` e.g. 0->-1, 1->-2
                 # this is for distinguishing zero tokens
-                if send_warp_id_in_rank == 0 and T.elect_one_sync():
-                    value = T.alloc_var('int32')
-                    value = T.if_then_else(
-                        responsible_channel > 0, channel_prefix_matrix[responsible_rank,
-                                                                       responsible_channel - 1], 0)
-                    T.st(
-                        channel_start_offset[responsible_channel, rank],
-                        -value - 1,
-                        scope='sys',
-                        sem='relaxed',
-                        dst_pe=responsible_rank)
+                if send_warp_id_in_rank == 0 and T.shuffle_elect(32):
+                    value = T.alloc_var("int32")
+                    value = T.if_then_else(responsible_channel > 0, channel_prefix_matrix[responsible_rank, responsible_channel - 1], 0)
+                    T.st(channel_start_offset[responsible_channel, rank], -value - 1, scope="sys", sem="relaxed", dst_pe=responsible_rank)
                     value = channel_prefix_matrix[responsible_rank, responsible_channel]
-                    T.st(
-                        channel_end_offset[responsible_channel, rank],
-                        -value - 1,
-                        scope='sys',
-                        sem='relaxed',
-                        dst_pe=responsible_rank)
+                    T.st(channel_end_offset[responsible_channel, rank], -value - 1, scope="sys", sem="relaxed", dst_pe=responsible_rank)
                 T.sync_warp()
 
                 # get task
                 num_tokens_per_channel = T.truncdiv(num_tokens + num_channels - 1, num_channels)
                 # todo: this is a workaround, as TVM has a bug when calculating safe ceildiv for tir.Var
-                token_start_idx = T.alloc_var('int32')
+                token_start_idx = T.alloc_var("int32")
                 token_start_idx = T.min(num_tokens_per_channel * responsible_channel, num_tokens)
-                token_end_idx = T.alloc_var('int32')
+                token_end_idx = T.alloc_var("int32")
                 token_end_idx = T.min(token_start_idx + num_tokens_per_channel, num_tokens)
 
                 # sender mainloop: iterate over all tokens and send by trunk
-                cached_channel_tail_idx = T.alloc_var('int32')
+                cached_channel_tail_idx = T.alloc_var("int32")
                 cached_channel_tail_idx = 0
-                token_idx = T.alloc_var('int32')
+                token_idx = T.alloc_var("int32")
                 token_idx = token_start_idx
-                with T.While(token_idx < token_end_idx):
-                    if T.elect_one_sync():
+                while token_idx < token_end_idx:
+                    if T.shuffle_elect(32):
                         T.wait_ge(
                             channel_head_idx[responsible_channel, rank],
                             num_max_send_tokens + cached_channel_tail_idx - num_recv_buffer_tokens,
-                            responsible_rank)
+                            responsible_rank,
+                        )
                     T.sync_warp()
 
-                    chunk_token_idx = T.alloc_var('int32')
+                    chunk_token_idx = T.alloc_var("int32")
                     chunk_token_idx = 0
                     while chunk_token_idx < num_max_send_tokens and token_idx < token_end_idx:
                         # for the same token, the warp assigned to save `send_head` may be different from the warp
                         # assigned to send the following data
-                        if token_idx % num_warps_per_rank == send_warp_id_in_rank and T.elect_one_sync(
-                        ):
+                        if token_idx % num_warps_per_rank == send_warp_id_in_rank and T.shuffle_elect(32):
                             send_head[token_idx, responsible_rank] = T.if_then_else(
-                                is_token_in_rank[token_idx, responsible_rank],
-                                cached_channel_tail_idx, -1)
+                                is_token_in_rank[token_idx, responsible_rank], cached_channel_tail_idx, -1
+                            )
 
                         # skip if not selected
                         if not is_token_in_rank[token_idx, responsible_rank]:
                             token_idx += 1
-                            T.loop_continue()
+                            continue
 
                         # selected, get an empty slot
-                        dst_slot_idx = T.alloc_var('int32')
+                        dst_slot_idx = T.alloc_var("int32")
                         dst_slot_idx = cached_channel_tail_idx % num_recv_buffer_tokens
                         cached_channel_tail_idx += 1
                         if cached_channel_tail_idx % num_warps_per_rank == send_warp_id_in_rank:
@@ -384,20 +362,16 @@ def dispatch_kernel(
                             # 1. copy data
                             T.put_warp(
                                 T.address_of(x[token_idx, 0]),
-                                T.address_of(channel_x_buffers[responsible_channel, rank,
-                                                               dst_slot_idx, 0]),
+                                T.address_of(channel_x_buffers[responsible_channel, rank, dst_slot_idx, 0]),
                                 hidden,
                                 dst_pe=responsible_rank,
                                 unroll_factor=4,
-                                enable_aggressive_vectorize=True)
+                                enable_aggressive_vectorize=True,
+                            )
 
                             # 2. copy src idx
-                            if T.elect_one_sync():
-                                T.st(
-                                    channel_src_idx_buffers[responsible_channel, rank,
-                                                            dst_slot_idx],
-                                    token_idx,
-                                    dst_pe=responsible_rank)
+                            if T.shuffle_elect(32):
+                                T.st(channel_src_idx_buffers[responsible_channel, rank, dst_slot_idx], token_idx, dst_pe=responsible_rank)
 
                             # 3. copy `topk_idx` and `topk_weights` with transformed index
                             if lane_id < num_topk:
@@ -405,26 +379,26 @@ def dispatch_kernel(
                                 recv_expert_begin = responsible_rank * num_local_experts
                                 recv_expert_end = recv_expert_begin + num_local_experts
 
-                                idx_value = T.alloc_var('int64')
+                                idx_value = T.alloc_var("int64")
                                 T.ld(topk_idx[token_idx, lane_id], idx_value, nc=True)
                                 idx_value = T.if_then_else(
-                                    recv_expert_begin <= T.cast(idx_value, 'int32') <
-                                    recv_expert_end, idx_value - recv_expert_begin, -1)
+                                    recv_expert_begin <= T.cast(idx_value, "int32") < recv_expert_end, idx_value - recv_expert_begin, -1
+                                )
                                 T.st(
-                                    channel_topk_idx_buffers[responsible_channel, rank,
-                                                             dst_slot_idx, lane_id],
+                                    channel_topk_idx_buffers[responsible_channel, rank, dst_slot_idx, lane_id],
                                     idx_value,
-                                    dst_pe=responsible_rank)
+                                    dst_pe=responsible_rank,
+                                )
 
                                 # topk_weights
-                                weight_value = T.alloc_var('float32')
+                                weight_value = T.alloc_var("float32")
                                 T.ld(topk_weights[token_idx, lane_id], weight_value, nc=True)
                                 weight_value = T.if_then_else(idx_value >= 0, weight_value, 0)
                                 T.st(
-                                    channel_topk_weights_buffers[responsible_channel, rank,
-                                                                 dst_slot_idx, lane_id],
+                                    channel_topk_weights_buffers[responsible_channel, rank, dst_slot_idx, lane_id],
                                     weight_value,
-                                    dst_pe=responsible_rank)
+                                    dst_pe=responsible_rank,
+                                )
 
                             # 4. copy scale (support fp8 later)
 
@@ -434,36 +408,30 @@ def dispatch_kernel(
                     # move tail index
                     # here all warps should share the same new tail
                     T.sync_threads(responsible_rank, num_threads_per_rank)
-                    if send_warp_id_in_rank == 0 and T.elect_one_sync():
+                    if send_warp_id_in_rank == 0 and T.shuffle_elect(32):
                         T.st(
                             channel_tail_idx[responsible_channel, rank],
                             cached_channel_tail_idx,
-                            scope='sys',
-                            sem='release',
-                            dst_pe=responsible_rank)
+                            scope="sys",
+                            sem="release",
+                            dst_pe=responsible_rank,
+                        )
 
             else:  # receiver
                 recv_thread_id_in_rank = tx % num_threads_per_rank
                 recv_warp_id_in_rank = recv_thread_id_in_rank // 32
 
                 # calculate offset first
-                rank_offset = T.if_then_else(responsible_rank > 0,
-                                             rank_prefix_matrix[responsible_rank - 1, rank], 0)
+                rank_offset = T.if_then_else(responsible_rank > 0, rank_prefix_matrix[responsible_rank - 1, rank], 0)
 
                 # receive channel offset
-                total_offset = T.alloc_var('int32')
-                num_tokens_to_recv = T.alloc_var('int32')
-                if T.elect_one_sync():
+                total_offset = T.alloc_var("int32")
+                num_tokens_to_recv = T.alloc_var("int32")
+                if T.shuffle_elect(32):
                     T.wait_ne(channel_start_offset[responsible_channel, responsible_rank], 0)
-                    T.ld(
-                        channel_start_offset[responsible_channel, responsible_rank],
-                        total_offset,
-                        sem='volatile')
+                    T.ld(channel_start_offset[responsible_channel, responsible_rank], total_offset, sem="volatile")
                     T.wait_ne(channel_end_offset[responsible_channel, responsible_rank], 0)
-                    T.ld(
-                        channel_end_offset[responsible_channel, responsible_rank],
-                        num_tokens_to_recv,
-                        sem='volatile')
+                    T.ld(channel_end_offset[responsible_channel, responsible_rank], num_tokens_to_recv, sem="volatile")
                     total_offset = -total_offset - 1
                     num_tokens_to_recv = -num_tokens_to_recv - 1
                     if recv_warp_id_in_rank == 0:
@@ -474,24 +442,20 @@ def dispatch_kernel(
                 num_tokens_to_recv = T.tvm_warp_shuffle(-1, num_tokens_to_recv, 0, 32, 32)
 
                 # Shared tail indices for different warps
-                shared_channel_tail_idx = T.alloc_shared([num_ranks], 'int32')
+                shared_channel_tail_idx = T.alloc_shared([num_ranks], "int32")
 
-                cached_channel_head_idx = T.alloc_var('int32')
+                cached_channel_head_idx = T.alloc_var("int32")
                 cached_channel_head_idx = 0
-                cached_channel_tail_idx = T.alloc_var('int32')
+                cached_channel_tail_idx = T.alloc_var("int32")
                 cached_channel_tail_idx = 0
-                with T.While(num_tokens_to_recv > 0):
-                    with T.While(recv_thread_id_in_rank == 0):
-                        T.ld(
-                            channel_tail_idx[responsible_channel, responsible_rank],
-                            cached_channel_tail_idx,
-                            sem='acquire',
-                            scope='sys')
+                while num_tokens_to_recv > 0:
+                    while recv_thread_id_in_rank == 0:
+                        T.ld(channel_tail_idx[responsible_channel, responsible_rank], cached_channel_tail_idx, sem="acquire", scope="sys")
 
                         # read to copy
                         if cached_channel_head_idx != cached_channel_tail_idx:
                             shared_channel_tail_idx[responsible_rank] = cached_channel_tail_idx
-                            T.loop_break()
+                            break
 
                     # sync queue tail
                     T.sync_threads(responsible_rank, num_threads_per_rank)
@@ -500,48 +464,42 @@ def dispatch_kernel(
                     # copy data
                     # 1. recv x
                     num_cur_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx
-                    for chunk_idx in T.serial(recv_warp_id_in_rank, num_cur_recv_tokens,
-                                              num_warps_per_rank):
-                        token_idx_in_buffer = (cached_channel_head_idx +
-                                               chunk_idx) % num_recv_buffer_tokens
+                    for chunk_idx in T.serial(recv_warp_id_in_rank, num_cur_recv_tokens, num_warps_per_rank):
+                        token_idx_in_buffer = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens
                         # T.copy(channel_x_buffers[responsible_channel, responsible_rank, token_idx_in_buffer, :], recv_x[total_offset+chunk_idx, :])  # todo: add ld_nc and st_na
                         #! T.copy will cause layout inference error
                         T.put_warp(
-                            T.address_of(channel_x_buffers[responsible_channel, responsible_rank,
-                                                           token_idx_in_buffer, 0]),
+                            T.address_of(channel_x_buffers[responsible_channel, responsible_rank, token_idx_in_buffer, 0]),
                             T.address_of(recv_x[total_offset + chunk_idx, 0]),
                             hidden,
                             -1,
                             5,
-                            enable_aggressive_vectorize=True)
+                            enable_aggressive_vectorize=True,
+                        )
 
                     # 2. recv src_idx
-                    for chunk_idx in T.serial(cached_channel_head_idx + recv_thread_id_in_rank,
-                                              cached_channel_tail_idx, num_threads_per_rank):
-                        local_src_idx = T.alloc_var('int32')
+                    for chunk_idx in T.serial(
+                        cached_channel_head_idx + recv_thread_id_in_rank, cached_channel_tail_idx, num_threads_per_rank
+                    ):
+                        local_src_idx = T.alloc_var("int32")
                         T.ld(
-                            channel_src_idx_buffers[responsible_channel, responsible_rank,
-                                                    chunk_idx % num_recv_buffer_tokens],
+                            channel_src_idx_buffers[responsible_channel, responsible_rank, chunk_idx % num_recv_buffer_tokens],
                             local_src_idx,
-                            nc=True)
-                        recv_src_idx[total_offset + chunk_idx -
-                                     cached_channel_head_idx] = local_src_idx
+                            nc=True,
+                        )
+                        recv_src_idx[total_offset + chunk_idx - cached_channel_head_idx] = local_src_idx
 
                     # 3. recv topk_idx and topk_weights
-                    for idx in T.serial(recv_thread_id_in_rank, num_cur_recv_tokens * num_topk,
-                                        num_threads_per_rank):
+                    for idx in T.serial(recv_thread_id_in_rank, num_cur_recv_tokens * num_topk, num_threads_per_rank):
                         chunk_idx = idx // num_topk
                         token_topk_idx = idx % num_topk
-                        token_idx_in_buffer = (cached_channel_head_idx +
-                                               chunk_idx) % num_recv_buffer_tokens
-                        recv_topk_idx[total_offset + chunk_idx,
-                                      token_topk_idx] = channel_topk_idx_buffers[
-                                          responsible_channel, responsible_rank,
-                                          token_idx_in_buffer, token_topk_idx]
-                        recv_topk_weights[total_offset + chunk_idx,
-                                          token_topk_idx] = channel_topk_weights_buffers[
-                                              responsible_channel, responsible_rank,
-                                              token_idx_in_buffer, token_topk_idx]
+                        token_idx_in_buffer = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens
+                        recv_topk_idx[total_offset + chunk_idx, token_topk_idx] = channel_topk_idx_buffers[
+                            responsible_channel, responsible_rank, token_idx_in_buffer, token_topk_idx
+                        ]
+                        recv_topk_weights[total_offset + chunk_idx, token_topk_idx] = channel_topk_weights_buffers[
+                            responsible_channel, responsible_rank, token_idx_in_buffer, token_topk_idx
+                        ]
 
                     # 4. recv scale (support fp8 later)
 
@@ -549,12 +507,8 @@ def dispatch_kernel(
                     cached_channel_head_idx += num_cur_recv_tokens
                     total_offset += num_cur_recv_tokens
                     T.sync_threads(responsible_rank, num_threads_per_rank)
-                    if recv_warp_id_in_rank == num_warps_per_rank - 1 and T.elect_one_sync():
-                        T.st(
-                            channel_head_idx[responsible_channel, responsible_rank],
-                            cached_channel_head_idx,
-                            scope='sys',
-                            sem='relaxed')
+                    if recv_warp_id_in_rank == num_warps_per_rank - 1 and T.shuffle_elect(32):
+                        T.st(channel_head_idx[responsible_channel, responsible_rank], cached_channel_head_idx, scope="sys", sem="relaxed")
 
                     # Exit
                     num_tokens_to_recv -= num_cur_recv_tokens
@@ -562,10 +516,12 @@ def dispatch_kernel(
     return dispatch_main
 
 
-@tilelang.jit(pass_configs={
-    "tl.disable_tma_lower": True,  # enable TMA later
-    "tl.disable_warp_specialized": True
-})
+@tilelang.jit(
+    pass_configs={
+        "tl.disable_tma_lower": True,  # enable TMA later
+        "tl.disable_warp_specialized": True,
+    }
+)
 def cached_dispatch_kernel(
     num_ranks,
     num_tokens,
@@ -573,7 +529,7 @@ def cached_dispatch_kernel(
     num_recv_buffer_tokens,  # config.num_max_nvl_chunked_recv_tokens
     hidden,
     num_sms,
-    dtype: str = 'bfloat16',
+    dtype: str = "bfloat16",
 ):
     threads = 768  # 24 warps
     TMABytesPerWarp = 8192
@@ -585,14 +541,14 @@ def cached_dispatch_kernel(
     num_warps = threads // 32  # 24
     num_warps_per_rank = num_warps // num_ranks  # 3
 
-    num_recv_tokens = T.dynamic('num_recv_tokens')
+    num_recv_tokens = T.dynamic("num_recv_tokens")
 
     @T.prim_func
     def cached_dispatch_main(
         rank: T.int32,
         # output
         recv_x: T.Tensor((num_recv_tokens, hidden), dtype),
-        recv_src_idx: T.Tensor((num_recv_tokens,), 'int32'),
+        recv_src_idx: T.Tensor((num_recv_tokens,), "int32"),
         recv_channel_offset: T.Tensor([num_ranks, num_channels], "int32"),
         send_head: T.Tensor([num_tokens, num_ranks], "int32"),
         # input
@@ -608,10 +564,8 @@ def cached_dispatch_kernel(
         channel_head_idx: T.Tensor([num_channels, num_ranks], "int32"),
         channel_tail_idx: T.Tensor([num_channels, num_ranks], "int32"),
         # channel data buffers, stored on the receiver side
-        channel_x_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens, hidden],
-                                    dtype),
-        channel_src_idx_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens],
-                                          "int32"),
+        channel_x_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens, hidden], dtype),
+        channel_src_idx_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens], "int32"),
         # channel_x_scales_buffers: T.Tensor([num_channels, num_ranks, num_recv_buffer_tokens, num_scales], "float32"),
     ):
         with T.Kernel(num_sms, threads=threads) as bx:
@@ -624,65 +578,52 @@ def cached_dispatch_kernel(
 
                 # send offset by `-value-1` e.g. 0->-1, 1->-2
                 # this is for distinguishing zero tokens
-                if send_warp_id_in_rank == 0 and T.elect_one_sync():
-                    value = T.alloc_var('int32')
-                    value = T.if_then_else(
-                        responsible_channel > 0, channel_prefix_matrix[responsible_rank,
-                                                                       responsible_channel - 1], 0)
-                    T.st(
-                        channel_start_offset[responsible_channel, rank],
-                        -value - 1,
-                        scope='sys',
-                        sem='relaxed',
-                        dst_pe=responsible_rank)
+                if send_warp_id_in_rank == 0 and T.shuffle_elect(32):
+                    value = T.alloc_var("int32")
+                    value = T.if_then_else(responsible_channel > 0, channel_prefix_matrix[responsible_rank, responsible_channel - 1], 0)
+                    T.st(channel_start_offset[responsible_channel, rank], -value - 1, scope="sys", sem="relaxed", dst_pe=responsible_rank)
                     value = channel_prefix_matrix[responsible_rank, responsible_channel]
-                    T.st(
-                        channel_end_offset[responsible_channel, rank],
-                        -value - 1,
-                        scope='sys',
-                        sem='relaxed',
-                        dst_pe=responsible_rank)
+                    T.st(channel_end_offset[responsible_channel, rank], -value - 1, scope="sys", sem="relaxed", dst_pe=responsible_rank)
                 T.sync_warp()
 
                 # get task
-                num_tokens_per_channel = T.alloc_var(
-                    'int32', init=T.ceildiv(num_tokens, num_channels))
-                token_start_idx = T.alloc_var('int32')
+                num_tokens_per_channel = T.alloc_var("int32", init=T.ceildiv(num_tokens, num_channels))
+                token_start_idx = T.alloc_var("int32")
                 token_start_idx = T.min(num_tokens_per_channel * responsible_channel, num_tokens)
-                token_end_idx = T.alloc_var('int32')
+                token_end_idx = T.alloc_var("int32")
                 token_end_idx = T.min(token_start_idx + num_tokens_per_channel, num_tokens)
 
                 # sender mainloop: iterate over all tokens and send by trunk
-                cached_channel_tail_idx = T.alloc_var('int32')
+                cached_channel_tail_idx = T.alloc_var("int32")
                 cached_channel_tail_idx = 0
-                token_idx = T.alloc_var('int32')
+                token_idx = T.alloc_var("int32")
                 token_idx = token_start_idx
-                with T.While(token_idx < token_end_idx):
-                    if T.elect_one_sync():
+                while token_idx < token_end_idx:
+                    if T.shuffle_elect(32):
                         T.wait_ge(
                             channel_head_idx[responsible_channel, rank],
                             num_max_send_tokens + cached_channel_tail_idx - num_recv_buffer_tokens,
-                            responsible_rank)
+                            responsible_rank,
+                        )
                     T.sync_warp()
 
-                    chunk_token_idx = T.alloc_var('int32')
+                    chunk_token_idx = T.alloc_var("int32")
                     chunk_token_idx = 0
                     while chunk_token_idx < num_max_send_tokens and token_idx < token_end_idx:
                         # for the same token, the warp assigned to save `send_head` may be different from the warp
                         # assigned to send the following data
-                        if token_idx % num_warps_per_rank == send_warp_id_in_rank and T.elect_one_sync(
-                        ):
+                        if token_idx % num_warps_per_rank == send_warp_id_in_rank and T.shuffle_elect(32):
                             send_head[token_idx, responsible_rank] = T.if_then_else(
-                                is_token_in_rank[token_idx, responsible_rank],
-                                cached_channel_tail_idx, -1)
+                                is_token_in_rank[token_idx, responsible_rank], cached_channel_tail_idx, -1
+                            )
 
                         # skip if not selected
                         if not is_token_in_rank[token_idx, responsible_rank]:
                             token_idx += 1
-                            T.loop_continue()
+                            continue
 
                         # selected, get an empty slot
-                        dst_slot_idx = T.alloc_var('int32')
+                        dst_slot_idx = T.alloc_var("int32")
                         dst_slot_idx = cached_channel_tail_idx % num_recv_buffer_tokens
                         cached_channel_tail_idx += 1
                         if cached_channel_tail_idx % num_warps_per_rank == send_warp_id_in_rank:
@@ -690,20 +631,16 @@ def cached_dispatch_kernel(
                             # 1. copy data
                             T.put_warp(
                                 T.address_of(x[token_idx, 0]),
-                                T.address_of(channel_x_buffers[responsible_channel, rank,
-                                                               dst_slot_idx, 0]),
+                                T.address_of(channel_x_buffers[responsible_channel, rank, dst_slot_idx, 0]),
                                 hidden,
                                 dst_pe=responsible_rank,
                                 unroll_factor=4,
-                                enable_aggressive_vectorize=True)
+                                enable_aggressive_vectorize=True,
+                            )
 
                             # 2. copy src idx
-                            if T.elect_one_sync():
-                                T.st(
-                                    channel_src_idx_buffers[responsible_channel, rank,
-                                                            dst_slot_idx],
-                                    token_idx,
-                                    dst_pe=responsible_rank)
+                            if T.shuffle_elect(32):
+                                T.st(channel_src_idx_buffers[responsible_channel, rank, dst_slot_idx], token_idx, dst_pe=responsible_rank)
 
                             # 4. copy scale (support fp8 later)
 
@@ -713,36 +650,30 @@ def cached_dispatch_kernel(
                     # move tail index
                     # here all warps should share the same new tail
                     T.sync_threads(responsible_rank, num_threads_per_rank)
-                    if send_warp_id_in_rank == 0 and T.elect_one_sync():
+                    if T.shuffle_elect(96):
                         T.st(
                             channel_tail_idx[responsible_channel, rank],
                             cached_channel_tail_idx,
-                            scope='sys',
-                            sem='release',
-                            dst_pe=responsible_rank)
+                            scope="sys",
+                            sem="release",
+                            dst_pe=responsible_rank,
+                        )
 
             else:  # receiver
                 recv_thread_id_in_rank = tx % num_threads_per_rank
                 recv_warp_id_in_rank = recv_thread_id_in_rank // 32
 
                 # calculate offset first
-                rank_offset = T.if_then_else(responsible_rank > 0,
-                                             rank_prefix_matrix[responsible_rank - 1, rank], 0)
+                rank_offset = T.if_then_else(responsible_rank > 0, rank_prefix_matrix[responsible_rank - 1, rank], 0)
 
                 # receive channel offset
-                total_offset = T.alloc_var('int32')
-                num_tokens_to_recv = T.alloc_var('int32')
-                if T.elect_one_sync():
+                total_offset = T.alloc_var("int32")
+                num_tokens_to_recv = T.alloc_var("int32")
+                if T.shuffle_elect(32):
                     T.wait_ne(channel_start_offset[responsible_channel, responsible_rank], 0)
-                    T.ld(
-                        channel_start_offset[responsible_channel, responsible_rank],
-                        total_offset,
-                        sem='volatile')
+                    T.ld(channel_start_offset[responsible_channel, responsible_rank], total_offset, sem="volatile")
                     T.wait_ne(channel_end_offset[responsible_channel, responsible_rank], 0)
-                    T.ld(
-                        channel_end_offset[responsible_channel, responsible_rank],
-                        num_tokens_to_recv,
-                        sem='volatile')
+                    T.ld(channel_end_offset[responsible_channel, responsible_rank], num_tokens_to_recv, sem="volatile")
                     total_offset = -total_offset - 1
                     num_tokens_to_recv = -num_tokens_to_recv - 1
                     if recv_warp_id_in_rank == 0:
@@ -753,24 +684,20 @@ def cached_dispatch_kernel(
                 num_tokens_to_recv = T.tvm_warp_shuffle(-1, num_tokens_to_recv, 0, 32, 32)
 
                 # Shared tail indices for different warps
-                shared_channel_tail_idx = T.alloc_shared([num_ranks], 'int32')
+                shared_channel_tail_idx = T.alloc_shared([num_ranks], "int32")
 
-                cached_channel_head_idx = T.alloc_var('int32')
+                cached_channel_head_idx = T.alloc_var("int32")
                 cached_channel_head_idx = 0
-                cached_channel_tail_idx = T.alloc_var('int32')
+                cached_channel_tail_idx = T.alloc_var("int32")
                 cached_channel_tail_idx = 0
-                with T.While(num_tokens_to_recv > 0):
-                    with T.While(recv_thread_id_in_rank == 0):
-                        T.ld(
-                            channel_tail_idx[responsible_channel, responsible_rank],
-                            cached_channel_tail_idx,
-                            sem='acquire',
-                            scope='sys')
+                while num_tokens_to_recv > 0:
+                    while recv_thread_id_in_rank == 0:
+                        T.ld(channel_tail_idx[responsible_channel, responsible_rank], cached_channel_tail_idx, sem="acquire", scope="sys")
 
                         # read to copy
                         if cached_channel_head_idx != cached_channel_tail_idx:
                             shared_channel_tail_idx[responsible_rank] = cached_channel_tail_idx
-                            T.loop_break()
+                            break
 
                     # sync queue tail
                     T.sync_threads(responsible_rank, num_threads_per_rank)
@@ -779,31 +706,29 @@ def cached_dispatch_kernel(
                     # copy data
                     # 1. recv x
                     num_cur_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx
-                    for chunk_idx in T.serial(recv_warp_id_in_rank, num_cur_recv_tokens,
-                                              num_warps_per_rank):
-                        token_idx_in_buffer = (cached_channel_head_idx +
-                                               chunk_idx) % num_recv_buffer_tokens
+                    for chunk_idx in T.serial(recv_warp_id_in_rank, num_cur_recv_tokens, num_warps_per_rank):
+                        token_idx_in_buffer = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens
                         #! T.copy will cause layout inference error
                         T.put_warp(
-                            T.address_of(channel_x_buffers[responsible_channel, responsible_rank,
-                                                           token_idx_in_buffer, 0]),
+                            T.address_of(channel_x_buffers[responsible_channel, responsible_rank, token_idx_in_buffer, 0]),
                             T.address_of(recv_x[total_offset + chunk_idx, 0]),
                             hidden,
                             -1,
                             5,
-                            enable_aggressive_vectorize=True)
+                            enable_aggressive_vectorize=True,
+                        )
 
                     # 2. recv src_idx
-                    for chunk_idx in T.serial(cached_channel_head_idx + recv_thread_id_in_rank,
-                                              cached_channel_tail_idx, num_threads_per_rank):
-                        local_src_idx = T.alloc_var('int32')
+                    for chunk_idx in T.serial(
+                        cached_channel_head_idx + recv_thread_id_in_rank, cached_channel_tail_idx, num_threads_per_rank
+                    ):
+                        local_src_idx = T.alloc_var("int32")
                         T.ld(
-                            channel_src_idx_buffers[responsible_channel, responsible_rank,
-                                                    chunk_idx % num_recv_buffer_tokens],
+                            channel_src_idx_buffers[responsible_channel, responsible_rank, chunk_idx % num_recv_buffer_tokens],
                             local_src_idx,
-                            nc=True)
-                        recv_src_idx[total_offset + chunk_idx -
-                                     cached_channel_head_idx] = local_src_idx
+                            nc=True,
+                        )
+                        recv_src_idx[total_offset + chunk_idx - cached_channel_head_idx] = local_src_idx
 
                     # 4. recv scale (support fp8 later)
 
@@ -811,12 +736,8 @@ def cached_dispatch_kernel(
                     cached_channel_head_idx += num_cur_recv_tokens
                     total_offset += num_cur_recv_tokens
                     T.sync_threads(responsible_rank, num_threads_per_rank)
-                    if recv_warp_id_in_rank == num_warps_per_rank - 1 and T.elect_one_sync():
-                        T.st(
-                            channel_head_idx[responsible_channel, responsible_rank],
-                            cached_channel_head_idx,
-                            scope='sys',
-                            sem='relaxed')
+                    if T.shuffle_elect(96):
+                        T.st(channel_head_idx[responsible_channel, responsible_rank], cached_channel_head_idx, scope="sys", sem="relaxed")
 
                     # Exit
                     num_tokens_to_recv -= num_cur_recv_tokens
@@ -848,8 +769,9 @@ def intranode_dispatch(
     # todo: support async functionality
 ):
     if handle is None:
-        assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None, \
-        "num_tokens_per_rank, is_token_in_rank, and num_tokens_per_expert must be provided in non-cached mode"
+        assert num_tokens_per_rank is not None and is_token_in_rank is not None and num_tokens_per_expert is not None, (
+            "num_tokens_per_rank, is_token_in_rank, and num_tokens_per_expert must be provided in non-cached mode"
+        )
     else:
         rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head = handle
 
@@ -858,8 +780,19 @@ def intranode_dispatch(
     num_ranks = num_tokens_per_rank.shape[0]
     num_topk = topk_idx.shape[1] if handle is None else 0
 
-    barrier_signal, per_rank_buffer, per_expert_buffer, channel_start_offset, channel_end_offset, channel_head_idx, channel_tail_idx, \
-        channel_x_buffers, channel_src_idx_buffers, channel_topk_idx_buffers, channel_topk_weights_buffers = symm_buffers
+    (
+        barrier_signal,
+        per_rank_buffer,
+        per_expert_buffer,
+        channel_start_offset,
+        channel_end_offset,
+        channel_head_idx,
+        channel_tail_idx,
+        channel_x_buffers,
+        channel_src_idx_buffers,
+        channel_topk_idx_buffers,
+        channel_topk_weights_buffers,
+    ) = symm_buffers
 
     if handle is None:
         num_recv_tokens, num_recv_tokens_per_expert_list, rank_prefix_matrix, channel_prefix_matrix = notify_dispatch(
@@ -895,76 +828,84 @@ def intranode_dispatch(
             channel_tail_idx,
             barrier_signal,
             allocator,
-            comm_stream=comm_stream)
+            comm_stream=comm_stream,
+        )
         num_recv_tokens = recv_src_idx.size(0)
 
-    recv_x = torch.empty((num_recv_tokens, hidden), dtype=x.dtype, device='cuda')
-    recv_src_idx = torch.empty((num_recv_tokens,), dtype=torch.int32, device='cuda')
+    recv_x = torch.empty((num_recv_tokens, hidden), dtype=x.dtype, device="cuda")
+    recv_src_idx = torch.empty((num_recv_tokens,), dtype=torch.int32, device="cuda")
     if handle is None:
-        recv_topk_idx = torch.empty((num_recv_tokens, num_topk), dtype=torch.int64, device='cuda')
-        recv_topk_weights = torch.empty((num_recv_tokens, num_topk),
-                                        dtype=torch.float32,
-                                        device='cuda')
-    recv_channel_prefix_matrix = torch.empty((num_ranks, config.num_channels),
-                                             dtype=torch.int32,
-                                             device='cuda')
-    send_head = torch.empty((num_tokens, num_ranks), dtype=torch.int32, device='cuda')
+        recv_topk_idx = torch.empty((num_recv_tokens, num_topk), dtype=torch.int64, device="cuda")
+        recv_topk_weights = torch.empty((num_recv_tokens, num_topk), dtype=torch.float32, device="cuda")
+    recv_channel_prefix_matrix = torch.empty((num_ranks, config.num_channels), dtype=torch.int32, device="cuda")
+    send_head = torch.empty((num_tokens, num_ranks), dtype=torch.int32, device="cuda")
 
     # run dispatch
     if handle is None:
-        kernel = dispatch_kernel(num_ranks, config.num_max_nvl_chunked_send_tokens,
-                                 config.num_max_nvl_chunked_recv_tokens, hidden, num_topk,
-                                 num_experts, config.num_sms, 'bfloat16')
-        kernel.initialize(allocator=allocator)
-        kernel(
-            rank,
-            recv_x,
-            recv_src_idx,
-            recv_topk_idx,
-            recv_topk_weights,
-            recv_channel_prefix_matrix,
-            send_head,
-            x,
-            topk_idx,
-            topk_weights,
-            is_token_in_rank,
-            rank_prefix_matrix,
-            channel_prefix_matrix,
-            channel_start_offset,
-            channel_end_offset,
-            channel_head_idx,
-            channel_tail_idx,
-            channel_x_buffers,
-            channel_src_idx_buffers,
-            channel_topk_idx_buffers,
-            channel_topk_weights_buffers,
-            stream=comm_stream.cuda_stream,
-            skip_tensor_validation=True)  # reduce runtime overhead
-        handle = (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix,
-                  recv_src_idx, is_token_in_rank, send_head)
+        kernel = dispatch_kernel(
+            num_ranks,
+            config.num_max_nvl_chunked_send_tokens,
+            config.num_max_nvl_chunked_recv_tokens,
+            hidden,
+            num_topk,
+            num_experts,
+            config.num_sms,
+            "bfloat16",
+        )
+        kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
+        with tvm_ffi.use_torch_stream(torch.cuda.stream(comm_stream)):
+            kernel(
+                rank,
+                recv_x,
+                recv_src_idx,
+                recv_topk_idx,
+                recv_topk_weights,
+                recv_channel_prefix_matrix,
+                send_head,
+                x,
+                topk_idx,
+                topk_weights,
+                is_token_in_rank,
+                rank_prefix_matrix,
+                channel_prefix_matrix,
+                channel_start_offset,
+                channel_end_offset,
+                channel_head_idx,
+                channel_tail_idx,
+                channel_x_buffers,
+                channel_src_idx_buffers,
+                channel_topk_idx_buffers,
+                channel_topk_weights_buffers,
+            )
+        handle = (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
         return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle
     else:
-        kernel = cached_dispatch_kernel(num_ranks, num_tokens,
-                                        config.num_max_nvl_chunked_send_tokens,
-                                        config.num_max_nvl_chunked_recv_tokens, hidden,
-                                        config.num_sms, 'bfloat16')
+        kernel = cached_dispatch_kernel(
+            num_ranks,
+            num_tokens,
+            config.num_max_nvl_chunked_send_tokens,
+            config.num_max_nvl_chunked_recv_tokens,
+            hidden,
+            config.num_sms,
+            "bfloat16",
+        )
         kernel.initialize(allocator=allocator, stream=comm_stream.cuda_stream)
-        kernel(
-            rank,
-            recv_x,
-            recv_src_idx,
-            recv_channel_prefix_matrix,
-            send_head,
-            x,
-            is_token_in_rank,
-            rank_prefix_matrix,
-            channel_prefix_matrix,
-            channel_start_offset,
-            channel_end_offset,
-            channel_head_idx,
-            channel_tail_idx,
-            channel_x_buffers,
-            channel_src_idx_buffers,
-            stream=comm_stream.cuda_stream,
-            skip_tensor_validation=True)  # reduce runtime overhead
+        with torch.cuda.stream(comm_stream):
+            kernel(
+                rank,
+                recv_x,
+                recv_src_idx,
+                recv_channel_prefix_matrix,
+                send_head,
+                x,
+                is_token_in_rank,
+                rank_prefix_matrix,
+                channel_prefix_matrix,
+                channel_start_offset,
+                channel_end_offset,
+                channel_head_idx,
+                channel_tail_idx,
+                channel_x_buffers,
+                channel_src_idx_buffers,
+            )
         return recv_x

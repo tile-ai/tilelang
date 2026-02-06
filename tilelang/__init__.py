@@ -4,17 +4,58 @@ import ctypes
 
 import logging
 import warnings
-from tqdm import tqdm
+from pathlib import Path
+from tqdm.auto import tqdm
+
+
+def _compute_version() -> str:
+    """Return the package version without being polluted by unrelated installs.
+
+    Preference order:
+    1) If running from a source checkout (VERSION file present at repo root),
+       use the dynamic version from version_provider (falls back to plain VERSION).
+    2) Otherwise, use importlib.metadata for the installed distribution.
+    3) As a last resort, return a dev sentinel.
+    """
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        version_file = repo_root / "VERSION"
+        if version_file.is_file():
+            try:
+                from version_provider import dynamic_metadata  # type: ignore
+
+                return dynamic_metadata("version")
+            except Exception:
+                # Fall back to the raw VERSION file if provider isn't available.
+                return version_file.read_text().strip()
+    except Exception:
+        # If any of the above fails, fall through to installed metadata.
+        pass
+
+    try:
+        from importlib.metadata import version as _dist_version  # py3.8+
+
+        return _dist_version("tilelang")
+    except Exception as exc:
+        warnings.warn(
+            f"tilelang version metadata unavailable ({exc!r}); using development version.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return "0.0.dev0"
+
+
+__version__ = _compute_version()
 
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version('tilelang')
+    __version__ = version("tilelang")
 except PackageNotFoundError:
     try:
         from version_provider import dynamic_metadata
 
-        __version__ = dynamic_metadata('version')
+        __version__ = dynamic_metadata("version")
     except Exception as exc:
         warnings.warn(
             f"tilelang version metadata unavailable ({exc!r}); using development version.",
@@ -98,7 +139,7 @@ def _load_tile_lang_lib():
 if env.SKIP_LOADING_TILELANG_SO == "0":
     _LIB, _LIB_PATH = _load_tile_lang_lib()
 
-from .jit import jit, JITKernel, compile  # noqa: F401
+from .jit import jit, lazy_jit, JITKernel, compile, par_compile  # noqa: F401
 from .profiler import Profiler  # noqa: F401
 from .cache import clear_cache  # noqa: F401
 
@@ -106,21 +147,32 @@ from .utils import (
     TensorSupplyType,  # noqa: F401
     deprecated,  # noqa: F401
 )
-from .utils.tensor import tensor  # noqa: F401
-from .utils.allocator import get_allocator  # noqa: F401
+
+# TileScale distributed extensions (optional - only available when tilescale_ext is installed)
+try:
+    from .utils.tensor import tensor  # noqa: F401
+    from .utils.allocator import get_allocator  # noqa: F401
+except ImportError:
+    # tilescale_ext not installed - distributed features unavailable
+    tensor = None
+    get_allocator = None
+
 from .layout import (
     Layout,  # noqa: F401
     Fragment,  # noqa: F401
 )
 from . import (
+    analysis,  # noqa: F401
     transform,  # noqa: F401
     language,  # noqa: F401
     engine,  # noqa: F401
+    tools,  # noqa: F401
 )
+from .language.v2 import dtypes  # noqa: F401
 from .autotuner import autotune  # noqa: F401
 from .transform import PassConfigKey  # noqa: F401
 
-from .engine import lower, register_cuda_postproc, register_hip_postproc  # noqa: F401
+from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
 
 from .math import *  # noqa: F403
 

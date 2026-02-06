@@ -6,7 +6,7 @@ import pynvshmem
 import os
 import datetime
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     assert WORLD_SIZE > 2
     RANK = int(os.environ.get("RANK", 0))
@@ -28,4 +28,4 @@ if __name__ == '__main__':
     assert pynvshmem.nvshmem_my_pe() == RANK
     assert pynvshmem.nvshmem_n_pes() == WORLD_SIZE
     if RANK == 0:
-        print('Test for basic queries passed!✅')
+        print("Test for basic queries passed!✅")

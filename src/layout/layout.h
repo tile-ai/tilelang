@@ -6,14 +6,37 @@
 #ifndef TVM_TL_LAYOUT_LAYOUT_H_
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
+#include <exception>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
+#include <tvm/ffi/object.h>
 #include <utility>
+
+#include "../support/ffi_aliases.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+// Common layout-related exceptions
+class LayoutConflictException : public std::exception {
+public:
+  const char *what() const noexcept override { return msg_.c_str(); }
+  explicit LayoutConflictException(const std::string &msg) : msg_(msg) {}
+
+private:
+  std::string msg_;
+};
+
+class LoopLayoutInjectiveException : public std::exception {
+public:
+  const char *what() const noexcept override { return msg_.c_str(); }
+  explicit LoopLayoutInjectiveException(const std::string &msg) : msg_(msg) {}
+
+private:
+  std::string msg_;
+};
 
 class Layout;
 class Fragment;
@@ -38,17 +61,30 @@ public:
   virtual Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const;
 
   virtual Layout Inverse() const;
+
+  // Reshape the layout to a new logical shape. When aliasing buffers of
+  // different dtypes, the element count may change while the underlying
+  // byte-size stays equal. Use rescale_num/rescale_den to represent the
+  // ratio between the old element size and the new element size in bytes.
+  // Specifically, define factor = rescale_num / rescale_den where:
+  //   new_num_elems = old_num_elems * factor
+  // For example, f32->i8 (4B -> 1B) uses rescale_num=4, rescale_den=1.
+  // i8->f32 (1B -> 4B) uses rescale_num=1, rescale_den=4.
+  virtual Layout Reshape(const Array<PrimExpr> &shape,
+                         arith::Analyzer *analyzer,
+                         const PrimExpr rescale_num = Integer(1),
+                         const PrimExpr rescale_den = Integer(1)) const;
+
   virtual std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const;
 
   virtual std::string DebugOutput() const;
 
   virtual bool IsEqual(const LayoutNode *other, bool skip_index = false) const;
 
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr const char *_type_key = "tl.Layout";
-  bool SEqualReduce(const LayoutNode *other, SEqualReducer equal) const;
   static void RegisterReflection();
-  TVM_DECLARE_BASE_OBJECT_INFO(LayoutNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.Layout", LayoutNode, Object);
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
 
 protected:
   virtual Map<Var, Range> getVarMap() const;
@@ -65,7 +101,7 @@ public:
   TVM_DLL Layout(Array<IterVar> forward_var, Array<PrimExpr> forward_index);
   TVM_DLL Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index);
 
-  TVM_DEFINE_OBJECT_REF_METHODS(Layout, ObjectRef, LayoutNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Layout, ObjectRef, LayoutNode);
 };
 
 class FragmentNode : public LayoutNode {
@@ -79,6 +115,11 @@ public:
   Array<PrimExpr> GetForwardVars() const final;
 
   Layout Inverse() const final;
+
+  Layout Reshape(const Array<PrimExpr> &shape, arith::Analyzer *analyzer,
+                 const PrimExpr rescale_num = Integer(1),
+                 const PrimExpr rescale_den = Integer(1)) const;
+
   std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const final;
 
   PrimExpr ThreadExtent() const;
@@ -107,11 +148,13 @@ public:
 
   bool IsCompletedReplicated() const;
 
+  arith::IterMapResult DetectInjective() const;
+
   static void RegisterReflection();
 
-  bool SEqualReduce(const FragmentNode *other, SEqualReducer equal) const;
-  static constexpr const char *_type_key = "tl.Fragment";
-  TVM_DECLARE_FINAL_OBJECT_INFO(FragmentNode, LayoutNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Fragment", FragmentNode, LayoutNode);
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
 
 protected:
   Map<Var, Range> getVarMap() const final;
@@ -132,7 +175,21 @@ public:
                    PrimExpr forward_thread, PrimExpr replicate_size,
                    Optional<Var> replicate_var);
 
-  TVM_DEFINE_OBJECT_REF_METHODS(Fragment, Layout, FragmentNode);
+  /*!
+   * \brief Create a fully replicated fragment layout.
+   *
+   * A fully replicated fragment means all threads hold identical copies of the
+   * entire buffer. This is useful for index buffers or masks that need to be
+   * accessed uniformly across all threads.
+   *
+   * \param shape The shape of the buffer.
+   * \param thread_extent The number of threads.
+   * \return A Fragment where each thread has a complete copy of all elements.
+   */
+  TVM_DLL static Fragment FullyReplicated(Array<PrimExpr> shape,
+                                          PrimExpr thread_extent);
+
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fragment, Layout, FragmentNode);
 };
 
 Var InputPlaceholder(size_t idx);
@@ -166,8 +223,8 @@ Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int warp_n, const int element_size,
                                const int k_pack, bool transposed = false);
 
-// Default Memory Layout
-Layout makeGemmLayoutLinear(int stride, int continuous);
+// Default Memory Layout (row-major linear layout for any dimension)
+Layout makeLinearLayout(Array<PrimExpr> shape);
 Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size);
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, bool k_inner = true);
@@ -201,6 +258,12 @@ Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
 namespace attr {
 // BlockAttr, Containing the layout for all the buffers in the block
 constexpr const char *kLayoutMap = "layout_map";
+// ForAttr, Containing the parallel loop layout for a parallel for loop
+constexpr const char *kParallelLoopLayout = "parallel_loop_layout";
+// ForAttr, Containing the predicate for a parallel for loop
+constexpr const char *kParallelLoopPredicate = "parallel_loop_predicate";
+// ForAttr, Width (in elements) for coalesced memory access
+constexpr const char *kCoalescedWidth = "coalesced_width";
 } // namespace attr
 
 } // namespace tl

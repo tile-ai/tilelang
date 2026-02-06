@@ -9,19 +9,14 @@ from __future__ import absolute_import as _abs
 
 import subprocess
 
-import tvm.ffi
+import tvm_ffi
 
 from tvm.contrib import utils
 from tvm.base import py_str
 from tvm.contrib.rocm import get_rocm_arch, find_rocm_path
 
 
-def compile_hip(code,
-                target_format="hsaco",
-                arch=None,
-                options=None,
-                path_target=None,
-                verbose=False):
+def compile_hip(code, target_format="hsaco", arch=None, options=None, path_target=None, verbose=False):
     """Compile HIP code with hipcc.
 
     Parameters
@@ -61,7 +56,7 @@ def compile_hip(code,
 
     file_target = path_target if path_target else temp_target
     cmd = ["hipcc"]
-    cmd += ["-O3", '-c']
+    cmd += ["-O3", "-c"]
     if isinstance(arch, str):
         cmd += [f"--offload-arch={arch}"]
     if target_format == "hsaco":
@@ -96,7 +91,7 @@ def compile_hip(code,
         return data
 
 
-@tvm.ffi.register_func("tilelang_callback_hip_compile", override=True)
+@tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
     """use hipcc to generate fatbin code for better optimization"""
     hsaco = compile_hip(code, target_format="hsaco")

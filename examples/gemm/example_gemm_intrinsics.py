@@ -4,7 +4,8 @@ import tilelang
 import tilelang.language as T
 from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
-    TensorCoreIntrinEmitter,)
+    TensorCoreIntrinEmitter,
+)
 from tilelang.transform import simplify_prim_func
 
 
@@ -34,18 +35,18 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
+        T.float16,
+        T.int8,
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        T.float16,
+        T.float32,
+        T.int32,
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if out_dtype == T.int32:
         micro_size_k = 32
 
     # This is a debug config
@@ -53,7 +54,7 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 64
     warp_col_tiles = 64
-    # chunk = 32 if in_dtype == "float16" else 64
+    # chunk = 32 if in_dtype == T.float16 else 64
     chunk = 32
     shared_scope = "shared.dyn"
 
@@ -99,12 +100,11 @@ def tl_matmul(
 
     @T.prim_func
     def gemm_intrinsics(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
@@ -112,10 +112,12 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)
@@ -123,7 +125,6 @@ def tl_matmul(
             T.clear(C_local)
 
             for ko in T.Pipelined((K // block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -133,7 +134,6 @@ def tl_matmul(
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(A_local, A_shared, ki)
 
@@ -163,7 +163,7 @@ def ref_program(A, B):
 
 
 def main(M=4096, N=4096, K=4096):
-    in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
+    in_dtype, out_dtype, accum_dtype = T.float16, T.float16, T.float32
     kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
@@ -179,6 +179,13 @@ def main(M=4096, N=4096, K=4096):
     assert latency is not None
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+
+
+def run_regression_perf(M=4096, N=4096, K=4096):
+    in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
+    kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    profiler = kernel.get_profiler()
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

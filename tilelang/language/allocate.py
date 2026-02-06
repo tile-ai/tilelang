@@ -13,15 +13,31 @@ Available allocation functions:
 Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
 """
+
 from __future__ import annotations
 
+from typing import TypeVar, overload, Literal
+
+# Python 3.9 compatibility for advanced typing features (PEP 646)
+try:
+    from typing import TypeVarTuple  # type: ignore[attr-defined]
+except Exception:
+    from typing_extensions import TypeVarTuple  # type: ignore
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr
 from tvm.script.parser.tir import block_attr
+from tvm.tir.buffer import Buffer
+from tvm.tir.expr import FloatImm, IntImm
+from .v2 import dtypes as _dtypes
+from .v2.dtypes import dtype as tl_dtype
+from .v2.builder import OutTensor
+
+_Shapes = TypeVarTuple("_Shapes")
+_DType = TypeVar("_DType")
 
 
-def alloc_shared(shape, dtype, scope="shared.dyn"):
+def alloc_shared(shape, dtype: _DType, scope="shared.dyn"):
     """Allocate a shared memory buffer for inter-thread communication.
 
     Args:
@@ -39,7 +55,7 @@ def alloc_shared(shape, dtype, scope="shared.dyn"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_local(shape, dtype, scope="local"):
+def alloc_local(shape, dtype: _DType, scope="local"):
     """Allocate a local memory buffer for thread-private storage.
 
     Args:
@@ -53,7 +69,7 @@ def alloc_local(shape, dtype, scope="local"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_fragment(shape, dtype, scope="local.fragment"):
+def alloc_fragment(shape, dtype: _DType, scope="local.fragment"):
     """Allocate a fragment memory buffer for specialized operations.
 
     Args:
@@ -65,6 +81,14 @@ def alloc_fragment(shape, dtype, scope="local.fragment"):
         T.Buffer: A TVM buffer object allocated in fragment memory
     """
     return T.alloc_buffer(shape, dtype, scope=scope)
+
+
+@overload
+def alloc_var(dtype: str, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
+
+
+@overload
+def alloc_var(dtype: str, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
 
 
 def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
@@ -82,7 +106,12 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
         init (PrimExpr, optional): The optional initializer value. When provided,
             the generated code will initialize the variable with this value instead
             of defaulting to zero.
-
+    Examples:
+        a = T.alloc_var('int32', 1) # var with init 1
+        a = T.alloc_var('int32', 'local.var') # var with local.var scope
+        a = T.alloc_var('int32', 1, 'local.var') # var with init 1 and local.var scope
+        a = T.alloc_var('int32', 'local.var', init=1) # var with init 1 and local.var scope
+        a = T.alloc_var('int32', init=1) # var with init 1 and local.var scope
     Returns:
         T.Buffer: A TVM buffer object allocated as a single-element variable
     """
@@ -105,15 +134,17 @@ def alloc_var(dtype, *args, scope="local.var", init: PrimExpr | None = None):
             raise TypeError("Scope must be provided as a string in alloc_var.")
         parsed_scope = parsed_scope_arg
     elif len(args) > 2:
-        raise TypeError(
-            f"alloc_var expected at most 3 positional arguments but got {len(args) + 1}.")
+        raise TypeError(f"alloc_var expected at most 3 positional arguments but got {len(args) + 1}.")
 
     if not isinstance(parsed_scope, str):
         raise TypeError("Scope must be a string in alloc_var.")
 
     buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
-        block_attr({"tl.local_var_init": {buffer.data: parsed_init}})
+        if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
+            block_attr({"tl.local_var_init": {buffer.data: tl_dtype(dtype)(parsed_init)}})
+        else:
+            T.buffer_store(buffer, parsed_init, 0)
     return buffer
 
 
@@ -126,7 +157,7 @@ def alloc_barrier(arrive_count: int):
     Returns:
         T.Buffer: A TVM buffer object allocated as a barrier
     """
-    return T.alloc_buffer([arrive_count], "uint64", scope="shared.barrier")
+    return T.alloc_buffer([arrive_count], _dtypes.uint64, scope="shared.barrier")
 
 
 def alloc_tmem(shape, dtype):
@@ -194,10 +225,55 @@ def alloc_reducer(shape, dtype, op="sum", replication=None):
     return reducer
 
 
-def alloc_descriptor(dtype="uint64", scope="local.descriptor"):
-    """Allocate a descriptor buffer for wgmma and utcmma.
+DescKind = Literal["wgmma", "tcgen05_smem", "tcgen05_instr"]
+
+
+def alloc_descriptor(
+    kind: DescKind = "wgmma",
+    dtype: str = _dtypes.uint64,
+):
+    """Allocate a descriptor buffer for WGMMA and TCGEN5.MMA.
+
+    Args:
+        kind: The descriptor kind, one of "wgmma", "tcgen05" ("utcmma" as alias).
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a descriptor
     """
+
+    scope = "local.descriptor." + kind
+    # Buffer naming via `name` is not supported by this TVM builder signature;
+    # keep parameter for forward-compat, but do not pass it.
     return T.alloc_buffer([1], dtype, scope=scope)
+
+
+def alloc_wgmma_desc(dtype: str = _dtypes.uint64):
+    return alloc_descriptor("wgmma", dtype=dtype)
+
+
+def alloc_tcgen05_smem_desc(dtype: str = _dtypes.uint64):
+    return alloc_descriptor("tcgen05_smem", dtype=dtype)
+
+
+def alloc_tcgen05_instruction_desc(dtype: str = _dtypes.uint32):
+    return alloc_descriptor("tcgen05_instr", dtype=dtype)
+
+
+# Alias: short name consistent with imports
+def alloc_tcgen05_instr_desc(dtype: str = _dtypes.uint32):
+    return alloc_tcgen05_instruction_desc(dtype)
+
+
+@overload
+def empty(shape, dtype: str = _dtypes.float32): ...
+
+
+def empty(*shape, dtype: str = _dtypes.float32):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+        return OutTensor(shape[0], dtype)
+    elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):
+        return OutTensor(shape[0], shape[1])
+    elif all([isinstance(x, (int, PrimExpr)) for x in shape]):
+        return OutTensor(shape, dtype)
+    else:
+        raise RuntimeError(f"Invalid shape {shape}")

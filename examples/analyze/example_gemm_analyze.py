@@ -15,14 +15,14 @@ def kernel(
     thread_num=None,
     enable_rasteration=None,
 ):
-    dtype = "float16"
-    accum_dtype = "float"
+    dtype = T.float16
+    accum_dtype = T.float32
 
     @T.prim_func
     def matmul(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)

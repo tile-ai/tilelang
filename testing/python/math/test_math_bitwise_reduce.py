@@ -19,18 +19,17 @@ def bitwise_reduce(
     func,
     clear=True,
 ):
-
     @T.prim_func
     def reduce_func(
-            A: T.Tensor((M, N), "int32"),
-            B: T.Tensor((M), "int32"),
-            Output: T.Tensor((M), "int32"),
+        A: T.Tensor((M, N), T.int32),
+        B: T.Tensor((M), T.int32),
+        Output: T.Tensor((M), T.int32),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_N), "int32")
-            A_fragment = T.alloc_fragment((block_M, block_N), "int32")
-            B_shared = T.alloc_shared((block_M,), "int32")
-            B_fragment = T.alloc_fragment((block_M), "int32")
+            A_shared = T.alloc_shared((block_M, block_N), T.int32)
+            A_fragment = T.alloc_fragment((block_M, block_N), T.int32)
+            B_shared = T.alloc_shared((block_M,), T.int32)
+            B_fragment = T.alloc_fragment((block_M), T.int32)
             T.copy(A[by * block_M, bx * block_N], A_shared)
             T.copy(A_shared, A_fragment)
             T.copy(B[by * block_M], B_shared)
@@ -64,7 +63,7 @@ def run_single_bitwise_reduce(
             row_pattern = (i & 0xF) << (i % 4)  # 4-bit patterns shifted by row
 
             # Column-based pattern: different bit positions set based on column
-            col_pattern = (1 << (j % 31))  # Single bit set at different positions
+            col_pattern = 1 << (j % 31)  # Single bit set at different positions
 
             # Combine patterns with XOR to create diverse bit distributions
             # Add some deterministic "noise" based on position
@@ -76,7 +75,7 @@ def run_single_bitwise_reduce(
             if i % 4 == 0:
                 a[i, j] &= ~(0x1 << (i // 4))
             elif i % 2 == 0:
-                a[i, j] |= (0x1 << (i // 2))
+                a[i, j] |= 0x1 << (i // 2)
 
     if name == "reduce_bitand":
         expected = torch.full((M,), -1, device="cuda", dtype=torch.int32)

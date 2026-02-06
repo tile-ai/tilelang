@@ -28,6 +28,10 @@ static constexpr const char *kWarpSpecializationScope =
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
+// A PrimFunc-level attribute carrying a list of handle Vars
+// that must NOT be marked with the restrict qualifier in codegen.
+// Type: Array<tir::Var>
+static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
@@ -40,7 +44,6 @@ static constexpr const char *kDisableWarpSpecialized =
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
 static constexpr const char *kEnableAggressiveSharedMemoryMerge =
     "tl.enable_aggressive_shared_memory_merge";
-static constexpr const char *kDisableRDC = "tl.disable_rdc";
 static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
 static constexpr const char *kEnableFastMath = "tl.enable_fast_math";
 static constexpr const char *kPtxasRegisterUsageLevel =
@@ -52,14 +55,12 @@ static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
-/*!
- * \brief Whether to disable dynamic tail split
- *
- * kDisableDynamicTailSplit = "tl.disable_dynamic_tail_split"
- *
- */
-static constexpr const char *kDisableDynamicTailSplit =
-    "tl.disable_dynamic_tail_split";
+static constexpr const char *kASTPrintEnable = "tl.ast_print_enable";
+static constexpr const char *kLayoutVisualizationEnable =
+    "tl.layout_visualization_enable";
+static constexpr const char *kLayoutVisualizationFormats =
+    "tl.layout_visualization_formats";
+static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
 
 /*!
  * \brief Whether to disable thread storage synchronization
@@ -82,18 +83,6 @@ static constexpr const char *kDisableThreadStorageSync =
  *
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
-
-/*!
- * \brief The size of the vectorized dimension in buffer, designed by user
- *
- * For example, if the vectorized dimension is 128 bits and the dtype of buffer
- * A[m, k] is float16, the size of the vectorized dimension (i.e. k) in buffer A
- * should be divisible by 8 (8 = 128 / 16).
- *
- * kDynamicAlignment = "tl.dynamic_alignment"
- *
- */
-static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
 
 /*!
  * \brief Get the type of the CUDA tensor map
@@ -138,6 +127,10 @@ TVM_DLL const Op &ieee_fsqrt();
 TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
+
+// random op
+TVM_DLL const Op &rng_init();
+TVM_DLL const Op &rng_rand();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
@@ -242,13 +235,23 @@ TVM_DLL const Op &ptx_wgmma_ss();
 /*!
  * \brief tvm intrinsics for ptx tensor core wgmma instructions.
  *
- *  void ptx_wgmma_rs(StringImm accum_dtype, StringImm wgmma_prefix, bool
- * a_is_k_major, bool b_is_k_major, StringImm a_dtype_abbrv, StringImm
- * b_dtype_abbrv, StringImm accum_dtype_abbrv, Var A_descriptor, PrimExpr
- * A_offset, Var B_descriptor, Var B_offset, Var C_data, Var C_offset, bool
- * scale_out, bool scale_in_a, bool scale_in_b);
+ *  void ptx_wgmma_rs(StringImm accum_dtype, StringImm wgmma_prefix,
+ * bool b_is_k_major, StringImm a_dtype_abbrv, StringImm b_dtype_abbrv,
+ * StringImm accum_dtype_abbrv, Var A_descriptor, PrimExpr A_offset, Var
+ * B_descriptor, Var B_offset, Var C_data, Var C_offset, bool scale_out,
+ * bool scale_in_a, bool scale_in_b);
  */
 TVM_DLL const Op &ptx_wgmma_rs();
+
+/*!
+ * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.
+ */
+TVM_DLL const Op &ptx_tcgen05_mma_ss();
+
+/*!
+ * \brief tvm intrinsic for tcgen05 mma tensor-shared instructions.
+ */
+TVM_DLL const Op &ptx_tcgen05_mma_ts();
 
 /*!
  * \brief tvm intrinsics for initializing tensor memory
@@ -267,6 +270,17 @@ TVM_DLL const Op &ptx_init_tensor_memory();
 TVM_DLL const Op &ptx_deallocate_tensor_memory();
 
 /*!
+ * \brief tvm intrinsic for ptx tensor core mma instructions on SM70.
+ *
+ *  void ptx_mma_sm70(StringImm shape, StringImm A_layout, StringImm B_layout,
+ *                    StringImm A_dtype, StringImm B_dtype, StringImm C_dtype,
+ *                    Var multiplicand_a, Expr a_index,
+ *                    Var multiplicand_b, Expr b_index,
+ *                    Var accumulator, Expr c_index, bool saturate);
+ */
+TVM_DLL const Op &ptx_mma_sm70();
+
+/*!
  * \brief tvm intrinsics for ldmatrix
  *
  * ptx_ldmatrix(transposed, num, shared_addr, local_addr)
@@ -281,22 +295,6 @@ TVM_DLL const Op &ptx_ldmatrix();
  *
  */
 TVM_DLL const Op &ptx_stmatrix();
-
-/*!
- * \brief tvm intrinsics for sync threads partial
- *
- * sync_thread_partial()
- *
- */
-TVM_DLL const Op &sync_thread_partial();
-
-/*!
- * \brief tvm intrinsics for copy unrolled
- *
- * copy_unrolled(dst, src, size, unroll_factor)
- *
- */
-TVM_DLL const Op &copy_unrolled();
 
 /*!
  * \brief tvm intrinsic for ptx async copy barrier using
@@ -379,6 +377,14 @@ TVM_DLL const Op &warpgroup_commit_batch();
 TVM_DLL const Op &warpgroup_wait();
 
 /*!
+ * \brief Fence accumulator operand registers for upcoming WGMMA operations
+ *
+ * warpgroup_fence_operand(dtype, ptr, offset, num_regs)
+ *
+ */
+TVM_DLL const Op &warpgroup_fence_operand();
+
+/*!
  * \brief Return the canonical lane index for the calling thread.
  *
  * get_lane_idx([warp_size])
@@ -421,10 +427,10 @@ TVM_DLL const Op &wait_wgmma();
 /*!
  * \brief Synchronize all threads in a grid
  *
- * sync_grid_cg()
+ * sync_grid()
  *
  */
-TVM_DLL const Op &sync_grid_cg();
+TVM_DLL const Op &sync_grid();
 
 /*!
  * \brief tvm intrinsic for loop continue
@@ -505,21 +511,27 @@ TVM_DLL const Op &tl_gemm_sp();
 TVM_DLL const Op &tl_shuffle_elect();
 
 /*!
- * \brief tvm intrinsic to get the current clock cycle count.
- *
- *  uint64 get_clock()
- *
- */
-TVM_DLL const Op &get_clock();
-
-/*!
  * \brief tilelang intrinsic for initializing a descriptor buffer for
  * wgmma/utcmma.
  *
  *  This op is used to represent a descriptor initialization operation in
  * tilelang.
  */
-TVM_DLL const Op &initialize_descriptor();
+TVM_DLL const Op &initialize_wgmma_descriptor();
+
+/*!
+ * \brief tilelang intrinsic for initializing a descriptor buffer for
+ * tcgen05 mma.
+ */
+TVM_DLL const Op &initialize_tcgen05_descriptor();
+
+/*!
+ * \brief tilelang intrinsic for committing UMMA (TCGEN05) barrier arrive.
+ *
+ *  This op wraps the device-side arrive used to signal completion of MMA work
+ *  to a shared-memory mbarrier. It mirrors CUTLASS's umma_arrive.
+ */
+TVM_DLL const Op &tcgen05_mma_arrive();
 
 /*!
  * \brief tilelang intrinsic for setting the start address of a descriptor
@@ -528,7 +540,17 @@ TVM_DLL const Op &initialize_descriptor();
  *  This op is used to represent a descriptor start address setting operation in
  * tilelang.
  */
+
 TVM_DLL const Op &increase_descriptor_offset();
+
+/*!
+ * \brief tilelang intrinsic for atomic add that returns the original value.
+ *
+ *  This op is used to represent an atomic add operation that returns the
+ * original value before addition in tilelang.
+ */
+TVM_DLL const Op &atom_add();
+
 /*!
  * \brief tilelang intrinsic for element-wise atomic addition.
  *
@@ -538,12 +560,18 @@ TVM_DLL const Op &increase_descriptor_offset();
 TVM_DLL const Op &atomicadd_elem_op();
 
 /*!
- * \brief tilelang intrinsic for atomic add that returns the original value.
+ * \brief tilelang intrinsic for assert on device.
  *
- *  This op is used to represent an atomic add operation that returns the
- * original value before addition in tilelang.
+ *  This op is used to represent an assert on device
  */
-TVM_DLL const Op &atom_add();
+TVM_DLL const Op &device_assert();
+
+/*!
+ * \brief tilelang intrinsic for assert on device with additional message.
+ *
+ *  This op is used to represent an assert on device with additional message.
+ */
+TVM_DLL const Op &device_assert_with_msg();
 
 /*!
  * \brief tilelang intrinsic for warp reduction sum.
@@ -571,32 +599,45 @@ TVM_DLL const Op &warp_reduce_bitand();
 TVM_DLL const Op &warp_reduce_bitor();
 
 /*!
- * \brief tilelang intrinsic for electing exactly one lane within a logical
- * thread group.
+ * \brief tilelang intrinsic for CUDA read-only cache load (__ldg).
+ *
+ *  This op allows users to explicitly request a non-coherent cached load
+ *  from global memory on CUDA by emitting `__ldg(&ptr[idx])` for 32-bit
+ *  element types on supported architectures. It provides a direct way to
+ *  leverage the read-only data cache for performance-sensitive loads when
+ *  the compiler cannot infer `const __restrict__` automatically.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.__ldg(x[i])
+ *
+ *  The op takes one argument preferred as a BufferLoad identifying the
+ *  source element; alternatively, backends may support passing a Buffer and
+ *  index expression.
  */
-TVM_DLL const Op &elect_one_sync();
+TVM_DLL const Op &__ldg();
 
 /*!
- * \brief tilelang intrinsic for synchronizing all threads in a warp.
+ * \brief Synchronize all threads in a warp
+ *
+ * sync_warp()
  */
 TVM_DLL const Op &sync_warp();
 
 /*!
- * \brief tilelang intrinsic for continuing the innermost loop.
- */
-TVM_DLL const Op &loop_continue();
-
-/*!
- * \brief tilelang intrinsic for checking if any lane in the warp has a true
- * value.
+ * \brief Check if any lane in the warp has a true value
+ *
+ * int warp_any(value, mask)
  */
 TVM_DLL const Op &warp_any();
 
 /*!
- * \brief tilelang intrinsic for checking if all lanes in the warp have a true
- * value.
+ * \brief Check if all lanes in the warp have a true value
+ *
+ * int warp_all(value, mask)
  */
 TVM_DLL const Op &warp_all();
+
+// Note: ld and st are TileOperators defined in remote_copy.h, not builtins
 
 } // namespace tl
 } // namespace tvm

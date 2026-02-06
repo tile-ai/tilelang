@@ -212,7 +212,7 @@ public:
     PrimExpr a = this->VisitExpr(op->a);
     PrimExpr b = this->VisitExpr(op->b);
     if (a.same_as(op->a) && b.same_as(op->b)) {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     } else {
       bool is_vec_a = a.dtype().is_scalable_or_fixed_length_vector();
       bool is_vec_b = b.dtype().is_scalable_or_fixed_length_vector();
@@ -266,7 +266,7 @@ public:
   PrimExpr VisitExpr_(const NotNode *op) final {
     PrimExpr a = this->VisitExpr(op->a);
     if (a.same_as(op->a)) {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     } else {
       return !(a);
     }
@@ -307,10 +307,10 @@ public:
     PrimExpr value = this->VisitExpr(op->value);
     if (value.dtype().is_scalable_or_fixed_length_vector()) {
       need_scalarize_ = true;
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
     if (value.same_as(op->value)) {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     } else {
       return Broadcast(op->value, op->lanes);
     }
@@ -322,7 +322,7 @@ public:
     PrimExpr f = this->VisitExpr(op->false_value);
     if (cond.same_as(op->condition) && t.same_as(op->true_value) &&
         f.same_as(op->false_value)) {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     } else {
       int cond_lanes = cond.dtype().get_lanes_or_vscale_factor();
       int t_lanes = t.dtype().get_lanes_or_vscale_factor();
@@ -340,7 +340,7 @@ public:
   PrimExpr VisitExpr_(const CastNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
     if (value.same_as(op->value)) {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     } else {
       if (value.dtype().is_scalable_vector()) {
         return Cast(op->dtype.with_scalable_vscale_factor(
@@ -353,20 +353,20 @@ public:
   }
 
   PrimExpr VisitExpr_(const FloatImmNode *op) final {
-    return GetRef<PrimExpr>(op);
+    return tvm::ffi::GetRef<PrimExpr>(op);
   }
 
   PrimExpr VisitExpr_(const IntImmNode *op) final {
-    return GetRef<PrimExpr>(op);
+    return tvm::ffi::GetRef<PrimExpr>(op);
   }
 
   PrimExpr VisitExpr_(const StringImmNode *op) final {
-    return GetRef<PrimExpr>(op);
+    return tvm::ffi::GetRef<PrimExpr>(op);
   }
 
   // Variable
   PrimExpr VisitExpr_(const VarNode *op) final {
-    Var var = GetRef<Var>(op);
+    Var var = tvm::ffi::GetRef<Var>(op);
 
     if (var.same_as(var_)) {
       return ramp_;
@@ -376,6 +376,50 @@ public:
       return it->second;
     } else {
       return std::move(var);
+    }
+  }
+  // IfThenElse expr
+  PrimExpr MutateIfThenElseExpr_(const CallNode *op) {
+    PrimExpr cond = this->VisitExpr(op->args[0]);
+    if (cond.dtype().is_scalable_or_fixed_length_vector()) {
+      need_scalarize_ = true;
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+    PrimExpr t = this->VisitExpr(op->args[1]);
+    PrimExpr f = this->VisitExpr(op->args[2]);
+    if (cond.same_as(op->args[0]) && t.same_as(op->args[1]) &&
+        f.same_as(op->args[2])) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    } else {
+      int t_lanes = t.dtype().get_lanes_or_vscale_factor();
+      int f_lanes = f.dtype().get_lanes_or_vscale_factor();
+      int lanes = std::max(t_lanes, f_lanes);
+      bool is_scalable =
+          t.dtype().is_scalable_vector() || f.dtype().is_scalable_vector();
+      t = BroadcastTo(t, lanes, is_scalable);
+      f = BroadcastTo(f, lanes, is_scalable);
+      if (is_scalable) {
+        return Call(op->dtype.with_scalable_vscale_factor(lanes), op->op,
+                    {cond, t, f});
+      } else {
+        return Call(op->dtype.with_lanes(lanes), op->op, {cond, t, f});
+      }
+    }
+  }
+  // Reinterpret expr
+  PrimExpr MutateReinterpretExpr_(const CallNode *op) {
+    ICHECK(op->op.same_as(builtin::reinterpret()));
+    PrimExpr value = this->VisitExpr(op->args[0]);
+    if (value.same_as(op->args[0])) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    } else {
+      int lanes = value.dtype().get_lanes_or_vscale_factor();
+      if (value.dtype().is_scalable_vector()) {
+        return Call(op->dtype.with_scalable_vscale_factor(lanes), op->op,
+                    {value});
+      } else {
+        return Call(op->dtype.with_lanes(lanes), op->op, {value});
+      }
     }
   }
   // tl::ld or tl::st expr vectorization
@@ -477,7 +521,7 @@ public:
       } else {
         // Can't vectorize to a standard type, fall back to scalarize
         need_scalarize_ = true;
-        return GetRef<PrimExpr>(op);
+        return tvm::ffi::GetRef<PrimExpr>(op);
       }
 
       // Reinterpret the value to vector type (e.g., int4 for 8xbf16)
@@ -502,12 +546,12 @@ public:
     if (new_addr.dtype().is_scalable_or_fixed_length_vector() ||
         new_value.dtype().is_scalable_or_fixed_length_vector()) {
       need_scalarize_ = true;
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
     // No vectorization needed, return with updated args if changed
     if (new_addr.same_as(addr_arg) && new_value.same_as(value_arg)) {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
     Array<PrimExpr> new_args;
@@ -520,50 +564,6 @@ public:
     return Call(op->dtype, op->op, new_args);
   }
 
-  // IfThenElse expr
-  PrimExpr MutateIfThenElseExpr_(const CallNode *op) {
-    PrimExpr cond = this->VisitExpr(op->args[0]);
-    if (cond.dtype().is_scalable_or_fixed_length_vector()) {
-      need_scalarize_ = true;
-      return GetRef<PrimExpr>(op);
-    }
-    PrimExpr t = this->VisitExpr(op->args[1]);
-    PrimExpr f = this->VisitExpr(op->args[2]);
-    if (cond.same_as(op->args[0]) && t.same_as(op->args[1]) &&
-        f.same_as(op->args[2])) {
-      return GetRef<PrimExpr>(op);
-    } else {
-      int t_lanes = t.dtype().get_lanes_or_vscale_factor();
-      int f_lanes = f.dtype().get_lanes_or_vscale_factor();
-      int lanes = std::max(t_lanes, f_lanes);
-      bool is_scalable =
-          t.dtype().is_scalable_vector() || f.dtype().is_scalable_vector();
-      t = BroadcastTo(t, lanes, is_scalable);
-      f = BroadcastTo(f, lanes, is_scalable);
-      if (is_scalable) {
-        return Call(op->dtype.with_scalable_vscale_factor(lanes), op->op,
-                    {cond, t, f});
-      } else {
-        return Call(op->dtype.with_lanes(lanes), op->op, {cond, t, f});
-      }
-    }
-  }
-  // Reinterpret expr
-  PrimExpr MutateReinterpretExpr_(const CallNode *op) {
-    ICHECK(op->op.same_as(builtin::reinterpret()));
-    PrimExpr value = this->VisitExpr(op->args[0]);
-    if (value.same_as(op->args[0])) {
-      return GetRef<PrimExpr>(op);
-    } else {
-      int lanes = value.dtype().get_lanes_or_vscale_factor();
-      if (value.dtype().is_scalable_vector()) {
-        return Call(op->dtype.with_scalable_vscale_factor(lanes), op->op,
-                    {value});
-      } else {
-        return Call(op->dtype.with_lanes(lanes), op->op, {value});
-      }
-    }
-  }
   // Call
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::if_then_else())) {
@@ -611,12 +611,12 @@ public:
         auto new_arg = this->VisitExpr(arg);
         if (new_arg.dtype().is_scalable_or_fixed_length_vector()) {
           need_scalarize_ = true;
-          return GetRef<PrimExpr>(op);
+          return tvm::ffi::GetRef<PrimExpr>(op);
         }
         new_args.push_back(new_arg);
       }
       if (op->args.same_as(new_args)) {
-        return GetRef<PrimExpr>(op);
+        return tvm::ffi::GetRef<PrimExpr>(op);
       } else {
         return Call(op->dtype, op->op, new_args);
       }
@@ -625,7 +625,7 @@ public:
       Array<PrimExpr> new_args = MutateArray(op->args, &lane);
       // normal code path.
       if (op->args.same_as(new_args)) {
-        return GetRef<PrimExpr>(op);
+        return tvm::ffi::GetRef<PrimExpr>(op);
       } else {
         return Call(op->dtype.with_lanes(lane), op->op, new_args);
       }
@@ -633,7 +633,7 @@ public:
   }
   // BufferLoad
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto load = GetRef<BufferLoad>(op);
+    auto load = tvm::ffi::GetRef<BufferLoad>(op);
 
     auto fmutate = [this](const PrimExpr &index) {
       return this->VisitExpr(index);
@@ -670,7 +670,7 @@ public:
       let_binding_[op->var] = op->var;
       PrimExpr body = this->VisitExpr(op->body);
       if (value.same_as(op->value) && body.same_as(op->body)) {
-        return GetRef<PrimExpr>(op);
+        return tvm::ffi::GetRef<PrimExpr>(op);
       } else {
         return Let(op->var, value, body);
       }
@@ -678,7 +678,7 @@ public:
   }
   // BufferStore
   Stmt VisitStmt_(const BufferStoreNode *op) final {
-    auto store = GetRef<BufferStore>(op);
+    auto store = tvm::ffi::GetRef<BufferStore>(op);
 
     auto fmutate = [this](const PrimExpr &index) {
       return this->VisitExpr(index);
@@ -741,11 +741,11 @@ public:
     ICHECK(!op->extent.dtype().is_scalable_or_fixed_length_vector());
     PrimExpr extent = this->VisitExpr(op->extent);
     if (extent.dtype().is_scalable_or_fixed_length_vector()) {
-      return Scalarize(GetRef<Stmt>(op));
+      return Scalarize(tvm::ffi::GetRef<Stmt>(op));
     }
     Stmt body = this->VisitStmt(op->body);
     if (extent.same_as(op->extent) && body.same_as(op->body)) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     } else {
       return For(op->loop_var, op->min, extent, op->kind, body,
                  op->thread_binding, op->annotations);
@@ -756,7 +756,7 @@ public:
     ICHECK(!op->condition.dtype().is_scalable_or_fixed_length_vector());
     PrimExpr condition = this->VisitExpr(op->condition);
     if (condition.dtype().is_scalable_or_fixed_length_vector()) {
-      return Scalarize(GetRef<Stmt>(op));
+      return Scalarize(tvm::ffi::GetRef<Stmt>(op));
     }
     Stmt then_case = this->VisitStmt(op->then_case);
     Optional<Stmt> else_case = std::nullopt;
@@ -765,7 +765,7 @@ public:
     }
     if (condition.same_as(op->condition) && then_case.same_as(op->then_case) &&
         else_case.same_as(op->else_case)) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     } else {
       return IfThenElse(condition, then_case, else_case);
     }
@@ -790,7 +790,7 @@ public:
       let_binding_[op->var] = op->var;
       Stmt body = this->VisitStmt(op->body);
       if (value.same_as(op->value) && body.same_as(op->body)) {
-        return GetRef<Stmt>(op);
+        return tvm::ffi::GetRef<Stmt>(op);
       } else {
         return LetStmt(op->var, value, body);
       }
@@ -803,7 +803,7 @@ public:
     if (condition.dtype().is_scalable_or_fixed_length_vector()) {
       LOG(WARNING) << "Cannot handle vector extent in alloc of "
                    << op->buffer_var->name_hint;
-      return Scalarize(GetRef<Stmt>(op));
+      return Scalarize(tvm::ffi::GetRef<Stmt>(op));
     }
 
     // Mutate the extents
@@ -813,7 +813,7 @@ public:
       if (new_ext.dtype().is_scalable_or_fixed_length_vector()) {
         LOG(WARNING) << "Cannot handle vector extent in alloc of "
                      << op->buffer_var->name_hint;
-        return Scalarize(GetRef<Stmt>(op));
+        return Scalarize(tvm::ffi::GetRef<Stmt>(op));
       }
       extents.push_back(new_ext);
     }
@@ -894,7 +894,7 @@ private:
     PrimExpr a = this->VisitExpr(op->a);
     PrimExpr b = this->VisitExpr(op->b);
     if (a.same_as(op->a) && b.same_as(op->b)) {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     } else {
       int a_lanes = a.dtype().get_lanes_or_vscale_factor();
       int b_lanes = b.dtype().get_lanes_or_vscale_factor();
@@ -910,7 +910,7 @@ private:
     PrimExpr a = this->VisitExpr(op->a);
     PrimExpr b = this->VisitExpr(op->b);
     if (a.same_as(op->a) && b.same_as(op->b)) {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     } else {
       int a_lanes = a.dtype().get_lanes_or_vscale_factor();
       int b_lanes = b.dtype().get_lanes_or_vscale_factor();

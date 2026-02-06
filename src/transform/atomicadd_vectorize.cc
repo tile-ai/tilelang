@@ -203,7 +203,8 @@ private:
         vmap.Set(old_var, new_var * vector_size_);
         Stmt body = Substitute(fnode->body, vmap);
         return For(new_var, 0, extent / vector_size_, fnode->kind, body,
-                   fnode->thread_binding, fnode->annotations, fnode->span);
+                   fnode->thread_binding, fnode->annotations, fnode->step,
+                   fnode->span);
       }
     }
     return ret;
@@ -231,21 +232,25 @@ private:
       // Ref: src/tl_templates/cuda/atomic.h::AtomicAdd
       const IntImm memory_order =
           node->args.size() >= 3 ? Downcast<IntImm>(node->args[2]) : IntImm(0);
-
+      Array<PrimExpr> new_args;
       Call address_of_dst =
           Call(DataType::Handle(), builtin::address_of(), {dst_node});
       Call address_of_value =
           Call(DataType::Handle(), builtin::address_of(), {value_node});
-      Array<PrimExpr> new_args;
       if (vector_size_ == 4) {
         new_args.push_back(StringImm("AtomicAddx4"));
+        new_args.push_back(address_of_dst);
+        new_args.push_back(address_of_value);
       } else if (vector_size_ == 2) {
         new_args.push_back(StringImm("AtomicAddx2"));
+        new_args.push_back(address_of_dst);
+        new_args.push_back(address_of_value);
       } else {
+        // Scalar case: AtomicAdd now expects a pointer to destination.
         new_args.push_back(StringImm("AtomicAdd"));
+        new_args.push_back(address_of_dst);
+        new_args.push_back(value_node);
       }
-      new_args.push_back(address_of_dst);
-      new_args.push_back(address_of_value);
       new_args.push_back(memory_order);
 
       Call new_call =
@@ -255,8 +260,28 @@ private:
     } else {
       Array<PrimExpr> new_args;
       new_args.push_back(StringImm("AtomicAdd"));
-      for (auto x : node->args)
-        new_args.push_back(x);
+      // Ensure first argument is an address; keep value as-is.
+      if (!node->args.empty()) {
+        if (const auto *bl = node->args[0].as<BufferLoadNode>()) {
+          Call address_of_dst = Call(DataType::Handle(), builtin::address_of(),
+                                     {Downcast<BufferLoad>(node->args[0])});
+          new_args.push_back(address_of_dst);
+        } else if (const auto *call = node->args[0].as<CallNode>()) {
+          // If it's already an address_of, forward it; otherwise, keep
+          // original.
+          if (call->op.same_as(builtin::address_of())) {
+            new_args.push_back(node->args[0]);
+          } else {
+            new_args.push_back(node->args[0]);
+          }
+        } else {
+          new_args.push_back(node->args[0]);
+        }
+        // Push remaining args unchanged (value, optional memory_order, ...)
+        for (size_t i = 1; i < node->args.size(); ++i) {
+          new_args.push_back(node->args[i]);
+        }
+      }
 
       Call new_call =
           tvm::tir::Call(node->dtype, builtin::call_extern(), new_args);

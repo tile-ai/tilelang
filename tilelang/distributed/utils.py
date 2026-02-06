@@ -5,13 +5,15 @@ import torch.distributed as dist
 import datetime
 import os
 import inspect
-from typing import Callable, Sequence
+from typing import Callable
+from collections.abc import Sequence
 from contextlib import contextmanager
 
 import importlib.metadata
 
 cuda_python_version = importlib.metadata.version("cuda-python")
 from packaging import version
+
 if version.parse(cuda_python_version) >= version.parse("12.8.0"):
     from cuda.bindings import driver as cuda
     from cuda.bindings import runtime as cudart
@@ -38,28 +40,27 @@ dtype_map = {
 
 
 def init_dist(local_rank: int, num_local_ranks: int):
-    ip = os.getenv('MASTER_ADDR', '127.0.0.1')
-    port = int(os.getenv('MASTER_PORT', '8361'))
-    num_nodes = int(os.getenv('WORLD_SIZE', 1))
-    node_rank = int(os.getenv('RANK', 0))
+    ip = os.getenv("MASTER_ADDR", "127.0.0.1")
+    port = int(os.getenv("MASTER_PORT", "8361"))
+    num_nodes = int(os.getenv("WORLD_SIZE", 1))
+    node_rank = int(os.getenv("RANK", 0))
 
     sig = inspect.signature(dist.init_process_group)
     params = {
-        'backend': 'nccl',
-        'init_method': f'tcp://{ip}:{port}',
-        'world_size': num_nodes * num_local_ranks,
-        'rank': node_rank * num_local_ranks + local_rank,
+        "backend": "nccl",
+        "init_method": f"tcp://{ip}:{port}",
+        "world_size": num_nodes * num_local_ranks,
+        "rank": node_rank * num_local_ranks + local_rank,
     }
-    if 'device_id' in sig.parameters:
+    if "device_id" in sig.parameters:
         # noinspection PyTypeChecker
-        params['device_id'] = torch.device(f'cuda:{local_rank}')
+        params["device_id"] = torch.device(f"cuda:{local_rank}")
     dist.init_process_group(**params)
     torch.set_default_dtype(torch.bfloat16)
-    torch.set_default_device('cuda')
+    torch.set_default_device("cuda")
     torch.cuda.set_device(local_rank)
 
-    return dist.get_rank(), dist.get_world_size(), dist.new_group(
-        list(range(num_local_ranks * num_nodes)))
+    return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(num_local_ranks * num_nodes)))
 
 
 def init_distributed(return_tp_group=False, init_nvshmem=True, return_lc_group=False):
@@ -69,7 +70,7 @@ def init_distributed(return_tp_group=False, init_nvshmem=True, return_lc_group=F
 
     torch.distributed.init_process_group(
         backend="nccl",
-        device_id=torch.device(f'cuda:{LOCAL_RANK}'),
+        device_id=torch.device(f"cuda:{LOCAL_RANK}"),
         world_size=WORLD_SIZE,
         rank=RANK,
         timeout=datetime.timedelta(seconds=1800),
@@ -81,13 +82,13 @@ def init_distributed(return_tp_group=False, init_nvshmem=True, return_lc_group=F
     torch.cuda.synchronize()
     if init_nvshmem:
         import pynvshmem
+
         pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
 
     if return_lc_group:
-        local_world_size = int(os.environ.get('LOCAL_WORLD_SIZE', 1))
+        local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
         base = (RANK // local_world_size) * local_world_size
-        LC_GROUP = torch.distributed.new_group(
-            list(range(base, base + local_world_size)), backend="nccl")
+        LC_GROUP = torch.distributed.new_group(list(range(base, base + local_world_size)), backend="nccl")
 
         return WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP, LC_GROUP
     elif return_tp_group:
@@ -108,8 +109,7 @@ def get_local_ipc_handle(data: torch.Tensor):
     return handle
 
 
-def create_dist_tensor(local_rank: int, num_local_ranks: int, data: torch.Tensor, rank: int,
-                       group: dist.ProcessGroup):
+def create_dist_tensor(local_rank: int, num_local_ranks: int, data: torch.Tensor, rank: int, group: dist.ProcessGroup):
     assert num_local_ranks == group.size()
     # Synchronize device IDs
     device_ids = [
@@ -125,8 +125,7 @@ def create_dist_tensor(local_rank: int, num_local_ranks: int, data: torch.Tensor
     local_ipc_handle = get_local_ipc_handle(data)
     dist.all_gather_object(ipc_handles, local_ipc_handle, group)
     buffer_ptrs_gpu = torch.empty(group.size(), dtype=torch.uint64, device="cuda")
-    _sync_ipc_handles(rank, device_ids,
-                      ctypes.c_void_p(buffer_ptrs_gpu.data_ptr()).value, ipc_handles, None)
+    _sync_ipc_handles(rank, device_ids, ctypes.c_void_p(buffer_ptrs_gpu.data_ptr()).value, ipc_handles, None)
     return buffer_ptrs_gpu
 
 
@@ -264,13 +263,13 @@ def supports_p2p_native_atomic():
     (err,) = cudart.cudaFree(0)
     CUDA_CHECK(err)
 
-    (err, support) = cudart.cudaDeviceGetP2PAttribute(
-        cudart.cudaDeviceP2PAttr.cudaDevP2PAttrNativeAtomicSupported, 0, 1)
+    (err, support) = cudart.cudaDeviceGetP2PAttribute(cudart.cudaDeviceP2PAttr.cudaDevP2PAttrNativeAtomicSupported, 0, 1)
     CUDA_CHECK(err)
     return support == 1
 
 
 def set_signal(signal_tensor: torch.Tensor, signal: int, stream: torch.cuda.Stream | None = None):
+    # host side
     stream = stream or torch.cuda.current_stream()
     if signal_tensor.dtype in (torch.int32, torch.uint32):
         (err,) = cuda.cuStreamWriteValue32(
@@ -284,10 +283,8 @@ def set_signal(signal_tensor: torch.Tensor, signal: int, stream: torch.cuda.Stre
         raise Exception(f"Unsupported signal dtype {signal_tensor.dtype}")
 
 
-def wait_eq(signal_tensor: torch.Tensor,
-            signal: int,
-            stream: torch.cuda.Stream | None = None,
-            require_i64=False):
+def wait_eq(signal_tensor: torch.Tensor, signal: int, stream: torch.cuda.Stream | None = None, require_i64=False):
+    # host side
     stream = stream or torch.cuda.current_stream()
     if signal_tensor.dtype == torch.int32:
         (err,) = cuda.cuStreamWaitValue32(
@@ -337,8 +334,7 @@ def has_fullmesh_nvlink_pynvml():
                 if remote_device == cur_device:
                     continue
                 remote_handle = handles[remote_device]
-                p2p_status = pynvml.nvmlDeviceGetP2PStatus(cur_handle, remote_handle,
-                                                           pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                p2p_status = pynvml.nvmlDeviceGetP2PStatus(cur_handle, remote_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
                 if p2p_status != pynvml.NVML_P2P_STATUS_OK:
                     return False
         return True
@@ -347,7 +343,6 @@ def has_fullmesh_nvlink_pynvml():
 
 
 class NvidiaSmiUtil:
-
     @staticmethod
     def get_nvlink_adjacency_matrix():
         output = subprocess.check_output(["nvidia-smi", "topo", "-m"], text=True)
@@ -391,8 +386,7 @@ def has_fullmesh_nvlink():
     except Exception:
         nvlink_matrix = NvidiaSmiUtil.get_nvlink_adjacency_matrix()
         has_nvlink = any([any(x == 1 for x in row) for row in nvlink_matrix])
-        _has_fullmesh_nvlink = all(
-            [i == j or v == 1 for i, row in enumerate(nvlink_matrix) for j, v in enumerate(row)])
+        _has_fullmesh_nvlink = all([i == j or v == 1 for i, row in enumerate(nvlink_matrix) for j, v in enumerate(row)])
         if has_nvlink and not _has_fullmesh_nvlink:
             warnings.warn(
                 "⚠️ found NVLink but not fullmesh NVLink, this may cause undefined behavior, please check your GPU topology",

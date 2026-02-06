@@ -3,27 +3,16 @@ import tilelang.language as T
 
 
 @tilelang.jit
-def matmul(M,
-           N,
-           K,
-           block_M,
-           block_N,
-           block_K,
-           split_k,
-           dtype="float16",
-           accum_dtype="float",
-           out_dtype="float32"):
-
+def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype=T.float16, accum_dtype=T.float32, out_dtype=T.float32):
     splitK = K // split_k
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), split_k, threads=128) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), split_k, threads=128) as (bx, by, bz):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
@@ -64,6 +53,30 @@ def main():
     ref_c = a @ b
 
     torch.testing.assert_close(c, ref_c.to(c.dtype), rtol=1e-2, atol=1e-2)
+
+
+def run_regression_perf():
+    M = 4096
+    N = 4096
+    K = 4096
+    block_M = 128
+    block_N = 128
+    block_K = 32
+    split_k = 4
+
+    kernel = matmul(M, N, K, block_M, block_N, block_K, split_k)
+    import torch
+
+    torch.random.manual_seed(42)
+    a = torch.randn(M, K).cuda().half()
+    b = torch.randn(K, N).cuda().half()
+    c = torch.zeros(M, N).cuda().float()
+    from tilelang.profiler import do_bench
+
+    def run_kernel_only():
+        kernel(a, b, c)
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 if __name__ == "__main__":

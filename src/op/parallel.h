@@ -24,19 +24,11 @@ namespace tl {
 
 using namespace tir;
 
-class LayoutConflictException : public std::exception {
-public:
-  const char *what() const noexcept override { return msg_.c_str(); }
-  LayoutConflictException(const std::string &msg) : msg_(msg) {}
-
-private:
-  std::string msg_;
-};
-
 bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> small_frag_indices,
                            Array<PrimExpr> large_frag_indices,
-                           arith::Analyzer &analyzer_);
+                           arith::Analyzer &analyzer_,
+                           bool check_forward_index = false);
 
 class ParallelOpNode;
 
@@ -66,8 +58,8 @@ public:
   mutable Optional<PrimExpr> predicate_;
 
   // Type key for TVM object system.
-  static constexpr const char *_type_key = "tl.ParallelOp";
-  TVM_DECLARE_FINAL_OBJECT_INFO(ParallelOpNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ParallelOp", ParallelOpNode,
+                                    TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -76,20 +68,6 @@ public:
         .def_ro("loop_layout", &ParallelOpNode::loop_layout_)
         .def_ro("predicate", &ParallelOpNode::predicate_);
   }
-
-  bool SEqualReduce(const ParallelOpNode *other, SEqualReducer equal) const {
-    return equal(root_, other->root_) &&
-           equal(loop_layout_, other->loop_layout_) &&
-           equal(predicate_, other->predicate_);
-  }
-
-  void SHashReduce(SHashReducer hash_reduce) const {
-    hash_reduce(root_);
-    hash_reduce(loop_layout_);
-    hash_reduce(predicate_);
-  }
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr bool _type_has_method_shash_reduce = true;
 
   // Construct from a root For loop.
   ParallelOpNode(For root);
@@ -124,10 +102,37 @@ private:
   Fragment CompleteBufferFragment(const Buffer &buffer) const;
   // Check if the buffer is accessed with common indices (i.e., loop variables).
   bool IsCommonAccessIndice(const Buffer &buffer) const;
+  // Validate a candidate loop layout against all source fragments in
+  // T.layout_map. Returns true if compatible with all fragments; otherwise
+  // false. Does not throw.
+  bool ValidateCandidateAgainstFragments(const Fragment &candidate,
+                                         const LayoutInferArgs &T) const;
+  // Choose the better loop layout from two candidates using validation,
+  // containment and replication heuristic.
+  Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,
+                               const Fragment &candidate_from_plan,
+                               const LayoutInferArgs &T) const;
+  // Compute loop layout from a source buffer's fragment mapping.
+  Fragment ComputeLoopLayoutFromBuffer(const Buffer &buffer,
+                                       const LayoutInferArgs &T) const;
+  // Compute plan-based loop layout candidate using vectorization and thread
+  // bounds.
+  Fragment ComputePlanCandidate(const LayoutInferArgs &T) const;
+  // Add replication guard predicates when needed for cross-thread stores.
+  void BuildReplicationGuardsIfNeeded(
+      const LayoutInferArgs &T,
+      const std::vector<Buffer> &store_shared_global_buffers,
+      const std::vector<Buffer> &store_fragment_buffers,
+      bool has_cross_thread_access,
+      const std::vector<Buffer> &const_index_fragment_buffer) const;
   // Add a predicate to the current predicate expression.
   void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
   }
+  // Expand let bindings to find fragment buffer accesses and add them to
+  // indice_map_. This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0],
+  // ...)
+  void ExpandLetBindings(const Map<Var, PrimExpr> &let_var_to_expr);
 
   // Allow ParallelLoopNestVisitor to access private members.
   friend class ParallelLoopNestVisitor;
@@ -150,10 +155,11 @@ private:
 
 class ParallelOp : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(ParallelOp, TileOperator, ParallelOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ParallelOp, TileOperator,
+                                             ParallelOpNode);
 
   ParallelOp(const For &root) {
-    auto op = make_object<ParallelOpNode>(root);
+    auto op = tvm::ffi::make_object<ParallelOpNode>(root);
     data_ = std::move(op);
   }
 };

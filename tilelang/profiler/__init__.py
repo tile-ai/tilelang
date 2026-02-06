@@ -1,4 +1,5 @@
 """The profiler and convert to torch utils"""
+
 from __future__ import annotations
 
 from typing import Callable, Any, Literal
@@ -11,7 +12,7 @@ from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
     torch_assert_close,
-    adapt_torch2tvm,
+    is_float8_dtype,
 )
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
@@ -19,6 +20,19 @@ from tilelang.profiler.bench import do_bench
 from tilelang import env
 
 import logging
+
+
+def _use_nvshmem():
+    """Check if NVSHMEM is enabled in the environment."""
+    val = str(env.USE_NVSHMEM).lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def _use_distributed():
+    """Check if distributed mode is enabled in the environment."""
+    val = str(env.USE_DISTRIBUTED).lower()
+    return val in ("1", "true", "yes", "on")
+
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +65,7 @@ class Profiler:
             result_idx = []
         elif isinstance(result_idx, int):
             if result_idx > len(params) or result_idx < -len(params):
-                raise ValueError(
-                    f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
+                raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
             if result_idx < 0:
                 result_idx = len(params) + result_idx
             result_idx = [result_idx]
@@ -84,12 +97,11 @@ class Profiler:
         TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
 
         torch.cuda.synchronize()
-        if env.USE_NVSHMEM:
+        if _use_nvshmem():
             try:
                 import pynvshmem
             except ImportError as e:
-                raise ValueError(
-                    "pynvshmem is not installed but required for distributed inputs") from e
+                raise ValueError("pynvshmem is not installed but required for distributed inputs") from e
             pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
 
     def _get_inputs(self, with_output=False):
@@ -100,14 +112,13 @@ class Profiler:
         return ins
 
     def _get_distributed_inputs(self, with_output=False):
-        if not env.USE_NVSHMEM:
+        if not _use_nvshmem():
             raise ValueError("NVSHMEM is required for distributed inputs but USE_NVSHMEM is False")
 
         try:
             import pynvshmem
         except ImportError as e:
-            raise ValueError(
-                "pynvshmem is not installed but required for distributed inputs") from e
+            raise ValueError("pynvshmem is not installed but required for distributed inputs") from e
 
         ins = []
         for i in range(len(self.params)):
@@ -118,21 +129,17 @@ class Profiler:
                     is_unsigned = self.params[i].is_unsigned()
                     is_float8 = self.params[i].is_float8()
                     if is_unsigned:
-                        tensor[:] = torch.randint(
-                            low=0, high=3, size=shape, device=tensor.device, dtype=tensor.dtype)
+                        tensor[:] = torch.randint(low=0, high=3, size=shape, device=tensor.device, dtype=tensor.dtype)
                     elif is_float8:
-                        tensor[:] = torch.randint(
-                            low=-128, high=128, size=shape, device=tensor.device,
-                            dtype=torch.int8).to(dtype=tensor.dtype)
+                        tensor[:] = torch.randint(low=-128, high=128, size=shape, device=tensor.device, dtype=torch.int8).to(
+                            dtype=tensor.dtype
+                        )
                     else:
-                        tensor[:] = torch.randint(
-                            low=-2, high=3, size=shape, device=tensor.device, dtype=tensor.dtype)
+                        tensor[:] = torch.randint(low=-2, high=3, size=shape, device=tensor.device, dtype=tensor.dtype)
                 elif self.supply_type == TensorSupplyType.Uniform:
-                    tensor[:] = torch.empty(
-                        *shape, device=tensor.device, dtype=tensor.dtype).uniform_(-1.0, 1.0)
+                    tensor[:] = torch.empty(*shape, device=tensor.device, dtype=tensor.dtype).uniform_(-1.0, 1.0)
                 elif self.supply_type == TensorSupplyType.Normal:
-                    tensor[:] = torch.empty(
-                        *shape, device=tensor.device, dtype=tensor.dtype).normal_(-1.0, 1.0)
+                    tensor[:] = torch.empty(*shape, device=tensor.device, dtype=tensor.dtype).normal_(-1.0, 1.0)
                 elif self.supply_type == TensorSupplyType.Randn:
                     tensor[:] = torch.randn(*shape, device=tensor.device).to(dtype=tensor.dtype)
                 elif self.supply_type == TensorSupplyType.Zero:
@@ -168,7 +175,7 @@ class Profiler:
             rtol: Relative tolerance for comparison
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
         """
-        if env.USE_DISTRIBUTED:
+        if _use_distributed():
             self.init_distributed()
             ins = self._get_distributed_inputs()
         else:
@@ -195,8 +202,7 @@ class Profiler:
         ref_tensors = ins + ref_outs
         lib_tensors = ins + lib_outs
 
-        assert len(lib_tensors) == len(
-            ref_tensors), "len(lib_tensors) not equals to len(ref_tensors) !"
+        assert len(lib_tensors) == len(ref_tensors), "len(lib_tensors) not equals to len(ref_tensors) !"
         # torch.set_printoptions(edgeitems=torch.inf)
         for lhs, rhs in zip(lib_tensors, ref_tensors):
             # close_mask = torch.isclose(lhs, rhs, rtol=rtol, atol=atol)
@@ -217,8 +223,8 @@ class Profiler:
                     }
 
                 torch_assert_close(
-                    lhs if not is_float8(lhs) else lhs.to(torch.float32),
-                    rhs if not is_float8(rhs) else rhs.to(torch.float32),
+                    lhs if not is_float8_dtype(lhs.dtype) else lhs.to(torch.float32),
+                    rhs if not is_float8_dtype(rhs.dtype) else rhs.to(torch.float32),
                     rtol=rtol,
                     atol=atol,
                     max_mismatched_ratio=max_mismatched_ratio,
@@ -264,7 +270,7 @@ class Profiler:
             repeat: Number of times to repeat the consistency check
         """
         # Used to check no race condition inside the kernel
-        if env.USE_DISTRIBUTED:
+        if _use_distributed():
             self.init_distributed()
             ins = self._get_distributed_inputs()
         else:
@@ -281,11 +287,7 @@ class Profiler:
                 ]
 
     def run_once(self, func: Callable | None = None):
-        if env.USE_DISTRIBUTED:  # noqa: SIM108
-            # self.init_distributed()
-            ins = self._get_distributed_inputs()
-        else:
-            ins = self._get_inputs()
+        ins = self._get_inputs()
         if not func:
             func = self.__call__
         return func(*ins)
@@ -336,7 +338,7 @@ class Profiler:
             if func is None:
                 assert self.adapter is not None, "benchmarking function should be provided"
                 func = self.adapter
-            if env.USE_DISTRIBUTED:
+            if _use_distributed():
                 self.init_distributed()
                 ins = self._get_distributed_inputs() if input_tensors is None else input_tensors
             else:
@@ -354,14 +356,9 @@ class Profiler:
             )
         elif profiler == "tvm":
             assert func is not None, "func should not be None"
-            assert isinstance(
-                func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
-            if env.USE_DISTRIBUTED:
-                self.init_distributed()
-                ins = self._get_distributed_inputs(
-                    with_output=True) if input_tensors is None else input_tensors
-            else:
-                ins = self._get_inputs(with_output=True) if input_tensors is None else input_tensors
+            assert isinstance(func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
+
+            ins = self._get_inputs(with_output=True) if input_tensors is None else input_tensors
             target = "cuda"
 
             with suppress(Exception):
@@ -370,11 +367,9 @@ class Profiler:
             assert target in ["cuda", "hip"], f"Unknown target: {target}"
 
             device = tvm.cuda(0) if target == "cuda" else tvm.rocm(0)
-            time_evaluator = self.mod.time_evaluator(
-                self.mod.entry_name, device, number=rep, repeat=n_repeat)
-            tvm_inputs = [adapt_torch2tvm(inp) for inp in ins]
+            time_evaluator = self.mod.time_evaluator(self.mod.entry_name, device, number=rep, repeat=n_repeat)
             # Transform Latency to ms
-            return time_evaluator(*tvm_inputs).mean * 1e3
+            return time_evaluator(*ins).mean * 1e3
         else:
             raise ValueError(f"Unknown profiler: {profiler}")
 

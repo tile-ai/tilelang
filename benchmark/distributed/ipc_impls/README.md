@@ -31,4 +31,3 @@ python benchmark/distributed/ipc_impls/benchmark_unrolledcp_p2p.py
 |      4,194,304 |               10.6560 |                 2.2474 |                 11.9145 |                  2.2845  |
 
 > **Note:** All data presented above are unidirectional bandwidth.
-
