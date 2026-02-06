@@ -4,6 +4,7 @@
  *
  */
 
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 
 #include <cmath>
@@ -378,9 +379,56 @@ PrimExpr xor8x8(const PrimExpr &i, const PrimExpr j) {
   return 2 * xor4x4(i1, j1) + xor2x2(i0, j0);
 }
 
+namespace {
+struct SwizzleShapeInfo {
+  int64_t stride;
+  int64_t continuous;
+  int element_size;
+};
+
+SwizzleShapeInfo GetSwizzleShapeInfoChecked(const Buffer &buffer) {
+  ICHECK(buffer.defined()) << "Swizzle layout expects a defined buffer";
+  ICHECK(buffer->shape.size() >= 2)
+      << "Swizzle layout expects rank >= 2 buffer, got rank="
+      << buffer->shape.size();
+  size_t ndim = buffer->shape.size();
+  int64_t stride = 1;
+  for (size_t i = 0; i + 1 < ndim; ++i) {
+    auto dim = as_const_int(buffer->shape[i]);
+    ICHECK(dim) << "Swizzle layout requires constant input shape";
+    stride *= *dim;
+  }
+  auto continuous = as_const_int(buffer->shape[ndim - 1]);
+  ICHECK(continuous) << "Swizzle layout requires constant input shape";
+  return SwizzleShapeInfo{stride, *continuous, buffer->dtype.bits()};
+}
+
+bool TryGetSwizzleShapeInfo(const Buffer &buffer, SwizzleShapeInfo *info) {
+  if (!buffer.defined() || buffer->shape.size() < 2) {
+    return false;
+  }
+  size_t ndim = buffer->shape.size();
+  int64_t stride = 1;
+  for (size_t i = 0; i + 1 < ndim; ++i) {
+    auto dim = as_const_int(buffer->shape[i]);
+    if (!dim) {
+      return false;
+    }
+    stride *= *dim;
+  }
+  auto continuous = as_const_int(buffer->shape[ndim - 1]);
+  if (!continuous) {
+    return false;
+  }
+  *info = SwizzleShapeInfo{stride, *continuous, buffer->dtype.bits()};
+  return true;
+}
+
+} // namespace
+
 // Layout swizzling for 32 bytes
-Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
-                                    int element_size) {
+static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
+                                             int element_size) {
   // Swizzle 1 bit
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
@@ -398,8 +446,17 @@ Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
+Layout makeQuarterBankSwizzleLayout(const Buffer &buffer) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base = MakeQuarterBankSwizzleLayout2D(static_cast<int>(info.stride),
+                                             static_cast<int>(info.continuous),
+                                             info.element_size);
+  return base->Reshape(buffer->shape);
+}
+
 // Layout swizzling for 64 bytes
-Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size) {
+static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
+                                          int element_size) {
   // Swizzle 2 bit
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
@@ -417,8 +474,17 @@ Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size) {
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
+Layout makeHalfBankSwizzleLayout(const Buffer &buffer) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base = MakeHalfBankSwizzleLayout2D(static_cast<int>(info.stride),
+                                          static_cast<int>(info.continuous),
+                                          info.element_size);
+  return base->Reshape(buffer->shape);
+}
+
 // Layout swizzling for 128 bytes
-Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size) {
+static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
+                                          int element_size) {
   // Swizzle 3 bit
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
@@ -434,6 +500,14 @@ Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size) {
   PrimExpr c_swizzle = xor8x8(c, s);
   PrimExpr index = vec + (c_swizzle + s * 8) * vector_size;
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+}
+
+Layout makeFullBankSwizzleLayout(const Buffer &buffer) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base = MakeFullBankSwizzleLayout2D(static_cast<int>(info.stride),
+                                          static_cast<int>(info.continuous),
+                                          info.element_size);
+  return base->Reshape(buffer->shape);
 }
 
 // Detail implementation please ref to
@@ -453,8 +527,8 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
 
   IterVar row = make_itervar("row", stride);
   IterVar col = make_itervar("col", continuous);
-  PrimExpr phase = FloorMod(row / perPhase, maxPhase);
-  PrimExpr colOffSwizzled = ((col / vecSize) ^ phase) * vecSize;
+  PrimExpr phase = FloorMod(FloorDiv(row, perPhase), maxPhase);
+  PrimExpr colOffSwizzled = (FloorDiv(col, vecSize) ^ phase) * vecSize;
   PrimExpr colOffOrdered = FloorMod(col, vecSize);
   PrimExpr colOff = colOffSwizzled + colOffOrdered;
 
@@ -742,9 +816,11 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   if (!k_inner && element_size == 8) // int8 KxN
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 8) == 0)
-    return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+    return MakeFullBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                       element_size);
   else if (mat_continuous % (vector_size * 4) == 0)
-    return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+    return MakeHalfBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                       element_size);
   else {
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
@@ -761,21 +837,21 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
     if (mat_stride % 8 != 0)
       return makeLinearLayout(
           Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
-    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                        element_size);
+    return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                          element_size);
   }
   int vector_size = 128 / element_size;
 
   if (mat_stride % 8 == 0) {
     if (mat_continuous % (vector_size * 8) == 0)
-      return makeFullBankSwizzleLayout(mat_stride, mat_continuous,
-                                       element_size);
+      return MakeFullBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                         element_size);
     else if (mat_continuous % (vector_size * 4) == 0)
-      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous,
-                                       element_size);
+      return MakeHalfBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                         element_size);
     else if (mat_continuous % (vector_size * 2) == 0)
-      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                          element_size);
+      return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                            element_size);
   }
 
   if (mat_continuous % vector_size == 0)
@@ -785,6 +861,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
     ICHECK(0) << "Unsupported layout for Hopper with stride=" << mat_stride
               << ", continuous=" << mat_continuous
               << ", element_size=" << element_size << ", k_inner=" << k_inner;
+  __builtin_unreachable(); // to prevent compiler warning
 }
 
 Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
@@ -796,14 +873,14 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
 
   if (mat_stride % 8 == 0) {
     if (mat_continuous % (vector_size * 8) == 0)
-      return makeFullBankSwizzleLayout(mat_stride, mat_continuous,
-                                       element_size);
+      return MakeFullBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                         element_size);
     else if (mat_continuous % (vector_size * 4) == 0)
-      return makeHalfBankSwizzleLayout(mat_stride, mat_continuous,
-                                       element_size);
+      return MakeHalfBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                         element_size);
     else if (mat_continuous % (vector_size * 2) == 0)
-      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                          element_size);
+      return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
+                                            element_size);
   }
 
   if (mat_continuous % vector_size == 0)
@@ -821,27 +898,30 @@ Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
   return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
 }
 
-SwizzleMode DetectSwizzleMode(const Layout &layout, int stride, int continuous,
-                              int element_size) {
-  int vector_size = 128 / element_size;
+SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
+  SwizzleShapeInfo info;
+  if (!TryGetSwizzleShapeInfo(buffer, &info)) {
+    return SwizzleMode::kNone;
+  }
+  int vector_size = 128 / info.element_size;
 
   // Check from smallest to largest granularity
   // Need to verify stride and continuous constraints before comparing
-  if (stride % 8 == 0 && continuous % (vector_size * 2) == 0) {
-    if (StructuralEqual()(layout, makeQuarterBankSwizzleLayout(
-                                      stride, continuous, element_size))) {
+  if (info.stride % 8 == 0 &&
+      info.continuous % (static_cast<int64_t>(vector_size) * 2) == 0) {
+    if (StructuralEqual()(layout, makeQuarterBankSwizzleLayout(buffer))) {
       return SwizzleMode::kQuarter;
     }
   }
-  if (stride % 8 == 0 && continuous % (vector_size * 4) == 0) {
-    if (StructuralEqual()(layout, makeHalfBankSwizzleLayout(stride, continuous,
-                                                            element_size))) {
+  if (info.stride % 8 == 0 &&
+      info.continuous % (static_cast<int64_t>(vector_size) * 4) == 0) {
+    if (StructuralEqual()(layout, makeHalfBankSwizzleLayout(buffer))) {
       return SwizzleMode::kHalf;
     }
   }
-  if (stride % 8 == 0 && continuous % (vector_size * 8) == 0) {
-    if (StructuralEqual()(layout, makeFullBankSwizzleLayout(stride, continuous,
-                                                            element_size))) {
+  if (info.stride % 8 == 0 &&
+      info.continuous % (static_cast<int64_t>(vector_size) * 8) == 0) {
+    if (StructuralEqual()(layout, makeFullBankSwizzleLayout(buffer))) {
       return SwizzleMode::kFull;
     }
   }
@@ -849,12 +929,14 @@ SwizzleMode DetectSwizzleMode(const Layout &layout, int stride, int continuous,
 }
 
 Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
-                                     const Layout &layout2, int stride,
-                                     int continuous, int element_size) {
-  SwizzleMode mode1 =
-      DetectSwizzleMode(layout1, stride, continuous, element_size);
-  SwizzleMode mode2 =
-      DetectSwizzleMode(layout2, stride, continuous, element_size);
+                                     const Layout &layout2,
+                                     const Buffer &buffer) {
+  SwizzleShapeInfo info;
+  if (!TryGetSwizzleShapeInfo(buffer, &info)) {
+    return std::nullopt;
+  }
+  SwizzleMode mode1 = DetectSwizzleMode(layout1, buffer);
+  SwizzleMode mode2 = DetectSwizzleMode(layout2, buffer);
 
   // If either is not a swizzle layout, cannot merge
   if (mode1 == SwizzleMode::kNone || mode2 == SwizzleMode::kNone) {
@@ -866,11 +948,11 @@ Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
 
   switch (min_mode) {
   case SwizzleMode::kQuarter:
-    return makeQuarterBankSwizzleLayout(stride, continuous, element_size);
+    return makeQuarterBankSwizzleLayout(buffer);
   case SwizzleMode::kHalf:
-    return makeHalfBankSwizzleLayout(stride, continuous, element_size);
+    return makeHalfBankSwizzleLayout(buffer);
   case SwizzleMode::kFull:
-    return makeFullBankSwizzleLayout(stride, continuous, element_size);
+    return makeFullBankSwizzleLayout(buffer);
   default:
     return std::nullopt;
   }

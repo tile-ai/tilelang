@@ -403,6 +403,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     // Detect smem layout for swizzle (similar to copy.cc)
     // linear layout must be computed before remapping
     auto linear_layout = makeLinearLayout(shared_tensor->shape);
+    Buffer shared_tensor_unmapped = shared_tensor;
     desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
     Layout shared_layout;
     if (T.layout_map.count(shared_tensor)) {
@@ -417,23 +418,20 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     } else if (StructuralEqual()(shared_layout, linear_layout)) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
     } else {
-      ICHECK(shared_layout->InputDim() == 2) << "Cannot detect TMA layout.";
+      ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
       auto stride = as_const_int(shared_layout->InputShape()[0]);
       auto continuous = as_const_int(shared_layout->InputShape()[1]);
       ICHECK(stride != nullptr && continuous != nullptr);
       if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(
-                                               *stride, *continuous,
-                                               shared_tensor->dtype.bits()))) {
+                                               shared_tensor_unmapped))) {
         desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
       } else if (StructuralEqual()(
                      shared_layout,
-                     makeHalfBankSwizzleLayout(*stride, *continuous,
-                                               shared_tensor->dtype.bits()))) {
+                     makeHalfBankSwizzleLayout(shared_tensor_unmapped))) {
         desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
       } else if (StructuralEqual()(
                      shared_layout,
-                     makeFullBankSwizzleLayout(*stride, *continuous,
-                                               shared_tensor->dtype.bits()))) {
+                     makeFullBankSwizzleLayout(shared_tensor_unmapped))) {
         desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
       } else if (StructuralEqual()(
                      shared_layout,
