@@ -24,7 +24,7 @@ using GemmNodeVariant = std::variant<const GemmNode *, const GemmPyNode *>;
  * \return std::optional<GemmNodeVariant> A variant holding the matching GEMM
  * node type, or std::nullopt if not a GEMM.
  */
-std::optional<GemmNodeVariant> TryParseGemmNode(const CallNode &call) {
+inline std::optional<GemmNodeVariant> TryParseGemmNode(const CallNode &call) {
   TileOperator tile_op = ParseOperator(tvm::ffi::GetRef<Call>(&call));
   if (auto gemm = tile_op.as<GemmNode>()) {
     return gemm;

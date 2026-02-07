@@ -132,16 +132,16 @@ class GemmBase:
         return getattr(self.gemm_node, "mbar", None)
 
     @property
-    def annotations(self) -> dict:
-        return getattr(self.gemm_node, "annotations", {})
-
-    @property
     def C_coords(self):
         coords = getattr(self.gemm_node, "cCoords", None)
         if coords is None or len(coords) == 0:
             zero = tvm.tir.const(0, T.int32)
             return [zero, zero]
         return [coords[i] for i in range(len(coords))]
+
+    @property
+    def annotations(self) -> dict:
+        return getattr(self.gemm_node, "ann", {})
 
     def get_region_base_offsets(self, region):
         """
