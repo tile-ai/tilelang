@@ -130,8 +130,8 @@ class GemmPy(Node, Scriptable):
     def _get_inferred_gemm_instruction(self) -> GemmInst:
         """Get the inferred GEMM instruction from annotations if available."""
         assert self.annotations is not None, "Annotations are not set"
-        assert 'instruction' in self.annotations, "GEMM instruction is not inferred"
-        return GemmInst(int(self.annotations['instruction']))
+        assert "instruction" in self.annotations, "GEMM instruction is not inferred"
+        return GemmInst(int(self.annotations["instruction"]))
 
     def _get_implementation_class(self, gemm_inst: GemmInst, target: Target):
         """Get the appropriate implementation class for the given GEMM instruction.

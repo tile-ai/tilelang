@@ -39,7 +39,8 @@ public:
   mutable GemmWarpPolicy policy_;
   Map<String, ObjectRef> annotations_; // Annotations for the GEMM operation
   // Supported annotation keys:
-  //   - "instruction": GemmInst, the specific instruction to use for the GEMM operation
+  //   - "instruction": GemmInst, the specific instruction to use for the GEMM
+  //   operation
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmPy", GemmPyNode, TileOperatorNode);
 

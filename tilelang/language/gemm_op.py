@@ -216,7 +216,7 @@ def gemm(
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
 ) -> tir.PrimExpr:
-    f"""TileLang GEMM operator.
+    """TileLang GEMM operator.
 
     Args:
         A (BufferLikeType, i.e. Buffer | BufferLoad | BufferRegion, or Var): Input buffer A.

@@ -441,9 +441,10 @@ static int GetArchInt(Target target) {
  */
 Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
-  ICHECK(annotations_.count("instruction")) << "Gemm instruction is not inferred";
-  GemmInst gemm_inst =
-      static_cast<GemmInst>(Downcast<IntImm>(annotations_.at("instruction"))->value);
+  ICHECK(annotations_.count("instruction"))
+      << "Gemm instruction is not inferred";
+  GemmInst gemm_inst = static_cast<GemmInst>(
+      Downcast<IntImm>(annotations_.at("instruction"))->value);
   auto [warp_m, warp_n] =
       policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
 
@@ -605,9 +606,10 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   LayoutMap results;
   auto thread_range = T.thread_bounds;
   auto block_size = *as_const_int(thread_range->extent);
-  ICHECK(annotations_.count("instruction")) << "Gemm instruction is not inferred";
-  GemmInst gemm_inst =
-      static_cast<GemmInst>(Downcast<IntImm>(annotations_.at("instruction"))->value);
+  ICHECK(annotations_.count("instruction"))
+      << "Gemm instruction is not inferred";
+  GemmInst gemm_inst = static_cast<GemmInst>(
+      Downcast<IntImm>(annotations_.at("instruction"))->value);
   auto [warp_m, warp_n] =
       policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
   if (TargetIsVolta(T.target)) {

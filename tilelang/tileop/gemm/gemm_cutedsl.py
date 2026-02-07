@@ -64,5 +64,5 @@ class GemmCuTeDSL(GemmBase):
 
     def _get_inferred_gemm_instruction(self) -> GemmInst:
         """Get the inferred GEMM instruction from annotations if available."""
-        assert 'instruction' in self.annotations, "GEMM instruction is not inferred"
-        return GemmInst(int(self.annotations['instruction']))
+        assert "instruction" in self.annotations, "GEMM instruction is not inferred"
+        return GemmInst(int(self.annotations["instruction"]))
