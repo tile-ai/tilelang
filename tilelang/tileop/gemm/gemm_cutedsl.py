@@ -43,6 +43,10 @@ class GemmCuTeDSL(GemmBase):
 
         # Convert C++ GemmWarpPolicy to Python enum value (int)
         policy_int = self.policy.policy_type
+        # Pass instruction annotation so the gemm_v1 call has it when LowerTileOp
+        # visits the lowered IR (gemm_v1 creates GemmNode which requires instruction)
+        gemm_inst = self._get_inferred_gemm_instruction()
+        annotations = {"instruction": int(gemm_inst)}
 
         @T.prim_func
         def _gemm_cutedsl() -> None:
@@ -57,6 +61,7 @@ class GemmCuTeDSL(GemmBase):
                 self.k_pack,
                 self.wg_wait,
                 self.mbar,
+                annotations=annotations,
             )
 
         # Simplify and return
