@@ -121,9 +121,10 @@ jobs:
           - { runner: ubuntu-24.04-arm, toolkit: "Nightly-CUDA-13.0" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
-          # Wheels are built with Python 3.8 Limited API, they should work with all Python >= 3.8.
-          # Only build wheels against Python 3.8 Limited API to save CI resources.
+          # Build wheels for different Python ABIs
           - "3.9"
+          - "3.14t"
+          # TODO: Add cp315-abi3.abi3t after PEP 803
       fail-fast: false
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
