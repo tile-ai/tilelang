@@ -108,8 +108,8 @@ PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
   int ndim = static_cast<int>(buf->shape.size());
 
   // Compute offset using row-major layout (iterate in reverse)
-  PrimExpr offset = make_const(DataType::Int(32), 0);
-  PrimExpr stride = make_const(DataType::Int(32), 1);
+  PrimExpr offset = 0;
+  PrimExpr stride = 1;
 
   for (int i = ndim - 1; i >= 0; --i) {
     const PrimExpr &index = load->indices[i];

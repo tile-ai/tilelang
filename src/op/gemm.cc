@@ -83,8 +83,6 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   if (args.size() > 16) {
     if (const auto *load = args[16].as<BufferLoadNode>()) {
       node->mbar_ = Downcast<BufferLoad>(args[16]);
-    } else {
-      node->mbar_ = std::nullopt;
     }
   }
   node->cCoords_ = Array<PrimExpr>(
@@ -459,7 +457,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ICHECK(can_use_tcgen5mma);
     ICHECK(b_.scope() == "shared.dyn" || b_.scope() == "shared");
     ICHECK(c_.scope() == "shared.tmem");
-    ICHECK(mbar_.has_value()) << "mbar must be provided for TCGEN5MMA";
+    ICHECK(mbar_.defined()) << "mbar must be provided for TCGEN5MMA";
     if (a_.scope() == "shared.tmem") {
       op_name = "tl::tcgen5mma_gemm_ts";
     } else if (a_.scope() == "shared.dyn" || a_.scope() == "shared") {
@@ -490,7 +488,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
     auto C_buffer = T.buffer_remap.count(c_) ? T.buffer_remap[c_] : c_;
     Array<PrimExpr> new_args;
-    auto mbarPtr = MakeAccessPtrFromBufferLoad(mbar_.value(), /*rw*/ 3);
+    auto mbarPtr = MakeAccessPtrFromBufferLoad(mbar_, /*rw*/ 3);
     new_args.push_back(StringImm(ss.str()));
     new_args.push_back(Aptr);
     new_args.push_back(Bptr);
