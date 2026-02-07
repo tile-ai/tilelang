@@ -18,6 +18,9 @@ on:
       - CMakeLists.txt
       - version_provider.py
       - .github/workflows/dist.yml
+      # temporarily add to dist check
+      # until we have type checking in ci / move to python 3.10
+      - tilelang/_typing.py
   release:
     types:
       - published

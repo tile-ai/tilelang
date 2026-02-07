@@ -1,9 +1,7 @@
 """Type annotations for TileLang."""
 
-# Union compatibility for Python 3.9
-from __future__ import annotations
-
 # NOTE(chaofan): We should name it "_typing.py" to avoid module shadowing with standard library "typing"
+# NOTE: In python 3.9, `from __future__ import annotations` does not for value expression, e.g. to define type alias
 
 # Python 3.9 compatibility
 try:
@@ -38,4 +36,4 @@ ShapeType: TypeAlias = Union[list[Union[tir.PrimExpr, int]], tuple[Union[tir.Pri
 
 # PrimExpr with adaptation to Python basic data types
 # IntImm, FloatImm, Bool: IntImm, Integer: IntImm
-PyPrimExpr: TypeAlias = tir.PrimExpr | int | float | bool
+PyPrimExpr: TypeAlias = Union[tir.PrimExpr, int, float, bool]
