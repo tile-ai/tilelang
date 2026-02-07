@@ -172,10 +172,10 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    # Infer the instructions for tileop (currently only Gemm) based on target
-    mod = tilelang.transform.InferInstructions()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
+    # Infer the instructions for tileop (currently only Gemm) based on target
+    mod = tilelang.transform.InferInstructions()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout
