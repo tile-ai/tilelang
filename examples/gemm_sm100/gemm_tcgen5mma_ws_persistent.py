@@ -7,7 +7,7 @@ from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 
 
-@tilelang.jit
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_LOOP_UNSWITCHING: True})
 def gemm(
     A,
     B,
