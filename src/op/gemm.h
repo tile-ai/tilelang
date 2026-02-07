@@ -134,6 +134,9 @@ public:
   std::optional<tir::Buffer> mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   mutable GemmWarpPolicy policy_;
+  Map<String, ObjectRef> annotations_; // Anotations for the GEMM operation
+  // Supported annotation keys:
+  //   - "instruction": GemmInst, the specific instruction to use for the GEMM operation
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
   static void RegisterReflection() {
@@ -157,7 +160,8 @@ public:
         .def_ro("clearAccum", &GemmNode::clearAccum_)
         .def_ro("kPack", &GemmNode::kPack_)
         .def_ro("wgWait", &GemmNode::wgWait_)
-        .def_ro("policy", &GemmNode::policy_);
+        .def_ro("policy", &GemmNode::policy_)
+        .def_ro("annotations", &GemmNode::annotations_);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
@@ -166,8 +170,10 @@ public:
 
   TileOperator Clone() const;
 
-private:
+  // Public method for instruction inference
   GemmInst getGemmInst(int block_size, Target target) const;
+
+private:
   bool allowTcgen5Mma(Target target) const;
   bool allowWgmma(int block_size, Target target) const;
 

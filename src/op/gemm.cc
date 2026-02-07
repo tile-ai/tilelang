@@ -91,6 +91,7 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+  node->annotations_ = annotations;
   data_ = std::move(node);
 }
 
@@ -440,7 +441,9 @@ static int GetArchInt(Target target) {
  */
 Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
-  GemmInst gemm_inst = getGemmInst(block_size, T.target);
+  ICHECK(annotations_.count("instruction")) << "Gemm instruction is not inferred";
+  GemmInst gemm_inst =
+      static_cast<GemmInst>(Downcast<IntImm>(annotations_.at("instruction"))->value);
   auto [warp_m, warp_n] =
       policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
 
@@ -602,7 +605,9 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   LayoutMap results;
   auto thread_range = T.thread_bounds;
   auto block_size = *as_const_int(thread_range->extent);
-  GemmInst gemm_inst = getGemmInst(block_size, T.target);
+  ICHECK(annotations_.count("instruction")) << "Gemm instruction is not inferred";
+  GemmInst gemm_inst =
+      static_cast<GemmInst>(Downcast<IntImm>(annotations_.at("instruction"))->value);
   auto [warp_m, warp_n] =
       policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
   if (TargetIsVolta(T.target)) {

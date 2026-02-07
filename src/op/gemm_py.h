@@ -37,6 +37,9 @@ public:
   int kPack_ = 1;
   int wgWait_ = 0;
   mutable GemmWarpPolicy policy_;
+  Map<String, ObjectRef> annotations_; // Annotations for the GEMM operation
+  // Supported annotation keys:
+  //   - "instruction": GemmInst, the specific instruction to use for the GEMM operation
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmPy", GemmPyNode, TileOperatorNode);
 
@@ -64,14 +67,15 @@ public:
         .def_ro("cCoords", &GemmPyNode::cCoords_)
         .def_ro("kPack", &GemmPyNode::kPack_)
         .def_ro("wgWait", &GemmPyNode::wgWait_)
-        .def_ro("policy", &GemmPyNode::policy_);
+        .def_ro("policy", &GemmPyNode::policy_)
+        .def_ro("ann", &GemmPyNode::annotations_);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
 
-  TileOperator Clone() const;
+  TileOperator Clone() const override;
 
   // Target GEMM instruction
   GemmInst getGemmInst(int block_size, Target target) const;

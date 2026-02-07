@@ -31,6 +31,7 @@ def _gemm_impl(
     k_pack: int = 1,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
+    annotations: dict | None = None,
 ) -> tir.PrimExpr:
     """Shared GEMM implementation.
 
@@ -108,6 +109,8 @@ def _gemm_impl(
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
+
+    annotations = annotations if annotations is not None else {}
     return tir.call_intrin(
         "handle",
         tir.op.Op.get(op_key),
@@ -130,6 +133,7 @@ def _gemm_impl(
         mbar,
         C_coords[0],
         C_coords[1],
+        annotations=annotations,
     )
 
 
@@ -145,6 +149,7 @@ def gemm_v1(
     k_pack: int = 1,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
+    annotations: dict | None = None,
 ) -> tir.PrimExpr:
     """GEMM v1: use op tl.gemm."""
     return _gemm_impl(
@@ -159,6 +164,7 @@ def gemm_v1(
         k_pack,
         wg_wait,
         mbar,
+        annotations,
     )
 
 
@@ -174,6 +180,7 @@ def gemm_v2(
     k_pack: int = 1,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
+    annotations: dict | None = None,
 ) -> tir.PrimExpr:
     """GEMM v2: use op tl.gemm_py."""
     return _gemm_impl(
@@ -188,6 +195,7 @@ def gemm_v2(
         k_pack,
         wg_wait,
         mbar,
+        annotations,
     )
 
 
@@ -206,8 +214,9 @@ def gemm(
     k_pack: int = 1,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
+    annotations: dict | None = None,
 ) -> tir.PrimExpr:
-    """TileLang GEMM operator.
+    f"""TileLang GEMM operator.
 
     Args:
         A (BufferLikeType, i.e. Buffer | BufferLoad | BufferRegion, or Var): Input buffer A.
@@ -220,10 +229,11 @@ def gemm(
         k_pack (int): Numbers of packed matrix cores, for ROCm only. Defaults to 1.
         wg_wait (int): Int identifier of the warpgroup MMA batch to wait on.. Defaults to 0.
         mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell. Defaults to None.
-
+        annotations (dict, optional): Additional annotations for the GEMM operation. Defaults to None.
+            If provided, `instruction` can be specified as "instruction": GemmInst.MMA, etc.
     Returns:
         tir.Call: A handle to the GEMM operation.
     """
 
     impl = gemm_v1 if _env.use_gemm_v1() else gemm_v2
-    return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum, k_pack, wg_wait, mbar)
+    return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum, k_pack, wg_wait, mbar, annotations)

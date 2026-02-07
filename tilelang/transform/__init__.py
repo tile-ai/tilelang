@@ -562,3 +562,21 @@ def LowerLDGSTG():
         The result pass
     """
     return _ffi_api.LowerLDGSTG()  # type: ignore
+
+
+def InferInstructions():
+    """InferInstructions for tileop based on target info.
+
+    This pass infers the specific instructions for tileop (currently only gemm) based
+    on target and layout.
+
+    Key behaviors
+    - Infer the specific instructions for tileop
+    - Set the instructions in the call annotations
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InferInstructions()  # type: ignore

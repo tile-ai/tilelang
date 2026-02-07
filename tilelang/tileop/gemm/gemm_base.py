@@ -132,6 +132,10 @@ class GemmBase:
         return getattr(self.gemm_node, "mbar", None)
 
     @property
+    def annotations(self) -> dict:
+        return getattr(self.gemm_node, "annotations", {})
+
+    @property
     def C_coords(self):
         coords = getattr(self.gemm_node, "cCoords", None)
         if coords is None or len(coords) == 0:
