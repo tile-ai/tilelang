@@ -76,9 +76,9 @@ def get_configs(M, N, K, with_roller=False, topk=20):
             config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
             configs.append(config)
     else:
-        block_M = [64, 128, 256] if M > 32 else [16, 32]
-        block_N = [64, 128, 256] if M > 32 else [16, 32]
-        block_K = [32, 64, 128]
+        block_M = [64, 128, 256]
+        block_N = [64, 128, 256]
+        block_K = [32, 64]
         num_stages = [0, 1, 2, 3]
         thread_num = [128, 256]
         enable_rasterization = [True, False]
