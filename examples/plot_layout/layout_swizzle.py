@@ -23,9 +23,11 @@ vector_size = 128 // element_size  # = 8 elements per 128-bit vector
 # Instead, we create a 2D Layout: (i, j) -> (i, swizzled_j), which clearly
 # shows the column permutation pattern per row.
 
+
 def make_full_bank_swizzle_2d(stride, continuous, element_size=16):
     """2D view of full-bank (128B) swizzle: 3-bit XOR, c_swizzle = c ^ s."""
     vs = 128 // element_size
+
     def forward(i, j):
         s = FloorMod(i, 8)
         tc = FloorDiv(FloorDiv(j, vs), 8)
@@ -33,12 +35,14 @@ def make_full_bank_swizzle_2d(stride, continuous, element_size=16):
         vec = FloorMod(j, vs)
         c_swizzle = c ^ s
         return (i, tc * 8 * vs + c_swizzle * vs + vec)
+
     return T.Layout([stride, continuous], forward)
 
 
 def make_half_bank_swizzle_2d(stride, continuous, element_size=16):
     """2D view of half-bank (64B) swizzle: 2-bit XOR, c_swizzle = c ^ (s >> 1)."""
     vs = 128 // element_size
+
     def forward(i, j):
         s = FloorMod(i, 8)
         tc = FloorDiv(FloorDiv(j, vs), 4)
@@ -46,12 +50,14 @@ def make_half_bank_swizzle_2d(stride, continuous, element_size=16):
         vec = FloorMod(j, vs)
         c_swizzle = c ^ FloorDiv(s, 2)
         return (i, tc * 4 * vs + c_swizzle * vs + vec)
+
     return T.Layout([stride, continuous], forward)
 
 
 def make_quarter_bank_swizzle_2d(stride, continuous, element_size=16):
     """2D view of quarter-bank (32B) swizzle: 1-bit XOR, c_swizzle = c ^ (s >> 2)."""
     vs = 128 // element_size
+
     def forward(i, j):
         s = FloorMod(i, 8)
         tc = FloorDiv(FloorDiv(j, vs), 2)
@@ -59,6 +65,7 @@ def make_quarter_bank_swizzle_2d(stride, continuous, element_size=16):
         vec = FloorMod(j, vs)
         c_swizzle = c ^ FloorDiv(s, 4)
         return (i, tc * 2 * vs + c_swizzle * vs + vec)
+
     return T.Layout([stride, continuous], forward)
 
 
