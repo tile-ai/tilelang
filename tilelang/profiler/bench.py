@@ -77,7 +77,7 @@ def do_bench(
     This function provides accurate GPU kernel timing by:
     - Clearing L2 cache between runs for consistent measurements
     - Auto-calculating warmup and repeat counts based on kernel runtime
-    - Supporting multiple profiling backends (CUDA events or CUPTI)
+    - Supporting multiple profiling backends (CUDA events, CUPTI, or CUDA graph replay)
     - Offering flexible result aggregation (mean/median/min/max/quantiles)
 
     Args:
@@ -222,9 +222,9 @@ def _bench_with_cudagraph(
     Note: Cache flushing is done before graph replay, not within the graph,
     since CUDA graphs require fixed execution patterns.
     """
+    n_retries = 10
     with torch.cuda.stream(torch.cuda.Stream()):
-        # Construct a CUDA graph with n_repeat unrolled function calls
-        # to minimize host overhead
+        # Construct a CUDA graph with `n_repeat` unrolled function calls to minimize host overhead.
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             for _ in range(n_repeat):
@@ -232,23 +232,21 @@ def _bench_with_cudagraph(
 
         torch.cuda.synchronize()
 
-        # Measure time by replaying the graph multiple times
-        # Clear cache before each replay for consistent measurements
-        ret = []
-        n_retries = 10
-        for _ in range(n_retries):
+        # Measure time by replaying the graph multiple times.
+        # Clear cache before each replay for consistent measurements.
+        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
+        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
+        for i in range(n_retries):
             cache.zero_()  # Clear L2 cache before replay
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
+            start_events[i].record()
             g.replay()
-            end_event.record()
-            torch.cuda.synchronize()
-            elapsed = start_event.elapsed_time(end_event)
-            ret.append(elapsed / n_repeat)
+            end_events[i].record()
 
-        # Convert to tensor for statistics
-        times = torch.tensor(ret, dtype=torch.float)
+        torch.cuda.synchronize()
+        times = torch.tensor(
+            [s.elapsed_time(e) / n_repeat for s, e in zip(start_events, end_events)],
+            dtype=torch.float,
+        )
 
         # Return quantiles if requested
         if quantiles is not None:

@@ -107,7 +107,13 @@ def get_configs(M, N, K, with_roller=False, topk=20):
     return configs
 
 
-def get_best_config(M, N, K, with_roller=False, profile_backend="event"):
+def get_best_config(
+    M,
+    N,
+    K,
+    with_roller: bool = False,
+    profile_backend: str = "event",
+):
     def kernel(
         block_M=None,
         block_N=None,
@@ -209,11 +215,21 @@ def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_ra
 
 
 def main(
-    M: int = 4096, N: int = 4096, K: int = 4096, use_autotune: bool = False, with_roller: bool = False, profile_backend: str = "event"
+    M: int = 4096,
+    N: int = 4096,
+    K: int = 4096,
+    use_autotune: bool = False,
+    with_roller: bool = False,
+    profile_backend: str = "event",
 ):
-    use_autotune = True
     if use_autotune:
-        result = get_best_config(M, N, K, with_roller, profile_backend)
+        result = get_best_config(
+            M,
+            N,
+            K,
+            with_roller=with_roller,
+            profile_backend=profile_backend,
+        )
         print(result.config)
         kernel = result.kernel
     else:
@@ -222,8 +238,13 @@ def main(
 
     # benchmark
     profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
-    tilelang_latency = profiler.do_bench(backend=profile_backend)
-    ref_latency = profiler.do_bench(ref_program, backend=profile_backend)
+    tilelang_latency = profiler.do_bench(
+        backend=profile_backend,
+    )
+    ref_latency = profiler.do_bench(
+        ref_program,
+        backend=profile_backend,
+    )
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
     print(f"TileLang latency: {tilelang_latency}")
     print(f"Ref latency: {ref_latency}")
@@ -247,4 +268,11 @@ if __name__ == "__main__":
     parser.add_argument("--with_roller", action="store_true", default=False, help="Whether to enable BitBLAS roller for search space")
     parser.add_argument("--profile_backend", type=str, default="event", help="Profiler backend")
     args = parser.parse_args()
-    main(args.m, args.n, args.k, args.use_autotune, args.with_roller, args.profile_backend)
+    main(
+        args.m,
+        args.n,
+        args.k,
+        args.use_autotune,
+        args.with_roller,
+        args.profile_backend,
+    )
