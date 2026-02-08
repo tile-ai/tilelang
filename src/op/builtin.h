@@ -57,6 +57,10 @@ static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kDisableLoopUnswitching =
     "tl.disable_loop_unswitching";
+// Allow loop unswitching even when the else-version of the loop body is
+// non-trivial (has side effects). Default: false (conservative).
+static constexpr const char *kLoopUnswitchingAllowNonTrivialElse =
+    "tl.loop_unswitching_allow_non_trivial_else";
 
 /*!
  * \brief Enable lowering non-predicated global load/store to ldg/stg intrinsics
