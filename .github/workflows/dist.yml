@@ -207,7 +207,7 @@ jobs:
           for WHEEL in wheelhouse/*.whl; do
             echo "Testing wheel: ${WHEEL}"
             if [[ "${WHEEL}" == *"abi3"* ]]; then
-              pipx run abi3audit --verbose --strict "${WHEEL}"
+              uvx abi3audit --verbose --strict "${WHEEL}"
             fi
             (
               set -e
