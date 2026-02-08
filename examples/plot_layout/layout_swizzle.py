@@ -1,15 +1,3 @@
-"""Visualize bank-swizzle layouts for shared memory.
-
-The swizzle layout remaps column indices within each 8-row tile using XOR
-to avoid shared memory bank conflicts.
-
-Full-bank  (128B): 3-bit XOR — c_swizzle = c ^ s
-Half-bank  (64B):  2-bit XOR — c_swizzle = c ^ (s >> 1)
-Quarter-bank (32B): 1-bit XOR — c_swizzle = c ^ (s >> 2)
-
-where s = row % 8 and c = column group index.
-"""
-
 from tilelang.layout import (
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,

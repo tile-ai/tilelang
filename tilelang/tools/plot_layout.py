@@ -241,6 +241,7 @@ def _plot_fragment_layout(
 
     plt.tight_layout()
     _save_plot(plt, save_directory, name, formats)
+    plt.close()
 
 
 # ---------------------------------------------------------------------------
