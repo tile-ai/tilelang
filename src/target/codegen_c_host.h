@@ -80,6 +80,8 @@ public:
 
   void VisitStmt_(const tvm::tir::AssertStmtNode *op) final; // NOLINT(*)
 
+  void VisitStmt_(const tvm::tir::AttrStmtNode *op) final; // NOLINT(*)
+
   void GenerateForwardFunctionDeclarations(
       tvm::ffi::String global_symbol,
       const tvm::ffi::Array<tvm::Type> &arg_types,
@@ -102,6 +104,8 @@ private:
   /*! \brief whether to generate the entry function if encountered */
   bool has_main_func_ = false;
 
+  bool is_in_metal_context = false;
+
   std::string GetPackedName(const tvm::tir::CallNode *op);
   void PrintGetFuncFromBackend(const std::string &func_name,
                                const std::string &packed_func_name);
@@ -116,6 +120,11 @@ private:
   template <typename T>
   inline void PrintTernaryCondExpr(const T *op, const char *compare,
                                    std::ostream &os); // NOLINT(*)
+
+  template <typename... Args> void PrintLine(Args &&...args) {
+    this->PrintIndent();
+    (this->stream << ... << args) << '\n';
+  }
 };
 
 } // namespace tl

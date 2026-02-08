@@ -76,7 +76,7 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
             T.fill(logsum, 0.0)
             # Warning: in causal/varlen/unaligned seqlen scenarios, the -inf will cause undefined behavior in exp ops
             # We should set it to negative large number instead
-            T.fill(scores_max, T.Cast(accum_dtype, -1e30))
+            T.fill(scores_max, T.cast(-1e30, accum_dtype))
             loop_range = T.ceildiv(k_current_seqlen, block_N)
             for k in T.Pipelined(loop_range, num_stages=1):
                 for i, d in T.Parallel(block_N, dim_qk):
@@ -91,12 +91,12 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
                             (bx * block_M + i >= k * block_N + j)
                             and (bx * block_M + i < q_current_seqlen and k * block_N + j < k_current_seqlen),
                             0,
-                            T.Cast(accum_dtype, -1e30),
+                            T.cast(-1e30, accum_dtype),
                         )
                 else:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(
-                            bx * block_M + i < q_current_seqlen and k * block_N + j < k_current_seqlen, 0, T.Cast(accum_dtype, -1e30)
+                            bx * block_M + i < q_current_seqlen and k * block_N + j < k_current_seqlen, 0, T.cast(-1e30, accum_dtype)
                         )
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 for i, d in T.Parallel(block_N, dim_v):
@@ -285,14 +285,6 @@ def flashattn_bwd_atomic_add(
             k_end_idx = cu_seqlens_k[bz + 1]
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
-
-            T.annotate_layout(
-                {
-                    dQ: make_dq_layout(dQ),
-                    dK: make_dq_layout(dK),
-                    dV: make_dq_layout(dV),
-                }
-            )
 
             T.copy(K[k_start_idx + by * block_M : k_start_idx + (by + 1) * block_M, bx // groups, :], K_shared)
             T.copy(V[k_start_idx + by * block_M : k_start_idx + (by + 1) * block_M, bx // groups, :], V_shared)
@@ -541,7 +533,6 @@ class _attention(torch.autograd.Function):
         block_M = 128
         block_N = 32
         mod_prep = flashattn_bwd_preprocess(BATCH, H, total_q, N_CTX, ctx.max_seqlen_q, D_HEAD_V)
-        mod_post = flashattn_bwd_postprocess(total_q, total_kv, H, HEAD_KV, D_HEAD_QK, D_HEAD_V)
         delta = mod_prep(o, do, cu_seqlens_q)
 
         if ctx.use_atomic:
@@ -565,7 +556,6 @@ class _attention(torch.autograd.Function):
             dk = torch.zeros_like(k, dtype=torch.float32)
             dv = torch.zeros_like(v, dtype=torch.float32)
             kernel(q, k, v, do, lse_clone, delta, cu_seqlens_q, cu_seqlens_k, dq, dk, dv)
-            dq, dk, dv = mod_post(dq, dk, dv)
         else:
             kernel = flashattn_bwd_split(
                 BATCH,
@@ -583,6 +573,7 @@ class _attention(torch.autograd.Function):
                 num_stages=2,
                 groups=groups,
             )
+            mod_post = flashattn_bwd_postprocess(total_q, total_kv, H, HEAD_KV, D_HEAD_QK, D_HEAD_V)
             dq = torch.zeros_like(q, dtype=torch.float32)
             dk = torch.empty(groups, *k.shape, dtype=torch.float16, device=q.device)
             dv = torch.empty(groups, *v.shape, dtype=torch.float16, device=q.device)

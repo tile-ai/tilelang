@@ -9,6 +9,7 @@
 #include <tvm/tir/op.h>
 
 #include "../layout/layout.h"
+#include "arith/int_operator.h"
 
 #include "../layout/utils.h"
 #include "../target/utils.h"
@@ -21,86 +22,7 @@ namespace tl {
 
 using namespace tir;
 
-// ProveFragmentContains checks whether the threads that access elements of a
-// smaller fragment (small_frag) are a subset of the threads that access
-// elements of a larger fragment (large_frag) for any given loop index. This
-// function ensures that if the small fragment's layout corresponds to the loop
-// itself, accessing the large fragment's elements is valid. Additionally, if
-// small is updated to large, the originally valid access remains valid. The
-// proof is performed by:
-//
-// 1. Defining a variable `rep_small` to represent the replicate index of the
-//    small fragment that is being checked.
-// 2. Using the `small_frag_indices` and `rep_small` to derive the thread
-// accessing
-//    the element in the small fragment.
-// 3. Using `large_frag_indices` to derive the physical index of the large
-// fragment
-//    along with the thread information, and then feeding these into the inverse
-//    of the large fragment to obtain the logical index and replicate index.
-// 4. Verifying the mapping by checking whether the computed thread using the
-// inverse
-//    layout corresponds to the original thread calculated for the small
-//    fragment. If they don't match, this indicates that the inverse layout's
-//    domain does not include the thread and thus the access is invalid.
-bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
-                           Array<PrimExpr> small_frag_indices,
-                           Array<PrimExpr> large_frag_indices,
-                           arith::Analyzer &analyzer_,
-                           bool check_forward_index) {
-  // When check_forward_index is true, verify that the physical indices
-  // (forward index) of both fragments are equal. This is required when
-  // validating loop layout against buffer fragment, as code generation
-  // needs to correctly derive buffer physical indices from loop layout.
-  if (check_forward_index) {
-    auto small_physical = small_frag->Forward(small_frag_indices);
-    auto large_physical = large_frag->Forward(large_frag_indices);
-
-    // Dimension mismatch means they are not equal.
-    if (small_physical.size() != large_physical.size()) {
-      return false;
-    }
-
-    // Check each physical index component for equality.
-    for (size_t i = 0; i < small_physical.size(); i++) {
-      auto diff = analyzer_.Simplify(small_physical[i] - large_physical[i]);
-      if (!is_zero(diff)) {
-        return false;
-      }
-    }
-  }
-
-  Var rep_small("__checking_frag_contains_rep");
-  analyzer_.Bind(rep_small,
-                 Range(IntImm(small_frag->ReplicateExtent()->dtype, 0),
-                       small_frag->ReplicateExtent()),
-                 true); // Bind the replicate extent of small_frag.
-  // Derive thread for small_frag.
-  auto thread = small_frag->ForwardThread(small_frag_indices, rep_small);
-
-  // Get physical index and thread for large_frag.
-  auto large_frag_physical_and_thread = large_frag->Forward(large_frag_indices);
-  // Add small_frag's thread to the large fragment's thread info.
-  large_frag_physical_and_thread.push_back(thread);
-  // Get the inverse of the large fragment.
-  auto inv_large_frag = large_frag->Inverse();
-  // Compute logical index and replicate index using inverse layout.
-  auto inv_large_frag_logical_and_rep =
-      inv_large_frag->Forward(large_frag_physical_and_thread);
-
-  // Extract replicate index from the result.
-  auto inv_large_frag_rep =
-      inv_large_frag_logical_and_rep[inv_large_frag_logical_and_rep.size() - 1];
-
-  // Calculate thread based on the logical index and replicate index.
-  auto check_thread =
-      large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep);
-
-  // Simplify the difference between the threads.
-  auto diff = analyzer_.Simplify(thread - check_thread);
-  // If the difference is zero, the threads match and the access is valid.
-  return is_zero(diff);
-}
+namespace {
 
 class IfBufferRemapLoopGenerator : public StmtExprMutator {
 public:
@@ -141,6 +63,8 @@ private:
   Map<Buffer, Layout> layout_map_;
 };
 
+} // anonymous namespace
+
 /**
  * @brief Handle a parallel For node during traversal, collecting loop metadata.
  *
@@ -169,27 +93,14 @@ void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
 
 void ParallelLoopNestVisitor::VisitStmt_(const BufferStoreNode *op) {
   if (IsFragmentBuffer(op->buffer)) {
-    if (p->indice_map_.find(op->buffer) != p->indice_map_.end()) {
-      ICHECK(StructuralEqual()(p->indice_map_.at(op->buffer), op->indices))
-          << op->buffer << ": " << op->indices << " and "
-          << p->indice_map_.at(op->buffer);
-    } else {
-      p->indice_map_.Set(op->buffer, op->indices);
-    }
-    p->buffer_is_write_.insert(op->buffer);
+    p->RecordBufferAccess(op->buffer, op->indices, /*is_write=*/true);
   }
   StmtExprVisitor::VisitStmt_(op);
 }
 
 void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
   if (IsFragmentBuffer(op->buffer)) {
-    if (p->indice_map_.find(op->buffer) != p->indice_map_.end()) {
-      ICHECK(StructuralEqual()(p->indice_map_.at(op->buffer), op->indices))
-          << op->buffer << ": " << op->indices << " and "
-          << p->indice_map_.at(op->buffer);
-    } else {
-      p->indice_map_.Set(op->buffer, op->indices);
-    }
+    p->RecordBufferAccess(op->buffer, op->indices, /*is_write=*/false);
   }
   StmtExprVisitor::VisitExpr_(op);
 }
@@ -206,6 +117,22 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
     annotated_predicate_ = Downcast<PrimExpr>(
         root_->annotations.Get(kParallelLoopPredicate).value());
   }
+  // Collect cross-thread access info and buffer store info.
+  PostOrderVisit(root_, [&](const ObjectRef &obj) {
+    if (const auto *store = obj.as<BufferStoreNode>()) {
+      auto buffer = store->buffer;
+      if (IsSharedBuffer(buffer) || IsGlobalBuffer(buffer)) {
+        has_cross_thread_access_ = true;
+        store_shared_global_buffers_.emplace_back(buffer);
+      } else if (IsFragmentBuffer(buffer)) {
+        store_fragment_buffers_.emplace_back(buffer);
+      }
+    } else if (const auto *load = obj.as<BufferLoadNode>()) {
+      if (IsSharedBuffer(load->buffer) || IsGlobalBuffer(load->buffer)) {
+        has_cross_thread_access_ = true;
+      }
+    }
+  });
 }
 
 TileOperator ParallelOpNode::Clone() const {
@@ -222,8 +149,8 @@ void ParallelOpNode::ExpandLetBindings(
   std::function<void(const PrimExpr &)> expand = [&](const PrimExpr &expr) {
     PostOrderVisit(expr, [&](const ObjectRef &node) {
       if (auto bl = node.as<BufferLoadNode>()) {
-        if (IsFragmentBuffer(bl->buffer) && !indice_map_.count(bl->buffer)) {
-          indice_map_.Set(bl->buffer, bl->indices);
+        if (IsFragmentBuffer(bl->buffer)) {
+          RecordBufferAccess(bl->buffer, bl->indices, /*is_write=*/false);
         }
       } else if (auto var_node = node.as<VarNode>()) {
         auto var = tvm::ffi::GetRef<Var>(var_node);
@@ -251,6 +178,49 @@ void ParallelOpNode::ExpandLetBindings(
   }
 }
 
+void ParallelOpNode::RecordBufferAccess(const Buffer &buffer,
+                                        const Array<PrimExpr> &indices,
+                                        bool is_write) {
+  auto it = indice_map_.find(buffer);
+  if (it != indice_map_.end()) {
+    ICHECK(StructuralEqual()(it->second.indices, indices))
+        << buffer << ": " << indices << " and " << it->second.indices;
+  } else {
+    BufferAccessInfo info;
+    info.indices = indices;
+    it = indice_map_.emplace(buffer, std::move(info)).first;
+  }
+  if (is_write) {
+    it->second.is_write = true;
+  } else {
+    it->second.is_read = true;
+  }
+}
+
+const ParallelOpNode::BufferAccessInfo &
+ParallelOpNode::GetAccessInfo(const Buffer &buffer) const {
+  auto it = indice_map_.find(buffer);
+  ICHECK(it != indice_map_.end())
+      << "Missing access info for buffer " << buffer;
+  return it->second;
+}
+
+bool ParallelOpNode::IsBufferCompletelyReplicated(
+    const Buffer &buffer, const LayoutMap &layout_map) const {
+  if (!IsFragmentBuffer(buffer))
+    return false;
+  auto frag = layout_map[buffer].as<Fragment>().value();
+  // buffer indices should be IntImm
+  for (const auto &index : GetAccessInfo(buffer).indices) {
+    if (!index.as<IntImmNode>()) {
+      return false;
+    } else if (index.as<IntImmNode>()->value != 0) {
+      LOG(FATAL) << "buffer " << buffer << " is not completed replicated";
+    }
+  }
+  return frag->IsCompletedReplicated();
+}
+
 Stmt ParallelOpNode::Lower(const LowerArgs &T,
                            arith::Analyzer *analyzer) const {
   return root_;
@@ -260,7 +230,7 @@ Stmt ParallelOpNode::Lower(const LowerArgs &T,
 
 bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
-  return StructuralEqual()(indice_map_[buffer], common_indice);
+  return StructuralEqual()(GetAccessInfo(buffer).indices, common_indice);
 }
 
 /*! \brief Infer the layout for parallel operations based on different inference
@@ -298,7 +268,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     // for i in T.Parallel(m):
     //   fragment[0] = x[i]
     // then fragment[0] must be replicated on all threads.
-    for (const auto &[buffer, indices] : indice_map_) {
+    for (const auto &[buffer, access] : indice_map_) {
       if (T.layout_map.count(buffer)) {
         continue;
       }
@@ -307,7 +277,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
       // Check if all indices are zero
       bool all_indices_zero = true;
-      for (const auto &index : indices) {
+      for (const auto &index : access.indices) {
         if (const auto *imm = index.as<IntImmNode>()) {
           if (imm->value != 0) {
             all_indices_zero = false;
@@ -346,29 +316,15 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     return results;
   }
 
-  auto buffer_is_completed_replicated = [&](const Buffer &buffer) {
-    if (!IsFragmentBuffer(buffer))
-      return false;
-    auto frag = T.layout_map[buffer].as<Fragment>().value();
-    // buffer indices should be IntImm
-    for (const auto &index : indice_map_[buffer]) {
-      if (!index.as<IntImmNode>()) {
-        return false;
-      } else if (index.as<IntImmNode>()->value != 0) {
-        LOG(FATAL) << "buffer " << buffer << " is not completed replicated";
-      }
-    }
-    return frag->IsCompletedReplicated();
-  };
   // Collect fragment buffers with const index and all fragment_buffers
   std::vector<Buffer> const_index_fragment_buffer, fragment_buffers;
-  for (const auto &[buffer, indices] : indice_map_) {
+  for (const auto &[buffer, access] : indice_map_) {
     if (!IsFragmentBuffer(buffer))
       continue;
     fragment_buffers.push_back(buffer);
 
     bool is_const_index = true;
-    for (const auto &index : indices) {
+    for (const auto &index : access.indices) {
       if (!index.as<IntImmNode>()) {
         is_const_index = false;
         break;
@@ -396,7 +352,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   Buffer source_buffer, read_source_buffer;
   Buffer replicated_write_buffer; // Backup: fully replicated write buffer
 
-  for (const auto &[buffer, indices] : indice_map_) {
+  for (const auto &[buffer, access] : indice_map_) {
     if (T.layout_map.count(buffer)) {
       // skip reducers with rep=ALL
       if (auto info = reducer_info_map_.Get(buffer->data);
@@ -404,9 +360,10 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         continue;
 
       auto frag = T.layout_map[buffer].as<Fragment>().value();
-      bool is_fully_replicated = buffer_is_completed_replicated(buffer);
+      bool is_fully_replicated =
+          IsBufferCompletelyReplicated(buffer, T.layout_map);
 
-      if (buffer_is_write_.count(buffer)) {
+      if (access.is_write) {
         source_buffer = buffer;
       } else {
         // Keep the buffer with largest number of indices
@@ -415,8 +372,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         // if the buffer is completed replicated, we don't need to infer the
         // layout from this buffer.
         if ((!read_source_buffer.defined() ||
-             indice_map_[buffer].size() >
-                 indice_map_[read_source_buffer].size())) {
+             access.indices.size() >
+                 GetAccessInfo(read_source_buffer).indices.size())) {
           read_source_buffer = buffer;
         }
         // If the buffer is not replicated and shape is equal to the
@@ -448,44 +405,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     loop_layout_ = ComputeLoopLayoutFromBuffer(source_buffer, T);
   } else if (!loop_layout_.defined() && level == InferLevel::kFree) {
     // For free layout inference
-    // If replication exists and buffer has cross-thread shared memory access,
-    // add predicate
-    bool has_cross_thread_access = false;
-    PostOrderVisit(root_, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        // check if scope is shared or global
-        if (store->buffer.scope() == "shared" ||
-            store->buffer.scope() == "shared.dyn" ||
-            store->buffer.scope() == "global") {
-          has_cross_thread_access = true;
-        }
-      } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        // check if scope is shared or global
-        if (load->buffer.scope() == "shared" ||
-            load->buffer.scope() == "shared.dyn" ||
-            load->buffer.scope() == "global") {
-          has_cross_thread_access = true;
-        }
-      }
-    });
-
-    // check if loop body contains a "pure" buffer store (i.e., direct
-    // assignment, not compound update)
-    std::vector<Buffer> store_shared_global_buffers, store_fragment_buffers;
-    // Buffers that scope is above fragments.
-    // global, shared, shared.dyn
-    // which can be used to analysis replicate case
-    PostOrderVisit(root_, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        auto buffer = store->buffer;
-        if (buffer.scope() == "shared" || buffer.scope() == "shared.dyn" ||
-            buffer.scope() == "global") {
-          store_shared_global_buffers.emplace_back(buffer);
-        } else if (IsFragmentBuffer(buffer)) {
-          store_fragment_buffers.emplace_back(buffer);
-        }
-      }
-    });
     // In free inference, try two mechanisms and prefer the one that
     // minimizes replication while remaining compatible:
     // 1) compute_loop_layout_from_buffer (always correct but may
@@ -515,10 +434,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       DLOG(INFO)
           << "[FreeInfer] only compute_from_buffer available, choose it.";
     }
-
-    BuildReplicationGuardsIfNeeded(
-        T, store_shared_global_buffers, store_fragment_buffers,
-        has_cross_thread_access, const_index_fragment_buffer);
   } else if (!loop_layout_.defined()) {
     // In non-free mode without a source buffer, if we don't have any layout
     // yet (e.g., no annotation), we have nothing to infer here.
@@ -555,23 +470,20 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   }
 
   // Step 2: Check that the loop's partition can correctly align with all source
-  // fragment, and infer layout only when it's not yet layout-ed
+  // fragment, and infer layout only when it's not yet layout-ed.
+  ValidateCandidateAgainstFragments(loop_layout_, T, /*throw_on_error=*/true,
+                                    /*check_forward_index=*/false,
+                                    source_buffer);
+
+  // Step 3: Build replication guards
+  BuildReplicationGuardsIfNeeded(
+      T, store_shared_global_buffers_, store_fragment_buffers_,
+      has_cross_thread_access_, const_index_fragment_buffer);
+
+  // Step 4: Collect buffer fragments
   LayoutMap results;
-  for (const auto &[buffer, _] : indice_map_) {
-    if (T.layout_map.count(buffer)) {
-      auto fragment = T.layout_map[buffer].as<Fragment>().value();
-      auto vars =
-          loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
-      if (!ProveFragmentContains(loop_layout_, fragment, vars,
-                                 indice_map_[buffer], analyzer_)) {
-        std::ostringstream oss;
-        oss << "Layout infer conflict between " << buffer << " and "
-            << source_buffer << " in T.Parallel loop:" << '\n'
-            << "    loop " << loop_layout_->DebugOutput() << '\n'
-            << "    fragment " << fragment->DebugOutput() << '\n';
-        throw LayoutConflictException(oss.str());
-      }
-    } else {
+  for (const auto &[buffer, access] : indice_map_) {
+    if (!T.layout_map.count(buffer)) {
       auto dst_layout =
           CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
       results.Set(buffer, dst_layout);
@@ -598,11 +510,12 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   // them directly and avoid introducing a synthetic replicate dimension.
   {
     auto res2d =
-        arith::DetectIterMap(indice_map_[buffer], ToVMap(loop_vars_), 1,
-                             arith::IterMapLevel::Bijective,
+        arith::DetectIterMap(GetAccessInfo(buffer).indices, ToVMap(loop_vars_),
+                             1, arith::IterMapLevel::Bijective,
                              const_cast<arith::Analyzer *>(&analyzer_));
     if (res2d->errors.empty()) {
-      Layout ind_inv2d = Layout(loop_vars_, indice_map_[buffer])->Inverse();
+      Layout ind_inv2d =
+          Layout(loop_vars_, GetAccessInfo(buffer).indices)->Inverse();
       PrimExpr indice_rep_extent = 1;
       PrimExpr loop_rep_extent = loop_layout_->ReplicateExtent();
       PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
@@ -619,9 +532,9 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   }
   // Otherwise, infer an extra flattened iterator that captures truly-unused
   // pieces of the loop space (if any), then try inversion with it.
-  PrimExpr rep_b = MakeFlattenedExpression(
-      DivideUnusedIterators(indice_map_[buffer], loop_vars_, &analyzer_));
-  auto bijective_indice = indice_map_[buffer];
+  PrimExpr rep_b = MakeFlattenedExpression(DivideUnusedIterators(
+      GetAccessInfo(buffer).indices, loop_vars_, &analyzer_));
+  auto bijective_indice = GetAccessInfo(buffer).indices;
   bijective_indice.push_back(rep_b);
   Layout ind_inv = Layout(loop_vars_, bijective_indice)->Inverse();
 
@@ -645,17 +558,45 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
 TVM_FFI_STATIC_INIT_BLOCK() { ParallelOpNode::RegisterReflection(); }
 
 bool ParallelOpNode::ValidateCandidateAgainstFragments(
-    const Fragment &candidate, const LayoutInferArgs &T) const {
+    const Fragment &candidate, const LayoutInferArgs &T, bool throw_on_error,
+    bool check_forward_index, const Buffer &source_buffer) const {
   auto vars =
       loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
-  for (const auto &[buffer, _] : indice_map_) {
+  for (const auto &[buffer, access] : indice_map_) {
     if (!T.layout_map.count(buffer))
       continue;
+    if (auto info = reducer_info_map_.Get(buffer->data);
+        info && info.value()->rep == ReducerRepType::ALL)
+      continue;
     auto fragment = T.layout_map[buffer].as<Fragment>().value();
-    // check_forward_index=true: when validating loop layout against buffer
-    // fragment, we need to ensure physical indices match for correct code gen.
-    if (!ProveFragmentContains(candidate, fragment, vars, indice_map_[buffer],
-                               analyzer_, /*check_forward_index=*/true)) {
+    std::ostringstream oss;
+    bool success = true;
+    if (access.is_read &&
+        !ProveFragmentContains(candidate, fragment, vars, access.indices,
+                               analyzer_, check_forward_index)) {
+      if (throw_on_error) {
+        oss << "Layout infer conflict between " << buffer << " and "
+            << source_buffer << " in T.Parallel loop:" << '\n'
+            << "    loop " << candidate->DebugOutput() << '\n'
+            << "    fragment " << fragment->DebugOutput() << '\n';
+      }
+      success = false;
+    }
+    if (access.is_write &&
+        !ProveFragmentContains(fragment, candidate, access.indices, vars,
+                               analyzer_, check_forward_index)) {
+      if (throw_on_error) {
+        oss << "Layout infer conflict between " << buffer << " and "
+            << source_buffer << " in T.Parallel loop:" << '\n'
+            << "    loop " << candidate->DebugOutput() << '\n'
+            << "    fragment " << fragment->DebugOutput() << '\n';
+      }
+      success = false;
+    }
+    if (!success) {
+      if (throw_on_error) {
+        throw LayoutConflictException(oss.str());
+      }
       return false;
     }
   }
@@ -670,14 +611,15 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
              << buffer << "` of layout " << src_layout->DebugOutput() << '\n';
 
   Fragment result;
+
   if (IsCommonAccessIndice(buffer)) {
     result = src_layout;
   } else {
-    Var rep;
+    Var rep("_rep");
     auto rep_iter =
         IterVar({0, src_layout->ReplicateExtent()}, rep, IterVarType::kDataPar);
     PrimExpr loop_var_to_thread =
-        src_layout->ForwardThread(indice_map_[buffer], rep);
+        src_layout->ForwardThread(GetAccessInfo(buffer).indices, rep);
     loop_var_to_thread = analyzer_.Simplify(loop_var_to_thread);
     PostOrderVisit(loop_var_to_thread, [&](const ObjectRef &objref) {
       if (auto opt_var = objref.as<Var>();
@@ -706,6 +648,15 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
   }
   DLOG(INFO) << "[compute_loop_layout_from_buffer] ... and get "
              << result->DebugOutput() << '\n';
+  // Lei: This is a tradeoff, disable it for now.
+  // // Try DeReplicate first to reduce replication if possible.
+  // Fragment dereplicated_layout = candidate_from_buffer->DeReplicate();
+  // if (ValidateCandidateAgainstFragments(
+  //         dereplicated_layout, T, /*throw_on_error=*/false,
+  //         /*check_forward_index=*/false,
+  //         /*source_buffer=*/read_source_buffer)) {
+  //   candidate_from_buffer = dereplicated_layout;
+  // }
   return result;
 }
 
@@ -714,7 +665,8 @@ Fragment ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &T) const {
   // As the pass will do post processing to the layout
   auto maybe_remapped_root_ =
       IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
-  int vector_size = GetVectorizeSize(maybe_remapped_root_, T.analyzer);
+  int vector_size =
+      GetVectorizeSize(maybe_remapped_root_, T.analyzer, T.layout_map);
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;

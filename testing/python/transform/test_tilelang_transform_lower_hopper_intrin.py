@@ -28,18 +28,35 @@ def test_lower_hopper_intrin_barrier():
     def before():
         with T.Kernel(8):
             _ = T.launch_thread("threadIdx.x", 128)
-            T.create_list_of_mbarrier(128, 128, 128, 128)
+            T.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), 128, 128, 128, 128)
 
     @T.prim_func
     def after():
         with T.Kernel(8):
-            v_1 = T.launch_thread("threadIdx.x", 128)
-            T.evaluate(tir.Call("handle", "tir.create_barriers", [4]))
-            with T.If(v_1 == 0), T.Then():
-                T.evaluate(tir.Call("handle", "tir.ptx_init_barrier_thread_count", [T.get_mbarrier(0), 128]))
-                T.evaluate(tir.Call("handle", "tir.ptx_init_barrier_thread_count", [T.get_mbarrier(1), 128]))
-                T.evaluate(tir.Call("handle", "tir.ptx_init_barrier_thread_count", [T.get_mbarrier(2), 128]))
-                T.evaluate(tir.Call("handle", "tir.ptx_init_barrier_thread_count", [T.get_mbarrier(3), 128]))
+            _ = T.launch_thread("threadIdx.x", 128)
+            mbarrier = T.alloc_barrier([128, 128, 128, 128])  # noqa: F841
+            with T.If(tir.Call("bool", tir.op.Op.get("tl.tl_shuffle_elect"), [0])), T.Then():
+                T.evaluate(
+                    tir.Call(
+                        "handle", "tir.ptx_init_barrier_thread_count", [T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), 0), 128]
+                    )
+                )
+                T.evaluate(
+                    tir.Call(
+                        "handle", "tir.ptx_init_barrier_thread_count", [T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), 1), 128]
+                    )
+                )
+                T.evaluate(
+                    tir.Call(
+                        "handle", "tir.ptx_init_barrier_thread_count", [T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), 2), 128]
+                    )
+                )
+                T.evaluate(
+                    tir.Call(
+                        "handle", "tir.ptx_init_barrier_thread_count", [T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), 3), 128]
+                    )
+                )
+            T.evaluate(tir.Call("handle", tir.op.Op.get("tl.ptx_fence_barrier_init"), []))
             T.evaluate(tir.Call("handle", "tir.tvm_storage_sync", ["shared"]))
 
     _check(before, after)

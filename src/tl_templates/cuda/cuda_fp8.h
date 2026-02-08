@@ -312,3 +312,58 @@ __tl_cvt_fp8x2_to_float2(const __nv_fp8x2_storage_t x,
   result.y = (float)tmp.y;
   return result;
 }
+
+// ============================================================================
+// FP8 E8M0 Related Conversions
+// ============================================================================
+#if TL_HAS_FP8_E8M0
+
+// fp8_e8m0 -> bfloat16
+TL_DEVICE __nv_bfloat16
+__tl_cvt_e8m0_to_bfloat16(const __nv_fp8_storage_t src) {
+  __nv_bfloat16_raw raw = __nv_cvt_e8m0_to_bf16raw(src);
+  return *reinterpret_cast<const __nv_bfloat16 *>(&raw);
+}
+
+// fp8_e8m0x2 -> bfloat16x2
+TL_DEVICE __nv_bfloat162
+__tl_cvt_e8m0x2_to_bfloat162(const __nv_fp8x2_storage_t src) {
+  __nv_bfloat162_raw raw = __nv_cvt_e8m0x2_to_bf162raw(src);
+  return *reinterpret_cast<const __nv_bfloat162 *>(&raw);
+}
+
+// bfloat16 -> fp8_e8m0
+TL_DEVICE
+__nv_fp8_storage_t __tl_cvt_bfloat16_to_e8m0(const __nv_bfloat16 src) {
+  __nv_bfloat16_raw raw = *reinterpret_cast<const __nv_bfloat16_raw *>(&src);
+  return __nv_cvt_bfloat16raw_to_e8m0(raw, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// bfloat162 -> fp8_e8m0x2
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_bfloat162_to_e8m0x2(const __nv_bfloat162 src) {
+  __nv_bfloat162_raw raw = *reinterpret_cast<const __nv_bfloat162_raw *>(&src);
+  return __nv_cvt_bfloat162raw_to_e8m0x2(raw, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// float -> fp8_e8m0
+TL_DEVICE __nv_fp8_storage_t __tl_cvt_float_to_e8m0(const float src) {
+  return __nv_cvt_float_to_e8m0(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// float2 -> fp8_e8m0x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_float2_to_e8m0x2(const float2 src) {
+  return __nv_cvt_float2_to_e8m0x2(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// double -> fp8_e8m0
+TL_DEVICE __nv_fp8_storage_t __tl_cvt_double_to_e8m0(const double src) {
+  return __nv_cvt_double_to_e8m0(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+// double2 -> fp8_e8m0x2
+TL_DEVICE __nv_fp8x2_storage_t __tl_cvt_double2_to_e8m0x2(const double2 src) {
+  return __nv_cvt_double2_to_e8m0x2(src, __NV_SATFINITE, cudaRoundPosInf);
+}
+
+#endif

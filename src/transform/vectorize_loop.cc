@@ -37,8 +37,11 @@
 #include <utility>
 #include <vector>
 
+#include "../op/builtin.h"
+#include "../target/utils.h"
 #include "arith/scalable_expression.h"
 #include "tir/analysis/check_contains.h"
+#include "tvm/ffi/cast.h"
 
 namespace tvm {
 namespace tl {
@@ -116,6 +119,52 @@ inline PrimExpr BroadcastTo(PrimExpr e, int lanes, bool is_scalable) {
       << " is_scalable=" << e.dtype().is_scalable_vector() << " to " << lanes;
 
   return Broadcast(e, CreateNewLanes(is_scalable, lanes));
+}
+
+/*!
+ * \brief Extract BufferLoad from an expression that may be wrapped in
+ * address_of.
+ */
+inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
+  if (const auto *load = expr.as<BufferLoadNode>()) {
+    return tvm::ffi::GetRef<BufferLoad>(load);
+  }
+  if (const auto *call = expr.as<CallNode>()) {
+    if (call->op.same_as(builtin::address_of()) && !call->args.empty()) {
+      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+        return tvm::ffi::GetRef<BufferLoad>(load);
+      }
+    }
+  }
+  return Optional<BufferLoad>();
+}
+
+/*!
+ * \brief Get the vectorized atomic add op based on vector size.
+ */
+inline Op GetVectorizedAtomicOp(int vector_size) {
+  switch (vector_size) {
+  case 4:
+    return atomic_addx4_elem_op();
+  case 2:
+    return atomic_addx2_elem_op();
+  default:
+    return atomic_add_elem_op();
+  }
+}
+
+/*!
+ * \brief Get the max vector size supported by the given dtype for atomic ops.
+ */
+inline int GetMaxAtomicVectorSize(DataType dtype, Target target) {
+  if (dtype.is_float16() || dtype.is_bfloat16()) {
+    return 2;
+  }
+  if (dtype.is_float() && dtype.bits() == 32 &&
+      TargetHasSMVersionGE(target, 90)) {
+    return 4;
+  }
+  return 1;
 }
 
 // Rewrite vectorized allocation access
@@ -421,6 +470,7 @@ public:
       return std::move(var);
     }
   }
+
   // IfThenElse expr
   PrimExpr MutateIfThenElseExpr_(const CallNode *op) {
     PrimExpr cond = this->VisitExpr(op->args[0]);
@@ -449,6 +499,34 @@ public:
       }
     }
   }
+
+  // Address of: remove vectorized var from indices to get base address
+  // e.g., T.address_of(buf[base + vec]) -> T.address_of(buf[base])
+  PrimExpr MutateAddressOfCall_(const CallNode *op) {
+    ICHECK(op->op.same_as(builtin::address_of()));
+    ICHECK_EQ(op->args.size(), 1);
+
+    auto buffer_load = op->args[0].as<BufferLoadNode>();
+    if (!buffer_load) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    // Remove the vectorized var from indices by substituting var_ with 0
+    Array<PrimExpr> new_indices;
+    for (const auto &index : buffer_load->indices) {
+      PrimExpr new_index = Substitute(index, {{var_, IntImm(var_->dtype, 0)}});
+      new_indices.push_back(analyzer_.Simplify(new_index));
+    }
+
+    BufferLoad new_load = GetRef<BufferLoad>(buffer_load);
+    if (!new_indices.same_as(buffer_load->indices)) {
+      auto writer = new_load.CopyOnWrite();
+      writer->indices = new_indices;
+    }
+
+    return Call(op->dtype, op->op, {new_load});
+  }
+
   // Reinterpret expr
   PrimExpr MutateReinterpretExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::reinterpret()));
@@ -465,6 +543,46 @@ public:
       }
     }
   }
+  // Atomic add vectorization
+  PrimExpr MutateAtomicAddExpr_(const CallNode *op) {
+    ICHECK(op->op.same_as(atomic_add_elem_op()));
+
+    // Must have at least 2 args (dst_ptr and src)
+    if (op->args.size() < 2) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    // Get the vector size from var_lanes_
+    auto lanes_ptr = as_const_int(var_lanes_);
+    if (!lanes_ptr || *lanes_ptr <= 1) {
+      // Not in vectorized context or vector size is 1
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+    int vector_size = static_cast<int>(*lanes_ptr);
+
+    auto dst = VisitExpr(op->args[0]);
+    auto src = VisitExpr(op->args[1]);
+
+    // If src is not Ramp/Broadcasted, it must be a scalar or something.
+    // Broadcast to vector size if needed
+    if (src.same_as(op->args[1])) {
+      src = BroadcastTo(src, vector_size, src.dtype().is_scalable_vector());
+    }
+
+    // Check if dtype supports this vector size
+    auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
+    Target target = Target::Current(false);
+    int max_vec_size =
+        GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer->dtype, target);
+    if (vector_size > max_vec_size) {
+      // Vector size not supported for this dtype, cannot vectorize
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    // Return the vectorized atomic op
+    return Call(op->dtype, GetVectorizedAtomicOp(vector_size), {dst, src});
+  }
+
   // Call
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::if_then_else())) {
@@ -486,6 +604,11 @@ public:
       return Call(op->dtype.with_lanes(lane), op->op, new_args);
     } else if (op->op.same_as(builtin::reinterpret())) {
       return MutateReinterpretExpr_(op);
+    } else if (op->op.same_as(atomic_add_elem_op())) {
+      // Handle vectorization of atomic_add_elem_op
+      return MutateAtomicAddExpr_(op);
+    } else if (op->op.same_as(builtin::address_of())) {
+      return MutateAddressOfCall_(op);
     }
     auto optional_op = op->op.as<Op>();
     bool vectorizable = optional_op &&
@@ -518,6 +641,7 @@ public:
       }
     }
   }
+
   // BufferLoad
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = tvm::ffi::GetRef<BufferLoad>(op);
@@ -535,6 +659,7 @@ public:
 
     return std::move(load);
   }
+
   // Let
   PrimExpr VisitExpr_(const LetNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
@@ -566,6 +691,7 @@ public:
       }
     }
   }
+
   // BufferStore
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = tvm::ffi::GetRef<BufferStore>(op);
@@ -622,6 +748,7 @@ public:
 
     return std::move(store);
   }
+
   // For
   Stmt VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kVectorized) {
@@ -641,6 +768,7 @@ public:
                  op->thread_binding, op->annotations);
     }
   }
+
   // IfThenElse
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     ICHECK(!op->condition.dtype().is_scalable_or_fixed_length_vector());
@@ -660,10 +788,12 @@ public:
       return IfThenElse(condition, then_case, else_case);
     }
   }
+
   // While
   Stmt VisitStmt_(const WhileNode *op) final {
     LOG(FATAL) << "A while loop inside a vectorized loop not supported.";
   }
+
   // LetStmt
   Stmt VisitStmt_(const LetStmtNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);

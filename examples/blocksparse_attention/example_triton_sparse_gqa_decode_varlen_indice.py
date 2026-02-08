@@ -329,21 +329,15 @@ def main(batch=64, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=1
     max_selected_blocks = int(math.ceil(max_cache_seqlen * (1 - sparse_ratio) / block_size))
     print("max_selected_blocks: ", max_selected_blocks)
     dtype = torch.float16
-    block_H = 64
 
     Q = torch.randn((batch, heads, dim), dtype=dtype, device="cuda")
     K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device="cuda")
     V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device="cuda")
     cache_seqlens = torch.randint(1, max_cache_seqlen, (batch,), dtype=torch.int32, device="cuda")
-    # cache_seqlens = torch.full((batch,), max_cache_seqlen, dtype=torch.int32, device='cuda')
     # Ensure at least one element equals cache_seqlen
     random_index = torch.randint(0, batch, (1,), device="cuda").item()  # Select a random index
     cache_seqlens[random_index] = max_cache_seqlen  # Assign cache_seqlen to ensure at least one occurrence
-
-    print("cache_seqlens: ", cache_seqlens)
-
     max_valid_num_blocks = torch.ceil(cache_seqlens / block_size).int()
-    print("max_valid_num_blocks: ", max_valid_num_blocks)
     # Initialize block_indices with -1 (for padding blocks)
     block_indices = torch.full((batch, heads_kv, max_selected_blocks), -1, dtype=torch.int32, device="cuda")
 
@@ -357,13 +351,7 @@ def main(batch=64, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=1
 
     # Sort indices within each batch-group for consistency
     block_indices, _ = block_indices.sort(dim=-1, descending=True)
-    # print("block_indices: ", block_indices)
-    actual_num_blocks = torch.sum(block_indices != -1, dim=-1).to(torch.int32)[:, 0]
-    print("actual_num_blocks: ", actual_num_blocks)
-    # print(block_indices.shape, actual_num_blocks.shape)
-
     max_num_blocks = torch.max(max_valid_num_blocks).item()
-    print("max_num_blocks: ", max_num_blocks)
 
     ref = ref_program_torch(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, max_num_blocks, block_size)
 
@@ -402,6 +390,7 @@ def main(batch=64, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=1
     avg_time = elapsed_time / 1000
     avg_flops = total_flops / avg_time
     print(f"Average time: {avg_time:.6f} seconds")
+    print(f"Average FLOPS: {avg_flops:.2f} GFLOPS")
 
     # Measure performance of reference implementation
     import flash_attn  # noqa: F401
@@ -415,7 +404,7 @@ def main(batch=64, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=1
     avg_time_ref = elapsed_time_ref / 1000
     avg_flops_ref = total_flops / avg_time_ref
     print(f"Average time of ref: {avg_time_ref:.6f} seconds")
-
+    print(f"Average FLOPS of ref: {avg_flops_ref:.2f} GFLOPS")
     print(f"Speedup: {avg_time_ref / avg_time:.2f}x")
 
 

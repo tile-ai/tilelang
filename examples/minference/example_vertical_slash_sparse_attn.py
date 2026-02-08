@@ -135,7 +135,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                 column_count = T.alloc_var(dtype=int_dtype)
                 column_index = T.alloc_shared([vertical_size_round], int_dtype, scope="shared")
 
-                T.create_list_of_mbarrier([128] * 9)
+                mbars = T.alloc_barrier([128] * 9)
 
                 block_count = BlockCount[bz, by, bx]
                 column_count = ColumnCount[bz, by, bx]
@@ -153,29 +153,29 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                 if tid >= 128:
                     T.annotate_producer_reg_dealloc()
                     T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
-                    T.mbarrier_arrive(mbarrier=8)
+                    T.mbarrier_arrive(mbarrier=mbars[8])
                     for bi in T.serial(block_count):
                         k = block_offset[bi]
-                        T.mbarrier_wait_parity(mbarrier=bi % 2 + 4, parity=(((bi & 3) >> 1) ^ 1))
+                        T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 4], parity=(((bi & 3) >> 1) ^ 1))
                         T.copy(K[bz, by, k : k + block_N, :], K_shared[bi % 2, :, :])
-                        T.mbarrier_arrive(mbarrier=bi % 2)
-                        T.mbarrier_wait_parity(mbarrier=bi % 2 + 6, parity=(((bi & 3) >> 1) ^ 1))
+                        T.mbarrier_arrive(mbarrier=mbars[bi % 2])
+                        T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 6], parity=(((bi & 3) >> 1) ^ 1))
                         T.copy(V[bz, by, k : k + block_N, :], V_shared[bi % 2, :, :])
-                        T.mbarrier_arrive(mbarrier=bi % 2 + 2)
+                        T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 2])
                 else:
                     T.annotate_consumer_reg_alloc()
                     T.fill(acc_o, 0)
                     T.fill(logsum, 0)
                     T.fill(scores_max, -T.infinity(accum_dtype))
-                    T.mbarrier_wait_parity(mbarrier=8, parity=0)
+                    T.mbarrier_wait_parity(mbarrier=mbars[8], parity=0)
                     for bi in T.serial(block_count):
                         k = block_offset[bi]
                         for i, j in T.Parallel(block_M, block_N):
                             acc_s[i, j] = T.if_then_else(bx * block_M + i >= k + j, 0, -T.infinity(acc_s.dtype))
 
-                        T.mbarrier_wait_parity(mbarrier=bi % 2, parity=((bi & 3) >> 1))
+                        T.mbarrier_wait_parity(mbarrier=mbars[bi % 2], parity=((bi & 3) >> 1))
                         T.gemm(Q_shared, K_shared[bi % 2, :, :], acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                        T.mbarrier_arrive(mbarrier=bi % 2 + 4)
+                        T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 4])
 
                         T.copy(scores_max, scores_max_prev)
 
@@ -191,10 +191,10 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                             acc_o[i, j] = acc_o[i, j] * scores_scale[i]
 
                         T.copy(acc_s, acc_s_cast)
-                        T.mbarrier_wait_parity(mbarrier=bi % 2 + 2, parity=((bi & 3) >> 1))
+                        T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 2], parity=((bi & 3) >> 1))
                         T.gemm(acc_s_cast, V_shared[bi % 2, :, :], acc_o, policy=T.GemmWarpPolicy.FullRow)
 
-                        T.mbarrier_arrive(mbarrier=bi % 2 + 6)
+                        T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 6])
 
                         T.reduce_sum(acc_s, scores_sum, dim=1)
 
@@ -560,21 +560,10 @@ def sum_all_diagonal_matrix(mat: torch.tensor):
     return sum_diags[:, :, 1:]
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser()
+def main(batch=1, heads=1, seq_len=4096, head_dim=64, vertical_size=1000, slash_size=200):
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = batch, heads, seq_len, head_dim
 
-    parser.add_argument("--batch", type=int, default=1)
-    parser.add_argument("--heads", type=int, default=1)
-    parser.add_argument("--seq_len", type=int, default=16384)
-    parser.add_argument("--head_dim", type=int, default=64)
-    parser.add_argument("--vertical_size", type=int, default=1000)
-    parser.add_argument("--slash_size", type=int, default=200)
-
-    args = parser.parse_args(argv)
-
-    BATCH, N_HEADS, SEQ_LEN, D_HEAD = args.batch, args.heads, args.seq_len, args.head_dim
-
-    vertical_size, slash_size = args.vertical_size, args.slash_size
+    vertical_size, slash_size = vertical_size, slash_size
 
     torch.manual_seed(0)
     q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
@@ -613,17 +602,8 @@ def main(argv=None):
     print(f"speedup: {triton_time / tilelang_time:.2f}x")
 
 
-def run_regression_perf(argv=None):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--batch", type=int, default=1)
-    parser.add_argument("--heads", type=int, default=1)
-    parser.add_argument("--seq_len", type=int, default=16384)
-    parser.add_argument("--head_dim", type=int, default=64)
-    parser.add_argument("--vertical_size", type=int, default=1000)
-    parser.add_argument("--slash_size", type=int, default=200)
-    args = parser.parse_args(argv)
-    BATCH, N_HEADS, SEQ_LEN, D_HEAD = args.batch, args.heads, args.seq_len, args.head_dim
-    vertical_size, slash_size = args.vertical_size, args.slash_size
+def run_regression_perf(batch=1, heads=1, seq_len=16384, head_dim=64, vertical_size=1000, slash_size=200):
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = batch, heads, seq_len, head_dim
     torch.manual_seed(0)
     q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
     k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
@@ -687,4 +667,19 @@ def run_regression_perf(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--heads", type=int, default=1)
+    parser.add_argument("--seq_len", type=int, default=16384)
+    parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument("--vertical_size", type=int, default=1000)
+    parser.add_argument("--slash_size", type=int, default=200)
+    args = parser.parse_args()
+    main(
+        batch=args.batch,
+        heads=args.heads,
+        seq_len=args.seq_len,
+        head_dim=args.head_dim,
+        vertical_size=args.vertical_size,
+        slash_size=args.slash_size,
+    )

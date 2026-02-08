@@ -225,10 +225,9 @@ class JITKernel(Generic[_P, _T]):
         target_host = self.target_host
 
         execution_backend = self.execution_backend
-        pass_configs = self.pass_configs or {}
+        pass_configs = dict(self.pass_configs) if self.pass_configs else {}
 
         compile_flags = self.compile_flags
-
         if compile_flags is not None:
             compile_flags_cfg = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
             pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = (
@@ -637,8 +636,17 @@ class JITKernel(Generic[_P, _T]):
         # rt_module: use export_library to export
         # rt_params: use cloudpickle to serialize
 
-        # Export the compiled kernel function to a shared library file.
-        self.rt_module.export_library(kernel_file)
+        if self.artifact is None or self.artifact.rt_mod is None:
+            raise AttributeError(
+                'Runtime module is not available. Please compile the kernel with `execution_backend="tvm_ffi"` before exporting.'
+            )
+
+        dir_path = os.path.dirname(kernel_file)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+
+        self.artifact.rt_mod.export_library(kernel_file)
+        logger.info(f"Kernel library exported to {os.path.abspath(kernel_file)}")
 
     def _get_ptx(self, verbose: bool | None = None) -> str:
         """

@@ -1,4 +1,5 @@
 from .gemm_base import GemmBase
+from .inst import GemmInst
 from tilelang.layout import make_tcgen05mma_swizzled_layout
 from tilelang.intrinsics.tcgen05_macro_generator import (
     TensorCoreIntrinEmitter,
@@ -7,6 +8,9 @@ from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from tvm import tir
 from tvm.target import Target
+from tvm.ir import Range
+from tvm.arith import Analyzer
+
 
 _FLOAT8_DTYPES = {
     "float8_e4m3",
@@ -20,7 +24,7 @@ _FLOAT8_DTYPES = {
 
 class GemmTCGEN5(GemmBase):
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, True)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -51,8 +55,9 @@ class GemmTCGEN5(GemmBase):
         # No special swizzle requirement; rely on existing layout.
         return {}
 
-    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, True)
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+        thread_nums = thread_bounds.extent
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -98,7 +103,7 @@ class GemmTCGEN5(GemmBase):
             raise ValueError("TCGEN5MMA expects 2D coordinates for C buffer access")
 
         accum_dtype = str(self.C.dtype)
-        if accum_dtype not in [str(T.float32), str(T.float16)]:
+        if accum_dtype not in [str(T.float32), str(T.float16), str(T.int32)]:
             raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA: {accum_dtype}")
 
         A_shared = self.ARegion
@@ -106,9 +111,25 @@ class GemmTCGEN5(GemmBase):
         C_local = self.C
         clear_accum = self.clear_accum
 
+        # Since TCGEN5MMA atoms provided by CUTLASS always have an internal
+        # `elect_one_sync()`, we check if we are calling it using full warps
+        analyzer = Analyzer()
+        warp_size = 32
+        assert analyzer.can_prove(thread_bounds.min % warp_size == 0 and thread_bounds.extent % warp_size == 0), (
+            "TCGEN5MMA requires thread bounds to be multiples of warp size (32) and aligned to warps."
+        )
+
         @T.prim_func
-        def _gemm_ss() -> None:
-            if thread_var // 32 == 0:
+        def _gemm_ss_cond() -> None:
+            if thread_var // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
-        return _Simplify(_gemm_ss, inline_let=True)
+        @T.prim_func
+        def _gemm_ss() -> None:
+            mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+
+        return (
+            _Simplify(_gemm_ss, inline_let=True)
+            if analyzer.can_prove(thread_bounds.extent == warp_size)
+            else _Simplify(_gemm_ss_cond, inline_let=True)
+        )

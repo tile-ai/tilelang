@@ -26,6 +26,11 @@ struct LetWrapper {
   PrimExpr value;
 };
 
+struct IfWrapper {
+  PrimExpr condition;
+  Span span;
+};
+
 /*!
  * \brief Collector to find all buffers used in a statement.
  *
@@ -303,16 +308,20 @@ public:
    * \param pipeline_loop The original loop to be software pipelined.
    * \param pipeline_info The pipeline annotation information.
    * \param loop_var_let_wrappers Let wrappers that depend on the loop var.
+   * \param loop_var_if_wrappers If wrappers with conditions that depend on
+   * the loop var.
    */
   PipelineRewriter(Map<Var, Buffer> buffer_data_to_buffer,
                    const Array<Buffer> &pipeline_allocs,
                    const Array<Buffer> &local_allocs, const For &pipeline_loop,
                    const PipelineInfo &pipeline_info,
-                   const std::vector<LetWrapper> &loop_var_let_wrappers)
+                   const std::vector<LetWrapper> &loop_var_let_wrappers,
+                   const std::vector<IfWrapper> &loop_var_if_wrappers)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), local_allocs_(local_allocs),
         pipeline_loop_(pipeline_loop), pipeline_info_(pipeline_info),
-        loop_var_let_wrappers_(loop_var_let_wrappers) {}
+        loop_var_let_wrappers_(loop_var_let_wrappers),
+        loop_var_if_wrappers_(loop_var_if_wrappers) {}
 
   Stmt BuildPipeline() {
     // Step 1: Analyze accesses to the buffers in the pipeline and compute the
@@ -838,13 +847,40 @@ private:
       // If there were Let-wrappers outside the original pipeline body that
       // depended on the pipeline loop var, push them into each rewritten
       // block with the correct per-block substitution.
+      // We iterate in reverse order so that earlier definitions scope over
+      // later ones. For example, if we have:
+      //   id = ids[i]       # depends on loop var
+      //   id2 = ids2[id]    # depends on id
+      // We want to produce:
+      //   LetStmt(id, ids[...],
+      //     LetStmt(id2, ids2[id],
+      //       body))
+      // So that id2's definition can reference id.
       if (!loop_var_let_wrappers_.empty()) {
         BlockNode *n = new_block.CopyOnWrite();
         Stmt inner = n->body;
-        for (const auto &lw : loop_var_let_wrappers_) {
+        for (auto it = loop_var_let_wrappers_.rbegin();
+             it != loop_var_let_wrappers_.rend(); ++it) {
+          const auto &lw = *it;
           PrimExpr substituted = Substitute(
               lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
           inner = LetStmt(lw.var, substituted, inner);
+        }
+        n->body = inner;
+      }
+
+      // Similarly, handle If-wrappers whose conditions depend on the
+      // pipeline loop var.
+      if (!loop_var_if_wrappers_.empty()) {
+        BlockNode *n = new_block.CopyOnWrite();
+        Stmt inner = n->body;
+        for (auto it = loop_var_if_wrappers_.rbegin();
+             it != loop_var_if_wrappers_.rend(); ++it) {
+          const auto &iw = *it;
+          PrimExpr substituted_condition =
+              Substitute(iw.condition,
+                         {{pipeline_loop_->loop_var, normalized_access_index}});
+          inner = IfThenElse(substituted_condition, inner, Stmt(), iw.span);
         }
         n->body = inner;
       }
@@ -913,6 +949,7 @@ private:
   Array<Block> ordered_stmts_;
   std::map<int, AsyncStateGlobal> async_states;
   std::vector<LetWrapper> loop_var_let_wrappers_;
+  std::vector<IfWrapper> loop_var_if_wrappers_;
 };
 
 /*!
@@ -1044,6 +1081,7 @@ private:
     const SeqStmtNode *pipeline_body_seq = nullptr;
     std::vector<std::function<Stmt(Stmt)>> rewrap_fns;
     std::vector<LetWrapper> loop_var_let_wrappers;
+    std::vector<IfWrapper> loop_var_if_wrappers;
     auto append_attr_wrapper = [&rewrap_fns](const AttrStmtNode *attr) {
       Any node = attr->node;
       String attr_key = attr->attr_key;
@@ -1066,24 +1104,55 @@ private:
           ICHECK(!if_then_else->else_case.defined())
               << "InjectSoftwarePipeline: Can't handle the body of the loop "
                  "because the IfThenElse node has an else branch";
-          PrimExpr condition = if_then_else->condition;
-          Span span = if_then_else->span;
-          rewrap_fns.emplace_back(
-              [condition = std::move(condition), span](Stmt body) -> Stmt {
-                return IfThenElse(condition, body, Stmt(), span);
+
+          // Check if the condition depends on the loop variable or any
+          // transitively dependent variables (similar to LetStmt handling)
+          std::unordered_set<const VarNode *> dependent_vars;
+          dependent_vars.insert(op->loop_var.get());
+          for (const auto &lw : loop_var_let_wrappers) {
+            dependent_vars.insert(lw.var.get());
+          }
+          bool condition_depends_on_loop = UsesVar(
+              if_then_else->condition, [&dependent_vars](const VarNode *vn) {
+                return dependent_vars.count(vn) > 0;
               });
+
+          if (condition_depends_on_loop) {
+            // If condition depends on loop variable, we need to push it inside
+            // each pipeline stage with proper substitution
+            loop_var_if_wrappers.push_back(
+                {if_then_else->condition, if_then_else->span});
+          } else {
+            // Otherwise, safe to wrap outside the pipeline
+            PrimExpr condition = if_then_else->condition;
+            Span span = if_then_else->span;
+            rewrap_fns.emplace_back(
+                [condition = std::move(condition), span](Stmt body) -> Stmt {
+                  return IfThenElse(condition, body, Stmt(), span);
+                });
+          }
           current = if_then_else->then_case;
           continue;
         }
         if (const auto *let_stmt = current.as<LetStmtNode>()) {
-          // If this Let value uses the pipeline loop var, record it and push
-          // inside each rewritten block later so the loop var can be
-          // substituted with the correct per-iteration index. Otherwise, keep
-          // it as a normal wrapper.
-          bool uses_loop_var = UsesVar(
-              let_stmt->value,
-              [v = op->loop_var.get()](const VarNode *vn) { return vn == v; });
-          if (uses_loop_var) {
+          // If this Let value uses the pipeline loop var OR any variable
+          // defined by a previously recorded loop-var-dependent LetStmt,
+          // record it and push inside each rewritten block later so the
+          // loop var can be substituted with the correct per-iteration index.
+          // Otherwise, keep it as a normal wrapper.
+          // This handles transitive dependencies like:
+          //   id = ids[i]      # depends on loop var
+          //   id2 = ids2[id]   # depends on id, so transitively on loop var
+          std::unordered_set<const VarNode *> dependent_vars;
+          dependent_vars.insert(op->loop_var.get());
+          for (const auto &lw : loop_var_let_wrappers) {
+            dependent_vars.insert(lw.var.get());
+          }
+          bool depends_on_loop =
+              UsesVar(let_stmt->value, [&dependent_vars](const VarNode *vn) {
+                return dependent_vars.count(vn) > 0;
+              });
+          if (depends_on_loop) {
             loop_var_let_wrappers.push_back({let_stmt->var, let_stmt->value});
           } else {
             Var var = let_stmt->var;
@@ -1156,19 +1225,6 @@ private:
       }
     }
 
-    // Check if any external buffer (from outer blocks) is already used in
-    // another pipeline. This would cause conflicts in multi-versioning.
-    for (const auto &buffer : pipeline_allocs) {
-      // Only check external buffers (not locally allocated in this pipeline)
-      if (local_allocs_set.count(buffer) == 0) {
-        CHECK(buffers_used_in_pipeline_.count(buffer) == 0)
-            << "Buffer '" << buffer->name
-            << "' is used in multiple software pipeline loops. "
-            << "This is not supported because multi-versioning would conflict.";
-        buffers_used_in_pipeline_.insert(buffer);
-      }
-    }
-
     auto pipeline_stages = Downcast<Array<Integer>>(
         op->annotations.at(tir::attr::software_pipeline_stage));
     auto pipeline_orders = Downcast<Array<Integer>>(
@@ -1227,7 +1283,8 @@ private:
 
     PipelineRewriter rewriter(buffer_data_to_buffer_, pipeline_allocs,
                               local_allocs, tvm::ffi::GetRef<For>(op),
-                              pipeline_info, loop_var_let_wrappers);
+                              pipeline_info, loop_var_let_wrappers,
+                              loop_var_if_wrappers);
     Stmt pipeline = rewriter.BuildPipeline();
 
     // Store the buffer remapping for updating outer block alloc_buffers

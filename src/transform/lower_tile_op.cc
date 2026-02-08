@@ -54,7 +54,6 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   }
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
-
   if (ptr_type->storage_scope == "shared" ||
       ptr_type->storage_scope == "shared.dyn") {
     int replicate_extent = 1;
@@ -67,6 +66,8 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
     }
     for (size_t i = 0; i < layout_shape.size(); i++) {
       auto shape = layout_shape[i].as<IntImmNode>();
+      ICHECK(shape) << "Layout output shape must be constant integer, but got: "
+                    << layout_shape[i];
       layout_extent *= shape->value;
     }
     replicate_extent = buffer_extent / layout_extent;
@@ -201,7 +202,13 @@ public:
     arith::Analyzer analyzer;
     LowerTileOpPass substituter(&analyzer);
     // Trace the buffer map for tvm_access_ptr
-    substituter.buffer_map_.insert(f->buffer_map.begin(), f->buffer_map.end());
+    // Insert both handle var and data var as keys for lookup
+    for (const auto &[param_var, buffer] : f->buffer_map) {
+      substituter.buffer_map_.insert(
+          {param_var, buffer}); // handle key (e.g., dQ_handle)
+      substituter.buffer_map_.insert(
+          {buffer->data, buffer}); // data key (e.g., dQ)
+    }
     for (const auto &[_, buffer] : f->buffer_map) {
       substituter.buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
@@ -298,7 +305,91 @@ private:
         << "Invalid access ptr for permuted layout: " << access_ptr;
     auto access_ptr_call = Downcast<Call>(access_ptr);
     if (access_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
-      LOG(FATAL) << "Transformation for tvm_access_ptr is not implemented yet";
+      // tvm_access_ptr format: (dtype, data, offset, extent, rw_mask)
+      auto buffer_var = Downcast<Var>(access_ptr_call->args[1]);
+
+      // Find original buffer from buffer_map_ using buffer_var
+      auto it = buffer_map_.find(buffer_var);
+      if (it == buffer_map_.end()) {
+        // If not found, buffer_var might be a new var after remap
+        // Do reverse lookup in var_remap_
+        for (const auto &[old_var, new_var] : var_remap_) {
+          if (new_var.same_as(buffer_var)) {
+            it = buffer_map_.find(old_var);
+            break;
+          }
+        }
+      }
+
+      if (it == buffer_map_.end()) {
+        return result; // Buffer not found, no transformation needed
+      }
+
+      Buffer original_buffer = it->second;
+
+      // Check if this buffer has a layout
+      if (!layout_map_.count(original_buffer)) {
+        return result; // No layout, no transformation needed
+      }
+
+      Layout layout = layout_map_[original_buffer];
+      Buffer new_buffer = buffer_remap_[original_buffer];
+
+      // In TMA context, swizzle is encoded in TMA descriptor parameters
+      // rather than in memory indices, so we only update buffer data
+      // without recomputing indices.
+      if (in_tma_context_) {
+        Array<PrimExpr> new_args = access_ptr_call->args;
+        new_args.Set(1, new_buffer->data); // Only replace data var
+        layout_remap_.Set(new_buffer, layout);
+        result.rewritten = true;
+        result.expr =
+            Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
+                 access_ptr_call->annotations, access_ptr_call->span);
+        return result;
+      }
+
+      // Get the offset from tvm_access_ptr args[2]
+      PrimExpr elem_offset = access_ptr_call->args[2];
+      if (offset.defined()) {
+        elem_offset = elem_offset + offset.value();
+      }
+      // Get original and new buffer shapes
+      Array<PrimExpr> old_shape = original_buffer->shape;
+      Array<PrimExpr> new_shape = new_buffer->shape;
+      // Convert linear offset to multi-dimensional indices
+      Array<PrimExpr> multi_dim_indices;
+      PrimExpr remaining_offset = elem_offset;
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
+        multi_dim_indices.insert(
+            multi_dim_indices.begin(),
+            analyzer_->Simplify(floormod(remaining_offset, old_shape[i])));
+        remaining_offset = floordiv(remaining_offset, old_shape[i]);
+      }
+      // Apply layout transformation
+      auto forward_indices = layout->Forward(multi_dim_indices);
+      PrimExpr new_offset = 0;
+      PrimExpr stride_offset = 1;
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
+        new_offset += forward_indices[i] * stride_offset;
+        stride_offset *= new_shape[i];
+      }
+      // Verify that access is within a single tile
+      ICHECK(is_zero(analyzer_->Simplify(remaining_offset)))
+          << "Access offset exceeds tile bounds, remaining_offset: "
+          << remaining_offset;
+      new_offset = analyzer_->Simplify(new_offset);
+      Array<PrimExpr> new_indices;
+      layout_remap_.Set(new_buffer, layout);
+
+      // Build new tvm_access_ptr call with new buffer and offset
+      Array<PrimExpr> new_args = access_ptr_call->args;
+      new_args.Set(1, new_buffer->data); // Replace data var
+      new_args.Set(2, new_offset);       // Replace offset
+      result.rewritten = true;
+      result.expr = Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
+                         access_ptr_call->annotations, access_ptr_call->span);
+      return result;
     } else if (access_ptr_call->op.same_as(builtin::address_of())) {
       Optional<PrimExpr> resolved = ResolveBufferLoad(access_ptr_call->args[0]);
       ICHECK(resolved.defined())
@@ -321,6 +412,31 @@ private:
           << "but got indices size: " << indices.size()
           << " and shape size: " << old_shape.size();
 
+      Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
+      Optional<Layout> layout = FindLayout(remap_key);
+      if (!layout.defined() || !buffer_map_.count(remap_key->data)) {
+        return result;
+      }
+      auto new_buffer = buffer_remap_.count(remap_key)
+                            ? buffer_remap_[remap_key]
+                            : load->buffer;
+      auto new_shape = new_buffer->shape;
+
+      // In TMA context, swizzle is encoded in TMA descriptor parameters
+      // rather than in memory indices, so we only update buffer data
+      // without recomputing indices.
+      if (in_tma_context_) {
+        Array<PrimExpr> new_args = {BufferLoad(new_buffer, indices)};
+        if (buffer_remap_.count(remap_key)) {
+          layout_remap_.Set(new_buffer, layout.value());
+        }
+        result.rewritten = true;
+        result.expr =
+            Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
+                 access_ptr_call->annotations, access_ptr_call->span);
+        return result;
+      }
+
       PrimExpr elem_offset = 0;
       PrimExpr stride = 1;
 
@@ -331,16 +447,6 @@ private:
 
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
-
-      Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
-      Optional<Layout> layout = FindLayout(remap_key);
-      if (!layout.defined() || !buffer_map_.count(remap_key->data)) {
-        return result;
-      }
-      auto new_buffer = buffer_remap_.count(remap_key)
-                            ? buffer_remap_[remap_key]
-                            : load->buffer;
-      auto new_shape = new_buffer->shape;
 
       auto buffer_map_iter = buffer_map_.find(Downcast<Var>(remap_key->data));
 
@@ -441,55 +547,166 @@ private:
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
-    if ((!has_tma_) && (op->op.same_as(tl::tma_load()) ||
-                        op->op.same_as(tl::tma_load_im2col()) ||
-                        op->op.same_as(tl::tma_store()))) {
+    if (op->op.same_as(tl::tma_load()) ||
+        op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_store())) {
+      // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
-    }
-    Array<RelaxExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
-                                         builtin::mma_store()};
-
-    if (std::find(ptx_instructions.begin(), ptx_instructions.end(), op->op) ==
-        ptx_instructions.end()) {
+      in_tma_context_ = true;
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      in_tma_context_ = false;
       return call;
-    } else {
-      is_ptx_ = true;
     }
-    // Rewrite from/to shared or shared.dyn to/from local
-    auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
-    if (call->op.same_as(builtin::ptx_ldmatrix())) {
+
+    if (is_ptx_) {
+      return Downcast<Call>(op);
+    }
+
+    // Handle ptx_ldmatrix
+    if (op->op.same_as(builtin::ptx_ldmatrix())) {
+      is_ptx_ = true;
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      is_ptx_ = false;
       // form: T.ptx_ldmatrix(..., smem_ptr, smem_offset)
       // smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
       // or T.address_of(buffer, offset)
       PrimExpr access_ptr = call->args[5];
       PrimExpr smem_offset = call->args[6];
-      Call address_of_call = Downcast<Call>(access_ptr);
-      if (!address_of_call->op.same_as(builtin::address_of())) {
+      Call access_ptr_call = Downcast<Call>(access_ptr);
+
+      // Handle both tvm_access_ptr and address_of
+      if (access_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, smem_offset, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(5, new_access_ptr.expr);
+          new_call->args.Set(6, IntImm(smem_offset->dtype, 0));
+        }
+      } else if (access_ptr_call->op.same_as(builtin::address_of())) {
+        Optional<PrimExpr> resolved =
+            ResolveBufferLoad(access_ptr_call->args[0]);
+        ICHECK(resolved.defined())
+            << "Invalid address_of argument for permuted layout: "
+            << access_ptr_call->args[0];
+        PrimExpr load_expr = resolved.value();
+        if (!load_expr.same_as(access_ptr_call->args[0])) {
+          auto call_node = call.CopyOnWrite();
+          call_node->args.Set(
+              5, Call(access_ptr_call->dtype, access_ptr_call->op, {load_expr},
+                      access_ptr_call->annotations, access_ptr_call->span));
+          access_ptr_call = Downcast<Call>(call->args[5]);
+          access_ptr = call->args[5];
+        }
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, smem_offset, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(5, new_access_ptr.expr);
+          new_call->args.Set(6, IntImm(smem_offset->dtype, 0));
+        }
+      } else {
         LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;
       }
-      Optional<PrimExpr> resolved = ResolveBufferLoad(address_of_call->args[0]);
-      ICHECK(resolved.defined())
-          << "Invalid address_of argument for permuted layout: "
-          << address_of_call->args[0];
-      PrimExpr load_expr = resolved.value();
-      if (!load_expr.same_as(address_of_call->args[0])) {
-        auto call_node = call.CopyOnWrite();
-        call_node->args.Set(5, Call(address_of_call->dtype, address_of_call->op,
-                                    {load_expr}, address_of_call->annotations,
-                                    address_of_call->span));
-        address_of_call = Downcast<Call>(call->args[5]);
-        access_ptr = call->args[5];
+      return call;
+    }
+
+    if (op->op.same_as(tl::ptx_ldmatrix())) {
+      is_ptx_ = true;
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      is_ptx_ = false;
+      // form: T.ptx_ldmatrix(..., smem_ptr, smem_offset)
+      // smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
+      // or T.address_of(buffer, offset)
+      PrimExpr access_ptr = call->args[2];
+      Call access_ptr_call = Downcast<Call>(access_ptr);
+
+      // Handle both tvm_access_ptr and address_of
+      if (access_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(2, new_access_ptr.expr);
+        }
+      } else if (access_ptr_call->op.same_as(builtin::address_of())) {
+        Optional<PrimExpr> resolved =
+            ResolveBufferLoad(access_ptr_call->args[0]);
+        ICHECK(resolved.defined())
+            << "Invalid address_of argument for permuted layout: "
+            << access_ptr_call->args[0];
+        PrimExpr load_expr = resolved.value();
+        if (!load_expr.same_as(access_ptr_call->args[0])) {
+          auto call_node = call.CopyOnWrite();
+          call_node->args.Set(
+              2, Call(access_ptr_call->dtype, access_ptr_call->op, {load_expr},
+                      access_ptr_call->annotations, access_ptr_call->span));
+          access_ptr_call = Downcast<Call>(call->args[2]);
+          access_ptr = call->args[2];
+        }
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(2, new_access_ptr.expr);
+        }
+      } else {
+        LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;
       }
-      BufferLoad load = Downcast<BufferLoad>(address_of_call->args[0]);
-      auto new_access_ptr =
-          HandleAccessPtrAndOffset(access_ptr, smem_offset, call->dtype);
-      if (new_access_ptr.rewritten) {
-        auto new_call = call.CopyOnWrite();
-        new_call->args.Set(5, new_access_ptr.expr);
-        new_call->args.Set(6, IntImm(smem_offset->dtype, 0));
+      return call;
+    }
+
+    // Handle tl::ptx_stmatrix
+    if (op->op.same_as(tl::ptx_stmatrix())) {
+      is_ptx_ = true;
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      is_ptx_ = false;
+      // form: T.ptx_stmatrix(trans, num, smem_ptr, value0, value1, ...)
+      // smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
+      // or T.address_of(buffer, offset)
+      PrimExpr access_ptr = call->args[2];
+      Call access_ptr_call = Downcast<Call>(access_ptr);
+
+      // Handle both tvm_access_ptr and address_of
+      if (access_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(2, new_access_ptr.expr);
+        }
+      } else if (access_ptr_call->op.same_as(builtin::address_of())) {
+        Optional<PrimExpr> resolved =
+            ResolveBufferLoad(access_ptr_call->args[0]);
+        ICHECK(resolved.defined())
+            << "Invalid address_of argument for permuted layout: "
+            << access_ptr_call->args[0];
+        PrimExpr load_expr = resolved.value();
+        if (!load_expr.same_as(access_ptr_call->args[0])) {
+          auto call_node = call.CopyOnWrite();
+          call_node->args.Set(
+              2, Call(access_ptr_call->dtype, access_ptr_call->op, {load_expr},
+                      access_ptr_call->annotations, access_ptr_call->span));
+          access_ptr_call = Downcast<Call>(call->args[2]);
+          access_ptr = call->args[2];
+        }
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(2, new_access_ptr.expr);
+        }
+      } else {
+        LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;
       }
-    } else if (call->op.same_as(builtin::mma_store())) {
+      return call;
+    }
+
+    // Handle mma_store
+    if (op->op.same_as(builtin::mma_store())) {
+      is_ptx_ = true;
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      is_ptx_ = false;
       // because we will directly store result to Buffer instead of calling
       // mma_store now
       auto access_ptr = call->args[2];
@@ -499,10 +716,22 @@ private:
         auto new_call = call.CopyOnWrite();
         new_call->args.Set(2, new_access_ptr.expr);
       }
-    } else {
-      LOG(FATAL) << "Invalid call node: " << call;
+      return call;
     }
-    is_ptx_ = false;
+
+    // Handle standalone tvm_access_ptr calls with layout transformation
+    if (op->op.same_as(builtin::tvm_access_ptr())) {
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      auto new_access_ptr =
+          HandleAccessPtrAndOffset(call, std::nullopt, call->dtype);
+      if (new_access_ptr.rewritten) {
+        return new_access_ptr.expr;
+      }
+      return call;
+    }
+
+    // Default: visit normally
+    auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
     return call;
   }
 
@@ -826,7 +1055,8 @@ private:
 
     // Lower the parallel loop using the common function
     return LowerParallelLoop(for_node, loop_layout, thread_var_->var, analyzer_,
-                             predicate, parallel_loop, should_vectorize);
+                             layout_map_, predicate, parallel_loop,
+                             should_vectorize);
   }
 
   Target target_;
@@ -850,6 +1080,11 @@ private:
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
   bool has_tma_{false};
+  // Flag to indicate we are inside a TMA context (tma_load, tma_load_im2col,
+  // tma_store). When true, HandleAccessPtrAndOffset only updates buffer data
+  // without recomputing indices, since swizzle is encoded in TMA descriptor
+  // parameters rather than in memory indices.
+  bool in_tma_context_{false};
 };
 
 namespace transform {

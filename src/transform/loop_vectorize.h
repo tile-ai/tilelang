@@ -25,6 +25,7 @@
 #ifndef TVM_TL_LOOP_VECTORIZE_H_
 #define TVM_TL_LOOP_VECTORIZE_H_
 
+#include "../op/operator.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/tir/op.h>
 
@@ -33,14 +34,16 @@ namespace tl {
 
 using namespace tir;
 
-int GetVectorizeSize(const For &loop);
+int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
 
-int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer);
+int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
+                     const LayoutMap &layout_map = {});
 
-For VectorizeLoop(const For &loop, int vectorize_hint = -1);
+For VectorizeLoop(const For &loop, const LayoutMap &layout_map = {},
+                  int vectorize_hint = -1);
 
 For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
-                  int vectorize_hint = -1);
+                  const LayoutMap &layout_map = {}, int vectorize_hint = -1);
 
 // Can prove expr is independent with var, i.e. the value of expr doesn't change
 // when var changes
@@ -52,9 +55,9 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
                                      int target_vectorized_size,
                                      arith::Analyzer *analyzer);
 
-bool IndiceCanVectorize(const PrimExpr &expr, Var var,
-                        const PrimExpr &iter_var_size,
-                        int target_vectorized_size, arith::Analyzer *analyzer);
+bool IndicesCanVectorize(const PrimExpr &expr, Var var,
+                         const PrimExpr &iter_var_size,
+                         int target_vectorized_size, arith::Analyzer *analyzer);
 
 } // namespace tl
 } // namespace tvm

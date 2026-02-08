@@ -24,24 +24,32 @@ namespace tl {
 using namespace tir;
 using arith::IRMutatorWithAnalyzer;
 
-// GlobalMemChecker for a BufferLoad/BufferStore node:
+// SafeMemChecker for a BufferLoad/BufferStore node:
 // 1. Identify BufferLoad and BufferStore nodes.
-// 2. Check if the buffer is in global scope.
-// 3. For each index, compare against the buffer's shape.
+// 2. For each index, compare against the buffer's shape.
 //    If the index might exceed the shape (upper bound too large),
-//    log a warning or handle accordingly.
-struct GlobalMemChecker : public StmtExprVisitor {
+//    log a warning (local/shared) or handle accordingly (global).
+struct SafeMemChecker : public StmtExprVisitor {
 
-  GlobalMemChecker(arith::Analyzer *analyzer, bool recursively_collect_conds)
+  bool disableOOBWarning = false;
+
+  SafeMemChecker(arith::Analyzer *analyzer, bool recursively_collect_conds)
       : analyzer_(analyzer),
-        recursively_collect_conds_(recursively_collect_conds) {}
+        recursively_collect_conds_(recursively_collect_conds) {
+    disableOOBWarning =
+        tvm::transform::PassContext::Current()
+            ->GetConfig(kDisableOutOfBoundWarning, Optional<Bool>())
+            .value_or(false);
+  }
   void VisitExpr_(const BufferLoadNode *op) final {
-    // Check if the buffer is in global scope
-    // This is because we are writing TilePrograms, where out of bounds
-    // accesses only happen in the global buffer.
-    if (IsGlobalBuffer(op->buffer)) {
-      CheckBufferIndices(op->buffer, op->indices, /*is_load=*/true);
-    }
+    // If the buffer is in global scope, we will check its indices and add
+    // corresponding bound checks.
+    // If the buffer is in shared/local, although out of bound accesses are
+    // still possible, we assume the developers can handle them. This is because
+    // we are writing TilePrograms. Therefore we only log warnings if there
+    // are possible out-of-bounds.
+    CheckBufferIndices(op->buffer, op->indices, /*is_load=*/true,
+                       !disableOOBWarning && !IsGlobalBuffer(op->buffer));
     if (recursively_collect_conds_) {
       StmtExprVisitor::VisitExpr_(op);
     }
@@ -49,9 +57,8 @@ struct GlobalMemChecker : public StmtExprVisitor {
 
   void VisitStmt_(const BufferStoreNode *op) final {
     // Check if the buffer is in global scope
-    if (IsGlobalBuffer(op->buffer)) {
-      CheckBufferIndices(op->buffer, op->indices, /*is_load=*/false);
-    }
+    CheckBufferIndices(op->buffer, op->indices, /*is_load=*/false,
+                       !disableOOBWarning && !IsGlobalBuffer(op->buffer));
     if (recursively_collect_conds_) {
       StmtExprVisitor::VisitStmt_(op);
     }
@@ -70,7 +77,7 @@ struct GlobalMemChecker : public StmtExprVisitor {
 
   // Check each index against the buffer shape dimensions
   void CheckBufferIndices(const Buffer &buffer, const Array<PrimExpr> &indices,
-                          bool is_load) {
+                          bool is_load, bool throw_warning) {
     // Ensure indices count matches buffer dimension
     if (indices.size() != buffer->shape.size()) {
       LOG(WARNING) << "Buffer access dimension mismatch: indices size ("
@@ -103,13 +110,24 @@ struct GlobalMemChecker : public StmtExprVisitor {
       PrimExpr upper_bound_cond = index < shape_dim;
       if (!analyzer_->CanProve(upper_bound_cond,
                                arith::ProofStrength::kSymbolicBound)) {
-        _conditions.push_back(upper_bound_cond);
+        if (throw_warning) {
+          LOG(WARNING) << "Index access may exceed buffer bounds: " << index
+                       << " >= " << shape_dim
+                       << "; Buffer name: " << buffer->name;
+        } else {
+          _conditions.push_back(upper_bound_cond);
+        }
       }
       // Check if index >= 0 can be proven.
       PrimExpr lower_bound_cond = index >= 0;
       if (!analyzer_->CanProve(lower_bound_cond,
                                arith::ProofStrength::kSymbolicBound)) {
-        _conditions.push_back(lower_bound_cond);
+        if (throw_warning) {
+          LOG(WARNING) << "Index access may be negative: " << index << " < 0"
+                       << "; Buffer name: " << buffer->name;
+        } else {
+          _conditions.push_back(lower_bound_cond);
+        }
       }
     }
   }
@@ -150,7 +168,7 @@ private:
 
     // For Load/Store, we only check the current node, not its children.
     // Since rewriter will recursively visit children.
-    GlobalMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
+    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     checker(load);
     Array<PrimExpr> conditions = checker.GetConditions();
 
@@ -173,7 +191,7 @@ private:
     // Check if the buffer is in global scope
     auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
-    GlobalMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
+    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     checker(store);
     Array<PrimExpr> conditions = checker.GetConditions();
 
@@ -215,16 +233,26 @@ private:
   // current statement. The current solution adopts a simplified approach:
   // directly applying the boundary constraints of all parameters to the
   // statement. While not entirely precise, it addresses most common scenarios.
+  // Check if the call is an atomic operation
+  bool IsAtomicOp(const Op &op) {
+    return op == atomic_add_elem_op() || op == atomic_add_ret_elem_op() ||
+           op == atomic_addx2_elem_op() || op == atomic_addx4_elem_op() ||
+           op == atomic_load_elem_op() || op == atomic_store_elem_op() ||
+           op == atomic_max_elem_op() || op == atomic_max_ret_elem_op() ||
+           op == atomic_min_elem_op() || op == atomic_min_ret_elem_op();
+  }
+
   Stmt VisitStmt_(const EvaluateNode *op) final {
     auto evaluate = Downcast<Evaluate>(op);
 
     if (const CallNode *call_op = op->value.as<CallNode>()) {
       auto call = Downcast<Call>(op->value);
-      if (call->op == builtin::call_extern()) {
-        // For CallExtern, we recursively collect conditions from all children.
-        // Since we cannot rewrite any BufferLoad in its children (Rewrite will
-        // cause potential Nullptr exception).
-        GlobalMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
+      if (call->op == builtin::call_extern() ||
+          (call->op.as<OpNode>() && IsAtomicOp(Downcast<Op>(call->op)))) {
+        // For CallExtern and atomic ops, we recursively collect conditions
+        // from all children. Since we cannot rewrite any BufferLoad in its
+        // children (Rewrite will cause potential Nullptr exception).
+        SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
         checker(call);
         Array<PrimExpr> conditions = checker.GetConditions();
 

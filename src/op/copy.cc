@@ -12,13 +12,10 @@
 #include "../layout/tcgen05_layout.h"
 #include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
-#include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "utils.h"
 
-#include "../target/stubs/cuda.h"
-#include "../target/utils.h"
 #include "builtin.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -29,75 +26,6 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-// Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
-static int to_CUtensorMapDataType(DataType dtype) {
-  CUtensorMapDataType tp;
-  if (dtype.is_float()) {
-    switch (dtype.bits()) {
-    case 64:
-      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT64;
-      break;
-    case 32:
-      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
-      break;
-    case 16:
-      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
-      break;
-    case 8:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
-      break;
-    default:
-      ICHECK(0) << dtype;
-    }
-  } else if (dtype.is_bfloat16()) {
-    tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  } else if (dtype.is_float8()) {
-    tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
-  } else if (dtype.is_int()) {
-    switch (dtype.bits()) {
-    case 64:
-      tp = CU_TENSOR_MAP_DATA_TYPE_INT64;
-      break;
-    case 32:
-      tp = CU_TENSOR_MAP_DATA_TYPE_INT32;
-      break;
-    case 16:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
-      break;
-    case 8:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
-      break;
-    default:
-      ICHECK(0) << dtype;
-    }
-  } else if (dtype.is_uint()) {
-    switch (dtype.bits()) {
-    case 64:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT64;
-      break;
-    case 32:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT32;
-      break;
-    case 16:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
-      break;
-    case 8:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
-      break;
-    default:
-      ICHECK(0) << dtype;
-    }
-  } else {
-    ICHECK(0) << dtype;
-  }
-  return static_cast<int>(tp);
-}
-
-// Reverses an array (used for row-major/column-major layout conversion).
-template <typename T> static Array<T> ReverseArray(Array<T> array) {
-  return Array<T>{array.rbegin(), array.rend()};
-}
 
 // Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
@@ -787,11 +715,8 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
-  auto transformed_loop =
-      Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
-
   For vectorized_thread_loop;
-  auto par_op = ParallelOp(transformed_loop);
+  auto par_op = ParallelOp(fused_loop);
 
   if (is_cpu_target || IsLocalBuffer(src) || IsLocalBuffer(dst)) {
     if (IsLocalBuffer(src) && !IsLocalBuffer(dst)) {
@@ -799,7 +724,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                    << dst.scope() << " buffer `" << dst->name
                    << "` may cause conflicted write.";
     }
-    vectorized_thread_loop = VectorizeLoop(transformed_loop);
+    vectorized_thread_loop = VectorizeLoop(fused_loop, T.layout_map);
     return vectorized_thread_loop;
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
@@ -818,7 +743,8 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
     // Use LowerParallelLoop to handle partitioning, vectorization, and
     // predicate
     return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
-                             analyzer, par_op->GetPredicate(T.thread_var));
+                             analyzer, T.layout_map,
+                             par_op->GetPredicate(T.thread_var));
   }
 }
 
@@ -847,6 +773,20 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   Buffer shared_tensor = is_ldmatrix ? src : dst;
   Buffer local_tensor = is_ldmatrix ? dst : src;
+  Array<Range> local_region = is_ldmatrix ? src_range : dst_range;
+  bool is_full_range = true;
+  for (size_t i = 0; i < local_region.size(); i++) {
+    if (!analyzer->CanProveEqual(local_region[i]->extent,
+                                 local_tensor->shape[i])) {
+      is_full_range = false;
+      break;
+    }
+  }
+  if (!is_full_range) {
+    // ldmatrix/stmatrix can only support full range, will be fallback to
+    // normal copy
+    return LowerNormalCopy(T, analyzer);
+  }
 
   Array<PrimExpr> local_indices = MakeIndices(loop_vars, is_ldmatrix ? 1 : 0);
   Fragment local_layout = Downcast<Fragment>(T.layout_map[local_tensor]);
@@ -861,14 +801,6 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   }
 
   Array<PrimExpr> shared_indices = MakeIndices(loop_vars, is_ldmatrix ? 0 : 1);
-  Array<PrimExpr> shared_indices_transformed = shared_indices;
-  Layout shared_layout;
-  if (T.buffer_remap.count(shared_tensor)) {
-    shared_layout = T.layout_map[shared_tensor];
-    shared_tensor = T.buffer_remap[shared_tensor];
-    shared_indices_transformed = shared_layout->Forward(shared_indices);
-  }
-
   // Check local_layout follows 8x8 layout
   // LDSM/STSM instructions require 8x8 matrix fragment layout
   // This matches the warp-level matrix multiplication pattern used in tensor
@@ -887,13 +819,13 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   PrimExpr local_indices_flattened =
       local_tensor.OffsetOf(local_indices_transformed).back();
   if (analyzer->CanProveEqual(matrix_8x8_thread_map, local_layout_thread_map) &&
-      IndiceCanVectorize(local_indices_flattened, col_var->var,
-                         col_var->dom->extent, 2, analyzer)) {
+      IndicesCanVectorize(local_indices_flattened, col_var->var,
+                          col_var->dom->extent, 2, analyzer)) {
     is_transposed = false;
   } else if (analyzer->CanProveEqual(matrix_8x8_thread_map_trans,
                                      local_layout_thread_map) &&
-             IndiceCanVectorize(local_indices_flattened, row_var->var,
-                                row_var->dom->extent, 2, analyzer)) {
+             IndicesCanVectorize(local_indices_flattened, row_var->var,
+                                 row_var->dom->extent, 2, analyzer)) {
     is_transposed = true;
   } else {
     // TMA ldmatrix/stmatrix cannot support non-8x8 layout, will be fallback to
@@ -908,10 +840,9 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     // be fallback to normal copy
     return LowerNormalCopy(T, analyzer);
   }
-  PrimExpr flattened_indice =
-      shared_tensor.OffsetOf(shared_indices_transformed).back();
-  if (!IndiceCanVectorize(flattened_indice, loop_vars.back()->var,
-                          loop_vars.back()->dom->extent, 8, analyzer)) {
+  PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
+  if (!IndicesCanVectorize(flattened_indice, loop_vars.back()->var,
+                           loop_vars.back()->dom->extent, 8, analyzer)) {
     // TMA ldmatrix/stmatrix cannot support non-16 bytes continuous layout, will
     // be fallback to normal copy
     return LowerNormalCopy(T, analyzer);
@@ -927,11 +858,16 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   }
 
   // Do the lowering here, try vectorized ldmatrix/stmatrix by 4/2/1
+  // now, local_tensor is local instead of shared.
   PrimExpr extent = local_tensor->shape[0];
   int num = 1;
   if (analyzer->CanProveEqual(FloorMod(extent, 8), 0))
+    // 16x16 -> full warp, we use x4, for 32 threads in a warp, each thread can
+    // hold 4 elements
     num = 4;
   else if (analyzer->CanProveEqual(FloorMod(extent, 4), 0))
+    // 8x16 -> half warp, we use x2, for 32 threads in a warp, each thread can
+    // hold 2 elements
     num = 2;
 
   Array<PrimExpr> args;
@@ -949,18 +885,21 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   Layout inv = local_layout->Inverse();
   Array<PrimExpr> shared_coords;
   PrimExpr warp = FloorDiv(T.thread_var, 32) * 32;
-  if (!is_transposed)
-    shared_coords = inv->Forward(
-        {local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num),
-         warp + FloorMod(T.thread_var, 8) * 4});
-  else
-    shared_coords = inv->Forward(
-        {local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num) +
-             FloorMod(T.thread_var, 2),
-         warp + FloorDiv(FloorMod(T.thread_var, 8), 2)});
+  if (!is_transposed) {
+    auto local_index = analyzer->Simplify(
+        local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num));
+    auto thread_index =
+        analyzer->Simplify(warp + FloorMod(T.thread_var, 8) * 4);
+    shared_coords = inv->Forward({local_index, thread_index});
+  } else {
+    auto local_index = analyzer->Simplify(
+        local_iter * 2 * num + 2 * FloorMod(FloorDiv(T.thread_var, 8), num) +
+        FloorMod(T.thread_var, 2));
+    auto thread_index =
+        analyzer->Simplify(warp + FloorDiv(FloorMod(T.thread_var, 8), 2));
+    shared_coords = inv->Forward({local_index, thread_index});
+  }
   shared_coords.pop_back(); // remove rep
-  if (shared_layout.defined())
-    shared_coords = shared_layout->Forward(shared_coords);
   PrimExpr shared_addr = shared_tensor.access_ptr(
       is_ldmatrix ? 1 : 2, DataType::Handle(), 1,
       shared_tensor.OffsetOf(shared_coords).back(), PrimExpr(2 * num));

@@ -1,6 +1,7 @@
 """Common math intrinsics exposed on the TileLang language surface."""
 
 from tvm import tir
+from tvm.tir import PrimExpr
 
 
 def _validate_rounding_mode(rounding_mode):
@@ -11,7 +12,7 @@ def _validate_rounding_mode(rounding_mode):
     raise ValueError(f"Invalid rounding mode '{rounding_mode}'. Must be one of: {valid_modes}")
 
 
-def __log(x):
+def __log(x: PrimExpr) -> PrimExpr:
     """Calculate log(x) with fast math
 
     Parameters
@@ -28,7 +29,7 @@ def __log(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log"), x)
 
 
-def __log2(x):
+def __log2(x: PrimExpr) -> PrimExpr:
     """Calculate log2(x) with fast math
 
     Parameters
@@ -45,7 +46,7 @@ def __log2(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log2"), x)
 
 
-def __log10(x):
+def __log10(x: PrimExpr) -> PrimExpr:
     """Calculate log10(x) with fast math
 
     Parameters
@@ -62,7 +63,7 @@ def __log10(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log10"), x)
 
 
-def __tan(x):
+def __tan(x: PrimExpr) -> PrimExpr:
     """Calculate tan(x) with fast math
 
     Parameters
@@ -79,7 +80,7 @@ def __tan(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__tan"), x)
 
 
-def __cos(x):
+def __cos(x: PrimExpr) -> PrimExpr:
     """Calculate cos(x) with fast math
 
     Parameters
@@ -96,7 +97,7 @@ def __cos(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__cos"), x)
 
 
-def __sin(x):
+def __sin(x: PrimExpr) -> PrimExpr:
     """Calculate sin(x) with fast math
 
     Parameters
@@ -113,7 +114,7 @@ def __sin(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__sin"), x)
 
 
-def __exp10(x):
+def __exp10(x: PrimExpr) -> PrimExpr:
     """Calculate 10**x with fast math
 
     Parameters
@@ -130,7 +131,7 @@ def __exp10(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp10"), x)
 
 
-def __exp(x):
+def __exp(x: PrimExpr) -> PrimExpr:
     """Calculate 2**x with fast math
 
     Parameters
@@ -148,7 +149,7 @@ def __exp(x):
 
 
 # IEEE-compliant operations
-def ieee_add(x, y, rounding_mode="rn"):
+def ieee_add(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
     """IEEE-compliant addition with specified rounding mode
 
     Parameters
@@ -174,7 +175,7 @@ def ieee_add(x, y, rounding_mode="rn"):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_add"), x, y, rounding_mode)
 
 
-def ieee_sub(x, y, rounding_mode="rn"):
+def ieee_sub(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
     """IEEE-compliant subtraction with specified rounding mode
 
     Parameters
@@ -198,7 +199,7 @@ def ieee_sub(x, y, rounding_mode="rn"):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_sub"), x, y, rounding_mode)
 
 
-def ieee_mul(x, y, rounding_mode="rn"):
+def ieee_mul(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
     """IEEE-compliant multiplication with specified rounding mode
 
     Parameters
@@ -222,7 +223,7 @@ def ieee_mul(x, y, rounding_mode="rn"):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_mul"), x, y, rounding_mode)
 
 
-def ieee_fmaf(x, y, z, rounding_mode="rn"):
+def ieee_fmaf(x: PrimExpr, y: PrimExpr, z: PrimExpr, rounding_mode="rn") -> PrimExpr:
     """IEEE-compliant fused multiply-add with specified rounding mode
 
     Parameters
@@ -249,7 +250,7 @@ def ieee_fmaf(x, y, z, rounding_mode="rn"):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_fmaf"), x, y, z, rounding_mode)
 
 
-def ieee_frcp(x, rounding_mode="rn"):
+def ieee_frcp(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
     """IEEE-compliant reciprocal with specified rounding mode
 
     Parameters
@@ -270,7 +271,7 @@ def ieee_frcp(x, rounding_mode="rn"):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_frcp"), x, rounding_mode)
 
 
-def ieee_fsqrt(x, rounding_mode="rn"):
+def ieee_fsqrt(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
     """IEEE-compliant square root with specified rounding mode
 
     Parameters
@@ -291,7 +292,7 @@ def ieee_fsqrt(x, rounding_mode="rn"):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_fsqrt"), x, rounding_mode)
 
 
-def ieee_frsqrt(x):
+def ieee_frsqrt(x: PrimExpr) -> PrimExpr:
     """IEEE-compliant reciprocal square root (round to nearest only)
 
     Parameters
@@ -308,7 +309,7 @@ def ieee_frsqrt(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_frsqrt"), x)
 
 
-def ieee_fdiv(x, y, rounding_mode="rn"):
+def ieee_fdiv(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
     """IEEE-compliant division with specified rounding mode
 
     Parameters

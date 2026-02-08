@@ -8,7 +8,41 @@ class PassConfigKey(str, Enum):
 
     # TileLang specific configs
     TL_SIMPLIFY = "tl.Simplify"
-    """Enable/disable TileLang simplification passes. Default: True"""
+    """Configuration for TileLang simplification passes.
+
+    This is a dict-based config with the following options:
+    - transitively_prove_inequalities: bool, default False
+    - convert_boolean_to_and_of_ors: bool, default False
+    - apply_constraints_to_boolean_branches: bool, default False
+    - propagate_knowns_to_prove_conditional: bool, default False
+    - propagate_knowns_to_simplify_expressions: bool, default False
+    - enable_simplify_let_inline: bool, default True
+
+    Usage:
+        with tvm.transform.PassContext(config={
+            "tl.Simplify": {"enable_simplify_let_inline": False}
+        }):
+            mod = tl.transform.Simplify()(mod)
+    """
+
+    # TL_SIMPLIFY sub-config keys
+    TL_SIMPLIFY_TRANSITIVELY_PROVE_INEQUALITIES = "transitively_prove_inequalities"
+    """Enable transitive inequality proving in simplification. Default: False"""
+
+    TL_SIMPLIFY_CONVERT_BOOLEAN_TO_AND_OF_ORS = "convert_boolean_to_and_of_ors"
+    """Convert boolean expressions to AND of ORs form. Default: False"""
+
+    TL_SIMPLIFY_APPLY_CONSTRAINTS_TO_BOOLEAN_BRANCHES = "apply_constraints_to_boolean_branches"
+    """Apply constraints to simplify boolean branches. Default: False"""
+
+    TL_SIMPLIFY_PROPAGATE_KNOWNS_TO_PROVE_CONDITIONAL = "propagate_knowns_to_prove_conditional"
+    """Propagate known values to prove conditionals. Default: False"""
+
+    TL_SIMPLIFY_PROPAGATE_KNOWNS_TO_SIMPLIFY_EXPRESSIONS = "propagate_knowns_to_simplify_expressions"
+    """Propagate known values to simplify expressions. Default: False"""
+
+    TL_SIMPLIFY_ENABLE_LET_INLINE = "enable_simplify_let_inline"
+    """Enable inlining of let statements during simplification. Default: True"""
 
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
     """Disable data race check in TileLang. Default: False"""
@@ -54,6 +88,24 @@ class PassConfigKey(str, Enum):
 
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
+
+    TL_ENABLE_LOWER_LDGSTG = "tl.enable_lower_ldgstg"
+    """Enable non-predicated LDG/STG lowering for global memory access.
+    When enabled, converts Ramp-based global buffer load/store to ldg/stg intrinsics.
+    Default: False"""
+
+    TL_ENABLE_LOWER_LDGSTG_PREDICATED = "tl.enable_lower_ldgstg_predicated"
+    """Enable predicated LDG/STG lowering.
+    When True, predicated loads (if_then_else with else=0) and
+    predicated stores (IfThenElse with empty then case) are lowered to
+    ldg/stg intrinsics. Default: False"""
+
+    TL_ENABLE_VECTORIZE_PLANNER_VERBOSE = "tl.enable_vectorize_planner_verbose"
+    """Enable verbose output for vectorize planner. When enabled, prints detailed
+    information about each buffer's inferred vector size and which buffer determines
+    the final vectorization factor. Useful for debugging vectorization issues.
+    Default: False"""
+
     TL_DISABLE_WGMMA = "tl.disable_wgmma"
     """Disable usage of Hopper WGMMA. Default: False"""
 
@@ -65,6 +117,9 @@ class PassConfigKey(str, Enum):
 
     TL_DISABLE_SHUFFLE_ELECT = "tl.disable_shuffle_elect"
     """Disable shuffle election optimization. Default: False"""
+
+    TL_DISABLE_LOOP_UNSWITCHING = "tl.disable_loop_unswitching"
+    """Disable loop unswitching optimization. Default: False"""
 
     TL_DISABLE_THREAD_STORAGE_SYNC = "tl.disable_thread_storage_sync"
     """Disable thread storage synchronization pass. When enabled, disables the
@@ -161,3 +216,6 @@ class PassConfigKey(str, Enum):
 
     CUDA_KERNELS_OUTPUT_DIR = "cuda.kernels_output_dir"
     """Output directory for generated CUDA kernels. Default: empty string"""
+
+    TL_DISABLE_OUT_OF_BOUND_WARNING = "tl.disable_out_of_bound_warning"
+    """Disable out-of-bound access warnings in safe memory access legalization. Default: False"""

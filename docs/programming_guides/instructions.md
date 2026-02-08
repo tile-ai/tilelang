@@ -104,7 +104,7 @@ Memory allocation and descriptors
 - `T.alloc_shared(shape, dtype, scope='shared.dyn')`: Allocate shared buffer.
 - `T.alloc_fragment(shape, dtype, scope='local.fragment')`: Allocate fragment.
 - `T.alloc_var(dtype, [init], scope='local.var')`: Scalar var buffer (1 elem).
-- `T.alloc_barrier(arrive_count)`: Shared barrier buffer.
+- `T.alloc_barrier(arrive_count)`: Allocate and initialize one or more mbarriers.
 - `T.alloc_tmem(shape, dtype)`: Tensor memory (TMEM) buffer (Hopper+).
 - `T.alloc_reducer(shape, dtype, op='sum', replication=None)`: Reducer buf.
 - `T.alloc_descriptor(kind, dtype)`: Generic descriptor allocator.
@@ -155,7 +155,7 @@ Custom intrinsics
 - `T.loop_break()`: Break from current loop via intrinsic.
 
 Barriers, TMA, warp‑group
-- Barriers: `T.create_list_of_mbarrier(...)`, `T.get_mbarrier(i)`.
+- Barriers: `T.alloc_barrier(arrive_count)`.
 - Parity ops: `T.mbarrier_wait_parity(barrier, parity)`, `T.mbarrier_arrive(barrier)`.
 - Expect tx: `T.mbarrier_expect_tx(...)`; sugar: `T.barrier_wait(id, parity=None)`.
 - TMA: `T.create_tma_descriptor(...)`, `T.tma_load(...)`,

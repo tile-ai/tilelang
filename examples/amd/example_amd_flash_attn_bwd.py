@@ -112,7 +112,7 @@ def fast_flashattn(
             bx_loop_var = T.alloc_var(T.int32)
             bx_loop_var = b_split
 
-            with T.While(bx_loop_var < num_q_blocks):
+            while bx_loop_var < num_q_blocks:
                 acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
                 m_i = T.alloc_fragment([block_M], accum_dtype)
                 l_i = T.alloc_fragment([block_M], accum_dtype)

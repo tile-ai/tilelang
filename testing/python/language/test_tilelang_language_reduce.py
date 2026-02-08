@@ -159,8 +159,8 @@ def reduce_sum_test_clear(M, N, dtype=T.float32):
     return main
 
 
-def run_reduce_sum_clear(M, N, dtype=T.float32):
-    program = reduce_sum_test_clear(M, N, dtype)
+def run_reduce_sum_clear(M, N, dtype=T.float32, tl_func=reduce_sum_test_clear):
+    program = tl_func(M, N, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
 
     def ref_program(A):
@@ -217,6 +217,54 @@ def run_reduce_max_clear(M, N, dtype=T.float16):
 
 def test_reduce_max_clear():
     run_reduce_max_clear(256, 256, T.float16)
+
+
+def reduce_sum_test_clear_B_shared(M, N, dtype=T.float32):
+    import tilelang.language as T
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
+    ):
+        with T.Kernel(1, threads=32) as _:
+            A_local = T.alloc_fragment((M, N), dtype)
+            B_shared = T.alloc_shared((M,), dtype)
+
+            T.copy(A, A_local)
+            T.fill(B_shared, 1)
+            T.reduce_sum(A_local, B_shared, dim=1, clear=False)
+            T.copy(B_shared, B)
+
+    return main
+
+
+def test_reduce_sum_clear_B_shared():
+    run_reduce_sum_clear(256, 256, T.float32, reduce_sum_test_clear_B_shared)
+
+
+def reduce_sum_test_clear_AB_shared(M, N, dtype=T.float32):
+    import tilelang.language as T
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
+    ):
+        with T.Kernel(1, threads=32) as _:
+            A_shared = T.alloc_shared((M, N), dtype)
+            B_shared = T.alloc_shared((M,), dtype)
+
+            T.copy(A, A_shared, disable_tma=True)
+            T.fill(B_shared, 1)
+            T.reduce_sum(A_shared, B_shared, dim=1, clear=False)
+            T.copy(B_shared, B)
+
+    return main
+
+
+def test_reduce_sum_clear_AB_shared():
+    run_reduce_sum_clear(64, 64, T.float32, reduce_sum_test_clear_AB_shared)
 
 
 if __name__ == "__main__":

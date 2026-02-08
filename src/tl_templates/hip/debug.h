@@ -99,3 +99,10 @@ __device__ void debug_print_buffer_value(const char *msg, const char *buf_name,
                                          int index, T var) {
   PrintTraits<T>::print_buffer(msg, buf_name, index, var);
 }
+
+// Specialization for msg-only debug print
+__device__ void debug_print_msg(const char *msg) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d)\n", msg,
+         blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z);
+}

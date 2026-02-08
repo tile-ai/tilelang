@@ -311,6 +311,36 @@ inline PrimExpr TVMArrayGet(DataType t, Var arr,
   return TVMStructGet(t, arr, 0, kind);
 }
 
+void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
+                                   const PrimExpr &logical_stride_val,
+                                   const PrimExpr &is_null,
+                                   const std::string &stride_element_name) {
+  if (const VarNode *v = stride.as<VarNode>()) {
+    auto it = def_map_->find(v);
+    if (it != def_map_->end()) {
+      PrimExpr expected = it->second;
+      if (is_zero(analyzer_.Simplify(expected))) {
+        LOG(WARNING) << "TileLang: Detected zero-dimension in "
+                     << stride_element_name << ". Relaxing stride check.";
+      }
+      PrimExpr cond = (expected == logical_stride_val) || (expected == 0);
+      BinderAddAssert(&analyzer_, cond, stride_element_name, &asserts_,
+                      is_null);
+    } else {
+      BindNullable(stride, logical_stride_val, stride_element_name, true,
+                   is_null);
+    }
+  } else {
+    const PrimExpr &expected = stride;
+    if (is_zero(analyzer_.Simplify(expected))) {
+      LOG(WARNING) << "TileLang: Detected zero-dimension in "
+                   << stride_element_name << ". Relaxing stride check.";
+    }
+    PrimExpr cond = (expected == logical_stride_val) || (expected == 0);
+    BinderAddAssert(&analyzer_, cond, stride_element_name, &asserts_, is_null);
+  }
+}
+
 void ArgBinder::BindDLTensors(
     const std::vector<std::pair<Var, Buffer>> &buffer_def,
     const PrimExpr &device_type, const PrimExpr &device_id,
@@ -827,8 +857,10 @@ void ArgBinder::BindDLTensors(
                 runtime_stride * make_const(stride_dtype, pack_factor);
           }
 
-          BindNullable(buffer->strides[k], logical_stride_val,
-                       stride_element_name(k), true, is_null);
+          // Relax stride check: if the expected stride is 0, allow any actual
+          // stride. This happens when one of the subsequent dimensions is 0.
+          RelaxedStrideCheck(k, buffer->strides[k], logical_stride_val, is_null,
+                             stride_element_name(k));
         }
       }
     } else {
@@ -859,7 +891,13 @@ void ArgBinder::BindDLTensors(
           PrimExpr svalue = cast(
               stype, BufferLoad(buf_strides, {IntImm(DataType::Int(32),
                                                      static_cast<int>(k))}));
-          conds.push_back(buffer->shape[k] == 1 || expect_stride == svalue);
+          if (is_zero(analyzer_.Simplify(expect_stride))) {
+            LOG(WARNING) << "TileLang: Detected zero-dimension in compact "
+                         << "buffer strides calculation. "
+                         << "Relaxing check for " << stride_handle_name();
+          }
+          conds.push_back(buffer->shape[k] == 1 || expect_stride == svalue ||
+                          expect_stride == 0);
           expect_stride = expect_stride * buffer->shape[k];
         }
         std::ostringstream stride_err_msg;
@@ -905,8 +943,10 @@ void ArgBinder::BindDLTensors(
           PrimExpr stride_val = tvm::if_then_else(
               v_strides_is_null, stride_from_shape, explicit_stride);
 
-          BindNullable(buffer->strides[k], stride_val, stride_element_name(k),
-                       true, is_null);
+          // Relax stride check: if the expected stride is 0, allow any actual
+          // stride. This happens when one of the subsequent dimensions is 0.
+          RelaxedStrideCheck(k, buffer->strides[k], stride_val, is_null,
+                             stride_element_name(k));
         }
       } else {
         PrimExpr stride_from_shape = 1;
@@ -924,8 +964,10 @@ void ArgBinder::BindDLTensors(
           PrimExpr stride_val = tvm::if_then_else(
               v_strides_is_null, stride_from_shape, explicit_stride);
 
-          BindNullable(buffer->strides[k], stride_val, stride_element_name(k),
-                       true, is_null);
+          // Relax stride check: if the expected stride is 0, allow any actual
+          // stride. This happens when one of the subsequent dimensions is 0.
+          RelaxedStrideCheck(k, buffer->strides[k], stride_val, is_null,
+                             stride_element_name(k));
         }
       }
     }

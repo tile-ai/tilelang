@@ -19,15 +19,16 @@
 namespace tvm {
 namespace tl {
 
-std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
-                                                               int block_size,
-                                                               Target target,
-                                                               bool use_wgmma,
-                                                               int bits) const {
+std::pair<int, int>
+GemmSPWarpPolicyNode::computeWarpPartition(int M, int N, int block_size,
+                                           Target target, GemmInst gemm_inst,
+                                           int bits) const {
   int num_warps = block_size / TargetGetWarpSize(target);
 
+  ICHECK(gemm_inst == GemmInst::kMMA || gemm_inst == GemmInst::kWGMMA)
+      << "GemmSP currently only supports MMA and WGMMA";
   auto [m_warp, n_warp] = GemmWarpPolicyNode::computeWarpPartition(
-      M, N, block_size, target, use_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA);
+      M, N, block_size, target, gemm_inst);
 
   // Special handling for gemm_sp when the tiling size is not a multiple
   // This should be consistent with shape check in gemm_sp_sm80.h
@@ -150,9 +151,9 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   bool maybe_wgmma = TargetIsHopper(T.target) && (this->m_ >= 64) &&
                      (block_size / warp_size % 4 == 0);
-
+  auto gemm_inst = maybe_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA;
   auto [warp_m, warp_n] = policy_->computeWarpPartition(
-      m_, n_, block_size, T.target, maybe_wgmma, a_->dtype.bits());
+      m_, n_, block_size, T.target, gemm_inst, a_->dtype.bits());
 
   std::stringstream ss;
   std::string op_name = "tl::gemm_sp_ss";
@@ -229,8 +230,9 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
     constexpr int wgmma_m = 16 * 4;
     bool maybe_wgmma =
         (this->m_ >= wgmma_m) && (block_size / warp_size % 4 == 0);
+    auto gemm_inst = maybe_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA;
     auto [warp_m, warp_n] = policy_->computeWarpPartition(
-        m_, n_, block_size, T.target, maybe_wgmma, a_->dtype.bits());
+        m_, n_, block_size, T.target, gemm_inst, a_->dtype.bits());
     auto fragment = maybe_wgmma
                         ? makeGemmFragmentCHopper(m_, n_, m_ / warp_m,
                                                   n_ / warp_n, c_->dtype.bits())
@@ -262,7 +264,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
     }
   } else if (TargetIsAmpere(T.target)) {
     auto [warp_m, warp_n] = policy_->computeWarpPartition(
-        m_, n_, block_size, T.target, false, a_->dtype.bits());
+        m_, n_, block_size, T.target, GemmInst::kMMA, a_->dtype.bits());
     auto fragment = makeGemmSparseFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
                                             c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
@@ -317,8 +319,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def(
       "tl.GemmSPWarpPolicyComputeWarpPartition",
       [](GemmSPWarpPolicy policy, int M, int N, int block_size, Target target,
-         bool use_wgmma, int bits) {
-        policy->computeWarpPartition(M, N, block_size, target, use_wgmma, bits);
+         GemmInst gemm_inst, int bits) {
+        policy->computeWarpPartition(M, N, block_size, target, gemm_inst, bits);
         return;
       });
 }

@@ -11,7 +11,7 @@ from tvm.script.parser.tir import *
 from . import overrides as _overrides  # noqa: F401
 
 # from .tir import prim_func, macro,  # noqa: F401
-from .v2 import *  # noqa: F401
+from .eager import *  # noqa: F401
 from .tir.ir import *  # noqa: F401
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .proxy import ptr, make_tensor, Buffer, Tensor, StridedTensor, FragmentBuffer, SharedBuffer, LocalBuffer  # noqa: F401
@@ -21,8 +21,10 @@ from .loop import (
     Pipelined,  # noqa: F401
     serial,  # noqa: F401
     unroll,  # noqa: F401
+    vectorized,  # noqa: F401
     Serial,  # noqa: F401
     Unroll,  # noqa: F401
+    Vectorized,  # noqa: F401
 )
 from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
@@ -90,6 +92,14 @@ from .customize import (
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 from .builtin import __ldg as __ldg  # noqa: F401
+from .builtin import ldg32 as ldg32  # noqa: F401
+from .builtin import ldg64 as ldg64  # noqa: F401
+from .builtin import ldg128 as ldg128  # noqa: F401
+from .builtin import ldg256 as ldg256  # noqa: F401
+from .builtin import stg32 as stg32  # noqa: F401
+from .builtin import stg64 as stg64  # noqa: F401
+from .builtin import stg128 as stg128  # noqa: F401
+from .builtin import stg256 as stg256  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
 

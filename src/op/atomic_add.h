@@ -6,77 +6,70 @@
 #ifndef TVM_TL_OP_ATOMIC_ADD_H_
 #define TVM_TL_OP_ATOMIC_ADD_H_
 
-#include "operator.h"
-#include "parallel.h"
+#include "atomic_reduce.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-/// Node class for atomic addition operations
-class AtomicAddNode : public TileOperatorNode {
+/*!
+ * \brief Node class for atomic addition operations.
+ *
+ * Inherits from AtomicOpBaseNode and adds TMA support and vectorization.
+ */
+class AtomicAddNode : public AtomicOpBaseNode {
 public:
-  Buffer src, dst; ///< Source and destination buffers
-  Array<Range> src_range,
-      dst_range; ///< Access ranges for source and destination
-  Map<String, ObjectRef> annotations; ///< Annotations for the atomic operation
-  // Supported annotation keys:
-  //   - "use_tma": IntImm, whether to use TMA for memory operations
-  //   - "coalesced_width": IntImm, width for memory coalescing optimization
-  //   - "memory_order": IntImm, memory order for atomic operations
-
-  mutable ParallelOp par_op_; ///< Associated parallel operation
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicAdd", AtomicAddNode,
                                     TileOperatorNode);
 
+  /// Override Lower to add TMA support
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
+
+  /// Override InferLayout to add TMA layout inference
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
 
   static const Op &Get();
+  const Op &GetElemOp() const override;
   TileOperator Clone() const;
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<AtomicAddNode>()
         .def_ro("src", &AtomicAddNode::src)
+        .def_ro("src_value", &AtomicAddNode::src_value)
         .def_ro("dst", &AtomicAddNode::dst)
         .def_ro("src_range", &AtomicAddNode::src_range)
         .def_ro("dst_range", &AtomicAddNode::dst_range)
         .def_ro("annotations", &AtomicAddNode::annotations);
   }
 
-  // Helper methods to get annotation values
+  /// Check if TMA should be used
   bool GetUseTMA() const {
     if (auto val = annotations.Get("use_tma")) {
       if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
+        if (int_val->value != 0) {
+          ICHECK(!src_value.defined())
+              << "TMA is not supported when using TiledAtomicAdd with PrimExpr "
+                 "as value.";
+          return true;
+        }
       }
     }
     return false;
   }
 
-  int GetMemoryOrder() const {
-    if (auto val = annotations.Get("memory_order")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value;
-      }
-    }
-    return 0; // default: relaxed
-  }
+  /// Get vectorization length based on dst dtype and target SM version
+  int GetVectorizeLength(Target target) const;
 
 protected:
-  /// Create SIMT-style parallel loop structure
+  /// Override MakeSIMTLoop to handle AtomicAdd-specific logic
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
-  /// Generate iteration variables for loop nest
-  Array<IterVar> MakeIterVars() const;
-  /// Generate buffer indices from iteration variables
-  Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
-  /// Return buffer indices and size
+
+  /// Return buffer indices and total size
   std::pair<Array<PrimExpr>, PrimExpr> ReturnIndicesAndSize(int src_dst) const;
-  /// Create boundary predicate for memory safety
-  PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
-                         Array<PrimExpr> extents, int src_dst) const;
+  /// Compute linear layout for shared tensor (used in TMA atomic add)
+  Layout ComputeLinearLayout(const Buffer &shared_tensor) const;
 };
 
 /// Wrapper class for atomic addition operations
@@ -93,4 +86,4 @@ public:
 } // namespace tl
 } // namespace tvm
 
-#endif //  TVM_TL_OP_ATOMIC_ADD_H_
+#endif // TVM_TL_OP_ATOMIC_ADD_H_

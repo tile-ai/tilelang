@@ -7,6 +7,7 @@ from tvm.tir import Var
 from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
 from tvm.ffi import register_object
 from tilelang import _ffi_api
+from tilelang.jit.exceptions import JITNoBuilderError
 import threading
 
 # Ensure single-dimension kernel bindings can be unpacked like iterables.
@@ -226,7 +227,7 @@ class KernelLaunchFrame(TIRFrame):
 
 
 def Kernel(
-    *blocks: tir.PrimExpr,
+    *blocks: int | tir.PrimExpr,
     threads: int | list[int] | tuple | None = None,
     is_cpu: bool = False,
     prelude: str | None = None,
@@ -279,6 +280,15 @@ def Kernel(
         with T.Kernel(loop_extent, is_cpu=True) as (i,):
             ...
     """
+    # In eager mode, we construct AST directly without prim_func,
+    # so there must be a Builder available. If not, this function
+    # is being called outside of a JIT/prim_func context.
+    # lazy import to avoid circular import
+    from tilelang.language.eager.builder import Builder
+
+    if Builder.current() is None:
+        raise JITNoBuilderError("T.Kernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
+
     attrs: dict = {}
 
     if not is_cpu and threads is None:

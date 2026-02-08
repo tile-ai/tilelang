@@ -5,16 +5,16 @@ from typing import Any
 from tvm import tir
 from tvm.tir import IntImm
 import tvm.script.ir_builder.tir as tb_tir
-from .v2.builder import SerialForWithStep, UnrollForWithStep
+from .eager.builder import SerialForWithStep, UnrollForWithStep
 from tilelang import _ffi_api
 from tvm.script.ir_builder.tir import frame
 
 
 def Parallel(
-    *extents: tir.PrimExpr,
+    *extents: int | tir.PrimExpr,
     coalesced_width: int | None = None,
     loop_layout: Any | None = None,
-):
+) -> frame.ForFrame:
     """Tools to construct nested parallel for loop.
        This can be used to create element-wise tensor expression.
 
@@ -76,8 +76,8 @@ def Persistent(
     domain: list[tir.PrimExpr],
     wave_size: tir.PrimExpr,
     index: tir.PrimExpr,
-    group_size: tir.PrimExpr | None = 8,
-):
+    group_size: tir.PrimExpr | int | None = 8,
+) -> frame.ForFrame:
     """Tools to construct persistent for loop.
 
     Parameters
@@ -96,13 +96,13 @@ def Persistent(
 
 def Pipelined(
     start: tir.PrimExpr,
-    stop: tir.PrimExpr = None,
+    stop: tir.PrimExpr | None = None,
     num_stages: int = 0,
     order: list[int] | None = None,
     stage: list[int] | None = None,
     sync: list[list[int]] | None = None,
     group: list[list[int]] | None = None,
-):
+) -> frame.ForFrame:
     """Tools to construct pipelined for loop.
 
     Parameters
@@ -135,7 +135,11 @@ def Pipelined(
 
 
 def serial(
-    start: tir.PrimExpr, stop: tir.PrimExpr | None = None, step: tir.PrimExpr | None = None, *, annotations: dict[str, Any] | None = None
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    step: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """The serial For statement.
 
@@ -245,7 +249,7 @@ def Serial(
     step: tir.PrimExpr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
-):
+) -> frame.ForFrame:
     """Alias of T.serial."""
 
     return serial(start, stop, step, annotations=annotations)
@@ -259,7 +263,45 @@ def Unroll(
     explicit: bool = False,
     unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
-):
+) -> frame.ForFrame:
     """Alias of T.unroll."""
 
     return unroll(start, stop, step, explicit=explicit, unroll_factor=unroll_factor, annotations=annotations)
+
+
+def vectorized(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
+) -> frame.ForFrame:
+    """The vectorized For statement.
+
+    Parameters
+    ----------
+    start : PrimExpr
+        The minimum value of iteration.
+
+    stop : PrimExpr
+        The maximum value of iteration.
+
+    annotations : Dict[str, Any]
+        The optional annotations of the For statement.
+
+    Returns
+    -------
+    res : frame.ForFrame
+        The ForFrame.
+    """
+    return tb_tir.vectorized(start, stop, annotations=annotations)
+
+
+def Vectorized(
+    start: tir.PrimExpr,
+    stop: tir.PrimExpr | None = None,
+    *,
+    annotations: dict[str, Any] | None = None,
+) -> frame.ForFrame:
+    """Alias of T.vectorized."""
+
+    return vectorized(start, stop, annotations=annotations)

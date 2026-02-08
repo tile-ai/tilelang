@@ -2,6 +2,7 @@ import torch
 import tilelang
 import tilelang.language as T
 from tilelang.utils.tensor import torch_assert_close
+from tilelang.utils import determine_fp8_type, determine_torch_fp8_type
 import itertools
 
 
@@ -17,8 +18,9 @@ def supply_prog(args):
     a_param, b_param = args
     M, K = a_param.shape
     N, _ = b_param.shape
-    a = (torch.randn(M, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=torch.float8_e4m3fnuz)
-    b = (torch.randn(N, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=torch.float8_e4m3fnuz)
+    fp8_dtype = determine_torch_fp8_type()
+    a = (torch.randn(M, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=fp8_dtype)
+    b = (torch.randn(N, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=fp8_dtype)
     return [a, b]
 
 
@@ -53,7 +55,7 @@ def get_configs():
 )
 @tilelang.jit(out_idx=[-1])
 def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pack, gemm_type):
-    dtype = T.float8_e4m3fnuz
+    dtype = determine_fp8_type()
     accum_dtype = T.float32
 
     @T.prim_func
@@ -104,8 +106,9 @@ def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pa
 
 def test_gemm_fp8(M, N, K):
     kernel = fp8_matmul(M, N, K)
-    a = (torch.randn(M, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=torch.float8_e4m3fnuz)
-    b = (torch.randn(N, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=torch.float8_e4m3fnuz)
+    fp8_dtype = determine_torch_fp8_type()
+    a = (torch.randn(M, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=fp8_dtype)
+    b = (torch.randn(N, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=fp8_dtype)
     c = kernel(a, b)
     ref_c = ref_program(a, b)
     torch_assert_close(c, ref_c, rtol=1e-2, atol=1e-2)

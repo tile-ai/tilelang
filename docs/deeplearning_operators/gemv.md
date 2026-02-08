@@ -292,7 +292,7 @@ def splitk_gemv_vectorized_tvm(
                     C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
             C_reduced = T.alloc_local((1,), accum_dtype)
             with T.attr(
-                    T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                    T.comm_reducer(lambda x, y: x + y, [T.cast(0, accum_dtype)]),
                     "reduce_scope",
                     T.reinterpret(T.uint64(0), dtype="handle"),
             ):
@@ -377,7 +377,7 @@ def get_best_config(N, K):
                         C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
                 C_reduced = T.alloc_local((1,), accum_dtype)
                 with T.attr(
-                        T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                        T.comm_reducer(lambda x, y: x + y, [T.cast(0, accum_dtype)]),
                         "reduce_scope",
                         T.reinterpret(T.uint64(0), dtype="handle"),
                 ):

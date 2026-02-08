@@ -7,7 +7,7 @@ from tilelang.layout import make_cutlass_metadata_layout
 from tilelang.utils.sparse import randn_semi_sparse
 from tilelang.utils.tensor import torch_assert_close
 
-from triton.testing import do_bench
+from tilelang.profiler import do_bench
 
 import torch
 
@@ -291,28 +291,17 @@ def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
     return kernel
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
-    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
-    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
-    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument("--use_cutlass_layout", action="store_true", help="Use cutlass layout for E tensor")
-    parser.add_argument("--use_torch_compressor", action="store_true", help="Use torch sparse for reference")
-    parser.add_argument("--accum_dtype", type=str, default=T.float, choices=[T.float, T.float16], help="Accumulation datatype")
-    parser.add_argument("--cfg", type=str, choices=["4090"], default="4090")
-    args = parser.parse_args()
-    kernel = matmul_sp_fp16_custom_compress(
-        args.m, args.n, args.k, args.accum_dtype, **DEFAULT_CONFIG[args.cfg][args.accum_dtype], use_cutlass_layout=args.use_cutlass_layout
-    )
+def main(M=1024, N=1024, K=1024, use_cutlass_layout=False, use_torch_compressor=False, accum_dtype=T.float, cfg="4090"):
+    kernel = matmul_sp_fp16_custom_compress(M, N, K, accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype], use_cutlass_layout=use_cutlass_layout)
 
-    a = randn_semi_sparse(args.m, args.k, device="cuda", dtype=torch.half)
-    b = torch.randn(args.k, args.n, device="cuda", dtype=torch.half)
+    a = randn_semi_sparse(M, K, device="cuda", dtype=torch.half)
+    b = torch.randn(K, N, device="cuda", dtype=torch.half)
 
-    if args.use_torch_compressor:
-        assert not args.use_cutlass_layout, "torch sparse must be used with naive layout"
+    if use_torch_compressor:
+        assert not use_cutlass_layout, "torch sparse must be used with naive layout"
         a_sparse, e = torch_compress(a)
     else:
-        a_sparse, e = compress_kernel(args.m, args.k, 32, 32, T.float16, use_cutlass_layout=args.use_cutlass_layout)(a)
+        a_sparse, e = compress_kernel(M, K, 32, 32, T.float16, use_cutlass_layout=use_cutlass_layout)(a)
 
     c = kernel(a_sparse, e, b)
 
@@ -325,7 +314,7 @@ def main():
     latency = do_bench(lambda: kernel(a_sparse, e, b))
     ref_latency = do_bench(lambda: a @ b)
 
-    total_flops = 2 * args.m * args.n * args.k
+    total_flops = 2 * M * N * K
     tflops = total_flops / latency / 1e9
     ref_tflops = total_flops / ref_latency / 1e9
     print(f"Sparse TFLOPS: {tflops:.2f}, Latency: {latency / 1e3} s")
@@ -333,4 +322,21 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
+    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
+    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
+    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
+    parser.add_argument("--use_cutlass_layout", action="store_true", help="Use cutlass layout for E tensor")
+    parser.add_argument("--use_torch_compressor", action="store_true", help="Use torch sparse for reference")
+    parser.add_argument("--accum_dtype", type=str, default=T.float, choices=[T.float, T.float16], help="Accumulation datatype")
+    parser.add_argument("--cfg", type=str, choices=["4090"], default="4090")
+    args = parser.parse_args()
+    main(
+        M=args.m,
+        N=args.n,
+        K=args.k,
+        use_cutlass_layout=args.use_cutlass_layout,
+        use_torch_compressor=args.use_torch_compressor,
+        accum_dtype=args.accum_dtype,
+        cfg=args.cfg,
+    )

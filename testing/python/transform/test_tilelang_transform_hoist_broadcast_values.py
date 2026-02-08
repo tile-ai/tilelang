@@ -82,5 +82,56 @@ def test_transform_hoist():
     _check(before, after)
 
 
+def test_transform_hoist_let_stmt():
+    @T.prim_func
+    def before():
+        with T.Kernel(8):
+            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            val: T.float8_e4m3fnx8 = T.Broadcast(T.float8_e4m3fn(1.2), 8) + T.Broadcast(T.float8_e4m3fn(3.4), 8)
+            A_shared[0:8] = val
+
+    @T.prim_func
+    def after():
+        with T.Kernel(8):
+            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            broadcast_var: T.float8_e4m3fn = T.float8_e4m3fn(1.2)
+            broadcast_var_1: T.float8_e4m3fn = T.float8_e4m3fn(3.4)
+            val: T.float8_e4m3fnx8 = T.Broadcast(broadcast_var, 8) + T.Broadcast(broadcast_var_1, 8)
+            A_shared[0:8] = val
+
+    _check(before, after)
+
+
+def test_transform_hoist_let_stmt_with_nested_bufferstore_broadcasts():
+    """Test case for the bug where BufferStore in LetStmt body clears pending_defs.
+
+    This test validates that broadcasts hoisted from a LetStmt's value expression
+    are preserved even when the body contains a BufferStore with additional broadcasts.
+    """
+
+    @T.prim_func
+    def before():
+        with T.Kernel(8):
+            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            # LetStmt value has broadcasts
+            val: T.float8_e4m3fnx8 = T.Broadcast(T.float8_e4m3fn(1.2), 8) + T.Broadcast(T.float8_e4m3fn(3.4), 8)
+            # Body is a BufferStore with additional broadcasts
+            A_shared[0:8] = val + T.Broadcast(T.float8_e4m3fn(5.6), 8)
+
+    @T.prim_func
+    def after():
+        with T.Kernel(8):
+            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            # Hoisted from LetStmt value
+            broadcast_var: T.float8_e4m3fn = T.float8_e4m3fn(1.2)
+            broadcast_var_1: T.float8_e4m3fn = T.float8_e4m3fn(3.4)
+            val: T.float8_e4m3fnx8 = T.Broadcast(broadcast_var, 8) + T.Broadcast(broadcast_var_1, 8)
+            # Hoisted from BufferStore
+            broadcast_var_2: T.float8_e4m3fn = T.float8_e4m3fn(5.6)
+            A_shared[0:8] = val + T.Broadcast(broadcast_var_2, 8)
+
+    _check(before, after)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

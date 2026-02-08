@@ -47,13 +47,13 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             T.fill(logsum, 0)
             # Warning: in causal/varlen/unaligned seqlen scenarios, the -inf will cause undefined behavior in exp ops
             # We should set it to negative large number instead
-            T.fill(scores_max, T.Cast(accum_dtype, -1e30))
+            T.fill(scores_max, T.cast(-1e30, accum_dtype))
             loop_range = T.ceildiv((bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_range, num_stages=1):
                 T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared)
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, T.Cast(accum_dtype, -1e30))
+                        acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, T.cast(-1e30, accum_dtype))
                 else:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0)
@@ -208,14 +208,6 @@ def flashattn_bwd_atomic_add(batch, heads, seq_len, dim_qk, dim_v, is_causal, bl
             dk_shared = T.alloc_shared([block_M, dim_qk], accum_dtype)
             dv_shared = T.alloc_shared([block_M, dim_v], accum_dtype)
             dq_shared = T.alloc_shared([block_N, dim_qk], accum_dtype)
-
-            T.annotate_layout(
-                {
-                    dQ: make_dq_layout(dQ),
-                    dK: make_dq_layout(dK),
-                    dV: make_dq_layout(dV),
-                }
-            )
 
             T.copy(K[bz, by * block_M : (by + 1) * block_M, bx // groups, :], K_shared)
             T.copy(V[bz, by * block_M : (by + 1) * block_M, bx // groups, :], V_shared)
@@ -387,7 +379,6 @@ class _attention(torch.autograd.Function):
         block_M = 128
         block_N = 32
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
-        mod_post = flashattn_bwd_postprocess(BATCH, H, HEAD_KV, N_CTX, D_HEAD_QK, D_HEAD_V)
         delta = mod_prep(o, do)
 
         if ctx.use_atomic:
@@ -401,11 +392,11 @@ class _attention(torch.autograd.Function):
             dk = torch.zeros(shape_k, dtype=torch.float32, device=q.device)
             dv = torch.zeros(shape_v, dtype=torch.float32, device=q.device)
             kernel(q, k, v, do, lse, delta, dq, dk, dv)
-            dq, dk, dv = mod_post(dq, dk, dv)
         else:
             kernel = flashattn_bwd_split_novarlen(
                 BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=256, num_stages=2, groups=groups
             )
+            mod_post = flashattn_bwd_postprocess(BATCH, H, HEAD_KV, N_CTX, D_HEAD_QK, D_HEAD_V)
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_QK]  # sum after kernel
             shape_v = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_V]  # sum after kernel

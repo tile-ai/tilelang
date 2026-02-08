@@ -23,11 +23,15 @@ import inspect
 from typing import Callable, Optional, Union
 
 from tvm.ir.base import deprecated
-from tvm.tir import Buffer, PrimFunc
+from tvm import tir
+from tvm.tir import PrimFunc
 
 from ..ast import buffer, ptr
 from tvm.script.parser._core import parse, scan_macro, utils
 from tvm.script.parser.core.parser import Parser, ScriptMacro
+
+from tilelang._typing import ShapeType, DType
+from tilelang.language import dtypes as _dtypes
 
 
 def prim_func(func: Optional[Callable] = None, private: bool = False, check_well_formed=True) -> Union[PrimFunc, Callable]:
@@ -156,8 +160,8 @@ class BufferProxy:
 
     def __call__(
         self,
-        shape,
-        dtype=T.float32,
+        shape: ShapeType,
+        dtype: DType = _dtypes.float32,
         data=None,
         strides=None,
         elem_offset=None,
@@ -166,7 +170,7 @@ class BufferProxy:
         offset_factor=0,
         buffer_type="",
         axis_separators=None,
-    ) -> Buffer:
+    ) -> tir.Buffer:
         return buffer(
             shape,
             dtype=dtype,
@@ -181,7 +185,7 @@ class BufferProxy:
         )
 
     @deprecated("T.Tensor[...]", "T.Tensor(...)")
-    def __getitem__(self, keys) -> Buffer:
+    def __getitem__(self, keys) -> tir.Buffer:
         if not isinstance(keys, tuple):
             return self(keys)
         if len(keys) >= 2 and not isinstance(keys[1], str):

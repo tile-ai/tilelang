@@ -4,11 +4,10 @@ import tilelang.testing
 from tvm import DataType
 import tilelang.language as T
 from tilelang.intrinsics import get_swizzle_layout
-from tilelang.intrinsics.mma_macro_generator import (
-    TensorCoreIntrinEmitter,
-)
-from tilelang.transform import simplify_prim_func
+from tilelang.intrinsics.mma_macro_generator import TensorCoreIntrinEmitter
+from tilelang.intrinsics.mfma_macro_generator import MatrixCoreIntrinEmitter
 from tilelang.utils.tensor import map_torch_type
+from tilelang.utils import determine_fp8_type
 
 tilelang.testing.set_random_seed(0)
 
@@ -29,7 +28,6 @@ def make_swizzle_layout(shared_buf):
 
 
 @tilelang.jit(out_idx=[2])
-@simplify_prim_func
 def tl_matmul(
     M,
     N,
@@ -41,25 +39,16 @@ def tl_matmul(
     assert in_dtype in [
         T.float16,
         T.float8_e4m3fn,
+        T.float8_e4m3fnuz,
         T.float8_e5m2,
+        T.float8_e5m2fnuz,
         T.int8,
-    ], "Currently only float16 and int8 are supported"
+    ], "Currently only float16, float8, and int8 are supported"
     assert out_dtype in [
         T.float16,
         T.float32,
         T.int32,
     ], "Currently only float16, float32 and int32 are supported"
-
-    micro_size_x = micro_size_y = micro_size_k = 16
-
-    is_float8 = in_dtype in [
-        T.float8_e4m3fn,
-        T.float8_e5m2,
-        T.float8_e4m3fn,
-        T.float8_e5m2fnuz,
-    ]
-    if out_dtype == T.int32 or is_float8:
-        micro_size_k = 32
 
     # This is a debug config
     block_row_warps = 2
@@ -80,6 +69,38 @@ def tl_matmul(
     B_shape = (N, K)
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, block_K)
+    is_hip = torch.version.hip is not None
+    # MMA Wrapper to Auto Generate Code for MMA/MFMA
+    if is_hip:
+        mma_emitter = MatrixCoreIntrinEmitter(
+            a_dtype=in_dtype,
+            b_dtype=in_dtype,
+            accum_dtype=accum_dtype,
+            a_transposed=False,
+            b_transposed=True,
+            block_row_warps=block_row_warps,
+            block_col_warps=block_col_warps,
+            warp_row_tiles=warp_row_tiles,
+            warp_col_tiles=warp_col_tiles,
+            chunk=chunk,
+        )
+    else:
+        mma_emitter = TensorCoreIntrinEmitter(
+            a_dtype=in_dtype,
+            b_dtype=in_dtype,
+            accum_dtype=accum_dtype,
+            a_transposed=False,
+            b_transposed=True,
+            block_row_warps=block_row_warps,
+            block_col_warps=block_col_warps,
+            warp_row_tiles=warp_row_tiles,
+            warp_col_tiles=warp_col_tiles,
+            chunk=chunk,
+        )
+
+    micro_size_x = mma_emitter.M_DIM
+    micro_size_y = getattr(mma_emitter, "n_dim", getattr(mma_emitter, "N_DIM", micro_size_x))
+    micro_size_k = mma_emitter.k_dim
     C_shared_shape = (
         block_M // micro_size_x,
         block_N // micro_size_y,
@@ -87,27 +108,12 @@ def tl_matmul(
         micro_size_y,
     )
 
-    warp_size = 32
-    threads = warp_size * (block_row_warps * block_col_warps)
-    local_size_a = (micro_size_x * micro_size_k) // warp_size
-    local_size_b = (micro_size_y * micro_size_k) // warp_size
-    local_size_c = (micro_size_x * micro_size_y) // warp_size
-    warp_rows = warp_row_tiles // micro_size_x
-    warp_cols = warp_col_tiles // micro_size_y
-
-    # MMA Wrapper to Auto Generate Code for MMA
-    mma_emitter = TensorCoreIntrinEmitter(
-        a_dtype=in_dtype,
-        b_dtype=in_dtype,
-        accum_dtype=accum_dtype,
-        a_transposed=False,
-        b_transposed=True,
-        block_row_warps=block_row_warps,
-        block_col_warps=block_col_warps,
-        warp_row_tiles=warp_row_tiles,
-        warp_col_tiles=warp_col_tiles,
-        chunk=chunk,
-    )
+    threads = mma_emitter.threads
+    local_size_a = mma_emitter.local_size_a
+    local_size_b = mma_emitter.local_size_b
+    local_size_c = mma_emitter.local_size_out
+    warp_rows = mma_emitter.warp_rows
+    warp_cols = mma_emitter.warp_cols
 
     @T.prim_func
     def gemm_fp8_intrinsic(
@@ -160,7 +166,10 @@ def tl_matmul(
                     )
 
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local)
+                    if is_hip:
+                        mma_emitter.mfma(A_local, B_local, C_local, ki)
+                    else:
+                        mma_emitter.mma(A_local, B_local, C_local)
 
             # Perform STMatrix
             mma_emitter.stmatrix(
@@ -194,7 +203,12 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     if in_dtype in {torch.int8, torch.int32}:
         A = torch.randint(-128, 128, (M, K), dtype=torch.int8).to(in_dtype).cuda()
         B = torch.randint(-128, 128, (N, K), dtype=torch.int8).to(in_dtype).cuda()
-    elif in_dtype in {torch.float8_e4m3fn, torch.float8_e5m2}:
+    elif in_dtype in {
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    }:
         A = torch.randn(M, K).to(in_dtype).cuda()
         B = torch.randn(N, K).to(in_dtype).cuda()
     else:
@@ -220,22 +234,24 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 def main():
-    assert_tl_matmul_correctness(128, 128, 128, T.float8_e4m3fn, T.float32, T.float32)
-    assert_tl_matmul_correctness(128, 128, 128, T.float8_e5m2, T.float32, T.float32)
+    e4m3_dtype = determine_fp8_type()
+    assert_tl_matmul_correctness(128, 128, 128, e4m3_dtype, T.float32, T.float32)
+    e5m2_dtype = determine_fp8_type("e5m2")
+    assert_tl_matmul_correctness(128, 128, 128, e5m2_dtype, T.float32, T.float32)
 
 
 def run_regression_perf():
     M, N, K = 4096, 4096, 4096
     out_dtype, accum_dtype = "float32", "float32"
-    in_dtype = T.float8_e4m3fn
+    in_dtype = determine_fp8_type()
     kernel_e4m3 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    print(kernel_e4m3.get_kernel_source())
     profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
-    latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")
-    in_dtype = T.float8_e5m2
-    kernel_e5m2 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    profiler_e5m2 = kernel_e5m2.get_profiler(tilelang.TensorSupplyType.Integer)
-    latency_e5m2 = profiler_e5m2.do_bench(backend="cupti")
-    return (latency_e4m3 + latency_e5m2) / 2
+    if torch.version.hip is None:
+        latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")
+    else:
+        latency_e4m3 = profiler_e4m3.do_bench()
+    return latency_e4m3
 
 
 if __name__ == "__main__":

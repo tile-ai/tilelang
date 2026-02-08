@@ -182,6 +182,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)
+    # Decouple type cast vectorization constraints before vectorization
+    mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
@@ -199,7 +201,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
-    # Lower the barrier.arrive into specific initialization slot
+    # Lower the shared.barrier into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
@@ -216,20 +218,13 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         # warp_specialized pass will pack the if stmt into the block
         # so we need to lower the opaque block first
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
-        mod = tilelang.transform.MergeIfStmt()(mod)
         if is_hopper(target):
             mod = tilelang.transform.RewriteWgmmaSync()(mod)
-        mod = tilelang.transform.InjectFenceProxy()(mod)
     else:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-        mod = tilelang.transform.MergeIfStmt()(mod)
-        if allow_fence_proxy(target=target):
-            # in hopper device, wgmma is an async proxy
-            # so we need to inject a fence proxy before it
-            mod = tilelang.transform.InjectFenceProxy()(mod)
 
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
@@ -241,11 +236,11 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
-    mod = tir.transform.UnrollLoop()(mod)
+    mod = tilelang.transform.LoopUnswitching()(mod)
+    mod = tilelang.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
     mod = tir.transform.Simplify()(mod)
     mod = tir.transform.RemoveNoOp()(mod)
-    mod = tir.transform.RewriteUnsafeSelect()(mod)
     mod = tir.transform.HoistIfThenElse()(mod)
 
     mod = tir.transform.VerifyMemory()(mod)
@@ -261,7 +256,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # the Legalization.
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
-
+    mod = tilelang.transform.LowerLDGSTG()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier
@@ -278,8 +273,16 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
     mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge)(mod)
+    if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
+        mod = tilelang.transform.InjectFenceProxy()(mod)
+    else:
+        if allow_fence_proxy(target=target):
+            # in hopper device, wgmma is an async proxy
+            # so we need to inject a fence proxy before it
+            mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    mod = tilelang.transform.MergeIfStmt()(mod)
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)

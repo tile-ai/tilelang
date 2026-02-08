@@ -9,6 +9,7 @@ On non-CUDA builds, the stream/device fall back to 0/CPU semantics.
 from __future__ import annotations
 
 from typing import Callable, Any
+import sys
 
 import torch
 from tilelang import tvm
@@ -19,7 +20,15 @@ from tilelang.utils.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
-from tilelang.language.v2.dtypes import dtype
+from tilelang.language.dtypes import dtype
+
+
+COMPILE_ARGS = {}
+
+if sys.platform == "darwin":
+    from torch.utils import cpp_extension
+
+    COMPILE_ARGS["options"] = ["-x", "objective-c++", "-g", "-std=gnu++17"] + ["-I" + i for i in cpp_extension.include_paths()]
 
 
 class TVMFFIKernelAdapter(BaseKernelAdapter):
@@ -160,6 +169,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         if self.executable is None:
             self.executable = runtime.Executable(self.rt_mod)
+            if COMPILE_ARGS:
+                # Precompile jit module with extra arguments
+                self.executable.jit(**COMPILE_ARGS)
 
         dynamic_symbolic_map = self._process_dynamic_symbolic()
         executable = self.executable
@@ -179,29 +191,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             else:
                 expected_dtype_strs.append(None)
                 is_buffer_param.append(False)
-
-        # Map torch dtype to TVM-style dtype string
-        def torch_dtype_to_tvm_str(dtype: torch.dtype) -> str:
-            try:
-                import torch as _torch
-            except Exception:  # pragma: no cover
-                # Fallback, though torch should always be available here
-                return str(dtype)
-            fp8_e4m3fn = getattr(_torch, "float8_e4m3fn", None)
-            fp8_e4m3fnuz = getattr(_torch, "float8_e4m3fnuz", None)
-            fp8_e5m2 = getattr(_torch, "float8_e5m2", None)
-            fp8_e5m2fnuz = getattr(_torch, "float8_e5m2fnuz", None)
-            if fp8_e4m3fn is not None and dtype == fp8_e4m3fn:
-                return "float8_e4m3"
-            if fp8_e4m3fnuz is not None and dtype == fp8_e4m3fnuz:
-                return "float8_e4m3fnuz"
-            if fp8_e5m2 is not None and dtype == fp8_e5m2:
-                return "float8_e5m2"
-            if fp8_e5m2fnuz is not None and dtype == fp8_e5m2fnuz:
-                return "float8_e5m2"
-            # Strip torch. prefix for readability
-            s = str(dtype)
-            return s[6:] if s.startswith("torch.") else s
 
         def func(*inputs: torch.Tensor | Any):
             # Validate input count strictly

@@ -387,48 +387,64 @@ M_VALUES = [64, 128, 256]
 N_VALUES = [16, 32, 64, 128, 256, 512]
 K_VALUES = [16, 32, 64, 128]
 K_VALUES_8Bit = [32, 64, 128]
-FALSE_TRUE_CASES = (
-    [
-        pytest.param(
-            k,
-            T.float16,
-            T.float16,
-            T.float16,
-            id=f"K{k}-float16-float16-float16",
-        )
-        for k in K_VALUES
-    ]
-    + [
-        pytest.param(
-            k,
-            T.int8,
-            T.int32,
-            T.int32,
-            id="K32-int8-int32-int32",
-        )
-        for k in K_VALUES_8Bit
-    ]
-    + [
-        pytest.param(
-            k,
-            T.float8_e5m2,
-            T.float32,
-            T.float32,
-            id="K32-float8_e5m2-float32-float32",
-        )
-        for k in K_VALUES_8Bit
-    ]
-    + [
-        pytest.param(
-            k,
-            T.float8_e4m3fn,
-            T.float32,
-            T.float32,
-            id="K32-float8_e4m3-float32-float32",
-        )
-        for k in K_VALUES_8Bit
-    ]
-)
+NUM_THREADS_VALUES = [128, 256]
+
+
+def _generate_dtype_cases(k_values, num_threads):
+    """Generate dtype test cases for given K values and num_threads."""
+    return (
+        [
+            pytest.param(
+                k,
+                T.float16,
+                T.float16,
+                T.float16,
+                num_threads,
+                id=f"K{k}-float16-float16-float16-threads{num_threads}",
+            )
+            for k in k_values
+        ]
+        + [
+            pytest.param(
+                k,
+                T.int8,
+                T.int32,
+                T.int32,
+                num_threads,
+                id=f"K{k}-int8-int32-int32-threads{num_threads}",
+            )
+            for k in K_VALUES_8Bit
+        ]
+        + [
+            pytest.param(
+                k,
+                T.float8_e5m2,
+                T.float32,
+                T.float32,
+                num_threads,
+                id=f"K{k}-float8_e5m2-float32-float32-threads{num_threads}",
+            )
+            for k in K_VALUES_8Bit
+        ]
+        + [
+            pytest.param(
+                k,
+                T.float8_e4m3fn,
+                T.float32,
+                T.float32,
+                num_threads,
+                id=f"K{k}-float8_e4m3fn-float32-float32-threads{num_threads}",
+            )
+            for k in K_VALUES_8Bit
+        ]
+    )
+
+
+# num_threads=128 can work with any N
+FALSE_TRUE_CASES_128 = _generate_dtype_cases(K_VALUES, 128)
+# num_threads=256 requires N >= 32
+FALSE_TRUE_CASES_256 = _generate_dtype_cases(K_VALUES, 256)
+FALSE_TRUE_CASES = FALSE_TRUE_CASES_128 + FALSE_TRUE_CASES_256
 
 
 def _ensure_torch_dtypes(*dtype_names):
@@ -439,52 +455,58 @@ def _ensure_torch_dtypes(*dtype_names):
             pytest.skip(f"Torch does not expose dtype {name}")
 
 
-def run_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
-    run_gemm_rs(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k)
+def _skip_if_threads_exceed_n(num_threads, n):
+    """Skip test if num_threads=256 and N < 32."""
+    if num_threads == 256 and n < 32:
+        pytest.skip(f"num_threads=256 requires N >= 32, but N={n}")
 
 
-def run_gemm_rs_false_false(m, n, k):
-    run_gemm_rs(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k)
+def run_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads=128):
+    run_gemm_rs(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_rs_true_false(m, n, k):
-    run_gemm_rs(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k)
+def run_gemm_rs_false_false(m, n, k, num_threads=128):
+    run_gemm_rs(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_rs_true_true(m, n, k):
-    run_gemm_rs(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k)
+def run_gemm_rs_true_false(m, n, k, num_threads=128):
+    run_gemm_rs(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
-    run_gemm_sr(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k)
+def run_gemm_rs_true_true(m, n, k, num_threads=128):
+    run_gemm_rs(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_sr_false_false(m, n, k):
-    run_gemm_sr(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k)
+def run_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads=128):
+    run_gemm_sr(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_sr_true_false(m, n, k):
-    run_gemm_sr(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k)
+def run_gemm_sr_false_false(m, n, k, num_threads=128):
+    run_gemm_sr(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_sr_true_true(m, n, k):
-    run_gemm_sr(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k)
+def run_gemm_sr_true_false(m, n, k, num_threads=128):
+    run_gemm_sr(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
-    run_gemm_rr(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k)
+def run_gemm_sr_true_true(m, n, k, num_threads=128):
+    run_gemm_sr(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_rr_false_false(m, n, k):
-    run_gemm_rr(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k)
+def run_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads=128):
+    run_gemm_rr(m, n, k * 3, False, True, in_dtype, out_dtype, accum_dtype, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_rr_true_false(m, n, k):
-    run_gemm_rr(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k)
+def run_gemm_rr_false_false(m, n, k, num_threads=128):
+    run_gemm_rr(m, n, k * 3, False, False, T.float16, T.float16, T.float16, m, n, k, num_threads=num_threads)
 
 
-def run_gemm_rr_true_true(m, n, k):
-    run_gemm_rr(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k)
+def run_gemm_rr_true_false(m, n, k, num_threads=128):
+    run_gemm_rr(m, n, k * 3, True, False, T.float16, T.float16, T.float16, m, n, k, num_threads=num_threads)
+
+
+def run_gemm_rr_true_true(m, n, k, num_threads=128):
+    run_gemm_rr(m, n, k * 3, True, True, T.float16, T.float16, T.float16, m, n, k, num_threads=num_threads)
 
 
 TRANS_CASES = [
@@ -503,9 +525,11 @@ def _setup_tilelang_environment():
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
-@pytest.mark.parametrize("k,in_dtype,out_dtype,accum_dtype", FALSE_TRUE_CASES)
-def test_gemm_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
+@pytest.mark.parametrize("k,in_dtype,out_dtype,accum_dtype,num_threads", FALSE_TRUE_CASES)
+def test_gemm_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads):
     import torch
+
+    _skip_if_threads_exceed_n(num_threads, n)
 
     required_torch_attrs = {
         in_dtype,
@@ -527,13 +551,16 @@ def test_gemm_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
         m,
         n,
         k,
+        num_threads=num_threads,
     )
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_false_false(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_false_false(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     run_gemm(
         m,
         n,
@@ -546,13 +573,16 @@ def test_gemm_false_false(m, n, k):
         m,
         n,
         k,
+        num_threads=num_threads,
     )
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_true_false(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_true_false(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     run_gemm(
         m,
         n,
@@ -565,13 +595,16 @@ def test_gemm_true_false(m, n, k):
         m,
         n,
         k,
+        num_threads=num_threads,
     )
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_true_true(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_true_true(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     run_gemm(
         m,
         n,
@@ -584,107 +617,143 @@ def test_gemm_true_true(m, n, k):
         m,
         n,
         k,
+        num_threads=num_threads,
     )
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
-@pytest.mark.parametrize("k,in_dtype,out_dtype,accum_dtype", FALSE_TRUE_CASES)
-def test_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
+@pytest.mark.parametrize("k,in_dtype,out_dtype,accum_dtype,num_threads", FALSE_TRUE_CASES)
+def test_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(in_dtype, out_dtype, accum_dtype)
-    run_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype)
+    run_gemm_rs_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_rs_false_false(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_rs_false_false(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(T.float16)
-    run_gemm_rs_false_false(m, n, k)
+    run_gemm_rs_false_false(m, n, k, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_rs_true_false(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_rs_true_false(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(T.float16)
-    run_gemm_rs_true_false(m, n, k)
+    run_gemm_rs_true_false(m, n, k, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_rs_true_true(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_rs_true_true(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(T.float16)
-    run_gemm_rs_true_true(m, n, k)
+    run_gemm_rs_true_true(m, n, k, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
-@pytest.mark.parametrize("k,in_dtype,out_dtype,accum_dtype", FALSE_TRUE_CASES)
-def test_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
+@pytest.mark.parametrize("k,in_dtype,out_dtype,accum_dtype,num_threads", FALSE_TRUE_CASES)
+def test_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(in_dtype, out_dtype, accum_dtype)
-    run_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype)
+    run_gemm_sr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_sr_false_false(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_sr_false_false(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(T.float16)
-    run_gemm_sr_false_false(m, n, k)
+    run_gemm_sr_false_false(m, n, k, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_sr_true_false(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_sr_true_false(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(T.float16)
-    run_gemm_sr_true_false(m, n, k)
+    run_gemm_sr_true_false(m, n, k, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_sr_true_true(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_sr_true_true(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(T.float16)
-    run_gemm_sr_true_true(m, n, k)
+    run_gemm_sr_true_true(m, n, k, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
-@pytest.mark.parametrize("k,in_dtype,out_dtype,accum_dtype", FALSE_TRUE_CASES)
-def test_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype):
+@pytest.mark.parametrize("k,in_dtype,out_dtype,accum_dtype,num_threads", FALSE_TRUE_CASES)
+def test_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(in_dtype, out_dtype, accum_dtype)
-    run_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype)
+    run_gemm_rr_false_true(m, n, k, in_dtype, out_dtype, accum_dtype, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_rr_false_false(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_rr_false_false(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(T.float16)
-    run_gemm_rr_false_false(m, n, k)
+    run_gemm_rr_false_false(m, n, k, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_rr_true_false(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_rr_true_false(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(T.float16)
-    run_gemm_rr_true_false(m, n, k)
+    run_gemm_rr_true_false(m, n, k, num_threads)
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
 @pytest.mark.parametrize("n", N_VALUES, ids=lambda v: f"N{v}")
 @pytest.mark.parametrize("k", K_VALUES, ids=lambda v: f"K{v}")
-def test_gemm_rr_true_true(m, n, k):
+@pytest.mark.parametrize("num_threads", NUM_THREADS_VALUES, ids=lambda v: f"threads{v}")
+def test_gemm_rr_true_true(m, n, k, num_threads):
+    _skip_if_threads_exceed_n(num_threads, n)
     _ensure_torch_dtypes(T.float16)
-    run_gemm_rr_true_true(m, n, k)
+    run_gemm_rr_true_true(m, n, k, num_threads)
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    run_gemm(
+        M=64,
+        N=192,
+        K=64,
+        trans_A=False,
+        trans_B=False,
+        in_dtype=T.bfloat16,
+        out_dtype=T.bfloat16,
+        dtypeAccum=T.float32,
+        block_M=64,
+        block_N=192,
+        block_K=64,
+        num_stages=0,
+        num_threads=256,
+    )
 
     # # Test Pass
     # for m in [64, 128, 256]:

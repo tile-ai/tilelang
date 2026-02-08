@@ -6,7 +6,7 @@ import tilelang.testing
 import tilelang.language as T
 
 
-@tilelang.lazy_jit
+@tilelang.jit
 def basic_shape_kernel(x):
     m = T.dynamic("m")
     x: T.Tensor[(m, 16), T.float4_e2m1fn]
@@ -15,7 +15,7 @@ def basic_shape_kernel(x):
         pass
 
 
-@tilelang.lazy_jit
+@tilelang.jit
 def strided_kernel(x):
     m = T.dynamic("m")
     s = T.dynamic("s")
@@ -95,7 +95,7 @@ def test_subtype_different_strides():
         strided_kernel(t_strided)
 
 
-@tilelang.lazy_jit
+@tilelang.jit
 def symbolic_last_dim_kernel(x):
     """Kernel with symbolic variable in the last dimension."""
     n = T.dynamic("n")
@@ -105,7 +105,7 @@ def symbolic_last_dim_kernel(x):
         pass
 
 
-@tilelang.lazy_jit
+@tilelang.jit
 def symbolic_last_dim_strided_kernel(x):
     """Kernel with symbolic variable in both shape and stride of last dimension."""
     n = T.dynamic("n")
@@ -116,7 +116,7 @@ def symbolic_last_dim_strided_kernel(x):
         pass
 
 
-@tilelang.lazy_jit
+@tilelang.jit
 def shared_symbolic_kernel(x, y):
     """Kernel with shared symbolic variable across multiple buffers."""
     m = T.dynamic("m")
@@ -127,7 +127,7 @@ def shared_symbolic_kernel(x, y):
         pass
 
 
-@tilelang.lazy_jit
+@tilelang.jit
 def shared_symbolic_strided_kernel(x, y):
     """Kernel with shared symbolic variable in strides."""
     m = T.dynamic("m")
@@ -139,7 +139,7 @@ def shared_symbolic_strided_kernel(x, y):
         pass
 
 
-@tilelang.lazy_jit
+@tilelang.jit
 def complex_expr_kernel(x, y):
     """Kernel with complex expressions involving symbolic variables."""
     m = T.dynamic("m")

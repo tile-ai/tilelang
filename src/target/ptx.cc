@@ -74,9 +74,11 @@ DataType DTypeFromString(const std::string str) {
     return DataType::kInt64;
   } else if (str == "uint64" || str == ".u64") {
     return DataType::kUInt64;
-  } else if (str == "float8_e4m3" || str == "e4m3" || str == ".e4m3") {
+  } else if (str == "float8_e4m3" || str == "float8_e4m3fn" || str == "e4m3" ||
+             str == ".e4m3") {
     return DataType::kFloat8_e4m3;
-  } else if (str == "float8_e5m2" || str == "e5m2" || str == ".e5m2") {
+  } else if (str == "float8_e5m2" || str == "float8_e5m2fn" || str == "e5m2" ||
+             str == ".e5m2") {
     return DataType::kFloat8_e5m2;
   } else if (str == "float16" || str == "fp16" || str == ".f16") {
     return DataType::kFloat16;
