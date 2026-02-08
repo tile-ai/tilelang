@@ -237,7 +237,7 @@ class AutotuneResult:
                     logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
                 self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
             elif kernel.execution_backend == "tvm_ffi":
-                if hasattr(kernel.adapter, 'libpath') and kernel.adapter.libpath:
+                if hasattr(kernel.adapter, "libpath") and kernel.adapter.libpath:
                     src_lib_path = kernel.adapter.libpath
                     if verbose:
                         logger.debug(f"Copying kernel library to file: {kernel_lib_path}")
