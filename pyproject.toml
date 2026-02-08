@@ -42,7 +42,7 @@ dependencies = [
     "setuptools; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
-    "z3-solver>=4.13.0",
+    "z3-solver>=4.13.0,!=4.15.5.0",
 ]
 
 [project.optional-dependencies]
@@ -61,7 +61,7 @@ nvcc = [
 requires = [
     "cython>=3.1.0",
     "scikit-build-core",
-    "z3-solver>=4.13.0",
+    "z3-solver>=4.13.0,!=4.15.5.0",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
     # See tvm's CMakeLists.txt for more information.
     "patchelf>=0.17.2; platform_system == 'Linux'",
