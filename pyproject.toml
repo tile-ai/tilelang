@@ -33,7 +33,7 @@ dependencies = [
     "apache-tvm-ffi~=0.1.0,>=0.1.2",
     # torch-c-dlpack-ext provides prebuilt torch extensions.
     # Without it, TVM FFI may require JIT compilation on first import.
-    "torch-c-dlpack-ext; python_version != '3.14t'",
+    "torch-c-dlpack-ext; python_version != '3.14'",
     "cloudpickle",
     "ml-dtypes",
     "numpy>=1.23.5",
