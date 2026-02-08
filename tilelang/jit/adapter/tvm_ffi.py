@@ -51,6 +51,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     host_kernel_source: str | None = None
     device_kernel_source: str | None = None
     executable: tvm.runtime.Executable | None = None
+    is_from_cache: bool = False
     # Pass configs for the compiler
     pass_configs: dict[str, Any] | None = None
     # host_mod
@@ -169,6 +170,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         if self.executable is None:
             self.executable = runtime.Executable(self.rt_mod)
+            self.is_from_cache = False
             if COMPILE_ARGS:
                 # Precompile jit module with extra arguments
                 self.executable.jit(**COMPILE_ARGS)
@@ -282,6 +284,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         adapter.verbose = verbose
         adapter.executable = runtime.load_module(kernel_lib_path)
+        adapter.is_from_cache = True
         adapter._post_init()
         return adapter
 

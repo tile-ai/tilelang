@@ -238,9 +238,12 @@ class AutotuneResult:
                 self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
             elif kernel.execution_backend == "tvm_ffi":
                 executable = kernel.adapter.executable
-                if verbose:
-                    logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
-                self._safe_write_executable(executable, kernel_lib_path)
+                if getattr(kernel.adapter, 'is_from_cache', False):
+                    logger.info("Kernel loaded from JIT cache, skipping save")
+                else:
+                    if verbose:
+                        logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
+                    self._safe_write_executable(executable, kernel_lib_path)
             else:
                 src_lib_path = kernel.adapter.libpath
                 if verbose:
