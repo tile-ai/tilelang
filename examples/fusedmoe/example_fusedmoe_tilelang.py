@@ -615,7 +615,7 @@ def run_regression_perf(
             moe.up_logits_routed,
             moe.expert_output_routed,
         )
-    
+
     shared_latency = do_bench(run_shared_kernel_only, backend="cupti")
     routed_latency = do_bench(run_routed_kernel_only, backend="cupti")
     return (shared_latency + routed_latency) / 2
