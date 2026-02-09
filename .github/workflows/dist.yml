@@ -117,20 +117,12 @@ jobs:
         target:
           - { runner: ubuntu-latest, toolkit: "CUDA-12.8" }
           - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
-          - { runner: ubuntu-latest, toolkit: "Nightly-CUDA-13.0" }
-          - { runner: ubuntu-24.04-arm, toolkit: "Nightly-CUDA-13.0" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
           # Build wheels for different Python ABIs
           - "3.9"
           # - "3.14t"  # let user to build from source for now
           # TODO: Add cp315-abi3.abi3t after PEP 803
-        include:
-          # map build version to test version
-          # Python 3.9 implicitly restrict torch version (e.g. on arm64).
-          # This test rely on torch to provide libnvrtc, so we need a rather new torch.
-          - { python-version: "3.9", test-python-version: "3.12" }
-          # - { python-version: "3.14t", test-python-version: "3.14t" }
       fail-fast: false
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
@@ -171,23 +163,6 @@ jobs:
             CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
             CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
-            if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
-              # Use torch nightly builds
-              export UV_INDEX="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
-            else
-              export UV_INDEX="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
-              echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
-            fi
-            echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-          fi
-
-          if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
-            if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
-              # Avoid using same file name for different toolkit.
-              echo "NO_GIT_VERSION=ON" | tee -a "${GITHUB_ENV}"
-            else
-              echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
-            fi
           fi
 
           if [[ "${{ runner.os }}" == "Linux" ]]; then
@@ -206,7 +181,7 @@ jobs:
         id: setup-uv
         uses: astral-sh/setup-uv@v7
         with:
-          python-version: ${{ matrix.test-python-version }}
+          python-version: ${{ matrix.python-version }}
           activate-environment: true
 
       - name: Test built wheels
@@ -220,11 +195,6 @@ jobs:
               set -e
               uv venv test-venv
               source test-venv/bin/activate
-
-              uv pip install --upgrade pip setuptools wheel
-              if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
-                uv pip install --prerelease=allow -v torch
-              fi
 
               uv pip install -v "${WHEEL}"
               (
