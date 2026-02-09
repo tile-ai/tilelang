@@ -73,15 +73,9 @@ void *TryLoadLibCudart() {
     return RTLD_DEFAULT;
   }
 
-  fprintf(
-      stderr,
-      "TileLang Internal Error: libcudart symbols not found in global scope. "
-      "This indicates an unexpected environment or failure to load CUDA "
-      "runtime symbols. "
-      "TileLang imports torch internally and relies on the CUDA runtime being "
-      "available via dynamic lookup. "
-      "Please ensure PyTorch with CUDA is installed and imported before using "
-      "TileLang.\n");
+  fprintf(stderr,
+          "TileLang Error: libcudart symbols not found globally. "
+          "Make sure PyTorch with CUDA is installed before using TileLang.\n");
   __builtin_unreachable();
 }
 
