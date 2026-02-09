@@ -1,6 +1,3 @@
-import os
-import tempfile
-
 import tilelang
 import tilelang.testing
 from tilelang import language as T
@@ -15,24 +12,19 @@ def test_issue_1810_l2_persistent_float16_host_stub_no_half(monkeypatch):
     type as `half`, which is not defined by the stable C ABI headers, causing
     host-side compilation failures when exporting the executable.
     """
-    with tempfile.TemporaryDirectory() as tmp:
-        cache_dir = os.path.join(tmp, "tilelang_cache")
-        tmp_dir = os.path.join(cache_dir, "tmp")
-        monkeypatch.setenv("TILELANG_CACHE_DIR", cache_dir)
-        monkeypatch.setenv("TILELANG_TMP_DIR", tmp_dir)
 
-        @T.prim_func
-        def minimal_kernel(A: T.Buffer((1,), "float16")):
-            with T.Kernel():
-                T.annotate_l2_hit_ratio({A: 0.9})
-                T.evaluate(0)
+    @T.prim_func
+    def minimal_kernel(A: T.Buffer((1,), "float16")):
+        with T.Kernel():
+            T.annotate_l2_hit_ratio({A: 0.9})
+            T.evaluate(0)
 
-        kernel = tilelang.compile(minimal_kernel, execution_backend="tvm_ffi", target="cuda")
-        source = kernel.get_host_source()
-        assert "__tvm_cuda_stream_set_access_policy_window_packed" in source
-        assert "__tvm_cuda_stream_reset_access_policy_window_packed" in source
-        assert "half*" not in source
-        assert "((half*)" not in source
+    kernel = tilelang.compile(minimal_kernel, execution_backend="tvm_ffi", target="cuda")
+    source = kernel.get_host_source()
+    assert "__tvm_cuda_stream_set_access_policy_window_packed" in source
+    assert "__tvm_cuda_stream_reset_access_policy_window_packed" in source
+    assert "half*" not in source
+    assert "((half*)" not in source
 
 
 if __name__ == "__main__":
