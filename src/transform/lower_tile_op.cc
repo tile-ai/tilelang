@@ -987,6 +987,31 @@ private:
         if (!IsLocalBuffer(load->buffer)) {
           local_register_only = false;
         }
+      } else if (const auto *call = obj.as<CallNode>()) {
+        // Handle pointer-style memory accesses that don't show up as explicit
+        // BufferLoad/BufferStore nodes, e.g., atomic_addx2_elem_op(
+        //   tvm_access_ptr(..., B, ...), tvm_access_ptr(..., A, ...)).
+        if (call->op.same_as(builtin::tvm_access_ptr()) &&
+            call->args.size() >= 2) {
+          const auto *var_node = call->args[1].as<VarNode>();
+          if (!var_node) {
+            // Unknown base expression - conservatively treat as non-local
+            // access so we don't skip thread partitioning.
+            local_register_only = false;
+            return;
+          }
+          Var buffer_var = tvm::ffi::GetRef<Var>(var_node);
+          auto it = buffer_map_.find(buffer_var);
+          if (it == buffer_map_.end()) {
+            // Unmapped var - conservatively treat as non-local access.
+            local_register_only = false;
+            return;
+          }
+          const Buffer &buffer = it->second;
+          if (!IsLocalBuffer(buffer)) {
+            local_register_only = false;
+          }
+        }
       }
     });
 
@@ -1004,6 +1029,26 @@ private:
       } else if (const auto *store = obj.as<BufferStoreNode>()) {
         if (!IsLocalBuffer(store->buffer) && !IsFragmentBuffer(store->buffer)) {
           has_non_local = true;
+        }
+      } else if (const auto *call = obj.as<CallNode>()) {
+        if (call->op.same_as(builtin::tvm_access_ptr()) &&
+            call->args.size() >= 2) {
+          const auto *var_node = call->args[1].as<VarNode>();
+          if (!var_node) {
+            // Unknown base expression - conservatively assume non-local.
+            has_non_local = true;
+            return;
+          }
+          Var buffer_var = tvm::ffi::GetRef<Var>(var_node);
+          auto it = buffer_map_.find(buffer_var);
+          if (it == buffer_map_.end()) {
+            has_non_local = true;
+            return;
+          }
+          const Buffer &buffer = it->second;
+          if (!IsLocalBuffer(buffer) && !IsFragmentBuffer(buffer)) {
+            has_non_local = true;
+          }
         }
       }
     });

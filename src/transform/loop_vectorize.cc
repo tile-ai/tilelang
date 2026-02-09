@@ -388,15 +388,23 @@ private:
       ICHECK(node->args.size() >= 2)
           << "atomic_add_elem_op requires at least 2 args (dst and src)";
 
-      // Get dst dtype from args[0] (address_of call containing BufferLoad)
-      auto address_of_call = node->args[0].as<CallNode>();
-      ICHECK(address_of_call && address_of_call->op == builtin::address_of())
-          << "atomic_add_elem_op first arg must be address_of call";
+      // Get dst dtype from args[0] (tvm_access_ptr or address_of(BufferLoad))
+      const CallNode *dst_ptr_call = node->args[0].as<CallNode>();
+      ICHECK(dst_ptr_call) << "atomic_add_elem_op first arg must be a call";
 
-      auto buffer_load = address_of_call->args[0].as<BufferLoadNode>();
-      ICHECK(buffer_load) << "address_of arg must be BufferLoad";
-
-      DataType dtype = buffer_load->buffer->dtype;
+      DataType dtype;
+      if (dst_ptr_call->op.same_as(builtin::address_of())) {
+        auto buffer_load = dst_ptr_call->args[0].as<BufferLoadNode>();
+        ICHECK(buffer_load) << "address_of arg must be BufferLoad";
+        dtype = buffer_load->buffer->dtype;
+      } else if (dst_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+        ICHECK(!dst_ptr_call->args.empty());
+        dtype = dst_ptr_call->args[0].dtype();
+      } else {
+        LOG(FATAL) << "atomic_add_elem_op first arg must be tvm_access_ptr "
+                      "or address_of call, but got "
+                   << node->args[0];
+      }
       int vectorize_length = 1;
       if (dtype.is_float16() || dtype.is_bfloat16()) {
         vectorize_length = 2;

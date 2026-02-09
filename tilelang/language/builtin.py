@@ -77,6 +77,151 @@ def __ldg(load_or_buf: BufferLoad | tir.Buffer, index: PrimExpr | int | None = N
     raise TypeError("T.__ldg expects a BufferLoad or a Buffer.")
 
 
+def access_ptr(
+    base: BufferLikeType,
+    access_type: str | int = "r",
+    *extents: PrimExpr | int | tuple[PrimExpr | int, ...] | list[PrimExpr | int],
+    offset: PrimExpr | int = 0,
+    extent: PrimExpr | int | None = None,
+    ignore_last_ndim: int = 0,
+) -> PrimExpr:
+    """Create a `tvm_access_ptr` from a buffer-like base location.
+
+    This is a frontend convenience wrapper around `tir.Buffer.access_ptr` that
+    lets users specify the base pointer using a `BufferLoad` (similar in spirit
+    to `T.address_of(buf[...])`), while still carrying the `rw_mask` metadata
+    (read/write intent) required by many downstream TIR passes.
+
+    Parameters
+    ----------
+    base : BufferLikeType
+        The base location to take the address of. Supported:
+        - `tir.BufferLoad` (e.g. `A[i, j]`): pointer to that element
+        - `tir.BufferRegion`: pointer to the region minima
+        - `tir.Buffer`: pointer to the beginning of the buffer
+        - `tir.Var` with let-binding to one of the above (inside TileLang frame)
+
+    access_type : str | int
+        Access mask for the pointer. Common string forms: `"r"`, `"w"`, `"rw"`.
+        Integer bitmask is also accepted (1=read, 2=write, 3=read-write).
+
+    *extents : PrimExpr | int
+        Optional per-axis extents. When provided and `extent` is not specified,
+        the 1D `extent` passed to `tvm_access_ptr` is computed as the product of
+        the provided extents (padding leading dimensions with 1 if needed).
+
+        For example:
+        - `T.access_ptr(A[i], "r")` -> extent defaults to 1 (element pointer)
+        - `T.access_ptr(A[i], "r", 16)` -> extent=16
+        - `T.access_ptr(A[i, j], "r", m, n)` -> extent=m*n
+
+    offset : PrimExpr | int
+        Additional element offset from the base location.
+
+    extent : PrimExpr | int | None
+        Optional explicit 1D extent override (in elements). If provided, it
+        takes precedence over `*extents`.
+
+    ignore_last_ndim : int
+        If non-zero, the base linear offset is computed only over the leading
+        dimensions, ignoring the last `ignore_last_ndim` axes. This is useful
+        when treating an N-D buffer as a view of its trailing sub-tensor.
+
+    Returns
+    -------
+    ptr : PrimExpr
+        A handle-typed `tir.Call` to `tir.builtin.tvm_access_ptr`.
+    """
+
+    from tilelang.language.frame import has_let_value, get_let_value
+    from tilelang.language.utils import get_buffer_region_from_load
+
+    if isinstance(base, tir.Var) and has_let_value(base):
+        base = get_let_value(base)
+
+    # Allow passing a single list/tuple as the extents argument.
+    if len(extents) == 1 and isinstance(extents[0], (list, tuple)):
+        extents = tuple(extents[0])
+
+    def _index_dtype(buf: tir.Buffer) -> str:
+        if len(buf.shape) > 0:
+            return str(buf.shape[0].dtype)
+        return "int32"
+
+    def _row_major_strides(buf: tir.Buffer) -> list[PrimExpr]:
+        idx_dtype = _index_dtype(buf)
+        stride: PrimExpr = tir.IntImm(idx_dtype, 1)
+        strides: list[PrimExpr] = []
+        for dim in reversed(buf.shape):
+            strides.insert(0, stride)
+            stride = stride * dim
+        return strides
+
+    # Extract underlying buffer and per-axis minima (indices).
+    inferred_region_extents: list[PrimExpr] | None = None
+    if isinstance(base, BufferLoad):
+        buf = base.buffer
+        region = get_buffer_region_from_load(base)
+        if region is not None:
+            mins = [r.min for r in region.region]
+            inferred_region_extents = [r.extent for r in region.region]
+        else:
+            mins = list(base.indices)
+    elif isinstance(base, BufferRegion):
+        buf = base.buffer
+        mins = [r.min for r in base.region]
+        inferred_region_extents = [r.extent for r in base.region]
+    elif isinstance(base, tir.Buffer):
+        buf = base
+        idx_dtype = _index_dtype(buf)
+        mins = [tir.IntImm(idx_dtype, 0) for _ in buf.shape]
+    else:
+        raise TypeError(f"T.access_ptr expects a Buffer, BufferLoad, BufferRegion, or a Var bound to one of them, but got {type(base)}.")
+
+    # Compute linearized element offset.
+    idx_dtype = _index_dtype(buf)
+    if len(buf.strides) == len(buf.shape) and len(buf.strides) > 0:
+        strides = list(buf.strides)
+    else:
+        strides = _row_major_strides(buf)
+
+    ignore_last_ndim = int(ignore_last_ndim)
+    upto = max(0, len(mins) - ignore_last_ndim)
+    linear_offset: PrimExpr = tir.IntImm(idx_dtype, 0)
+    for i in range(upto):
+        linear_offset = linear_offset + mins[i] * strides[i]
+    linear_offset = linear_offset + convert(offset)
+
+    # Compute 1D extent for tvm_access_ptr when requested.
+    extent_1d: PrimExpr | None
+    if extent is not None:
+        extent_1d = convert(extent)
+    elif len(extents) > 0:
+        exts = [convert(e) for e in extents]
+        if len(exts) > len(buf.shape):
+            raise ValueError(f"T.access_ptr got {len(exts)} extents for a buffer with ndim={len(buf.shape)}.")
+        if len(exts) < len(buf.shape):
+            pad = [tir.IntImm(idx_dtype, 1) for _ in range(len(buf.shape) - len(exts))]
+            exts = pad + exts
+        extent_1d = tir.IntImm(idx_dtype, 1)
+        for e in exts:
+            extent_1d = extent_1d * e
+    else:
+        # Make BufferLoad behave like "element pointer" by default.
+        if isinstance(base, BufferLoad):
+            extent_1d = tir.IntImm(idx_dtype, 1)
+        elif inferred_region_extents is not None:
+            extent_1d = tir.IntImm(idx_dtype, 1)
+            for e in inferred_region_extents:
+                extent_1d = extent_1d * convert(e)
+        else:
+            extent_1d = None
+
+    if extent_1d is None:
+        return buf.access_ptr(access_type, offset=linear_offset)
+    return buf.access_ptr(access_type, offset=linear_offset, extent=extent_1d)
+
+
 def create_tma_descriptor(*args):
     """Create a Tensor Memory Access (TMA) descriptor.
 

@@ -32,6 +32,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -137,6 +138,27 @@ inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
     }
   }
   return Optional<BufferLoad>();
+}
+
+/*!
+ * \brief Extract dst scalar dtype for atomic ops.
+ *
+ * Supports:
+ * - BufferLoad / address_of(BufferLoad)
+ * - tvm_access_ptr(tir.type_annotation(dtype), ...)
+ */
+inline std::optional<DataType> ExtractDTypeForAtomic(const PrimExpr &expr) {
+  if (auto load = ExtractBufferLoadForAtomic(expr)) {
+    return load.value()->buffer->dtype;
+  }
+  if (const auto *call = expr.as<CallNode>()) {
+    if (call->op.same_as(builtin::tvm_access_ptr()) && !call->args.empty()) {
+      // The first argument is a TIR type annotation expression whose dtype is
+      // the element type of the pointer.
+      return call->args[0].dtype();
+    }
+  }
+  return std::nullopt;
 }
 
 /*!
@@ -527,6 +549,37 @@ public:
     return Call(op->dtype, op->op, {new_load});
   }
 
+  // tvm_access_ptr: remove vectorized var from offset to get base address
+  // e.g., T.tvm_access_ptr(..., base + vec, ...) -> T.tvm_access_ptr(..., base,
+  // ...)
+  PrimExpr MutateTVMAccessPtrCall_(const CallNode *op) {
+    ICHECK(op->op.same_as(builtin::tvm_access_ptr()));
+    if (op->args.size() < 5) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    PrimExpr zero = IntImm(var_->dtype, 0);
+
+    PrimExpr new_offset = Substitute(op->args[2], {{var_, zero}});
+    new_offset = analyzer_.Simplify(new_offset);
+
+    PrimExpr new_extent = Substitute(op->args[3], {{var_, zero}});
+    new_extent = analyzer_.Simplify(new_extent);
+
+    if (new_offset.same_as(op->args[2]) && new_extent.same_as(op->args[3])) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    auto new_args = op->args;
+    if (!new_offset.same_as(op->args[2])) {
+      new_args.Set(2, new_offset);
+    }
+    if (!new_extent.same_as(op->args[3])) {
+      new_args.Set(3, new_extent);
+    }
+    return Call(op->dtype, op->op, new_args);
+  }
+
   // Reinterpret expr
   PrimExpr MutateReinterpretExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::reinterpret()));
@@ -570,10 +623,13 @@ public:
     }
 
     // Check if dtype supports this vector size
-    auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
     Target target = Target::Current(false);
-    int max_vec_size =
-        GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer->dtype, target);
+    auto dst_dtype = ExtractDTypeForAtomic(dst);
+    if (!dst_dtype.has_value()) {
+      // Cannot infer dtype, skip vectorization.
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+    int max_vec_size = GetMaxAtomicVectorSize(dst_dtype.value(), target);
     if (vector_size > max_vec_size) {
       // Vector size not supported for this dtype, cannot vectorize
       return tvm::ffi::GetRef<PrimExpr>(op);
@@ -607,8 +663,27 @@ public:
     } else if (op->op.same_as(atomic_add_elem_op())) {
       // Handle vectorization of atomic_add_elem_op
       return MutateAtomicAddExpr_(op);
+    } else if (op->op.same_as(atomic_addx2_elem_op()) ||
+               op->op.same_as(atomic_addx4_elem_op()) ||
+               op->op.same_as(atomic_add_ret_elem_op()) ||
+               op->op.same_as(atomic_load_elem_op()) ||
+               op->op.same_as(atomic_store_elem_op()) ||
+               op->op.same_as(atomic_max_elem_op()) ||
+               op->op.same_as(atomic_max_ret_elem_op()) ||
+               op->op.same_as(atomic_min_elem_op()) ||
+               op->op.same_as(atomic_min_ret_elem_op())) {
+      // These per-element atomic ops do not have a general vectorized lowering
+      // in TileLang. When they appear inside a vectorized loop, we must
+      // scalarize the whole loop to avoid incorrectly dropping the lane
+      // component (e.g., pointer base extraction in tvm_access_ptr/address_of).
+      if (!is_one(var_lanes_)) {
+        need_scalarize_ = true;
+      }
+      return tvm::ffi::GetRef<PrimExpr>(op);
     } else if (op->op.same_as(builtin::address_of())) {
       return MutateAddressOfCall_(op);
+    } else if (op->op.same_as(builtin::tvm_access_ptr())) {
+      return MutateTVMAccessPtrCall_(op);
     }
     auto optional_op = op->op.as<Op>();
     bool vectorizable = optional_op &&

@@ -208,9 +208,11 @@ For AtomicOpBaseNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   if (src_value_arg->dtype != dst->dtype)
     src_value_arg = Cast(dst->dtype, src_value_arg);
 
-  // Build a pointer to destination element using tvm_access_ptr
-  PrimExpr dst_ptr = Call(DataType::Handle(), builtin::address_of(),
-                          {BufferLoad(dst, dst_indices)});
+  // Build an access pointer to the destination element (rw).
+  PrimExpr dst_offset = dst.OffsetOf(dst_indices).back();
+  PrimExpr dst_ptr = dst.access_ptr(
+      /*access_mask=*/3, DataType::Handle(), /*content_lanes=*/1, dst_offset,
+      /*input_extent=*/make_const(dst_offset.dtype(), 1));
 
   new_args.push_back(dst_ptr);
   new_args.push_back(src_value_arg);

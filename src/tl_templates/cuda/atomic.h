@@ -332,18 +332,18 @@ TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
 }
 
 template <typename src_type>
-TL_DEVICE void AtomicAddx2(half_t *ref, src_type *val,
+TL_DEVICE void AtomicAddx2(half_t *ref, const src_type *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<half2 *>(ref),
-              static_cast<half2>(*reinterpret_cast<half2 *>(val)));
+              static_cast<half2>(*reinterpret_cast<const half2 *>(val)));
   } else {
     // Since atomicAdd does not support memory order, atomic_ref does not
     // support vectorized atomic operation we can only inline ptx code here
     // Note: Vectorized atomic operations only support global space
     // Note: for 16-bit value, we need to reinterpret_cast the value to unsigned
     // short and use "h" register in assembly
-    __half2 add_val = *reinterpret_cast<__half2 *>(val);
+    __half2 add_val = *reinterpret_cast<const __half2 *>(val);
     unsigned short add_val_x_cast =
         *reinterpret_cast<unsigned short *>(&add_val.x);
     unsigned short add_val_y_cast =
@@ -380,13 +380,13 @@ TL_DEVICE void AtomicAddx2(half_t *ref, src_type *val,
 
 template <typename src_type>
 TL_DEVICE half2
-AtomicAddx2Ret(half_t *ref, src_type *val,
+AtomicAddx2Ret(half_t *ref, const src_type *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(reinterpret_cast<half2 *>(ref),
-                     static_cast<half2>(*reinterpret_cast<half2 *>(val)));
+                     static_cast<half2>(*reinterpret_cast<const half2 *>(val)));
   } else {
-    __half2 add_val = *reinterpret_cast<__half2 *>(val);
+    __half2 add_val = *reinterpret_cast<const __half2 *>(val);
     unsigned short add_val_x_cast =
         *reinterpret_cast<unsigned short *>(&add_val.x);
     unsigned short add_val_y_cast =
@@ -509,8 +509,8 @@ AtomicAddx2Ret(bfloat16_t *ref, src_type *val,
 #endif
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
-template <typename T> TL_DEVICE float2 ToFloat2(T *val) {
-  return *reinterpret_cast<float2 *>(val);
+template <typename T> TL_DEVICE float2 ToFloat2(const T *val) {
+  return *reinterpret_cast<const float2 *>(val);
 }
 
 TL_DEVICE float2 ToFloat2(float2 val) { return val; }
@@ -577,8 +577,8 @@ AtomicAddx2Ret(float *ref, ValType val,
   }
 }
 
-template <typename T> TL_DEVICE float4 ToFloat4(T *val) {
-  return *reinterpret_cast<float4 *>(val);
+template <typename T> TL_DEVICE float4 ToFloat4(const T *val) {
+  return *reinterpret_cast<const float4 *>(val);
 }
 
 TL_DEVICE float4 ToFloat4(float4 val) { return val; }
@@ -666,14 +666,14 @@ AtomicAddx4Ret(dst_dtype *ref, ValType val,
   }
 }
 #else
-template <typename T> TL_DEVICE float2 ToFloat2(T *val) {
-  return *reinterpret_cast<float2 *>(val);
+template <typename T> TL_DEVICE float2 ToFloat2(const T *val) {
+  return *reinterpret_cast<const float2 *>(val);
 }
 
 TL_DEVICE float2 ToFloat2(float2 val) { return val; }
 
-template <typename T> TL_DEVICE float4 ToFloat4(T *val) {
-  return *reinterpret_cast<float4 *>(val);
+template <typename T> TL_DEVICE float4 ToFloat4(const T *val) {
+  return *reinterpret_cast<const float4 *>(val);
 }
 
 TL_DEVICE float4 ToFloat4(float4 val) { return val; }
