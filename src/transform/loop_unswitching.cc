@@ -326,7 +326,8 @@ bool IsSideEffectFreeStmt(const Stmt &stmt) {
     if (!IsSideEffectFreeStmt(op->then_case)) {
       return false;
     }
-    if (op->else_case.defined() && !IsSideEffectFreeStmt(op->else_case.value())) {
+    if (op->else_case.defined() &&
+        !IsSideEffectFreeStmt(op->else_case.value())) {
       return false;
     }
     return true;
@@ -347,12 +348,11 @@ bool IsSideEffectFreeStmt(const Stmt &stmt) {
 /*!
  * \brief Check if a condition is loop-invariant
  */
-bool IsLoopInvariant(const PrimExpr &cond, const Var &loop_var,
-                     const std::unordered_set<const VarNode *> &written_vars,
-                     const std::unordered_map<const VarNode *, PrimExpr>
-                         *let_bindings = nullptr,
-                     const std::unordered_set<const VarNode *>
-                         *disallowed_vars = nullptr) {
+bool IsLoopInvariant(
+    const PrimExpr &cond, const Var &loop_var,
+    const std::unordered_set<const VarNode *> &written_vars,
+    const std::unordered_map<const VarNode *, PrimExpr> *let_bindings = nullptr,
+    const std::unordered_set<const VarNode *> *disallowed_vars = nullptr) {
   // Check 0: disallow conditions that depend on per-thread binding vars (e.g.
   // threadIdx.x). These predicates are loop-invariant, but unswitching them can
   // split the execution into different code paths across threads. Later passes
@@ -498,8 +498,8 @@ public:
   void VisitStmt_(const IfThenElseNode *op) final {
     if (found)
       return;
-    if (IsLoopInvariant(op->condition, loop_var, written_vars,
-                        &let_bindings_, disallowed_vars)) {
+    if (IsLoopInvariant(op->condition, loop_var, written_vars, &let_bindings_,
+                        disallowed_vars)) {
       found = op;
       // Collect Let-bound variables used in the condition
       LetVarCollector collector(let_bindings_);
@@ -592,8 +592,9 @@ public:
                                       finder.hoisted_let_bindings)(body);
 
     // Only unswitch when the else-version does not do any meaningful work.
-    // This keeps the canonical optimization `for: if(cond) {S}` -> `if(cond){for:S}`
-    // while avoiding duplicating non-trivial loop bodies into two versions.
+    // This keeps the canonical optimization `for: if(cond) {S}` ->
+    // `if(cond){for:S}` while avoiding duplicating non-trivial loop bodies into
+    // two versions.
     if (!allow_non_trivial_else_ && !IsSideEffectFreeStmt(else_body)) {
       result = For(op->loop_var, op->min, op->extent, op->kind, body,
                    op->thread_binding, op->annotations);
@@ -649,7 +650,8 @@ tvm::transform::Pass LoopUnswitching() {
     bool allow_non_trivial_else =
         ctx->GetConfig<Bool>(kLoopUnswitchingAllowNonTrivialElse, Bool(false))
             .value();
-    f.CopyOnWrite()->body = ApplyLoopUnswitching(f->body, allow_non_trivial_else);
+    f.CopyOnWrite()->body =
+        ApplyLoopUnswitching(f->body, allow_non_trivial_else);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LoopUnswitching", {});
