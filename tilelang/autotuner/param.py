@@ -86,6 +86,7 @@ class ProfileArgs:
         warmup: Number of warmup iterations.
         rep: Number of repetitions for timing.
         timeout: Maximum time per configuration.
+        backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
         supply_type: Type of tensor supply mechanism.
         ref_prog: Reference program for correctness validation.
         supply_prog: Supply program for input tensors.
@@ -104,6 +105,7 @@ class ProfileArgs:
     warmup: int = 25
     rep: int = 100
     timeout: int = 30
+    backend: Literal["event", "cupti", "cudagraph"] = "event"
     supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
     ref_prog: Callable = None
     supply_prog: Callable = None
@@ -119,6 +121,7 @@ class ProfileArgs:
             "warmup": self.warmup,
             "rep": self.rep,
             "timeout": self.timeout,
+            "backend": self.backend,
             "supply_type": str(self.supply_type),
             "rtol": self.rtol,
             "atol": self.atol,
@@ -237,10 +240,16 @@ class AutotuneResult:
                     logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
                 self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
             elif kernel.execution_backend == "tvm_ffi":
-                executable = kernel.adapter.executable
-                if verbose:
-                    logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
-                self._safe_write_executable(executable, kernel_lib_path)
+                if hasattr(kernel.adapter, "libpath") and kernel.adapter.libpath:
+                    src_lib_path = kernel.adapter.libpath
+                    if verbose:
+                        logger.debug(f"Copying kernel library to file: {kernel_lib_path}")
+                    self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
+                else:
+                    executable = kernel.adapter.executable
+                    if verbose:
+                        logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
+                    self._safe_write_executable(executable, kernel_lib_path)
             else:
                 src_lib_path = kernel.adapter.libpath
                 if verbose:
