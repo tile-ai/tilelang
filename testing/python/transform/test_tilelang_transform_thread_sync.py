@@ -631,5 +631,4 @@ def test_sync_hoist_non_uniform_if_in_loop_with_shared_memory():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_sync_hoist_non_uniform_if_in_loop_with_shared_memory()
+    tilelang.testing.main()
