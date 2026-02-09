@@ -26,7 +26,6 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
-#include <optional>
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
@@ -1243,9 +1242,6 @@ private:
     ConstrSet curr_cset{rhs.cset};
     arith::Analyzer analyzer;
 
-    // Find threadIdx variables by their thread_tag, not by position
-    const std::string thread_tags[] = {"threadIdx.x", "threadIdx.y",
-                                       "threadIdx.z"};
     struct ThreadVarInfo {
       const char *name_prev;
       const char *name_curr;
@@ -1254,33 +1250,14 @@ private:
         {"ty1", "ty2"},
         {"tz1", "tz2"},
     };
-
-    auto find_thread_var = [](const Array<IterVar> &threads,
-                              const std::string &tag) -> std::optional<Var> {
-      for (const auto &iv : threads) {
-        if (iv->thread_tag == tag) {
-          return iv->var;
-        }
-      }
-      return std::nullopt;
-    };
-
     PrimExpr lhs_min = analyzer.Simplify(lhs.touched[0].min());
     PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
     PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
     PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
     for (unsigned idx = 0; idx != 3; ++idx) {
-      auto lhs_var_opt = find_thread_var(lhs.threads, thread_tags[idx]);
-      auto rhs_var_opt = find_thread_var(rhs.threads, thread_tags[idx]);
-
-      // Skip if this threadIdx dimension doesn't exist in both accesses
-      if (!lhs_var_opt.has_value() || !rhs_var_opt.has_value()) {
-        continue;
-      }
-
       auto &info = thread_vars[idx];
-      Var old_prev_var = lhs_var_opt.value();
-      Var old_curr_var = rhs_var_opt.value();
+      Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
+      Var old_curr_var = rhs.threads[rhs.threads.size() + idx - 3]->var;
       Var prev_var(info.name_prev, old_prev_var.dtype());
       Var curr_var(info.name_curr, old_curr_var.dtype());
       lhs_min = Substitute(lhs_min, {{old_prev_var, prev_var}});
@@ -1556,34 +1533,10 @@ private:
       PrimExpr thread_condition = Bool(false);
       ffi::Map<Var, PrimExpr> prev_sub, curr_sub;
 
-      // Find threadIdx variables by their thread_tag, not by position
-      // This fixes the bug where we assumed the last 3 elements of env_threads_
-      // are always threadIdx.x/y/z, but they could be blockIdx or other vars
-      const std::string thread_tags[] = {"threadIdx.x", "threadIdx.y",
-                                         "threadIdx.z"};
       const char *thread_names[] = {"tx", "ty", "tz"};
-
-      auto find_thread_var = [](const Array<IterVar> &threads,
-                                const std::string &tag) -> std::optional<Var> {
-        for (const auto &iv : threads) {
-          if (iv->thread_tag == tag) {
-            return iv->var;
-          }
-        }
-        return std::nullopt;
-      };
-
       for (unsigned idx = 0; idx != 3; ++idx) {
-        auto prev_var_opt = find_thread_var(prev.threads, thread_tags[idx]);
-        auto curr_var_opt = find_thread_var(curr.threads, thread_tags[idx]);
-
-        // Skip if this threadIdx dimension doesn't exist in both accesses
-        if (!prev_var_opt.has_value() || !curr_var_opt.has_value()) {
-          continue;
-        }
-
-        Var old_prev_var = prev_var_opt.value();
-        Var old_curr_var = curr_var_opt.value();
+        Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
+        Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
 
         if (same_access_type) {
           // For WAW/RAR: use a single shared Var object for both prev and curr
