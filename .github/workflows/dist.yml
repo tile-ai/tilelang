@@ -125,6 +125,13 @@ jobs:
           - "3.9"
           - "3.14t"
           # TODO: Add cp315-abi3.abi3t after PEP 803
+        include:
+          # Python 3.9 implicitly restrict torch version (e.g. on arm64).
+          # This test rely on torch to provide libnvrtc, so we need a rather new torch.
+          - python-version: "3.9"
+            test-python-version: "3.12"
+          - python-version: "3.14t"
+            test-python-version: "3.14t"
       fail-fast: false
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
@@ -158,18 +165,6 @@ jobs:
           PYTHON_VERSION_MAJMIN="$(echo "${PYTHON_VERSION}" | cut -d '.' -f-2)"
           PYTHON_VERSION_MAJMIN_NODOT="${PYTHON_VERSION_MAJMIN//./}"
           echo "CIBW_BUILD=cp${PYTHON_VERSION_MAJMIN_NODOT}-*" | tee -a "${GITHUB_ENV}"
-
-          # Python 3.9 implicitly restrict torch version (e.g. on arm64).
-          # This test rely on torch to provide libnvrtc, so we need a rather new torch.
-          case "${{ matrix.python-version }}" in
-            "3.9")
-              TEST_PYTHON_VERSION="3.12"
-              ;;
-            *)
-              TEST_PYTHON_VERSION="${{ matrix.python-version }}"
-              ;;
-          esac
-          echo "TEST_PYTHON_VERSION=${TEST_PYTHON_VERSION}" | tee -a "${GITHUB_ENV}"
 
           if [[ "${{ matrix.target.toolkit }}" == *"CUDA"* ]]; then
             CUDA_VERSION="${{ matrix.target.toolkit }}"
@@ -212,7 +207,7 @@ jobs:
         id: setup-uv
         uses: astral-sh/setup-uv@v7
         with:
-          python-version: ${{ env.TEST_PYTHON_VERSION }}
+          python-version: ${{ matrix.test-python-version }}
           activate-environment: true
 
       - name: Test built wheels
