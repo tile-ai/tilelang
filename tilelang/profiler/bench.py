@@ -69,7 +69,7 @@ def do_bench(
     _n_repeat: int = 0,
     quantiles: list[float] | None = None,
     fast_flush: bool = True,
-    backend: Literal["event", "cupti"] = "event",
+    backend: Literal["event", "cupti", "cudagraph"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
 ) -> float | list[float]:
     """Benchmark the runtime of a PyTorch function with L2 cache management.
@@ -77,7 +77,7 @@ def do_bench(
     This function provides accurate GPU kernel timing by:
     - Clearing L2 cache between runs for consistent measurements
     - Auto-calculating warmup and repeat counts based on kernel runtime
-    - Supporting multiple profiling backends (CUDA events or CUPTI)
+    - Supporting multiple profiling backends (CUDA events, CUPTI, or CUDA graph replay)
     - Offering flexible result aggregation (mean/median/min/max/quantiles)
 
     Args:
@@ -88,7 +88,7 @@ def do_bench(
         _n_repeat: Manual override for benchmark iterations (default: 0 = auto)
         quantiles: Performance percentiles to compute (e.g., [0.5, 0.95])
         fast_flush: Use faster L2 cache flush with int32 vs int8 (default: True)
-        backend: Profiler backend - "event" (CUDA events) or "cupti" (default: "event")
+        backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph" (default: "event")
         return_mode: Result aggregation method - "mean", "median", "min", or "max"
 
     Returns:
@@ -131,6 +131,8 @@ def do_bench(
         return _bench_with_cuda_events(fn, cache, n_repeat, quantiles, return_mode)
     elif backend == "cupti":
         return _bench_with_cupti(fn, cache, n_repeat)
+    elif backend == "cudagraph":
+        return _bench_with_cudagraph(fn, cache, n_repeat, quantiles, return_mode)
     else:
         raise ValueError(f"Unknown profiler backend: {backend}")
 
@@ -202,3 +204,54 @@ def _bench_with_cupti(
 
     kernel_time_us = (total_cuda_time - excluded_time) / n_repeat
     return kernel_time_us * 1e-3  # Convert microseconds to milliseconds
+
+
+def _bench_with_cudagraph(
+    fn: Callable,
+    cache: torch.Tensor,
+    n_repeat: int,
+    quantiles: list[float] | None,
+    return_mode: str,
+) -> float | list[float]:
+    """Benchmark using CUDA graph for minimal launch overhead.
+
+    This implementation follows triton.testing.do_bench_cudagraph.
+    It captures the kernel execution in a CUDA graph and replays it multiple
+    times to minimize host overhead and provide accurate timing measurements.
+
+    Note: Cache flushing is done before graph replay, not within the graph,
+    since CUDA graphs require fixed execution patterns.
+    """
+    n_retries = 10
+    with torch.cuda.stream(torch.cuda.Stream()):
+        # Construct a CUDA graph with `n_repeat` unrolled function calls to minimize host overhead.
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            for _ in range(n_repeat):
+                fn()
+
+        torch.cuda.synchronize()
+
+        # Measure time by replaying the graph multiple times.
+        # Clear cache before each replay for consistent measurements.
+        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
+        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
+        for i in range(n_retries):
+            cache.zero_()  # Clear L2 cache before replay
+            start_events[i].record()
+            g.replay()
+            end_events[i].record()
+
+        torch.cuda.synchronize()
+        times = torch.tensor(
+            [s.elapsed_time(e) / n_repeat for s, e in zip(start_events, end_events)],
+            dtype=torch.float,
+        )
+
+        # Return quantiles if requested
+        if quantiles is not None:
+            quantile_values = torch.quantile(times, torch.tensor(quantiles, dtype=torch.float)).tolist()
+            return quantile_values[0] if len(quantile_values) == 1 else quantile_values
+
+        # Return aggregated result
+        return getattr(torch, return_mode)(times).item()

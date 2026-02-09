@@ -281,6 +281,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         adapter.target = Target.canon_target(determine_target(target))
 
         adapter.verbose = verbose
+        adapter.libpath = kernel_lib_path
+        adapter.kernel_global_source = device_kernel_source
         adapter.executable = runtime.load_module(kernel_lib_path)
         adapter._post_init()
         return adapter
