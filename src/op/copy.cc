@@ -934,7 +934,7 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   auto body = Evaluate(Call(DataType::Handle(), op, args));
   For for_node =
       For(local_iter, 0, FloorDiv(extent, 2 * num), ForKind::kSerial, body);
-  for_node = LoopPragmaUnroll(for_node);
+  for_node = PragmaUnrollLoop(for_node);
   auto range = T.thread_bounds;
   if (range.defined()) {
     auto thread_var = T.thread_var;
