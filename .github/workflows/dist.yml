@@ -123,15 +123,14 @@ jobs:
         python-version:
           # Build wheels for different Python ABIs
           - "3.9"
-          - "3.14t"
+          # - "3.14t"  # let user to build from source for now
           # TODO: Add cp315-abi3.abi3t after PEP 803
         include:
+          # map build version to test version
           # Python 3.9 implicitly restrict torch version (e.g. on arm64).
           # This test rely on torch to provide libnvrtc, so we need a rather new torch.
-          - python-version: "3.9"
-            test-python-version: "3.12"
-          - python-version: "3.14t"
-            test-python-version: "3.14t"
+          - { python-version: "3.9", test-python-version: "3.12" }
+          # - { python-version: "3.14t", test-python-version: "3.14t" }
       fail-fast: false
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
