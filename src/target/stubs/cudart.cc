@@ -16,6 +16,10 @@
  * API call, and symbols are resolved via dlsym().
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <cuda_runtime_api.h>
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
@@ -49,19 +53,6 @@ static_assert(CUDART_VERSION >= 11000,
 
 namespace {
 
-// Try multiple major versions for cross-toolkit compatibility.
-constexpr const char *kLibCudartPaths[] = {
-    "libcudart.so.13",
-    "libcudart.so.12",
-    // CUDA 11 typically uses `libcudart.so.11.0` (and may also provide a
-    // `libcudart.so.11` symlink depending on the packaging).
-    "libcudart.so.11.0",
-    "libcudart.so.11",
-    // Unversioned name typically only exists with development packages, but try
-    // it as a last resort.
-    "libcudart.so",
-};
-
 using CudaGraphInstantiateLegacy = cudaError_t (*)(cudaGraphExec_t *pGraphExec,
                                                    cudaGraph_t graph,
                                                    cudaGraphNode_t *pErrorNode,
@@ -71,26 +62,16 @@ using CudaGraphInstantiateWithFlags = cudaError_t (*)(
     cudaGraphExec_t *pGraphExec, cudaGraph_t graph, unsigned long long flags);
 
 void *TryLoadLibCudart() {
-  // If libcudart is already loaded in the current process (e.g. via PyTorch or
-  // another CUDA-enabled library), prefer reusing that instance to avoid
-  // loading multiple libcudart versions in one process.
-#ifdef RTLD_NOLOAD
-  for (const char *path : kLibCudartPaths) {
-    void *existing = dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
-    if (existing != nullptr) {
-      return existing;
-    }
+  // First, check if the symbols are already available globally.
+  // This handles cases where PyTorch or another library has already loaded
+  // libcudart, making its symbols available in the global namespace.
+  // We use a representative symbol like cudaGetErrorString.
+  // dlsym with RTLD_DEFAULT searches the global scope.
+  if (dlsym(RTLD_DEFAULT, "cudaGetErrorString") != nullptr) {
+    return RTLD_DEFAULT;
   }
-#endif
 
-  void *handle = nullptr;
-  for (const char *path : kLibCudartPaths) {
-    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
-    if (handle != nullptr) {
-      break;
-    }
-  }
-  return handle;
+  return nullptr;
 }
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
