@@ -21,6 +21,24 @@
 #include <stddef.h>
 #include <string.h>
 
+// This stub intentionally targets CUDA 12+.
+//
+// - CUDA 12 introduced a new `cudaGraphInstantiate(cudaGraphExec_t*, cudaGraph_t, flags)`
+//   signature (and kept a compatibility inline wrapper in `cuda_runtime.h`).
+// - libcudart's SONAME encodes its major version, and this stub only attempts to
+//   load libcudart 12/13 (plus an unversioned fallback for dev setups).
+//
+// Guard against accidental builds with CUDA 11 headers, which would mismatch
+// the build-time declarations vs the runtime libraries this stub loads.
+#ifndef CUDART_VERSION
+#error "CUDART_VERSION is not defined. Ensure CUDA runtime headers are available."
+#endif
+static_assert(CUDART_VERSION >= 12000,
+              "cudart_stub requires CUDA Toolkit headers >= 12.0 (CUDART_VERSION >= 12000).");
+#if defined(CUDA_MAJOR_VERSION)
+static_assert(CUDA_MAJOR_VERSION >= 12, "cudart_stub requires CUDA_MAJOR_VERSION >= 12.");
+#endif
+
 // Export symbols with default visibility for the shared stub library.
 #if defined(_WIN32) || defined(__CYGWIN__)
 #ifdef TILELANG_CUDART_STUB_EXPORTS
