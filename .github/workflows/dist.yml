@@ -18,6 +18,9 @@ on:
       - CMakeLists.txt
       - version_provider.py
       - .github/workflows/dist.yml
+      # temporarily add to dist check
+      # until we have type checking in ci / move to python 3.10
+      - tilelang/_typing.py
   release:
     types:
       - published
@@ -118,9 +121,16 @@ jobs:
           - { runner: ubuntu-24.04-arm, toolkit: "Nightly-CUDA-13.0" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
-          # Wheels are built with Python 3.8 Limited API, they should work with all Python >= 3.8.
-          # Only build wheels against Python 3.8 Limited API to save CI resources.
+          # Build wheels for different Python ABIs
           - "3.9"
+          # - "3.14t"  # let user to build from source for now
+          # TODO: Add cp315-abi3.abi3t after PEP 803
+        include:
+          # map build version to test version
+          # Python 3.9 implicitly restrict torch version (e.g. on arm64).
+          # This test rely on torch to provide libnvrtc, so we need a rather new torch.
+          - { python-version: "3.9", test-python-version: "3.12" }
+          # - { python-version: "3.14t", test-python-version: "3.14t" }
       fail-fast: false
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
@@ -142,9 +152,10 @@ jobs:
           create-symlink: true
           evict-old-files: "7d"
           append-timestamp: false
-          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ hashFiles('**/*.cc') }}
           restore-keys: |
-            wheel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ hashFiles('**/*.cc') }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}
             wheel-${{ runner.os }}-${{ runner.arch }}
 
       - name: Set CIBW_BUILD
@@ -195,16 +206,19 @@ jobs:
         id: setup-uv
         uses: astral-sh/setup-uv@v7
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.test-python-version }}
           activate-environment: true
 
       - name: Test built wheels
         run: |
           for WHEEL in wheelhouse/*.whl; do
             echo "Testing wheel: ${WHEEL}"
+            if [[ "${WHEEL}" == *"abi3"* ]]; then
+              uvx abi3audit --verbose --strict "${WHEEL}"
+            fi
             (
               set -e
-              uv venv --python=3.12 test-venv
+              uv venv test-venv
               source test-venv/bin/activate
 
               uv pip install --upgrade pip setuptools wheel

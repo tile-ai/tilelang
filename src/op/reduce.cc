@@ -448,6 +448,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     if (dst_layout->InputDim() > 0) {
       body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
                            red_layout);
+      body = PragmaUnrollLoop(Downcast<For>(body));
     } else {
       auto guard = (T.thread_var == T.thread_bounds->min);
       body = IfThenElse(guard, body);
