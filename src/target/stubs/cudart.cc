@@ -1,13 +1,14 @@
 /**
  * \file cudart.cc
- * \brief CUDA Runtime API stub library for lazy loading libcudart.so at runtime.
+ * \brief CUDA Runtime API stub library for lazy loading libcudart.so at
+ * runtime.
  *
  * Motivation
  * ----------
- * libcudart's SONAME encodes its major version (e.g. libcudart.so.12, libcudart.so.13).
- * If we link libtvm.so / libtvm_runtime.so directly against a specific SONAME,
- * a wheel built against one CUDA toolkit becomes unusable in another environment
- * that only provides a different libcudart major version.
+ * libcudart's SONAME encodes its major version (e.g. libcudart.so.12,
+ * libcudart.so.13). If we link libtvm.so / libtvm_runtime.so directly against a
+ * specific SONAME, a wheel built against one CUDA toolkit becomes unusable in
+ * another environment that only provides a different libcudart major version.
  *
  * This stub exports the subset of CUDA Runtime API entrypoints used by TVM in
  * this repository. The real libcudart is loaded lazily via dlopen() on first
@@ -34,7 +35,7 @@
 namespace {
 
 // Try multiple major versions for cross-toolkit compatibility.
-constexpr const char* kLibCudartPaths[] = {
+constexpr const char *kLibCudartPaths[] = {
     "libcudart.so.13",
     "libcudart.so.12",
     // Unversioned name typically only exists with development packages, but try
@@ -42,21 +43,21 @@ constexpr const char* kLibCudartPaths[] = {
     "libcudart.so",
 };
 
-void* TryLoadLibCudart() {
+void *TryLoadLibCudart() {
   // If libcudart is already loaded in the current process (e.g. via PyTorch or
-  // another CUDA-enabled library), prefer reusing that instance to avoid loading
-  // multiple libcudart versions in one process.
+  // another CUDA-enabled library), prefer reusing that instance to avoid
+  // loading multiple libcudart versions in one process.
 #ifdef RTLD_NOLOAD
-  for (const char* path : kLibCudartPaths) {
-    void* existing = dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
+  for (const char *path : kLibCudartPaths) {
+    void *existing = dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
     if (existing != nullptr) {
       return existing;
     }
   }
 #endif
 
-  void* handle = nullptr;
-  for (const char* path : kLibCudartPaths) {
+  void *handle = nullptr;
+  for (const char *path : kLibCudartPaths) {
     handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
     if (handle != nullptr) {
       break;
@@ -65,11 +66,10 @@ void* TryLoadLibCudart() {
   return handle;
 }
 
-template <typename T>
-T GetSymbol(void* handle, const char* name) {
+template <typename T> T GetSymbol(void *handle, const char *name) {
   (void)dlerror();
-  void* sym = dlsym(handle, name);
-  const char* error = dlerror();
+  void *sym = dlsym(handle, name);
+  const char *error = dlerror();
   if (error != nullptr) {
     return nullptr;
   }
@@ -129,14 +129,14 @@ struct CUDARuntimeAPI {
   decltype(&::cudaFuncSetAttribute) cudaFuncSetAttribute_{nullptr};
 };
 
-void* GetLibCudartHandle() {
-  static void* handle = TryLoadLibCudart();
+void *GetLibCudartHandle() {
+  static void *handle = TryLoadLibCudart();
   return handle;
 }
 
 cudaError_t MissingLibraryError() { return cudaErrorUnknown; }
 
-const char* FallbackCudaErrorString(cudaError_t error) {
+const char *FallbackCudaErrorString(cudaError_t error) {
   if (error == cudaSuccess) {
     return "cudaSuccess";
   }
@@ -148,21 +148,21 @@ const char* FallbackCudaErrorString(cudaError_t error) {
 
 CUDARuntimeAPI CreateCUDARuntimeAPI() {
   CUDARuntimeAPI api{};
-  void* handle = GetLibCudartHandle();
+  void *handle = GetLibCudartHandle();
   if (handle == nullptr) {
     return api;
   }
 
-#define LOOKUP_REQUIRED(name)                                                   \
-  api.name##_ = GetSymbol<decltype(api.name##_)>(handle, #name);                \
-  if (api.name##_ == nullptr) {                                                 \
-    return CUDARuntimeAPI{};                                                    \
+#define LOOKUP_REQUIRED(name)                                                  \
+  api.name##_ = GetSymbol<decltype(api.name##_)>(handle, #name);               \
+  if (api.name##_ == nullptr) {                                                \
+    return CUDARuntimeAPI{};                                                   \
   }
 
   // NOTE: cudaGetErrorString is optional in the sense that we can provide a
   // fallback string, but when libcudart is present it should always exist.
-  api.cudaGetErrorString_ =
-      GetSymbol<decltype(api.cudaGetErrorString_)>(handle, "cudaGetErrorString");
+  api.cudaGetErrorString_ = GetSymbol<decltype(api.cudaGetErrorString_)>(
+      handle, "cudaGetErrorString");
 
   LOOKUP_REQUIRED(cudaGetLastError)
   LOOKUP_REQUIRED(cudaPeekAtLastError)
@@ -211,17 +211,17 @@ CUDARuntimeAPI CreateCUDARuntimeAPI() {
   return api;
 }
 
-CUDARuntimeAPI* GetCUDARuntimeAPI() {
+CUDARuntimeAPI *GetCUDARuntimeAPI() {
   static CUDARuntimeAPI singleton = CreateCUDARuntimeAPI();
   return &singleton;
 }
 
-}  // namespace
+} // namespace
 
 extern "C" {
 
-TILELANG_CUDART_STUB_API const char* cudaGetErrorString(cudaError_t error) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API const char *cudaGetErrorString(cudaError_t error) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaGetErrorString_ != nullptr) {
     return api->cudaGetErrorString_(error);
   }
@@ -229,7 +229,7 @@ TILELANG_CUDART_STUB_API const char* cudaGetErrorString(cudaError_t error) {
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaGetLastError(void) {
-  auto* api = GetCUDARuntimeAPI();
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaGetLastError_ == nullptr) {
     return MissingLibraryError();
   }
@@ -237,7 +237,7 @@ TILELANG_CUDART_STUB_API cudaError_t cudaGetLastError(void) {
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaPeekAtLastError(void) {
-  auto* api = GetCUDARuntimeAPI();
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaPeekAtLastError_ == nullptr) {
     return MissingLibraryError();
   }
@@ -245,15 +245,15 @@ TILELANG_CUDART_STUB_API cudaError_t cudaPeekAtLastError(void) {
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaSetDevice(int device) {
-  auto* api = GetCUDARuntimeAPI();
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaSetDevice_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaSetDevice_(device);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaGetDevice(int* device) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaGetDevice(int *device) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaGetDevice_ == nullptr) {
     if (device != nullptr) {
       *device = 0;
@@ -263,8 +263,8 @@ TILELANG_CUDART_STUB_API cudaError_t cudaGetDevice(int* device) {
   return api->cudaGetDevice_(device);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaGetDeviceCount(int* count) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaGetDeviceCount(int *count) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaGetDeviceCount_ == nullptr) {
     if (count != nullptr) {
       *count = 0;
@@ -274,10 +274,10 @@ TILELANG_CUDART_STUB_API cudaError_t cudaGetDeviceCount(int* count) {
   return api->cudaGetDeviceCount_(count);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaDeviceGetAttribute(int* value,
-                                                           cudaDeviceAttr attr,
-                                                           int device) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaDeviceGetAttribute(int *value,
+                                                            cudaDeviceAttr attr,
+                                                            int device) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaDeviceGetAttribute_ == nullptr) {
     if (value != nullptr) {
       *value = 0;
@@ -287,9 +287,9 @@ TILELANG_CUDART_STUB_API cudaError_t cudaDeviceGetAttribute(int* value,
   return api->cudaDeviceGetAttribute_(value, attr, device);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop,
-                                                            int device) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t
+cudaGetDeviceProperties(cudaDeviceProp *prop, int device) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaGetDeviceProperties_ == nullptr) {
     if (prop != nullptr) {
       memset(prop, 0, sizeof(*prop));
@@ -299,8 +299,9 @@ TILELANG_CUDART_STUB_API cudaError_t cudaGetDeviceProperties(cudaDeviceProp* pro
   return api->cudaGetDeviceProperties_(prop, device);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaMemGetInfo(size_t* free, size_t* total) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaMemGetInfo(size_t *free,
+                                                    size_t *total) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaMemGetInfo_ == nullptr) {
     if (free != nullptr) {
       *free = 0;
@@ -313,8 +314,8 @@ TILELANG_CUDART_STUB_API cudaError_t cudaMemGetInfo(size_t* free, size_t* total)
   return api->cudaMemGetInfo_(free, total);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaMalloc(void** devPtr, size_t size) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaMalloc(void **devPtr, size_t size) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaMalloc_ == nullptr) {
     if (devPtr != nullptr) {
       *devPtr = nullptr;
@@ -324,16 +325,16 @@ TILELANG_CUDART_STUB_API cudaError_t cudaMalloc(void** devPtr, size_t size) {
   return api->cudaMalloc_(devPtr, size);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaFree(void* devPtr) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaFree(void *devPtr) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaFree_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaFree_(devPtr);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaMallocHost(void** ptr, size_t size) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaMallocHost(void **ptr, size_t size) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaMallocHost_ == nullptr) {
     if (ptr != nullptr) {
       *ptr = nullptr;
@@ -343,63 +344,67 @@ TILELANG_CUDART_STUB_API cudaError_t cudaMallocHost(void** ptr, size_t size) {
   return api->cudaMallocHost_(ptr, size);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaFreeHost(void* ptr) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaFreeHost(void *ptr) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaFreeHost_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaFreeHost_(ptr);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaMemset(void* devPtr, int value,
-                                               size_t count) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaMemset(void *devPtr, int value,
+                                                size_t count) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaMemset_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaMemset_(devPtr, value, count);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaMemsetAsync(void* devPtr, int value,
-                                                    size_t count, cudaStream_t stream) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaMemsetAsync(void *devPtr, int value,
+                                                     size_t count,
+                                                     cudaStream_t stream) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaMemsetAsync_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaMemsetAsync_(devPtr, value, count, stream);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaMemcpy(void* dst, const void* src,
-                                               size_t count, cudaMemcpyKind kind) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaMemcpy(void *dst, const void *src,
+                                                size_t count,
+                                                cudaMemcpyKind kind) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaMemcpy_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaMemcpy_(dst, src, count, kind);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaMemcpyAsync(void* dst, const void* src,
-                                                    size_t count, cudaMemcpyKind kind,
-                                                    cudaStream_t stream) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaMemcpyAsync(void *dst, const void *src,
+                                                     size_t count,
+                                                     cudaMemcpyKind kind,
+                                                     cudaStream_t stream) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaMemcpyAsync_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaMemcpyAsync_(dst, src, count, kind, stream);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaMemcpyPeerAsync(void* dst, int dstDevice,
-                                                        const void* src, int srcDevice,
-                                                        size_t count, cudaStream_t stream) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t
+cudaMemcpyPeerAsync(void *dst, int dstDevice, const void *src, int srcDevice,
+                    size_t count, cudaStream_t stream) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaMemcpyPeerAsync_ == nullptr) {
     return MissingLibraryError();
   }
-  return api->cudaMemcpyPeerAsync_(dst, dstDevice, src, srcDevice, count, stream);
+  return api->cudaMemcpyPeerAsync_(dst, dstDevice, src, srcDevice, count,
+                                   stream);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaStreamCreate(cudaStream_t* pStream) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaStreamCreate(cudaStream_t *pStream) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaStreamCreate_ == nullptr) {
     if (pStream != nullptr) {
       *pStream = nullptr;
@@ -410,8 +415,8 @@ TILELANG_CUDART_STUB_API cudaError_t cudaStreamCreate(cudaStream_t* pStream) {
 }
 
 TILELANG_CUDART_STUB_API cudaError_t
-cudaStreamCreateWithFlags(cudaStream_t* pStream, unsigned int flags) {
-  auto* api = GetCUDARuntimeAPI();
+cudaStreamCreateWithFlags(cudaStream_t *pStream, unsigned int flags) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaStreamCreateWithFlags_ == nullptr) {
     if (pStream != nullptr) {
       *pStream = nullptr;
@@ -422,15 +427,16 @@ cudaStreamCreateWithFlags(cudaStream_t* pStream, unsigned int flags) {
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaStreamDestroy(cudaStream_t stream) {
-  auto* api = GetCUDARuntimeAPI();
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaStreamDestroy_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaStreamDestroy_(stream);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t
+cudaStreamSynchronize(cudaStream_t stream) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaStreamSynchronize_ == nullptr) {
     return MissingLibraryError();
   }
@@ -438,17 +444,17 @@ TILELANG_CUDART_STUB_API cudaError_t cudaStreamSynchronize(cudaStream_t stream) 
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaStreamWaitEvent(cudaStream_t stream,
-                                                        cudaEvent_t event,
-                                                        unsigned int flags) {
-  auto* api = GetCUDARuntimeAPI();
+                                                         cudaEvent_t event,
+                                                         unsigned int flags) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaStreamWaitEvent_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaStreamWaitEvent_(stream, event, flags);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaEventCreate(cudaEvent_t* event) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaEventCreate(cudaEvent_t *event) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaEventCreate_ == nullptr) {
     if (event != nullptr) {
       *event = nullptr;
@@ -459,7 +465,7 @@ TILELANG_CUDART_STUB_API cudaError_t cudaEventCreate(cudaEvent_t* event) {
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaEventDestroy(cudaEvent_t event) {
-  auto* api = GetCUDARuntimeAPI();
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaEventDestroy_ == nullptr) {
     return MissingLibraryError();
   }
@@ -467,8 +473,8 @@ TILELANG_CUDART_STUB_API cudaError_t cudaEventDestroy(cudaEvent_t event) {
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaEventRecord(cudaEvent_t event,
-                                                    cudaStream_t stream) {
-  auto* api = GetCUDARuntimeAPI();
+                                                     cudaStream_t stream) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaEventRecord_ == nullptr) {
     return MissingLibraryError();
   }
@@ -476,17 +482,17 @@ TILELANG_CUDART_STUB_API cudaError_t cudaEventRecord(cudaEvent_t event,
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaEventSynchronize(cudaEvent_t event) {
-  auto* api = GetCUDARuntimeAPI();
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaEventSynchronize_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaEventSynchronize_(event);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaEventElapsedTime(float* ms,
-                                                         cudaEvent_t start,
-                                                         cudaEvent_t end) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaEventElapsedTime(float *ms,
+                                                          cudaEvent_t start,
+                                                          cudaEvent_t end) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaEventElapsedTime_ == nullptr) {
     if (ms != nullptr) {
       *ms = 0.0f;
@@ -497,16 +503,16 @@ TILELANG_CUDART_STUB_API cudaError_t cudaEventElapsedTime(float* ms,
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaDeviceSynchronize(void) {
-  auto* api = GetCUDARuntimeAPI();
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaDeviceSynchronize_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaDeviceSynchronize_();
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaStreamBeginCapture(
-    cudaStream_t stream, cudaStreamCaptureMode mode) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t
+cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaStreamBeginCapture_ == nullptr) {
     return MissingLibraryError();
   }
@@ -514,8 +520,8 @@ TILELANG_CUDART_STUB_API cudaError_t cudaStreamBeginCapture(
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaStreamEndCapture(cudaStream_t stream,
-                                                         cudaGraph_t* graph) {
-  auto* api = GetCUDARuntimeAPI();
+                                                          cudaGraph_t *graph) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaStreamEndCapture_ == nullptr) {
     if (graph != nullptr) {
       *graph = nullptr;
@@ -525,10 +531,9 @@ TILELANG_CUDART_STUB_API cudaError_t cudaStreamEndCapture(cudaStream_t stream,
   return api->cudaStreamEndCapture_(stream, graph);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec,
-                                                         cudaGraph_t graph,
-                                                         unsigned long long flags) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaGraphInstantiate(
+    cudaGraphExec_t *pGraphExec, cudaGraph_t graph, unsigned long long flags) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaGraphInstantiate_ == nullptr) {
     if (pGraphExec != nullptr) {
       *pGraphExec = nullptr;
@@ -539,8 +544,8 @@ TILELANG_CUDART_STUB_API cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGrap
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec,
-                                                    cudaStream_t stream) {
-  auto* api = GetCUDARuntimeAPI();
+                                                     cudaStream_t stream) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaGraphLaunch_ == nullptr) {
     return MissingLibraryError();
   }
@@ -548,15 +553,16 @@ TILELANG_CUDART_STUB_API cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec,
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaGraphDestroy(cudaGraph_t graph) {
-  auto* api = GetCUDARuntimeAPI();
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaGraphDestroy_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaGraphDestroy_(graph);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t
+cudaGraphExecDestroy(cudaGraphExec_t graphExec) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaGraphExecDestroy_ == nullptr) {
     return MissingLibraryError();
   }
@@ -564,8 +570,8 @@ TILELANG_CUDART_STUB_API cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphE
 }
 
 TILELANG_CUDART_STUB_API cudaError_t
-cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr) {
-  auto* api = GetCUDARuntimeAPI();
+cudaIpcGetMemHandle(cudaIpcMemHandle_t *handle, void *devPtr) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaIpcGetMemHandle_ == nullptr) {
     if (handle != nullptr) {
       memset(handle, 0, sizeof(*handle));
@@ -576,8 +582,8 @@ cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr) {
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaIpcOpenMemHandle(
-    void** devPtr, cudaIpcMemHandle_t handle, unsigned int flags) {
-  auto* api = GetCUDARuntimeAPI();
+    void **devPtr, cudaIpcMemHandle_t handle, unsigned int flags) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaIpcOpenMemHandle_ == nullptr) {
     if (devPtr != nullptr) {
       *devPtr = nullptr;
@@ -587,22 +593,21 @@ TILELANG_CUDART_STUB_API cudaError_t cudaIpcOpenMemHandle(
   return api->cudaIpcOpenMemHandle_(devPtr, handle, flags);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaIpcCloseMemHandle(void* devPtr) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t cudaIpcCloseMemHandle(void *devPtr) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaIpcCloseMemHandle_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaIpcCloseMemHandle_(devPtr);
 }
 
-TILELANG_CUDART_STUB_API cudaError_t cudaFuncSetAttribute(const void* func,
-                                                         cudaFuncAttribute attr,
-                                                         int value) {
-  auto* api = GetCUDARuntimeAPI();
+TILELANG_CUDART_STUB_API cudaError_t
+cudaFuncSetAttribute(const void *func, cudaFuncAttribute attr, int value) {
+  auto *api = GetCUDARuntimeAPI();
   if (api->cudaFuncSetAttribute_ == nullptr) {
     return MissingLibraryError();
   }
   return api->cudaFuncSetAttribute_(func, attr, value);
 }
 
-}  // extern "C"
+} // extern "C"

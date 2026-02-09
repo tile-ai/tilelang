@@ -4,10 +4,10 @@
  *
  * Motivation
  * ----------
- * NVRTC's SONAME encodes its major version (e.g. libnvrtc.so.12, libnvrtc.so.13).
- * If we link libtvm.so directly against a specific SONAME, a wheel built in one
- * CUDA toolkit environment becomes unusable in another environment that only
- * provides a different NVRTC major version.
+ * NVRTC's SONAME encodes its major version (e.g. libnvrtc.so.12,
+ * libnvrtc.so.13). If we link libtvm.so directly against a specific SONAME, a
+ * wheel built in one CUDA toolkit environment becomes unusable in another
+ * environment that only provides a different NVRTC major version.
  *
  * This stub exports a minimal set of NVRTC C API entrypoints used by
  * TVM/TileLang. The actual libnvrtc is loaded lazily via dlopen() on first API
@@ -161,10 +161,9 @@ TILELANG_NVRTC_STUB_API nvrtcResult nvrtcVersion(int *major, int *minor) {
   return api->nvrtcVersion_(major, minor);
 }
 
-TILELANG_NVRTC_STUB_API nvrtcResult
-nvrtcCreateProgram(nvrtcProgram *prog, const char *src, const char *name,
-                   int numHeaders, const char *const *headers,
-                   const char *const *includeNames) {
+TILELANG_NVRTC_STUB_API nvrtcResult nvrtcCreateProgram(
+    nvrtcProgram *prog, const char *src, const char *name, int numHeaders,
+    const char *const *headers, const char *const *includeNames) {
   auto *api = GetNVRTCAPI();
   if (api->nvrtcCreateProgram_ == nullptr) {
     return MissingLibraryError();
@@ -181,9 +180,8 @@ TILELANG_NVRTC_STUB_API nvrtcResult nvrtcDestroyProgram(nvrtcProgram *prog) {
   return api->nvrtcDestroyProgram_(prog);
 }
 
-TILELANG_NVRTC_STUB_API nvrtcResult
-nvrtcCompileProgram(nvrtcProgram prog, int numOptions,
-                    const char *const *options) {
+TILELANG_NVRTC_STUB_API nvrtcResult nvrtcCompileProgram(
+    nvrtcProgram prog, int numOptions, const char *const *options) {
   auto *api = GetNVRTCAPI();
   if (api->nvrtcCompileProgram_ == nullptr) {
     return MissingLibraryError();
@@ -208,8 +206,8 @@ TILELANG_NVRTC_STUB_API nvrtcResult nvrtcGetPTX(nvrtcProgram prog, char *ptx) {
   return api->nvrtcGetPTX_(prog, ptx);
 }
 
-TILELANG_NVRTC_STUB_API nvrtcResult
-nvrtcGetProgramLogSize(nvrtcProgram prog, size_t *logSizeRet) {
+TILELANG_NVRTC_STUB_API nvrtcResult nvrtcGetProgramLogSize(nvrtcProgram prog,
+                                                           size_t *logSizeRet) {
   auto *api = GetNVRTCAPI();
   if (api->nvrtcGetProgramLogSize_ == nullptr) {
     return MissingLibraryError();
