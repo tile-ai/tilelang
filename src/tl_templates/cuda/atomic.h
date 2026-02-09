@@ -587,13 +587,23 @@ template <typename dst_dtype, typename ValType>
 TL_DEVICE void AtomicAddx4(dst_dtype *ref, ValType val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   float4 add_val = ToFloat4(val);
+  // Vectorized atomics require strict alignment. If the address is not
+  // 16-byte aligned, fall back to per-element atomics to preserve correctness.
+  unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
+  if ((ref_addr & 0xF) != 0) {
+    float *ref_f = reinterpret_cast<float *>(ref);
+    AtomicAdd(ref_f + 0, add_val.x, memory_order);
+    AtomicAdd(ref_f + 1, add_val.y, memory_order);
+    AtomicAdd(ref_f + 2, add_val.z, memory_order);
+    AtomicAdd(ref_f + 3, add_val.w, memory_order);
+    return;
+  }
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<float4 *>(ref), add_val);
   } else {
     // Since atomicAdd does not support memory order, atomic_ref does not
     // support vectorized atomic operation we can only inline ptx code here
     // Note: Vectorized atomic operations only support global space
-    unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
     float4 ret_val;
     if (memory_order == int(cuda::memory_order_release) ||
         memory_order == int(cuda::memory_order_consume)) {
@@ -630,10 +640,20 @@ TL_DEVICE float4
 AtomicAddx4Ret(dst_dtype *ref, ValType val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   float4 add_val = ToFloat4(val);
+  // Vectorized atomics require strict alignment. If the address is not
+  // 16-byte aligned, fall back to per-element atomics to preserve correctness.
+  unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
+  if ((ref_addr & 0xF) != 0) {
+    float *ref_f = reinterpret_cast<float *>(ref);
+    float r0 = AtomicAddRet(ref_f + 0, add_val.x, memory_order);
+    float r1 = AtomicAddRet(ref_f + 1, add_val.y, memory_order);
+    float r2 = AtomicAddRet(ref_f + 2, add_val.z, memory_order);
+    float r3 = AtomicAddRet(ref_f + 3, add_val.w, memory_order);
+    return make_float4(r0, r1, r2, r3);
+  }
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(reinterpret_cast<float4 *>(ref), add_val);
   } else {
-    unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
     float4 ret_val;
     if (memory_order == int(cuda::memory_order_release) ||
         memory_order == int(cuda::memory_order_consume)) {

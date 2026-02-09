@@ -596,6 +596,33 @@ public:
       }
     }
   }
+
+  bool CanProveVectorAtomicAligned_(const PrimExpr &dst_ptr,
+                                   int vector_size) {
+    if (vector_size <= 1) {
+      return true;
+    }
+
+    auto check_offset = [&](const PrimExpr &offset) -> bool {
+      PrimExpr mod = analyzer_.Simplify(
+          floormod(offset, make_const(offset.dtype(), vector_size)));
+      return is_zero(mod);
+    };
+
+    if (const auto *call = dst_ptr.as<CallNode>()) {
+      if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
+        return check_offset(call->args[2]);
+      }
+      if (call->op.same_as(builtin::address_of()) && call->args.size() == 1U) {
+        if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+          PrimExpr offset = load->buffer.OffsetOf(load->indices).back();
+          return check_offset(offset);
+        }
+      }
+    }
+    return false;
+  }
+
   // Atomic add vectorization
   PrimExpr MutateAtomicAddExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(atomic_add_elem_op()));
@@ -632,6 +659,13 @@ public:
     int max_vec_size = GetMaxAtomicVectorSize(dst_dtype.value(), target);
     if (vector_size > max_vec_size) {
       // Vector size not supported for this dtype, cannot vectorize
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    // Vectorized atomics require alignment (e.g., float4 requires 16B). If we
+    // cannot prove alignment, scalarize the loop to preserve correctness.
+    if (!CanProveVectorAtomicAligned_(dst, vector_size)) {
+      need_scalarize_ = true;
       return tvm::ffi::GetRef<PrimExpr>(op);
     }
 

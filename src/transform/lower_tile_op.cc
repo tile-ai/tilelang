@@ -368,18 +368,17 @@ private:
       }
       // Apply layout transformation
       auto forward_indices = layout->Forward(multi_dim_indices);
-      PrimExpr new_offset = 0;
-      PrimExpr stride_offset = 1;
+      PrimExpr new_offset_in_tile = 0;
+      PrimExpr tile_extent = 1;
       for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= new_shape[i];
+        new_offset_in_tile += forward_indices[i] * tile_extent;
+        tile_extent *= new_shape[i];
       }
-      // Verify that access is within a single tile
-      ICHECK(is_zero(analyzer_->Simplify(remaining_offset)))
-          << "Access offset exceeds tile bounds, remaining_offset: "
-          << remaining_offset;
-      new_offset = analyzer_->Simplify(new_offset);
-      Array<PrimExpr> new_indices;
+      // For tvm_access_ptr, offset can be symbolic (e.g., includes block/loop
+      // vars) and is not always provably within bounds. Preserve the outer-tile
+      // component instead of forcing remaining_offset to simplify to 0.
+      PrimExpr new_offset =
+          analyzer_->Simplify(new_offset_in_tile + remaining_offset * tile_extent);
       layout_remap_.Set(new_buffer, layout);
 
       // Build new tvm_access_ptr call with new buffer and offset
