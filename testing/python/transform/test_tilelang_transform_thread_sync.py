@@ -622,7 +622,6 @@ def test_sync_hoist_non_uniform_if_in_loop_with_shared_memory():
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod)
-    print(mod)
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
     # Sync should be before the if inside the loop, not inside the if
     sync_pos = s.index('T.tvm_storage_sync("shared")')
