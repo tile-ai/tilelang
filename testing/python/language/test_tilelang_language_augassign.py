@@ -32,4 +32,3 @@ def test_augassign_immutable_var_is_lowered_as_rebind():
     # Just building the PrimFunc is sufficient; pre-fix this raised because
     # augmented assignment on immutable `Var` was rejected.
     assert main is not None
-
