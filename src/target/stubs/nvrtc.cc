@@ -31,6 +31,8 @@
 
 #include <dlfcn.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 // Export symbols with default visibility for the shared stub library.
 #define TILELANG_NVRTC_STUB_API __attribute__((visibility("default")))
@@ -46,7 +48,16 @@ void *TryLoadLibNvrtc() {
     return RTLD_DEFAULT;
   }
 
-  return nullptr;
+  fprintf(
+      stderr,
+      "TileLang Internal Error: libnvrtc symbols not found in global scope. "
+      "This indicates an unexpected environment or failure to load CUDA "
+      "runtime symbols. "
+      "TileLang imports torch internally and relies on the CUDA runtime being "
+      "available via dynamic lookup. "
+      "Please ensure PyTorch with CUDA is installed and imported before using "
+      "TileLang.\n");
+  __builtin_unreachable();
 }
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
