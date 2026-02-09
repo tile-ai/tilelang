@@ -18,6 +18,12 @@
 
 #include <cuda_runtime_api.h>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#error "cudart_stub is currently POSIX-only (requires <dlfcn.h> / dlopen). "       \
+    "On Windows, build TileLang from source with -DTILELANG_USE_CUDA_STUBS=OFF " \
+    "to link against the real CUDA libraries."
+#endif
+
 #include <dlfcn.h>
 #include <stddef.h>
 #include <string.h>
@@ -39,15 +45,7 @@ static_assert(CUDART_VERSION >= 11000,
               "(CUDART_VERSION >= 11000).");
 
 // Export symbols with default visibility for the shared stub library.
-#if defined(_WIN32) || defined(__CYGWIN__)
-#ifdef TILELANG_CUDART_STUB_EXPORTS
-#define TILELANG_CUDART_STUB_API __declspec(dllexport)
-#else
-#define TILELANG_CUDART_STUB_API __declspec(dllimport)
-#endif
-#else
 #define TILELANG_CUDART_STUB_API __attribute__((visibility("default")))
-#endif
 
 namespace {
 
