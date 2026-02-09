@@ -44,14 +44,19 @@ void *TryLoadLibNvrtc() {
   // This handles cases where PyTorch or another library has already loaded
   // libnvrtc.
   // We use a representative symbol like nvrtcVersion.
-  if (dlsym(RTLD_DEFAULT, "nvrtcVersion") != nullptr) {
+  void *sym = dlsym(RTLD_DEFAULT, "nvrtcVersion");
+  if (sym != nullptr && sym != reinterpret_cast<void *>(&nvrtcVersion)) {
     return RTLD_DEFAULT;
+  }
+  sym = dlsym(RTLD_NEXT, "nvrtcVersion");
+  if (sym != nullptr) {
+    return RTLD_NEXT;
   }
 
   fprintf(stderr,
           "TileLang Error: libnvrtc symbols not found globally. "
           "Make sure PyTorch with CUDA is installed before using TileLang.\n");
-  __builtin_unreachable();
+  abort();
 }
 
 template <typename T> T GetSymbol(void *handle, const char *name) {

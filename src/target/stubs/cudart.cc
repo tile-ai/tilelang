@@ -69,14 +69,19 @@ void *TryLoadLibCudart() {
   // libcudart, making its symbols available in the global namespace.
   // We use a representative symbol like cudaGetErrorString.
   // dlsym with RTLD_DEFAULT searches the global scope.
-  if (dlsym(RTLD_DEFAULT, "cudaGetErrorString") != nullptr) {
+  void *sym = dlsym(RTLD_DEFAULT, "cudaGetErrorString");
+  if (sym != nullptr && sym != reinterpret_cast<void *>(&cudaGetErrorString)) {
     return RTLD_DEFAULT;
+  }
+  sym = dlsym(RTLD_NEXT, "cudaGetErrorString");
+  if (sym != nullptr) {
+    return RTLD_NEXT;
   }
 
   fprintf(stderr,
           "TileLang Error: libcudart symbols not found globally. "
           "Make sure PyTorch with CUDA is installed before using TileLang.\n");
-  __builtin_unreachable();
+  abort();
 }
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
