@@ -31,4 +31,3 @@ def test_access_ptr_cp_async_codegen():
 
 if __name__ == "__main__":
     tilelang.testing.main()
-
