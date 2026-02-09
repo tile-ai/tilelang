@@ -237,6 +237,62 @@ elseif(USE_CUDA)
     OUTPUT_NAME "cuda_stub"
   )
 
+  # ============================================================================
+  # CUDA Runtime Stub Library (libcudart_stub.so)
+  # ============================================================================
+  # libcudart's SONAME includes its major version (e.g. libcudart.so.12 / .13).
+  # Link against this stub instead of the real libcudart so a single wheel can
+  # run in environments that provide different libcudart major versions.
+  #
+  # The stub exports a minimal set of CUDA Runtime API entrypoints used by TVM
+  # and lazily loads libcudart at runtime on first API call.
+  # ============================================================================
+  add_library(cudart_stub SHARED src/target/stubs/cudart.cc)
+  target_include_directories(cudart_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  target_compile_definitions(cudart_stub PRIVATE TILELANG_CUDART_STUB_EXPORTS)
+  target_link_libraries(cudart_stub PRIVATE ${CMAKE_DL_LIBS})
+  set_target_properties(cudart_stub PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    OUTPUT_NAME "cudart_stub"
+  )
+
+  # Make TVM link against our CUDA Runtime stub instead of the real libcudart.
+  #
+  # NOTE: TVM's `find_cuda()` calls `find_library(CUDA_CUDART_LIBRARY cudart ...)`.
+  # `find_library()` will not override an already-cached variable, so setting it
+  # here ensures TVM doesn't record a DT_NEEDED on `libcudart.so.<major>`.
+  set(CUDA_CUDART_LIBRARY cudart_stub CACHE STRING "CUDART library to link against" FORCE)
+
+  # ============================================================================
+  # NVRTC Stub Library (libnvrtc_stub.so)
+  # ============================================================================
+  # NVRTC's SONAME includes its major version (e.g. libnvrtc.so.12 / .13).
+  # Link against this stub instead of the real NVRTC library so a single wheel
+  # can run in environments that provide different NVRTC major versions.
+  #
+  # The stub exports a minimal set of NVRTC C API entrypoints used by TVM and
+  # lazily loads libnvrtc at runtime on first API call.
+  # ============================================================================
+  add_library(nvrtc_stub SHARED src/target/stubs/nvrtc.cc)
+  target_include_directories(nvrtc_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  target_compile_definitions(nvrtc_stub PRIVATE TILELANG_NVRTC_STUB_EXPORTS)
+  target_link_libraries(nvrtc_stub PRIVATE ${CMAKE_DL_LIBS})
+  set_target_properties(nvrtc_stub PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    OUTPUT_NAME "nvrtc_stub"
+  )
+
+  # Make TVM link against our NVRTC stub instead of the real libnvrtc.
+  #
+  # NOTE: TVM's `find_cuda()` calls `find_library(CUDA_NVRTC_LIBRARY nvrtc ...)`.
+  # `find_library()` will not override an already-cached variable, so setting it
+  # here ensures TVM doesn't record a DT_NEEDED on `libnvrtc.so.<major>`.
+  set(CUDA_NVRTC_LIBRARY nvrtc_stub CACHE STRING "NVRTC library to link against" FORCE)
+
   file(GLOB TILE_LANG_CUDA_SRCS
     src/runtime/runtime.cc
     src/target/ptx.cc
@@ -352,7 +408,7 @@ if(USE_CUDA)
     target_link_libraries(${target} PUBLIC cuda_stub)
   endforeach()
   # Include CUDA stub in output targets for RPATH configuration
-  list(APPEND TILELANG_OUTPUT_TARGETS cuda_stub)
+  list(APPEND TILELANG_OUTPUT_TARGETS cuda_stub cudart_stub nvrtc_stub)
 endif()
 
 unset(PATCHELF_EXECUTABLE CACHE)
@@ -395,7 +451,10 @@ if(USE_CUDA AND PATCHELF_EXECUTABLE)
   foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
     install(CODE "
       execute_process(
-        COMMAND ${PATCHELF_EXECUTABLE} --remove-needed libcuda.so.1 --remove-needed libcuda.so \"$<TARGET_FILE:${target}>\"
+        COMMAND ${PATCHELF_EXECUTABLE}
+          --remove-needed libcuda.so.1
+          --remove-needed libcuda.so
+          \"$<TARGET_FILE:${target}>\"
         WORKING_DIRECTORY \"${CMAKE_INSTALL_PREFIX}\"
         RESULT_VARIABLE patchelf_result
       )
