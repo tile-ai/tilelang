@@ -13,9 +13,8 @@
  * TVM/TileLang. The actual libnvrtc is loaded lazily via dlopen() on first API
  * call, and symbols are resolved via dlsym().
  *
- * As a result, the final wheel can run in environments that have either
- * libnvrtc.so.12 or libnvrtc.so.13 available (as long as the required symbols
- * exist).
+ * As a result, the final wheel can run in environments that have NVRTC from
+ * CUDA 11/12/13 available (as long as the required symbols exist).
  */
 
 #include <nvrtc.h>
@@ -40,6 +39,12 @@ namespace {
 constexpr const char *kLibNvrtcPaths[] = {
     "libnvrtc.so.13",
     "libnvrtc.so.12",
+    // CUDA 11 typically uses `libnvrtc.so.11.2` (and may also provide a
+    // `libnvrtc.so.11` symlink depending on the packaging).
+    "libnvrtc.so.11.2",
+    "libnvrtc.so.11.1",
+    "libnvrtc.so.11.0",
+    "libnvrtc.so.11",
     // Unversioned name typically only exists with development packages, but try
     // it as a last resort.
     "libnvrtc.so",

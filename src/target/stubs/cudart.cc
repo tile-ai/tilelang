@@ -5,10 +5,11 @@
  *
  * Motivation
  * ----------
- * libcudart's SONAME encodes its major version (e.g. libcudart.so.12,
- * libcudart.so.13). If we link libtvm.so / libtvm_runtime.so directly against a
- * specific SONAME, a wheel built against one CUDA toolkit becomes unusable in
- * another environment that only provides a different libcudart major version.
+ * libcudart's SONAME encodes its major version (e.g. libcudart.so.11.0,
+ * libcudart.so.12, libcudart.so.13). If we link libtvm.so / libtvm_runtime.so
+ * directly against a specific SONAME, a wheel built against one CUDA toolkit
+ * becomes unusable in another environment that only provides a different
+ * libcudart major version.
  *
  * This stub exports the subset of CUDA Runtime API entrypoints used by TVM in
  * this repository. The real libcudart is loaded lazily via dlopen() on first
@@ -21,23 +22,21 @@
 #include <stddef.h>
 #include <string.h>
 
-// This stub intentionally targets CUDA 12+.
+// This stub supports CUDA 11+.
 //
-// - CUDA 12 introduced a new `cudaGraphInstantiate(cudaGraphExec_t*, cudaGraph_t, flags)`
-//   signature (and kept a compatibility inline wrapper in `cuda_runtime.h`).
-// - libcudart's SONAME encodes its major version, and this stub only attempts to
-//   load libcudart 12/13 (plus an unversioned fallback for dev setups).
-//
-// Guard against accidental builds with CUDA 11 headers, which would mismatch
-// the build-time declarations vs the runtime libraries this stub loads.
+// Note: CUDA 12 changed the `cudaGraphInstantiate` entrypoint signature in
+// `cuda_runtime_api.h` from a legacy 5-parameter form to a 3-parameter form
+// (with flags). To keep wheels usable across CUDA majors, this stub resolves
+// and dispatches to `cudaGraphInstantiateWithFlags` when available
+// (CUDA 11.4+), otherwise falls back to the legacy `cudaGraphInstantiate`
+// symbol.
 #ifndef CUDART_VERSION
-#error "CUDART_VERSION is not defined. Ensure CUDA runtime headers are available."
+#error                                                                         \
+    "CUDART_VERSION is not defined. Ensure CUDA runtime headers are available."
 #endif
-static_assert(CUDART_VERSION >= 12000,
-              "cudart_stub requires CUDA Toolkit headers >= 12.0 (CUDART_VERSION >= 12000).");
-#if defined(CUDA_MAJOR_VERSION)
-static_assert(CUDA_MAJOR_VERSION >= 12, "cudart_stub requires CUDA_MAJOR_VERSION >= 12.");
-#endif
+static_assert(CUDART_VERSION >= 11000,
+              "cudart_stub requires CUDA Toolkit headers >= 11.0 "
+              "(CUDART_VERSION >= 11000).");
 
 // Export symbols with default visibility for the shared stub library.
 #if defined(_WIN32) || defined(__CYGWIN__)
@@ -56,10 +55,22 @@ namespace {
 constexpr const char *kLibCudartPaths[] = {
     "libcudart.so.13",
     "libcudart.so.12",
+    // CUDA 11 typically uses `libcudart.so.11.0` (and may also provide a
+    // `libcudart.so.11` symlink depending on the packaging).
+    "libcudart.so.11.0",
+    "libcudart.so.11",
     // Unversioned name typically only exists with development packages, but try
     // it as a last resort.
     "libcudart.so",
 };
+
+using CudaGraphInstantiateLegacy = cudaError_t (*)(cudaGraphExec_t *pGraphExec,
+                                                   cudaGraph_t graph,
+                                                   cudaGraphNode_t *pErrorNode,
+                                                   char *pLogBuffer,
+                                                   size_t bufferSize);
+using CudaGraphInstantiateWithFlags = cudaError_t (*)(
+    cudaGraphExec_t *pGraphExec, cudaGraph_t graph, unsigned long long flags);
 
 void *TryLoadLibCudart() {
   // If libcudart is already loaded in the current process (e.g. via PyTorch or
@@ -133,7 +144,10 @@ struct CUDARuntimeAPI {
 
   decltype(&::cudaStreamBeginCapture) cudaStreamBeginCapture_{nullptr};
   decltype(&::cudaStreamEndCapture) cudaStreamEndCapture_{nullptr};
-  decltype(&::cudaGraphInstantiate) cudaGraphInstantiate_{nullptr};
+  // `cudaGraphInstantiate` changed signature in CUDA 12. Use explicit function
+  // pointer typedefs and dispatch based on available symbols.
+  CudaGraphInstantiateLegacy cudaGraphInstantiate_{nullptr};
+  CudaGraphInstantiateWithFlags cudaGraphInstantiateWithFlags_{nullptr};
   decltype(&::cudaGraphLaunch) cudaGraphLaunch_{nullptr};
   decltype(&::cudaGraphDestroy) cudaGraphDestroy_{nullptr};
   decltype(&::cudaGraphExecDestroy) cudaGraphExecDestroy_{nullptr};
@@ -213,6 +227,8 @@ CUDARuntimeAPI CreateCUDARuntimeAPI() {
   LOOKUP_REQUIRED(cudaStreamBeginCapture)
   LOOKUP_REQUIRED(cudaStreamEndCapture)
   LOOKUP_REQUIRED(cudaGraphInstantiate)
+  api.cudaGraphInstantiateWithFlags_ = GetSymbol<CudaGraphInstantiateWithFlags>(
+      handle, "cudaGraphInstantiateWithFlags");
   LOOKUP_REQUIRED(cudaGraphLaunch)
   LOOKUP_REQUIRED(cudaGraphDestroy)
   LOOKUP_REQUIRED(cudaGraphExecDestroy)
@@ -232,6 +248,27 @@ CUDARuntimeAPI CreateCUDARuntimeAPI() {
 CUDARuntimeAPI *GetCUDARuntimeAPI() {
   static CUDARuntimeAPI singleton = CreateCUDARuntimeAPI();
   return &singleton;
+}
+
+cudaError_t GraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
+                             unsigned long long flags,
+                             cudaGraphNode_t *pErrorNode, char *pLogBuffer,
+                             size_t bufferSize) {
+  auto *api = GetCUDARuntimeAPI();
+  if (api->cudaGraphInstantiateWithFlags_ != nullptr) {
+    return api->cudaGraphInstantiateWithFlags_(pGraphExec, graph, flags);
+  }
+  if (api->cudaGraphInstantiate_ == nullptr) {
+    if (pGraphExec != nullptr) {
+      *pGraphExec = nullptr;
+    }
+    return MissingLibraryError();
+  }
+  // Legacy API (CUDA 11.0-11.3): `cudaGraphInstantiate` has no flags parameter.
+  // The caller (TVM) uses flags=0 and passes NULL diagnostics.
+  (void)flags;
+  return api->cudaGraphInstantiate_(pGraphExec, graph, pErrorNode, pLogBuffer,
+                                    bufferSize);
 }
 
 } // namespace
@@ -549,17 +586,19 @@ TILELANG_CUDART_STUB_API cudaError_t cudaStreamEndCapture(cudaStream_t stream,
   return api->cudaStreamEndCapture_(stream, graph);
 }
 
+#if CUDART_VERSION >= 12000
 TILELANG_CUDART_STUB_API cudaError_t cudaGraphInstantiate(
     cudaGraphExec_t *pGraphExec, cudaGraph_t graph, unsigned long long flags) {
-  auto *api = GetCUDARuntimeAPI();
-  if (api->cudaGraphInstantiate_ == nullptr) {
-    if (pGraphExec != nullptr) {
-      *pGraphExec = nullptr;
-    }
-    return MissingLibraryError();
-  }
-  return api->cudaGraphInstantiate_(pGraphExec, graph, flags);
+  return GraphInstantiate(pGraphExec, graph, flags, nullptr, nullptr, 0);
 }
+#else
+TILELANG_CUDART_STUB_API cudaError_t cudaGraphInstantiate(
+    cudaGraphExec_t *pGraphExec, cudaGraph_t graph, cudaGraphNode_t *pErrorNode,
+    char *pLogBuffer, size_t bufferSize) {
+  return GraphInstantiate(pGraphExec, graph, 0, pErrorNode, pLogBuffer,
+                          bufferSize);
+}
+#endif
 
 TILELANG_CUDART_STUB_API cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec,
                                                      cudaStream_t stream) {

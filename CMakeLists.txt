@@ -240,7 +240,7 @@ elseif(USE_CUDA)
   # ============================================================================
   # CUDA Runtime Stub Library (libcudart_stub.so)
   # ============================================================================
-  # libcudart's SONAME includes its major version (e.g. libcudart.so.12 / .13).
+  # libcudart's SONAME includes its major version (e.g. libcudart.so.11.0 / .12 / .13).
   # Link against this stub instead of the real libcudart so a single wheel can
   # run in environments that provide different libcudart major versions.
   #
@@ -268,7 +268,7 @@ elseif(USE_CUDA)
   # ============================================================================
   # NVRTC Stub Library (libnvrtc_stub.so)
   # ============================================================================
-  # NVRTC's SONAME includes its major version (e.g. libnvrtc.so.12 / .13).
+  # NVRTC's SONAME includes its major version (e.g. libnvrtc.so.11.2 / .12 / .13).
   # Link against this stub instead of the real NVRTC library so a single wheel
   # can run in environments that provide different NVRTC major versions.
   #
