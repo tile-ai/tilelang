@@ -597,8 +597,7 @@ public:
     }
   }
 
-  bool CanProveVectorAtomicAligned_(const PrimExpr &dst_ptr,
-                                   int vector_size) {
+  bool CanProveVectorAtomicAligned_(const PrimExpr &dst_ptr, int vector_size) {
     if (vector_size <= 1) {
       return true;
     }
@@ -610,7 +609,8 @@ public:
     };
 
     if (const auto *call = dst_ptr.as<CallNode>()) {
-      if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
+      if (call->op.same_as(builtin::tvm_access_ptr()) &&
+          call->args.size() >= 3) {
         return check_offset(call->args[2]);
       }
       if (call->op.same_as(builtin::address_of()) && call->args.size() == 1U) {

@@ -377,8 +377,8 @@ private:
       // For tvm_access_ptr, offset can be symbolic (e.g., includes block/loop
       // vars) and is not always provably within bounds. Preserve the outer-tile
       // component instead of forcing remaining_offset to simplify to 0.
-      PrimExpr new_offset =
-          analyzer_->Simplify(new_offset_in_tile + remaining_offset * tile_extent);
+      PrimExpr new_offset = analyzer_->Simplify(new_offset_in_tile +
+                                                remaining_offset * tile_extent);
       layout_remap_.Set(new_buffer, layout);
 
       // Build new tvm_access_ptr call with new buffer and offset
