@@ -3,6 +3,7 @@ import tilelang.testing
 from tilelang import language as T
 
 
+@tilelang.testing.requires_cuda
 def test_issue_1810_l2_persistent_float16_host_stub_no_half(monkeypatch):
     """Regression for issue #1810.
 
