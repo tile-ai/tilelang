@@ -170,10 +170,6 @@ const char *FallbackCudaErrorString(cudaError_t error) {
 CUDARuntimeAPI CreateCUDARuntimeAPI() {
   CUDARuntimeAPI api{};
   void *handle = GetLibCudartHandle();
-  if (handle == nullptr) {
-    return api;
-  }
-
 #define LOOKUP_REQUIRED(name)                                                  \
   api.name##_ = GetSymbol<decltype(api.name##_)>(handle, #name);               \
   if (api.name##_ == nullptr) {                                                \

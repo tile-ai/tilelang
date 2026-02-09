@@ -89,10 +89,6 @@ void *GetLibNvrtcHandle() {
 NVRTCAPI CreateNVRTCAPI() {
   NVRTCAPI api{};
   void *handle = GetLibNvrtcHandle();
-  if (handle == nullptr) {
-    return api;
-  }
-
 #define LOOKUP_REQUIRED(name)                                                  \
   api.name##_ = GetSymbol<decltype(api.name##_)>(handle, #name);               \
   if (api.name##_ == nullptr) {                                                \
