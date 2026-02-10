@@ -8,13 +8,26 @@ from __future__ import annotations
 import cutlass
 import cutlass.cute as cute
 from cutlass.cute.typing import Int32, Float32
+from cutlass.base_dsl.typing import Numeric, as_numeric
 from cutlass.cutlass_dsl import dsl_user_op, T
-from cutlass._mlir.dialects import nvvm
+from cutlass._mlir.dialects import arith, nvvm
 from cutlass.cute.arch.nvvm_wrappers import shuffle_sync_op
 
 
+def _is_int_type(val):
+    """Check if a value is an integer Numeric type."""
+    if isinstance(val, Int32):
+        return True
+    if isinstance(val, Numeric) and hasattr(val, 'mlir_type'):
+        from cutlass._mlir import ir as mlir_ir
+        return isinstance(val.mlir_type, mlir_ir.IntegerType)
+    if isinstance(val, int) and not isinstance(val, bool):
+        return True
+    return False
+
+
 @dsl_user_op
-def min(a: float | Float32, b: float | Float32, c: float | Float32 | None = None, *, loc=None, ip=None) -> Float32:
+def _fmin(a, b, c=None, *, loc=None, ip=None):
     return Float32(
         nvvm.fmin(
             T.f32(),
@@ -28,7 +41,19 @@ def min(a: float | Float32, b: float | Float32, c: float | Float32 | None = None
 
 
 @dsl_user_op
-def max(a: float | Float32, b: float | Float32, c: float | Float32 | None = None, *, loc=None, ip=None) -> Float32:
+def _imin(a, b, *, loc=None, ip=None):
+    return Int32(
+        arith.minsi(
+            Int32(a).ir_value(loc=loc, ip=ip),
+            Int32(b).ir_value(loc=loc, ip=ip),
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
+def _fmax(a, b, c=None, *, loc=None, ip=None):
     return Float32(
         nvvm.fmax(
             T.f32(),
@@ -39,6 +64,32 @@ def max(a: float | Float32, b: float | Float32, c: float | Float32 | None = None
             ip=ip,
         )
     )
+
+
+@dsl_user_op
+def _imax(a, b, *, loc=None, ip=None):
+    return Int32(
+        arith.maxsi(
+            Int32(a).ir_value(loc=loc, ip=ip),
+            Int32(b).ir_value(loc=loc, ip=ip),
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+def min(a, b, c=None):
+    """Type-aware min: uses arith.minsi for integers, nvvm.fmin for floats."""
+    if _is_int_type(a) and _is_int_type(b):
+        return _imin(a, b)
+    return _fmin(a, b, c)
+
+
+def max(a, b, c=None):
+    """Type-aware max: uses arith.maxsi for integers, nvvm.fmax for floats."""
+    if _is_int_type(a) and _is_int_type(b):
+        return _imax(a, b)
+    return _fmax(a, b, c)
 
 
 class SumOp:
