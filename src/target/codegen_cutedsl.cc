@@ -520,7 +520,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         is_inc ? "tl.warpgroup_reg_alloc" : "tl.warpgroup_reg_dealloc";
     stream << func_name << "(" << nreg << ")\n";
   } else if (op->op.same_as(tl::wait_wgmma())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    PrintIndent();
+    int num_mma = Downcast<IntImm>(op->args[0])->value;
+    stream << "tl.wgmma_wait_group(" << num_mma << ")\n";
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "tl.pack_half2(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";

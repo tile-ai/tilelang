@@ -5,6 +5,7 @@ import cutlass.cute as cute
 from cutlass.cute.arch import sync_threads  # noqa: F401
 from cutlass.cute.arch import alloc_smem, get_dyn_smem  # noqa: F401
 from cutlass.cute.arch import warpgroup_reg_alloc, warpgroup_reg_dealloc  # noqa: F401
+from cutlass.cute.nvgpu.warpgroup.helpers import wait_group as wgmma_wait_group  # noqa: F401
 
 from cutlass.cute import make_tensor, make_rmem_tensor, recast_ptr  # noqa: F401
 from cutlass.cute.typing import Numeric  # noqa: F401
