@@ -117,6 +117,23 @@ public:
   // Memory access regions (collected during analysis)
   std::vector<BufferRegion> GetReadRegions() const override { return read_regions_; }
   std::vector<BufferRegion> GetWriteRegions() const override { return write_regions_; }
+  std::vector<std::pair<BufferRegion, bool>> GetReadWriteRegions() const {
+    std::vector<std::pair<BufferRegion, bool>> read_write_regions;
+    std::set<Buffer> buffers;
+    for (const auto &region : GetWriteRegions()) {
+      if (buffers.find(region->buffer) == buffers.end()) {
+        buffers.insert(region->buffer);
+        read_write_regions.push_back({region, true});
+      }
+    }
+    for (const auto &region : GetReadRegions()) {
+      if (buffers.find(region->buffer) == buffers.end()) {
+        buffers.insert(region->buffer);
+        read_write_regions.push_back({region, false});
+      }
+    }
+    return read_write_regions;
+  }
 
   // Latency estimation
   int64_t GetLatency() const override { return latency_; }

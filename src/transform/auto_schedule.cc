@@ -312,8 +312,9 @@ static void AnalyzeAndInsertBarriers(IRStructure* node, int& next_barrier_id, st
 static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id, std::vector<Buffer>& barrier_buffers, Map<ObjectRef, ObjectRef>& barrier_map, PrimExpr thread_count) {
   if (!seq) return;
 
-  // Map from buffer to (task, warpgroup_id) of last write
-  std::unordered_map<Buffer, TaskNode*, ObjectPtrHash, ObjectPtrEqual> last_write_map;
+  // Map from (buffer, warpgroup_id) to task of last access
+  std::unordered_map<Buffer, TaskNode*, ObjectPtrHash, ObjectPtrEqual> last_access_map[2];
+  std::unordered_map<Buffer, std::pair<TaskNode*, int>, ObjectPtrHash, ObjectPtrEqual> last_write_map;
 
   // Process tasks in sequence order
   for (auto& child : seq->children) {
@@ -327,54 +328,95 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode* seq, int& next_barrier_id,
     int wg_id = task->GetWarpgroupId();
     if (wg_id == -1) continue;
 
-    // Check read regions for dependencies
-    for (const auto& read_region : task->GetReadRegions()) {
-      if (IsRegisterRegion(read_region)) continue;
-      Buffer buffer = read_region->buffer;
-      auto it = last_write_map.find(buffer);
-      if (it != last_write_map.end()) {
-        TaskNode* last_write_task = it->second;
-        int last_wg_id = last_write_task->GetWarpgroupId();
-        if (last_wg_id == -1) continue;
-
-        // If warpgroup ids differ, insert barrier
-        if (last_wg_id != wg_id) {
-          // Allocate a new barrier ID and buffer
-          int barrier_id = next_barrier_id++;
-          LOG(INFO) << "Inserting barrier " << barrier_id << " between task in warpgroup " << last_wg_id
-                    << " and task in warpgroup " << wg_id << " for buffer " << buffer;
-
-          // Create barrier buffer with arrive_count based on thread count
-          PrimExpr arrive_count = thread_count;
-          Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "barrier_" + std::to_string(barrier_id), barrier_map);
-
-          // Collect the barrier buffer to be added to tilelang_root block's alloc_buffers
-          barrier_buffers.push_back(barrier_buffer);
-
-          // Create BufferLoad expression for barrier[0]
-          PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
-
-          // Insert barrier_arrive at the end of last_write_task's statements
-          Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-          InsertStatementIntoTaskNode(last_write_task, arrive_stmt, false);
-          LOG(INFO) << "Added barrier_arrive for barrier " << barrier_id << " to task in warpgroup " << last_wg_id;
-
-          // Insert barrier_wait at the beginning of task's statements
-          Stmt wait_stmt = makeBarrierWait(barrier_load, 0); // parity = 0 for non-loop barriers
-          InsertStatementIntoTaskNode(task, wait_stmt, true);
-          LOG(INFO) << "Added barrier_wait for barrier " << barrier_id << ", parity=0 to task in warpgroup " << wg_id;
-          // Remove from map after read (as per user instruction)
-          last_write_map.erase(it);
+    // Check regions for dependencies
+    for (const auto& region_access : task->GetReadWriteRegions()) {
+      auto &region = region_access.first;
+      if (IsRegisterRegion(region)) continue;
+      Buffer buffer = region->buffer;
+      bool need_barrier = false;
+      TaskNode* last_access_task;
+      int last_wg_id;
+      if (!region_access.second) {
+        auto it = last_write_map.find(buffer);
+        if (it != last_write_map.end()) {
+          last_access_task = it->second.first;
+          last_wg_id = last_access_task->GetWarpgroupId();
+          if (last_wg_id == -1) continue;
+          if (it->second.second & (1 << wg_id)) continue;
+          
+          if (last_wg_id != wg_id || true) {
+            need_barrier = true;
+          }
         }
+      } else {
+        auto it = last_access_map[!wg_id].find(buffer);
+        if (it != last_access_map[!wg_id].end()) {
+          last_access_task = it->second;
+          last_wg_id = last_access_task->GetWarpgroupId();
+          if (last_wg_id == -1) continue;
 
+          if (last_wg_id != wg_id) {
+              need_barrier = true;
+          }
+        }
+      }
+      // If warpgroup ids differ, insert barrier
+      if (need_barrier) {
+        // Allocate a new barrier ID and buffer
+        int barrier_id = next_barrier_id++;
+        LOG(INFO) << "Inserting barrier " << barrier_id << " between task in warpgroup " << last_wg_id
+                  << " and task in warpgroup " << wg_id << " for buffer " << buffer;
+
+        // Create barrier buffer with arrive_count based on thread count
+        PrimExpr arrive_count = thread_count;
+        Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "barrier_" + std::to_string(barrier_id), barrier_map);
+
+        // Collect the barrier buffer to be added to tilelang_root block's alloc_buffers
+        barrier_buffers.push_back(barrier_buffer);
+
+        // Create BufferLoad expression for barrier[0]
+        PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
+
+        // Insert barrier_arrive at the end of last_access_task's statements
+        Stmt arrive_stmt = makeBarrierArrive(barrier_load);
+        InsertStatementIntoTaskNode(last_access_task, arrive_stmt, false);
+        LOG(INFO) << "Added barrier_arrive for barrier " << barrier_id << " to task in warpgroup " << last_wg_id;
+
+        // Insert barrier_wait at the beginning of task's statements
+        Stmt wait_stmt = makeBarrierWait(barrier_load, 0); // parity = 0 for non-loop barriers
+        InsertStatementIntoTaskNode(task, wait_stmt, true);
+        LOG(INFO) << "Added barrier_wait for barrier " << barrier_id << ", parity=0 to task in warpgroup " << wg_id;
+        // Remove from map (as per user instruction)
+        if (!region_access.second) {
+          auto it = last_write_map.find(buffer);
+          it->second.second |= (1 << wg_id);
+          if (it->second.second == 3) {
+            last_write_map.erase(last_write_map.find(buffer));
+          }
+        } else {
+          for (unsigned idx=0; idx<2; ++idx) {
+            auto it = last_access_map[idx].find(buffer);
+            if (it != last_access_map[idx].end()) {
+              last_access_map[idx].erase(it);
+            }
+          }
+          auto it = last_write_map.find(buffer);
+          if (it != last_write_map.end()) {
+            last_write_map.erase(it);
+          }
+        }
       }
     }
 
-    // Update write regions
-    for (const auto& write_region : task->GetWriteRegions()) {
-      Buffer buffer = write_region->buffer;
-      if (IsRegisterRegion(write_region)) continue;
-      last_write_map[buffer] = task;
+    // Update regions
+    for (const auto& region_access : task->GetReadWriteRegions()) {
+      auto &region = region_access.first;
+      if (IsRegisterRegion(region)) continue;
+      Buffer buffer = region->buffer;
+      last_access_map[wg_id][buffer] = task;
+      if (region_access.second) {
+        last_write_map[buffer] = std::make_pair(task, 0);
+      }
     }
   }
 }
@@ -423,8 +465,9 @@ static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, 
     ordered_tasks.insert(ordered_tasks.end(), promoted_tasks.begin(), promoted_tasks.end());
     ordered_tasks.insert(ordered_tasks.end(), non_promoted_tasks.begin(), non_promoted_tasks.end());
 
-    // Map from buffer to (task, warpgroup_id, is_promoted)
-    std::unordered_map<Buffer, TaskNode*, ObjectPtrHash, ObjectPtrEqual> last_write_map;
+    // Map from (buffer, warpgroup_id) to task
+    std::unordered_map<Buffer, TaskNode*, ObjectPtrHash, ObjectPtrEqual> last_access_map[2];
+    std::unordered_map<Buffer, std::pair<TaskNode*, int>, ObjectPtrHash, ObjectPtrEqual> last_write_map;
 
     // Process tasks in the specified order
     for (TaskNode* task : ordered_tasks) {
@@ -432,66 +475,124 @@ static void AnalyzeControlNodeBarriers(ControlNode* ctrl, int& next_barrier_id, 
       bool is_promoted = task->GetPromote();
       if (wg_id == -1) continue;
 
-      // Check read regions for dependencies
-      for (const auto& read_region : task->GetReadRegions()) {
-        if (IsRegisterRegion(read_region)) continue;
-        Buffer buffer = read_region->buffer;
-        auto it = last_write_map.find(buffer);
-        if (it != last_write_map.end()) {
-          TaskNode* last_write_task = it->second;
-          int last_wg_id = last_write_task->GetWarpgroupId();
-          bool last_is_promoted = last_write_task->GetPromote();
-          if (last_wg_id == -1) continue;  // Allow barriers involving neutral tasks
+      // Check regions for dependencies
+      for (const auto& region_access : task->GetReadWriteRegions()) {
+        auto &region = region_access.first;
+        if (IsRegisterRegion(region)) continue;
+        Buffer buffer = region->buffer;
+        bool need_barrier = false;
+        TaskNode* last_access_task;
+        int last_wg_id;
+        bool last_is_promoted;
+        if (!region_access.second) {
+          auto it = last_write_map.find(buffer);
+          if (it != last_write_map.end()) {
+            last_access_task = it->second.first;
+            last_wg_id = last_access_task->GetWarpgroupId();
+            last_is_promoted = last_access_task->GetPromote();
+            if (last_wg_id == -1) continue;  // Allow barriers involving neutral tasks
+            if (it->second.second & (1 << wg_id)) continue;
 
-          // If warpgroup ids differ or promotion status differs, insert barrier
-          if (last_wg_id != wg_id || last_is_promoted != is_promoted) {
-            // Allocate a new barrier ID and buffer
-            int barrier_id = next_barrier_id++;
-
-            // Calculate parity for barrier wait
-            // parity = indexmod(loop_var - loop_start + promote + 1, 2)
-            // where promote is 1 if the waiting task is promoted, 0 otherwise
-            // The waiting task is 'task' (the reading task)
-            int promote_int = is_promoted ? 1 : 0;
-            PrimExpr parity_expr = tvm::indexmod(loop_var - loop_start + IntImm(DataType::Int(32), promote_int + 1), 2);
-
-            LOG(INFO) << "Inserting barrier " << barrier_id << " in loop between task in warpgroup " << last_wg_id
-                      << " and task in warpgroup " << wg_id << " for buffer " << buffer;
-            LOG(INFO) << "  Reading task is " << (is_promoted ? "promoted" : "non-promoted") << " (promote=" << promote_int << ")";
-            LOG(INFO) << "  Writing task was " << (last_is_promoted ? "promoted" : "non-promoted");
-            LOG(INFO) << "  Parity expression: " << parity_expr;
-
-            // Create barrier buffer with arrive_count based on thread count
-            PrimExpr arrive_count = thread_count;
-            Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "barrier_" + std::to_string(barrier_id), barrier_map);
-
-            // Collect the barrier buffer to be added to tilelang_root block's alloc_buffers
-            barrier_buffers.push_back(barrier_buffer);
-
-            // Create BufferLoad expression for barrier[0]
-            PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
-
-            // Insert barrier_arrive at the end of last_write_task's statements
-            Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-            InsertStatementIntoTaskNode(last_write_task, arrive_stmt, false);
-            LOG(INFO) << "Added barrier_arrive for barrier " << barrier_id << " to task in warpgroup " << last_wg_id;
-
-            // Insert barrier_wait at the beginning of task's statements
-            Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
-            InsertStatementIntoTaskNode(task, wait_stmt, true);
-            LOG(INFO) << "Added barrier_wait for barrier " << barrier_id << ", parity=" << parity_expr << " to task in warpgroup " << wg_id;
-            // Remove from map after read (as per user instruction)
-            last_write_map.erase(it);
+            // If warpgroup ids differ or promotion status differs, insert barrier
+            if (last_wg_id != wg_id || last_is_promoted != is_promoted || true) {
+              need_barrier = true;
+            }
           }
+        } else {
+          auto it = last_access_map[!wg_id].find(buffer);
+          if (it != last_access_map[!wg_id].end()) {
+            last_access_task = it->second;
+            last_wg_id = last_access_task->GetWarpgroupId();
+            last_is_promoted = last_access_task->GetPromote();
+            if (last_wg_id == -1) continue;  // Allow barriers involving neutral tasks
 
+            // If warpgroup ids differ or promotion status differs, insert barrier
+            if (last_wg_id != wg_id || last_is_promoted != is_promoted) {
+                need_barrier = true;
+            }
+          }
+        }
+        // If warpgroup ids differ or promotion status differs, insert barrier
+        if (need_barrier) {
+          // Allocate a new barrier ID and buffer
+          int barrier_id = next_barrier_id++;
+
+          // Calculate parity for barrier wait
+          // parity = indexmod(loop_var - loop_start + promote + 1, 2)
+          // where promote is 1 if the waiting task is promoted, 0 otherwise
+          // The waiting task is 'task' (the reading task)
+          int promote_int = is_promoted ? 1 : 0;
+          PrimExpr parity_expr = tvm::indexmod(loop_var - loop_start + IntImm(DataType::Int(32), promote_int + 1), 2);
+
+          LOG(INFO) << "Inserting barrier " << barrier_id << " in loop between task in warpgroup " << last_wg_id
+                    << " and task in warpgroup " << wg_id << " for buffer " << buffer;
+          LOG(INFO) << "  Reading task is " << (is_promoted ? "promoted" : "non-promoted") << " (promote=" << promote_int << ")";
+          LOG(INFO) << "  Writing task was " << (last_is_promoted ? "promoted" : "non-promoted");
+          LOG(INFO) << "  Parity expression: " << parity_expr;
+
+          // Create barrier buffer with arrive_count based on thread count
+          PrimExpr arrive_count = thread_count;
+          Buffer barrier_buffer = makeBarrierBuffer(arrive_count, "barrier_" + std::to_string(barrier_id), barrier_map);
+
+          // Collect the barrier buffer to be added to tilelang_root block's alloc_buffers
+          barrier_buffers.push_back(barrier_buffer);
+
+          // Create BufferLoad expression for barrier[0]
+          PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
+
+          // Insert barrier_arrive at the end of last_access_task's statements
+          Stmt arrive_stmt = makeBarrierArrive(barrier_load);
+          InsertStatementIntoTaskNode(last_access_task, arrive_stmt, false);
+          LOG(INFO) << "Added barrier_arrive for barrier " << barrier_id << " to task in warpgroup " << last_wg_id;
+
+          // Insert barrier_wait at the beginning of task's statements
+          Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
+          InsertStatementIntoTaskNode(task, wait_stmt, true);
+          LOG(INFO) << "Added barrier_wait for barrier " << barrier_id << ", parity=" << parity_expr << " to task in warpgroup " << wg_id;
+          // Remove from map (as per user instruction)
+          if (!region_access.second) {
+            auto it = last_write_map.find(buffer);
+            it->second.second |= (1 << wg_id);
+            if (it->second.second == 3) {
+              last_write_map.erase(last_write_map.find(buffer));
+            }
+          } else {
+            for (unsigned idx=0; idx<2; ++idx) {
+              auto it = last_access_map[idx].find(buffer);
+              if (it != last_access_map[idx].end()) {
+                last_access_map[idx].erase(it);
+              }
+            }
+            auto it = last_write_map.find(buffer);
+            if (it != last_write_map.end()) {
+              last_write_map.erase(it);
+            }
+          }
+          if (last_wg_id != wg_id && last_is_promoted != is_promoted) {
+            int barrier_id = next_barrier_id++;
+            PrimExpr arrive_count = thread_count;
+            Buffer barrier_free = makeBarrierBuffer(arrive_count, "barrier_" + std::to_string(barrier_id), barrier_map);
+            barrier_buffers.push_back(barrier_free);
+            PrimExpr barrier_load = tir::BufferLoad(barrier_free, {0});
+            Stmt arrive_stmt = makeBarrierArrive(barrier_load);
+            InsertStatementIntoTaskNode(task, arrive_stmt, false);
+            int promote_int = last_is_promoted ? 1 : 0;
+            PrimExpr parity_expr = tvm::indexmod(loop_var - loop_start + IntImm(DataType::Int(32), promote_int), 2);
+            Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
+            InsertStatementIntoTaskNode(last_access_task, wait_stmt, true);
+          }
         }
       }
 
-      // Update write regions
-      for (const auto& write_region : task->GetWriteRegions()) {
-        if (IsRegisterRegion(write_region)) continue;
-        Buffer buffer = write_region->buffer;
-        last_write_map[buffer] = task;
+      // Update regions
+      for (const auto& region_access : task->GetReadWriteRegions()) {
+        auto &region = region_access.first;
+        if (IsRegisterRegion(region)) continue;
+        Buffer buffer = region->buffer;
+        last_access_map[wg_id][buffer] = task;
+        if (region_access.second) {
+          last_write_map[buffer] = std::make_pair(task, 0);
+        }
       }
     }
   } else {
