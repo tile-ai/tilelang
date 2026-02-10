@@ -6,11 +6,12 @@ import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
 
+
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: True,
     },
-    out_idx=[6]
+    out_idx=[6],
 )
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)
@@ -132,7 +133,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 # Step 4.
                 for i, j in T.Parallel(block_H, block_N):
                     acc_s_0[i, j] = T.exp2(acc_s_0[i, j] * scale - scores_max[i] * scale)
-                
+
                 for i in T.Parallel(block_H):
                     scores_scale_0[i] = T.exp2(scores_max_prev_0[i] * scale - scores_max[i] * scale)
 
@@ -187,7 +188,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 # Step 13.
                 for i, j in T.Parallel(block_H, h_dim):
                     acc_o_l[i, j] *= scores_scale_1[i]
-                
+
                 for i in T.Parallel(block_H):
                     logsum_0[i] = logsum_0[i] * scores_scale_1[i]
 
@@ -212,7 +213,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             T.copy(O_shared_r, Output[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, h_dim:])
 
     return main_no_split
-
 
 
 def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
@@ -272,10 +272,9 @@ if __name__ == "__main__":
     parser.add_argument("--batch", type=int, default=132, help="batch size")
     parser.add_argument("--heads", type=int, default=128, help="q heads number")
     parser.add_argument("--kv_heads", type=int, default=1, help="kv heads number")
-    parser.add_argument("--kv_ctx", type=int, default=8192, help="kv context length") # 8192
+    parser.add_argument("--kv_ctx", type=int, default=8192, help="kv context length")
     parser.add_argument("--dim", type=int, default=512, help="head dim")
     parser.add_argument("--pe_dim", type=int, default=64, help="pe head dim")
     args = parser.parse_args()
     batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
-    for _ in range(1000):
-        main(batch, heads, kv_heads, kv_ctx, dim, pe_dim)
+    main(batch, heads, kv_heads, kv_ctx, dim, pe_dim)

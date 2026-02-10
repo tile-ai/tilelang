@@ -4,62 +4,45 @@ This module provides a Python implementation of the Z3 scheduler that can be
 called from C++ via TVM FFI.
 """
 
-from typing import List, Tuple, Dict, Any
-import numpy as np
-import tvm
 import tvm_ffi
 
 # Try to import z3, but handle missing installation gracefully
 try:
     import z3
+
     Z3_AVAILABLE = True
 except ImportError:
     Z3_AVAILABLE = False
     print("[Python Z3] WARNING: z3-solver package not installed. Z3 scheduling will not work.")
 
-# Try to import mip, but handle missing installation gracefully
-try:
-    import mip
-    MIP_AVAILABLE = True
-except ImportError:
-    MIP_AVAILABLE = False
-    print("[Python MIP] WARNING: python-mip package not installed. MIP scheduling will not work.")
-
-# Try to import ortools, but handle missing installation gracefully
-try:
-    from ortools.sat.python import cp_model
-    ORTOOLS_AVAILABLE = True
-except ImportError:
-    ORTOOLS_AVAILABLE = False
-    print("[Python OR-Tools] WARNING: ortools package not installed. OR-Tools scheduling will not work.")
-
 
 def z3_schedule_python(
-    latencies: List[int],
-    iis: List[int],
-    resource_flags: List[int],
-    data_deps: List[Tuple[int, int]],
-    resource_deps: List[Tuple[int, int]]
-) -> Tuple[List[int], List[int]]:
+    latencies: list[int],
+    iis: list[int],
+    resource_flags: list[int],
+    data_deps: list[tuple[int, int]],
+    resource_deps: list[tuple[int, int]],
+    verbose: bool = False,
+) -> tuple[list[int], list[int]]:
     """Z3-based scheduler implemented in Python.
 
     Parameters
     ----------
-    latencies : List[int]
+    latencies : list[int]
         Latency for each task in cycles
-    iis : List[int]
+    iis : list[int]
         Initiation interval for each task in cycles
-    resource_flags : List[int]
+    resource_flags : list[int]
         Resource usage flags for each task (bitmask):
         1 = uses CUDA core, 2 = uses TMA core, 4 = uses Tensor core
-    data_deps : List[Tuple[int, int]]
+    data_deps : list[tuple[int, int]]
         Data dependency pairs (i, j) where task j depends on task i
-    resource_deps : List[Tuple[int, int]]
+    resource_deps : list[tuple[int, int]]
         Resource dependency pairs (i, j) where tasks i and j use same resource
 
     Returns
     -------
-    Tuple[List[int], List[int]]
+    tuple[list[int], list[int]]
         start_times: Start time for each task
         sorted_indices: Task indices sorted by start time
     """
@@ -71,23 +54,23 @@ def z3_schedule_python(
             return [0], [0]
         return [], []
 
-    print(f"[Python Z3] Starting scheduling for {n} tasks")
-    print(f"[Python Z3] Latencies: {latencies}")
-    print(f"[Python Z3] IIs: {iis}")
-    print(f"[Python Z3] Resource flags: {resource_flags}")
-    print(f"[Python Z3] Data dependencies: {data_deps}")
-    print(f"[Python Z3] Resource dependencies: {resource_deps}")
+    if verbose:
+        print(f"[Python Z3] Starting scheduling for {n} tasks")
+        print(f"[Python Z3] Latencies: {latencies}")
+        print(f"[Python Z3] IIs: {iis}")
+        print(f"[Python Z3] Resource flags: {resource_flags}")
+        print(f"[Python Z3] Data dependencies: {data_deps}")
+        print(f"[Python Z3] Resource dependencies: {resource_deps}")
 
     # Check if z3 is available
     if not Z3_AVAILABLE:
-        print(f"[Python Z3] WARNING: z3-solver not available, using fallback scheduler")
+        print("[Python Z3] WARNING: z3-solver not available, using fallback scheduler")
         return fallback_schedule(latencies, data_deps, resource_deps)
 
     try:
         # Create Z3 solver
         solver = z3.Optimize()
         solver.set("timeout", 10000)
-
 
         # Create start time variables
         start_vars = [z3.Int(f"start_{i}") for i in range(n)]
@@ -104,7 +87,8 @@ def z3_schedule_python(
                 if latency_i < 0:
                     latency_i = abs(latency_i)
                 solver.add(start_vars[j] >= start_vars[i] + latency_i)
-                print(f"[Python Z3] Data dependency: task {j} >= task {i} + {latency_i}")
+                if verbose:
+                    print(f"[Python Z3] Data dependency: task {j} >= task {i} + {latency_i}")
 
         # Add resource dependency constraints
         # For tasks i and j that use same resource, they cannot execute simultaneously
@@ -127,7 +111,8 @@ def z3_schedule_python(
                 # If o_ij is False (j before i), then start_i >= start_j + ii_j
                 solver.add(z3.Implies(z3.Not(o_ij), start_vars[i] >= start_vars[j] + ii_j))
 
-                print(f"[Python Z3] Resource dependency between {i} and {j}: ii_i={ii_i}, ii_j={ii_j}")
+                if verbose:
+                    print(f"[Python Z3] Resource dependency between {i} and {j}: ii_i={ii_i}, ii_j={ii_j}")
 
         # Objective: minimize maximum completion time (makespan)
         makespan = z3.Int("makespan")
@@ -142,18 +127,15 @@ def z3_schedule_python(
         solver.minimize(makespan)
 
         # Check satisfiability
-        print(f"[Python Z3] Checking satisfiability...")
+        if verbose:
+            print("[Python Z3] Checking satisfiability...")
         if solver.check() == z3.sat:
             model = solver.model()
 
             # Extract start times
             start_times = []
             for i in range(n):
-                try:
-                    start_time = model.eval(start_vars[i]).as_long()
-                except:
-                    # Fallback to 0 if evaluation fails
-                    start_time = 0
+                start_time = model.eval(start_vars[i]).as_long()
                 start_times.append(start_time)
 
             # Get makespan
@@ -163,16 +145,21 @@ def z3_schedule_python(
             task_indices = list(range(n))
             task_indices.sort(key=lambda idx: (start_times[idx], idx))
 
-            print(f"[Python Z3] Scheduling completed. Makespan = {makespan_val}")
+            if verbose:
+                print(f"[Python Z3] Scheduling completed. Makespan = {makespan_val}")
             for i in range(n):
                 idx = task_indices[i]
-                print(f"[Python Z3]   Task {idx}: start_time={start_times[idx]}, "
-                      f"latency={latencies[idx]}, II={iis[idx]}, "
-                      f"resource_flags={resource_flags[idx]:03b}")
+                if verbose:
+                    print(
+                        f"[Python Z3]   Task {idx}: start_time={start_times[idx]}, "
+                        f"latency={latencies[idx]}, II={iis[idx]}, "
+                        f"resource_flags={resource_flags[idx]:03b}"
+                    )
 
             return start_times, task_indices
         else:
-            print(f"[Python Z3] Z3 scheduling failed, falling back to topological sort")
+            if verbose:
+                print("[Python Z3] Z3 scheduling failed, falling back to topological sort")
             # Fallback: return tasks in original order with start times based on dependencies
             return fallback_schedule(latencies, data_deps, resource_deps)
 
@@ -183,10 +170,8 @@ def z3_schedule_python(
 
 
 def fallback_schedule(
-    latencies: List[int],
-    data_deps: List[Tuple[int, int]],
-    resource_deps: List[Tuple[int, int]]
-) -> Tuple[List[int], List[int]]:
+    latencies: list[int], data_deps: list[tuple[int, int]], resource_deps: list[tuple[int, int]]
+) -> tuple[list[int], list[int]]:
     """Fallback schedule when Z3 solver fails.
 
     Simple topological sort based on data dependencies.
@@ -227,24 +212,17 @@ def fallback_schedule(
 
     # If there's a cycle (not all tasks processed), return original order
     if len(result) != n:
-        print(f"[Python Z3] Cycle detected in dependencies, using original order")
         result = list(range(n))
         # Simple linear schedule
         for i in range(1, n):
-            start_times[i] = start_times[i-1] + latencies[i-1]
+            start_times[i] = start_times[i - 1] + latencies[i - 1]
 
     return start_times, result
 
 
 # FFI-exposed function that matches C++ interface
 @tvm_ffi.register_global_func("tl.transform.z3_schedule_python")
-def z3_schedule_ffi(
-    latencies,
-    iis,
-    resource_flags,
-    data_deps,
-    resource_deps
-):
+def z3_schedule_ffi(latencies, iis, resource_flags, data_deps, resource_deps):
     """FFI wrapper for z3_schedule_python.
 
     This function accepts TVM containers and converts them to Python lists.
@@ -259,36 +237,31 @@ def z3_schedule_ffi(
     if data_deps is not None:
         # Assuming data_deps is a list of pairs
         for i in range(len(data_deps)):
-            if hasattr(data_deps[i], '__len__') and len(data_deps[i]) == 2:
+            if hasattr(data_deps[i], "__len__") and len(data_deps[i]) == 2:
                 data_deps_list.append((int(data_deps[i][0]), int(data_deps[i][1])))
 
     # Convert resource dependencies
     resource_deps_list = []
     if resource_deps is not None:
         for i in range(len(resource_deps)):
-            if hasattr(resource_deps[i], '__len__') and len(resource_deps[i]) == 2:
+            if hasattr(resource_deps[i], "__len__") and len(resource_deps[i]) == 2:
                 resource_deps_list.append((int(resource_deps[i][0]), int(resource_deps[i][1])))
 
     # Call the actual scheduler
-    start_times, _ = z3_schedule_python(
-        latencies_list,
-        iis_list,
-        resource_flags_list,
-        data_deps_list,
-        resource_deps_list
-    )
+    start_times, _ = z3_schedule_python(latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list)
 
     # Return only start_times, C++ side will sort by start_time
     return start_times
 
 
 def z3_schedule_loop_python(
-    latencies: List[int],
-    iis: List[int],
-    resource_flags: List[int],
-    data_deps: List[Tuple[int, int, int]],  # (i, j, distance)
-    resource_deps: List[Tuple[int, int]]
-) -> Tuple[List[int], List[int], int]:
+    latencies: list[int],
+    iis: list[int],
+    resource_flags: list[int],
+    data_deps: list[tuple[int, int, int]],  # (i, j, distance)
+    resource_deps: list[tuple[int, int]],
+    verbose: bool = False,
+) -> tuple[list[int], list[int], int]:
     """Z3-based scheduler for loops with distance-aware dependencies.
 
     New modeling:
@@ -301,22 +274,22 @@ def z3_schedule_loop_python(
 
     Parameters
     ----------
-    latencies : List[int]
+    latencies : list[int]
         Latency for each task in cycles
-    iis : List[int]
+    iis : list[int]
         Initiation interval for each task in cycles
-    resource_flags : List[int]
+    resource_flags : list[int]
         Resource usage flags for each task (bitmask):
         1 = uses CUDA core, 2 = uses TMA core, 4 = uses Tensor core
-    data_deps : List[Tuple[int, int, int]]
+    data_deps : list[tuple[int, int, int]]
         Data dependency tuples (i, j, distance) where task j depends on task i
         with distance d (loop iterations distance)
-    resource_deps : List[Tuple[int, int]]
+    resource_deps : list[tuple[int, int]]
         Resource dependency pairs (i, j) where tasks i and j use same resource
 
     Returns
     -------
-    Tuple[List[int], List[int]]
+    tuple[list[int], list[int]]
         start_times: Start time for each task
         sorted_indices: Task indices sorted by start time
     """
@@ -328,16 +301,18 @@ def z3_schedule_loop_python(
             return [0], [0]
         return [], []
 
-    print(f"[Python Z3 Loop] Starting scheduling for {n} tasks")
-    print(f"[Python Z3 Loop] Latencies: {latencies}")
-    print(f"[Python Z3 Loop] IIs: {iis}")
-    print(f"[Python Z3 Loop] Resource flags: {resource_flags}")
-    print(f"[Python Z3 Loop] Data dependencies with distances: {data_deps}")
-    print(f"[Python Z3 Loop] Resource dependencies: {resource_deps}")
+    if verbose:
+        print(f"[Python Z3 Loop] Starting scheduling for {n} tasks")
+        print(f"[Python Z3 Loop] Latencies: {latencies}")
+        print(f"[Python Z3 Loop] IIs: {iis}")
+        print(f"[Python Z3 Loop] Resource flags: {resource_flags}")
+        print(f"[Python Z3 Loop] Data dependencies with distances: {data_deps}")
+        print(f"[Python Z3 Loop] Resource dependencies: {resource_deps}")
 
     # Check if z3 is available
     if not Z3_AVAILABLE:
-        print(f"[Python Z3 Loop] WARNING: z3-solver not available, using fallback scheduler")
+        if verbose:
+            print("[Python Z3 Loop] WARNING: z3-solver not available, using fallback scheduler")
         # Convert data_deps to pairs for fallback (ignore distance)
         data_deps_pairs = [(i, j) for i, j, d in data_deps]
         return fallback_schedule(latencies, data_deps_pairs, resource_deps)
@@ -352,11 +327,13 @@ def z3_schedule_loop_python(
         best_model = None
         best_start_vars = None
 
-        print(f"[Python Z3 Loop] Binary search range: [{ii_lower}, {ii_upper})")
+        if verbose:
+            print(f"[Python Z3 Loop] Binary search range: [{ii_lower}, {ii_upper})")
 
         while ii_lower < ii_upper:
             ii_mid = (ii_lower + ii_upper) // 2
-            print(f"[Python Z3 Loop] Testing II = {ii_mid}")
+            if verbose:
+                print(f"[Python Z3 Loop] Testing II = {ii_mid}")
 
             # Create solver for feasibility check
             solver = z3.Solver()
@@ -379,7 +356,8 @@ def z3_schedule_loop_python(
                 latency_u = latencies[u]
                 if latency_u < 0:
                     latency_u = abs(latency_u)
-                print(f"[Python Z3 Loop] Data dependency: task {v} - task {u} >= {latency_u} - {ii_mid}*{distance}")
+                if verbose:
+                    print(f"[Python Z3 Loop] Data dependency: task {v} - task {u} >= {latency_u} - {ii_mid}*{distance}")
                 solver.add(start_vars[v] - start_vars[u] >= latency_u - ii_mid * distance)
 
             # Add resource dependency constraints
@@ -403,12 +381,15 @@ def z3_schedule_loop_python(
                     # If o_ij is False (j before i), then start_i >= start_j + ii_j
                     solver.add(z3.Implies(z3.Not(o_ij), start_vars[i] >= start_vars[j] + ii_j))
 
-                    print(f"[Python Z3 Loop] Resource dependency between {i} and {j}: ii_i={ii_i}, ii_j={ii_j}")
+                    if verbose:
+                        print(f"[Python Z3 Loop] Resource dependency between {i} and {j}: ii_i={ii_i}, ii_j={ii_j}")
 
             # Check feasibility
-            print(f"[Python Z3 Loop] Checking feasibility for II = {ii_mid}...")
+            if verbose:
+                print(f"[Python Z3 Loop] Checking feasibility for II = {ii_mid}...")
             if solver.check() == z3.sat:
-                print(f"[Python Z3 Loop] II = {ii_mid} is feasible")
+                if verbose:
+                    print(f"[Python Z3 Loop] II = {ii_mid} is feasible")
                 best_ii = ii_mid
                 best_model = solver.model()
                 best_start_vars = start_vars
@@ -416,46 +397,49 @@ def z3_schedule_loop_python(
                 # Try smaller II
                 ii_upper = ii_mid
             else:
-                print(f"[Python Z3 Loop] II = {ii_mid} is infeasible")
+                if verbose:
+                    print(f"[Python Z3 Loop] II = {ii_mid} is infeasible")
                 # Need larger II
                 ii_lower = ii_mid + 1
 
         if best_model is None:
-            print(f"[Python Z3 Loop] No feasible II found in range, falling back to topological sort")
+            if verbose:
+                print("[Python Z3 Loop] No feasible II found in range, falling back to topological sort")
             data_deps_pairs = [(i, j) for i, j, d in data_deps]
             return fallback_schedule(latencies, data_deps_pairs, resource_deps)
 
-        print(f"[Python Z3 Loop] Minimal feasible II = {best_ii}")
+        if verbose:
+            print(f"[Python Z3 Loop] Minimal feasible II = {best_ii}")
 
         # Extract start times from best model
         start_times = []
         promotes = []
         for i in range(n):
-            try:
-                start_time = best_model.eval(best_start_vars[i]).as_long()
-                promote = z3.is_true(best_model.eval(best_pro_vars[i]))
-            except:
-                # Fallback to 0 if evaluation fails
-                start_time = 0
-                promote = False
+            start_time = best_model.eval(best_start_vars[i]).as_long()
+            promote = z3.is_true(best_model.eval(best_pro_vars[i]))
             start_times.append(start_time)
             promotes.append(promote)
 
         # Sort tasks by start time (and by index as tie-breaker)
         task_indices = list(range(n))
-        task_indices.sort(key=lambda idx: (start_times[idx]+promotes[idx]*best_ii, idx))
+        task_indices.sort(key=lambda idx: (start_times[idx] + promotes[idx] * best_ii, idx))
 
-        print(f"[Python Z3 Loop] Scheduling completed. Minimal II = {best_ii}")
+        if verbose:
+            print(f"[Python Z3 Loop] Scheduling completed. Minimal II = {best_ii}")
         for i in range(n):
             idx = task_indices[i]
-            print(f"[Python Z3 Loop]   Task {idx}: start_time={start_times[idx]}, "
-                  f"latency={latencies[idx]}, II={iis[idx]}, pro={promotes[idx]}, "
-                  f"resource_flags={resource_flags[idx]:03b}")
+            if verbose:
+                print(
+                    f"[Python Z3 Loop]   Task {idx}: start_time={start_times[idx]}, "
+                    f"latency={latencies[idx]}, II={iis[idx]}, pro={promotes[idx]}, "
+                    f"resource_flags={resource_flags[idx]:03b}"
+                )
 
         return start_times, promotes, best_ii
 
     except Exception as e:
-        print(f"[Python Z3 Loop] Error in Z3 scheduling: {e}")
+        if verbose:
+            print(f"[Python Z3 Loop] Error in Z3 scheduling: {e}")
         # Fallback to simple schedule
         data_deps_pairs = [(i, j) for i, j, d in data_deps]
         return fallback_schedule(latencies, data_deps_pairs, resource_deps)
@@ -463,13 +447,7 @@ def z3_schedule_loop_python(
 
 # FFI-exposed function for loop scheduling
 @tvm_ffi.register_global_func("tl.transform.z3_schedule_loop_python")
-def z3_schedule_loop_ffi(
-    latencies,
-    iis,
-    resource_flags,
-    data_deps,
-    resource_deps
-):
+def z3_schedule_loop_ffi(latencies, iis, resource_flags, data_deps, resource_deps):
     """FFI wrapper for z3_schedule_loop_python.
 
     This function accepts TVM containers and converts them to Python lists.
@@ -485,23 +463,19 @@ def z3_schedule_loop_ffi(
     if data_deps is not None:
         # Assuming data_deps is a list of triples
         for i in range(len(data_deps)):
-            if hasattr(data_deps[i], '__len__') and len(data_deps[i]) == 3:
+            if hasattr(data_deps[i], "__len__") and len(data_deps[i]) == 3:
                 data_deps_list.append((int(data_deps[i][0]), int(data_deps[i][1]), int(data_deps[i][2])))
 
     # Convert resource dependencies (pairs)
     resource_deps_list = []
     if resource_deps is not None:
         for i in range(len(resource_deps)):
-            if hasattr(resource_deps[i], '__len__') and len(resource_deps[i]) == 2:
+            if hasattr(resource_deps[i], "__len__") and len(resource_deps[i]) == 2:
                 resource_deps_list.append((int(resource_deps[i][0]), int(resource_deps[i][1])))
 
     # Call the actual scheduler
     start_times, promotes, best_ii = z3_schedule_loop_python(
-        latencies_list,
-        iis_list,
-        resource_flags_list,
-        data_deps_list,
-        resource_deps_list
+        latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list
     )
 
     # Return start_times and promotes as separate arrays for easier FFI handling

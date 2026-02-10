@@ -37,6 +37,7 @@ def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     disable_vectorize = pass_ctx.config.get("tir.disable_vectorize", False)
     return not disable_vectorize
 
+
 def allow_autoschedule(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
