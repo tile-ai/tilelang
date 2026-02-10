@@ -1,7 +1,5 @@
 import cutlass
 import cutlass.cute as cute
-from cutlass._mlir.dialects import nvvm
-from cutlass.cutlass_dsl import T
 
 # re-export cutlass.cute.arch functions first
 from cutlass.cute.arch import sync_threads  # noqa: F401
@@ -9,7 +7,7 @@ from cutlass.cute.arch import alloc_smem, get_dyn_smem  # noqa: F401
 from cutlass.cute.arch import warpgroup_reg_alloc, warpgroup_reg_dealloc  # noqa: F401
 
 from cutlass.cute import make_tensor, make_rmem_tensor, recast_ptr  # noqa: F401
-from cutlass.cute.typing import Numeric
+from cutlass.cute.typing import Numeric  # noqa: F401
 
 from cutlass.base_dsl.typing import as_numeric, Int32, Uint16, Uint32  # noqa: F401
 from cutlass._mlir.dialects import llvm, arith  # noqa: F401
@@ -25,13 +23,8 @@ from .ldsm import *
 from .ptx_mma import *
 from .math import *
 from .threadblock_swizzle import *
+from .atomic import *
 
-# Forward nvvm enums
-from cutlass._mlir.dialects.nvvm import (
-    MemOrderKind,
-    MemScopeKind,
-    AtomicOpKind,
-)
 
 BYTES_PER_TENSORMAP = 128
 BYTES_PER_POINTER = 8
@@ -99,31 +92,3 @@ def pack_half2(x, y):
         return Int32(packed_xy)
 
     return pack_half2_impl(x, y)
-
-
-def AtomicAdd(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
-    if ptr.dtype == cutlass.Float32:
-        ret = nvvm.atomicrmw(
-            T.f32(),
-            AtomicOpKind.FADD,
-            ptr.llvm_ptr,
-            ptr.dtype(value).ir_value(loc=loc, ip=ip),
-            mem_order=MemOrderKind.RELAXED,
-            syncscope=MemScopeKind.GPU,
-            loc=loc,
-            ip=ip,
-        )
-    elif ptr.dtype == cutlass.Int32:
-        ret = nvvm.atomicrmw(
-            T.i32(),
-            AtomicOpKind.ADD,
-            ptr.llvm_ptr,
-            ptr.dtype(value).ir_value(loc=loc, ip=ip),
-            mem_order=MemOrderKind.RELAXED,
-            syncscope=MemScopeKind.GPU,
-            loc=loc,
-            ip=ip,
-        )
-    else:
-        raise ValueError(f"Unsupported dtype: {ptr.dtype}")
-    return ptr.dtype(ret)

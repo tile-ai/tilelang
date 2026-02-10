@@ -52,13 +52,13 @@ CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
 std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
     const std::string &func_name) const {
   static const std::unordered_map<std::string, std::string> kFastMathMap = {
-      {"divf", "tl.divf"},   {"exp", "tl.exp"},    {"expf", "tl.exp"},
-      {"exp2", "tl.exp2"},   {"exp2f", "tl.exp2"}, {"log", "tl.log"},
-      {"logf", "tl.log"},    {"log2", "tl.log2"},  {"log2f", "tl.log2"},
-      {"log10", "tl.log10"}, {"tan", "tl.tan"},    {"cos", "tl.cos"},
-      {"sin", "tl.sin"},     {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
-      {"tanh", "tl.tanh"},   {"tanhf", "tl.tanh"},
-      {"rsqrt", "tl.rsqrt"}, {"rsqrtf", "tl.rsqrt"},
+      {"divf", "tl.divf"},    {"exp", "tl.exp"},    {"expf", "tl.exp"},
+      {"exp2", "tl.exp2"},    {"exp2f", "tl.exp2"}, {"log", "tl.log"},
+      {"logf", "tl.log"},     {"log2", "tl.log2"},  {"log2f", "tl.log2"},
+      {"log10", "tl.log10"},  {"tan", "tl.tan"},    {"cos", "tl.cos"},
+      {"sin", "tl.sin"},      {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
+      {"tanh", "tl.tanh"},    {"tanhf", "tl.tanh"}, {"rsqrt", "tl.rsqrt"},
+      {"rsqrtf", "tl.rsqrt"},
   };
 
   auto it = kFastMathMap.find(func_name);
@@ -584,7 +584,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // arg 3: pointer to local buffer.
     // arg 4: The offset of the element to store in the local buffer.
     // arg 5: pointer to the shared memory buffer to load.
-    // arg 6: The offset of the start element of the row to load in shared memory.
+    // arg 6: The offset of the start element of the row to load in shared
+    // memory.
     ICHECK_EQ(op->args.size(), 7U);
     bool trans = Downcast<Bool>(op->args[0])->value;
     int num = Downcast<Integer>(op->args[1])->value;
@@ -717,8 +718,53 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     this->PrintIndent();
     this->stream << "tl.AtomicAdd(" << dst_ptr << ", " << src_value << ")\n";
   } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
-    // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns prev value
+    // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
     os << "tl.AtomicAdd(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_addx2_elem_op())) {
+    // atomic_addx2_elem_op(dst_ptr, src_ptr[, memory_order]) -> may return prev
+    // value
+    os << "tl.AtomicAddx2(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
+    // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order]) -> may return prev
+    // value
+    os << "tl.AtomicAddx4(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_load_elem_op())) {
+    // atomic_load_elem_op(src_ptr, memory_order) -> returns loaded value
+    os << "tl.AtomicLoad(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_store_elem_op())) {
+    // atomic_store_elem_op(dst_ptr, value, memory_order)
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string value = PrintExpr_(op->args[1]);
+    std::string memory_order = PrintExpr_(op->args[2]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicStore(" << dst_ptr << ", " << value << ", "
+                 << memory_order << ")\n";
+  } else if (op->op.same_as(tl::atomic_max_elem_op())) {
+    // atomic_max_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string src_value = PrintExpr_(op->args[1]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicMax(" << dst_ptr << ", " << src_value << ")\n";
+  } else if (op->op.same_as(tl::atomic_max_ret_elem_op())) {
+    // atomic_max_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
+    os << "tl.AtomicMaxRet(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_min_elem_op())) {
+    // atomic_min_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string src_value = PrintExpr_(op->args[1]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicMin(" << dst_ptr << ", " << src_value << ")\n";
+  } else if (op->op.same_as(tl::atomic_min_ret_elem_op())) {
+    // atomic_min_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
+    os << "tl.AtomicMinRet(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
   } else {
     CodeGenTileLangPY::VisitExpr_(op, os);
@@ -1333,8 +1379,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
 
   if (t == buffer_element_dtype) {
     if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
-        (scope == "local" || scope == "shared" ||
-         scope == "shared.barrier")) {
+        (scope == "local" || scope == "shared" || scope == "shared.barrier")) {
       // Tensors in these scopes are allocated as one-dimensional, so can be
       // assessed via "[]" correctly. Other tensors may be multi-dimensional,
       // and must be assessed via ptr, otherwise CuTeDSL will interpret "[]"
