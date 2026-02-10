@@ -10,7 +10,8 @@
  *
  * This stub library allows TileLang to:
  * 1. Be imported on CPU-only machines (no libcuda.so present).
- * 2. Avoid versioning conflicts by loading the available libcuda.so dynamically.
+ * 2. Avoid versioning conflicts by loading the available libcuda.so
+ * dynamically.
  *
  * This library provides drop-in replacements for CUDA driver API functions.
  * It allows tilelang to be imported on CPU-only machines without CUDA
