@@ -514,7 +514,7 @@ private:
     // Best-effort resolve the underlying buffer/layout by matching the data
     // var. This allows us to infer a vector length from the layout.
     if (auto data_var = node->args[1].as<Var>()) {
-      const Var& data = data_var.value();
+      const Var &data = data_var.value();
       if (layout_map_.defined()) {
         for (const auto &kv : layout_map_) {
           if (kv.first->data.same_as(data)) {
