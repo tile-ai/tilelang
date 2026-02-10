@@ -16,7 +16,6 @@ def get_bwd_configs():
     else:
         return 128, 32, 2, 256
 
-
 @tilelang.jit(
     out_idx=[3, 4],
     pass_configs={

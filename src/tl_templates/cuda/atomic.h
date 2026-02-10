@@ -332,18 +332,18 @@ TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
 }
 
 template <typename src_type>
-TL_DEVICE void AtomicAddx2(half_t *ref, const src_type *val,
+TL_DEVICE void AtomicAddx2(half_t *ref, src_type *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<half2 *>(ref),
-              static_cast<half2>(*reinterpret_cast<const half2 *>(val)));
+              static_cast<half2>(*reinterpret_cast<half2 *>(val)));
   } else {
     // Since atomicAdd does not support memory order, atomic_ref does not
     // support vectorized atomic operation we can only inline ptx code here
     // Note: Vectorized atomic operations only support global space
     // Note: for 16-bit value, we need to reinterpret_cast the value to unsigned
     // short and use "h" register in assembly
-    __half2 add_val = *reinterpret_cast<const __half2 *>(val);
+    __half2 add_val = *reinterpret_cast<__half2 *>(val);
     unsigned short add_val_x_cast =
         *reinterpret_cast<unsigned short *>(&add_val.x);
     unsigned short add_val_y_cast =
@@ -380,13 +380,13 @@ TL_DEVICE void AtomicAddx2(half_t *ref, const src_type *val,
 
 template <typename src_type>
 TL_DEVICE half2
-AtomicAddx2Ret(half_t *ref, const src_type *val,
+AtomicAddx2Ret(half_t *ref, src_type *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(reinterpret_cast<half2 *>(ref),
-                     static_cast<half2>(*reinterpret_cast<const half2 *>(val)));
+                     static_cast<half2>(*reinterpret_cast<half2 *>(val)));
   } else {
-    __half2 add_val = *reinterpret_cast<const __half2 *>(val);
+    __half2 add_val = *reinterpret_cast<__half2 *>(val);
     unsigned short add_val_x_cast =
         *reinterpret_cast<unsigned short *>(&add_val.x);
     unsigned short add_val_y_cast =
@@ -509,8 +509,8 @@ AtomicAddx2Ret(bfloat16_t *ref, src_type *val,
 #endif
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
-template <typename T> TL_DEVICE float2 ToFloat2(const T *val) {
-  return *reinterpret_cast<const float2 *>(val);
+template <typename T> TL_DEVICE float2 ToFloat2(T *val) {
+  return *reinterpret_cast<float2 *>(val);
 }
 
 TL_DEVICE float2 ToFloat2(float2 val) { return val; }
@@ -577,8 +577,8 @@ AtomicAddx2Ret(float *ref, ValType val,
   }
 }
 
-template <typename T> TL_DEVICE float4 ToFloat4(const T *val) {
-  return *reinterpret_cast<const float4 *>(val);
+template <typename T> TL_DEVICE float4 ToFloat4(T *val) {
+  return *reinterpret_cast<float4 *>(val);
 }
 
 TL_DEVICE float4 ToFloat4(float4 val) { return val; }
@@ -587,23 +587,13 @@ template <typename dst_dtype, typename ValType>
 TL_DEVICE void AtomicAddx4(dst_dtype *ref, ValType val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   float4 add_val = ToFloat4(val);
-  // Vectorized atomics require strict alignment. If the address is not
-  // 16-byte aligned, fall back to per-element atomics to preserve correctness.
-  unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
-  if ((ref_addr & 0xF) != 0) {
-    float *ref_f = reinterpret_cast<float *>(ref);
-    AtomicAdd(ref_f + 0, add_val.x, memory_order);
-    AtomicAdd(ref_f + 1, add_val.y, memory_order);
-    AtomicAdd(ref_f + 2, add_val.z, memory_order);
-    AtomicAdd(ref_f + 3, add_val.w, memory_order);
-    return;
-  }
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<float4 *>(ref), add_val);
   } else {
     // Since atomicAdd does not support memory order, atomic_ref does not
     // support vectorized atomic operation we can only inline ptx code here
     // Note: Vectorized atomic operations only support global space
+    unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
     float4 ret_val;
     if (memory_order == int(cuda::memory_order_release) ||
         memory_order == int(cuda::memory_order_consume)) {
@@ -640,20 +630,10 @@ TL_DEVICE float4
 AtomicAddx4Ret(dst_dtype *ref, ValType val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   float4 add_val = ToFloat4(val);
-  // Vectorized atomics require strict alignment. If the address is not
-  // 16-byte aligned, fall back to per-element atomics to preserve correctness.
-  unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
-  if ((ref_addr & 0xF) != 0) {
-    float *ref_f = reinterpret_cast<float *>(ref);
-    float r0 = AtomicAddRet(ref_f + 0, add_val.x, memory_order);
-    float r1 = AtomicAddRet(ref_f + 1, add_val.y, memory_order);
-    float r2 = AtomicAddRet(ref_f + 2, add_val.z, memory_order);
-    float r3 = AtomicAddRet(ref_f + 3, add_val.w, memory_order);
-    return make_float4(r0, r1, r2, r3);
-  }
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(reinterpret_cast<float4 *>(ref), add_val);
   } else {
+    unsigned long long ref_addr = reinterpret_cast<unsigned long long>(ref);
     float4 ret_val;
     if (memory_order == int(cuda::memory_order_release) ||
         memory_order == int(cuda::memory_order_consume)) {
@@ -686,14 +666,14 @@ AtomicAddx4Ret(dst_dtype *ref, ValType val,
   }
 }
 #else
-template <typename T> TL_DEVICE float2 ToFloat2(const T *val) {
-  return *reinterpret_cast<const float2 *>(val);
+template <typename T> TL_DEVICE float2 ToFloat2(T *val) {
+  return *reinterpret_cast<float2 *>(val);
 }
 
 TL_DEVICE float2 ToFloat2(float2 val) { return val; }
 
-template <typename T> TL_DEVICE float4 ToFloat4(const T *val) {
-  return *reinterpret_cast<const float4 *>(val);
+template <typename T> TL_DEVICE float4 ToFloat4(T *val) {
+  return *reinterpret_cast<float4 *>(val);
 }
 
 TL_DEVICE float4 ToFloat4(float4 val) { return val; }

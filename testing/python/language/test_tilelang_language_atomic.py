@@ -614,4 +614,5 @@ def test_tile_atomic_max_expr():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_atomic_load_store()

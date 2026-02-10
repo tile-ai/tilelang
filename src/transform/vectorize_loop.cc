@@ -549,37 +549,6 @@ public:
     return Call(op->dtype, op->op, {new_load});
   }
 
-  // tvm_access_ptr: remove vectorized var from offset to get base address
-  // e.g., T.tvm_access_ptr(..., base + vec, ...) -> T.tvm_access_ptr(..., base,
-  // ...)
-  PrimExpr MutateTVMAccessPtrCall_(const CallNode *op) {
-    ICHECK(op->op.same_as(builtin::tvm_access_ptr()));
-    if (op->args.size() < 5) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-
-    PrimExpr zero = IntImm(var_->dtype, 0);
-
-    PrimExpr new_offset = Substitute(op->args[2], {{var_, zero}});
-    new_offset = analyzer_.Simplify(new_offset);
-
-    PrimExpr new_extent = Substitute(op->args[3], {{var_, zero}});
-    new_extent = analyzer_.Simplify(new_extent);
-
-    if (new_offset.same_as(op->args[2]) && new_extent.same_as(op->args[3])) {
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-
-    auto new_args = op->args;
-    if (!new_offset.same_as(op->args[2])) {
-      new_args.Set(2, new_offset);
-    }
-    if (!new_extent.same_as(op->args[3])) {
-      new_args.Set(3, new_extent);
-    }
-    return Call(op->dtype, op->op, new_args);
-  }
-
   // Reinterpret expr
   PrimExpr MutateReinterpretExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::reinterpret()));
@@ -595,32 +564,6 @@ public:
         return Call(op->dtype.with_lanes(lanes), op->op, {value});
       }
     }
-  }
-
-  bool CanProveVectorAtomicAligned_(const PrimExpr &dst_ptr, int vector_size) {
-    if (vector_size <= 1) {
-      return true;
-    }
-
-    auto check_offset = [&](const PrimExpr &offset) -> bool {
-      PrimExpr mod = analyzer_.Simplify(
-          floormod(offset, make_const(offset.dtype(), vector_size)));
-      return is_zero(mod);
-    };
-
-    if (const auto *call = dst_ptr.as<CallNode>()) {
-      if (call->op.same_as(builtin::tvm_access_ptr()) &&
-          call->args.size() >= 3) {
-        return check_offset(call->args[2]);
-      }
-      if (call->op.same_as(builtin::address_of()) && call->args.size() == 1U) {
-        if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-          PrimExpr offset = load->buffer.OffsetOf(load->indices).back();
-          return check_offset(offset);
-        }
-      }
-    }
-    return false;
   }
 
   // Atomic add vectorization
@@ -662,13 +605,6 @@ public:
       return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
-    // Vectorized atomics require alignment (e.g., float4 requires 16B). If we
-    // cannot prove alignment, scalarize the loop to preserve correctness.
-    if (!CanProveVectorAtomicAligned_(dst, vector_size)) {
-      need_scalarize_ = true;
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-
     // Return the vectorized atomic op
     return Call(op->dtype, GetVectorizedAtomicOp(vector_size), {dst, src});
   }
@@ -697,28 +633,10 @@ public:
     } else if (op->op.same_as(atomic_add_elem_op())) {
       // Handle vectorization of atomic_add_elem_op
       return MutateAtomicAddExpr_(op);
-    } else if (op->op.same_as(atomic_addx2_elem_op()) ||
-               op->op.same_as(atomic_addx4_elem_op()) ||
-               op->op.same_as(atomic_add_ret_elem_op()) ||
-               op->op.same_as(atomic_load_elem_op()) ||
-               op->op.same_as(atomic_store_elem_op()) ||
-               op->op.same_as(atomic_max_elem_op()) ||
-               op->op.same_as(atomic_max_ret_elem_op()) ||
-               op->op.same_as(atomic_min_elem_op()) ||
-               op->op.same_as(atomic_min_ret_elem_op())) {
-      // These per-element atomic ops do not have a general vectorized lowering
-      // in TileLang. When they appear inside a vectorized loop, we must
-      // scalarize the whole loop to avoid incorrectly dropping the lane
-      // component (e.g., pointer base extraction in tvm_access_ptr/address_of).
-      if (!is_one(var_lanes_)) {
-        need_scalarize_ = true;
-      }
-      return tvm::ffi::GetRef<PrimExpr>(op);
     } else if (op->op.same_as(builtin::address_of())) {
       return MutateAddressOfCall_(op);
-    } else if (op->op.same_as(builtin::tvm_access_ptr())) {
-      return MutateTVMAccessPtrCall_(op);
     }
+
     auto optional_op = op->op.as<Op>();
     bool vectorizable = optional_op &&
                         op_vectorizable_.get(optional_op.value(), false) &&
