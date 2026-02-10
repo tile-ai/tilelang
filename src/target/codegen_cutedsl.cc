@@ -158,8 +158,12 @@ void CodeGenTileLangCuTeDSL::PrintType(DataType t,
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const BroadcastNode *op,
                                         std::ostream &os) { // NOLINT(*)
+  // Note: We need to pass the dtype to make_filled_tensor so it can create
+  // the correct CuTeDSL type (e.g., cutlass.Int32 instead of Python int)
+  std::ostringstream dtype_str;
+  PrintType(op->value.dtype(), dtype_str);
   os << "tl.make_filled_tensor((" << PrintExpr_(op->lanes) << ",), "
-     << PrintExpr_(op->value) << ").load()";
+     << dtype_str.str() << "(" << PrintExpr_(op->value) << ")).load()";
 }
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
@@ -525,7 +529,40 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     PrintIndent();
     stream << "break\n";
   } else if (op->op.same_as(builtin::ptx_mma())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: shape: mXnXkX
+    // arg 1: A layout: row/col
+    // arg 2: B layout: row/col
+    // arg 3: A precision: fp16, fp64, ...
+    // arg 4: B precision: fp16, fp64, ...
+    // arg 5: C precision: fp32, fp64, ...
+    // arg 6: A multiplicand
+    // arg 7: A multiplicand index
+    // arg 8: B multiplicand
+    // arg 9: B multiplicand index
+    // arg 10: C accumulator
+    // arg 11: C accumulator index
+    // arg 12: saturate
+    // arg 13: (optional) 1-bit operator (xor or and)
+    ICHECK(op->args.size() == 13U || op->args.size() == 14U);
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[1])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_ref = GetVarPtr_(op->args[6]);
+    std::string a_bias = PrintExpr_(op->args[7]);
+    std::string b_ref = GetVarPtr_(op->args[8]);
+    std::string b_bias = PrintExpr_(op->args[9]);
+    std::string c_ref = GetVarPtr_(op->args[10]);
+    std::string c_bias = PrintExpr_(op->args[11]);
+
+    // Generate call to tl.ptx_mma dispatcher
+    PrintIndent();
+    stream << "tl.ptx_mma(\"" << shape << "\", \"" << A_layout << "\", \""
+           << B_layout << "\", \"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << a_ref << ", " << a_bias << ", " << b_ref
+           << ", " << b_bias << ", " << c_ref << ", " << c_bias << ")\n";
   } else if (op->op.same_as(tl::ptx_mma_sm70())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
@@ -551,7 +588,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ICHECK_EQ(op->args.size(), 7U);
     bool trans = Downcast<Bool>(op->args[0])->value;
     int num = Downcast<Integer>(op->args[1])->value;
-    std::string local_ptr = PrintExpr_(op->args[3]);
+    std::string local_ptr = GetVarPtr_(op->args[3]);
     std::string local_elem_offset = PrintExpr_(op->args[4]);
     std::string smem_ptr = PrintExpr_(op->args[5]);
     std::string smem_elem_offset = PrintExpr_(op->args[6]);
@@ -1245,6 +1282,15 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
 
   std::string index_str = PrintExpr_(index);
   return "(" + ptr_str + " + " + index_str + ")";
+}
+
+std::string CodeGenTileLangCuTeDSL::GetVarPtr_(const PrimExpr &expr) {
+  // For local buffers (rmem tensors), we need to use .iterator to get the
+  // pointer since local buffers in CuTeDSL are tensors, not raw pointers
+  if (const VarNode *var = expr.as<VarNode>()) {
+    return GetVarID(var) + ".iterator";
+  }
+  return PrintExpr_(expr);
 }
 
 // The following forms can be returned:

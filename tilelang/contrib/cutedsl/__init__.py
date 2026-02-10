@@ -22,6 +22,7 @@ from .cpasync import *
 from .gemm_V1 import *
 from .reduce import *
 from .ldsm import *
+from .ptx_mma import *
 from .math import *
 from .threadblock_swizzle import *
 
