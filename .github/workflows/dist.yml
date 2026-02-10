@@ -212,28 +212,28 @@ jobs:
             )
           done
 
-      - name: Test built wheels with nightly torch
+      - name: Test built wheels with different CUDA
         if: contains(matrix.target.toolkit, 'CUDA')
-        env:
-          UV_INDEX: "https://download.pytorch.org/whl/nightly"
         run: |
-          unset UV_TORCH_BACKEND
-          for WHEEL in wheelhouse/*.whl; do
-            echo "Testing wheel: ${WHEEL}"
-            (
-              set -e
-              uv venv test-venv
-              source test-venv/bin/activate
-
-              uv pip install -v "${WHEEL}"
+          for UV_TORCH_BACKEND in cu118 cu130; do
+            export UV_TORCH_BACKEND
+            for WHEEL in wheelhouse/*.whl; do
+              echo "Testing wheel: ${WHEEL}"
               (
                 set -e
-                cd /
-                uv run --no-project -- python -c "import tilelang; print(tilelang.__version__)"
+                uv venv test-venv
+                source test-venv/bin/activate
+
+                uv pip install -v "${WHEEL}"
+                (
+                  set -e
+                  cd /
+                  uv run --no-project -- python -c "import tilelang; print(tilelang.__version__)"
+                )
+                deactivate
+                rm -rf test-venv
               )
-              deactivate
-              rm -rf test-venv
-            )
+            done
           done
 
       - name: Upload wheels
