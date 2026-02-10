@@ -157,14 +157,13 @@ jobs:
           PYTHON_VERSION_MAJMIN_NODOT="${PYTHON_VERSION_MAJMIN//./}"
           echo "CIBW_BUILD=cp${PYTHON_VERSION_MAJMIN_NODOT}-*" | tee -a "${GITHUB_ENV}"
 
-          echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
-
           if [[ "${{ matrix.target.toolkit }}" == *"CUDA"* ]]; then
             CUDA_VERSION="${{ matrix.target.toolkit }}"
             CUDA_VERSION="${CUDA_VERSION##*-}"
             CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
             CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+            echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           fi
 
           if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
@@ -216,9 +215,9 @@ jobs:
       - name: Test built wheels with nightly torch
         if: contains(matrix.target.toolkit, 'CUDA')
         env:
-          UV_TORCH_BACKEND: ""
           UV_INDEX: "https://download.pytorch.org/whl/nightly"
         run: |
+          unset UV_TORCH_BACKEND
           for WHEEL in wheelhouse/*.whl; do
             echo "Testing wheel: ${WHEEL}"
             (
