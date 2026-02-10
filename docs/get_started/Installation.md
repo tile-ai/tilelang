@@ -264,8 +264,8 @@ If you still want to use `pip install -e . -v --no-build-isolation` without `--n
 For users who want access to the latest features and improvements before official releases, we provide nightly builds of tilelang.
 
 ```bash
-pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
-# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
+pip install tilelang -f https://tile-ai.github.io/whl/nightly
+# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
 ```
 
 > **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
