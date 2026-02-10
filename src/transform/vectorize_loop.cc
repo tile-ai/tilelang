@@ -32,7 +32,6 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -138,27 +137,6 @@ inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
     }
   }
   return Optional<BufferLoad>();
-}
-
-/*!
- * \brief Extract dst scalar dtype for atomic ops.
- *
- * Supports:
- * - BufferLoad / address_of(BufferLoad)
- * - tvm_access_ptr(tir.type_annotation(dtype), ...)
- */
-inline std::optional<DataType> ExtractDTypeForAtomic(const PrimExpr &expr) {
-  if (auto load = ExtractBufferLoadForAtomic(expr)) {
-    return load.value()->buffer->dtype;
-  }
-  if (const auto *call = expr.as<CallNode>()) {
-    if (call->op.same_as(builtin::tvm_access_ptr()) && !call->args.empty()) {
-      // The first argument is a TIR type annotation expression whose dtype is
-      // the element type of the pointer.
-      return call->args[0].dtype();
-    }
-  }
-  return std::nullopt;
 }
 
 /*!
@@ -565,7 +543,6 @@ public:
       }
     }
   }
-
   // Atomic add vectorization
   PrimExpr MutateAtomicAddExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(atomic_add_elem_op()));
@@ -593,13 +570,10 @@ public:
     }
 
     // Check if dtype supports this vector size
+    auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
     Target target = Target::Current(false);
-    auto dst_dtype = ExtractDTypeForAtomic(dst);
-    if (!dst_dtype.has_value()) {
-      // Cannot infer dtype, skip vectorization.
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-    int max_vec_size = GetMaxAtomicVectorSize(dst_dtype.value(), target);
+    int max_vec_size =
+        GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer->dtype, target);
     if (vector_size > max_vec_size) {
       // Vector size not supported for this dtype, cannot vectorize
       return tvm::ffi::GetRef<PrimExpr>(op);
@@ -636,7 +610,6 @@ public:
     } else if (op->op.same_as(builtin::address_of())) {
       return MutateAddressOfCall_(op);
     }
-
     auto optional_op = op->op.as<Op>();
     bool vectorizable = optional_op &&
                         op_vectorizable_.get(optional_op.value(), false) &&

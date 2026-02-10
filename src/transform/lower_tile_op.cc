@@ -368,17 +368,18 @@ private:
       }
       // Apply layout transformation
       auto forward_indices = layout->Forward(multi_dim_indices);
-      PrimExpr new_offset_in_tile = 0;
-      PrimExpr tile_extent = 1;
+      PrimExpr new_offset = 0;
+      PrimExpr stride_offset = 1;
       for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset_in_tile += forward_indices[i] * tile_extent;
-        tile_extent *= new_shape[i];
+        new_offset += forward_indices[i] * stride_offset;
+        stride_offset *= new_shape[i];
       }
-      // For tvm_access_ptr, offset can be symbolic (e.g., includes block/loop
-      // vars) and is not always provably within bounds. Preserve the outer-tile
-      // component instead of forcing remaining_offset to simplify to 0.
-      PrimExpr new_offset = analyzer_->Simplify(new_offset_in_tile +
-                                                remaining_offset * tile_extent);
+      // Verify that access is within a single tile
+      ICHECK(is_zero(analyzer_->Simplify(remaining_offset)))
+          << "Access offset exceeds tile bounds, remaining_offset: "
+          << remaining_offset;
+      new_offset = analyzer_->Simplify(new_offset);
+      Array<PrimExpr> new_indices;
       layout_remap_.Set(new_buffer, layout);
 
       // Build new tvm_access_ptr call with new buffer and offset
@@ -986,31 +987,6 @@ private:
         if (!IsLocalBuffer(load->buffer)) {
           local_register_only = false;
         }
-      } else if (const auto *call = obj.as<CallNode>()) {
-        // Handle pointer-style memory accesses that don't show up as explicit
-        // BufferLoad/BufferStore nodes, e.g., atomic_addx2_elem_op(
-        //   tvm_access_ptr(..., B, ...), tvm_access_ptr(..., A, ...)).
-        if (call->op.same_as(builtin::tvm_access_ptr()) &&
-            call->args.size() >= 2) {
-          const auto *var_node = call->args[1].as<VarNode>();
-          if (!var_node) {
-            // Unknown base expression - conservatively treat as non-local
-            // access so we don't skip thread partitioning.
-            local_register_only = false;
-            return;
-          }
-          Var buffer_var = tvm::ffi::GetRef<Var>(var_node);
-          auto it = buffer_map_.find(buffer_var);
-          if (it == buffer_map_.end()) {
-            // Unmapped var - conservatively treat as non-local access.
-            local_register_only = false;
-            return;
-          }
-          const Buffer &buffer = it->second;
-          if (!IsLocalBuffer(buffer)) {
-            local_register_only = false;
-          }
-        }
       }
     });
 
@@ -1028,26 +1004,6 @@ private:
       } else if (const auto *store = obj.as<BufferStoreNode>()) {
         if (!IsLocalBuffer(store->buffer) && !IsFragmentBuffer(store->buffer)) {
           has_non_local = true;
-        }
-      } else if (const auto *call = obj.as<CallNode>()) {
-        if (call->op.same_as(builtin::tvm_access_ptr()) &&
-            call->args.size() >= 2) {
-          const auto *var_node = call->args[1].as<VarNode>();
-          if (!var_node) {
-            // Unknown base expression - conservatively assume non-local.
-            has_non_local = true;
-            return;
-          }
-          Var buffer_var = tvm::ffi::GetRef<Var>(var_node);
-          auto it = buffer_map_.find(buffer_var);
-          if (it == buffer_map_.end()) {
-            has_non_local = true;
-            return;
-          }
-          const Buffer &buffer = it->second;
-          if (!IsLocalBuffer(buffer) && !IsFragmentBuffer(buffer)) {
-            has_non_local = true;
-          }
         }
       }
     });
