@@ -509,9 +509,9 @@ private:
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (!tma_op_to_barrier_id_.count(call_ref)) {
-        // For 1D TMA loads, promote raw integer barrier id to get_mbarrier(id)
-        // so codegen can emit mbarrier[index]. This handles degenerate
-        // producer-only kernels where no arrive() is seen and mapping is empty.
+        // Promote raw integer barrier id to get_mbarrier(id) so codegen can
+        // emit mbarrier[index]. This handles degenerate producer-only kernels
+        // where no arrive()/expect mapping is recorded.
         auto arg0 = op->args[0].as<Call>();
         bool is_1d_tma_load =
             arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
@@ -520,6 +520,14 @@ private:
           if (const auto *imm = op->args[2].as<IntImmNode>()) {
             Array<PrimExpr> new_args = op->args;
             new_args.Set(2, Call(DataType::Handle(), get_mbarrier(),
+                                 {IntImm(DataType::Int(32),
+                                         static_cast<int>(imm->value))}));
+            return Call(op->dtype, op->op, new_args, op->annotations);
+          }
+        } else if (!is_1d_tma_load && op->args.size() >= 2) {
+          if (const auto *imm = op->args[1].as<IntImmNode>()) {
+            Array<PrimExpr> new_args = op->args;
+            new_args.Set(1, Call(DataType::Handle(), get_mbarrier(),
                                  {IntImm(DataType::Int(32),
                                          static_cast<int>(imm->value))}));
             return Call(op->dtype, op->op, new_args, op->annotations);
