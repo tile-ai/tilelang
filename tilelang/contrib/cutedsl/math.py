@@ -2,7 +2,7 @@ import cutlass.cute as cute
 from cutlass.cute.typing import Union, Numeric
 from cutlass.cute.tensor import TensorSSA
 from cutlass._mlir.dialects import arith, math
-from cutlass.cute.math import exp, exp2, log, log2, log10, tan, cos, sin, sqrt  # noqa: F401
+from cutlass.cute.math import exp, exp2, log, log2, log10, tan, cos, sin, sqrt, rsqrt  # noqa: F401
 
 from cutlass._mlir.dialects import llvm
 from cutlass.base_dsl.typing import Float32

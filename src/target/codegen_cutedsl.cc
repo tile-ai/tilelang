@@ -58,6 +58,7 @@ std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
       {"log10", "tl.log10"}, {"tan", "tl.tan"},    {"cos", "tl.cos"},
       {"sin", "tl.sin"},     {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
       {"tanh", "tl.tanh"},   {"tanhf", "tl.tanh"},
+      {"rsqrt", "tl.rsqrt"}, {"rsqrtf", "tl.rsqrt"},
   };
 
   auto it = kFastMathMap.find(func_name);
@@ -633,7 +634,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::ieee_fsqrt())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::ieee_frsqrt())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.rsqrt(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::ieee_fdiv())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
