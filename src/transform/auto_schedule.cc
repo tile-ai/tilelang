@@ -377,6 +377,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
       bool need_barrier = false;
       TaskNode *last_access_task;
       int last_wg_id;
+      bool is_async = task->UsesTensorCore() || task->UsesTMACore();
       if (!region_access.second) {
         auto it = last_write_map.find(buffer);
         if (it != last_write_map.end()) {
@@ -386,8 +387,10 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
             continue;
           if (it->second.second & (1 << wg_id))
             continue;
+          bool last_async = last_access_task->UsesTensorCore() ||
+                            last_access_task->UsesTMACore();
 
-          if (last_wg_id != wg_id || true) {
+          if (last_wg_id != wg_id || is_async || last_async) {
             need_barrier = true;
           }
         }
@@ -398,7 +401,6 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
           last_wg_id = last_access_task->GetWarpgroupId();
           if (last_wg_id == -1)
             continue;
-
           if (last_wg_id != wg_id) {
             need_barrier = true;
           }
@@ -529,6 +531,7 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
       bool is_promoted = task->GetPromote();
       if (wg_id == -1)
         continue;
+      bool is_async = task->UsesTensorCore() || task->UsesTMACore();
 
       // Check regions for dependencies
       for (const auto &region_access : task->GetReadWriteRegions()) {
@@ -551,10 +554,12 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             if (it->second.second & (1 << wg_id))
               continue;
 
+            bool last_async = last_access_task->UsesTensorCore() ||
+                              last_access_task->UsesTMACore();
             // If warpgroup ids differ or promotion status differs, insert
             // barrier
             if (last_wg_id != wg_id || last_is_promoted != is_promoted ||
-                true) {
+                is_async || last_async) {
               need_barrier = true;
             }
           }
@@ -2269,7 +2274,20 @@ private:
 
         // Check if this is a TMA copy operation
         if (op->op.same_as(copy_op)) {
-          found_tma = true;
+          bool found_global = false;
+          for (unsigned idx = 0; idx != 2; ++idx) {
+            auto region = Downcast<Call>(op->args[0]);
+            if (const auto *buffer_load =
+                    region->args[0].as<BufferLoadNode>()) {
+              Buffer buffer = buffer_load->buffer;
+              String scope = buffer.scope();
+              MemoryType mem_type = GetMemoryTypeFromScope(scope);
+              if (mem_type == MemoryType::kGlobal) {
+                found_global = true;
+              }
+            }
+          }
+          found_tma |= found_global;
         } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op)) {
           found_tensor = true;
         } else if (op->op.same_as(reduce_op) || op->op.same_as(fill_op)) {
@@ -2390,7 +2408,7 @@ tvm::transform::Pass AutoSchedule() {
     ICHECK(ir_structure) << "IRStructure is null (empty body?)";
 
     // First print the summary view
-    // PrintIRStructure(ir_structure.get());
+    PrintIRStructure(ir_structure.get());
 
     // Then print all statements
     // PrintAllStmts(ir_structure.get());
@@ -2839,7 +2857,7 @@ ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
   new_task_node->SetII(max_ii);
   new_task_node->SetWarpgroupId(-1); // mixed
 
-  // Also copy read/write regions from all tasks
+  // Also copy read/write regions from all tasksp
   for (TaskNode *task : all_tasks) {
     auto read_regions = task->GetReadRegions();
     for (const auto &region : read_regions) {
