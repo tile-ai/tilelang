@@ -88,6 +88,7 @@ def atomic_addx2_program(M, N, block_M, block_N, dtype=T.float16):
 
 def run_atomic_addx2(M, N, block_M, block_N, dtype=T.float16):
     kernel = atomic_addx2_program(M, N, block_M, block_N, dtype=dtype)
+    print(kernel.get_kernel_source())
     import torch
 
     A = torch.randn(M, N, dtype=torch.float32).cuda().to(getattr(torch, dtype))
@@ -614,5 +615,4 @@ def test_tile_atomic_max_expr():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_atomic_load_store()
+    tilelang.testing.main()

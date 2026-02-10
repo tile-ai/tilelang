@@ -719,7 +719,6 @@ private:
 
     // Handle standalone tvm_access_ptr calls with layout transformation
     if (op->op.same_as(builtin::tvm_access_ptr())) {
-      LOG(INFO) << "tvm_access_ptr: " << Downcast<Call>(op);
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       auto new_access_ptr =
           HandleAccessPtrAndOffset(call, std::nullopt, call->dtype);
@@ -947,7 +946,6 @@ private:
 
     auto loop_layout = Downcast<Fragment>(
         op->annotations.Get(attr::kParallelLoopLayout).value());
-
     // Get predicate if it exists
     Optional<PrimExpr> predicate;
     if (op->annotations.count(attr::kParallelLoopPredicate)) {
@@ -985,6 +983,18 @@ private:
       } else if (const auto *load = obj.as<BufferLoadNode>()) {
         if (!IsLocalBuffer(load->buffer)) {
           local_register_only = false;
+        }
+      } else if (const auto *call = obj.as<CallNode>()) {
+        if (call->op.same_as(builtin::tvm_access_ptr())) {
+          // tvm_access_ptr format: (dtype, data, offset, extent, rw_mask)
+          auto buffer_var = call->args[1].as<VarNode>();
+          if (buffer_var) {
+            Var var = tvm::ffi::GetRef<Var>(buffer_var);
+            auto it = buffer_map_.find(var);
+            if (it != buffer_map_.end() && !IsLocalBuffer(it->second)) {
+              local_register_only = false;
+            }
+          }
         }
       }
     });
@@ -1051,7 +1061,6 @@ private:
     // - AND no reducers are present
     bool should_vectorize =
         (has_non_local || has_cast_operations) && !has_reducer;
-
     // Lower the parallel loop using the common function
     return LowerParallelLoop(for_node, loop_layout, thread_var_->var, analyzer_,
                              layout_map_, predicate, parallel_loop,

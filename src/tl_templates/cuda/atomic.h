@@ -336,14 +336,14 @@ TL_DEVICE void AtomicAddx2(half_t *ref, src_type *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<half2 *>(ref),
-              static_cast<half2>(*reinterpret_cast<half2 *>(val)));
+              static_cast<half2>(*reinterpret_cast<const half2 *>(val)));
   } else {
     // Since atomicAdd does not support memory order, atomic_ref does not
     // support vectorized atomic operation we can only inline ptx code here
     // Note: Vectorized atomic operations only support global space
     // Note: for 16-bit value, we need to reinterpret_cast the value to unsigned
     // short and use "h" register in assembly
-    __half2 add_val = *reinterpret_cast<__half2 *>(val);
+    __half2 add_val = *reinterpret_cast<const __half2 *>(val);
     unsigned short add_val_x_cast =
         *reinterpret_cast<unsigned short *>(&add_val.x);
     unsigned short add_val_y_cast =
@@ -384,9 +384,9 @@ AtomicAddx2Ret(half_t *ref, src_type *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(reinterpret_cast<half2 *>(ref),
-                     static_cast<half2>(*reinterpret_cast<half2 *>(val)));
+                     static_cast<half2>(*reinterpret_cast<const half2 *>(val)));
   } else {
-    __half2 add_val = *reinterpret_cast<__half2 *>(val);
+    __half2 add_val = *reinterpret_cast<const __half2 *>(val);
     unsigned short add_val_x_cast =
         *reinterpret_cast<unsigned short *>(&add_val.x);
     unsigned short add_val_y_cast =
@@ -430,9 +430,9 @@ TL_DEVICE void AtomicAddx2(bfloat16_t *ref, src_type *val,
   if (memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(
         reinterpret_cast<__nv_bfloat162 *>(ref),
-        static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
+        static_cast<__nv_bfloat162>(*reinterpret_cast<const __nv_bfloat162 *>(val)));
   } else {
-    __nv_bfloat162 add_val = *reinterpret_cast<__nv_bfloat162 *>(val);
+    __nv_bfloat162 add_val = *reinterpret_cast<const __nv_bfloat162 *>(val);
     unsigned short add_val_x_cast =
         *reinterpret_cast<unsigned short *>(&add_val.x);
     unsigned short add_val_y_cast =
@@ -471,9 +471,9 @@ AtomicAddx2Ret(bfloat16_t *ref, src_type *val,
   if (memory_order == int(cuda::memory_order_relaxed)) {
     return atomicAdd(
         reinterpret_cast<__nv_bfloat162 *>(ref),
-        static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
+        static_cast<__nv_bfloat162>(*reinterpret_cast<const __nv_bfloat162 *>(val)));
   } else {
-    __nv_bfloat162 add_val = *reinterpret_cast<__nv_bfloat162 *>(val);
+    __nv_bfloat162 add_val = *reinterpret_cast<const __nv_bfloat162 *>(val);
     unsigned short add_val_x_cast =
         *reinterpret_cast<unsigned short *>(&add_val.x);
     unsigned short add_val_y_cast =
