@@ -165,6 +165,10 @@ jobs:
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
           fi
 
+          if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
+            echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
+          fi
+
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             HOST_CCACHE_DIR="$(ccache --get-config cache_dir)"
             echo "CIBW_BEFORE_BUILD_LINUX=dnf install -y ccache && ccache -o cache_dir=/host${HOST_CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
