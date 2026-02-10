@@ -541,7 +541,27 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: whether the matrix is loaded in column major format or not.
+    // arg 1: number of matrices to load.
+    // arg 2: The data type in the matrix, .b16 is the only accepted data type.
+    // arg 3: pointer to local buffer.
+    // arg 4: The offset of the element to store in the local buffer.
+    // arg 5: pointer to the shared memory buffer to load.
+    // arg 6: The offset of the start element of the row to load in shared memory.
+    ICHECK_EQ(op->args.size(), 7U);
+    bool trans = Downcast<Bool>(op->args[0])->value;
+    int num = Downcast<Integer>(op->args[1])->value;
+    std::string local_ptr = PrintExpr_(op->args[3]);
+    std::string local_elem_offset = PrintExpr_(op->args[4]);
+    std::string smem_ptr = PrintExpr_(op->args[5]);
+    std::string smem_elem_offset = PrintExpr_(op->args[6]);
+
+    std::string func_name = "tl.ptx_ldmatrix_x" + std::to_string(num);
+    if (trans)
+      func_name += "_trans";
+    PrintIndent();
+    stream << func_name << "(" << smem_ptr << " + " << smem_elem_offset << ", "
+           << local_ptr << " + " << local_elem_offset << ")\n";
   } else if (op->op.same_as(builtin::mma_store())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::mma_fill())) {
