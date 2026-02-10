@@ -59,6 +59,7 @@ std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
       {"sin", "tl.sin"},      {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
       {"tanh", "tl.tanh"},    {"tanhf", "tl.tanh"}, {"rsqrt", "tl.rsqrt"},
       {"rsqrtf", "tl.rsqrt"},
+      {"fabs", "tl.fabsf"},    {"fabsf", "tl.fabsf"},
   };
 
   auto it = kFastMathMap.find(func_name);
