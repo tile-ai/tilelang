@@ -356,17 +356,10 @@ endif()
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
-add_library(tilelang_module SHARED $<TARGET_OBJECTS:tilelang_objs>)
-target_link_libraries(tilelang PUBLIC tvm_runtime tvm)
-target_link_libraries(tilelang_module PUBLIC tvm)
+target_link_libraries(tilelang PUBLIC tvm)
 
 # Place dev build outputs under build/lib for consistency
 set_target_properties(tilelang PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
-set_target_properties(tilelang_module PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
@@ -415,12 +408,7 @@ if(USE_Z3 AND USE_PYPI_Z3)
   endif()
 endif()
 
-set(TILELANG_OUTPUT_TARGETS
-  tilelang
-  tilelang_module
-  tvm
-  tvm_runtime
-)
+set(TILELANG_OUTPUT_TARGETS tilelang tvm)
 
 if(USE_CUDA AND TILELANG_USE_CUDA_STUBS)
   # Link against CUDA stub library instead of libcuda.so
@@ -455,7 +443,7 @@ elseif(UNIX)
   endif()
 endif()
 
-# Let libtilelang search for tvm/tvm_runtime in the same directory
+# Let libtilelang search for tvm in the same directory
 foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
   set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
   set_target_properties(${target} PROPERTIES
