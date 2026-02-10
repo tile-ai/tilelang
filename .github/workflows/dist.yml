@@ -157,6 +157,8 @@ jobs:
           PYTHON_VERSION_MAJMIN_NODOT="${PYTHON_VERSION_MAJMIN//./}"
           echo "CIBW_BUILD=cp${PYTHON_VERSION_MAJMIN_NODOT}-*" | tee -a "${GITHUB_ENV}"
 
+          echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+
           if [[ "${{ matrix.target.toolkit }}" == *"CUDA"* ]]; then
             CUDA_VERSION="${{ matrix.target.toolkit }}"
             CUDA_VERSION="${CUDA_VERSION##*-}"
@@ -195,6 +197,30 @@ jobs:
             if [[ "${WHEEL}" == *"abi3"* ]]; then
               uvx abi3audit --verbose --strict "${WHEEL}"
             fi
+            (
+              set -e
+              uv venv test-venv
+              source test-venv/bin/activate
+
+              uv pip install -v "${WHEEL}"
+              (
+                set -e
+                cd /
+                uv run --no-project -- python -c "import tilelang; print(tilelang.__version__)"
+              )
+              deactivate
+              rm -rf test-venv
+            )
+          done
+
+      - name: Test built wheels with nightly torch
+        if: contains(matrix.target.toolkit, 'CUDA')
+        env:
+          UV_TORCH_BACKEND: ""
+          UV_INDEX: "https://download.pytorch.org/whl/nightly"
+        run: |
+          for WHEEL in wheelhouse/*.whl; do
+            echo "Testing wheel: ${WHEEL}"
             (
               set -e
               uv venv test-venv
