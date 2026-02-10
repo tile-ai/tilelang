@@ -64,8 +64,7 @@ using namespace tir;
 using ffi::GetRef;
 
 // Forward declaration
-std::unique_ptr<IRStructure>
-ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
+Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
                                      std::vector<Buffer> &barrier_buffers,
                                      Map<ObjectRef, ObjectRef> &barrier_map);
 void CollectTaskNodesFromIRStructure(IRStructure *node,
@@ -336,8 +335,14 @@ static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
     AnalyzeControlNodeBarriers(static_cast<ControlNode *>(node),
                                next_barrier_id, barrier_buffers, barrier_map,
                                thread_count);
+  } else if (node->IsLet()) {
+    LetNode *let = static_cast<LetNode *>(node);
+    AnalyzeAndInsertBarriers(let->child.get(), next_barrier_id, barrier_buffers, barrier_map, thread_count);
+  } else if (node->IsTask()) {
+    // For TaskNode, nothing to do at this level
+  } else {
+    LOG(FATAL);
   }
-  // For TaskNode, nothing to do at this level
 }
 
 static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
@@ -710,6 +715,11 @@ void CollectAllTaskNodesWithContext(const IRStructure *node,
     // When entering a control node, update the current control context
     CollectAllTaskNodesWithContext(control->child.get(), all_tasks,
                                    const_cast<ControlNode *>(control));
+  } else if (node->IsLet()) {
+    const LetNode *let = static_cast<const LetNode *>(node);
+    // Let nodes don't change control context, just recurse into child
+    CollectAllTaskNodesWithContext(let->child.get(), all_tasks,
+                                   current_control_node);
   }
 }
 
@@ -717,52 +727,30 @@ void CollectAllTaskNodesWithContext(const IRStructure *node,
 // register region at the beginning of sequences)
 void CollectPrefixTasks(IRStructure *node,
                         std::unordered_set<TaskNode *> &prefix_tasks,
-                        ControlNode *current_control_node) {
+                        bool &prefix_valid) {
   if (!node)
     return;
+  
+  if (!prefix_valid) return;
 
   if (node->IsSequence()) {
     SequenceNode *seq = static_cast<SequenceNode *>(node);
-    // Check if we're inside a ControlNode - prefix optimization is not applied
-    // inside ControlNode
-    if (current_control_node == nullptr) {
-      // Find consecutive tasks without register region at the beginning of this
-      // sequence
-      bool found_reg = false;
-      for (size_t i = 0; i < seq->children.size(); i++) {
-        if (!seq->children[i])
-          continue;
-
-        if (seq->children[i]->IsTask()) {
-          if (!found_reg && CountRegisterRegions(seq->children[i].get()) == 0) {
-            // This is a prefix task (consecutive task without register region
-            // at the beginning)
-            TaskNode *task = static_cast<TaskNode *>(seq->children[i].get());
-            prefix_tasks.insert(task);
-          } else {
-            // Found a task with register region or after a task with register
-            // region
-            found_reg = true;
-          }
-        } else if (seq->children[i]->IsSequence() ||
-                   seq->children[i]->IsControl()) {
-          // If we encounter a nested Sequence or Control node, we need to
-          // recurse But this breaks the consecutive sequence at the top level
-          CollectPrefixTasks(seq->children[i].get(), prefix_tasks,
-                             current_control_node);
-          // After encountering a non-task node, we can't have more prefix tasks
-          // at this level
-          found_reg = true;
-        }
-      }
+    for (auto &child: seq->children) {
+      CollectPrefixTasks(child.get(), prefix_tasks, prefix_valid);
     }
   } else if (node->IsControl()) {
     ControlNode *ctrl = static_cast<ControlNode *>(node);
-    // When entering a control node, update the current control context
-    CollectPrefixTasks(ctrl->child.get(), prefix_tasks, ctrl);
+    prefix_valid = false;
+  } else if (node->IsLet()) {
+    LetNode *let = static_cast<LetNode *>(node);
+    CollectPrefixTasks(let->child.get(), prefix_tasks, prefix_valid);
   } else if (node->IsTask()) {
-    // Task node outside of a sequence context - not a prefix task
-    return;
+    if (CountRegisterRegions(node) == 0) {
+      TaskNode *task = static_cast<TaskNode *>(node);
+      prefix_tasks.insert(task);
+    } else {
+      prefix_valid = false;
+    }
   }
 }
 
@@ -954,6 +942,21 @@ std::unique_ptr<IRStructure> ControlNode::Clone() const {
   return new_ctrl;
 }
 
+std::unique_ptr<IRStructure> LetNode::Clone() const {
+  auto new_let = std::make_unique<LetNode>();
+  // Copy var and value (TVM objects with reference counting)
+  new_let->var = var;
+  new_let->value = value;
+  // Clone child if exists
+  if (child) {
+    new_let->child = child->Clone();
+  }
+  // Copy latency and II
+  new_let->SetLatency(GetLatency());
+  new_let->SetII(GetII());
+  return new_let;
+}
+
 // Global warpgroup id assignment - should be called from the top level
 // Tasks that use the same register region must have the same warpgroup id
 // Goal: balance weighted latency between two warpgroups (0 and 1)
@@ -975,7 +978,8 @@ void AssignWarpgroupIdsGlobal(IRStructure *root) {
   // Collect all prefix tasks (consecutive tasks without register region at the
   // beginning of sequences)
   std::unordered_set<TaskNode *> prefix_tasks;
-  CollectPrefixTasks(root, prefix_tasks, nullptr);
+  bool prefix_valid = true;
+  CollectPrefixTasks(root, prefix_tasks, prefix_valid);
 
   // Step 2: Initialize all warpgroup ids to -1 (unassigned)
   for (auto &task_ctx : all_tasks) {
@@ -1956,73 +1960,18 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
     }
 
     return;
+  } else if (node->IsLet()) {
+    LetNode *let = static_cast<LetNode *>(node);
+    if (let->child) {
+      ScheduleRecursive(let->child.get());
+      let->SetII(let->child->GetII());
+      let->SetLatency(let->child->GetLatency());
+    }
+    return;
   }
 
   LOG(FATAL) << "[ScheduleRecursive] Unknown IRStructure type";
 }
-
-// Rewriter to convert IRStructure back to TIR statements
-class IRStructureRewriter {
-public:
-  Stmt Rewrite(const IRStructure *node) {
-    if (!node)
-      return Stmt();
-
-    if (node->IsTask()) {
-      const TaskNode *task = static_cast<const TaskNode *>(node);
-
-      // Get the task statements (may be multiple)
-      if (task->stmts.empty()) {
-        return Stmt();
-      }
-
-      // Combine multiple statements into SeqStmt if needed
-      Stmt task_body;
-      if (task->stmts.size() == 1) {
-        task_body = task->stmts[0];
-      } else {
-        task_body = SeqStmt(task->stmts);
-      }
-
-      // Create conditional statement
-      return task_body;
-
-    } else if (node->IsSequence()) {
-      const SequenceNode *seq = static_cast<const SequenceNode *>(node);
-
-      std::vector<Stmt> all_stmts;
-      all_stmts.reserve(seq->children.size());
-      for (const auto &child : seq->children) {
-        all_stmts.push_back(Rewrite(child.get()));
-      }
-      if (all_stmts.empty()) {
-        return Stmt();
-      }
-      if (all_stmts.size() == 1) {
-        return all_stmts[0];
-      }
-      return SeqStmt(all_stmts);
-
-    } else if (node->IsControl()) {
-      // For control nodes (nested loops), use regular Rewrite
-      // Promote transformation only applies to tasks in the current loop
-      const ControlNode *control = static_cast<const ControlNode *>(node);
-      Stmt child_stmt = Rewrite(control->child.get());
-      if (!child_stmt.defined()) {
-        return Stmt();
-      }
-      // Reconstruct the control node with rewritten child
-      return For(control->control->loop_var, control->control->min,
-                 control->control->extent, control->control->kind, child_stmt,
-                 control->control->thread_binding,
-                 control->control->annotations);
-
-    } else {
-      LOG(WARNING) << "BuildPromotedLoopBody: Unknown IRStructure type";
-      return Stmt();
-    }
-  }
-};
 
 // Mutator to update thread extent in AttrStmt nodes
 // Used after warpgroup partition to double thread extent
@@ -2212,13 +2161,18 @@ protected:
   }
 
   void VisitStmt_(const LetStmtNode *op) override {
-    // Let statement -> treat as TaskNode
-    auto task_node = std::make_unique<TaskNode>();
-    task_node->stmts.push_back(GetRef<Stmt>(op));
+    // Let statement -> LetNode
+    auto let_node = std::make_unique<LetNode>();
+    let_node->var = op->var;
+    let_node->value = op->value;
 
-    AnalyzeResourceUsage(op->body, task_node.get());
+    // Process the let body
+    VisitStmt(op->body);
+    if (root_) {
+      let_node->child = std::move(root_);
+    }
 
-    root_ = std::move(task_node);
+    root_ = std::move(let_node);
   }
 
   void VisitStmt_(const WhileNode *op) override {
@@ -2408,7 +2362,7 @@ tvm::transform::Pass AutoSchedule() {
     ICHECK(ir_structure) << "IRStructure is null (empty body?)";
 
     // First print the summary view
-    PrintIRStructure(ir_structure.get());
+    // PrintIRStructure(ir_structure.get());
 
     // Then print all statements
     // PrintAllStmts(ir_structure.get());
@@ -2425,7 +2379,7 @@ tvm::transform::Pass AutoSchedule() {
     if (thread_var.defined()) {
       unit_builder.SetThreadVar(thread_var);
     } else {
-      LOG(WARNING) << "Could not find thread index variable, warpgroup "
+      LOG(FATAL) << "Could not find thread index variable, warpgroup "
                       "partition will use default";
     }
     unit_builder.Build(ir_structure.get());
@@ -2445,36 +2399,13 @@ tvm::transform::Pass AutoSchedule() {
     AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id,
                              barrier_buffers, barrier_map, thread_count);
 
+    // Print the modified summary view
+    PrintIRStructure(ir_structure.get());
+
     // Apply warpgroup partition to entire IRStructure
-    if (thread_var.defined()) {
-      auto partitioned_ir_structure = ApplyWarpgroupPartitionToIRStructure(
-          ir_structure.get(), thread_var, barrier_buffers, barrier_map);
-      if (partitioned_ir_structure) {
-        ir_structure = std::move(partitioned_ir_structure);
-        // PrintIRStructure(ir_structure.get());
-
-        // After warpgroup partition, thread extent should be doubled
-        // ThreadExtentUpdater will update the AttrStmt node in the final IR
-        Range old_dom = thread_var->dom;
-        PrimExpr new_extent = old_dom->extent * 2;
-        updated_thread_extent = new_extent;
-      } else {
-        LOG(WARNING) << "Warpgroup partition returned null, keeping original "
-                        "IRStructure";
-      }
-    } else {
-      LOG(WARNING)
-          << "Thread variable not defined, skipping warpgroup partition";
-    }
-
-    // Rewrite body based on IRStructure
-    Stmt new_body;
-    if (ir_structure) {
-      IRStructureRewriter rewriter;
-      new_body = rewriter.Rewrite(ir_structure.get());
-    } else {
-      new_body = body_to_schedule;
-    }
+    Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
+        ir_structure.get(), thread_var, barrier_buffers, barrier_map);
+    updated_thread_extent = thread_var->dom->extent * 2;
 
     // If we extracted from tilelang_root block, replace the body
     Stmt final_body;
@@ -2523,6 +2454,13 @@ void CollectTaskNodesFromIRStructure(IRStructure *node,
     if (ctrl->child) {
       CollectTaskNodesFromIRStructure(ctrl->child.get(), tasks);
     }
+  } else if (node->IsLet()) {
+    LetNode *let = static_cast<LetNode *>(node);
+    if (let->child) {
+      CollectTaskNodesFromIRStructure(let->child.get(), tasks);
+    }
+  } else {
+    LOG(FATAL);
   }
 }
 
@@ -2544,6 +2482,11 @@ void CollectIRStructureNodes(IRStructure *node,
     ControlNode *ctrl = static_cast<ControlNode *>(node);
     if (ctrl->child) {
       CollectIRStructureNodes(ctrl->child.get(), nodes);
+    }
+  } else if (node->IsLet()) {
+    LetNode *let = static_cast<LetNode *>(node);
+    if (let->child) {
+      CollectIRStructureNodes(let->child.get(), nodes);
     }
   }
   // For TaskNode, no recursion needed
@@ -2597,17 +2540,35 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
           CloneIRStructureWithWarpgroupFilter(ctrl->child.get(), warpgroup_id);
     }
     return new_ctrl;
+  } else if (node->IsLet()) {
+    LetNode *let = static_cast<LetNode *>(node);
+    auto new_let = std::make_unique<LetNode>();
+    new_let->var = let->var;
+    new_let->value = let->value;
+    if (let->child) {
+      new_let->child =
+          CloneIRStructureWithWarpgroupFilter(let->child.get(), warpgroup_id);
+    }
+    return new_let;
   }
   return nullptr;
 }
 
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
-std::unique_ptr<IRStructure>
-ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
+Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
                                      std::vector<Buffer> &barrier_buffers,
                                      Map<ObjectRef, ObjectRef> &barrier_map) {
   if (!root)
-    return nullptr;
+    return Evaluate(0);
+
+  if (root->IsLet()) {
+    const LetNode *let = static_cast<const LetNode *>(root);
+    Stmt body = Evaluate(0);
+    if (let->child) {
+      body = ApplyWarpgroupPartitionToIRStructure(let->child.get(), thread_var, barrier_buffers, barrier_map);
+    }
+    return LetStmt(let->var, let->value, body);
+  }
 
   // Check if there are tasks with mixed warpgroup ids
   std::vector<TaskNode *> all_tasks;
@@ -2626,17 +2587,64 @@ ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
       has_warpgroup_neutral = true;
   }
 
+    // Convert IRStructure to Stmt for IfThenElse
+  std::function<Stmt(IRStructure *)> irstructure_to_stmt;
+  irstructure_to_stmt = [&irstructure_to_stmt](IRStructure *structure) -> Stmt {
+    if (!structure) {
+      return Evaluate(0);
+    }
+
+    if (structure->IsTask()) {
+      TaskNode *task = static_cast<TaskNode *>(structure);
+      if (task->stmts.empty()) {
+        return Evaluate(0);
+      } else if (task->stmts.size() == 1) {
+        return task->stmts[0];
+      } else {
+        return SeqStmt(task->stmts);
+      }
+    } else if (structure->IsSequence()) {
+      SequenceNode *seq = static_cast<SequenceNode *>(structure);
+      std::vector<Stmt> stmts;
+      for (const auto &child : seq->children) {
+        if (child) {
+          Stmt child_stmt = irstructure_to_stmt(child.get());
+          stmts.push_back(child_stmt);
+        }
+      }
+      if (stmts.empty()) {
+        return Evaluate(0);
+      } else if (stmts.size() == 1) {
+        return stmts[0];
+      } else {
+        return SeqStmt(stmts);
+      }
+    } else if (structure->IsControl()) {
+      ControlNode *ctrl = static_cast<ControlNode *>(structure);
+      Stmt body = Evaluate(0);
+      if (ctrl->child) {
+        body = irstructure_to_stmt(ctrl->child.get());
+      }
+      return For(ctrl->control->loop_var, ctrl->control->min,
+                 ctrl->control->extent, ctrl->control->kind, body,
+                 ctrl->control->thread_binding, ctrl->control->annotations);
+    } else if (structure->IsLet()) {
+      const LetNode *let = static_cast<const LetNode *>(structure);
+      Stmt body = Evaluate(0);
+      if (let->child) {
+        body = irstructure_to_stmt(let->child.get());
+      }
+      return LetStmt(let->var, let->value, body);
+    }
+
+    LOG(WARNING)
+        << "Failed to convert IRStructure to Stmt, returning empty statement";
+    return Evaluate(0);
+  };
+
   // If all tasks belong to the same warpgroup, no partition needed
   if (!(has_warpgroup0 && has_warpgroup1)) {
-    // Return a clone of the original structure
-    if (root->IsTask()) {
-      return static_cast<TaskNode *>(root)->Clone();
-    } else if (root->IsSequence()) {
-      return static_cast<SequenceNode *>(root)->Clone();
-    } else if (root->IsControl()) {
-      return static_cast<ControlNode *>(root)->Clone();
-    }
-    return nullptr;
+    return irstructure_to_stmt(root);
   }
 
   // Helper function to clone IRStructure filtering tasks with warpgroup_id ==
@@ -2681,10 +2689,10 @@ ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
         }
       }
       return new_seq;
-    } else if (node->IsControl()) {
+    } else if (node->IsControl() || node->IsLet()) {
       return nullptr;
     }
-    return nullptr;
+    LOG(FATAL);
   };
 
   // Clone IRStructure for warpgroup neutral, 0 and 1
@@ -2724,54 +2732,6 @@ ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
     original_threads = IntImm(DataType::Int(32), 128);
     condition = tx_var < original_threads;
   }
-
-  // Convert IRStructure to Stmt for IfThenElse
-  std::function<Stmt(IRStructure *)> irstructure_to_stmt;
-  irstructure_to_stmt = [&irstructure_to_stmt](IRStructure *structure) -> Stmt {
-    if (!structure) {
-      return Evaluate(0);
-    }
-
-    if (structure->IsTask()) {
-      TaskNode *task = static_cast<TaskNode *>(structure);
-      if (task->stmts.empty()) {
-        return Evaluate(0);
-      } else if (task->stmts.size() == 1) {
-        return task->stmts[0];
-      } else {
-        return SeqStmt(task->stmts);
-      }
-    } else if (structure->IsSequence()) {
-      SequenceNode *seq = static_cast<SequenceNode *>(structure);
-      std::vector<Stmt> stmts;
-      for (const auto &child : seq->children) {
-        if (child) {
-          Stmt child_stmt = irstructure_to_stmt(child.get());
-          stmts.push_back(child_stmt);
-        }
-      }
-      if (stmts.empty()) {
-        return Evaluate(0);
-      } else if (stmts.size() == 1) {
-        return stmts[0];
-      } else {
-        return SeqStmt(stmts);
-      }
-    } else if (structure->IsControl()) {
-      ControlNode *ctrl = static_cast<ControlNode *>(structure);
-      Stmt body = Evaluate(0);
-      if (ctrl->child) {
-        body = irstructure_to_stmt(ctrl->child.get());
-      }
-      return For(ctrl->control->loop_var, ctrl->control->min,
-                 ctrl->control->extent, ctrl->control->kind, body,
-                 ctrl->control->thread_binding, ctrl->control->annotations);
-    }
-
-    LOG(WARNING)
-        << "Failed to convert IRStructure to Stmt, returning empty statement";
-    return Evaluate(0);
-  };
 
   Stmt neutral_body = wg_neutral_has_stmts
                           ? irstructure_to_stmt(wg_neutral_structure.get())
@@ -2833,43 +2793,7 @@ ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
     combined_stmt = if_then_else;
   }
 
-  // Create appropriate IRStructure based on original node type
-  auto new_task_node = std::make_unique<TaskNode>();
-  new_task_node->stmts.push_back(combined_stmt);
-
-  // Copy resource usage flags from all tasks (take union)
-  bool uses_cuda_core = false;
-  bool uses_tma_core = false;
-  bool uses_tensor_core = false;
-  int64_t total_latency = 0;
-  int64_t max_ii = 0;
-  for (TaskNode *task : all_tasks) {
-    uses_cuda_core = uses_cuda_core || task->UsesCUDACore();
-    uses_tma_core = uses_tma_core || task->UsesTMACore();
-    uses_tensor_core = uses_tensor_core || task->UsesTensorCore();
-    total_latency += task->GetLatency();
-    max_ii = std::max(max_ii, task->GetII());
-  }
-  new_task_node->SetUsesCUDACore(uses_cuda_core);
-  new_task_node->SetUsesTMACore(uses_tma_core);
-  new_task_node->SetUsesTensorCore(uses_tensor_core);
-  new_task_node->SetLatency(total_latency);
-  new_task_node->SetII(max_ii);
-  new_task_node->SetWarpgroupId(-1); // mixed
-
-  // Also copy read/write regions from all tasksp
-  for (TaskNode *task : all_tasks) {
-    auto read_regions = task->GetReadRegions();
-    for (const auto &region : read_regions) {
-      new_task_node->AddReadRegion(region);
-    }
-    auto write_regions = task->GetWriteRegions();
-    for (const auto &region : write_regions) {
-      new_task_node->AddWriteRegion(region);
-    }
-  }
-
-  return new_task_node;
+  return combined_stmt;
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

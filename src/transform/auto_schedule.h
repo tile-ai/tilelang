@@ -63,7 +63,7 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
 // Base class for all IR nodes in scheduling
 class IRStructure {
 public:
-  enum class Kind { kTask, kControl, kSequence };
+  enum class Kind { kTask, kControl, kSequence, kLet };
 
   virtual ~IRStructure() = default;
   virtual Kind GetKind() const = 0;
@@ -73,6 +73,7 @@ public:
   bool IsTask() const { return GetKind() == Kind::kTask; }
   bool IsControl() const { return GetKind() == Kind::kControl; }
   bool IsSequence() const { return GetKind() == Kind::kSequence; }
+  bool IsLet() const { return GetKind() == Kind::kLet; }
 
   // Resource usage flags (accessible by all IR nodes)
   virtual bool UsesCUDACore() const = 0;
@@ -286,6 +287,81 @@ private:
   int64_t ii_{0};      // Initiation interval in cycles
 };
 
+// Let node: contains a Let statement with variable, value, and child IRStructure
+class LetNode : public IRStructure {
+public:
+  Var var; // The variable being defined
+  PrimExpr value; // The value being bound
+  std::unique_ptr<IRStructure> child;
+
+  Kind GetKind() const override { return Kind::kLet; }
+
+  // Resource usage flags (aggregate from child)
+  bool UsesCUDACore() const override {
+    return child ? child->UsesCUDACore() : false;
+  }
+  bool UsesTMACore() const override {
+    return child ? child->UsesTMACore() : false;
+  }
+  bool UsesTensorCore() const override {
+    return child ? child->UsesTensorCore() : false;
+  }
+
+  // Memory access regions (aggregate from child)
+  std::vector<BufferRegion> GetReadRegions() const override {
+    return child ? child->GetReadRegions() : std::vector<BufferRegion>{};
+  }
+  std::vector<BufferRegion> GetWriteRegions() const override {
+    return child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
+  }
+
+  // Latency estimation (aggregate from child)
+  int64_t GetLatency() const override { return latency_; }
+  int64_t GetII() const override { return ii_; }
+
+  // Setters (delegate to child if exists)
+  void SetUsesCUDACore(bool value) override {
+    if (child)
+      child->SetUsesCUDACore(value);
+  }
+  void SetUsesTMACore(bool value) override {
+    if (child)
+      child->SetUsesTMACore(value);
+  }
+  void SetUsesTensorCore(bool value) override {
+    if (child)
+      child->SetUsesTensorCore(value);
+  }
+  void SetReadRegions(const std::vector<BufferRegion> &regions) override {
+    if (child)
+      child->SetReadRegions(regions);
+  }
+  void SetWriteRegions(const std::vector<BufferRegion> &regions) override {
+    if (child)
+      child->SetWriteRegions(regions);
+  }
+  void SetLatency(int64_t latency) override { latency_ = latency; }
+  void SetII(int64_t ii) override { ii_ = ii; }
+
+  // Helper methods to add regions (delegate to child)
+  void AddReadRegion(const BufferRegion &region) override {
+    if (child)
+      child->AddReadRegion(region);
+  }
+  void AddWriteRegion(const BufferRegion &region) override {
+    if (child)
+      child->AddWriteRegion(region);
+  }
+
+  // Clone method
+  std::unique_ptr<IRStructure> Clone() const override;
+
+private:
+  // Latency estimation
+  int64_t latency_{0}; // Estimated latency in cycles
+  int64_t ii_{0};      // Initiation interval in cycles
+};
+
 // Sequence node: contains a vector of child IRStructures
 class SequenceNode : public IRStructure {
 public:
@@ -327,6 +403,7 @@ private:
   int64_t latency_{0}; // Estimated latency in cycles
   int64_t ii_{0};      // Initiation interval in cycles
 };
+
 
 // Simple Union-Find (Disjoint Set Union) for task grouping
 class TaskUnionFind {
@@ -528,6 +605,16 @@ void PrintAllStmts(const IRStructure *node, int indent = 0) {
       LOG(INFO) << indent_str << "  Child " << i << ":";
       PrintAllStmts(seq->children[i].get(), indent + 2);
     }
+  } else if (node->GetKind() == IRStructure::Kind::kLet) {
+    const LetNode *let = static_cast<const LetNode *>(node);
+    LOG(INFO) << indent_str << "LetNode:";
+    LOG(INFO) << indent_str << "  Variable: " << let->var;
+    LOG(INFO) << indent_str << "  Value: " << let->value;
+    // Recursively print child statements
+    if (let->child) {
+      LOG(INFO) << indent_str << "  Let body:";
+      PrintAllStmts(let->child.get(), indent + 2);
+    }
   }
 }
 
@@ -575,6 +662,15 @@ void PrintIRStructure(const IRStructure *node, int indent = 0) {
     for (size_t i = 0; i < seq->children.size(); i++) {
       LOG(INFO) << indent_str << "  Child " << i << ":";
       PrintIRStructure(seq->children[i].get(), indent + 2);
+    }
+  } else if (node->GetKind() == IRStructure::Kind::kLet) {
+    const LetNode *let = static_cast<const LetNode *>(node);
+    LOG(INFO) << indent_str << "LetNode:";
+    LOG(INFO) << indent_str << "  Variable: " << let->var;
+    LOG(INFO) << indent_str << "  Value: " << let->value;
+    if (let->child) {
+      LOG(INFO) << indent_str << "  Child:";
+      PrintIRStructure(let->child.get(), indent + 2);
     }
   }
 }
