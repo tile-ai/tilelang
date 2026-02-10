@@ -115,8 +115,8 @@ jobs:
     strategy:
       matrix:
         target:
-          - { runner: ubuntu-latest, toolkit: "CUDA-12.8" }
-          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
+          - { runner: ubuntu-latest, toolkit: "CUDA-12.8", test_backends: "cu118 cu130" }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8", test_backends: "cu126 cu130" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
           # Build wheels for different Python ABIs
@@ -215,8 +215,7 @@ jobs:
       - name: Test built wheels with different CUDA
         if: contains(matrix.target.toolkit, 'CUDA')
         run: |
-          export UV_PYTHON=3.12
-          for UV_TORCH_BACKEND in cu118 cu130; do
+          for UV_TORCH_BACKEND in ${{ matrix.target.test_backends }}; do
             export UV_TORCH_BACKEND
             for WHEEL in wheelhouse/*.whl; do
               echo "Testing wheel: ${WHEEL}"
@@ -229,7 +228,7 @@ jobs:
                 (
                   set -e
                   cd /
-                  uv run --no-project -- python -c "import tilelang; print(tilelang.__version__)"
+                  uv run --no-project -- python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)"
                 )
                 deactivate
                 rm -rf test-venv
