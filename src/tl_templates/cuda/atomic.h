@@ -428,9 +428,9 @@ template <typename src_type>
 TL_DEVICE void AtomicAddx2(bfloat16_t *ref, src_type *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
-    atomicAdd(
-        reinterpret_cast<__nv_bfloat162 *>(ref),
-        static_cast<__nv_bfloat162>(*reinterpret_cast<const __nv_bfloat162 *>(val)));
+    atomicAdd(reinterpret_cast<__nv_bfloat162 *>(ref),
+              static_cast<__nv_bfloat162>(
+                  *reinterpret_cast<const __nv_bfloat162 *>(val)));
   } else {
     __nv_bfloat162 add_val = *reinterpret_cast<const __nv_bfloat162 *>(val);
     unsigned short add_val_x_cast =
@@ -469,9 +469,9 @@ TL_DEVICE __nv_bfloat162
 AtomicAddx2Ret(bfloat16_t *ref, src_type *val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   if (memory_order == int(cuda::memory_order_relaxed)) {
-    return atomicAdd(
-        reinterpret_cast<__nv_bfloat162 *>(ref),
-        static_cast<__nv_bfloat162>(*reinterpret_cast<const __nv_bfloat162 *>(val)));
+    return atomicAdd(reinterpret_cast<__nv_bfloat162 *>(ref),
+                     static_cast<__nv_bfloat162>(
+                         *reinterpret_cast<const __nv_bfloat162 *>(val)));
   } else {
     __nv_bfloat162 add_val = *reinterpret_cast<const __nv_bfloat162 *>(val);
     unsigned short add_val_x_cast =
