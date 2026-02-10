@@ -653,6 +653,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ICHECK_EQ(load->indices.size(), 1)
         << "CodeGenTileLangCuTeDSL only supports flat memory";
     os << GetBufferPtr_(load->buffer.get(), load->indices[0]);
+  } else if (op->op.same_as(tl::atomic_add_elem_op())) {
+    // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string src_value = PrintExpr_(op->args[1]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicAdd(" << dst_ptr << ", " << src_value << ")\n";
+  } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
+    // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns prev value
+    os << "tl.AtomicAdd(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
   } else {
     CodeGenTileLangPY::VisitExpr_(op, os);
   }
@@ -1257,12 +1267,14 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
 
   if (t == buffer_element_dtype) {
     if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
-        (scope == "local" || scope == "shared" || scope == "shared.dyn" ||
+        (scope == "local" || scope == "shared" ||
          scope == "shared.barrier")) {
       // Tensors in these scopes are allocated as one-dimensional, so can be
       // assessed via "[]" correctly. Other tensors may be multi-dimensional,
       // and must be assessed via ptr, otherwise CuTeDSL will interpret "[]"
       // access using its visiting order and layout.
+      // Note: shared.dyn is excluded because its shape is set to (1,) and
+      // direct indexing would cause out-of-bounds access.
       return vid + "[" + index_str + "]";
     } else {
       std::ostringstream os;
