@@ -216,6 +216,7 @@ jobs:
         if: contains(matrix.target.toolkit, 'CUDA')
         run: |
           export UV_PYTHON=3.12
+          VERSION_LOG=$(mktemp)
           for UV_TORCH_BACKEND in ${{ matrix.target.test_backends }}; do
             export UV_TORCH_BACKEND
             for WHEEL in wheelhouse/*.whl; do
@@ -229,13 +230,14 @@ jobs:
                 (
                   set -e
                   cd /
-                  uv run --no-project -- python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)"
+                  uv run --no-project -- python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)" >> "$VERSION_LOG"
                 )
                 deactivate
                 rm -rf test-venv
               )
             done
           done
+          cat "$VERSION_LOG"
 
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.
