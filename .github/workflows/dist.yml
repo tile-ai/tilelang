@@ -215,6 +215,7 @@ jobs:
       - name: Test built wheels with different CUDA
         if: contains(matrix.target.toolkit, 'CUDA')
         run: |
+          export UV_PYTHON=3.12
           for UV_TORCH_BACKEND in ${{ matrix.target.test_backends }}; do
             export UV_TORCH_BACKEND
             for WHEEL in wheelhouse/*.whl; do
