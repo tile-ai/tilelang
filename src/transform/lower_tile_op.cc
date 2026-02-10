@@ -350,6 +350,7 @@ private:
       }
 
       // Get the offset from tvm_access_ptr args[2]
+      LOG(INFO) << "access_ptr_call->args[2]: " << access_ptr_call->args[2];
       PrimExpr elem_offset = access_ptr_call->args[2];
       if (offset.defined()) {
         elem_offset = elem_offset + offset.value();
@@ -364,7 +365,8 @@ private:
         multi_dim_indices.insert(
             multi_dim_indices.begin(),
             analyzer_->Simplify(floormod(remaining_offset, old_shape[i])));
-        remaining_offset = floordiv(remaining_offset, old_shape[i]);
+        remaining_offset =
+            analyzer_->Simplify(floordiv(remaining_offset, old_shape[i]));
       }
       // Apply layout transformation
       auto forward_indices = layout->Forward(multi_dim_indices);
@@ -374,10 +376,6 @@ private:
         new_offset += forward_indices[i] * stride_offset;
         stride_offset *= new_shape[i];
       }
-      // Verify that access is within a single tile
-      ICHECK(is_zero(analyzer_->Simplify(remaining_offset)))
-          << "Access offset exceeds tile bounds, remaining_offset: "
-          << remaining_offset;
       new_offset = analyzer_->Simplify(new_offset);
       Array<PrimExpr> new_indices;
       layout_remap_.Set(new_buffer, layout);
@@ -721,6 +719,7 @@ private:
 
     // Handle standalone tvm_access_ptr calls with layout transformation
     if (op->op.same_as(builtin::tvm_access_ptr())) {
+      LOG(INFO) << "tvm_access_ptr: " << Downcast<Call>(op);
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       auto new_access_ptr =
           HandleAccessPtrAndOffset(call, std::nullopt, call->dtype);

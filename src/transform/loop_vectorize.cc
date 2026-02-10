@@ -383,6 +383,9 @@ private:
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    } else if (node->op.same_as(builtin::tvm_access_ptr())) {
+      HandleTvmAccessPtr(node);
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == tl::atomic_add_elem_op()) {
       // Assert at least 2 args (dst_ptr and src)
       ICHECK(node->args.size() >= 2)
@@ -486,6 +489,100 @@ private:
 
   void CheckConditionVectorized(const PrimExpr &cond) {
     // TODO: perform some checks here
+  }
+
+  void HandleTvmAccessPtr(const CallNode *node) {
+    // tvm_access_ptr format: (ptype, data, offset, extent, rw_mask)
+    if (!inner_for_) {
+      return;
+    }
+    if (node->args.size() != 5U) {
+      // Be permissive for legacy patterns; do not introduce hard failures in
+      // the planner for malformed calls.
+      return;
+    }
+
+    // args[0] is TypeAnnotation(dtype[/lanes]); dtype() encodes the element
+    // type. See tvm::tir::Buffer::access_ptr implementation.
+    DataType dtype = node->args[0].dtype();
+    PrimExpr offset = node->args[2];
+    PrimExpr extent = node->args[3];
+
+    Optional<Buffer> buffer_opt;
+    Optional<Layout> layout_opt;
+
+    // Best-effort resolve the underlying buffer/layout by matching the data
+    // var. This allows us to infer a vector length from the layout.
+    if (auto data_var = node->args[1].as<Var>()) {
+      Var data = data_var.value();
+      if (layout_map_.defined()) {
+        for (const auto &kv : layout_map_) {
+          if (kv.first->data.same_as(data)) {
+            buffer_opt = kv.first;
+            layout_opt = kv.second;
+            break;
+          }
+        }
+      }
+      if (!buffer_opt.defined()) {
+        for (const auto &info : buffer_vector_infos_) {
+          if (info.buffer.defined() && info.buffer->data.same_as(data)) {
+            buffer_opt = info.buffer;
+            break;
+          }
+        }
+      }
+    }
+
+    // Base vector size from loop extent.
+    int access_vec_size = loop_extent_vector_size_;
+
+    // Constrain by dtype lane capacity (128/256-bit vector load/store width).
+    // This mirrors ComputeBufferVectorSize's dtype-based lower bound.
+    int dtype_bits = dtype.bits() * dtype.lanes();
+    if (dtype_bits > 0) {
+      int dtype_lane_bound = vector_load_bits_max_ / dtype_bits;
+      if (dtype_lane_bound <= 0) {
+        dtype_lane_bound = 1;
+      }
+      access_vec_size = arith::ZeroAwareGCD(access_vec_size, dtype_lane_bound);
+    }
+
+    // Constrain by access_ptr extent if it is a compile-time constant > 1.
+    // extent==1 is common for scalar pointer uses; do not force vec=1 from it.
+    if (auto extent_int = as_const_int(analyzer_->Simplify(extent));
+        extent_int && *extent_int > 1) {
+      access_vec_size = arith::ZeroAwareGCD(access_vec_size, *extent_int);
+    }
+
+    // If the buffer has a layout, use the last output dimension as a proxy for
+    // the maximum contiguous vector length implied by the layout.
+    if (layout_opt.defined()) {
+      Array<PrimExpr> out_shape = layout_opt.value()->OutputShape();
+      if (!out_shape.empty()) {
+        PrimExpr contig = analyzer_->Simplify(out_shape.back());
+        if (auto contig_int = as_const_int(contig);
+            contig_int && *contig_int > 1) {
+          access_vec_size = arith::ZeroAwareGCD(access_vec_size, *contig_int);
+        }
+      }
+    }
+
+    // tvm_access_ptr itself is not vectorizable in TLVectorizer. If its offset
+    // depends on the vectorized loop var, TLVectorizer will force scalarization
+    // of the whole loop body. To avoid planning a vector size that will be
+    // immediately scalarized (and to keep semantics sane for side-effectful
+    // calls), require the offset to be invariant within the vector boundary.
+    PrimExpr offset_s = analyzer_->Simplify(offset);
+    while (access_vec_size > 1 &&
+           !IsExprInvariantInVectorBoundary(offset_s, inner_for_->loop_var,
+                                            access_vec_size, analyzer_)) {
+      access_vec_size /= 2;
+    }
+
+    // Record as a memory-like constraint if we can resolve the buffer.
+    buffer_vector_infos_.push_back(
+        {buffer_opt.value_or(Buffer()), access_vec_size, false, {}});
   }
 
   Array<PrimExpr> TransformIndices(const Array<PrimExpr> &indices,

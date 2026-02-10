@@ -588,9 +588,11 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
+  LOG(INFO) << "loop_layout: " << loop_layout;
   auto lowered_loop =
       LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
                         T.layout_map, par_op->GetPredicate(T.thread_var));
+  LOG(INFO) << "lowered_loop: " << lowered_loop;
   return lowered_loop;
 }
 
