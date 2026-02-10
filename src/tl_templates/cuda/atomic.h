@@ -510,7 +510,7 @@ AtomicAddx2Ret(bfloat16_t *ref, src_type *val,
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
 template <typename T> TL_DEVICE float2 ToFloat2(T *val) {
-  return *reinterpret_cast<float2 *>(val);
+  return *reinterpret_cast<const float2 *>(val);
 }
 
 TL_DEVICE float2 ToFloat2(float2 val) { return val; }
@@ -578,7 +578,7 @@ AtomicAddx2Ret(float *ref, ValType val,
 }
 
 template <typename T> TL_DEVICE float4 ToFloat4(T *val) {
-  return *reinterpret_cast<float4 *>(val);
+  return *reinterpret_cast<const float4 *>(val);
 }
 
 TL_DEVICE float4 ToFloat4(float4 val) { return val; }
@@ -667,13 +667,13 @@ AtomicAddx4Ret(dst_dtype *ref, ValType val,
 }
 #else
 template <typename T> TL_DEVICE float2 ToFloat2(T *val) {
-  return *reinterpret_cast<float2 *>(val);
+  return *reinterpret_cast<const float2 *>(val);
 }
 
 TL_DEVICE float2 ToFloat2(float2 val) { return val; }
 
 template <typename T> TL_DEVICE float4 ToFloat4(T *val) {
-  return *reinterpret_cast<float4 *>(val);
+  return *reinterpret_cast<const float4 *>(val);
 }
 
 TL_DEVICE float4 ToFloat4(float4 val) { return val; }
