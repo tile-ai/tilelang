@@ -4,17 +4,14 @@
  *
  * Motivation
  * ----------
- * NVRTC's SONAME encodes its major version (e.g. libnvrtc.so.12,
- * libnvrtc.so.13). If we link libtvm.so directly against a specific SONAME, a
- * wheel built in one CUDA toolkit environment becomes unusable in another
- * environment that only provides a different NVRTC major version.
+ * Similar to cudart, the primary purpose is to resolve SONAME mismatches,
+ * allowing a single build to work across different CUDA versions. This is
+ * achieved by reusing the NVRTC library already loaded by frameworks like
+ * PyTorch.
  *
  * This stub exports a minimal set of NVRTC C API entrypoints used by
  * TVM/TileLang. The actual libnvrtc is loaded lazily via dlopen() on first API
  * call, and symbols are resolved via dlsym().
- *
- * As a result, the final wheel can run in environments that have NVRTC from
- * CUDA 11/12/13 available (as long as the required symbols exist).
  */
 
 #ifndef _GNU_SOURCE

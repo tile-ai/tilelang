@@ -5,11 +5,10 @@
  *
  * Motivation
  * ----------
- * libcudart's SONAME encodes its major version (e.g. libcudart.so.11.0,
- * libcudart.so.12, libcudart.so.13). If we link libtvm.so / libtvm_runtime.so
- * directly against a specific SONAME, a wheel built against one CUDA toolkit
- * becomes unusable in another environment that only provides a different
- * libcudart major version.
+ * The primary purpose is to resolve SONAME mismatches (e.g., libcudart.so.11.0
+ * vs libcudart.so.12), allowing a single build to work across different CUDA
+ * versions. This is achieved by reusing the CUDA runtime already loaded by
+ * frameworks like PyTorch.
  *
  * This stub exports the subset of CUDA Runtime API entrypoints used by TVM in
  * this repository. The real libcudart is loaded lazily via dlopen() on first
