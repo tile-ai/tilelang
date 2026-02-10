@@ -545,7 +545,6 @@ def run_regression_perf(
         block_dexpert=128,
         threads=256,
         num_stages=1,
-        coalesced_width=2,
     )
 
     moe = MoE(config, shared_kernel, routed_kernel, weights, padding_M=128)
@@ -617,7 +616,9 @@ def run_regression_perf(
             moe.expert_output_routed,
         )
 
-    return do_bench(run_routed_kernel_only, backend="cupti")
+    shared_latency = do_bench(run_shared_kernel_only, backend="cupti")
+    routed_latency = do_bench(run_routed_kernel_only, backend="cupti")
+    return (shared_latency + routed_latency) / 2
 
 
 if __name__ == "__main__":

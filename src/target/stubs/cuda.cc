@@ -12,6 +12,12 @@
 
 #include "cuda.h"
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#error "cuda_stub is currently POSIX-only (requires <dlfcn.h> / dlopen). "         \
+    "On Windows, build TileLang from source with -DTILELANG_USE_CUDA_STUBS=OFF " \
+    "to link against the real CUDA libraries."
+#endif
+
 #include <dlfcn.h>
 #include <stdexcept>
 #include <string>

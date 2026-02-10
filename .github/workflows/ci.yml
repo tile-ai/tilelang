@@ -45,18 +45,8 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Setup Python 3.8
-        id: setup-pylowest
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.8" # use lowest supported version for linting
-          update-environment: false
-
-      - name: Check AST with Python 3.8
-        run: |
-          "${{ steps.setup-pylowest.outputs.python-path }}" -m compileall -q -f tilelang
-
       - name: Setup Python 3.9
+        id: setup-pylowest
         uses: actions/setup-python@v6
         with:
           python-version: "3.9"
@@ -66,6 +56,10 @@ jobs:
             pyproject.toml
             requirements*.txt
             .pre-commit-config.yaml
+
+      - name: Check AST with Python 3.9
+        run: |
+          "${{ steps.setup-pylowest.outputs.python-path }}" -m compileall -q -f tilelang
 
       - name: Pre-commit Lint
         run: |

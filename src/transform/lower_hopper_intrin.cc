@@ -72,8 +72,24 @@ public:
             continue;
           }
           const Buffer &buf = name2buf.at(buf_name);
-          // Build base pointer expression (read access)
-          PrimExpr base_ptr = buf.access_ptr(1);
+          // Build base pointer expression.
+          //
+          // We only need the base address for CUDA stream access policy window
+          // configuration. Using `Buffer::access_ptr` would materialize a
+          // typed pointer cast based on `buf->dtype` (e.g. float16 -> `half*`)
+          // in the generated C host stubs, which then requires a `half`
+          // definition during host compilation. Since the runtime API treats
+          // the pointer as opaque, keep it as `void*`/handle and adjust by
+          // `elem_offset` in bytes when needed.
+          PrimExpr base_ptr = buf->data;
+          if (buf->elem_offset.defined() && !is_zero(buf->elem_offset)) {
+            PrimExpr byte_offset =
+                buf->elem_offset *
+                IntImm(buf->elem_offset.dtype(), buf->dtype.bytes());
+            base_ptr =
+                Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+                     {base_ptr, byte_offset});
+          }
           // Args packed: func_name, base_ptr, num_bytes, hit_ratio
           Array<PrimExpr> packed_args;
           packed_args.push_back(

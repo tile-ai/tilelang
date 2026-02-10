@@ -27,11 +27,13 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    # Memory issue: tilelang#1502
-    "apache-tvm-ffi~=0.1.0,>=0.1.6",
+    # >=0.1.6 fixes a memory issue: tilelang#1502, but keep
+    # requirement as wide as possible to be compatible with other libraries
+    # pip will try to use latest version whenever possible.
+    "apache-tvm-ffi~=0.1.0,>=0.1.2",
     # torch-c-dlpack-ext provides prebuilt torch extensions.
     # Without it, TVM FFI may require JIT compilation on first import.
-    "torch-c-dlpack-ext",
+    "torch-c-dlpack-ext; python_version < '3.14'",
     "cloudpickle",
     "ml-dtypes",
     "numpy>=1.23.5",
@@ -42,7 +44,7 @@ dependencies = [
     "setuptools; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
-    "z3-solver>=4.13.0",
+    "z3-solver>=4.13.0,<4.15.5",
 ]
 
 [project.optional-dependencies]
@@ -61,7 +63,7 @@ nvcc = [
 requires = [
     "cython>=3.1.0",
     "scikit-build-core",
-    "z3-solver>=4.13.0",
+    "z3-solver>=4.13.0,<4.15.5",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
     # See tvm's CMakeLists.txt for more information.
     "patchelf>=0.17.2; platform_system == 'Linux'",
@@ -268,17 +270,11 @@ v="${cudaver//./-}"
 dnf install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}"
 dnf clean all
 """
-repair-wheel-command = [
-    # Do not bundle libtvm_ffi.so and libz3.so because they are shipped by the dependency packages.
-    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
-    "pipx run abi3audit --verbose --strict {wheel}",
-]
+# Do not bundle libtvm_ffi.so and libz3.so because they are shipped by the dependency packages.
+repair-wheel-command = "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
-repair-wheel-command = [
-    "delocate-wheel --verbose --ignore-missing-dependencies --no-sanitize-rpaths --require-archs {delocate_archs} -w {dest_dir} -v {wheel}",
-    "pipx run abi3audit --verbose --strict {wheel}",
-]
+repair-wheel-command = "delocate-wheel --verbose --ignore-missing-dependencies --no-sanitize-rpaths --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
 
 [[tool.cibuildwheel.overrides]]
 select = "*linux*x86_64*"
