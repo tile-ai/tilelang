@@ -1,6 +1,7 @@
 /*!
  * \file lower_access_ptr.cc
- * \brief Lower TileLang frontend `tl.access_ptr` to `tir.builtin.tvm_access_ptr`.
+ * \brief Lower TileLang frontend `tl.access_ptr` to
+ * `tir.builtin.tvm_access_ptr`.
  */
 
 #include <tvm/ffi/reflection/registry.h>
@@ -18,14 +19,14 @@ using namespace tir;
 
 namespace {
 
-DataType IndexDTypeFromBuffer(const Buffer& buffer) {
+DataType IndexDTypeFromBuffer(const Buffer &buffer) {
   if (!buffer.defined() || buffer->shape.empty()) {
     return DataType::Int(32);
   }
   return buffer->shape[0].dtype();
 }
 
-Array<PrimExpr> RowMajorStrides(const Buffer& buffer) {
+Array<PrimExpr> RowMajorStrides(const Buffer &buffer) {
   int ndim = static_cast<int>(buffer->shape.size());
   Array<PrimExpr> strides;
   DataType idx_dtype = IndexDTypeFromBuffer(buffer);
@@ -39,17 +40,17 @@ Array<PrimExpr> RowMajorStrides(const Buffer& buffer) {
   return strides;
 }
 
-PrimExpr BaseIndexForOffset(const PrimExpr& index) {
-  if (const auto* ramp = index.as<RampNode>()) {
+PrimExpr BaseIndexForOffset(const PrimExpr &index) {
+  if (const auto *ramp = index.as<RampNode>()) {
     return ramp->base;
   }
-  if (const auto* broadcast = index.as<BroadcastNode>()) {
+  if (const auto *broadcast = index.as<BroadcastNode>()) {
     return broadcast->value;
   }
   return index;
 }
 
-PrimExpr LinearOffsetFromLoad(const BufferLoad& load) {
+PrimExpr LinearOffsetFromLoad(const BufferLoad &load) {
   Buffer buffer = load->buffer;
   ICHECK(buffer.defined());
   int ndim = static_cast<int>(buffer->shape.size());
@@ -75,7 +76,7 @@ PrimExpr LinearOffsetFromLoad(const BufferLoad& load) {
 
 class AccessPtrLowerer : public StmtExprMutator {
 public:
-  PrimExpr VisitExpr_(const CallNode* op) final {
+  PrimExpr VisitExpr_(const CallNode *op) final {
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (!call->op.same_as(tl::access_ptr())) {
       return std::move(call);
@@ -105,7 +106,7 @@ PrimFunc LowerAccessPtrPrimFunc(PrimFunc f) {
     return f;
   }
   AccessPtrLowerer lowerer;
-  PrimFuncNode* n = f.CopyOnWrite();
+  PrimFuncNode *n = f.CopyOnWrite();
   n->body = lowerer(std::move(n->body));
   return f;
 }
@@ -115,8 +116,8 @@ PrimFunc LowerAccessPtrPrimFunc(PrimFunc f) {
 namespace transform {
 
 tvm::transform::Pass LowerAccessPtr() {
-  auto pass_func = [](PrimFunc f, const IRModule& m,
-                      const tvm::transform::PassContext& ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m,
+                      const tvm::transform::PassContext &ctx) {
     return LowerAccessPtrPrimFunc(std::move(f));
   };
   return tvm::tir::transform::CreatePrimFuncPass(pass_func, 0,
