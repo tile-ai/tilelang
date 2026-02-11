@@ -12,7 +12,6 @@ from .gemm_wgmma import GemmWGMMA
 from .gemm_tcgen05 import GemmTCGEN5
 from .gemm_mfma import GemmMFMA
 from .gemm_cutedsl import GemmCuTeDSL
-from tilelang import _ffi_api
 from tilelang.utils.target import target_is_volta
 from tilelang.jit.adapter.utils import is_cutedsl_target
 
@@ -111,36 +110,27 @@ class GemmPy(Node, Scriptable):
     def wg_wait(self):
         return self.wgWait
 
+    @property
+    def annotations(self):
+        return self.ann
+
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""
-        gemm_inst = self._select_gemm_instruction(thread_nums, target)
+        gemm_inst = self._get_inferred_gemm_instruction()
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).infer_layout(target, thread_nums)
 
     def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
         """Lower the GEMM operation to TIR statements based on target architecture."""
-        thread_nums = thread_bounds.extent
-        gemm_inst = self._select_gemm_instruction(thread_nums, target)
+        gemm_inst = self._get_inferred_gemm_instruction()
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).lower(layout_map, target, thread_bounds, thread_var)
 
-    def _select_gemm_instruction(self, thread_nums: int, target: Target) -> GemmInst:
-        """Select the appropriate GEMM instruction based on target and thread configuration.
-
-        The selection logic follows this priority:
-        1. WGMMA for Hopper architecture with sufficient matrix size and warp count
-        2. MFMA for CDNA (AMD) architecture
-        3. MMA for CUDA architecture
-        4. Fallback to MMA for other cases
-
-        Args:
-            thread_nums: Number of threads in the block
-            target: Target architecture
-
-        Returns:
-            GemmInst: The selected GEMM instruction type
-        """
-        return GemmInst(_ffi_api.GemmPyGemmInst(self, int(thread_nums), target))
+    def _get_inferred_gemm_instruction(self) -> GemmInst:
+        """Get the inferred GEMM instruction from annotations if available."""
+        assert self.annotations is not None, "Annotations are not set"
+        assert "instruction" in self.annotations, "GEMM instruction is not inferred"
+        return GemmInst(int(self.annotations["instruction"]))
 
     def _get_implementation_class(self, gemm_inst: GemmInst, target: Target):
         """Get the appropriate implementation class for the given GEMM instruction.

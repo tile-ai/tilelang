@@ -139,6 +139,10 @@ class GemmBase:
             return [zero, zero]
         return [coords[i] for i in range(len(coords))]
 
+    @property
+    def annotations(self) -> dict:
+        return getattr(self.gemm_node, "ann", {})
+
     def get_region_base_offsets(self, region):
         """
         Get the base offset (start index) for each dimension from a BufferRegion.

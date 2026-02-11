@@ -5,6 +5,7 @@ from tilelang import language as T
 from tvm import tir
 from tvm.target import Target
 from tvm.ir import Range
+from tilelang.tileop.gemm import GemmInst
 
 
 class GemmCuTeDSL(GemmBase):
@@ -22,13 +23,11 @@ class GemmCuTeDSL(GemmBase):
         so it needs the same layout information. We delegate to the appropriate
         implementation based on the instruction type.
         """
-        from tilelang.tileop.gemm import GemmInst
         from tilelang.tileop.gemm.gemm_wgmma import GemmWGMMA
         from tilelang.tileop.gemm.gemm_mma import GemmMMA
-        from tilelang import _ffi_api
 
         # Determine which GEMM instruction will be used
-        gemm_inst = GemmInst(_ffi_api.GemmPyGemmInst(self.gemm_node, int(thread_nums), target))
+        gemm_inst = self._get_inferred_gemm_instruction()
 
         # Use WGMMA or MMA layout inference based on instruction type
         if gemm_inst.is_wgmma():
@@ -44,6 +43,10 @@ class GemmCuTeDSL(GemmBase):
 
         # Convert C++ GemmWarpPolicy to Python enum value (int)
         policy_int = self.policy.policy_type
+        # Pass instruction annotation so the gemm_v1 call has it when LowerTileOp
+        # visits the lowered IR (gemm_v1 creates GemmNode which requires instruction)
+        gemm_inst = self._get_inferred_gemm_instruction()
+        annotations = {"instruction": int(gemm_inst)}
 
         @T.prim_func
         def _gemm_cutedsl() -> None:
@@ -58,7 +61,13 @@ class GemmCuTeDSL(GemmBase):
                 self.k_pack,
                 self.wg_wait,
                 self.mbar,
+                annotations=annotations,
             )
 
         # Simplify and return
         return _Simplify(_gemm_cutedsl, inline_let=True)
+
+    def _get_inferred_gemm_instruction(self) -> GemmInst:
+        """Get the inferred GEMM instruction from annotations if available."""
+        assert "instruction" in self.annotations, "GEMM instruction is not inferred"
+        return GemmInst(int(self.annotations["instruction"]))
