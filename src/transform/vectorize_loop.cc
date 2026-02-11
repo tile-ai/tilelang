@@ -39,6 +39,7 @@
 
 #include "../op/builtin.h"
 #include "../target/utils.h"
+#include "arith/ir_mutator_with_analyzer.h"
 #include "arith/scalable_expression.h"
 #include "tir/analysis/check_contains.h"
 #include "tvm/ffi/cast.h"
@@ -261,8 +262,9 @@ public:
 
   // Convenience entry to vectorize a loop body without exposing
   // the mutator invocation pattern at call sites.
-  static Stmt Vectorize(const Var &var, const PrimExpr &var_lanes, Stmt body) {
-    TLVectorizer vec{var, var_lanes};
+  static Stmt Vectorize(const Var &var, const PrimExpr &var_lanes, Stmt body,
+                        arith::Analyzer *analyzer) {
+    TLVectorizer vec{var, var_lanes, analyzer};
     Stmt original_body = body;
     auto vec_stmt = vec(std::move(body));
     // If scalarization is needed, scalarize the entire original body
@@ -272,8 +274,9 @@ public:
     return vec_stmt;
   }
 
-  TLVectorizer(const Var &var, const PrimExpr &var_lanes)
-      : var_(var), var_lanes_(var_lanes) {
+  TLVectorizer(const Var &var, const PrimExpr &var_lanes,
+               arith::Analyzer *analyzer)
+      : var_(var), var_lanes_(var_lanes), analyzer_(analyzer) {
     ramp_ = Ramp(IntImm(var->dtype, 0), IntImm(var->dtype, 1), var_lanes);
   }
 
@@ -317,11 +320,11 @@ public:
       if (is_vec_a || is_vec_b) {
         const RampNode *b_ramp = b.as<RampNode>();
         const RampNode *a_ramp = a.as<RampNode>();
-        if (a_ramp && b.dtype().is_scalar() && analyzer_.CanProve(b > 0)) {
+        if (a_ramp && b.dtype().is_scalar() && analyzer_->CanProve(b > 0)) {
           PrimExpr lanes = a_ramp->lanes;
           return Ramp(a_ramp->base * b, a_ramp->stride * b, lanes);
         }
-        if (b_ramp && a.dtype().is_scalar() && analyzer_.CanProve(a > 0)) {
+        if (b_ramp && a.dtype().is_scalar() && analyzer_->CanProve(a > 0)) {
           PrimExpr lanes = b_ramp->lanes;
           return Ramp(b_ramp->base * a, b_ramp->stride * a, lanes);
         }
@@ -378,9 +381,9 @@ public:
       int op_lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
       int base_ramp_lanes =
           static_cast<int>(Downcast<IntImm>(base_ramp->lanes)->value);
-      if (analyzer_.CanProve(base_ramp->stride ==
-                             stride *
-                                 make_const(stride.dtype(), base_ramp_lanes))) {
+      if (analyzer_->CanProve(
+              base_ramp->stride ==
+              stride * make_const(stride.dtype(), base_ramp_lanes))) {
         return Ramp(base_ramp->base, stride, op_lanes * base_ramp_lanes);
       }
     }
@@ -473,7 +476,12 @@ public:
 
   // IfThenElse expr
   PrimExpr MutateIfThenElseExpr_(const CallNode *op) {
-    PrimExpr cond = this->VisitExpr(op->args[0]);
+    PrimExpr cond = op->args[0];
+    PrimExpr cond_zeroed = Substitute(cond, {{var_, IntImm(var_->dtype, 0)}});
+    if (analyzer_->CanProve(cond == cond_zeroed)) {
+      cond = cond_zeroed;
+    }
+    cond = this->VisitExpr(cond);
     if (cond.dtype().is_scalable_or_fixed_length_vector()) {
       need_scalarize_ = true;
       return tvm::ffi::GetRef<PrimExpr>(op);
@@ -515,7 +523,7 @@ public:
     Array<PrimExpr> new_indices;
     for (const auto &index : buffer_load->indices) {
       PrimExpr new_index = Substitute(index, {{var_, IntImm(var_->dtype, 0)}});
-      new_indices.push_back(analyzer_.Simplify(new_index));
+      new_indices.push_back(analyzer_->Simplify(new_index));
     }
 
     BufferLoad new_load = GetRef<BufferLoad>(buffer_load);
@@ -861,7 +869,7 @@ public:
 
 private:
   // analyzer
-  arith::Analyzer analyzer_;
+  arith::Analyzer *analyzer_;
   // deep equal
   ExprDeepEqual deep_equal_;
   // variable to be replaced
@@ -960,9 +968,12 @@ inline bool TargetHasSVE() {
   return Target::Current()->GetFeature<Bool>("has_sve").value_or(false);
 }
 
-class LoopVectorizer : public StmtMutator {
+class LoopVectorizer : public arith::IRMutatorWithAnalyzer {
 public:
+  LoopVectorizer(arith::Analyzer *analyzer)
+      : arith::IRMutatorWithAnalyzer(analyzer) {}
   Stmt VisitStmt_(const ForNode *op) final {
+    analyzer_->Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
     if (op->kind == ForKind::kVectorized) {
       auto *extent_as_int = op->extent.as<IntImmNode>();
 
@@ -974,7 +985,8 @@ public:
             << " for target " << Target::Current();
       }
       ICHECK(is_zero(op->min));
-      return TLVectorizer::Vectorize(op->loop_var, op->extent, op->body);
+      return TLVectorizer::Vectorize(op->loop_var, op->extent, op->body,
+                                     analyzer_);
     } else {
       return StmtMutator::VisitStmt_(op);
     }
@@ -1001,7 +1013,8 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     if (enable_vectorize) {
-      n->body = tvm::tl::LoopVectorizer()(std::move(n->body));
+      arith::Analyzer analyzer;
+      n->body = tvm::tl::LoopVectorizer(&analyzer)(std::move(n->body));
     } else {
       n->body = tvm::tl::VectorizeSkipper()(std::move(n->body));
     }
