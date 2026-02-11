@@ -63,7 +63,7 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
 // Base class for all IR nodes in scheduling
 class IRStructure {
 public:
-  enum class Kind { kTask, kControl, kSequence, kLet };
+  enum class Kind { kTask, kControl, kSequence, kWrapper };
 
   virtual ~IRStructure() = default;
   virtual Kind GetKind() const = 0;
@@ -73,7 +73,7 @@ public:
   bool IsTask() const { return GetKind() == Kind::kTask; }
   bool IsControl() const { return GetKind() == Kind::kControl; }
   bool IsSequence() const { return GetKind() == Kind::kSequence; }
-  bool IsLet() const { return GetKind() == Kind::kLet; }
+  bool IsWrapper() const { return GetKind() == Kind::kWrapper; }
 
   // Resource usage flags (accessible by all IR nodes)
   virtual bool UsesCUDACore() const = 0;
@@ -287,15 +287,14 @@ private:
   int64_t ii_{0};      // Initiation interval in cycles
 };
 
-// Let node: contains a Let statement with variable, value, and child
+// Wrapper node: contains a Wrapper statement with variable, value, and child
 // IRStructure
-class LetNode : public IRStructure {
+class WrapperNode : public IRStructure {
 public:
-  Var var;        // The variable being defined
-  PrimExpr value; // The value being bound
+  Stmt wrapper;
   std::unique_ptr<IRStructure> child;
 
-  Kind GetKind() const override { return Kind::kLet; }
+  Kind GetKind() const override { return Kind::kWrapper; }
 
   // Resource usage flags (aggregate from child)
   bool UsesCUDACore() const override {
@@ -605,15 +604,14 @@ void PrintAllStmts(const IRStructure *node, int indent = 0) {
       LOG(INFO) << indent_str << "  Child " << i << ":";
       PrintAllStmts(seq->children[i].get(), indent + 2);
     }
-  } else if (node->GetKind() == IRStructure::Kind::kLet) {
-    const LetNode *let = static_cast<const LetNode *>(node);
-    LOG(INFO) << indent_str << "LetNode:";
-    LOG(INFO) << indent_str << "  Variable: " << let->var;
-    LOG(INFO) << indent_str << "  Value: " << let->value;
+  } else if (node->GetKind() == IRStructure::Kind::kWrapper) {
+    const WrapperNode *wrapper = static_cast<const WrapperNode *>(node);
+    LOG(INFO) << indent_str << "WrapperNode:";
+    LOG(INFO) << indent_str << "  Wrapper: " << wrapper->wrapper;
     // Recursively print child statements
-    if (let->child) {
-      LOG(INFO) << indent_str << "  Let body:";
-      PrintAllStmts(let->child.get(), indent + 2);
+    if (wrapper->child) {
+      LOG(INFO) << indent_str << "  Wrapper body:";
+      PrintAllStmts(wrapper->child.get(), indent + 2);
     }
   }
 }
@@ -663,14 +661,13 @@ void PrintIRStructure(const IRStructure *node, int indent = 0) {
       LOG(INFO) << indent_str << "  Child " << i << ":";
       PrintIRStructure(seq->children[i].get(), indent + 2);
     }
-  } else if (node->GetKind() == IRStructure::Kind::kLet) {
-    const LetNode *let = static_cast<const LetNode *>(node);
-    LOG(INFO) << indent_str << "LetNode:";
-    LOG(INFO) << indent_str << "  Variable: " << let->var;
-    LOG(INFO) << indent_str << "  Value: " << let->value;
-    if (let->child) {
+  } else if (node->GetKind() == IRStructure::Kind::kWrapper) {
+    const WrapperNode *wrapper = static_cast<const WrapperNode *>(node);
+    LOG(INFO) << indent_str << "WrapperNode:";
+    LOG(INFO) << indent_str << "  Wrapper: " << wrapper->wrapper;
+    if (wrapper->child) {
       LOG(INFO) << indent_str << "  Child:";
-      PrintIRStructure(let->child.get(), indent + 2);
+      PrintIRStructure(wrapper->child.get(), indent + 2);
     }
   }
 }

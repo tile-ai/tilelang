@@ -335,10 +335,10 @@ static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
     AnalyzeControlNodeBarriers(static_cast<ControlNode *>(node),
                                next_barrier_id, barrier_buffers, barrier_map,
                                thread_count);
-  } else if (node->IsLet()) {
-    LetNode *let = static_cast<LetNode *>(node);
-    AnalyzeAndInsertBarriers(let->child.get(), next_barrier_id, barrier_buffers,
-                             barrier_map, thread_count);
+  } else if (node->IsWrapper()) {
+    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    AnalyzeAndInsertBarriers(wrapper->child.get(), next_barrier_id,
+                             barrier_buffers, barrier_map, thread_count);
   } else if (node->IsTask()) {
     // For TaskNode, nothing to do at this level
   } else {
@@ -736,10 +736,10 @@ void CollectAllTaskNodesWithContext(const IRStructure *node,
     // When entering a control node, update the current control context
     CollectAllTaskNodesWithContext(control->child.get(), all_tasks,
                                    const_cast<ControlNode *>(control));
-  } else if (node->IsLet()) {
-    const LetNode *let = static_cast<const LetNode *>(node);
-    // Let nodes don't change control context, just recurse into child
-    CollectAllTaskNodesWithContext(let->child.get(), all_tasks,
+  } else if (node->IsWrapper()) {
+    const WrapperNode *wrapper = static_cast<const WrapperNode *>(node);
+    // Wrapper nodes don't change control context, just recurse into child
+    CollectAllTaskNodesWithContext(wrapper->child.get(), all_tasks,
                                    current_control_node);
   }
 }
@@ -763,9 +763,9 @@ void CollectPrefixTasks(IRStructure *node,
   } else if (node->IsControl()) {
     ControlNode *ctrl = static_cast<ControlNode *>(node);
     prefix_valid = false;
-  } else if (node->IsLet()) {
-    LetNode *let = static_cast<LetNode *>(node);
-    CollectPrefixTasks(let->child.get(), prefix_tasks, prefix_valid);
+  } else if (node->IsWrapper()) {
+    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    CollectPrefixTasks(wrapper->child.get(), prefix_tasks, prefix_valid);
   } else if (node->IsTask()) {
     if (CountRegisterRegions(node) == 0) {
       TaskNode *task = static_cast<TaskNode *>(node);
@@ -964,19 +964,18 @@ std::unique_ptr<IRStructure> ControlNode::Clone() const {
   return new_ctrl;
 }
 
-std::unique_ptr<IRStructure> LetNode::Clone() const {
-  auto new_let = std::make_unique<LetNode>();
+std::unique_ptr<IRStructure> WrapperNode::Clone() const {
+  auto new_wrapper = std::make_unique<WrapperNode>();
   // Copy var and value (TVM objects with reference counting)
-  new_let->var = var;
-  new_let->value = value;
+  new_wrapper->wrapper = wrapper;
   // Clone child if exists
   if (child) {
-    new_let->child = child->Clone();
+    new_wrapper->child = child->Clone();
   }
   // Copy latency and II
-  new_let->SetLatency(GetLatency());
-  new_let->SetII(GetII());
-  return new_let;
+  new_wrapper->SetLatency(GetLatency());
+  new_wrapper->SetII(GetII());
+  return new_wrapper;
 }
 
 // Global warpgroup id assignment - should be called from the top level
@@ -1982,12 +1981,12 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
     }
 
     return;
-  } else if (node->IsLet()) {
-    LetNode *let = static_cast<LetNode *>(node);
-    if (let->child) {
-      ScheduleRecursive(let->child.get());
-      let->SetII(let->child->GetII());
-      let->SetLatency(let->child->GetLatency());
+  } else if (node->IsWrapper()) {
+    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    if (wrapper->child) {
+      ScheduleRecursive(wrapper->child.get());
+      wrapper->SetII(wrapper->child->GetII());
+      wrapper->SetLatency(wrapper->child->GetLatency());
     }
     return;
   }
@@ -2183,18 +2182,31 @@ protected:
   }
 
   void VisitStmt_(const LetStmtNode *op) override {
-    // Let statement -> LetNode
-    auto let_node = std::make_unique<LetNode>();
-    let_node->var = op->var;
-    let_node->value = op->value;
+    // Wrapper statement -> WrapperNode
+    auto wrapper_node = std::make_unique<WrapperNode>();
+    wrapper_node->wrapper = GetRef<Stmt>(op);
 
-    // Process the let body
+    // Process the wrapperbody
     VisitStmt(op->body);
     if (root_) {
-      let_node->child = std::move(root_);
+      wrapper_node->child = std::move(root_);
     }
 
-    root_ = std::move(let_node);
+    root_ = std::move(wrapper_node);
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) override {
+    // Wrapper statement -> WrapperNode
+    auto wrapper_node = std::make_unique<WrapperNode>();
+    wrapper_node->wrapper = GetRef<Stmt>(op);
+
+    // Process the wrapperbody
+    VisitStmt(op->body);
+    if (root_) {
+      wrapper_node->child = std::move(root_);
+    }
+
+    root_ = std::move(wrapper_node);
   }
 
   void VisitStmt_(const WhileNode *op) override {
@@ -2422,7 +2434,7 @@ tvm::transform::Pass AutoSchedule() {
                              barrier_buffers, barrier_map, thread_count);
 
     // Print the modified summary view
-    PrintIRStructure(ir_structure.get());
+    // PrintIRStructure(ir_structure.get());
 
     // Apply warpgroup partition to entire IRStructure
     Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
@@ -2476,10 +2488,10 @@ void CollectTaskNodesFromIRStructure(IRStructure *node,
     if (ctrl->child) {
       CollectTaskNodesFromIRStructure(ctrl->child.get(), tasks);
     }
-  } else if (node->IsLet()) {
-    LetNode *let = static_cast<LetNode *>(node);
-    if (let->child) {
-      CollectTaskNodesFromIRStructure(let->child.get(), tasks);
+  } else if (node->IsWrapper()) {
+    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    if (wrapper->child) {
+      CollectTaskNodesFromIRStructure(wrapper->child.get(), tasks);
     }
   } else {
     LOG(FATAL);
@@ -2505,10 +2517,10 @@ void CollectIRStructureNodes(IRStructure *node,
     if (ctrl->child) {
       CollectIRStructureNodes(ctrl->child.get(), nodes);
     }
-  } else if (node->IsLet()) {
-    LetNode *let = static_cast<LetNode *>(node);
-    if (let->child) {
-      CollectIRStructureNodes(let->child.get(), nodes);
+  } else if (node->IsWrapper()) {
+    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    if (wrapper->child) {
+      CollectIRStructureNodes(wrapper->child.get(), nodes);
     }
   }
   // For TaskNode, no recursion needed
@@ -2562,16 +2574,15 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
           CloneIRStructureWithWarpgroupFilter(ctrl->child.get(), warpgroup_id);
     }
     return new_ctrl;
-  } else if (node->IsLet()) {
-    LetNode *let = static_cast<LetNode *>(node);
-    auto new_let = std::make_unique<LetNode>();
-    new_let->var = let->var;
-    new_let->value = let->value;
-    if (let->child) {
-      new_let->child =
-          CloneIRStructureWithWarpgroupFilter(let->child.get(), warpgroup_id);
+  } else if (node->IsWrapper()) {
+    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    auto new_wrapper = std::make_unique<WrapperNode>();
+    new_wrapper->wrapper = wrapper->wrapper;
+    if (wrapper->child) {
+      new_wrapper->child = CloneIRStructureWithWarpgroupFilter(
+          wrapper->child.get(), warpgroup_id);
     }
-    return new_let;
+    return new_wrapper;
   }
   return nullptr;
 }
@@ -2583,14 +2594,20 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   if (!root)
     return Evaluate(0);
 
-  if (root->IsLet()) {
-    const LetNode *let = static_cast<const LetNode *>(root);
+  if (root->IsWrapper()) {
+    const WrapperNode *wrapper = static_cast<const WrapperNode *>(root);
     Stmt body = Evaluate(0);
-    if (let->child) {
-      body = ApplyWarpgroupPartitionToIRStructure(let->child.get(), thread_var,
-                                                  barrier_buffers, barrier_map);
+    if (wrapper->child) {
+      body = ApplyWarpgroupPartitionToIRStructure(
+          wrapper->child.get(), thread_var, barrier_buffers, barrier_map);
     }
-    return LetStmt(let->var, let->value, body);
+    if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
+      return LetStmt(let->var, let->value, body);
+    } else if (const auto *attr = wrapper->wrapper.as<AttrStmtNode>()) {
+      return AttrStmt(attr->node, attr->attr_key, attr->value, body);
+    } else {
+      LOG(FATAL);
+    }
   }
 
   // Check if there are tasks with mixed warpgroup ids
@@ -2651,13 +2668,19 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       return For(ctrl->control->loop_var, ctrl->control->min,
                  ctrl->control->extent, ctrl->control->kind, body,
                  ctrl->control->thread_binding, ctrl->control->annotations);
-    } else if (structure->IsLet()) {
-      const LetNode *let = static_cast<const LetNode *>(structure);
+    } else if (structure->IsWrapper()) {
+      const WrapperNode *wrapper = static_cast<const WrapperNode *>(structure);
       Stmt body = Evaluate(0);
-      if (let->child) {
-        body = irstructure_to_stmt(let->child.get());
+      if (wrapper->child) {
+        body = irstructure_to_stmt(wrapper->child.get());
       }
-      return LetStmt(let->var, let->value, body);
+      if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
+        return LetStmt(let->var, let->value, body);
+      } else if (const auto *attr = wrapper->wrapper.as<AttrStmtNode>()) {
+        return AttrStmt(attr->node, attr->attr_key, attr->value, body);
+      } else {
+        LOG(FATAL);
+      }
     }
 
     LOG(WARNING)
@@ -2712,7 +2735,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         }
       }
       return new_seq;
-    } else if (node->IsControl() || node->IsLet()) {
+    } else if (node->IsControl() || node->IsWrapper()) {
       return nullptr;
     }
     LOG(FATAL);
