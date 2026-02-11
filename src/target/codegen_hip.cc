@@ -425,17 +425,6 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 void CodeGenTileLangHIP::PrintVecBinaryOp(const std::string &op, DataType t,
                                           PrimExpr lhs, PrimExpr rhs,
                                           std::ostream &os) { // NOLINT(*)
-  // Fast-path for packed FP32x2 arithmetic (portable fallback in HIP).
-  if (t.is_float() && t.bits() == 32 && t.lanes() == 2) {
-    if (op == "+") {
-      os << "tl::fadd2(" << PrintExpr(lhs) << ", " << PrintExpr(rhs) << ")";
-      return;
-    }
-    if (op == "*") {
-      os << "tl::fmul2(" << PrintExpr(lhs) << ", " << PrintExpr(rhs) << ")";
-      return;
-    }
-  }
 
   // Declare the result.
   std::string sret = name_supply_->FreshName("_");
