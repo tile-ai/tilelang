@@ -837,7 +837,6 @@ public:
       // Record mapping from the new var to its bound value
       let_value_binding_[op->var] = op->value;
       let_value_binding_[new_var] = value;
-
       return LetStmt(new_var, value, this->VisitStmt(op->body));
     } else {
       let_var_map_[op->var] = op->var;
@@ -877,10 +876,23 @@ public:
         }
       }
     });
+
+    // Check which vars already have LetStmt definitions inside stmt
+    std::unordered_set<const VarNode *> defined_in_stmt;
+    PostOrderVisit(stmt, [&defined_in_stmt](const ObjectRef &node) {
+      if (const auto *let = node.as<LetStmtNode>()) {
+        defined_in_stmt.insert(let->var.get());
+      }
+    });
+
     stmt = Substitute(stmt, {{var_, idx}});
 
     if (!used_let_bound_vars.empty()) {
       for (const auto &v : used_let_bound_vars) {
+        if (defined_in_stmt.count(v.get()) > 0;) {
+          // Skip: the original stmt already contains a LetStmt definition for this var
+          continue;
+        }
         // Bind the existing var v to its value around the stmt scope
         auto new_value = Substitute(let_value_binding_.at(v), {{var_, idx}});
         stmt = LetStmt(v, new_value, stmt);

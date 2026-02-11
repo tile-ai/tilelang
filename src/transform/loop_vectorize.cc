@@ -470,6 +470,18 @@ private:
                                                target_vec_size, analyzer_)) {
             all_invariant = false;
           }
+        } else if (auto *call = obj.as<CallNode>()) {
+          // tvm_access_ptr(dtype_annotation, data, offset, extent, rw_mask)
+          // The offset (args[2]) is the element offset into the buffer.
+          if (call->op.same_as(builtin::tvm_access_ptr()) &&
+              call->args.size() >= 3) {
+            PrimExpr offset = call->args[2];
+            if (!IsExprInvariantInVectorBoundary(offset,
+                                                 inner_for_->loop_var,
+                                                 target_vec_size, analyzer_)) {
+              all_invariant = false;
+            }
+          }
         }
       });
       return all_invariant;
