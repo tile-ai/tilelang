@@ -135,7 +135,7 @@ inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
         return tvm::ffi::GetRef<BufferLoad>(load);
       }
     }
-    if (call->op.same_as(tl::access_ptr()) && call->args.size() >= 1) {
+    if (call->op.same_as(tl::access_ptr()) && !call->args.empty()) {
       if (const auto *load = call->args[0].as<BufferLoadNode>()) {
         return tvm::ffi::GetRef<BufferLoad>(load);
       }
