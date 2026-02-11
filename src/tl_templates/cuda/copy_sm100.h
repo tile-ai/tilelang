@@ -58,19 +58,47 @@ __device__ __forceinline__ void global_load_256(ulonglong4 &D, void const *ptr,
 }
 
 // Convenience wrapper functions
-template <typename T>
-__device__ __forceinline__ T load_global_256(const T *ptr) {
+__device__ __forceinline__ longlong4 load_global_256(const longlong4 *ptr) {
   ulonglong4 ret{};
   global_load_256(ret, ptr, true);
-  return *reinterpret_cast<T *>(&ret);
+  return *reinterpret_cast<longlong4 *>(&ret);
+}
+
+__device__ __forceinline__ ulonglong4 load_global_256(const ulonglong4 *ptr) {
+  ulonglong4 ret{};
+  global_load_256(ret, ptr, true);
+  return ret;
+}
+
+// Predicated (conditional) versions
+__device__ __forceinline__ longlong4
+load_global_256_conditional(const longlong4 *ptr, bool pred) {
+  ulonglong4 ret{};
+  global_load_256(ret, ptr, pred);
+  return *reinterpret_cast<longlong4 *>(&ret);
+}
+
+__device__ __forceinline__ ulonglong4
+load_global_256_conditional(const ulonglong4 *ptr, bool pred) {
+  ulonglong4 ret{};
+  global_load_256(ret, ptr, pred);
+  return ret;
+}
+
+// Generic 256-bit load for FP8 and other types (returns ulonglong4)
+template <typename T>
+__device__ __forceinline__ ulonglong4 load_global_256(const T *ptr) {
+  ulonglong4 ret{};
+  global_load_256(ret, ptr, true);
+  return ret;
 }
 
 template <typename T>
-__device__ __forceinline__ T load_global_256_conditional(const T *ptr,
-                                                         bool pred) {
+__device__ __forceinline__ ulonglong4 load_global_256_conditional(const T *ptr,
+                                                                  bool pred) {
   ulonglong4 ret{};
   global_load_256(ret, ptr, pred);
-  return *reinterpret_cast<T *>(&ret);
+  return ret;
 }
 
 // 256-bit store specialization for ulonglong4
