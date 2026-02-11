@@ -253,7 +253,8 @@ TL_DEVICE void store_global_128(void *ptr, uint4 value) {
 }
 
 // Predicated (conditional) versions
-TL_DEVICE void store_global_32_conditional(void *ptr, uint32_t value, bool pred) {
+TL_DEVICE void store_global_32_conditional(void *ptr, uint32_t value,
+                                           bool pred) {
   global_store<uint32_t, 4>(ptr, value, pred);
 }
 
