@@ -64,9 +64,9 @@ using namespace tir;
 using ffi::GetRef;
 
 // Forward declaration
-Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
-                                     std::vector<Buffer> &barrier_buffers,
-                                     Map<ObjectRef, ObjectRef> &barrier_map);
+Stmt ApplyWarpgroupPartitionToIRStructure(
+    IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
+    Map<ObjectRef, ObjectRef> &barrier_map);
 void CollectTaskNodesFromIRStructure(IRStructure *node,
                                      std::vector<TaskNode *> &tasks);
 void CollectIRStructureNodes(IRStructure *node,
@@ -337,7 +337,8 @@ static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
                                thread_count);
   } else if (node->IsLet()) {
     LetNode *let = static_cast<LetNode *>(node);
-    AnalyzeAndInsertBarriers(let->child.get(), next_barrier_id, barrier_buffers, barrier_map, thread_count);
+    AnalyzeAndInsertBarriers(let->child.get(), next_barrier_id, barrier_buffers,
+                             barrier_map, thread_count);
   } else if (node->IsTask()) {
     // For TaskNode, nothing to do at this level
   } else {
@@ -487,7 +488,16 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
   PrimExpr loop_step = for_node->step.has_value()
                            ? for_node->step.value()
                            : IntImm(DataType::Int(32), 1);
+  std::vector<TaskNode *> tasks;
+  CollectTaskNodesFromIRStructure(ctrl->child.get(), tasks);
 
+  bool has_promoted_tasks = false;
+  for (TaskNode *task : tasks) {
+    if (task->GetPromote()) {
+      has_promoted_tasks = true;
+      break;
+    }
+  }
   // If child is a SequenceNode, we need special handling for
   // promote/non-promote tasks
   if (ctrl->child->IsSequence()) {
@@ -598,6 +608,9 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               tvm::indexmod(loop_var - loop_start +
                                 IntImm(DataType::Int(32), promote_int + 1),
                             2);
+          if (!has_promoted_tasks) {
+            parity_expr = tvm::indexmod(loop_var - loop_start, 2);
+          }
 
           Buffer barrier_buffer = makeBarrierBuffer(
               thread_count, "barrier_" + std::to_string(barrier_id),
@@ -636,7 +649,10 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               last_write_map.erase(it);
             }
           }
-          if (last_wg_id != wg_id && last_is_promoted != is_promoted) {
+          bool last_async = last_access_task->UsesTensorCore() ||
+                            last_access_task->UsesTMACore();
+          if (last_wg_id != wg_id &&
+              (last_is_promoted != is_promoted || (is_async && last_async))) {
             int barrier_id = next_barrier_id++;
             const PrimExpr &arrive_count = thread_count;
             Buffer barrier_free = makeBarrierBuffer(
@@ -650,7 +666,12 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             PrimExpr parity_expr = tvm::indexmod(
                 loop_var - loop_start + IntImm(DataType::Int(32), promote_int),
                 2);
-            Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
+            if (!has_promoted_tasks) {
+              parity_expr = tvm::indexmod(loop_var - loop_start + 1, 2);
+            }
+            Stmt wait_stmt =
+                IfThenElse(loop_var != loop_start,
+                           makeBarrierWait(barrier_load, parity_expr));
             InsertStatementIntoTaskNode(last_access_task, wait_stmt, true);
           }
         }
@@ -730,12 +751,13 @@ void CollectPrefixTasks(IRStructure *node,
                         bool &prefix_valid) {
   if (!node)
     return;
-  
-  if (!prefix_valid) return;
+
+  if (!prefix_valid)
+    return;
 
   if (node->IsSequence()) {
     SequenceNode *seq = static_cast<SequenceNode *>(node);
-    for (auto &child: seq->children) {
+    for (auto &child : seq->children) {
       CollectPrefixTasks(child.get(), prefix_tasks, prefix_valid);
     }
   } else if (node->IsControl()) {
@@ -2380,7 +2402,7 @@ tvm::transform::Pass AutoSchedule() {
       unit_builder.SetThreadVar(thread_var);
     } else {
       LOG(FATAL) << "Could not find thread index variable, warpgroup "
-                      "partition will use default";
+                    "partition will use default";
     }
     unit_builder.Build(ir_structure.get());
 
@@ -2555,9 +2577,9 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
 }
 
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
-Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
-                                     std::vector<Buffer> &barrier_buffers,
-                                     Map<ObjectRef, ObjectRef> &barrier_map) {
+Stmt ApplyWarpgroupPartitionToIRStructure(
+    IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
+    Map<ObjectRef, ObjectRef> &barrier_map) {
   if (!root)
     return Evaluate(0);
 
@@ -2565,7 +2587,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
     const LetNode *let = static_cast<const LetNode *>(root);
     Stmt body = Evaluate(0);
     if (let->child) {
-      body = ApplyWarpgroupPartitionToIRStructure(let->child.get(), thread_var, barrier_buffers, barrier_map);
+      body = ApplyWarpgroupPartitionToIRStructure(let->child.get(), thread_var,
+                                                  barrier_buffers, barrier_map);
     }
     return LetStmt(let->var, let->value, body);
   }
@@ -2587,7 +2610,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
       has_warpgroup_neutral = true;
   }
 
-    // Convert IRStructure to Stmt for IfThenElse
+  // Convert IRStructure to Stmt for IfThenElse
   std::function<Stmt(IRStructure *)> irstructure_to_stmt;
   irstructure_to_stmt = [&irstructure_to_stmt](IRStructure *structure) -> Stmt {
     if (!structure) {

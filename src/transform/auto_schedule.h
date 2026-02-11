@@ -287,10 +287,11 @@ private:
   int64_t ii_{0};      // Initiation interval in cycles
 };
 
-// Let node: contains a Let statement with variable, value, and child IRStructure
+// Let node: contains a Let statement with variable, value, and child
+// IRStructure
 class LetNode : public IRStructure {
 public:
-  Var var; // The variable being defined
+  Var var;        // The variable being defined
   PrimExpr value; // The value being bound
   std::unique_ptr<IRStructure> child;
 
@@ -403,7 +404,6 @@ private:
   int64_t latency_{0}; // Estimated latency in cycles
   int64_t ii_{0};      // Initiation interval in cycles
 };
-
 
 // Simple Union-Find (Disjoint Set Union) for task grouping
 class TaskUnionFind {
