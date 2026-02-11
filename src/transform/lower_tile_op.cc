@@ -350,7 +350,6 @@ private:
       }
 
       // Get the offset from tvm_access_ptr args[2]
-      LOG(INFO) << "access_ptr_call->args[2]: " << access_ptr_call->args[2];
       PrimExpr elem_offset = access_ptr_call->args[2];
       if (offset.defined()) {
         elem_offset = elem_offset + offset.value();

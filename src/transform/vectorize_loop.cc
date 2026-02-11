@@ -135,6 +135,11 @@ inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
         return tvm::ffi::GetRef<BufferLoad>(load);
       }
     }
+    if (call->op.same_as(tl::access_ptr()) && call->args.size() >= 1) {
+      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+        return tvm::ffi::GetRef<BufferLoad>(load);
+      }
+    }
     // Handle tvm_access_ptr: args are (dtype_annotation, data, offset, extent,
     // access_mask)
     if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
@@ -559,6 +564,37 @@ public:
     return Call(op->dtype, op->op, new_args);
   }
 
+  // tl.access_ptr: substitute loop var with 0 in BufferLoad indices.
+  // args are (base_load, extent, access_mask)
+  PrimExpr MutateTLAccessPtrCall_(const CallNode *op) {
+    ICHECK(op->op.same_as(tl::access_ptr()));
+    ICHECK_GE(op->args.size(), 3);
+
+    auto buffer_load = op->args[0].as<BufferLoadNode>();
+    if (!buffer_load) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    Array<PrimExpr> new_indices;
+    for (const auto &index : buffer_load->indices) {
+      PrimExpr new_index = Substitute(index, {{var_, IntImm(var_->dtype, 0)}});
+      new_indices.push_back(analyzer_.Simplify(new_index));
+    }
+
+    if (new_indices.same_as(buffer_load->indices)) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    BufferLoad new_load = GetRef<BufferLoad>(buffer_load);
+    auto writer = new_load.CopyOnWrite();
+    writer->indices = new_indices;
+    LegalizeBufferLoadDType(writer);
+
+    Array<PrimExpr> new_args = op->args;
+    new_args.Set(0, new_load);
+    return Call(op->dtype, op->op, new_args);
+  }
+
   // Reinterpret expr
   PrimExpr MutateReinterpretExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::reinterpret()));
@@ -640,6 +676,8 @@ public:
       return MutateAtomicAddExpr_(op);
     } else if (op->op.same_as(builtin::address_of())) {
       return MutateAddressOfCall_(op);
+    } else if (op->op.same_as(tl::access_ptr())) {
+      return MutateTLAccessPtrCall_(op);
     } else if (op->op.same_as(builtin::tvm_access_ptr())) {
       return MutateAccessPtrCall_(op);
     }
