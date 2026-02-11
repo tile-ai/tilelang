@@ -854,17 +854,6 @@ private:
       return call;
     }
 
-    // Handle standalone tl.access_ptr calls with layout transformation
-    if (op->op.same_as(tl::access_ptr())) {
-      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
-      auto new_access_ptr =
-          HandleAccessPtrAndOffset(call, std::nullopt, call->dtype);
-      if (new_access_ptr.rewritten) {
-        return new_access_ptr.expr;
-      }
-      return call;
-    }
-
     // Default: visit normally
     auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
     return call;
