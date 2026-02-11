@@ -73,15 +73,6 @@ class KernelCache:
         except Exception:
             pass
 
-        # Fallback: check the package-local lib directory if present.
-        try:
-            pkg_root = os.path.dirname(os.path.abspath(__file__))
-            # .../tilelang/cache -> .../tilelang
-            pkg_root = os.path.dirname(pkg_root)
-            lib_dirs.append(os.path.join(pkg_root, "lib"))
-        except Exception:
-            pass
-
         if sys.platform == "win32":
             lib_names = ["tilelang.dll", "libtilelang.dll"]
         elif sys.platform == "darwin":

@@ -1,4 +1,4 @@
-import tilelang  # noqa: F401  # sets up TVM Python path
+import tilelang
 import tvm
 from tvm import arith
 from tvm import tir
