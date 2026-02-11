@@ -476,8 +476,7 @@ private:
           if (call->op.same_as(builtin::tvm_access_ptr()) &&
               call->args.size() >= 3) {
             PrimExpr offset = call->args[2];
-            if (!IsExprInvariantInVectorBoundary(offset,
-                                                 inner_for_->loop_var,
+            if (!IsExprInvariantInVectorBoundary(offset, inner_for_->loop_var,
                                                  target_vec_size, analyzer_)) {
               all_invariant = false;
             }

@@ -135,12 +135,14 @@ inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
         return tvm::ffi::GetRef<BufferLoad>(load);
       }
     }
-    // Handle tvm_access_ptr: args are (dtype_annotation, data, offset, extent, access_mask)
+    // Handle tvm_access_ptr: args are (dtype_annotation, data, offset, extent,
+    // access_mask)
     if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
       DataType dtype = call->args[0].dtype();
       Var data_var = Downcast<Var>(call->args[1]);
       PrimExpr offset = call->args[2];
-      // Create a dummy buffer with the correct dtype and a BufferLoad from data + offset
+      // Create a dummy buffer with the correct dtype and a BufferLoad from data
+      // + offset
       Buffer dummy_buf(data_var, dtype, {Integer(1)}, {}, Integer(0),
                        data_var->name_hint, 0, 0, kDefault);
       return BufferLoad(dummy_buf, {offset});
@@ -890,7 +892,8 @@ public:
     if (!used_let_bound_vars.empty()) {
       for (const auto &v : used_let_bound_vars) {
         if (defined_in_stmt.count(v.get()) > 0;) {
-          // Skip: the original stmt already contains a LetStmt definition for this var
+          // Skip: the original stmt already contains a LetStmt definition for
+          // this var
           continue;
         }
         // Bind the existing var v to its value around the stmt scope
