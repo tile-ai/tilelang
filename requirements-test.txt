@@ -33,4 +33,4 @@ seaborn
 tabulate
 tornado
 wheel
-z3-solver>=4.13.0
+z3-solver>=4.13.0,<4.15.5
