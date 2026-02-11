@@ -891,7 +891,7 @@ public:
 
     if (!used_let_bound_vars.empty()) {
       for (const auto &v : used_let_bound_vars) {
-        if (defined_in_stmt.count(v.get()) > 0;) {
+        if (defined_in_stmt.count(v.get()) > 0) {
           // Skip: the original stmt already contains a LetStmt definition for
           // this var
           continue;

@@ -44,8 +44,7 @@ def test_issue_1257_missing_syncthreads_after_atomic_add_on_shared():
     # There should be a __syncthreads() between the AtomicAdd and the read
     sync_pos = source.find("__syncthreads()", atomic_pos)
     assert sync_pos != -1 and sync_pos < read_after_atomic, (
-        "Missing __syncthreads() between AtomicAdd on shared memory and "
-        "subsequent shared memory read"
+        "Missing __syncthreads() between AtomicAdd on shared memory and subsequent shared memory read"
     )
 
 
