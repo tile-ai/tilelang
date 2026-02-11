@@ -1115,7 +1115,7 @@ private:
   void VisitStmt_(const ForNode *op) override {
     Range range = Range::FromMinExtent(op->min, op->extent);
     dom_map_[op->loop_var.get()] = arith::IntSet::FromRange(range);
-    StmtVisitor::VisitStmt_(op);
+    StmtExprVisitor::VisitStmt_(op);
     dom_map_.erase(op->loop_var.get());
   }
 
@@ -1134,7 +1134,7 @@ private:
 
   void VisitStmt_(const LetStmtNode *op) override {
     let_bindings_[op->var.get()] = op->value;
-    StmtVisitor::VisitStmt_(op);
+    StmtExprVisitor::VisitStmt_(op);
     let_bindings_.erase(op->var.get());
   }
 
@@ -1152,7 +1152,7 @@ private:
       relaxed_region.push_back(RelaxAccessIndex(index));
     }
     Update(&read_buffers_, &read_regions_, op->buffer, relaxed_region);
-    ExprVisitor::VisitExpr_(op);
+    StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) override {
@@ -1169,7 +1169,7 @@ private:
       relaxed_region.push_back(RelaxAccessIndex(index));
     }
     Update(&write_buffers_, &write_regions_, op->buffer, relaxed_region);
-    StmtVisitor::VisitStmt_(op);
+    StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitExpr_(const CallNode *op) override {
