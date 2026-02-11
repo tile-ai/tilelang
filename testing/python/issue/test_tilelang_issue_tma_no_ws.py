@@ -105,8 +105,7 @@ def test_tma_lower_no_warp_specialized_2d_descriptor_uses_args1_barrier():
     flat_src = " ".join(src.split())
     pattern = r"tl::tma_load\([^,]+,\s*mbarrier\[[0-9]+\]"
     assert re.search(pattern, flat_src), (
-        f"Expected regex {pattern!r} to match flattened CUDA source. "
-        f"Generated source (truncated):\n{src[:1000]}"
+        f"Expected regex {pattern!r} to match flattened CUDA source. Generated source (truncated):\n{src[:1000]}"
     )
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
