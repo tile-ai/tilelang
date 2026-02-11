@@ -135,6 +135,16 @@ inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
         return tvm::ffi::GetRef<BufferLoad>(load);
       }
     }
+    // Handle tvm_access_ptr: args are (dtype_annotation, data, offset, extent, access_mask)
+    if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
+      DataType dtype = call->args[0].dtype();
+      Var data_var = Downcast<Var>(call->args[1]);
+      PrimExpr offset = call->args[2];
+      // Create a dummy buffer with the correct dtype and a BufferLoad from data + offset
+      Buffer dummy_buf(data_var, dtype, {Integer(1)}, {}, Integer(0),
+                       data_var->name_hint, 0, 0, kDefault);
+      return BufferLoad(dummy_buf, {offset});
+    }
   }
   return Optional<BufferLoad>();
 }
@@ -527,6 +537,26 @@ public:
     return Call(op->dtype, op->op, {new_load});
   }
 
+  // tvm_access_ptr: substitute loop var with 0 in offset to get base address
+  // args are (dtype_annotation, data, offset, extent, access_mask)
+  PrimExpr MutateAccessPtrCall_(const CallNode *op) {
+    ICHECK(op->op.same_as(builtin::tvm_access_ptr()));
+    ICHECK_GE(op->args.size(), 5);
+
+    // Only the offset (args[2]) may contain the loop var; substitute it with 0
+    PrimExpr offset = op->args[2];
+    PrimExpr new_offset = Substitute(offset, {{var_, IntImm(var_->dtype, 0)}});
+    new_offset = analyzer_.Simplify(new_offset);
+
+    if (new_offset.same_as(offset)) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    Array<PrimExpr> new_args = op->args;
+    new_args.Set(2, new_offset);
+    return Call(op->dtype, op->op, new_args);
+  }
+
   // Reinterpret expr
   PrimExpr MutateReinterpretExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::reinterpret()));
@@ -559,7 +589,6 @@ public:
       return tvm::ffi::GetRef<PrimExpr>(op);
     }
     int vector_size = static_cast<int>(*lanes_ptr);
-
     auto dst = VisitExpr(op->args[0]);
     auto src = VisitExpr(op->args[1]);
 
@@ -609,6 +638,8 @@ public:
       return MutateAtomicAddExpr_(op);
     } else if (op->op.same_as(builtin::address_of())) {
       return MutateAddressOfCall_(op);
+    } else if (op->op.same_as(builtin::tvm_access_ptr())) {
+      return MutateAccessPtrCall_(op);
     }
     auto optional_op = op->op.as<Op>();
     bool vectorizable = optional_op &&
