@@ -583,6 +583,83 @@ template <> struct to_cute_type<tl::float_e5m2_t> {
   using type = cute::float_e5m2_t;
 };
 
+// Packed FP32x2 math helpers
+//
+// PTX ISA 8.6 introduced packed FP32x2 arithmetic instructions (e.g.
+// `add.rn.f32x2`, `mul.rn.f32x2`, `fma.rn.f32x2`) that may lower to SASS
+// instructions like FADD2/FMUL2/FFMA2 on supported architectures.
+//
+// We expose these as `tl::f*2(float2, float2, ...)` device helpers.
+// When unsupported (older arch/toolchain), we fall back to per-lane scalar
+// operations to preserve correctness.
+namespace detail {
+union __align__(8) F32x2Bitcast {
+  unsigned long long u64;
+  float2 f2;
+};
+} // namespace detail
+
+TL_DEVICE float2 fadd2(float2 a, float2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
+    ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
+     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8))
+  detail::F32x2Bitcast ua;
+  detail::F32x2Bitcast ub;
+  detail::F32x2Bitcast ur;
+  ua.f2 = a;
+  ub.f2 = b;
+  asm("add.rn.f32x2 %0, %1, %2;\n" : "=l"(ur.u64) : "l"(ua.u64), "l"(ub.u64));
+  return ur.f2;
+#else
+  float2 out;
+  out.x = a.x + b.x;
+  out.y = a.y + b.y;
+  return out;
+#endif
+}
+
+TL_DEVICE float2 fmul2(float2 a, float2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
+    ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
+     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8))
+  detail::F32x2Bitcast ua;
+  detail::F32x2Bitcast ub;
+  detail::F32x2Bitcast ur;
+  ua.f2 = a;
+  ub.f2 = b;
+  asm("mul.rn.f32x2 %0, %1, %2;\n" : "=l"(ur.u64) : "l"(ua.u64), "l"(ub.u64));
+  return ur.f2;
+#else
+  float2 out;
+  out.x = a.x * b.x;
+  out.y = a.y * b.y;
+  return out;
+#endif
+}
+
+TL_DEVICE float2 fma2(float2 a, float2 b, float2 c) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
+    ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
+     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8))
+  detail::F32x2Bitcast ua;
+  detail::F32x2Bitcast ub;
+  detail::F32x2Bitcast uc;
+  detail::F32x2Bitcast ur;
+  ua.f2 = a;
+  ub.f2 = b;
+  uc.f2 = c;
+  asm("fma.rn.f32x2 %0, %1, %2, %3;\n"
+      : "=l"(ur.u64)
+      : "l"(ua.u64), "l"(ub.u64), "l"(uc.u64));
+  return ur.f2;
+#else
+  float2 out;
+  out.x = a.x * b.x + c.x;
+  out.y = a.y * b.y + c.y;
+  return out;
+#endif
+}
+
 } // namespace tl
 
 namespace cutlass {
