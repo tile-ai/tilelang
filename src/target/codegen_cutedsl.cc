@@ -214,20 +214,64 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   if (from_ty.is_scalar())
     return CodeGenTileLangPY::VisitExpr_(op, os);
 
-  // Emit this as vectorized unary ops.
-  std::string sret = name_supply_->FreshName("_");
-  PrintIndent();
-  stream << sret << " = tl.make_rmem_tensor((" << target_ty.lanes() << ",), ";
-  PrintType(target_ty.element_of(), stream);
-  stream << ")\n";
+  int lanes = target_ty.lanes();
+
+  // CuTeDSL requires narrow precision (e.g. FP8) vector operations to be
+  // 32-bit aligned. For unaligned widths (e.g. float8x2), pad the source
+  // to aligned width, cast, then extract the needed elements.
+  bool is_narrow_unaligned =
+      target_ty.bits() < 32 && lanes > 1 &&
+      (target_ty.bits() * lanes) % 32 != 0;
+  int aligned_lanes =
+      is_narrow_unaligned ? (32 / target_ty.bits()) : lanes;
 
   std::string src = SSAGetID(PrintExpr_(op->value), from_ty);
 
+  // If unaligned, pad source to aligned width
+  std::string cast_src = src;
+  if (is_narrow_unaligned) {
+    cast_src = name_supply_->FreshName("_pad_src");
+    PrintIndent();
+    stream << cast_src << " = tl.make_rmem_tensor((" << aligned_lanes
+           << ",), ";
+    PrintType(from_ty.element_of(), stream);
+    stream << ")\n";
+    for (int i = 0; i < aligned_lanes; ++i) {
+      PrintIndent();
+      if (i < lanes) {
+        stream << cast_src << "[" << i << "] = " << src << "[" << i << "]\n";
+      } else {
+        stream << cast_src << "[" << i << "] = ";
+        PrintType(from_ty.element_of(), stream);
+        stream << "(0)\n";
+      }
+    }
+  }
+
+  // Cast (always aligned now)
+  std::string cast_dst = name_supply_->FreshName("_cast");
   PrintIndent();
-  stream << sret << ".store(" << src << ".to(";
+  stream << cast_dst << " = tl.make_rmem_tensor((" << aligned_lanes << ",), ";
+  PrintType(target_ty.element_of(), stream);
+  stream << ")\n";
+  PrintIndent();
+  if (is_narrow_unaligned) {
+    stream << cast_dst << ".store(" << cast_src << ".load().to(";
+  } else {
+    stream << cast_dst << ".store(" << src << ".to(";
+  }
   PrintType(target_ty.element_of(), stream);
   stream << "))\n";
-  os << sret << ".load()";
+
+  if (is_narrow_unaligned) {
+    // Return the aligned rmem tensor (not .load()) so downstream code
+    // uses rmem element access (e.g. cast_dst[i]) instead of MLIR
+    // vector extractelement, which fails for FP8 types due to
+    // unrealized_conversion_cast in LLVM translation.
+    os << cast_dst;
+  } else {
+    os << cast_dst << ".load()";
+  }
   return;
 }
 
@@ -787,7 +831,74 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
   DataType element_dtype = op->buffer->dtype;
 
   const int value_lanes = value_dtype.lanes();
-  if (value_lanes == element_dtype.lanes()) {
+
+  // CuTeDSL requires narrow precision vector loads to be 32-bit aligned.
+  // For unaligned widths (e.g. float8x2), load an aligned-width vector
+  // and extract the needed elements via scalar copy.
+  bool is_narrow_unaligned =
+      value_dtype.bits() < 32 && value_lanes > 1 &&
+      (value_dtype.bits() * value_lanes) % 32 != 0;
+
+  if (is_narrow_unaligned) {
+    int aligned_lanes = 32 / value_dtype.bits();
+    std::string vid = GetVarID(buffer_var.get());
+    std::string scope;
+    if (alloc_storage_scope_.count(buffer_var.get())) {
+      scope = alloc_storage_scope_.at(buffer_var.get());
+    }
+
+    // Compute scalar base offset
+    PrimExpr scalar_base;
+    if (value_lanes == element_dtype.lanes()) {
+      scalar_base = index * value_lanes;
+    } else {
+      // Contiguous vectorized load: extract base from ramp index
+      arith::PVar<PrimExpr> ramp_base;
+      ICHECK(arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
+                 .Match(index))
+          << "Non-contiguous narrow-precision load not supported";
+      scalar_base = ramp_base.Eval() * element_dtype.lanes();
+    }
+
+    // Load aligned vector into an rmem tensor (not a raw MLIR vector).
+    // This ensures downstream element access uses rmem tensor indexing
+    // (which CuTeDSL handles correctly for FP8) instead of MLIR
+    // extractelement (which fails due to unrealized_conversion_cast).
+    std::string aligned_rmem = name_supply_->FreshName("_aload");
+    PrintIndent();
+    stream << aligned_rmem << " = tl.make_rmem_tensor((" << aligned_lanes
+           << ",), ";
+    PrintType(value_dtype.element_of(), stream);
+    stream << ")\n";
+
+    PrintIndent();
+    if (scope == "local") {
+      stream << aligned_rmem << ".store(tl.make_tensor_at_offset(" << vid
+             << ".iterator, " << PrintExpr_(scalar_base) << ", ("
+             << aligned_lanes << ",), div_by=" << aligned_lanes
+             << ").load())\n";
+    } else {
+      bool is_handle_match =
+          HandleTypeMatch_(buffer_var.get(), element_dtype);
+      std::string ptr_str;
+      if (is_handle_match) {
+        ptr_str = vid + ".iterator";
+      } else {
+        std::ostringstream ptr_os;
+        ptr_os << "tl.recast_ptr(" << vid << ".iterator, dtype=";
+        PrintType(value_dtype.element_of(), ptr_os);
+        ptr_os << ")";
+        ptr_str = ptr_os.str();
+      }
+      stream << aligned_rmem << ".store(tl.make_tensor_at_offset(" << ptr_str
+             << ", " << PrintExpr_(scalar_base) << ", (" << aligned_lanes
+             << ",), div_by=" << aligned_lanes << ").load())\n";
+    }
+
+    // Return the rmem tensor (not .load()) so downstream code uses
+    // rmem element access instead of MLIR vector extractelement.
+    os << aligned_rmem;
+  } else if (value_lanes == element_dtype.lanes()) {
     std::string ref = GetBufferRef_(value_dtype, op->buffer.get(), index);
     if (ref.back() == ')') {
       ref += ".load()";
@@ -851,7 +962,98 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
   std::string value_str = PrintExpr_(op->value);
 
   int value_lanes = value_dtype.lanes();
-  if (value_lanes == element_dtype.lanes()) {
+
+  // CuTeDSL requires narrow precision (e.g. FP8) vector stores to be 32-bit
+  // aligned. For unaligned widths (e.g. float8x2), pad to aligned width via
+  // scalar element copy, then store as aligned vector.
+  bool is_narrow_unaligned =
+      value_dtype.bits() < 32 && value_lanes > 1 &&
+      (value_dtype.bits() * value_lanes) % 32 != 0;
+
+  if (is_narrow_unaligned) {
+    int aligned_lanes = 32 / value_dtype.bits();  // e.g. 4 for FP8
+    // value_str may be an rmem tensor name (from Cast/BufferLoad narrow path)
+    // or a .load() expression. SSAGetID will alias it if already a name.
+    value_str = SSAGetID(value_str, value_dtype);
+
+    // Determine store target scope
+    std::string vid = GetVarID(buffer_var.get());
+    std::string scope;
+    if (alloc_storage_scope_.count(buffer_var.get())) {
+      scope = alloc_storage_scope_.at(buffer_var.get());
+    }
+
+    if (scope == "local") {
+      // For local rmem: pad to aligned width and store as aligned vector.
+      // rmem allocation is over-aligned so writing extra bytes is safe.
+      std::string padded = name_supply_->FreshName("_npad");
+      PrintIndent();
+      stream << padded << " = tl.make_rmem_tensor((" << aligned_lanes
+             << ",), ";
+      PrintType(value_dtype.element_of(), stream);
+      stream << ")\n";
+      for (int i = 0; i < aligned_lanes; ++i) {
+        PrintIndent();
+        stream << padded << "[" << i << "] = " << value_str << "["
+               << (i % value_lanes) << "]\n";
+      }
+
+      PrimExpr scalar_base;
+      if (value_lanes == element_dtype.lanes()) {
+        scalar_base = index_expr * value_lanes;
+      } else {
+        arith::PVar<PrimExpr> ramp_base;
+        ICHECK(
+            arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
+                .Match(index_expr))
+            << "Non-contiguous narrow-precision store not supported";
+        scalar_base = ramp_base.Eval() * element_dtype.lanes();
+      }
+      PrintIndent();
+      stream << "tl.make_tensor_at_offset(" << vid << ".iterator, "
+             << PrintExpr_(scalar_base) << ", (" << aligned_lanes
+             << ",), div_by=" << aligned_lanes << ").store(" << padded
+             << ".load())\n";
+    } else {
+      // For global/shared: use scalar element stores (works at any alignment).
+      // CuTeDSL supports scalar FP8 stores via rmem_tensor -> global_tensor[i].
+      PrimExpr scalar_base;
+      if (value_lanes == element_dtype.lanes()) {
+        scalar_base = index_expr * value_lanes;
+      } else {
+        arith::PVar<PrimExpr> ramp_base;
+        ICHECK(
+            arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
+                .Match(index_expr))
+            << "Non-contiguous narrow-precision store not supported";
+        scalar_base = ramp_base.Eval() * element_dtype.lanes();
+      }
+
+      bool is_handle_match =
+          HandleTypeMatch_(buffer_var.get(), element_dtype);
+      std::string ptr_str;
+      if (is_handle_match) {
+        ptr_str = vid + ".iterator";
+      } else {
+        std::ostringstream ptr_os;
+        ptr_os << "tl.recast_ptr(" << vid << ".iterator, dtype=";
+        PrintType(value_dtype.element_of(), ptr_os);
+        ptr_os << ")";
+        ptr_str = ptr_os.str();
+      }
+
+      // Create a tensor view and store each element individually
+      std::string view_var = name_supply_->FreshName("_sview");
+      PrintIndent();
+      stream << view_var << " = tl.make_tensor(" << ptr_str << " + "
+             << PrintExpr_(scalar_base) << ", (" << value_lanes << ",))\n";
+      for (int i = 0; i < value_lanes; ++i) {
+        PrintIndent();
+        stream << view_var << "[" << i << "] = " << value_str << "[" << i
+               << "]\n";
+      }
+    }
+  } else if (value_lanes == element_dtype.lanes()) {
     std::string ref = GetBufferRef_(value_dtype, op->buffer.get(), index_expr);
     PrintIndent();
 
