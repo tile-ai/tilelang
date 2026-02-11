@@ -403,9 +403,15 @@ private:
       } else if (dst_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
         ICHECK(!dst_ptr_call->args.empty());
         dtype = dst_ptr_call->args[0].dtype();
+      } else if (dst_ptr_call->op.same_as(tl::access_ptr())) {
+        ICHECK_EQ(dst_ptr_call->args.size(), 3U)
+            << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+        auto buffer_load = dst_ptr_call->args[0].as<BufferLoadNode>();
+        ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
+        dtype = buffer_load->buffer->dtype;
       } else {
-        LOG(FATAL) << "atomic_add_elem_op first arg must be tvm_access_ptr "
-                      "or address_of call, but got "
+        LOG(FATAL) << "atomic_add_elem_op first arg must be tvm_access_ptr, "
+                      "tl.access_ptr, or address_of call, but got "
                    << node->args[0];
       }
       int vectorize_length = 1;
@@ -418,9 +424,10 @@ private:
 
       buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
-    } else if (node->op == builtin::address_of()) {
-      // address_of have buffer load value so we should analysis the buffer load
-      // node to update vector_size_.
+    } else if (node->op == builtin::address_of() ||
+               node->op == tl::access_ptr()) {
+      // address_of and tl.access_ptr have buffer load value so we should
+      // analysis the buffer load node to update vector_size_.
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
 

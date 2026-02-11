@@ -54,6 +54,12 @@ DataType cuTensorMapType() { return DataType::UInt(8, 128); }
   TVM_REGISTER_OP("tl." #OpName)                                               \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)
 
+// Pointer access metadata op (frontend-only, lowered later).
+TIR_DEFINE_TL_BUILTIN(access_ptr)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 // fast math related op
 TIR_DEFINE_TL_BUILTIN(__exp).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));

@@ -5,7 +5,7 @@ import tilelang.testing
 
 @tilelang.testing.requires_cuda
 def test_access_ptr_cp_async_codegen():
-    """Smoke-test codegen for T.access_ptr -> tvm_access_ptr -> cp.async."""
+    """Smoke-test codegen for T.access_ptr -> tl.access_ptr -> tvm_access_ptr -> cp.async."""
 
     @T.prim_func
     def main(

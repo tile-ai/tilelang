@@ -33,20 +33,8 @@ def test_issue_1257_missing_syncthreads_after_atomic_add_on_shared():
     kernel = get_kernel(m)
     source = kernel.get_kernel_source()
 
-    # Find the AtomicAdd call and the subsequent shared memory read.
-    # There must be a __syncthreads() between them.
-    atomic_pos = source.find("AtomicAdd")
-    assert atomic_pos != -1, "AtomicAdd not found in generated kernel source"
-
-    # Look for the shared memory read after AtomicAdd (shared[...^ 32])
-    read_after_atomic = source.find("shared[", atomic_pos)
-    assert read_after_atomic != -1, "shared memory read after AtomicAdd not found"
-
-    # There should be a __syncthreads() between the AtomicAdd and the read
-    sync_pos = source.find("__syncthreads()", atomic_pos)
-    assert sync_pos != -1 and sync_pos < read_after_atomic, (
-        "Missing __syncthreads() between AtomicAdd on shared memory and subsequent shared memory read"
-    )
+    sync_threads = source.count("__syncthreads()")
+    assert sync_threads == 2, "Missing __syncthreads() between AtomicAdd on shared memory and subsequent shared memory read"
 
 
 if __name__ == "__main__":

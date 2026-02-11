@@ -85,12 +85,15 @@ def access_ptr(
     extent: PrimExpr | int | None = None,
     ignore_last_ndim: int = 0,
 ) -> PrimExpr:
-    """Create a `tvm_access_ptr` from a buffer-like base location.
+    """Create a TileLang `tl.access_ptr` from a buffer-like base location.
 
-    This is a frontend convenience wrapper around `tir.Buffer.access_ptr` that
-    lets users specify the base pointer using a `BufferLoad` (similar in spirit
-    to `T.address_of(buf[...])`), while still carrying the `rw_mask` metadata
-    (read/write intent) required by many downstream TIR passes.
+    This is a frontend convenience wrapper that keeps a `BufferLoad` argument
+    in the resulting call so downstream passes can recover the referenced
+    `tir.Buffer` (including strides/storage scope) *and* the `rw_mask`
+    (read/write intent) required by synchronization and safety checks.
+
+    The returned `tl.access_ptr` is expected to be lowered to
+    `tir.builtin.tvm_access_ptr` later in the TileLang compilation pipeline.
 
     Parameters
     ----------
@@ -130,7 +133,7 @@ def access_ptr(
     Returns
     -------
     ptr : PrimExpr
-        A handle-typed `tir.Call` to `tir.builtin.tvm_access_ptr`.
+        A handle-typed `tir.Call` to `tl.access_ptr`.
     """
 
     from tilelang.language.frame import has_let_value, get_let_value
@@ -143,23 +146,26 @@ def access_ptr(
     if len(extents) == 1 and isinstance(extents[0], (list, tuple)):
         extents = tuple(extents[0])
 
+    def _rw_mask(access_type: str | int) -> int:
+        if isinstance(access_type, int):
+            return int(access_type)
+        if isinstance(access_type, str):
+            table = {"r": 1, "w": 2, "rw": 3}
+            if access_type not in table:
+                raise ValueError(f'Invalid access_type="{access_type}", expected one of {sorted(table.keys())}.')
+            return table[access_type]
+        raise TypeError(f"T.access_ptr access_type must be str or int, but got {type(access_type)}.")
+
     def _index_dtype(buf: tir.Buffer) -> str:
         if len(buf.shape) > 0:
             return str(buf.shape[0].dtype)
         return "int32"
 
-    def _row_major_strides(buf: tir.Buffer) -> list[PrimExpr]:
-        idx_dtype = _index_dtype(buf)
-        stride: PrimExpr = tir.IntImm(idx_dtype, 1)
-        strides: list[PrimExpr] = []
-        for dim in reversed(buf.shape):
-            strides.insert(0, stride)
-            stride = stride * dim
-        return strides
-
     # Extract underlying buffer and per-axis minima (indices).
     inferred_region_extents: list[PrimExpr] | None = None
+    is_buffer_load_base = False
     if isinstance(base, BufferLoad):
+        is_buffer_load_base = True
         buf = base.buffer
         region = get_buffer_region_from_load(base)
         if region is not None:
@@ -178,22 +184,37 @@ def access_ptr(
     else:
         raise TypeError(f"T.access_ptr expects a Buffer, BufferLoad, BufferRegion, or a Var bound to one of them, but got {type(base)}.")
 
-    # Compute linearized element offset.
+    # Apply ignore_last_ndim by zeroing-out the ignored tail indices.
     idx_dtype = _index_dtype(buf)
-    if len(buf.strides) == len(buf.shape) and len(buf.strides) > 0:
-        strides = list(buf.strides)
-    else:
-        strides = _row_major_strides(buf)
-
     ignore_last_ndim = int(ignore_last_ndim)
-    upto = max(0, len(mins) - ignore_last_ndim)
-    linear_offset: PrimExpr = tir.IntImm(idx_dtype, 0)
-    for i in range(upto):
-        linear_offset = linear_offset + mins[i] * strides[i]
-    linear_offset = linear_offset + convert(offset)
+    if ignore_last_ndim != 0:
+        upto = max(0, len(mins) - ignore_last_ndim)
+        mins = list(mins[:upto]) + [tir.IntImm(idx_dtype, 0) for _ in range(len(mins) - upto)]
 
-    # Compute 1D extent for tvm_access_ptr when requested.
-    extent_1d: PrimExpr | None
+    # Support non-zero `offset` only for 1D buffers in the frontend meta-op.
+    if isinstance(offset, int):
+        if offset != 0:
+            if len(mins) != 1:
+                raise ValueError(
+                    "T.access_ptr(offset!=0) is only supported for 1D buffers when emitting tl.access_ptr. "
+                    "Use explicit indexing (e.g. A[i + off]) for N-D buffers."
+                )
+            mins = [mins[0] + tir.IntImm(idx_dtype, offset)]
+    elif isinstance(offset, PrimExpr):
+        if not (isinstance(offset, tir.IntImm) and int(offset.value) == 0):
+            if len(mins) != 1:
+                raise ValueError(
+                    "T.access_ptr(offset!=0) is only supported for 1D buffers when emitting tl.access_ptr. "
+                    "Use explicit indexing (e.g. A[i + off]) for N-D buffers."
+                )
+            mins = [mins[0] + offset]
+    else:
+        raise TypeError(f"T.access_ptr offset must be int or PrimExpr, but got {type(offset)}.")
+
+    base_load = BufferLoad(buf, mins)
+
+    # Compute 1D extent (in elements).
+    extent_1d: PrimExpr
     if extent is not None:
         extent_1d = convert(extent)
     elif len(extents) > 0:
@@ -207,19 +228,28 @@ def access_ptr(
         for e in exts:
             extent_1d = extent_1d * e
     else:
-        # Make BufferLoad behave like "element pointer" by default.
-        if isinstance(base, BufferLoad):
+        # Match `tir.Buffer.access_ptr` defaults:
+        # - BufferLoad base: element pointer (extent=1)
+        # - BufferRegion base: product of region extents
+        # - Buffer base: full buffer size (product of shape)
+        if is_buffer_load_base:
             extent_1d = tir.IntImm(idx_dtype, 1)
         elif inferred_region_extents is not None:
             extent_1d = tir.IntImm(idx_dtype, 1)
             for e in inferred_region_extents:
                 extent_1d = extent_1d * convert(e)
         else:
-            extent_1d = None
+            extent_1d = tir.IntImm(idx_dtype, 1)
+            for dim in buf.shape:
+                extent_1d = extent_1d * convert(dim)
 
-    if extent_1d is None:
-        return buf.access_ptr(access_type, offset=linear_offset)
-    return buf.access_ptr(access_type, offset=linear_offset, extent=extent_1d)
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.access_ptr"),
+        base_load,
+        extent_1d,
+        tir.IntImm("int32", _rw_mask(access_type)),
+    )
 
 
 def create_tma_descriptor(*args):

@@ -485,6 +485,110 @@ private:
       result.expr = Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
                          access_ptr_call->annotations, access_ptr_call->span);
       return result;
+    } else if (access_ptr_call->op.same_as(tl::access_ptr())) {
+      // tl.access_ptr format: (base_load, extent, rw_mask)
+      ICHECK_EQ(access_ptr_call->args.size(), 3U)
+          << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+      Optional<PrimExpr> resolved = ResolveBufferLoad(access_ptr_call->args[0]);
+      ICHECK(resolved.defined())
+          << "Invalid tl.access_ptr argument for permuted layout: "
+          << access_ptr_call->args[0];
+      PrimExpr load_expr = resolved.value();
+      if (!load_expr.same_as(access_ptr_call->args[0])) {
+        Array<PrimExpr> new_args = access_ptr_call->args;
+        new_args.Set(0, load_expr);
+        access_ptr_call =
+            Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
+                 access_ptr_call->annotations, access_ptr_call->span);
+      }
+
+      BufferLoad load = Downcast<BufferLoad>(access_ptr_call->args[0]);
+      PrimExpr extent = access_ptr_call->args[1];
+      PrimExpr rw_mask = access_ptr_call->args[2];
+
+      Array<PrimExpr> indices = load->indices;
+      Array<PrimExpr> old_shape = load->buffer->shape;
+
+      CHECK_EQ(indices.size(), old_shape.size())
+          << "Indices size and shape size must match for general N-dimensional "
+             "buffer "
+          << "but got indices size: " << indices.size()
+          << " and shape size: " << old_shape.size();
+
+      Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
+      Optional<Layout> layout = FindLayout(remap_key);
+      if (!layout.defined() || !buffer_map_.count(remap_key->data)) {
+        return result;
+      }
+      auto new_buffer = buffer_remap_.count(remap_key)
+                            ? buffer_remap_[remap_key]
+                            : load->buffer;
+      auto new_shape = new_buffer->shape;
+
+      // In TMA context, swizzle is encoded in TMA descriptor parameters
+      // rather than in memory indices, so we only update buffer data
+      // without recomputing indices.
+      if (in_tma_context_) {
+        Array<PrimExpr> new_args = {BufferLoad(new_buffer, indices), extent,
+                                    rw_mask};
+        if (buffer_remap_.count(remap_key)) {
+          layout_remap_.Set(new_buffer, layout.value());
+        }
+        result.rewritten = true;
+        result.expr =
+            Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
+                 access_ptr_call->annotations, access_ptr_call->span);
+        return result;
+      }
+
+      PrimExpr elem_offset = 0;
+      PrimExpr stride = 1;
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
+        elem_offset += indices[i] * stride;
+        stride *= old_shape[i];
+      }
+
+      PrimExpr smem_offset =
+          elem_offset + (offset.defined() ? offset.value() : 0);
+
+      auto buffer_map_iter = buffer_map_.find(Downcast<Var>(remap_key->data));
+      int buffer_row_size = CheckAndGetBufferRowSize(buffer_map_iter->second);
+      (void)buffer_row_size;
+
+      // Convert offset to target-dimension, reindex it and convert it back
+      Array<PrimExpr> multi_dim_indices;
+      PrimExpr remaining_offset = smem_offset;
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
+        multi_dim_indices.insert(multi_dim_indices.begin(),
+                                 floormod(remaining_offset, old_shape[i]));
+        remaining_offset = floordiv(remaining_offset, old_shape[i]);
+      }
+
+      auto forward_indices = layout.value()->Forward(multi_dim_indices);
+      PrimExpr new_offset = 0;
+      PrimExpr stride_offset = 1;
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
+        new_offset += forward_indices[i] * stride_offset;
+        stride_offset *= new_shape[i];
+      }
+      new_offset = analyzer_->Simplify(new_offset);
+
+      Array<PrimExpr> new_indices;
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
+        new_indices.insert(new_indices.begin(),
+                           floormod(new_offset, new_shape[i]));
+        new_offset = floordiv(new_offset, new_shape[i]);
+      }
+
+      Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices), extent,
+                                  rw_mask};
+      if (buffer_remap_.count(remap_key)) {
+        layout_remap_.Set(new_buffer, layout.value());
+      }
+      result.rewritten = true;
+      result.expr = Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
+                         access_ptr_call->annotations, access_ptr_call->span);
+      return result;
     } else {
       LOG(FATAL) << "Invalid access op for permuted layout: " << access_ptr;
     }
@@ -603,6 +707,14 @@ private:
           new_call->args.Set(5, new_access_ptr.expr);
           new_call->args.Set(6, IntImm(smem_offset->dtype, 0));
         }
+      } else if (access_ptr_call->op.same_as(tl::access_ptr())) {
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, smem_offset, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(5, new_access_ptr.expr);
+          new_call->args.Set(6, IntImm(smem_offset->dtype, 0));
+        }
       } else {
         LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;
       }
@@ -642,6 +754,13 @@ private:
           access_ptr_call = Downcast<Call>(call->args[2]);
           access_ptr = call->args[2];
         }
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(2, new_access_ptr.expr);
+        }
+      } else if (access_ptr_call->op.same_as(tl::access_ptr())) {
         auto new_access_ptr =
             HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
         if (new_access_ptr.rewritten) {
@@ -694,6 +813,13 @@ private:
           auto new_call = call.CopyOnWrite();
           new_call->args.Set(2, new_access_ptr.expr);
         }
+      } else if (access_ptr_call->op.same_as(tl::access_ptr())) {
+        auto new_access_ptr =
+            HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
+        if (new_access_ptr.rewritten) {
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(2, new_access_ptr.expr);
+        }
       } else {
         LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;
       }
@@ -719,6 +845,17 @@ private:
 
     // Handle standalone tvm_access_ptr calls with layout transformation
     if (op->op.same_as(builtin::tvm_access_ptr())) {
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      auto new_access_ptr =
+          HandleAccessPtrAndOffset(call, std::nullopt, call->dtype);
+      if (new_access_ptr.rewritten) {
+        return new_access_ptr.expr;
+      }
+      return call;
+    }
+
+    // Handle standalone tl.access_ptr calls with layout transformation
+    if (op->op.same_as(tl::access_ptr())) {
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       auto new_access_ptr =
           HandleAccessPtrAndOffset(call, std::nullopt, call->dtype);

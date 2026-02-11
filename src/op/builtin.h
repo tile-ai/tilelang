@@ -129,6 +129,25 @@ static constexpr const char *kDisableOutOfBoundWarning =
  */
 DataType cuTensorMapType();
 
+/*!
+ * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
+ *
+ * Unlike `tir.builtin.tvm_access_ptr`, this op keeps a `BufferLoad` argument so
+ * downstream analysis can recover the referenced `Buffer` (and its strides /
+ * scope), while also carrying the access mask required by synchronization and
+ * safety checks.
+ *
+ * The frontend is expected to lower this op to `tir.builtin.tvm_access_ptr`
+ * once the additional metadata is no longer needed.
+ *
+ * access_ptr(base_load, extent, rw_mask)
+ *
+ * - base_load: BufferLoad whose indices denote the base element address.
+ * - extent: 1D extent in elements (same meaning as tvm_access_ptr arg3).
+ * - rw_mask: 1=read, 2=write, 3=read-write.
+ */
+TVM_DLL const Op &access_ptr();
+
 // fast math related op
 // __exp(x) - fast exponential
 TVM_DLL const Op &__exp();
