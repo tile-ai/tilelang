@@ -77,26 +77,31 @@ def _lower_to_cuda_source(func, target: str = SM100_TARGET) -> str:
     return artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 def test_cuda_codegen_fadd2():
     src = _lower_to_cuda_source(vec_add_f32x2(), target=SM100_TARGET)
     assert "tl::fadd2" in src
 
 
+@tilelang.testing.requires_cuda
 def test_cuda_codegen_fmul2():
     src = _lower_to_cuda_source(vec_mul_f32x2(), target=SM100_TARGET)
     assert "tl::fmul2" in src
 
 
+@tilelang.testing.requires_cuda
 def test_cuda_codegen_fma2():
     src = _lower_to_cuda_source(vec_fma_f32x2(), target=SM100_TARGET)
     assert "tl::fma2" in src
 
 
+@tilelang.testing.requires_cuda
 def test_cuda_codegen_auto_vectorize_fadd2():
     src = _lower_to_cuda_source(auto_vec_add_f32x2(), target=SM100_TARGET)
     assert "tl::fadd2" in src
 
 
+@tilelang.testing.requires_cuda
 def test_cuda_codegen_no_fadd2_before_sm100():
     src = _lower_to_cuda_source(vec_add_f32x2(), target=SM80_TARGET)
     assert "tl::fadd2" not in src
