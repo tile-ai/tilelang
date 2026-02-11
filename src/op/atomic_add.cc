@@ -186,8 +186,8 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
     src_value_arg = Cast(dst->dtype, src_value_arg);
 
   // Build an access pointer to the destination element (rw).
-  DataType idx_dtype = dst_indices.empty() ? DataType::Int(32)
-                                           : dst_indices[0].dtype();
+  DataType idx_dtype =
+      dst_indices.empty() ? DataType::Int(32) : dst_indices[0].dtype();
   PrimExpr dst_ptr =
       Call(DataType::Handle(), tl::access_ptr(),
            {BufferLoad(dst, dst_indices), make_const(idx_dtype, 1),
