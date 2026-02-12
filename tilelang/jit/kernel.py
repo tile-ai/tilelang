@@ -234,6 +234,13 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
             )
 
+        if env.use_dlcompiler():
+            from triton.backends.dicp_triton.commonir.adapter import AdapterWrapper
+
+            adapter_wrapper = AdapterWrapper.compile_and_create_adapter(tilelang_func)
+            self.artifact = adapter_wrapper.artifact
+            return adapter_wrapper.adapter
+
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "tvm_ffi"
         enable_device_compile = execution_backend == "tvm_ffi"
@@ -342,6 +349,19 @@ class JITKernel(Generic[_P, _T]):
     ) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
+
+        if env.use_dlcompiler():
+            from triton.backends.dicp_triton.commonir.adapter import AdapterWrapper
+            adapter_wrapper = AdapterWrapper.from_database(
+                params=params,
+                result_idx=result_idx,
+                target=target,
+                func_or_mod=func_or_mod,
+                host_kernel_source=host_kernel_source,
+                kernel_lib_path=kernel_lib_path,
+                pass_configs=pass_configs,
+            )
+            return adapter_wrapper.adapter
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "tvm_ffi":
