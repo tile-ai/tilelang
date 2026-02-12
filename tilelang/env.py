@@ -253,6 +253,9 @@ class Environment:
     CUTLASS_INCLUDE_DIR = EnvVar("TL_CUTLASS_PATH", None)
     COMPOSABLE_KERNEL_INCLUDE_DIR = EnvVar("TL_COMPOSABLE_KERNEL_PATH", None)
 
+    # For DLCompiler
+    TILELANG_USE_DLCOMPILER = EnvVar("TILELANG_USE_DLCOMPILER", "0")
+
     # TVM integration
     TVM_PYTHON_PATH = EnvVar("TVM_IMPORT_PYTHON_PATH", None)
     TVM_LIBRARY_PATH = EnvVar("TVM_LIBRARY_PATH", None)
@@ -328,6 +331,9 @@ class Environment:
         {"1", "true", "yes", "on"} (case-insensitive).
         """
         return str(self.TILELANG_USE_GEMM_V1).lower() in ("1", "true", "yes", "on")
+    
+    def use_dlcompiler(self) -> bool:
+        return str(self.TILELANG_USE_DLCOMPILER).lower() in ("1", "true", "yes", "on")
 
     def get_default_target(self) -> str:
         """Get default compilation target from environment."""
