@@ -66,7 +66,7 @@ using ffi::GetRef;
 // Forward declaration
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
-    Map<ObjectRef, ObjectRef> &barrier_map);
+    Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi);
 void CollectTaskNodesFromIRStructure(IRStructure *node,
                                      std::vector<TaskNode *> &tasks);
 void CollectIRStructureNodes(IRStructure *node,
@@ -2452,10 +2452,11 @@ private:
 };
 
 // The main pass function
-tvm::transform::Pass AutoSchedule() {
+tvm::transform::Pass AutoSchedule(const bool enable_epi) {
   using namespace tir::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const tvm::transform::PassContext &ctx) -> PrimFunc {
+  auto pass_func =
+      [enable_epi](PrimFunc func, const IRModule &mod,
+                   const tvm::transform::PassContext &ctx) -> PrimFunc {
     // Extract the body of tilelang_root block if it exists
     TilelangRootBodyExtractor extractor;
     extractor(func->body);
@@ -2522,7 +2523,8 @@ tvm::transform::Pass AutoSchedule() {
 
     // Apply warpgroup partition to entire IRStructure
     Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
-        ir_structure.get(), thread_var, barrier_buffers, barrier_map);
+        ir_structure.get(), thread_var, barrier_buffers, barrier_map,
+        enable_epi);
     updated_thread_extent = thread_var->dom->extent * 2;
 
     // If we extracted from tilelang_root block, replace the body
@@ -2674,7 +2676,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
-    Map<ObjectRef, ObjectRef> &barrier_map) {
+    Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi) {
   if (!root)
     return Evaluate(0);
 
@@ -2682,8 +2684,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     const WrapperNode *wrapper = static_cast<const WrapperNode *>(root);
     Stmt body = Evaluate(0);
     if (wrapper->child) {
-      body = ApplyWarpgroupPartitionToIRStructure(
-          wrapper->child.get(), thread_var, barrier_buffers, barrier_map);
+      body = ApplyWarpgroupPartitionToIRStructure(wrapper->child.get(),
+                                                  thread_var, barrier_buffers,
+                                                  barrier_map, enable_epi);
     }
     if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
       return LetStmt(let->var, let->value, body);
@@ -2713,7 +2716,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
 
   // Convert IRStructure to Stmt for IfThenElse
   std::function<Stmt(IRStructure *)> irstructure_to_stmt;
-  irstructure_to_stmt = [&irstructure_to_stmt](IRStructure *structure) -> Stmt {
+  irstructure_to_stmt = [&irstructure_to_stmt,
+                         enable_epi](IRStructure *structure) -> Stmt {
     if (!structure) {
       return Evaluate(0);
     }
@@ -2755,12 +2759,26 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       PrimExpr loop_step = ctrl->control->step.has_value()
                                ? ctrl->control->step.value()
                                : IntImm(DataType::Int(32), 1);
+      // return For(loop_var, loop_start, loop_extent,
+      //         ctrl->control->kind, body, ctrl->control->thread_binding,
+      //         ctrl->control->annotations);
+      auto check_promote = [&](PrimExpr expr) {
+        if (const auto *op = expr.as<tvm::tir::LTNode>()) {
+          tvm::PrimExpr lhs = op->a;
+          tvm::PrimExpr rhs = op->b;
+          if (StructuralEqual()(op->a, loop_var)) {
+            if (StructuralEqual()(op->b + loop_step,
+                                  loop_start + loop_extent)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
       std::function<Optional<Stmt>(Stmt, bool)> extract_prologue;
       extract_prologue = [&](Stmt stmt, bool in_condition) -> Optional<Stmt> {
         if (const auto *if_node = stmt.as<IfThenElseNode>()) {
-          if (StructuralEqual()(if_node->condition, loop_var < loop_start +
-                                                                   loop_extent -
-                                                                   loop_step)) {
+          if (check_promote(if_node->condition)) {
             return extract_prologue(if_node->then_case, true);
           }
           if (in_condition) {
@@ -2810,13 +2828,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           return Optional<Stmt>();
         }
       };
-      bool enable_epi = false;
       std::function<Stmt(Stmt)> extract_steady;
       extract_steady = [&](Stmt stmt) -> Stmt {
         if (const auto *if_node = stmt.as<IfThenElseNode>()) {
-          if (StructuralEqual()(if_node->condition, loop_var < loop_start +
-                                                                   loop_extent -
-                                                                   loop_step)) {
+          if (check_promote(if_node->condition)) {
             if (enable_epi) {
               return extract_steady(if_node->then_case);
             } else {
@@ -2849,23 +2864,17 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           if (pro.has_value()) {
             pro_stmts.push_back(pro.value());
           }
-          if (enable_epi) {
-            auto epi = extract_epilogue(stmt, false);
-            if (epi.has_value()) {
-              epi_stmts.push_back(epi.value());
-            }
+          auto epi = extract_epilogue(stmt, false);
+          if (epi.has_value()) {
+            epi_stmts.push_back(epi.value());
           }
         }
       }
-      if (pro_stmts.empty() && epi_stmts.empty()) {
-        return For(loop_var, loop_start, loop_extent, ctrl->control->kind, body,
-                   ctrl->control->thread_binding, ctrl->control->annotations);
-      }
       Stmt prologue = Evaluate(0);
-      {
+      if (!epi_stmts.empty()) {
         if (pro_stmts.size() == 1) {
           prologue = pro_stmts[0];
-        } else {
+        } else if (!pro_stmts.empty()) {
           prologue = SeqStmt(pro_stmts);
         }
         Map<Var, PrimExpr> substitution;
@@ -2873,10 +2882,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         prologue = Substitute(prologue, substitution);
       }
       Stmt epilogue = Evaluate(0);
-      if (enable_epi) {
+      if (enable_epi && !pro_stmts.empty()) {
         if (epi_stmts.size() == 1) {
           epilogue = epi_stmts[0];
-        } else {
+        } else if (!epi_stmts.empty()) {
           epilogue = SeqStmt(epi_stmts);
         }
         Map<Var, PrimExpr> substitution;
@@ -2884,16 +2893,24 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         epilogue = Substitute(epilogue, substitution);
       }
       Stmt new_body = extract_steady(body);
-      {
+      if (!epi_stmts.empty()) {
         Map<Var, PrimExpr> substitution;
         substitution.Set(loop_var, loop_var + loop_step);
         new_body = Substitute(new_body, substitution);
       }
+      auto new_var = loop_var.copy_with_suffix("");
       Stmt new_for =
-          For(loop_var, loop_start,
-              ctrl->control->extent - loop_step * (1 + enable_epi),
+          For(new_var, loop_start,
+              ctrl->control->extent -
+                  loop_step * ((!pro_stmts.empty()) +
+                               (enable_epi && !epi_stmts.empty())),
               ctrl->control->kind, new_body, ctrl->control->thread_binding,
               ctrl->control->annotations);
+      {
+        Map<Var, PrimExpr> substitution;
+        substitution.Set(loop_var, new_var);
+        new_for = Substitute(new_for, substitution);
+      }
       return SeqStmt({prologue, new_for, epilogue});
     } else if (structure->IsWrapper()) {
       const WrapperNode *wrapper = static_cast<const WrapperNode *>(structure);

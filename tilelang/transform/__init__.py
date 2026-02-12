@@ -513,9 +513,9 @@ def LowerSharedTmem():
     return _ffi_api.LowerSharedTmem()  # type: ignore
 
 
-def AutoSchedule():
+def AutoSchedule(enable_epi: bool):
     """Auto schedule for high-level operations"""
-    return _ffi_api.AutoSchedule()  # type: ignore
+    return _ffi_api.AutoSchedule(enable_epi)  # type: ignore
 
 
 def LayoutReducer():
