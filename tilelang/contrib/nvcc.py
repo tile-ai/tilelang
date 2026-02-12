@@ -572,10 +572,19 @@ def have_tma(target):
         return False
     compute_version = get_target_compute_version(target)
     major, minor = parse_compute_version(compute_version)
-    # TMA is supported in Ada Lovelace (9.0) or later architectures.
+    # TMA is supported in Hopper (9.0) or later architectures.
     conditions = [False]
     conditions.append(major >= 9)
     return any(conditions)
+
+
+def have_tmem(target):
+    if target.kind.name != "cuda":
+        return False
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    # Tensor Memory is supported in Blackwell (10.0) or later architectures.
+    return major >= 10
 
 
 def is_hopper(target):

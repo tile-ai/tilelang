@@ -3,7 +3,7 @@ from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
-from tilelang.contrib.nvcc import have_tma, is_hopper, have_pdl
+from tilelang.contrib.nvcc import have_tma, is_hopper, have_pdl, have_tmem
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
@@ -25,6 +25,13 @@ def allow_tma_and_warp_specialized(pass_ctx: PassContext | None = None, target: 
         return False
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
     return not disable_tma_lower and allow_warp_specialized(pass_ctx=pass_ctx, target=target)
+
+
+def allow_tmem_injection(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    disable_tmem_injection = pass_ctx.config.get("tl.disable_tmem_injection", False)
+    return not disable_tmem_injection and have_tmem(target)
 
 
 def allow_fence_proxy(target: Target | None = None) -> bool:
@@ -135,7 +142,6 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
 
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
-    # Bind the target device information to the module
     """
     Bind target information and progressively legalize and lower frontend Tile IR into a form suitable for downstream optimization and codegen.
 
@@ -156,6 +162,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     Returns:
         IRModule: The transformed module, ready for target-specific optimization passes.
     """
+    pass_ctx = tilelang.transform.get_pass_context()
+    # Bind the target device information to the module
     mod = tir.transform.BindTarget(target)(mod)
 
     if should_force_let_inline():
@@ -172,6 +180,11 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
+    print(mod)
+    # Inject the allocation, usage and destruction of tmem
+    if allow_tmem_injection(pass_ctx=pass_ctx, target=target):
+        mod = tilelang.transform.InjectTmem()(mod)
+    print(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
