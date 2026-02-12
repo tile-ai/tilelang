@@ -2810,13 +2810,20 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           return Optional<Stmt>();
         }
       };
+      bool enable_epi = false;
       std::function<Stmt(Stmt)> extract_steady;
       extract_steady = [&](Stmt stmt) -> Stmt {
         if (const auto *if_node = stmt.as<IfThenElseNode>()) {
           if (StructuralEqual()(if_node->condition, loop_var < loop_start +
                                                                    loop_extent -
                                                                    loop_step)) {
-            return extract_steady(if_node->then_case);
+            if (enable_epi) {
+              return extract_steady(if_node->then_case);
+            } else {
+              return IfThenElse(if_node->condition,
+                                extract_steady(if_node->then_case),
+                                if_node->else_case);
+            }
           }
           if (StructuralEqual()(if_node->condition, loop_var > loop_start)) {
             return extract_steady(if_node->then_case);
@@ -2842,9 +2849,11 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           if (pro.has_value()) {
             pro_stmts.push_back(pro.value());
           }
-          auto epi = extract_epilogue(stmt, false);
-          if (epi.has_value()) {
-            epi_stmts.push_back(epi.value());
+          if (enable_epi) {
+            auto epi = extract_epilogue(stmt, false);
+            if (epi.has_value()) {
+              epi_stmts.push_back(epi.value());
+            }
           }
         }
       }
@@ -2864,7 +2873,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         prologue = Substitute(prologue, substitution);
       }
       Stmt epilogue = Evaluate(0);
-      {
+      if (enable_epi) {
         if (epi_stmts.size() == 1) {
           epilogue = epi_stmts[0];
         } else {
@@ -2881,7 +2890,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         new_body = Substitute(new_body, substitution);
       }
       Stmt new_for =
-          For(loop_var, loop_start, ctrl->control->extent - loop_step * 2,
+          For(loop_var, loop_start,
+              ctrl->control->extent - loop_step * (1 + enable_epi),
               ctrl->control->kind, new_body, ctrl->control->thread_binding,
               ctrl->control->annotations);
       return SeqStmt({prologue, new_for, epilogue});
