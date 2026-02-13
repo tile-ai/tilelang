@@ -672,10 +672,9 @@ bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
 } // namespace cutlass
 
 //
-// Type-safe warp shuffle helpers for 16-bit float types
-// These wrappers avoid relying on implicit conversions that may be disallowed
-// (e.g., converting float -> cutlass::bfloat16_t) by explicitly promoting to
-// float for the shuffle and then down-converting.
+// Optimized type-punned warp shuffle helpers for 16-bit types
+// Directly shuffle the underlying bits (as uint16/uint32) to avoid
+// costly fp32 conversions and instruction overhead.
 //
 namespace tl {
 
