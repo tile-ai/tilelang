@@ -28,8 +28,7 @@ struct SumOp {
 };
 
 struct MaxOp {
-  template <typename T>
-  TL_DEVICE T operator()(T const &x, T const &y) {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
     return cutlass::fast_max(x, y);
   }
 
@@ -43,12 +42,12 @@ struct MaxOp {
 };
 
 struct MinOp {
-  template <typename T>
-  TL_DEVICE T operator()(T const &x, T const &y) {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
     return cutlass::fast_min(x, y);
   }
 
-  TL_DEVICE cutlass::bfloat16_t operator()(bfloat16_t const &x, bfloat16_t const &y) {
+  TL_DEVICE cutlass::bfloat16_t operator()(bfloat16_t const &x,
+                                           bfloat16_t const &y) {
     return bfloat16_t(__hmin(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
   }
 
