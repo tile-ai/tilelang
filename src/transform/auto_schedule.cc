@@ -66,7 +66,8 @@ using ffi::GetRef;
 // Forward declaration
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
-    Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi);
+    Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi,
+    PrimExpr thread_count[2]);
 void CollectTaskNodesFromIRStructure(IRStructure *node,
                                      std::vector<TaskNode *> &tasks);
 void CollectIRStructureNodes(IRStructure *node,
@@ -75,20 +76,20 @@ void CollectIRStructureNodes(IRStructure *node,
 static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
                                          std::vector<Buffer> &barrier_buffers,
                                          Map<ObjectRef, ObjectRef> &barrier_map,
-                                         PrimExpr thread_count);
+                                         PrimExpr thread_count[2]);
 // Barrier dependency analysis functions
 static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
                                      std::vector<Buffer> &barrier_buffers,
                                      Map<ObjectRef, ObjectRef> &barrier_map,
-                                     PrimExpr thread_count);
+                                     PrimExpr thread_count[2]);
 static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
                                         std::vector<Buffer> &barrier_buffers,
                                         Map<ObjectRef, ObjectRef> &barrier_map,
-                                        PrimExpr thread_count);
+                                        PrimExpr thread_count[2]);
 static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                                        std::vector<Buffer> &barrier_buffers,
                                        Map<ObjectRef, ObjectRef> &barrier_map,
-                                       PrimExpr thread_count);
+                                       PrimExpr thread_count[2]);
 
 // Helper function to check if two ranges overlap
 bool RangesOverlap(const Range &a, const Range &b) {
@@ -200,9 +201,9 @@ static Buffer makeBarrierBuffer(PrimExpr arrive_count, const std::string &name,
 static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
                                          std::vector<Buffer> &barrier_buffers,
                                          Map<ObjectRef, ObjectRef> &barrier_map,
-                                         PrimExpr thread_count) {
+                                         PrimExpr thread_count[2]) {
   // If either body is empty, no barriers needed
-  if (neutral_body.as<EvaluateNode>() && warpgroup_body.as<EvaluateNode>()) {
+  if (IsEvaluateZero(neutral_body) || IsEvaluateZero(warpgroup_body)) {
     return SeqStmt({neutral_body, warpgroup_body});
   }
 
@@ -210,7 +211,7 @@ static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
   // Equivalent to Python: barrier = T.alloc_buffer((thread_count*2,), "uint64",
   // scope="shared.barrier") Using arrive_count = thread_count * 2 (number of
   // threads * 2 for neutral-to-warpgroup synchronization)
-  PrimExpr arrive_count = thread_count * IntImm(DataType::Int(32), 2);
+  PrimExpr arrive_count = thread_count[0] + thread_count[1];
   Buffer barrier_buffer =
       makeBarrierBuffer(arrive_count, "neutral_warpgroup_barrier", barrier_map);
   barrier_buffers.push_back(barrier_buffer);
@@ -225,12 +226,12 @@ static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
 
   // Combine: neutral_body -> arrive_barrier -> wait_barrier -> warpgroup_body
   std::vector<Stmt> stmts;
-  if (!neutral_body.as<EvaluateNode>()) {
+  if (!IsEvaluateZero(neutral_body)) {
     stmts.push_back(neutral_body);
   }
   stmts.push_back(arrive_barrier);
   stmts.push_back(wait_barrier);
-  if (!warpgroup_body.as<EvaluateNode>()) {
+  if (!IsEvaluateZero(warpgroup_body)) {
     stmts.push_back(warpgroup_body);
   }
 
@@ -323,7 +324,7 @@ static void InsertStatementIntoTaskNode(TaskNode *task, const Stmt &stmt,
 static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
                                      std::vector<Buffer> &barrier_buffers,
                                      Map<ObjectRef, ObjectRef> &barrier_map,
-                                     PrimExpr thread_count) {
+                                     PrimExpr thread_count[2]) {
   if (!node)
     return;
 
@@ -349,7 +350,7 @@ static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
 static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
                                         std::vector<Buffer> &barrier_buffers,
                                         Map<ObjectRef, ObjectRef> &barrier_map,
-                                        PrimExpr thread_count) {
+                                        PrimExpr thread_count[2]) {
   if (!seq)
     return;
 
@@ -434,7 +435,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
           int barrier_id = next_barrier_id++;
 
           Buffer barrier_buffer = makeBarrierBuffer(
-              thread_count, "barrier_" + std::to_string(barrier_id),
+              thread_count[last_wg_id], "barrier_" + std::to_string(barrier_id),
               barrier_map);
 
           // Collect the barrier buffer to be added to tilelang_root block's
@@ -504,7 +505,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
 static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                                        std::vector<Buffer> &barrier_buffers,
                                        Map<ObjectRef, ObjectRef> &barrier_map,
-                                       PrimExpr thread_count) {
+                                       PrimExpr thread_count[2]) {
   if (!ctrl || !ctrl->child)
     return;
 
@@ -679,8 +680,8 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               }
 
               Buffer barrier_buffer = makeBarrierBuffer(
-                  thread_count, "barrier_" + std::to_string(barrier_id),
-                  barrier_map);
+                  thread_count[last_wg_id],
+                  "barrier_" + std::to_string(barrier_id), barrier_map);
 
               // Collect the barrier buffer to be added to tilelang_root block's
               // alloc_buffers
@@ -697,10 +698,16 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               // Insert barrier_wait at the beginning of task's statements
               Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
               if (iter == 1) {
-                wait_stmt = IfThenElse(
-                    loop_var !=
-                        loop_start + IntImm(DataType::Int(32), !promote_int),
-                    wait_stmt);
+                if (!has_promoted_tasks) {
+                  wait_stmt = IfThenElse(loop_var != loop_start, wait_stmt);
+                } else {
+                  if (promote_int) {
+                    wait_stmt = IfThenElse(loop_var != loop_start, wait_stmt);
+                  } else {
+                    wait_stmt = IfThenElse(loop_var != loop_start + loop_step,
+                                           wait_stmt);
+                  }
+                }
               }
               InsertStatementIntoTaskNode(task, wait_stmt, true);
               // Remove from map (as per user instruction)
@@ -1076,16 +1083,18 @@ std::unique_ptr<IRStructure> WrapperNode::Clone() const {
 // Goal: balance weighted latency between two warpgroups (0 and 1)
 // Weighted latency = latency * tripcount (tripcount = 100 for non-constant loop
 // extent)
-void AssignWarpgroupIdsGlobal(IRStructure *root) {
-  if (!root)
-    return;
+bool AssignWarpgroupIdsGlobal(IRStructure *root) {
+  if (!root) {
+    LOG(FATAL) << "Empty root";
+  }
 
   // Step 1: Collect all TaskNodes with context information
   std::vector<TaskNodeWithContext> all_tasks;
   CollectAllTaskNodesWithContext(root, all_tasks);
 
-  if (all_tasks.empty())
-    return;
+  if (all_tasks.empty()) {
+    LOG(FATAL) << "No task";
+  }
 
   int n = all_tasks.size();
 
@@ -1133,6 +1142,8 @@ void AssignWarpgroupIdsGlobal(IRStructure *root) {
     }
     int64_t total_weighted_latency = 0;
     bool has_task = false;
+    bool has_tma_core = false;
+    bool has_tensor_core = false;
     for (int idx : indices) {
       if (prefix_tasks.find(all_tasks[idx].task) != prefix_tasks.end()) {
         // This is a prefix task, skip it (it won't participate in warpgroup
@@ -1143,9 +1154,12 @@ void AssignWarpgroupIdsGlobal(IRStructure *root) {
       int64_t latency = all_tasks[idx].task->GetLatency();
       int64_t tripcount = all_tasks[idx].tripcount;
       total_weighted_latency += latency * tripcount;
+      has_tma_core |= all_tasks[idx].task->UsesTMACore();
+      has_tensor_core |= all_tasks[idx].task->UsesTensorCore();
     }
     if (has_task) {
-      component_infos.push_back({root, total_weighted_latency, indices});
+      component_infos.push_back({root, total_weighted_latency, indices,
+                                 has_tma_core, has_tensor_core});
     }
   }
 
@@ -1170,34 +1184,68 @@ void AssignWarpgroupIdsGlobal(IRStructure *root) {
       assigned_warpgroup = 1;
       warpgroup1_latency += comp.weighted_latency;
     }
-
-    // Assign warpgroup id to all tasks in this component
-    for (int idx : comp.task_indices) {
-      all_tasks[idx].task->SetWarpgroupId(assigned_warpgroup);
-    }
   }
 
-  // Log the assignment
-  int count_warpgroup0 = 0;
-  int count_warpgroup1 = 0;
-  for (const auto &task_ctx : all_tasks) {
-    if (task_ctx.task->GetWarpgroupId() == 0)
-      count_warpgroup0++;
-    else if (task_ctx.task->GetWarpgroupId() == 1)
-      count_warpgroup1++;
+  int64_t max_latency = std::max(warpgroup0_latency, warpgroup1_latency);
+  int64_t min_latency = std::min(warpgroup0_latency, warpgroup1_latency);
+  if ((double)max_latency / min_latency < 1.1) {
+    int64_t warpgroup0_latency = 0;
+    int64_t warpgroup1_latency = 0;
+
+    for (const auto &comp : component_infos) {
+      int assigned_warpgroup = 0;
+      if (warpgroup0_latency <= warpgroup1_latency) {
+        assigned_warpgroup = 0;
+        warpgroup0_latency += comp.weighted_latency;
+      } else {
+        assigned_warpgroup = 1;
+        warpgroup1_latency += comp.weighted_latency;
+      }
+
+      // Assign warpgroup id to all tasks in this component
+      for (int idx : comp.task_indices) {
+        all_tasks[idx].task->SetWarpgroupId(assigned_warpgroup);
+      }
+    }
+    return true;
+  } else {
+    int64_t warpgroup0_latency = 0;
+    int64_t warpgroup1_latency = 0;
+    for (const auto &comp : component_infos) {
+      int assigned_warpgroup = 0;
+      if (comp.uses_tensor_core_ && !comp.uses_tma_core_) {
+        assigned_warpgroup = 0;
+        warpgroup0_latency += comp.weighted_latency;
+      } else if (!comp.uses_tensor_core_ && comp.uses_tma_core_) {
+        assigned_warpgroup = 1;
+        warpgroup1_latency += comp.weighted_latency;
+      } else if (warpgroup0_latency <= warpgroup1_latency) {
+        assigned_warpgroup = 0;
+        warpgroup0_latency += comp.weighted_latency;
+      } else {
+        assigned_warpgroup = 1;
+        warpgroup1_latency += comp.weighted_latency;
+      }
+
+      // Assign warpgroup id to all tasks in this component
+      for (int idx : comp.task_indices) {
+        all_tasks[idx].task->SetWarpgroupId(assigned_warpgroup);
+      }
+    }
+    return false;
   }
 }
 
 // Builder that collects ScheduleUnits from IRStructure
 class ScheduleUnitBuilder {
 public:
-  void Build(IRStructure *root) {
+  bool Build(IRStructure *root) {
     scheduled_control_nodes_.clear();
 
     ScheduleRecursive(root);
 
     // Global warpgroup id assignment from the top level
-    AssignWarpgroupIdsGlobal(root);
+    return AssignWarpgroupIdsGlobal(root);
   }
 
   // New recursive scheduling function that replaces Collect method
@@ -2470,6 +2518,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       body_to_schedule = extractor.body;
       has_tilelang_root = true;
     } else {
+      LOG(FATAL);
       body_to_schedule = func->body;
     }
 
@@ -2501,7 +2550,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       LOG(FATAL) << "Could not find thread index variable, warpgroup "
                     "partition will use default";
     }
-    unit_builder.Build(ir_structure.get());
+    bool double_thread = unit_builder.Build(ir_structure.get());
 
     // Print the modified summary view
     // PrintIRStructure(ir_structure.get());
@@ -2512,9 +2561,9 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     std::vector<Buffer> barrier_buffers;
     Map<ObjectRef, ObjectRef> barrier_map;
     // Determine thread count for barrier arrive_count calculations
-    PrimExpr thread_count = thread_var.defined()
-                                ? thread_var->dom->extent
-                                : IntImm(DataType::Int(32), 256);
+    PrimExpr thread_count[2] = {thread_var->dom->extent,
+                                double_thread ? thread_var->dom->extent
+                                              : IntImm(DataType::Int(32), 128)};
     AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id,
                              barrier_buffers, barrier_map, thread_count);
 
@@ -2524,22 +2573,21 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     // Apply warpgroup partition to entire IRStructure
     Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
         ir_structure.get(), thread_var, barrier_buffers, barrier_map,
-        enable_epi);
-    updated_thread_extent = thread_var->dom->extent * 2;
+        enable_epi, thread_count);
+    if (double_thread) {
+      updated_thread_extent = thread_var->dom->extent * 2;
+    } else {
+      updated_thread_extent =
+          thread_var->dom->extent + IntImm(DataType::Int(32), 128);
+    }
 
     // If we extracted from tilelang_root block, replace the body
     Stmt final_body;
-    if (has_tilelang_root) {
-      TilelangRootBodyReplacer replacer(new_body);
-      final_body = replacer(func->body);
-      // Apply thread extent update if warpgroup partition was applied
-      if (updated_thread_extent.defined() && thread_var.defined()) {
-        ThreadExtentUpdater extent_updater(updated_thread_extent);
-        final_body = extent_updater(final_body);
-      }
-    } else {
-      final_body = new_body;
-    }
+    TilelangRootBodyReplacer replacer(new_body);
+    final_body = replacer(func->body);
+    // Apply thread extent update if warpgroup partition was applied
+    ThreadExtentUpdater extent_updater(updated_thread_extent);
+    final_body = extent_updater(final_body);
     // Add barrier buffers to tilelang_root block's alloc_buffers
     if (!barrier_buffers.empty()) {
       TilelangRootAllocBufferAdder adder(barrier_buffers, barrier_map);
@@ -2676,7 +2724,8 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
-    Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi) {
+    Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi,
+    PrimExpr thread_count[2]) {
   if (!root)
     return Evaluate(0);
 
@@ -2684,9 +2733,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     const WrapperNode *wrapper = static_cast<const WrapperNode *>(root);
     Stmt body = Evaluate(0);
     if (wrapper->child) {
-      body = ApplyWarpgroupPartitionToIRStructure(wrapper->child.get(),
-                                                  thread_var, barrier_buffers,
-                                                  barrier_map, enable_epi);
+      body = ApplyWarpgroupPartitionToIRStructure(
+          wrapper->child.get(), thread_var, barrier_buffers, barrier_map,
+          enable_epi, thread_count);
     }
     if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
       return LetStmt(let->var, let->value, body);
@@ -2740,13 +2789,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           stmts.push_back(child_stmt);
         }
       }
-      if (stmts.empty()) {
-        return Evaluate(0);
-      } else if (stmts.size() == 1) {
-        return stmts[0];
-      } else {
-        return SeqStmt(stmts);
-      }
+      auto flattened = SeqStmt::Flatten(stmts);
+      return flattened;
     } else if (structure->IsControl()) {
       ControlNode *ctrl = static_cast<ControlNode *>(structure);
       Stmt body = Evaluate(0);
@@ -2759,9 +2803,6 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       PrimExpr loop_step = ctrl->control->step.has_value()
                                ? ctrl->control->step.value()
                                : IntImm(DataType::Int(32), 1);
-      // return For(loop_var, loop_start, loop_extent,
-      //         ctrl->control->kind, body, ctrl->control->thread_binding,
-      //         ctrl->control->annotations);
       auto check_promote = [&](PrimExpr expr) {
         if (const auto *op = expr.as<tvm::tir::LTNode>()) {
           tvm::PrimExpr lhs = op->a;
@@ -3009,19 +3050,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   bool wg0_has_stmts = has_actual_statements(wg0_structure.get());
   bool wg1_has_stmts = has_actual_statements(wg1_structure.get());
 
-  // Prepare condition: tx < original_threads
-  PrimExpr condition;
-  PrimExpr original_threads;
-  if (thread_var.defined() && thread_var->dom.defined()) {
-    Var thread_idx_var = thread_var->var;
-    Range thread_dom = thread_var->dom;
-    original_threads = thread_dom->extent;
-    condition = thread_idx_var < original_threads;
-  } else {
-    Var tx_var("tx", DataType::Int(32));
-    original_threads = IntImm(DataType::Int(32), 128);
-    condition = tx_var < original_threads;
-  }
+  PrimExpr condition = thread_var->var < thread_count[0];
 
   Stmt neutral_body = wg_neutral_has_stmts
                           ? irstructure_to_stmt(wg_neutral_structure.get())
@@ -3054,20 +3083,19 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   // work
   Stmt combined_stmt;
   if (wg_neutral_has_stmts) {
-    if (!if_then_else.as<EvaluateNode>() && !neutral_body.as<EvaluateNode>()) {
+    if (!IsEvaluateZero(if_then_else) && !IsEvaluateZero(neutral_body)) {
       // Both have statements: insert barriers for neutral-to-warpgroup
       // synchronization
       combined_stmt = InsertBarriersForNeutralSync(neutral_body, if_then_else,
                                                    barrier_buffers, barrier_map,
-                                                   original_threads);
-    } else if (!if_then_else.as<EvaluateNode>() ||
-               !neutral_body.as<EvaluateNode>()) {
+                                                   thread_count);
+    } else if (!IsEvaluateZero(if_then_else) || !IsEvaluateZero(neutral_body)) {
       // Only one has actual statements
       std::vector<Stmt> stmts;
-      if (!neutral_body.as<EvaluateNode>()) {
+      if (!IsEvaluateZero(neutral_body)) {
         stmts.push_back(neutral_body);
       }
-      if (!if_then_else.as<EvaluateNode>()) {
+      if (!IsEvaluateZero(if_then_else)) {
         stmts.push_back(if_then_else);
       }
       if (stmts.size() == 1) {

@@ -454,6 +454,8 @@ struct ComponentInfo {
   int root;
   int64_t weighted_latency; // total weighted latency in this component
   std::vector<int> task_indices;
+  bool uses_tma_core_{false};
+  bool uses_tensor_core_{false};
 };
 
 // Helper function to check if a buffer region is in register memory
@@ -522,7 +524,7 @@ void CollectAllTaskNodesWithContext(
 // Goal: balance weighted latency between two warpgroups (0 and 1)
 // Weighted latency = latency * tripcount (tripcount = 100 for non-constant loop
 // extent)
-void AssignWarpgroupIdsGlobal(IRStructure *root);
+bool AssignWarpgroupIdsGlobal(IRStructure *root);
 
 // Helper function to print BufferRegion details
 void PrintBufferRegion(const BufferRegion &region, const std::string &indent) {
@@ -1289,5 +1291,13 @@ private:
   }
 };
 
+bool IsEvaluateZero(const tvm::tir::Stmt &stmt) {
+  if (const EvaluateNode *eval_node = stmt.as<EvaluateNode>()) {
+    if (is_const_int(eval_node->value, 0)) {
+      return true;
+    }
+  }
+  return false;
+}
 } // namespace tl
 } // namespace tvm
