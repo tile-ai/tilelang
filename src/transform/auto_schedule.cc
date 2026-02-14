@@ -68,8 +68,6 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
     Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi,
     PrimExpr thread_count[2]);
-void CollectTaskNodesFromIRStructure(IRStructure *node,
-                                     std::vector<TaskNode *> &tasks);
 void CollectIRStructureNodes(IRStructure *node,
                              std::vector<IRStructure *> &nodes);
 // Barrier synchronization helper functions
@@ -247,76 +245,13 @@ static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
   return sync_body;
 }
 
-// Helper function to insert a statement into TaskNode's stmts, handling
-// IfThenElse if present
-static void InsertStatementIntoTaskNode(TaskNode *task, const Stmt &stmt,
-                                        bool at_beginning = false) {
-  if (task->stmts.empty()) {
-    // If no statements, just add the statement
-    task->stmts.push_back(stmt);
-    return;
-  }
-
-  // Check if the first statement is an IfThenElse
-  if (const auto *if_node = task->stmts[0].as<IfThenElseNode>()) {
-    // Get the IfThenElse statement
-    Stmt if_stmt = task->stmts[0];
-
-    // Extract then case (always present)
-    Stmt then_case = if_node->then_case;
-
-    // Extract else case (optional)
-    Optional<Stmt> else_case = if_node->else_case;
-
-    // Insert statement into the appropriate case
-    if (at_beginning) {
-      // Insert at beginning of then_case
-      if (const auto *seq_node = then_case.as<SeqStmtNode>()) {
-        // If then_case is a SeqStmt, insert at beginning
-        Array<Stmt> new_seq_stmts;
-        new_seq_stmts.push_back(stmt);
-        for (const auto &s : seq_node->seq) {
-          new_seq_stmts.push_back(s);
-        }
-        then_case = SeqStmt(new_seq_stmts);
-      } else {
-        // If then_case is a single statement, create a SeqStmt
-        then_case = SeqStmt({stmt, then_case});
-      }
-    } else {
-      // Insert at end of then_case
-      if (const auto *seq_node = then_case.as<SeqStmtNode>()) {
-        // If then_case is a SeqStmt, append to end
-        Array<Stmt> new_seq_stmts;
-        for (const auto &s : seq_node->seq) {
-          new_seq_stmts.push_back(s);
-        }
-        new_seq_stmts.push_back(stmt);
-        then_case = SeqStmt(new_seq_stmts);
-      } else {
-        // If then_case is a single statement, create a SeqStmt
-        then_case = SeqStmt({then_case, stmt});
-      }
-    }
-
-    // Create new IfThenElse statement with updated then_case
-    Stmt new_if_stmt;
-    if (else_case.defined()) {
-      new_if_stmt =
-          IfThenElse(if_node->condition, then_case, else_case.value());
-    } else {
-      new_if_stmt = IfThenElse(if_node->condition, then_case);
-    }
-
-    // Replace the old IfThenElse with the new one
-    task->stmts[0] = new_if_stmt;
+// Helper function to insert a statement into PromoteNode's stmts
+static void InsertStatementIntoPromoteNode(ScheduleUnit *task, const Stmt &stmt,
+                                           bool at_beginning = false) {
+  if (at_beginning) {
+    task->before.insert(task->before.begin(), stmt);
   } else {
-    // No IfThenElse, just insert into stmts vector
-    if (at_beginning) {
-      task->stmts.insert(task->stmts.begin(), stmt);
-    } else {
-      task->stmts.push_back(stmt);
-    }
+    task->after.push_back(stmt);
   }
 }
 
@@ -337,7 +272,7 @@ static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
                                next_barrier_id, barrier_buffers, barrier_map,
                                thread_count);
   } else if (node->IsWrapper()) {
-    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    auto wrapper = static_cast<WrapperNode *>(node);
     AnalyzeAndInsertBarriers(wrapper->child.get(), next_barrier_id,
                              barrier_buffers, barrier_map, thread_count);
   } else if (node->IsTask()) {
@@ -355,26 +290,27 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
     return;
 
   // Map from (buffer, warpgroup_id) to task of last access
-  std::unordered_map<Buffer, TaskNode *, ObjectPtrHash, ObjectPtrEqual>
+  std::unordered_map<Buffer, ScheduleUnit *, ObjectPtrHash, ObjectPtrEqual>
       last_access_map[2];
-  std::unordered_map<Buffer, std::pair<TaskNode *, int>, ObjectPtrHash,
+  std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                      ObjectPtrEqual>
       last_write_map;
-  std::unordered_map<Buffer, std::pair<TaskNode *, int>, ObjectPtrHash,
+  std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                      ObjectPtrEqual>
       last_wgmma_map[2];
   int wait_wgmma_id[2] = {}, total_wgmma[2] = {};
 
   // Process tasks in sequence order
-  for (auto &child : seq->children) {
-    if (!child || !child->IsTask()) {
+  for (auto &promote_child : seq->children) {
+    auto task = static_cast<ScheduleUnit *>(promote_child.get());
+    if (task->child->IsSequence() || task->child->IsControl()) {
       // If child is SequenceNode or ControlNode, recursively analyze it
-      AnalyzeAndInsertBarriers(child.get(), next_barrier_id, barrier_buffers,
-                               barrier_map, thread_count);
+      AnalyzeAndInsertBarriers(task->child.get(), next_barrier_id,
+                               barrier_buffers, barrier_map, thread_count);
       continue;
     }
-
-    TaskNode *task = static_cast<TaskNode *>(child.get());
+    if (!task->isInnerTask())
+      continue;
     int wg_id = task->GetWarpgroupId();
     if (wg_id == -1)
       continue;
@@ -394,11 +330,11 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
         Stmt wait_stmt =
             Evaluate(Call(DataType::Handle(), wait_wgmma(),
                           {total_wgmma[wg_id] - wait_wgmma_id[wg_id]}));
-        InsertStatementIntoTaskNode(task, wait_stmt, true);
+        InsertStatementIntoPromoteNode(task, wait_stmt, true);
       } else {
         Buffer buffer = region->buffer;
         bool need_barrier = false;
-        TaskNode *last_access_task;
+        ScheduleUnit *last_access_task;
         int last_wg_id;
         bool is_async = task->UsesTensorCore() || task->UsesTMACore();
         if (!region_access.second) {
@@ -447,13 +383,13 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
 
           // Insert barrier_arrive at the end of last_access_task's statements
           Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-          InsertStatementIntoTaskNode(last_access_task, arrive_stmt, false);
+          InsertStatementIntoPromoteNode(last_access_task, arrive_stmt, false);
 
           // Insert barrier_wait at the beginning of task's statements
           Stmt wait_stmt =
               makeBarrierWait(barrier_load,
                               0); // parity = 0 for non-loop barriers
-          InsertStatementIntoTaskNode(task, wait_stmt, true);
+          InsertStatementIntoPromoteNode(task, wait_stmt, true);
           // Remove from map (as per user instruction)
           if (!region_access.second) {
             auto it = last_write_map.find(buffer);
@@ -519,36 +455,32 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
   PrimExpr loop_step = for_node->step.has_value()
                            ? for_node->step.value()
                            : IntImm(DataType::Int(32), 1);
-  std::vector<TaskNode *> tasks;
-  CollectTaskNodesFromIRStructure(ctrl->child.get(), tasks);
+  bool has_promoted_tasks = ctrl->hasPromote();
 
-  bool has_promoted_tasks = false;
-  for (TaskNode *task : tasks) {
-    if (task->GetPromote()) {
-      has_promoted_tasks = true;
-      break;
-    }
-  }
   // If child is a SequenceNode, we need special handling for
   // promote/non-promote tasks
   if (ctrl->child->IsSequence()) {
-    SequenceNode *seq = static_cast<SequenceNode *>(ctrl->child.get());
+    auto seq = static_cast<SequenceNode *>(ctrl->child.get());
 
     // Separate promoted and non-promoted tasks
-    std::vector<TaskNode *> promoted_tasks;
-    std::vector<TaskNode *> non_promoted_tasks;
+    std::vector<ScheduleUnit *> promoted_tasks;
+    std::vector<ScheduleUnit *> non_promoted_tasks;
 
     // Collect all tasks from the sequence
-    std::vector<TaskNode *> all_tasks;
+    std::vector<ScheduleUnit *> all_tasks;
     for (auto &child : seq->children) {
-      if (child && child->IsTask()) {
-        TaskNode *task = static_cast<TaskNode *>(child.get());
-        all_tasks.push_back(task);
+      auto task = static_cast<ScheduleUnit *>(child.get());
+      if (task->child->IsSequence() || task->child->IsControl()) {
+        // If child is SequenceNode or ControlNode, recursively analyze it
+        AnalyzeAndInsertBarriers(task->child.get(), next_barrier_id,
+                                 barrier_buffers, barrier_map, thread_count);
+        continue;
       }
+      all_tasks.push_back(task);
     }
 
     // Separate by promote flag
-    for (TaskNode *task : all_tasks) {
+    for (ScheduleUnit *task : all_tasks) {
       if (task->GetPromote()) {
         promoted_tasks.push_back(task);
       } else {
@@ -558,29 +490,31 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
 
     // Process in order: promoted tasks first, then non-promoted tasks
     // This matches the software pipelining order
-    std::vector<TaskNode *> ordered_tasks;
+    std::vector<ScheduleUnit *> ordered_tasks;
     ordered_tasks.insert(ordered_tasks.end(), promoted_tasks.begin(),
                          promoted_tasks.end());
     ordered_tasks.insert(ordered_tasks.end(), non_promoted_tasks.begin(),
                          non_promoted_tasks.end());
 
     // Map from (buffer, warpgroup_id) to task
-    std::unordered_map<Buffer, TaskNode *, ObjectPtrHash, ObjectPtrEqual>
+    std::unordered_map<Buffer, ScheduleUnit *, ObjectPtrHash, ObjectPtrEqual>
         last_access_map[2];
     std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>
         last_access_set[2];
-    std::unordered_map<Buffer, std::pair<TaskNode *, int>, ObjectPtrHash,
+    std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                        ObjectPtrEqual>
         last_write_map;
     std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> last_write_set;
-    std::unordered_map<Buffer, std::pair<TaskNode *, int>, ObjectPtrHash,
+    std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                        ObjectPtrEqual>
         last_wgmma_map[2];
     int wait_wgmma_id[2] = {}, total_wgmma[2] = {};
 
     // Process tasks in the specified order
     for (unsigned iter = 0; iter != 2; ++iter) {
-      for (TaskNode *task : ordered_tasks) {
+      for (ScheduleUnit *task : ordered_tasks) {
+        if (!task->isInnerTask())
+          continue;
         int wg_id = task->GetWarpgroupId();
         bool is_promoted = task->GetPromote();
         if (wg_id == -1)
@@ -603,11 +537,11 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             Stmt wait_stmt =
                 Evaluate(Call(DataType::Handle(), wait_wgmma(),
                               {total_wgmma[wg_id] - wait_wgmma_id[wg_id]}));
-            InsertStatementIntoTaskNode(task, wait_stmt, true);
+            InsertStatementIntoPromoteNode(task, wait_stmt, true);
           } else {
             Buffer buffer = region->buffer;
             bool need_barrier = false;
-            TaskNode *last_access_task;
+            ScheduleUnit *last_access_task;
             int last_wg_id;
             bool last_is_promoted;
             if (!region_access.second) {
@@ -666,18 +600,10 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               int barrier_id = next_barrier_id++;
 
               // Calculate parity for barrier wait
-              // parity = indexmod(loop_var - loop_start + promote + 1, 2)
-              // where promote is 1 if the waiting task is promoted, 0 otherwise
-              // The waiting task is 'task' (the reading task)
-              int promote_int = is_promoted ? 1 : 0;
               PrimExpr parity_expr = tvm::indexmod(
-                  loop_var - loop_start +
-                      IntImm(DataType::Int(32), promote_int + iter + 1),
+                  tvm::indexdiv(loop_var - loop_start, loop_step) +
+                      IntImm(DataType::Int(32), iter + 2),
                   2);
-              if (!has_promoted_tasks) {
-                parity_expr = tvm::indexmod(
-                    loop_var - loop_start + IntImm(DataType::Int(32), iter), 2);
-              }
 
               Buffer barrier_buffer = makeBarrierBuffer(
                   thread_count[last_wg_id],
@@ -693,23 +619,15 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               // Insert barrier_arrive at the end of last_access_task's
               // statements
               Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-              InsertStatementIntoTaskNode(last_access_task, arrive_stmt, false);
+              InsertStatementIntoPromoteNode(last_access_task, arrive_stmt,
+                                             false);
 
               // Insert barrier_wait at the beginning of task's statements
               Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
               if (iter == 1) {
-                if (!has_promoted_tasks) {
-                  wait_stmt = IfThenElse(loop_var != loop_start, wait_stmt);
-                } else {
-                  if (promote_int) {
-                    wait_stmt = IfThenElse(loop_var != loop_start, wait_stmt);
-                  } else {
-                    wait_stmt = IfThenElse(loop_var != loop_start + loop_step,
-                                           wait_stmt);
-                  }
-                }
+                wait_stmt = IfThenElse(loop_var != loop_start, wait_stmt);
               }
-              InsertStatementIntoTaskNode(task, wait_stmt, true);
+              InsertStatementIntoPromoteNode(task, wait_stmt, true);
               // Remove from map (as per user instruction)
               if (!region_access.second) {
                 auto it = last_write_map.find(buffer);
@@ -731,32 +649,6 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               }
               bool last_async = last_access_task->UsesTensorCore() ||
                                 last_access_task->UsesTMACore();
-              // if (last_wg_id != wg_id &&
-              //     (last_is_promoted != is_promoted || (is_async &&
-              //     last_async))) {
-              //   if (iter == 1) continue;
-              //   int barrier_id = next_barrier_id++;
-              //   const PrimExpr &arrive_count = thread_count;
-              //   Buffer barrier_free = makeBarrierBuffer(
-              //       arrive_count, "barrier_" + std::to_string(barrier_id),
-              //       barrier_map);
-              //   barrier_buffers.push_back(barrier_free);
-              //   PrimExpr barrier_load = tir::BufferLoad(barrier_free, {0});
-              //   Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-              //   InsertStatementIntoTaskNode(task, arrive_stmt, false);
-              //   int promote_int = last_is_promoted ? 1 : 0;
-              //   PrimExpr parity_expr = tvm::indexmod(
-              //       loop_var - loop_start + IntImm(DataType::Int(32),
-              //       promote_int), 2);
-              //   if (!has_promoted_tasks) {
-              //     parity_expr = tvm::indexmod(loop_var - loop_start + 1, 2);
-              //   }
-              //   Stmt wait_stmt =
-              //       IfThenElse(loop_var != loop_start,
-              //                 makeBarrierWait(barrier_load, parity_expr));
-              //   InsertStatementIntoTaskNode(last_access_task, wait_stmt,
-              //   true);
-              // }
             }
           }
         }
@@ -796,15 +688,14 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
 }
 
 // Helper function to collect all TaskNodes with context information
-void CollectAllTaskNodesWithContext(const IRStructure *node,
-                                    std::vector<TaskNodeWithContext> &all_tasks,
-                                    ControlNode *current_control_node) {
+void CollectAllTaskNodesWithContext(
+    IRStructure *node, std::vector<TaskNodeWithContext> &all_tasks,
+    ControlNode *current_control_node = nullptr) {
   if (!node)
     return;
 
   if (node->IsTask()) {
-    TaskNode *task =
-        const_cast<TaskNode *>(static_cast<const TaskNode *>(node));
+    auto task = static_cast<TaskNode *>(node);
     TaskNodeWithContext task_ctx;
     task_ctx.task = task;
     task_ctx.control_node = current_control_node;
@@ -826,21 +717,28 @@ void CollectAllTaskNodesWithContext(const IRStructure *node,
 
     all_tasks.push_back(task_ctx);
   } else if (node->IsSequence()) {
-    const SequenceNode *seq = static_cast<const SequenceNode *>(node);
+    auto seq = static_cast<const SequenceNode *>(node);
     for (const auto &child : seq->children) {
       CollectAllTaskNodesWithContext(child.get(), all_tasks,
                                      current_control_node);
     }
   } else if (node->IsControl()) {
-    const ControlNode *control = static_cast<const ControlNode *>(node);
+    auto control = static_cast<const ControlNode *>(node);
     // When entering a control node, update the current control context
     CollectAllTaskNodesWithContext(control->child.get(), all_tasks,
                                    const_cast<ControlNode *>(control));
   } else if (node->IsWrapper()) {
-    const WrapperNode *wrapper = static_cast<const WrapperNode *>(node);
+    auto wrapper = static_cast<const WrapperNode *>(node);
     // Wrapper nodes don't change control context, just recurse into child
     CollectAllTaskNodesWithContext(wrapper->child.get(), all_tasks,
                                    current_control_node);
+  } else if (node->IsScheduleUnit()) {
+    auto promote = static_cast<const ScheduleUnit *>(node);
+    // Promote nodes don't change control context, just recurse into child
+    CollectAllTaskNodesWithContext(promote->child.get(), all_tasks,
+                                   current_control_node);
+  } else {
+    LOG(FATAL);
   }
 }
 
@@ -856,23 +754,28 @@ void CollectPrefixTasks(IRStructure *node,
     return;
 
   if (node->IsSequence()) {
-    SequenceNode *seq = static_cast<SequenceNode *>(node);
+    auto seq = static_cast<SequenceNode *>(node);
     for (auto &child : seq->children) {
       CollectPrefixTasks(child.get(), prefix_tasks, prefix_valid);
     }
   } else if (node->IsControl()) {
-    ControlNode *ctrl = static_cast<ControlNode *>(node);
+    auto ctrl = static_cast<ControlNode *>(node);
     prefix_valid = false;
   } else if (node->IsWrapper()) {
-    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    auto wrapper = static_cast<WrapperNode *>(node);
     CollectPrefixTasks(wrapper->child.get(), prefix_tasks, prefix_valid);
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<ScheduleUnit *>(node);
+    CollectPrefixTasks(unit->child.get(), prefix_tasks, prefix_valid);
   } else if (node->IsTask()) {
     if (CountRegisterRegions(node) == 0) {
-      TaskNode *task = static_cast<TaskNode *>(node);
+      auto task = static_cast<TaskNode *>(node);
       prefix_tasks.insert(task);
     } else {
       prefix_valid = false;
     }
+  } else {
+    LOG(FATAL);
   }
 }
 
@@ -1043,8 +946,6 @@ std::unique_ptr<IRStructure> TaskNode::Clone() const {
   new_task->SetII(GetII());
   // Copy start time
   new_task->SetStartTime(GetStartTime());
-  // Copy promote flag
-  new_task->SetPromote(GetPromote());
   // Copy warpgroup id
   new_task->SetWarpgroupId(GetWarpgroupId());
   return new_task;
@@ -1078,6 +979,20 @@ std::unique_ptr<IRStructure> WrapperNode::Clone() const {
   return new_wrapper;
 }
 
+std::unique_ptr<IRStructure> ScheduleUnit::Clone() const {
+  auto new_unit = std::make_unique<ScheduleUnit>();
+  // Copy var and value (TVM objects with reference counting)
+  new_unit->promote = promote;
+  // Clone child if exists
+  if (child) {
+    new_unit->child = child->Clone();
+  }
+  // Copy latency and II
+  new_unit->SetLatency(GetLatency());
+  new_unit->SetII(GetII());
+  return new_unit;
+}
+
 // Global warpgroup id assignment - should be called from the top level
 // Tasks that use the same register region must have the same warpgroup id
 // Goal: balance weighted latency between two warpgroups (0 and 1)
@@ -1087,6 +1002,7 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
   if (!root) {
     LOG(FATAL) << "Empty root";
   }
+  // PrintIRStructure(root);
 
   // Step 1: Collect all TaskNodes with context information
   std::vector<TaskNodeWithContext> all_tasks;
@@ -1240,8 +1156,6 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
 class ScheduleUnitBuilder {
 public:
   bool Build(IRStructure *root) {
-    scheduled_control_nodes_.clear();
-
     ScheduleRecursive(root);
 
     // Global warpgroup id assignment from the top level
@@ -1260,7 +1174,7 @@ public:
       if (n == 1) {
         // For TaskNode, set start time
         if (nodes[0]->IsTask()) {
-          TaskNode *task = static_cast<TaskNode *>(nodes[0]);
+          auto task = static_cast<TaskNode *>(nodes[0]);
           task->SetStartTime(0);
         }
       }
@@ -1370,7 +1284,7 @@ public:
       for (size_t i = 0; i < n; ++i) {
         // Only TaskNode has SetStartTime method
         if (nodes[i]->IsTask()) {
-          TaskNode *task = static_cast<TaskNode *>(nodes[i]);
+          auto task = static_cast<TaskNode *>(nodes[i]);
           task->SetStartTime(start_times[i]);
         }
       }
@@ -1414,323 +1328,218 @@ public:
 
   // Z3-based scheduler for loops that calls Python implementation via FFI
   // with distance-aware dependencies
-  std::pair<std::vector<IRStructure *>, int64_t>
-  Z3SchedulePythonLoop(const std::vector<IRStructure *> &nodes) {
+  void Z3SchedulePythonLoop(ControlNode *ctrl) {
+    auto seq_body = static_cast<SequenceNode *>(ctrl->child.get());
+    std::vector<IRStructure *> nodes;
+    nodes.reserve(seq_body->children.size());
+    for (const auto &child : seq_body->children) {
+      nodes.push_back(child.get());
+    }
+
     size_t n = nodes.size();
     int64_t ii = 1; // default II
-    if (n <= 1) {
-      if (n == 1) {
-        // Only TaskNode has SetStartTime method
-        if (nodes[0]->IsTask()) {
-          TaskNode *task = static_cast<TaskNode *>(nodes[0]);
-          task->SetStartTime(0);
-        }
-      }
-      return std::make_pair(nodes, ii);
+
+    static std::optional<tvm::ffi::Function> z3_schedule_loop_func =
+        tvm::ffi::Function::GetGlobal("tl.transform.z3_schedule_loop_python");
+    if (!z3_schedule_loop_func.has_value()) {
+      LOG(FATAL) << "Python Z3 loop scheduler not registered, falling back "
+                    "to topological sort";
     }
 
-    try {
-      // Get the Python-registered function using ffi::Function::GetGlobal
-      static std::optional<tvm::ffi::Function> z3_schedule_loop_func =
-          tvm::ffi::Function::GetGlobal("tl.transform.z3_schedule_loop_python");
-      if (!z3_schedule_loop_func.has_value()) {
-        LOG(WARNING) << "Python Z3 loop scheduler not registered, falling back "
-                        "to topological sort";
-        return std::make_pair(nodes, ii);
-      }
+    // Prepare input data
+    std::vector<int64_t> latencies;
+    std::vector<int64_t> iis;
+    std::vector<int64_t> resource_flags;
+    std::vector<std::tuple<int64_t, int64_t, int64_t>>
+        data_deps; // (i, j, distance)
+    std::vector<std::pair<int64_t, int64_t>> resource_deps;
 
-      // Prepare input data
-      std::vector<int64_t> latencies;
-      std::vector<int64_t> iis;
-      std::vector<int64_t> resource_flags;
-      std::vector<std::tuple<int64_t, int64_t, int64_t>>
-          data_deps; // (i, j, distance)
-      std::vector<std::pair<int64_t, int64_t>> resource_deps;
+    latencies.reserve(n);
+    iis.reserve(n);
+    resource_flags.reserve(n);
 
-      latencies.reserve(n);
-      iis.reserve(n);
-      resource_flags.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+      const IRStructure *node = nodes[i];
+      latencies.push_back(node->GetLatency());
+      iis.push_back(node->GetII());
 
-      for (size_t i = 0; i < n; ++i) {
-        const IRStructure *node = nodes[i];
-        latencies.push_back(node->GetLatency());
-        iis.push_back(node->GetII());
-
-        // Encode resource flags as bitmask
-        int64_t flags = 0;
-        if (node->UsesCUDACore())
-          flags |= 1;
-        if (node->UsesTMACore())
-          flags |= 2;
-        if (node->UsesTensorCore())
-          flags |= 4;
-        resource_flags.push_back(flags);
-      }
-
-      // Collect data dependencies with distance
-      // distance = 0 if i < j (same iteration), distance = 1 if i > j (next
-      // iteration)
-      for (size_t i = 0; i < n; ++i) {
-        for (size_t j = 0; j < n; ++j) {
-          if (i == j)
-            continue; // Skip self-dependency
-          if (HasDependency(nodes[i], nodes[j])) {
-            // distance = 0 if i < j, 1 if i > j
-            int64_t distance = (i < j) ? 0 : 1;
-            data_deps.emplace_back(i, j, distance);
-          }
-        }
-      }
-
-      // Collect resource dependencies
-      for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i + 1; j < n; ++j) {
-          if (HasResourceDependency(nodes[i], nodes[j])) {
-            resource_deps.emplace_back(i, j);
-          }
-        }
-      }
-
-      // Convert vectors to TVM containers
-      ffi::Array<int64_t> tvm_latencies;
-      ffi::Array<int64_t> tvm_iis;
-      ffi::Array<int64_t> tvm_resource_flags;
-      ffi::Array<ffi::Array<int64_t>>
-          tvm_data_deps; // each element is [i, j, distance]
-      ffi::Array<ffi::Array<int64_t>> tvm_resource_deps;
-
-      for (auto val : latencies) {
-        tvm_latencies.push_back(val);
-      }
-      for (auto val : iis) {
-        tvm_iis.push_back(val);
-      }
-      for (auto val : resource_flags) {
-        tvm_resource_flags.push_back(val);
-      }
-      for (const auto &dep : data_deps) {
-        ffi::Array<int64_t> triple;
-        triple.push_back(std::get<0>(dep));
-        triple.push_back(std::get<1>(dep));
-        triple.push_back(std::get<2>(dep));
-        tvm_data_deps.push_back(triple);
-      }
-      for (const auto &dep : resource_deps) {
-        ffi::Array<int64_t> pair;
-        pair.push_back(dep.first);
-        pair.push_back(dep.second);
-        tvm_resource_deps.push_back(pair);
-      }
-
-      // Extract results
-      // Python function returns (start_times, promotes) as a tuple of two
-      // arrays
-      auto return_val =
-          z3_schedule_loop_func
-              .value()(tvm_latencies, tvm_iis, tvm_resource_flags,
-                       tvm_data_deps, tvm_resource_deps)
-              .cast<
-                  ffi::Tuple<ffi::Array<int64_t>, ffi::Array<bool>, int64_t>>();
-
-      ffi::Array<int64_t> start_times = return_val.get<0>();
-      ffi::Array<bool> promotes = return_val.get<1>();
-      ii = return_val.get<2>();
-
-      if (start_times.size() != n || promotes.size() != n) {
-        LOG(WARNING) << "Python Z3 loop scheduler returned invalid results "
-                        "(size mismatch), falling back to topological sort";
-        return std::make_pair(nodes, ii);
-      }
-
-      // Apply start times and promote flags to nodes
-      size_t num_promoted = 0;
-      for (size_t i = 0; i < n; ++i) {
-        // Only TaskNode has SetStartTime and SetPromote methods
-        if (nodes[i]->IsTask()) {
-          TaskNode *task = static_cast<TaskNode *>(nodes[i]);
-          task->SetStartTime(start_times[i]);
-          bool promote = promotes[i] != 0; // Convert int to bool
-          task->SetPromote(promote);
-          if (promote) {
-            num_promoted++;
-          }
-        }
-      }
-      if (num_promoted > 0) {
-        // Promote transformation will be applied in IRStructureRewriter
-        // For promoted tasks, they should be executed in previous iteration
-        // Loop bounds will be extended by step (not II) as per user requirement
-        // Example transformation:
-        // for i = start to end:
-        //   Task0 (not promoted)
-        //   Task1 (promoted)
-        // =>
-        // for i = start to end+step:
-        //   if i > start: Task1 with index i-step
-        //   if i < end+step: Task0 with index i
-      }
-
-      // Create sorted task list based on start_time (and original index as
-      // tie-breaker)
-      std::vector<std::pair<int64_t, size_t>> start_time_with_idx;
-      start_time_with_idx.reserve(n);
-      for (size_t i = 0; i < n; ++i) {
-        start_time_with_idx.emplace_back(
-            start_times[i] + promotes[i] * return_val.get<2>(), i);
-      }
-
-      // Sort by start_time, then by original index
-      std::sort(start_time_with_idx.begin(), start_time_with_idx.end(),
-                [](const std::pair<int64_t, size_t> &a,
-                   const std::pair<int64_t, size_t> &b) {
-                  if (a.first != b.first)
-                    return a.first < b.first;
-                  return a.second < b.second;
-                });
-
-      // Create sorted node list
-      std::vector<IRStructure *> sorted_nodes;
-      sorted_nodes.reserve(n);
-      for (const auto &p : start_time_with_idx) {
-        sorted_nodes.push_back(nodes[p.second]);
-      }
-
-      return std::make_pair(sorted_nodes, ii);
-
-    } catch (const std::exception &e) {
-      LOG(WARNING) << "Python Z3 loop scheduler failed with exception: "
-                   << e.what() << ", falling back to topological sort";
-      return std::make_pair(nodes, ii);
-    } catch (...) {
-      LOG(WARNING) << "Python Z3 loop scheduler failed with unknown exception, "
-                      "falling back to topological sort";
-      return std::make_pair(nodes, ii);
-    }
-  }
-
-  // Apply promote transformation for software pipelining
-  // This transforms loops with promoted tasks according to the pattern:
-  // Original: for i = start to end: Task0 (promoted), Task1 (non-promoted)
-  // Transformed: for i = start to end+step:
-  //   if i > start: Task1 with i-step (non-promoted, adjusted index)
-  //   if i < end+step: Task0 with i (promoted, original index)
-  void ApplyPromoteTransformation(std::vector<TaskNode *> &tasks,
-                                  ControlNode *control_node) {
-    if (tasks.empty() || !control_node) {
-      return;
+      // Encode resource flags as bitmask
+      int64_t flags = 0;
+      if (node->UsesCUDACore())
+        flags |= 1;
+      if (node->UsesTMACore())
+        flags |= 2;
+      if (node->UsesTensorCore())
+        flags |= 4;
+      resource_flags.push_back(flags);
     }
 
-    // Count promoted tasks
+    // Collect data dependencies with distance
+    // distance = 0 if i < j (same iteration), distance = 1 if i > j (next
+    // iteration)
+    for (size_t i = 0; i < n; ++i) {
+      for (size_t j = 0; j < n; ++j) {
+        if (i == j)
+          continue; // Skip self-dependency
+        if (HasDependency(nodes[i], nodes[j])) {
+          // distance = 0 if i < j, 1 if i > j
+          int64_t distance = (i < j) ? 0 : 1;
+          data_deps.emplace_back(i, j, distance);
+        }
+      }
+    }
+
+    // Collect resource dependencies
+    for (size_t i = 0; i < n; ++i) {
+      for (size_t j = i + 1; j < n; ++j) {
+        if (HasResourceDependency(nodes[i], nodes[j])) {
+          resource_deps.emplace_back(i, j);
+        }
+      }
+    }
+
+    // Convert vectors to TVM containers
+    ffi::Array<int64_t> tvm_latencies;
+    ffi::Array<int64_t> tvm_iis;
+    ffi::Array<int64_t> tvm_resource_flags;
+    ffi::Array<ffi::Array<int64_t>>
+        tvm_data_deps; // each element is [i, j, distance]
+    ffi::Array<ffi::Array<int64_t>> tvm_resource_deps;
+
+    for (auto val : latencies) {
+      tvm_latencies.push_back(val);
+    }
+    for (auto val : iis) {
+      tvm_iis.push_back(val);
+    }
+    for (auto val : resource_flags) {
+      tvm_resource_flags.push_back(val);
+    }
+    for (const auto &dep : data_deps) {
+      ffi::Array<int64_t> triple;
+      triple.push_back(std::get<0>(dep));
+      triple.push_back(std::get<1>(dep));
+      triple.push_back(std::get<2>(dep));
+      tvm_data_deps.push_back(triple);
+    }
+    for (const auto &dep : resource_deps) {
+      ffi::Array<int64_t> pair;
+      pair.push_back(dep.first);
+      pair.push_back(dep.second);
+      tvm_resource_deps.push_back(pair);
+    }
+
+    // Extract results
+    // Python function returns (start_times, promotes) as a tuple of two
+    // arrays
+    auto return_val =
+        z3_schedule_loop_func
+            .value()(tvm_latencies, tvm_iis, tvm_resource_flags, tvm_data_deps,
+                     tvm_resource_deps)
+            .cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<bool>, int64_t>>();
+
+    ffi::Array<int64_t> start_times = return_val.get<0>();
+    ffi::Array<bool> promotes = return_val.get<1>();
+    ii = return_val.get<2>();
+
+    // Apply start times and promote flags to nodes
+    std::map<IRStructure *, bool> promote_map;
     size_t num_promoted = 0;
-    std::vector<TaskNode *> promoted_tasks;
-    std::vector<TaskNode *> non_promoted_tasks;
-
-    for (TaskNode *task : tasks) {
-      if (task->GetPromote()) {
+    for (size_t i = 0; i < n; ++i) {
+      nodes[i]->SetStartTime(start_times[i]);
+      bool promote = promotes[i] != 0; // Convert int to bool
+      promote_map[nodes[i]] = promote;
+      if (promote) {
         num_promoted++;
-        promoted_tasks.push_back(task);
-      } else {
-        non_promoted_tasks.push_back(task);
+      }
+    }
+    // Promote transformation will be applied in IRStructureRewriter
+    // For promoted tasks, they should be executed in previous iteration
+    // Loop bounds will be extended by step (not II) as per user requirement
+    // Example transformation:
+    // for i = start to end:
+    //   Task0 (not promoted)
+    //   Task1 (promoted)
+    // =>
+    // for i = start to end+step:
+    //   if i > start: Task1 with index i-step
+    //   if i < end+step: Task0 with index i
+
+    // Create sorted task list based on start_time (and original index as
+    // tie-breaker)
+    std::vector<std::pair<int64_t, size_t>> start_time_with_idx;
+    start_time_with_idx.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+      start_time_with_idx.emplace_back(
+          start_times[i] + promotes[i] * return_val.get<2>(), i);
+    }
+
+    // Sort by start_time, then by original index
+    std::sort(start_time_with_idx.begin(), start_time_with_idx.end(),
+              [](const std::pair<int64_t, size_t> &a,
+                 const std::pair<int64_t, size_t> &b) {
+                if (a.first != b.first)
+                  return a.first < b.first;
+                return a.second < b.second;
+              });
+
+    // Create sorted node list
+    std::vector<IRStructure *> sorted_nodes;
+    sorted_nodes.reserve(n);
+    for (const auto &p : start_time_with_idx) {
+      sorted_nodes.push_back(nodes[p.second]);
+    }
+
+    // Reorder children if order changed
+    bool order_changed = false;
+    for (size_t i = 0; i < sorted_nodes.size(); ++i) {
+      if (sorted_nodes[i] != nodes[i]) {
+        order_changed = true;
+        break;
       }
     }
 
-    if (num_promoted == 0) {
-      return;
-    }
-
-    // Get loop step from control_node->control
-    // ForNode has a 'step' member (ffi::Optional<PrimExpr>, default is 1)
-    const ForNode *for_node = control_node->control.get();
-    PrimExpr loop_step_expr = for_node->step.has_value()
-                                  ? for_node->step.value()
-                                  : IntImm(DataType::Int(32), 1);
-
-    // Get step expression (no simplification)
-
-    // Try to get constant step value for logging
-    int64_t loop_step_value = 1;
-    if (const auto *int_imm = loop_step_expr.as<IntImmNode>()) {
-      loop_step_value = int_imm->value;
-    } else {
-      loop_step_value = 1;
-    }
-
-    // Get loop bounds from control_node->control
-    PrimExpr loop_var = for_node->loop_var;
-    PrimExpr loop_start = for_node->min;
-    PrimExpr loop_extent = for_node->extent;
-
-    // Calculate loop end
-    PrimExpr loop_end = loop_start + loop_extent;
-
-    // Create new loop with extended bounds: end = loop_end + loop_step_expr
-    PrimExpr new_loop_end = loop_end + loop_step_expr;
-
-    // Actually apply the promote transformation:
-    // 1. Update ControlNode's loop bounds: extent = loop_extent +
-    // loop_step_expr
-    // 2. For each promoted task: add condition if (loop_var < loop_end)
-    // 3. For each non-promoted task: add condition if (loop_var > loop_start)
-    // and substitute loop_var with (loop_var - loop_step_expr)
-
-    // 1. Update ControlNode's loop bounds
-    PrimExpr new_loop_extent = loop_extent + loop_step_expr;
-    control_node->control.CopyOnWrite()->extent = new_loop_extent;
-
-    // 2. Process promoted tasks
-    for (TaskNode *task : promoted_tasks) {
-      if (task->stmts.empty()) {
-        continue;
+    if (order_changed) {
+      std::unordered_map<IRStructure *, size_t> node_to_index;
+      for (size_t i = 0; i < nodes.size(); ++i) {
+        node_to_index[nodes[i]] = i;
       }
 
-      // Combine multiple statements into SeqStmt if needed
-      Stmt task_body;
-      if (task->stmts.size() == 1) {
-        task_body = task->stmts[0];
-      } else {
-        task_body = SeqStmt(task->stmts);
+      std::vector<std::unique_ptr<IRStructure>> reordered_children;
+      reordered_children.reserve(sorted_nodes.size());
+      for (IRStructure *sorted_node : sorted_nodes) {
+        auto it = node_to_index.find(sorted_node);
+        if (it == node_to_index.end()) {
+          LOG(FATAL) << "[ScheduleRecursive] IRStructure not found in "
+                        "children mapping";
+        }
+        reordered_children.push_back(std::move(seq_body->children[it->second]));
       }
-
-      // Create condition: loop_var < loop_end (original loop boundary)
-      PrimExpr condition = loop_var < loop_end;
-
-      // Create conditional statement
-      Stmt conditional_stmt = IfThenElse(condition, task_body);
-
-      // Replace task statements with the conditional statement
-      task->stmts.clear();
-      task->stmts.push_back(conditional_stmt);
+      seq_body->children = std::move(reordered_children);
     }
 
-    // 3. Process non-promoted tasks
-    for (TaskNode *task : non_promoted_tasks) {
-      if (task->stmts.empty()) {
-        continue;
-      }
-
-      // Combine multiple statements into SeqStmt if needed
-      Stmt task_body;
-      if (task->stmts.size() == 1) {
-        task_body = task->stmts[0];
-      } else {
-        task_body = SeqStmt(task->stmts);
-      }
-
-      // Apply variable substitution: loop_var -> loop_var - loop_step_expr
-      Map<Var, PrimExpr> substitution;
-      substitution.Set(for_node->loop_var, loop_var - loop_step_expr);
-      task_body = Substitute(task_body, substitution);
-
-      // Create condition: loop_var > loop_start (i.e., not in first iteration)
-      PrimExpr condition = loop_var > loop_start;
-
-      // Create conditional statement
-      Stmt conditional_stmt = IfThenElse(condition, task_body);
-
-      // Replace task statements with the conditional statement
-      task->stmts.clear();
-      task->stmts.push_back(conditional_stmt);
+    for (auto &node : seq_body->children) {
+      auto promote_node = std::make_unique<ScheduleUnit>();
+      promote_node->promote = promote_map[node.get()];
+      promote_node->child = std::move(node);
+      node = std::move(promote_node);
     }
+
+    if (num_promoted > 0) {
+      ctrl->SetPromote(true);
+    }
+
+    // Estimate overall latency: II * tripcount
+    // Get tripcount from For loop extent
+    int64_t tripcount = 100; // default if not constant
+    if (const auto *extent_int = ctrl->control->extent.as<IntImmNode>()) {
+      tripcount = extent_int->value;
+    }
+    int64_t overall_latency = ii * tripcount;
+
+    // Set II and latency on the ControlNode (which delegates to child)
+    ctrl->SetII(overall_latency);
+    ctrl->SetLatency(overall_latency);
   }
 
   // Set thread index variable for warpgroup partition
@@ -1738,9 +1547,6 @@ public:
 
 private:
   IterVar thread_var_; // Thread index variable for warpgroup partition
-  std::unordered_set<ControlNode *>
-      scheduled_control_nodes_; // Track already scheduled ControlNodes to avoid
-                                // duplicate scheduling
 
   // Check if two regions refer to the same buffer
   bool SameBuffer(const BufferRegion &a, const BufferRegion &b) const {
@@ -1813,157 +1619,6 @@ private:
 
     return false;
   }
-
-  // Helper function to recursively schedule ControlNode internals
-  void ScheduleControlNodeRecursive(ControlNode *ctrl) {
-    if (!ctrl || !ctrl->child)
-      return;
-
-    // Check if this ControlNode has already been scheduled
-    if (scheduled_control_nodes_.find(ctrl) != scheduled_control_nodes_.end()) {
-      return;
-    }
-    // Mark as scheduled
-    scheduled_control_nodes_.insert(ctrl);
-
-    // First, recursively schedule any nested ControlNodes inside this
-    // ControlNode If child is a SequenceNode, process its children recursively
-    if (ctrl->child->IsSequence()) {
-      SequenceNode *seq = static_cast<SequenceNode *>(ctrl->child.get());
-      int control_child_count = 0;
-      for (auto &child : seq->children) {
-        if (child && child->IsControl()) {
-          control_child_count++;
-          ScheduleControlNodeRecursive(static_cast<ControlNode *>(child.get()));
-        }
-      }
-    } else if (ctrl->child->IsControl()) {
-      // Child is itself a ControlNode (nested loop)
-      ScheduleControlNodeRecursive(
-          static_cast<ControlNode *>(ctrl->child.get()));
-    } else {
-    }
-
-    // Now schedule the direct children of this ControlNode
-    // Collect direct child nodes (not recursively)
-    std::vector<IRStructure *> direct_children;
-    if (ctrl->child->IsSequence()) {
-      SequenceNode *seq = static_cast<SequenceNode *>(ctrl->child.get());
-      for (auto &child : seq->children) {
-        if (child) {
-          direct_children.push_back(child.get());
-        }
-      }
-    } else {
-      // Child is a single node (TaskNode or ControlNode)
-      direct_children.push_back(ctrl->child.get());
-    }
-
-    if (direct_children.size() <= 1) {
-      // No need to schedule if only one or zero direct children
-      // Still need to check for promote transformation
-      CheckAndApplyPromoteTransformation(ctrl);
-      return;
-    }
-
-    // Schedule the direct children using loop-aware scheduler
-    auto result = Z3SchedulePythonLoop(direct_children);
-    std::vector<IRStructure *> sorted_nodes = result.first;
-    int64_t ii = result.second;
-
-    // Apply promote transformation if any tasks are marked for promotion
-    CheckAndApplyPromoteTransformation(ctrl);
-
-    // Compute overall latency: II * tripcount
-    int64_t tripcount = 100; // default if not constant
-    if (auto extent_int = ctrl->control.get()->extent.as<IntImm>()) {
-      tripcount = extent_int.value()->value;
-    }
-    int64_t overall_latency = ii * tripcount;
-
-    // Apply the scheduling result by reordering children if child is a
-    // SequenceNode
-    if (ctrl->child->IsSequence()) {
-      SequenceNode *seq = static_cast<SequenceNode *>(ctrl->child.get());
-
-      // Check if order actually changed
-      bool order_changed = false;
-      for (size_t i = 0; i < sorted_nodes.size(); ++i) {
-        if (sorted_nodes[i] != direct_children[i]) {
-          order_changed = true;
-          break;
-        }
-      }
-
-      if (order_changed) {
-        // Create a mapping from IRStructure pointer to its index in
-        // seq->children
-        std::unordered_map<IRStructure *, size_t> node_to_old_index;
-        for (size_t i = 0; i < seq->children.size(); ++i) {
-          IRStructure *child_ptr = seq->children[i].get();
-          node_to_old_index[child_ptr] = i;
-        }
-
-        // Reorder seq->children according to sorted_nodes
-        std::vector<std::unique_ptr<IRStructure>> reordered_children;
-        reordered_children.reserve(seq->children.size());
-
-        for (IRStructure *node : sorted_nodes) {
-          auto it = node_to_old_index.find(node);
-          if (it == node_to_old_index.end()) {
-            LOG(FATAL) << "IRStructure not found in SequenceNode children";
-          }
-          size_t old_idx = it->second;
-          reordered_children.push_back(std::move(seq->children[old_idx]));
-        }
-
-        // Replace seq->children with reordered children
-        seq->children = std::move(reordered_children);
-
-        // For nested scheduling: encapsulate scheduled children as a single
-        // SequenceNode This allows the scheduled unit to be treated as a whole
-        // in outer scheduling
-        if (sorted_nodes.size() > 1) {
-
-          // Create a new SequenceNode
-          auto new_seq_node = std::make_unique<SequenceNode>();
-
-          // Move all children into the new SequenceNode
-          for (auto &child : seq->children) {
-            new_seq_node->children.push_back(std::move(child));
-          }
-
-          // Replace the original SequenceNode with the new encapsulated one
-          // Note: seq is a pointer to ctrl->child, which is a unique_ptr
-          // We need to replace ctrl->child with new_seq_node
-          ctrl->child = std::move(new_seq_node);
-        }
-      }
-    }
-  }
-
-  // Helper to check and apply promote transformation for a ControlNode
-  void CheckAndApplyPromoteTransformation(ControlNode *ctrl) {
-    if (!ctrl || !ctrl->child)
-      return;
-
-    // Collect all TaskNodes inside the ControlNode (recursively) for promote
-    // check
-    std::vector<TaskNode *> tasks;
-    CollectTaskNodesFromIRStructure(ctrl->child.get(), tasks);
-
-    bool has_promoted_tasks = false;
-    for (TaskNode *task : tasks) {
-      if (task->GetPromote()) {
-        has_promoted_tasks = true;
-        break;
-      }
-    }
-
-    if (has_promoted_tasks) {
-      ApplyPromoteTransformation(tasks, ctrl);
-    }
-  }
 };
 
 // Implementation of ScheduleRecursive function
@@ -1975,7 +1630,7 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
     // TaskNode: no further scheduling needed
     return;
   } else if (node->IsSequence()) {
-    SequenceNode *seq = static_cast<SequenceNode *>(node);
+    auto seq = static_cast<SequenceNode *>(node);
 
     // First, recursively schedule all children
     for (size_t i = 0; i < seq->children.size(); ++i) {
@@ -1989,132 +1644,66 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
       child_nodes.push_back(child.get());
     }
 
-    // Only schedule if there are multiple nodes
-    if (child_nodes.size() > 1) {
-      std::vector<IRStructure *> sorted_nodes;
-      sorted_nodes = Z3SchedulePython(child_nodes);
+    std::vector<IRStructure *> sorted_nodes;
+    sorted_nodes = Z3SchedulePython(child_nodes);
 
-      // Check if order changed
-      bool order_changed = false;
-      for (size_t i = 0; i < sorted_nodes.size(); ++i) {
-        if (sorted_nodes[i] != child_nodes[i]) {
-          order_changed = true;
-          break;
-        }
+    // Check if order changed
+    bool order_changed = false;
+    for (size_t i = 0; i < sorted_nodes.size(); ++i) {
+      if (sorted_nodes[i] != child_nodes[i]) {
+        order_changed = true;
+        break;
       }
-
-      if (order_changed) {
-        // Create mapping from IRStructure pointer to child index
-        std::unordered_map<IRStructure *, size_t> node_to_index;
-        for (size_t i = 0; i < child_nodes.size(); ++i) {
-          node_to_index[child_nodes[i]] = i;
-        }
-
-        // Reorder children according to sorted_nodes
-        std::vector<std::unique_ptr<IRStructure>> reordered_children;
-        reordered_children.reserve(sorted_nodes.size());
-
-        for (IRStructure *sorted_node : sorted_nodes) {
-          auto it = node_to_index.find(sorted_node);
-          if (it == node_to_index.end()) {
-            LOG(FATAL) << "[ScheduleRecursive] IRStructure not found in "
-                          "children mapping";
-          }
-          size_t old_idx = it->second;
-          reordered_children.push_back(std::move(seq->children[old_idx]));
-        }
-
-        // Move reordered children back
-        seq->children = std::move(reordered_children);
-      } else {
-      }
-    } else {
     }
 
+    if (order_changed) {
+      // Create mapping from IRStructure pointer to child index
+      std::unordered_map<IRStructure *, size_t> node_to_index;
+      for (size_t i = 0; i < child_nodes.size(); ++i) {
+        node_to_index[child_nodes[i]] = i;
+      }
+
+      // Reorder children according to sorted_nodes
+      std::vector<std::unique_ptr<IRStructure>> reordered_children;
+      reordered_children.reserve(sorted_nodes.size());
+
+      for (IRStructure *sorted_node : sorted_nodes) {
+        auto it = node_to_index.find(sorted_node);
+        if (it == node_to_index.end()) {
+          LOG(FATAL) << "[ScheduleRecursive] IRStructure not found in "
+                        "children mapping";
+        }
+        size_t old_idx = it->second;
+        reordered_children.push_back(std::move(seq->children[old_idx]));
+      }
+
+      // Move reordered children back
+      seq->children = std::move(reordered_children);
+    }
+    for (auto &node : seq->children) {
+      auto promote_node = std::make_unique<ScheduleUnit>();
+      promote_node->promote = -1;
+      promote_node->child = std::move(node);
+      node = std::move(promote_node);
+    }
     return;
   } else if (node->IsControl()) {
-    ControlNode *ctrl = static_cast<ControlNode *>(node);
-
-    // First, recursively schedule the body (child) inside the control node
-    if (ctrl->child && !ctrl->child->IsSequence()) {
-      ScheduleRecursive(ctrl->child.get());
-    }
+    auto ctrl = static_cast<ControlNode *>(node);
 
     // Now schedule the ControlNode's internal tasks (if any) as a unit
     // The body should now be a SequenceNode containing the tasks
     if (ctrl->child && ctrl->child->IsSequence()) {
-      SequenceNode *seq_body = static_cast<SequenceNode *>(ctrl->child.get());
-      if (seq_body->children.size() > 1) {
-        // Collect child nodes
-        std::vector<IRStructure *> body_nodes;
-        body_nodes.reserve(seq_body->children.size());
-        for (const auto &child : seq_body->children) {
-          body_nodes.push_back(child.get());
-        }
-
-        // Call loop-aware scheduler
-        auto result = Z3SchedulePythonLoop(body_nodes);
-        std::vector<IRStructure *> sorted_nodes = result.first;
-        int64_t ii = result.second;
-
-        // Reorder children if order changed
-        bool order_changed = false;
-        for (size_t i = 0; i < sorted_nodes.size(); ++i) {
-          if (sorted_nodes[i] != body_nodes[i]) {
-            order_changed = true;
-            break;
-          }
-        }
-
-        if (order_changed) {
-          std::unordered_map<IRStructure *, size_t> node_to_index;
-          for (size_t i = 0; i < body_nodes.size(); ++i) {
-            node_to_index[body_nodes[i]] = i;
-          }
-
-          std::vector<std::unique_ptr<IRStructure>> reordered_children;
-          reordered_children.reserve(sorted_nodes.size());
-          for (IRStructure *sorted_node : sorted_nodes) {
-            auto it = node_to_index.find(sorted_node);
-            if (it == node_to_index.end()) {
-              LOG(FATAL) << "[ScheduleRecursive] IRStructure not found in "
-                            "children mapping";
-            }
-            reordered_children.push_back(
-                std::move(seq_body->children[it->second]));
-          }
-          seq_body->children = std::move(reordered_children);
-        }
-
-        // Apply promote transformation if any tasks are marked for promotion
-        CheckAndApplyPromoteTransformation(ctrl);
-
-        // Estimate overall latency: II * tripcount
-        // Get tripcount from For loop extent
-        int64_t tripcount = 100; // default if not constant
-        if (const auto *extent_int = ctrl->control->extent.as<IntImmNode>()) {
-          tripcount = extent_int->value;
-        }
-        int64_t overall_latency = ii * tripcount;
-
-        // Set II and latency on the ControlNode (which delegates to child)
-        ctrl->SetII(overall_latency);
-        ctrl->SetLatency(overall_latency);
-
-      } else {
-        // Still check for promote transformation
-        CheckAndApplyPromoteTransformation(ctrl);
+      auto seq_body = static_cast<SequenceNode *>(ctrl->child.get());
+      for (const auto &child : seq_body->children) {
+        ScheduleRecursive(child.get());
       }
+      Z3SchedulePythonLoop(ctrl);
     } else {
-      // Still check for promote transformation if there's a child
-      if (ctrl->child) {
-        CheckAndApplyPromoteTransformation(ctrl);
-      }
+      ScheduleRecursive(ctrl->child.get());
     }
-
     return;
   } else if (node->IsWrapper()) {
-    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    auto wrapper = static_cast<WrapperNode *>(node);
     if (wrapper->child) {
       ScheduleRecursive(wrapper->child.get());
       wrapper->SetII(wrapper->child->GetII());
@@ -2123,7 +1712,7 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
     return;
   }
 
-  LOG(FATAL) << "[ScheduleRecursive] Unknown IRStructure type";
+  LOG(FATAL) << "[ScheduleRecursive] Unknown IRStructure type" << node;
 }
 
 // Mutator to update thread extent in AttrStmt nodes
@@ -2603,35 +2192,6 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
   return CreatePrimFuncPass(pass_func, 0, "tl.AutoSchedule", {});
 }
 
-// Helper function to collect all TaskNodes from an IRStructure
-void CollectTaskNodesFromIRStructure(IRStructure *node,
-                                     std::vector<TaskNode *> &tasks) {
-  if (!node)
-    return;
-  if (node->IsTask()) {
-    tasks.push_back(static_cast<TaskNode *>(node));
-  } else if (node->IsSequence()) {
-    SequenceNode *seq = static_cast<SequenceNode *>(node);
-    for (const auto &child : seq->children) {
-      if (child) {
-        CollectTaskNodesFromIRStructure(child.get(), tasks);
-      }
-    }
-  } else if (node->IsControl()) {
-    ControlNode *ctrl = static_cast<ControlNode *>(node);
-    if (ctrl->child) {
-      CollectTaskNodesFromIRStructure(ctrl->child.get(), tasks);
-    }
-  } else if (node->IsWrapper()) {
-    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
-    if (wrapper->child) {
-      CollectTaskNodesFromIRStructure(wrapper->child.get(), tasks);
-    }
-  } else {
-    LOG(FATAL);
-  }
-}
-
 // Helper function to collect all IRStructure nodes (not just TaskNodes) from an
 // IRStructure
 void CollectIRStructureNodes(IRStructure *node,
@@ -2640,19 +2200,19 @@ void CollectIRStructureNodes(IRStructure *node,
     return;
   nodes.push_back(node);
   if (node->IsSequence()) {
-    SequenceNode *seq = static_cast<SequenceNode *>(node);
+    auto seq = static_cast<SequenceNode *>(node);
     for (const auto &child : seq->children) {
       if (child) {
         CollectIRStructureNodes(child.get(), nodes);
       }
     }
   } else if (node->IsControl()) {
-    ControlNode *ctrl = static_cast<ControlNode *>(node);
+    auto ctrl = static_cast<ControlNode *>(node);
     if (ctrl->child) {
       CollectIRStructureNodes(ctrl->child.get(), nodes);
     }
   } else if (node->IsWrapper()) {
-    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    auto wrapper = static_cast<WrapperNode *>(node);
     if (wrapper->child) {
       CollectIRStructureNodes(wrapper->child.get(), nodes);
     }
@@ -2663,62 +2223,49 @@ void CollectIRStructureNodes(IRStructure *node,
 // Helper function to clone IRStructure with warpgroup filter
 std::unique_ptr<IRStructure>
 CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
-  if (!node)
+  if (!node || !node->containWarpgroupId(warpgroup_id))
     return nullptr;
 
   if (node->IsTask()) {
-    TaskNode *task = static_cast<TaskNode *>(node);
-    if (task->GetWarpgroupId() == warpgroup_id) {
-      return task->Clone();
-    } else {
-      // Create empty task node for other warpgroup
-      auto new_task = std::make_unique<TaskNode>();
-      // Copy metadata but no statements
-      new_task->SetUsesCUDACore(task->UsesCUDACore());
-      new_task->SetUsesTMACore(task->UsesTMACore());
-      new_task->SetUsesTensorCore(task->UsesTensorCore());
-      new_task->SetReadRegions(task->GetReadRegions());
-      new_task->SetWriteRegions(task->GetWriteRegions());
-      new_task->SetLatency(task->GetLatency());
-      new_task->SetII(task->GetII());
-      new_task->SetStartTime(task->GetStartTime());
-      new_task->SetPromote(task->GetPromote());
-      new_task->SetWarpgroupId(task->GetWarpgroupId());
-      // Empty statements
-      return new_task;
-    }
+    auto task = static_cast<TaskNode *>(node);
+    return task->Clone();
   } else if (node->IsSequence()) {
-    SequenceNode *seq = static_cast<SequenceNode *>(node);
+    auto seq = static_cast<SequenceNode *>(node);
     auto new_seq = std::make_unique<SequenceNode>();
     for (const auto &child : seq->children) {
-      if (child) {
-        new_seq->children.push_back(
-            CloneIRStructureWithWarpgroupFilter(child.get(), warpgroup_id));
-      } else {
-        new_seq->children.push_back(nullptr);
+      auto new_child =
+          CloneIRStructureWithWarpgroupFilter(child.get(), warpgroup_id);
+      if (new_child) {
+        new_seq->children.push_back(std::move(new_child));
       }
     }
     return new_seq;
   } else if (node->IsControl()) {
-    ControlNode *ctrl = static_cast<ControlNode *>(node);
+    auto ctrl = static_cast<ControlNode *>(node);
     auto new_ctrl = std::make_unique<ControlNode>();
     new_ctrl->control = ctrl->control;
-    if (ctrl->child) {
-      new_ctrl->child =
-          CloneIRStructureWithWarpgroupFilter(ctrl->child.get(), warpgroup_id);
-    }
+    new_ctrl->SetPromote(ctrl->hasPromote());
+    new_ctrl->child =
+        CloneIRStructureWithWarpgroupFilter(ctrl->child.get(), warpgroup_id);
     return new_ctrl;
   } else if (node->IsWrapper()) {
-    WrapperNode *wrapper = static_cast<WrapperNode *>(node);
+    auto wrapper = static_cast<WrapperNode *>(node);
     auto new_wrapper = std::make_unique<WrapperNode>();
     new_wrapper->wrapper = wrapper->wrapper;
-    if (wrapper->child) {
-      new_wrapper->child = CloneIRStructureWithWarpgroupFilter(
-          wrapper->child.get(), warpgroup_id);
-    }
+    new_wrapper->child =
+        CloneIRStructureWithWarpgroupFilter(wrapper->child.get(), warpgroup_id);
     return new_wrapper;
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<ScheduleUnit *>(node);
+    auto new_unit = std::make_unique<ScheduleUnit>();
+    new_unit->before = unit->before;
+    new_unit->after = unit->after;
+    new_unit->promote = unit->promote;
+    new_unit->child =
+        CloneIRStructureWithWarpgroupFilter(unit->child.get(), warpgroup_id);
+    return new_unit;
   }
-  return nullptr;
+  LOG(FATAL);
 }
 
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
@@ -2730,7 +2277,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     return Evaluate(0);
 
   if (root->IsWrapper()) {
-    const WrapperNode *wrapper = static_cast<const WrapperNode *>(root);
+    auto wrapper = static_cast<const WrapperNode *>(root);
     Stmt body = Evaluate(0);
     if (wrapper->child) {
       body = ApplyWarpgroupPartitionToIRStructure(
@@ -2747,14 +2294,14 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   }
 
   // Check if there are tasks with mixed warpgroup ids
-  std::vector<TaskNode *> all_tasks;
-  CollectTaskNodesFromIRStructure(root, all_tasks);
+  std::vector<TaskNodeWithContext> all_tasks;
+  CollectAllTaskNodesWithContext(root, all_tasks);
 
   bool has_warpgroup0 = false;
   bool has_warpgroup1 = false;
   bool has_warpgroup_neutral = false;
-  for (TaskNode *task : all_tasks) {
-    int wg_id = task->GetWarpgroupId();
+  for (auto &task : all_tasks) {
+    int wg_id = task.task->GetWarpgroupId();
     if (wg_id == 0)
       has_warpgroup0 = true;
     else if (wg_id == 1)
@@ -2772,7 +2319,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     }
 
     if (structure->IsTask()) {
-      TaskNode *task = static_cast<TaskNode *>(structure);
+      auto task = static_cast<TaskNode *>(structure);
       if (task->stmts.empty()) {
         return Evaluate(0);
       } else if (task->stmts.size() == 1) {
@@ -2781,172 +2328,145 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         return SeqStmt(task->stmts);
       }
     } else if (structure->IsSequence()) {
-      SequenceNode *seq = static_cast<SequenceNode *>(structure);
+      auto seq = static_cast<SequenceNode *>(structure);
       std::vector<Stmt> stmts;
       for (const auto &child : seq->children) {
-        if (child) {
-          Stmt child_stmt = irstructure_to_stmt(child.get());
-          stmts.push_back(child_stmt);
+        auto unit = static_cast<ScheduleUnit *>(child.get());
+        for (auto &stmt : unit->before) {
+          stmts.push_back(stmt);
+        }
+        Stmt child_stmt = irstructure_to_stmt(unit->child.get());
+        stmts.push_back(child_stmt);
+        for (auto &stmt : unit->after) {
+          stmts.push_back(stmt);
         }
       }
       auto flattened = SeqStmt::Flatten(stmts);
       return flattened;
     } else if (structure->IsControl()) {
-      ControlNode *ctrl = static_cast<ControlNode *>(structure);
-      Stmt body = Evaluate(0);
-      if (ctrl->child) {
-        body = irstructure_to_stmt(ctrl->child.get());
-      }
+      auto ctrl = static_cast<ControlNode *>(structure);
       Var loop_var = ctrl->control->loop_var;
       PrimExpr loop_start = ctrl->control->min;
       PrimExpr loop_extent = ctrl->control->extent;
       PrimExpr loop_step = ctrl->control->step.has_value()
                                ? ctrl->control->step.value()
                                : IntImm(DataType::Int(32), 1);
-      auto check_promote = [&](PrimExpr expr) {
-        if (const auto *op = expr.as<tvm::tir::LTNode>()) {
-          tvm::PrimExpr lhs = op->a;
-          tvm::PrimExpr rhs = op->b;
-          if (StructuralEqual()(op->a, loop_var)) {
-            if (StructuralEqual()(op->b + loop_step,
-                                  loop_start + loop_extent)) {
-              return true;
+      if (!ctrl->hasPromote() || !ctrl->child->IsSequence()) {
+        std::vector<Stmt> stmts;
+        if (ctrl->child->IsScheduleUnit()) {
+          auto unit = static_cast<ScheduleUnit *>(ctrl->child.get());
+          for (auto &stmt : unit->before) {
+            stmts.push_back(stmt);
+          }
+          stmts.push_back(irstructure_to_stmt(unit->child.get()));
+          for (auto &stmt : unit->after) {
+            stmts.push_back(stmt);
+          }
+        } else if (ctrl->child->IsSequence()) {
+          auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+          for (auto &child : seq->children) {
+            ICHECK(child->IsScheduleUnit());
+            auto unit = static_cast<ScheduleUnit *>(child.get());
+            for (auto &stmt : unit->before) {
+              stmts.push_back(stmt);
+            }
+            stmts.push_back(irstructure_to_stmt(unit->child.get()));
+            for (auto &stmt : unit->after) {
+              stmts.push_back(stmt);
             }
           }
-        }
-        return false;
-      };
-      std::function<Optional<Stmt>(Stmt, bool)> extract_prologue;
-      extract_prologue = [&](Stmt stmt, bool in_condition) -> Optional<Stmt> {
-        if (const auto *if_node = stmt.as<IfThenElseNode>()) {
-          if (check_promote(if_node->condition)) {
-            return extract_prologue(if_node->then_case, true);
-          }
-          if (in_condition) {
-            if (StructuralEqual()(if_node->condition, loop_var != loop_start)) {
-              return Evaluate(0);
-            }
-            return stmt;
-          }
-          return Optional<Stmt>();
-        } else if (const auto *seq_node = stmt.as<SeqStmtNode>()) {
-          if (in_condition) {
-            std::vector<Stmt> stmts;
-            for (auto &stmt : seq_node->seq) {
-              stmts.push_back(extract_prologue(stmt, in_condition).value());
-            }
-            return SeqStmt(stmts);
-          }
-          return Optional<Stmt>();
         } else {
-          if (in_condition)
-            return stmt;
-          return Optional<Stmt>();
+          LOG(FATAL);
         }
-      };
-      std::function<Optional<Stmt>(Stmt, bool)> extract_epilogue;
-      extract_epilogue = [&](Stmt stmt, bool in_condition) -> Optional<Stmt> {
-        if (const auto *if_node = stmt.as<IfThenElseNode>()) {
-          if (StructuralEqual()(if_node->condition, loop_var > loop_start)) {
-            return extract_epilogue(if_node->then_case, true);
-          }
-          if (in_condition) {
-            return stmt;
-          }
-          return Optional<Stmt>();
-        } else if (const auto *seq_node = stmt.as<SeqStmtNode>()) {
-          if (in_condition) {
-            std::vector<Stmt> stmts;
-            for (auto &stmt : seq_node->seq) {
-              stmts.push_back(extract_epilogue(stmt, in_condition).value());
-            }
-            return SeqStmt(stmts);
-          }
-          return Optional<Stmt>();
-        } else {
-          if (in_condition)
-            return stmt;
-          return Optional<Stmt>();
+        Stmt body = SeqStmt::Flatten(stmts);
+        return For(loop_var, loop_start, loop_extent, ctrl->control->kind, body,
+                   ctrl->control->thread_binding, ctrl->control->annotations);
+      }
+      Stmt body = Evaluate(0);
+      std::vector<Stmt> unit_stages[2];
+      auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+      for (auto &child : seq->children) {
+        auto unit = static_cast<ScheduleUnit *>(child.get());
+        std::vector<Stmt> stmts;
+        for (auto &stmt : unit->before) {
+          stmts.push_back(stmt);
         }
-      };
-      std::function<Stmt(Stmt)> extract_steady;
-      extract_steady = [&](Stmt stmt) -> Stmt {
-        if (const auto *if_node = stmt.as<IfThenElseNode>()) {
-          if (check_promote(if_node->condition)) {
-            if (enable_epi) {
-              return extract_steady(if_node->then_case);
-            } else {
-              return IfThenElse(if_node->condition,
-                                extract_steady(if_node->then_case),
-                                if_node->else_case);
-            }
-          }
-          if (StructuralEqual()(if_node->condition, loop_var > loop_start)) {
-            return extract_steady(if_node->then_case);
-          }
-          if (StructuralEqual()(if_node->condition, loop_var != loop_start)) {
-            return extract_steady(if_node->then_case);
-          }
-          return stmt;
-        } else if (const auto *seq_node = stmt.as<SeqStmtNode>()) {
-          std::vector<Stmt> stmts;
-          for (auto &stmt : seq_node->seq) {
-            stmts.push_back(extract_steady(stmt));
-          }
-          return SeqStmt(stmts);
-        } else {
-          return stmt;
+        stmts.push_back(irstructure_to_stmt(unit->child.get()));
+        for (auto &stmt : unit->after) {
+          stmts.push_back(stmt);
         }
-      };
-      std::vector<Stmt> pro_stmts, epi_stmts;
-      if (auto *seq = body.as<SeqStmtNode>()) {
-        for (auto &stmt : seq->seq) {
-          auto pro = extract_prologue(stmt, false);
-          if (pro.has_value()) {
-            pro_stmts.push_back(pro.value());
-          }
-          auto epi = extract_epilogue(stmt, false);
-          if (epi.has_value()) {
-            epi_stmts.push_back(epi.value());
-          }
-        }
+        unit_stages[unit->promote].push_back(SeqStmt::Flatten(stmts));
       }
       Stmt prologue = Evaluate(0);
-      if (!epi_stmts.empty()) {
-        if (pro_stmts.size() == 1) {
-          prologue = pro_stmts[0];
-        } else if (!pro_stmts.empty()) {
-          prologue = SeqStmt(pro_stmts);
-        }
+      bool has_prologue = !unit_stages[0].empty();
+      bool has_epilogue = enable_epi && !unit_stages[0].empty();
+      if (has_prologue) {
+        prologue = SeqStmt::Flatten(unit_stages[1]);
         Map<Var, PrimExpr> substitution;
         substitution.Set(loop_var, loop_start);
         prologue = Substitute(prologue, substitution);
+        prologue = IfThenElse(loop_extent > 0, prologue);
       }
       Stmt epilogue = Evaluate(0);
-      if (enable_epi && !pro_stmts.empty()) {
-        if (epi_stmts.size() == 1) {
-          epilogue = epi_stmts[0];
-        } else if (!epi_stmts.empty()) {
-          epilogue = SeqStmt(epi_stmts);
-        }
+      if (has_epilogue) {
+        epilogue = SeqStmt::Flatten(unit_stages[0]);
         Map<Var, PrimExpr> substitution;
         substitution.Set(loop_var, loop_start + loop_extent - loop_step);
         epilogue = Substitute(epilogue, substitution);
+        epilogue = IfThenElse(loop_extent > 0, epilogue);
       }
-      Stmt new_body = extract_steady(body);
-      if (!epi_stmts.empty()) {
+      std::vector<Stmt> steady;
+      for (auto &child : seq->children) {
+        auto unit = static_cast<ScheduleUnit *>(child.get());
+        std::vector<Stmt> stmts;
+        for (auto &stmt : unit->before) {
+          stmts.push_back(stmt);
+        }
+        stmts.push_back(irstructure_to_stmt(unit->child.get()));
+        for (auto &stmt : unit->after) {
+          stmts.push_back(stmt);
+        }
+        if (unit->promote == 1) {
+          if (!has_epilogue) {
+            Map<Var, PrimExpr> substitution;
+            substitution.Set(loop_var, loop_var + loop_step);
+            Stmt new_stmt = IfThenElse(
+                loop_var < loop_start + loop_extent - loop_step * has_prologue,
+                Substitute(SeqStmt::Flatten(stmts), substitution));
+            steady.push_back(new_stmt);
+          } else {
+            Map<Var, PrimExpr> substitution;
+            substitution.Set(loop_var, loop_var + loop_step);
+            Stmt new_stmt = Substitute(SeqStmt::Flatten(stmts), substitution);
+            steady.push_back(new_stmt);
+          }
+        } else if (unit->promote == 0) {
+          Map<Var, PrimExpr> substitution;
+          substitution.Set(loop_var, loop_var - loop_step);
+          if (!has_prologue) {
+            Stmt new_stmt =
+                IfThenElse(loop_var > loop_start,
+                           Substitute(SeqStmt::Flatten(stmts), substitution));
+            steady.push_back(new_stmt);
+          } else {
+            steady.push_back(SeqStmt::Flatten(stmts));
+          }
+        } else {
+          steady.push_back(SeqStmt::Flatten(stmts));
+        }
+      }
+      Stmt new_body = SeqStmt::Flatten(steady);
+      if (unit_stages[0].empty()) {
         Map<Var, PrimExpr> substitution;
-        substitution.Set(loop_var, loop_var + loop_step);
+        substitution.Set(loop_var, loop_var - loop_step);
         new_body = Substitute(new_body, substitution);
       }
       auto new_var = loop_var.copy_with_suffix("");
-      Stmt new_for =
-          For(new_var, loop_start,
-              ctrl->control->extent -
-                  loop_step * ((!pro_stmts.empty()) +
-                               (enable_epi && !epi_stmts.empty())),
-              ctrl->control->kind, new_body, ctrl->control->thread_binding,
-              ctrl->control->annotations);
+      Stmt new_for = For(
+          new_var, loop_start,
+          ctrl->control->extent + loop_step * (1 - has_prologue - has_epilogue),
+          ctrl->control->kind, new_body, ctrl->control->thread_binding,
+          ctrl->control->annotations);
       {
         Map<Var, PrimExpr> substitution;
         substitution.Set(loop_var, new_var);
@@ -2954,7 +2474,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       }
       return SeqStmt({prologue, new_for, epilogue});
     } else if (structure->IsWrapper()) {
-      const WrapperNode *wrapper = static_cast<const WrapperNode *>(structure);
+      auto wrapper = static_cast<const WrapperNode *>(structure);
       Stmt body = Evaluate(0);
       if (wrapper->child) {
         body = irstructure_to_stmt(wrapper->child.get());
@@ -2968,7 +2488,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       }
     }
 
-    LOG(WARNING)
+    LOG(FATAL)
         << "Failed to convert IRStructure to Stmt, returning empty statement";
     return Evaluate(0);
   };
@@ -2989,34 +2509,26 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       return nullptr;
 
     if (node->IsTask()) {
-      TaskNode *task = static_cast<TaskNode *>(node);
+      auto task = static_cast<TaskNode *>(node);
       if (task->GetWarpgroupId() == -1) {
         return task->Clone();
       } else {
-        // Create empty task node for tasks with warpgroup id 0 or 1
         auto new_task = std::make_unique<TaskNode>();
-        // Copy metadata but no statements
-        new_task->SetUsesCUDACore(task->UsesCUDACore());
-        new_task->SetUsesTMACore(task->UsesTMACore());
-        new_task->SetUsesTensorCore(task->UsesTensorCore());
-        new_task->SetReadRegions(task->GetReadRegions());
-        new_task->SetWriteRegions(task->GetWriteRegions());
-        new_task->SetLatency(task->GetLatency());
-        new_task->SetII(task->GetII());
-        new_task->SetStartTime(task->GetStartTime());
-        new_task->SetPromote(task->GetPromote());
-        new_task->SetWarpgroupId(task->GetWarpgroupId());
         // Empty statements
         return new_task;
       }
     } else if (node->IsSequence()) {
-      SequenceNode *seq = static_cast<SequenceNode *>(node);
+      auto seq = static_cast<SequenceNode *>(node);
       auto new_seq = std::make_unique<SequenceNode>();
       for (const auto &child : seq->children) {
         if (child) {
-          new_seq->children.push_back(clone_neutral_filter(child.get()));
-        } else {
-          new_seq->children.push_back(nullptr);
+          auto node = static_cast<ScheduleUnit *>(child.get());
+          auto new_node = clone_neutral_filter(node->child.get());
+          if (new_node) {
+            auto new_unit = std::make_unique<ScheduleUnit>();
+            new_unit->child = std::move(new_node);
+            new_seq->children.push_back(std::move(new_unit));
+          }
         }
       }
       return new_seq;
@@ -3034,10 +2546,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
 
   // Check if both clones have actual statements
   auto has_actual_statements = [](IRStructure *node) -> bool {
-    std::vector<TaskNode *> tasks;
-    CollectTaskNodesFromIRStructure(node, tasks);
-    for (TaskNode *task : tasks) {
-      if (!task->stmts.empty()) {
+    std::vector<TaskNodeWithContext> tasks;
+    CollectAllTaskNodesWithContext(node, tasks);
+    for (auto &task : tasks) {
+      if (!task.task->stmts.empty()) {
         return true;
       }
     }

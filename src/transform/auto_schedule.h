@@ -63,7 +63,7 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
 // Base class for all IR nodes in scheduling
 class IRStructure {
 public:
-  enum class Kind { kTask, kControl, kSequence, kWrapper };
+  enum class Kind { kTask, kControl, kSequence, kWrapper, kSchedule };
 
   virtual ~IRStructure() = default;
   virtual Kind GetKind() const = 0;
@@ -74,6 +74,7 @@ public:
   bool IsControl() const { return GetKind() == Kind::kControl; }
   bool IsSequence() const { return GetKind() == Kind::kSequence; }
   bool IsWrapper() const { return GetKind() == Kind::kWrapper; }
+  bool IsScheduleUnit() const { return GetKind() == Kind::kSchedule; }
 
   // Resource usage flags (accessible by all IR nodes)
   virtual bool UsesCUDACore() const = 0;
@@ -100,6 +101,30 @@ public:
   // Helper methods to add regions (for incremental analysis)
   virtual void AddReadRegion(const BufferRegion &region) = 0;
   virtual void AddWriteRegion(const BufferRegion &region) = 0;
+  std::vector<std::pair<BufferRegion, bool>> GetReadWriteRegions() const {
+    std::vector<std::pair<BufferRegion, bool>> read_write_regions;
+    std::set<Buffer> buffers;
+    for (const auto &region : GetWriteRegions()) {
+      if (buffers.find(region->buffer) == buffers.end()) {
+        buffers.insert(region->buffer);
+        read_write_regions.push_back({region, true});
+      }
+    }
+    for (const auto &region : GetReadRegions()) {
+      if (buffers.find(region->buffer) == buffers.end()) {
+        buffers.insert(region->buffer);
+        read_write_regions.push_back({region, false});
+      }
+    }
+    return read_write_regions;
+  }
+
+  virtual bool containWarpgroupId(int id) const = 0;
+
+  // Start time for scheduling
+  void SetStartTime(int64_t start_time) { start_time_ = start_time; }
+  int64_t GetStartTime() const { return start_time_; }
+  int64_t start_time_{0}; // Scheduled start time in cycles
 };
 
 // Task node: contains a vector of statements
@@ -121,24 +146,6 @@ public:
   std::vector<BufferRegion> GetWriteRegions() const override {
     return write_regions_;
   }
-  std::vector<std::pair<BufferRegion, bool>> GetReadWriteRegions() const {
-    std::vector<std::pair<BufferRegion, bool>> read_write_regions;
-    std::set<Buffer> buffers;
-    for (const auto &region : GetWriteRegions()) {
-      if (buffers.find(region->buffer) == buffers.end()) {
-        buffers.insert(region->buffer);
-        read_write_regions.push_back({region, true});
-      }
-    }
-    for (const auto &region : GetReadRegions()) {
-      if (buffers.find(region->buffer) == buffers.end()) {
-        buffers.insert(region->buffer);
-        read_write_regions.push_back({region, false});
-      }
-    }
-    return read_write_regions;
-  }
-
   // Latency estimation
   int64_t GetLatency() const override { return latency_; }
   int64_t GetII() const override { return ii_; }
@@ -155,14 +162,6 @@ public:
   }
   void SetLatency(int64_t latency) override { latency_ = latency; }
   void SetII(int64_t ii) override { ii_ = ii; }
-
-  // Start time for scheduling
-  void SetStartTime(int64_t start_time) { start_time_ = start_time; }
-  int64_t GetStartTime() const { return start_time_; }
-
-  // Promote flag for software pipelining
-  void SetPromote(bool promote) { promote_ = promote; }
-  bool GetPromote() const { return promote_; }
 
   // Warpgroup id for warpgroup specialization
   void SetWarpgroupId(int warpgroup_id) { warpgroup_id_ = warpgroup_id; }
@@ -194,6 +193,8 @@ public:
     write_regions_.push_back(region);
   }
 
+  bool containWarpgroupId(int id) const override { return warpgroup_id_ == id; }
+
 private:
   // Resource usage flags
   bool uses_cuda_core_{false};
@@ -205,10 +206,8 @@ private:
   std::vector<BufferRegion> write_regions_;
 
   // Latency estimation
-  int64_t latency_{0};    // Estimated latency in cycles
-  int64_t ii_{0};         // Initiation interval in cycles
-  int64_t start_time_{0}; // Scheduled start time in cycles
-  bool promote_{false};   // Promote flag for software pipelining
+  int64_t latency_{0}; // Estimated latency in cycles
+  int64_t ii_{0};      // Initiation interval in cycles
   int warpgroup_id_{
       -1}; // Warpgroup id for warpgroup specialization (-1 means unassigned)
 };
@@ -278,13 +277,22 @@ public:
       child->AddWriteRegion(region);
   }
 
+  bool hasPromote() const { return has_promote_; }
+
+  void SetPromote(bool promote) { has_promote_ = promote; }
+
   // Clone method
   std::unique_ptr<IRStructure> Clone() const override;
+
+  bool containWarpgroupId(int id) const override {
+    return child->containWarpgroupId(id);
+  }
 
 private:
   // Latency estimation
   int64_t latency_{0}; // Estimated latency in cycles
   int64_t ii_{0};      // Initiation interval in cycles
+  bool has_promote_{false};
 };
 
 // Wrapper node: contains a Wrapper statement with variable, value, and child
@@ -356,6 +364,95 @@ public:
   // Clone method
   std::unique_ptr<IRStructure> Clone() const override;
 
+  bool containWarpgroupId(int id) const override {
+    return child->containWarpgroupId(id);
+  }
+
+private:
+  // Latency estimation
+  int64_t latency_{0}; // Estimated latency in cycles
+  int64_t ii_{0};      // Initiation interval in cycles
+};
+
+class ScheduleUnit : public IRStructure {
+public:
+  int promote;
+  std::vector<Stmt> before, after;
+  std::unique_ptr<IRStructure> child;
+
+  Kind GetKind() const override { return Kind::kSchedule; }
+
+  // Resource usage flags (aggregate from child)
+  bool UsesCUDACore() const override {
+    return child ? child->UsesCUDACore() : false;
+  }
+  bool UsesTMACore() const override {
+    return child ? child->UsesTMACore() : false;
+  }
+  bool UsesTensorCore() const override {
+    return child ? child->UsesTensorCore() : false;
+  }
+
+  // Memory access regions (aggregate from child)
+  std::vector<BufferRegion> GetReadRegions() const override {
+    return child ? child->GetReadRegions() : std::vector<BufferRegion>{};
+  }
+  std::vector<BufferRegion> GetWriteRegions() const override {
+    return child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
+  }
+
+  // Latency estimation (aggregate from child)
+  int64_t GetLatency() const override { return latency_; }
+  int64_t GetII() const override { return ii_; }
+
+  // Setters (delegate to child if exists)
+  void SetUsesCUDACore(bool value) override {
+    if (child)
+      child->SetUsesCUDACore(value);
+  }
+  void SetUsesTMACore(bool value) override {
+    if (child)
+      child->SetUsesTMACore(value);
+  }
+  void SetUsesTensorCore(bool value) override {
+    if (child)
+      child->SetUsesTensorCore(value);
+  }
+  void SetReadRegions(const std::vector<BufferRegion> &regions) override {
+    if (child)
+      child->SetReadRegions(regions);
+  }
+  void SetWriteRegions(const std::vector<BufferRegion> &regions) override {
+    if (child)
+      child->SetWriteRegions(regions);
+  }
+  void SetLatency(int64_t latency) override { latency_ = latency; }
+  void SetII(int64_t ii) override { ii_ = ii; }
+
+  // Helper methods to add regions (delegate to child)
+  void AddReadRegion(const BufferRegion &region) override {
+    if (child)
+      child->AddReadRegion(region);
+  }
+  void AddWriteRegion(const BufferRegion &region) override {
+    if (child)
+      child->AddWriteRegion(region);
+  }
+  bool GetPromote() const { return promote; }
+  bool isInnerTask() const { return child->IsTask(); }
+  int GetWarpgroupId() const {
+    ICHECK(isInnerTask());
+    const TaskNode *task = static_cast<const TaskNode *>(child.get());
+    return task->GetWarpgroupId();
+  }
+
+  // Clone method
+  std::unique_ptr<IRStructure> Clone() const override;
+
+  bool containWarpgroupId(int id) const override {
+    return child->containWarpgroupId(id);
+  }
+
 private:
   // Latency estimation
   int64_t latency_{0}; // Estimated latency in cycles
@@ -397,6 +494,15 @@ public:
 
   // Clone method
   std::unique_ptr<IRStructure> Clone() const override;
+
+  bool containWarpgroupId(int id) const override {
+    for (auto &child : children) {
+      if (child->containWarpgroupId(id)) {
+        return true;
+      }
+    }
+    return false;
+  }
 
 private:
   // Latency estimation
@@ -500,7 +606,6 @@ inline bool UseSameRegisterRegion(const IRStructure *a, const IRStructure *b) {
     for (const auto &region_b : reg_regions_b) {
       // Check if same buffer
       if (region_a->buffer.same_as(region_b->buffer)) {
-        // Buffer相同就认为是同一个region
         return true;
       }
     }
@@ -584,8 +689,7 @@ void PrintAllStmts(const IRStructure *node, int indent = 0) {
               << ", Tensor=" << task->UsesTensorCore();
     LOG(INFO) << indent_str << "  Latency: " << task->GetLatency()
               << " cycles, II: " << task->GetII()
-              << " cycles, warpgroup_id: " << task->GetWarpgroupId()
-              << ", promote: " << task->GetPromote();
+              << " cycles, warpgroup_id: " << task->GetWarpgroupId();
   } else if (node->IsControl()) {
     const ControlNode *control = static_cast<const ControlNode *>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";
@@ -606,7 +710,7 @@ void PrintAllStmts(const IRStructure *node, int indent = 0) {
       LOG(INFO) << indent_str << "  Child " << i << ":";
       PrintAllStmts(seq->children[i].get(), indent + 2);
     }
-  } else if (node->GetKind() == IRStructure::Kind::kWrapper) {
+  } else if (node->IsWrapper()) {
     const WrapperNode *wrapper = static_cast<const WrapperNode *>(node);
     LOG(INFO) << indent_str << "WrapperNode:";
     LOG(INFO) << indent_str << "  Wrapper: " << wrapper->wrapper;
@@ -614,6 +718,21 @@ void PrintAllStmts(const IRStructure *node, int indent = 0) {
     if (wrapper->child) {
       LOG(INFO) << indent_str << "  Wrapper body:";
       PrintAllStmts(wrapper->child.get(), indent + 2);
+    }
+  } else if (node->IsScheduleUnit()) {
+    const ScheduleUnit *promote = static_cast<const ScheduleUnit *>(node);
+    LOG(INFO) << indent_str << "PromoteNode:";
+    LOG(INFO) << indent_str << "  Promote: " << promote->promote;
+    for (auto &stmt : promote->before) {
+      LOG(INFO) << indent_str << "  Before: " << stmt;
+    }
+    for (auto &stmt : promote->after) {
+      LOG(INFO) << indent_str << "  After: " << stmt;
+    }
+    // Recursively print child statements
+    if (promote->child) {
+      LOG(INFO) << indent_str << "  Promote body:";
+      PrintAllStmts(promote->child.get(), indent + 2);
     }
   }
 }
@@ -646,7 +765,6 @@ void PrintIRStructure(const IRStructure *node, int indent = 0) {
     LOG(INFO) << indent_str << "  latency: " << task->GetLatency() << " cycles";
     LOG(INFO) << indent_str << "  II: " << task->GetII() << " cycles";
     LOG(INFO) << indent_str << "  warpgroup_id: " << task->GetWarpgroupId();
-    LOG(INFO) << indent_str << "  promote: " << task->GetPromote();
   } else if (node->IsControl()) {
     const ControlNode *control = static_cast<const ControlNode *>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";
@@ -663,13 +781,27 @@ void PrintIRStructure(const IRStructure *node, int indent = 0) {
       LOG(INFO) << indent_str << "  Child " << i << ":";
       PrintIRStructure(seq->children[i].get(), indent + 2);
     }
-  } else if (node->GetKind() == IRStructure::Kind::kWrapper) {
+  } else if (node->IsWrapper()) {
     const WrapperNode *wrapper = static_cast<const WrapperNode *>(node);
     LOG(INFO) << indent_str << "WrapperNode:";
     LOG(INFO) << indent_str << "  Wrapper: " << wrapper->wrapper;
     if (wrapper->child) {
       LOG(INFO) << indent_str << "  Child:";
       PrintIRStructure(wrapper->child.get(), indent + 2);
+    }
+  } else if (node->IsScheduleUnit()) {
+    const ScheduleUnit *promote = static_cast<const ScheduleUnit *>(node);
+    LOG(INFO) << indent_str << "PromoteNode:";
+    LOG(INFO) << indent_str << "  Promote: " << promote->promote;
+    for (auto &stmt : promote->before) {
+      LOG(INFO) << indent_str << "  Before: " << stmt;
+    }
+    for (auto &stmt : promote->after) {
+      LOG(INFO) << indent_str << "  After: " << stmt;
+    }
+    if (promote->child) {
+      LOG(INFO) << indent_str << "  Promote body:";
+      PrintAllStmts(promote->child.get(), indent + 2);
     }
   }
 }
