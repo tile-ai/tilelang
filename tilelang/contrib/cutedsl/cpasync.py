@@ -93,6 +93,9 @@ def tma_load(tma_desc, mbar: cute.Pointer, smem_ptr: cute.Pointer, crd: Int | tu
             tma_desc_ptr = tma_desc.iterator
         else:
             tma_desc_ptr = tma_desc
+        # Ensure crd is a tuple (handle single coordinate case)
+        if not isinstance(crd, tuple):
+            crd = (crd,)
         nvvm.cp_async_bulk_tensor_shared_cluster_global(
             dst_mem=smem_ptr.llvm_ptr,
             tma_descriptor=tma_desc_ptr.llvm_ptr,
