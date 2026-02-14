@@ -900,7 +900,12 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
     os << aligned_rmem;
   } else if (value_lanes == element_dtype.lanes()) {
     std::string ref = GetBufferRef_(value_dtype, op->buffer.get(), index);
-    if (ref.back() == ')') {
+    // Check if this is a barrier buffer - barrier pointers don't need .load()
+    std::string scope;
+    if (alloc_storage_scope_.count(buffer_var.get())) {
+      scope = alloc_storage_scope_.at(buffer_var.get());
+    }
+    if (ref.back() == ')' && scope != "shared.barrier") {
       ref += ".load()";
     }
     os << ref;
@@ -1583,8 +1588,13 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   const std::string index_str = PrintExpr_(index);
 
   if (t == buffer_element_dtype) {
-    if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
-        (scope == "local" || scope == "shared" || scope == "shared.barrier")) {
+    if (scope == "shared.barrier") {
+      // shared.barrier is allocated via tl.alloc_smem() which returns _Pointer.
+      // _Pointer does not support subscript access [i], but supports pointer
+      // arithmetic (ptr + i). Use pointer addition instead of subscript.
+      return "(" + vid + " + " + index_str + ")";
+    } else if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
+               (scope == "local" || scope == "shared")) {
       // Tensors in these scopes are allocated as one-dimensional, so can be
       // assessed via "[]" correctly. Other tensors may be multi-dimensional,
       // and must be assessed via ptr, otherwise CuTeDSL will interpret "[]"
