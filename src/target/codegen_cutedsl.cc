@@ -666,22 +666,30 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            "bits";
 
     const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
-    ICHECK(op->args.size() == 1 && load);
-    ICHECK_EQ(load->indices.size(), 1)
-        << "CodeGenTileLangCuTeDSL only supports flat memory";
+    if (load) {
+      // Path 1: BufferLoad - use recast_ptr for memory access
+      ICHECK_EQ(load->indices.size(), 1)
+          << "CodeGenTileLangCuTeDSL only supports flat memory";
 
-    PrimExpr index = load->indices[0];
-    if (const RampNode *node = index.as<RampNode>(); node) {
-      auto *p_stride = as_const_int(node->stride);
-      CHECK(p_stride);
-      ICHECK_EQ(*p_stride, 1) << "reinterpret expects contiguous elements";
-      index = node->base;
+      PrimExpr index = load->indices[0];
+      if (const RampNode *node = index.as<RampNode>(); node) {
+        auto *p_stride = as_const_int(node->stride);
+        CHECK(p_stride);
+        ICHECK_EQ(*p_stride, 1) << "reinterpret expects contiguous elements";
+        index = node->base;
+      }
+
+      auto ptr_str = GetBufferPtr_(load->buffer.get(), index);
+      os << "tl.make_tensor(tl.recast_ptr(" << ptr_str << ", dtype=";
+      PrintType(tgt_dtype.element_of(), os);
+      os << "), (" << tgt_dtype.lanes() << ",)).load()";
+    } else {
+      // Path 2: General expression - use arith.bitcast
+      std::string expr_str = PrintExpr_(op->args[0]);
+      os << "tl.bitcast(" << expr_str << ", ";
+      PrintType(tgt_dtype.element_of(), os);
+      os << ")";
     }
-
-    auto ptr_str = GetBufferPtr_(load->buffer.get(), index);
-    os << "tl.make_tensor(tl.recast_ptr(" << ptr_str << ", dtype=";
-    PrintType(tgt_dtype.element_of(), os);
-    os << "), (" << tgt_dtype.lanes() << ",)).load()";
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else if (op->op.same_as(tl::tl_gemm())) {
@@ -813,6 +821,24 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // prev value
     os << "tl.AtomicMinRet(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(builtin::shift_right())) {
+    // CuTeDSL type promotion fix: Int8 >> 4 returns Int32 in CuTeDSL,
+    // but TIR expects result type to match operand type. Wrap in explicit
+    // type conversion to match CUDA behavior.
+    ICHECK_EQ(op->args.size(), 2U);
+    DataType result_dtype = op->dtype;
+    std::string lhs = PrintExpr_(op->args[0]);
+    std::string rhs = PrintExpr_(op->args[1]);
+    PrintType(result_dtype, os);
+    os << "((" << lhs << " >> " << rhs << "))";
+  } else if (op->op.same_as(builtin::shift_left())) {
+    // Same fix for shift_left
+    ICHECK_EQ(op->args.size(), 2U);
+    DataType result_dtype = op->dtype;
+    std::string lhs = PrintExpr_(op->args[0]);
+    std::string rhs = PrintExpr_(op->args[1]);
+    PrintType(result_dtype, os);
+    os << "((" << lhs << " << " << rhs << "))";
   } else {
     CodeGenTileLangPY::VisitExpr_(op, os);
   }

@@ -10,10 +10,59 @@ from cutlass.cute.nvgpu.warpgroup.helpers import wait_group as wgmma_wait_group 
 from cutlass.cute import make_tensor, make_rmem_tensor, recast_ptr  # noqa: F401
 from cutlass.cute.typing import Numeric  # noqa: F401
 
-from cutlass.base_dsl.typing import as_numeric, Int32, Uint16, Uint32  # noqa: F401
+from cutlass.base_dsl.typing import as_numeric, Int8, Int16, Int32, Uint8, Uint16, Uint32, Float16, Float32, BFloat16  # noqa: F401
 from cutlass._mlir.dialects import llvm, arith  # noqa: F401
 from cutlass._mlir import ir as mlir_ir
 from cutlass.cutlass_dsl import dsl_user_op
+
+
+# Map dtype to CuTeDSL type
+_DTYPE_TO_CUTEDSL_TYPE = {
+    "int8": Int8,
+    "int16": Int16,
+    "int32": Int32,
+    "uint8": Uint8,
+    "uint16": Uint16,
+    "uint32": Uint32,
+    "float16": Float16,
+    "float32": Float32,
+    "bfloat16": BFloat16,
+}
+
+
+def bitcast(value, target_dtype):
+    """
+    Reinterpret the bits of a value as a different type.
+    Equivalent to C's (*(target_type *)(&value)).
+    
+    Args:
+        value: Source value (Numeric type from CuTeDSL)
+        target_dtype: Target type (CuTeDSL type like Int8, Float16, etc.)
+    
+    Returns:
+        Value reinterpreted as target type
+    """
+    # Get the target MLIR type
+    if isinstance(target_dtype, type):
+        tgt_mlir_type = target_dtype.mlir_type
+        tgt_wrapper = target_dtype
+    elif hasattr(target_dtype, 'mlir_type'):
+        tgt_mlir_type = target_dtype.mlir_type
+        tgt_wrapper = target_dtype
+    else:
+        # Assume it's a string like "int8", "float16", etc.
+        tgt_wrapper = _DTYPE_TO_CUTEDSL_TYPE.get(str(target_dtype))
+        if tgt_wrapper is None:
+            raise ValueError(f"Unknown target dtype: {target_dtype}")
+        tgt_mlir_type = tgt_wrapper.mlir_type
+    
+    @dsl_user_op
+    def bitcast_impl(src_val, *, loc=None, ip=None):
+        src_ir = src_val.ir_value(loc=loc, ip=ip) if hasattr(src_val, "ir_value") else src_val
+        result = llvm.bitcast(tgt_mlir_type, src_ir, loc=loc, ip=ip)
+        return tgt_wrapper(result)
+    
+    return bitcast_impl(value)
 
 # Import our custom implementations (will override if names conflict)
 from .mbar import *
