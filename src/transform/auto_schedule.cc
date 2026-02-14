@@ -2398,9 +2398,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         unit_stages[unit->promote].push_back(SeqStmt::Flatten(stmts));
       }
       Stmt prologue = Evaluate(0);
-      bool has_prologue = !unit_stages[0].empty();
-      bool has_epilogue = enable_epi && !unit_stages[0].empty();
-      if (has_prologue) {
+      bool enable_pro = true;
+      if (enable_pro && !unit_stages[1].empty()) {
         prologue = SeqStmt::Flatten(unit_stages[1]);
         Map<Var, PrimExpr> substitution;
         substitution.Set(loop_var, loop_start);
@@ -2408,7 +2407,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         prologue = IfThenElse(loop_extent > 0, prologue);
       }
       Stmt epilogue = Evaluate(0);
-      if (has_epilogue) {
+      if (enable_epi && !unit_stages[0].empty()) {
         epilogue = SeqStmt::Flatten(unit_stages[0]);
         Map<Var, PrimExpr> substitution;
         substitution.Set(loop_var, loop_start + loop_extent - loop_step);
@@ -2416,6 +2415,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         epilogue = IfThenElse(loop_extent > 0, epilogue);
       }
       std::vector<Stmt> steady;
+
+      bool remove_pro = enable_pro || unit_stages[1].empty();
+      bool remove_epi = enable_epi || unit_stages[0].empty();
       for (auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
         std::vector<Stmt> stmts;
@@ -2427,29 +2429,29 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           stmts.push_back(stmt);
         }
         if (unit->promote == 1) {
-          if (!has_epilogue) {
+          if (remove_epi) {
             Map<Var, PrimExpr> substitution;
             substitution.Set(loop_var, loop_var + loop_step);
-            Stmt new_stmt = IfThenElse(
-                loop_var < loop_start + loop_extent - loop_step * has_prologue,
-                Substitute(SeqStmt::Flatten(stmts), substitution));
+            Stmt new_stmt = Substitute(SeqStmt::Flatten(stmts), substitution);
             steady.push_back(new_stmt);
           } else {
             Map<Var, PrimExpr> substitution;
             substitution.Set(loop_var, loop_var + loop_step);
-            Stmt new_stmt = Substitute(SeqStmt::Flatten(stmts), substitution);
+            Stmt new_stmt = IfThenElse(
+                loop_var < loop_start + loop_extent - loop_step * remove_pro,
+                Substitute(SeqStmt::Flatten(stmts), substitution));
             steady.push_back(new_stmt);
           }
         } else if (unit->promote == 0) {
           Map<Var, PrimExpr> substitution;
           substitution.Set(loop_var, loop_var - loop_step);
-          if (!has_prologue) {
+          if (remove_pro) {
+            steady.push_back(SeqStmt::Flatten(stmts));
+          } else {
             Stmt new_stmt =
                 IfThenElse(loop_var > loop_start,
                            Substitute(SeqStmt::Flatten(stmts), substitution));
             steady.push_back(new_stmt);
-          } else {
-            steady.push_back(SeqStmt::Flatten(stmts));
           }
         } else {
           steady.push_back(SeqStmt::Flatten(stmts));
@@ -2462,11 +2464,11 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         new_body = Substitute(new_body, substitution);
       }
       auto new_var = loop_var.copy_with_suffix("");
-      Stmt new_for = For(
-          new_var, loop_start,
-          ctrl->control->extent + loop_step * (1 - has_prologue - has_epilogue),
-          ctrl->control->kind, new_body, ctrl->control->thread_binding,
-          ctrl->control->annotations);
+      Stmt new_for =
+          For(new_var, loop_start,
+              ctrl->control->extent + loop_step * (1 - remove_pro - remove_epi),
+              ctrl->control->kind, new_body, ctrl->control->thread_binding,
+              ctrl->control->annotations);
       {
         Map<Var, PrimExpr> substitution;
         substitution.Set(loop_var, new_var);
