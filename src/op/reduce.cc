@@ -294,6 +294,11 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                !this->clear) {
       need_duplicate = true;
       need_update = true;
+    } else if ((this->type->isMax() || this->type->isMin() ||
+                this->type->isAbsMax()) &&
+               !this->clear) {
+      need_duplicate = true;
+      need_update = true;
     }
 
     // red_layout should always contain dst_layout
@@ -315,7 +320,12 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                  GetPtrStorageScope(dst_buffer->data));
     }
     // make reduce-init stmt
-    if (require_init) {
+    // For max/min/absmax with clear=false and need_duplicate, we still need to
+    // initialize the temporary buffer with identity values since the original
+    // dst values will be combined later via need_update
+    if (require_init ||
+        (need_duplicate && (this->type->isMax() || this->type->isMin() ||
+                            this->type->isAbsMax()))) {
       stmts.push_back(
           BufferStore(clear_buffer, this->MakeInitValue(), red_indices));
     }
@@ -438,6 +448,10 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           update = bitwise_or(dst_val, src_val);
         } else if (this->type->isBitXor()) {
           update = bitwise_xor(dst_val, src_val);
+        } else if (this->type->isMax() || this->type->isAbsMax()) {
+          update = Max(dst_val, src_val);
+        } else if (this->type->isMin()) {
+          update = Min(dst_val, src_val);
         } else {
           LOG(FATAL) << "Unsupported reduce type: " << this->type->type;
         }

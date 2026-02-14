@@ -1434,9 +1434,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
   DataType t = op->dtype;
 
   // Standard min/max functions don't support bfloat16 or float16
-  if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
-    os << "cutlass::fast_min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
-       << ")";
+  if (t.is_bfloat16() && t.is_scalar()) {
+    os << "cutlass::bfloat16_t(__hmin("
+       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
+       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
+    return;
+  }
+
+  if (t.is_float16() && t.is_scalar()) {
+    os << "cutlass::half_t(__hmin("
+       << "(" << PrintExpr(op->a) << ").to_half(), "
+       << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
@@ -1457,9 +1465,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
   DataType t = op->dtype;
 
   // Standard min/max functions don't support bfloat16 or float16
-  if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
-    os << "cutlass::fast_max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
-       << ")";
+  if (t.is_bfloat16() && t.is_scalar()) {
+    os << "cutlass::bfloat16_t(__hmax("
+       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
+       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
+    return;
+  }
+
+  if (t.is_float16() && t.is_scalar()) {
+    os << "cutlass::half_t(__hmax("
+       << "(" << PrintExpr(op->a) << ").to_half(), "
+       << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
