@@ -25,6 +25,8 @@ from .ptx_mma import *
 from .math import *
 from .threadblock_swizzle import *
 from .atomic import *
+from .quantize import *
+from .warp import *
 
 
 BYTES_PER_TENSORMAP = 128

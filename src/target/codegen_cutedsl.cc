@@ -1454,6 +1454,14 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
       sargs[0] = GetBufferPtr_(load->buffer.get(), load->indices[0]);
     }
   }
+  // Quantization Functions (decode_i4u_to_f16, decode_i4s_to_f16, etc.)
+  if (global_symbol_str.substr(0, 7) == "decode_") {
+    global_symbol_str = "tl." + global_symbol_str;
+  }
+  // Warp-level primitives (__activemask, __shfl_down_sync, __shfl_sync)
+  if (global_symbol_str.substr(0, 2) == "__") {
+    global_symbol_str = "tl." + global_symbol_str;
+  }
   // some optional template arguments might be ommited, so add names explicitly
   // for remain arguments
   if (global_symbol_str == "tl.gemm_ss" || global_symbol_str == "tl.gemm_rs" ||
