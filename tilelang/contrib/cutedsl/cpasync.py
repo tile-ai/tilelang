@@ -153,6 +153,48 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
 
 
 @dsl_user_op
+def tma_reduce(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, loc=None, ip=None) -> None:
+    """
+    Reduce data from shared memory to global memory using TMA with atomic ADD reduction.
+    
+    This performs an atomic add of shared memory data to global memory using
+    the TMA unit's reduce capability.
+    
+    :param tma_desc:                 TMA descriptor for the tensor
+    :type tma_desc:                  TMA descriptor
+    :param smem_ptr:                 Source pointer in shared memory
+    :type smem_ptr:                  Pointer
+    :param crd:                      Coordinates tuple for the tensor access
+    :type crd:                       tuple[Int, ...]
+    """
+    from cutlass._mlir.dialects._nvvm_enum_gen import TMAReduxKind, TMAStoreMode
+    
+    arch = CuTeDSL._get_dsl().envar.arch
+    check_value_in(arch, ["sm_90", "sm_90a", "sm_100a"], "arch")
+    
+    if isinstance(tma_desc, cute.CopyAtom):
+        tma_desc_ptr = extract_tensormap_ptr(tma_desc)
+    elif isinstance(tma_desc, cute.Tensor):
+        tma_desc_ptr = tma_desc.iterator
+    else:
+        tma_desc_ptr = tma_desc
+    
+    # Ensure crd is a tuple
+    if not isinstance(crd, tuple):
+        crd = (crd,)
+    
+    nvvm.cp_async_bulk_tensor_reduce(
+        tma_descriptor=tma_desc_ptr.llvm_ptr,
+        src_mem=smem_ptr.llvm_ptr,
+        red_kind=TMAReduxKind.ADD,
+        coordinates=[Int32(i).ir_value(loc=loc, ip=ip) for i in crd],
+        mode=TMAStoreMode.TILE,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
 def tma_store_arrive(*, loc=None, ip=None) -> None:
     """
     Indicate arrival of warp issuing TMA_STORE.

@@ -494,7 +494,20 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         << op->args[op->args.size() - 2]->GetTypeKey();
     auto need_reduce = need_reduce_ptr->value;
     if (need_reduce) {
-      LOG(FATAL) << "Currently unsupported op: " << op->op;
+      // Use tma_reduce for reduce mode
+      ss << "tl.tma_reduce(";
+      auto desc = op->args[0];
+      ss << PrintExpr_(desc) << ", ";
+      ss << PrintExpr_(op->args[1]) << ", (";
+      for (size_t i = 2; i < op->args.size() - 2; i++) {
+        if (i > 2)
+          ss << ", ";
+        ss << PrintExpr_(op->args[i]);
+      }
+      ss << "))\n";
+      PrintIndent();
+      stream << ss.str();
+      return;
     }
 
     // Safely extract and validate eviction policy index
