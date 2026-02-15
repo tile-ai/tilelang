@@ -844,6 +844,26 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   }
 }
 
+void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
+                                         std::ostream &os) {  // NOLINT(*)
+  // CuTeDSL Tensor.store() expects TensorSSA; Python (a if c else b) yields
+  // ArithValue. Emit tl.where(cond, true_val, false_val) so the result is
+  // TensorSSA. Wrap scalar subexprs in make_filled_tensor((n,), x).load().
+  int lanes = op->dtype.lanes();
+  std::string c_str = PrintExpr_(op->condition);
+  std::string t_str = PrintExpr_(op->true_value);
+  std::string f_str = PrintExpr_(op->false_value);
+  auto as_tsa = [this, lanes](const std::string &s, int n) {
+    if (n == 0) n = 1;
+    if (s.size() >= 7 && s.compare(s.size() - 7, 7, ".load()") == 0) return s;
+    std::ostringstream o;
+    o << "tl.make_filled_tensor((" << n << ",), " << s << ").load()";
+    return o.str();
+  };
+  os << "tl.where(" << as_tsa(c_str, 1) << ", " << as_tsa(t_str, lanes)
+     << ", " << as_tsa(f_str, lanes) << ")";
+}
+
 void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
                                         std::ostream &os) { // NOLINT(*)
   ICHECK_EQ(op->indices.size(), 1)
@@ -1091,7 +1111,18 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
     if (ref.back() != ')') {
       stream << ref << " = " << RemoveOutermostParentheses(value_str) << "\n";
     } else {
-      stream << ref << ".store(" << RemoveOutermostParentheses(value_str)
+      // CuTeDSL Tensor.store() expects TensorSSA; scalar/Select emit ArithValue.
+      // Select is handled by VisitExpr_(SelectNode) -> tl.where(...). For other
+      // scalar expressions (Cast, binary op, etc.) wrap in make_filled_tensor.
+      std::string store_rhs = value_str;
+      if (value_lanes == 1 && !op->value.as<BufferLoadNode>()) {
+        if (store_rhs.size() < 7 ||
+            store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
+          store_rhs =
+              "tl.make_filled_tensor((1,), " + store_rhs + ").load()";
+        }
+      }
+      stream << ref << ".store(" << RemoveOutermostParentheses(store_rhs)
              << ")\n";
     }
   } else {

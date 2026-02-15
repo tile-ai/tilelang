@@ -834,11 +834,13 @@ def ptx_mma(
             return ptx_mma_m16n8k32_e5m2_e5m2_f32(a_ptr, a_offset, b_ptr, b_offset, c_ptr, c_offset, a_layout, b_layout)
 
     elif shape == "m16n8k4":
-        if a_dtype in ["tf32", "tensorfloat32"]:
+        # TF32 MMA: accept tf32 or fp32 (TileLang may pass float32 for TF32 GEMM)
+        if a_dtype in ["tf32", "tensorfloat32", "fp32", "f32", "float32"]:
             return ptx_mma_m16n8k4_tf32_tf32_f32(a_ptr, a_offset, b_ptr, b_offset, c_ptr, c_offset, a_layout, b_layout)
 
     elif shape == "m16n8k8":
-        if a_dtype in ["tf32", "tensorfloat32"]:
+        # TF32 MMA: accept tf32 or fp32 (e.g. deepseek_mhc)
+        if a_dtype in ["tf32", "tensorfloat32", "fp32", "f32", "float32"]:
             return ptx_mma_m16n8k8_tf32_tf32_f32(a_ptr, a_offset, b_ptr, b_offset, c_ptr, c_offset, a_layout, b_layout)
 
     elif shape == "m8n8k4" and a_dtype in ["fp64", "f64", "float64"]:
