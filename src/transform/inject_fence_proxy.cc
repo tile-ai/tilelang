@@ -80,7 +80,7 @@ bool IsAsyncIntrinsic(const CallNode *call) {
 
   // TileLang async intrinsics
   // Although tma_load is also an async intrinsic, it has no dependency on data
-  // from generic proxy. Hence, we doesn't take it into account.
+  // from generic proxy. Hence, we don't take it into account.
   if (call->op.same_as(tma_store()) || call->op.same_as(tma_store_arrive()) ||
       call->op.same_as(tma_store_wait()) || call->op.same_as(ptx_wgmma_ss()) ||
       call->op.same_as(ptx_wgmma_rs()) ||
