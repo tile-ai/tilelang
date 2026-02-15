@@ -156,9 +156,9 @@ class GemmPy(Node, Scriptable):
             NotImplementedError: If the instruction type is not supported
             ValueError: If the instruction type is unknown
         """
-        # CuTeDSL backend uses direct intrinsic call, bypass complex lowering
-        if is_cutedsl_target(target):
-            return GemmCuTeDSL
+        # # CuTeDSL backend uses direct intrinsic call, bypass complex lowering
+        # if is_cutedsl_target(target):
+        #     return GemmCuTeDSL
 
         if gemm_inst.is_mma():
             if target_is_volta(target):
