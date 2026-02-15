@@ -5,12 +5,12 @@ Warp-level primitives for CuTeDSL backend.
 Re-exports from cutlass.cute.arch with TileLang naming conventions.
 """
 
-__all__ = ['__activemask', '__shfl_down_sync', '__shfl_sync']
+__all__ = ['__activemask', '__shfl_down_sync', '__shfl_up_sync', '__shfl_sync']
 
 from cutlass._mlir.dialects import llvm, nvvm
 from cutlass.base_dsl.typing import Uint32, Int32
 from cutlass.cutlass_dsl import T, dsl_user_op
-from cutlass.cute.arch import shuffle_sync, shuffle_sync_down
+from cutlass.cute.arch import shuffle_sync, shuffle_sync_down, shuffle_sync_up
 
 
 FULL_MASK = 0xFFFFFFFF
@@ -47,6 +47,17 @@ def __shfl_down_sync(mask, val, delta, width=32):
     """
     mask_and_clamp = ((width - 1) & 0x1f) | 0x1f00
     return shuffle_sync_down(val, offset=delta, mask=mask, mask_and_clamp=mask_and_clamp)
+
+
+def __shfl_up_sync(mask, val, delta, width=32):
+    """
+    Shuffle up within warp.
+    
+    Uses CuTeDSL's shuffle_sync_up with proper mask_and_clamp calculation.
+    For shfl.up: mask_and_clamp = 0 (lower lanes wrap to self)
+    """
+    mask_and_clamp = 0
+    return shuffle_sync_up(val, offset=delta, mask=mask, mask_and_clamp=mask_and_clamp)
 
 
 def __shfl_sync(mask, val, srcLane, width=32):
