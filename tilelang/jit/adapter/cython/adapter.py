@@ -51,6 +51,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
     # that is not wrapped by the wrapper code
     host_kernel_source: str | None = None
     device_kernel_source: str | None = None
+    kernel_global_source: str | None = None  # Alias for device_kernel_source for compatibility
     lib: ctypes.CDLL | None = None  # Compiled library handle
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: dict[tir.Var, tuple[int, int]] | None = None
@@ -96,6 +97,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
         self.device_kernel_source = device_kernel_source
+        self.kernel_global_source = device_kernel_source  # Set alias for compatibility
 
         if isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -166,6 +168,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.host_kernel_source = host_kernel_source
         adapter.device_kernel_source = device_kernel_source
+        adapter.kernel_global_source = device_kernel_source  # Set alias for compatibility
         adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tir.PrimFunc):
