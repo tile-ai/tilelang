@@ -1,6 +1,5 @@
 # NOTE: This bwd script is not an official upstream script; it is community-written and provided for reference only.
 # checkout pr: https://github.com/tile-ai/tilelang/pull/1758
-
 import torch
 
 import tilelang
@@ -175,9 +174,7 @@ def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 1
             # Conjugate gradient: iteration ends
 
             for i_tile, i_nx, i_ny in T.Parallel(tilesize, n_stream, n_stream):
-                res_tile[i_tile, i_nx, i_ny] = (
-                    dR[i_tile, i_nx, i_ny] - x1[i_tile, i_nx] - x2[i_tile, i_ny]
-                ) * R[i_tile, i_nx, i_ny]
+                res_tile[i_tile, i_nx, i_ny] = (dR[i_tile, i_nx, i_ny] - x1[i_tile, i_nx] - x2[i_tile, i_ny]) * R[i_tile, i_nx, i_ny]
 
             T.copy(res_tile, res[i_seq * tilesize : (i_seq + 1) * tilesize, :, :])
 
