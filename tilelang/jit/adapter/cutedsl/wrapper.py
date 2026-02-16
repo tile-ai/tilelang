@@ -587,7 +587,7 @@ def _generate_cubin_if_needed({cubin_gen_params}):
       "torch.int64": cutlass.Int64,
       "torch.int32": cutlass.Int32,
       "torch.uint32": cutlass.Uint32,
-      "torch.bool": cutlass.Boolean,
+      "torch.bool": cutlass.Uint8,  # CuTeDSL only supports i1 in rmem; use u8 for gmem
       "torch.int8": cutlass.Int8,
       "torch.uint8": cutlass.Uint8,
       "torch.int16": cutlass.Int16,
@@ -660,7 +660,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         "int64": "cutlass.Int64",
         "int32": "cutlass.Int32",
         "uint32": "cutlass.Uint32",
-        "bool": "cutlass.Boolean",
+        "bool": "cutlass.Uint8",  # CuTeDSL only supports i1 in rmem; use u8 for gmem
         "int8": "cutlass.Int8",
         "uint8": "cutlass.Uint8",
         "int16": "cutlass.Int16",

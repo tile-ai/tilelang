@@ -348,62 +348,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << ")\n";
   };
 
-  // CuTeDSL: builtin::if_then_else must produce TensorSSA (not Python ternary
-  // which yields ArithValue). Emit tl.where(...) just like SelectNode.
-  // Use make_rmem_tensor (not make_filled_tensor which fails for int types).
-  if (op->op.same_as(tir::builtin::if_then_else())) {
-    ICHECK_EQ(op->args.size(), 3);
-    int lanes = op->dtype.lanes();
-    if (lanes == 0) lanes = 1;
-    std::string c_str = PrintExpr_(op->args[0]);
-    std::string t_str = PrintExpr_(op->args[1]);
-    std::string f_str = PrintExpr_(op->args[2]);
-    auto as_tsa = [this](const std::string &s, int n, DataType elem_dt) {
-      if (n == 0) n = 1;
-      if (s.size() >= 7 && s.compare(s.size() - 7, 7, ".load()") == 0)
-        return s;
-      std::string var = name_supply_->FreshName("_tsa");
-      PrintIndent();
-      if (elem_dt.is_bool()) {
-        stream << var << " = tl.make_rmem_tensor((" << n
-               << ",), cutlass.Boolean)\n";
-      } else {
-        stream << var << " = tl.make_rmem_tensor((" << n << ",), "
-               << DTypeToString(elem_dt) << ")\n";
-      }
-      if (n == 1) {
-        PrintIndent();
-        stream << var << "[0] = " << s << "\n";
-      } else {
-        for (int i = 0; i < n; ++i) {
-          PrintIndent();
-          stream << var << "[" << i << "] = " << s << "[" << i << "]\n";
-        }
-      }
-      return var + ".load()";
-    };
-    // Unify arm dtypes: tl.where requires both arms to have the same dtype.
-    DataType true_ty = op->args[1].dtype().element_of();
-    DataType false_ty = op->args[2].dtype().element_of();
-    std::string cond_tsa = as_tsa(c_str, 1, DataType::Bool());
-    std::string then_tsa = as_tsa(t_str, lanes, true_ty);
-    std::string else_tsa = as_tsa(f_str, lanes, false_ty);
-    if (true_ty != false_ty) {
-      DataType common =
-          (true_ty.bits() >= false_ty.bits()) ? true_ty : false_ty;
-      if (common.bits() < 32 && true_ty.is_float() && false_ty.is_float())
-        common = DataType::Float(32);
-      std::string common_str = DTypeToString(common);
-      then_tsa += ".to(" + common_str + ")";
-      else_tsa += ".to(" + common_str + ")";
-    }
-    std::string result = name_supply_->FreshName("_where");
-    PrintIndent();
-    stream << result << " = tl.where(" << cond_tsa << ", " << then_tsa << ", "
-           << else_tsa << ")\n";
-    os << result;
-    return;
-  }
+  // NOTE: builtin::if_then_else is handled by the base class (CodeGenTileLangPY)
+  // as a Python ternary: (true_val if cond else false_val). This is correct for
+  // expression contexts (range(), arithmetic, etc.). When the result is used in
+  // a BufferStore that needs TensorSSA, the store handler wraps it with tl.where().
 
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
@@ -552,7 +500,20 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         << op->args[op->args.size() - 2]->GetTypeKey();
     auto need_reduce = need_reduce_ptr->value;
     if (need_reduce) {
-      LOG(FATAL) << "Currently unsupported op: " << op->op;
+      // Use tma_reduce for reduce mode
+      ss << "tl.tma_reduce(";
+      auto desc = op->args[0];
+      ss << PrintExpr_(desc) << ", ";
+      ss << PrintExpr_(op->args[1]) << ", (";
+      for (size_t i = 2; i < op->args.size() - 2; i++) {
+        if (i > 2)
+          ss << ", ";
+        ss << PrintExpr_(op->args[i]);
+      }
+      ss << "))\n";
+      PrintIndent();
+      stream << ss.str();
+      return;
     }
 
     // Safely extract and validate eviction policy index
@@ -904,60 +865,14 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
                                          std::ostream &os) {  // NOLINT(*)
-  // CuTeDSL Tensor.store() expects TensorSSA; Python (a if c else b) yields
-  // ArithValue. Emit tl.where(cond, true_val, false_val) so the result is
-  // TensorSSA. Use make_rmem_tensor + element assignment (not make_filled_tensor
-  // which creates vector<1xT> types that CuTeDSL may not support for int).
-  int lanes = op->dtype.lanes();
-  if (lanes == 0) lanes = 1;
-  std::string c_str = PrintExpr_(op->condition);
-  std::string t_str = PrintExpr_(op->true_value);
-  std::string f_str = PrintExpr_(op->false_value);
-  // Emit rmem tensor setup as statements to `stream`, return "var.load()".
-  auto as_tsa = [this](const std::string &s, int n, DataType elem_dt) {
-    if (n == 0) n = 1;
-    if (s.size() >= 7 && s.compare(s.size() - 7, 7, ".load()") == 0) return s;
-    std::string var = name_supply_->FreshName("_tsa");
-    PrintIndent();
-    if (elem_dt.is_bool()) {
-      stream << var << " = tl.make_rmem_tensor((" << n
-             << ",), cutlass.Boolean)\n";
-    } else {
-      stream << var << " = tl.make_rmem_tensor((" << n << ",), "
-             << DTypeToString(elem_dt) << ")\n";
-    }
-    if (n == 1) {
-      PrintIndent();
-      stream << var << "[0] = " << s << "\n";
-    } else {
-      for (int i = 0; i < n; ++i) {
-        PrintIndent();
-        stream << var << "[" << i << "] = " << s << "[" << i << "]\n";
-      }
-    }
-    return var + ".load()";
-  };
-  // Unify arm dtypes: tl.where requires both arms to have the same dtype.
-  DataType true_ty = op->true_value.dtype().element_of();
-  DataType false_ty = op->false_value.dtype().element_of();
-  DataType cond_ty = op->condition.dtype().element_of();
-  std::string cond_tsa = as_tsa(c_str, 1, DataType::Bool());
-  std::string then_tsa = as_tsa(t_str, lanes, true_ty);
-  std::string else_tsa = as_tsa(f_str, lanes, false_ty);
-  if (true_ty != false_ty) {
-    DataType common =
-        (true_ty.bits() >= false_ty.bits()) ? true_ty : false_ty;
-    if (common.bits() < 32 && true_ty.is_float() && false_ty.is_float())
-      common = DataType::Float(32);
-    std::string common_str = DTypeToString(common);
-    then_tsa += ".to(" + common_str + ")";
-    else_tsa += ".to(" + common_str + ")";
-  }
-  std::string result = name_supply_->FreshName("_where");
-  PrintIndent();
-  stream << result << " = tl.where(" << cond_tsa << ", " << then_tsa << ", "
-         << else_tsa << ")\n";
-  os << result;
+  // Emit Python ternary: (true_val if cond else false_val).
+  // This yields ArithValue which is fine in expression contexts (range(), etc.).
+  // When used as a BufferStore value that requires TensorSSA, the store handler
+  // will wrap it with tl.where() at statement level.
+  std::string cond = PrintExpr_(op->condition);
+  std::string t = PrintExpr_(op->true_value);
+  std::string f = PrintExpr_(op->false_value);
+  os << "(" << t << " if " << cond << " else " << f << ")";
 }
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
@@ -1106,7 +1021,103 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
   DataType element_dtype = op->buffer->dtype;
   PrimExpr index_expr = op->indices[0];
   Var buffer_var = op->buffer->data;
-  std::string value_str = PrintExpr_(op->value);
+
+  // Pre-compute Select/if_then_else as tl.where() at statement level.
+  // Python ternary (ArithValue) is rejected by CuTeDSL .store(); tl.where()
+  // produces TensorSSA which works in all store paths (.store(), vec store, etc.).
+  // Also handles Cast(Select/if_then_else) — the cast is applied via .to() on
+  // the tl.where result.
+  bool value_is_conditional = false;
+  PrimExpr cond_expr, true_expr, false_expr;
+  DataType cast_to_dtype;  // non-void if a Cast wraps the conditional
+  // Helper to detect Select/if_then_else in a PrimExpr.
+  auto detect_conditional = [&](const PrimExpr &expr) {
+    if (auto sel = expr.as<SelectNode>()) {
+      value_is_conditional = true;
+      cond_expr = sel->condition;
+      true_expr = sel->true_value;
+      false_expr = sel->false_value;
+    } else if (auto call = expr.as<CallNode>();
+               call && call->op.same_as(tir::builtin::if_then_else())) {
+      value_is_conditional = true;
+      cond_expr = call->args[0];
+      true_expr = call->args[1];
+      false_expr = call->args[2];
+    }
+  };
+  detect_conditional(op->value);
+  if (!value_is_conditional) {
+    // Check for Cast(Select/if_then_else)
+    if (auto cast_node = op->value.as<CastNode>()) {
+      detect_conditional(cast_node->value);
+      if (value_is_conditional) {
+        cast_to_dtype = cast_node->dtype;
+      }
+    }
+  }
+
+  std::string value_str;
+  if (value_is_conditional) {
+    int lanes = value_dtype.lanes();
+    if (lanes == 0) lanes = 1;
+    // Helper: wrap a sub-expression as TensorSSA via make_rmem_tensor.
+    auto as_tsa = [this](const PrimExpr &e, int n,
+                         DataType elem_dt) -> std::string {
+      std::string s = PrintExpr_(e);
+      if (n == 0) n = 1;
+      if (s.size() >= 7 && s.compare(s.size() - 7, 7, ".load()") == 0)
+        return s;
+      std::string var = name_supply_->FreshName("_tsa");
+      PrintIndent();
+      if (elem_dt.is_bool()) {
+        stream << var << " = tl.make_rmem_tensor((" << n
+               << ",), cutlass.Boolean)\n";
+      } else {
+        stream << var << " = tl.make_rmem_tensor((" << n << ",), "
+               << DTypeToString(elem_dt) << ")\n";
+      }
+      for (int i = 0; i < n; ++i) {
+        PrintIndent();
+        if (n == 1) {
+          stream << var << "[0] = " << s << "\n";
+        } else {
+          stream << var << "[" << i << "] = " << s << "[" << i << "]\n";
+        }
+      }
+      return var + ".load()";
+    };
+    DataType true_ty = true_expr.dtype().element_of();
+    DataType false_ty = false_expr.dtype().element_of();
+    std::string cond_tsa = as_tsa(cond_expr, 1, DataType::Bool());
+    std::string then_tsa = as_tsa(true_expr, lanes, true_ty);
+    std::string else_tsa = as_tsa(false_expr, lanes, false_ty);
+    if (true_ty != false_ty) {
+      DataType common =
+          (true_ty.bits() >= false_ty.bits()) ? true_ty : false_ty;
+      if (common.bits() < 32 && true_ty.is_float() && false_ty.is_float())
+        common = DataType::Float(32);
+      std::string common_str = DTypeToString(common);
+      then_tsa += ".to(" + common_str + ")";
+      else_tsa += ".to(" + common_str + ")";
+    }
+    std::string result = name_supply_->FreshName("_where");
+    PrintIndent();
+    stream << result << " = tl.where(" << cond_tsa << ", " << then_tsa << ", "
+           << else_tsa << ")\n";
+    // If the conditional was wrapped in a Cast, apply .to() on the result.
+    // tl.where() returns TensorSSA, and .to() on TensorSSA returns TensorSSA.
+    if (cast_to_dtype.bits() > 0) {
+      std::string cast_result = name_supply_->FreshName("_wcast");
+      PrintIndent();
+      stream << cast_result << " = " << result << ".to("
+             << DTypeToString(cast_to_dtype.element_of()) << ")\n";
+      value_str = cast_result;
+    } else {
+      value_str = result;
+    }
+  } else {
+    value_str = PrintExpr_(op->value);
+  }
 
   int value_lanes = value_dtype.lanes();
 
@@ -1206,17 +1217,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
 
     if (ref.back() != ')') {
       // Direct element assignment (e.g. vid[i] = value).
-      // If value is Select/if_then_else (now tl.where -> TensorSSA), the RHS
-      // is a 1-element TensorSSA. Extract scalar via [0] for element assignment.
-      bool value_is_conditional =
-          op->value.as<SelectNode>() != nullptr ||
-          (op->value.as<CallNode>() != nullptr &&
-           op->value.as<CallNode>()->op.same_as(tir::builtin::if_then_else())) ||
-          (op->value.as<CastNode>() != nullptr &&
-           (op->value.as<CastNode>()->value.as<SelectNode>() != nullptr ||
-            (op->value.as<CastNode>()->value.as<CallNode>() != nullptr &&
-             op->value.as<CastNode>()->value.as<CallNode>()->op.same_as(
-                 tir::builtin::if_then_else()))));
+      // For conditionals (pre-computed as tl.where), extract scalar via [0].
       if (value_is_conditional && value_lanes == 1) {
         stream << ref << " = " << value_str << "[0]\n";
       } else {
@@ -1224,16 +1225,11 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
       }
     } else {
       // CuTeDSL Tensor.store() expects TensorSSA; scalar expressions yield
-      // ArithValue. Select and if_then_else are now emitted as tl.where(...)
-      // which already returns TensorSSA. For other scalar expressions (Cast,
-      // binary op, etc.) wrap in make_filled_tensor.
+      // ArithValue. Conditionals are already converted to tl.where() (TensorSSA)
+      // at the top. For other scalar expressions, wrap in make_filled_tensor.
       std::string store_rhs = value_str;
-      bool value_already_tsa =
-          op->value.as<SelectNode>() != nullptr ||
-          (op->value.as<CallNode>() != nullptr &&
-           op->value.as<CallNode>()->op.same_as(tir::builtin::if_then_else()));
-      if (value_lanes == 1 && !op->value.as<BufferLoadNode>() &&
-          !value_already_tsa) {
+      if (!value_is_conditional && value_lanes == 1 &&
+          !op->value.as<BufferLoadNode>()) {
         if (store_rhs.size() < 7 ||
             store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
           store_rhs =
@@ -1709,14 +1705,26 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
   const std::string vid = GetVarID(buffer_var);
 
   DataType buffer_element_dtype = buffer->dtype;
+  // CuTeDSL only supports i1 (Boolean) in rmem; use Uint8 for gmem pointers.
+  DataType effective_dtype = buffer_element_dtype;
+  if (buffer_element_dtype.is_bool()) {
+    std::string scope;
+    if (alloc_storage_scope_.count(buffer_var)) {
+      scope = alloc_storage_scope_.at(buffer_var);
+    }
+    if (scope.empty()) scope = GetPtrStorageScope(buffer->data);
+    if (scope != "local" && scope != "local.var") {
+      effective_dtype = DataType::UInt(8);
+    }
+  }
   bool is_handle_type_match =
-      HandleTypeMatch_(buffer_var, buffer_element_dtype);
+      HandleTypeMatch_(buffer_var, effective_dtype);
   std::string ptr_str;
   if (is_handle_type_match) {
     ptr_str = vid + ".iterator";
   } else {
     ptr_str = "tl.recast_ptr(" + vid +
-              ".iterator, dtype=" + DTypeToString(buffer_element_dtype) + ")";
+              ".iterator, dtype=" + DTypeToString(effective_dtype) + ")";
   }
 
   std::string index_str = PrintExpr_(index);
@@ -1758,14 +1766,20 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   }
 
   DataType buffer_element_dtype = buffer->dtype;
+  // CuTeDSL only supports i1 (Boolean) in rmem. For gmem/shared bool buffers,
+  // use Uint8 instead (matches PyTorch's torch.bool memory layout).
+  DataType effective_dtype = buffer_element_dtype;
+  if (buffer_element_dtype.is_bool() && scope != "local" && scope != "local.var") {
+    effective_dtype = DataType::UInt(8);
+  }
   bool is_handle_type_match =
-      HandleTypeMatch_(buffer_var, buffer_element_dtype);
+      HandleTypeMatch_(buffer_var, effective_dtype);
   std::string ptr_str;
   if (is_handle_type_match) {
     ptr_str = vid + ".iterator";
   } else {
     ptr_str = "tl.recast_ptr(" + vid +
-              ".iterator, dtype=" + DTypeToString(buffer_element_dtype) + ")";
+              ".iterator, dtype=" + DTypeToString(effective_dtype) + ")";
   }
 
   // CuTeDSL make_tensor_at_offset(ptr, offset, shape, div_by) expects a

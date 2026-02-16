@@ -159,6 +159,185 @@ def bar_sync_ptx(barrier_id, number_of_threads):
     )
 
 
+# Import shuffle functions from warp module
+from .warp import __shfl_up_sync, __shfl_down_sync
+
+
+def _warp_prefix_sum_forward(val, lane, MASK=0xffffffff):
+    """
+    Warp-level inclusive prefix sum (forward).
+    Uses shfl.up to propagate values from lower lanes.
+    """
+    # Unrolled loop for SEG=32: off = 1, 2, 4, 8, 16
+    n = __shfl_up_sync(MASK, val, 1)
+    val = cutlass.select_(lane >= 1, val + n, val)
+    n = __shfl_up_sync(MASK, val, 2)
+    val = cutlass.select_(lane >= 2, val + n, val)
+    n = __shfl_up_sync(MASK, val, 4)
+    val = cutlass.select_(lane >= 4, val + n, val)
+    n = __shfl_up_sync(MASK, val, 8)
+    val = cutlass.select_(lane >= 8, val + n, val)
+    n = __shfl_up_sync(MASK, val, 16)
+    val = cutlass.select_(lane >= 16, val + n, val)
+    return val
+
+
+def _warp_prefix_sum_reverse(val, lane, MASK=0xffffffff):
+    """
+    Warp-level inclusive prefix sum (reverse).
+    Uses shfl.down to propagate values from higher lanes.
+    """
+    SEG = 32
+    # Unrolled loop for SEG=32: off = 1, 2, 4, 8, 16
+    n = __shfl_down_sync(MASK, val, 1)
+    val = cutlass.select_(lane < SEG - 1, val + n, val)
+    n = __shfl_down_sync(MASK, val, 2)
+    val = cutlass.select_(lane < SEG - 2, val + n, val)
+    n = __shfl_down_sync(MASK, val, 4)
+    val = cutlass.select_(lane < SEG - 4, val + n, val)
+    n = __shfl_down_sync(MASK, val, 8)
+    val = cutlass.select_(lane < SEG - 8, val + n, val)
+    n = __shfl_down_sync(MASK, val, 16)
+    val = cutlass.select_(lane < SEG - 16, val + n, val)
+    return val
+
+
+class CumSum1D:
+    """
+    1D cumulative sum operation.
+    Based on tl::CumSum1D from reduce.h
+    
+    Template params:
+        threads: Number of threads
+        reverse: Whether to cumsum in reverse order
+    """
+    
+    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+        self.threads = threads
+        self.reverse = reverse
+        self.SEG = 32  # Warp size
+    
+    @cute.jit
+    def run(self, src: cute.Pointer, dst: cute.Pointer, N):
+        """
+        Perform 1D cumulative sum.
+        
+        Args:
+            src: Source pointer
+            dst: Destination pointer
+            N: Number of elements (must be compile-time constant or small)
+        """
+        MASK = 0xffffffff
+        tidx, _, _ = cute.arch.thread_idx()
+        lane = tidx % self.SEG
+        
+        src_tensor = cute.make_tensor(src, (N,))
+        dst_tensor = cute.make_tensor(dst, (N,))
+        
+        # Load value (0 if out of bounds)
+        val = Float32(0.0)
+        if tidx < N:
+            val = src_tensor[tidx]
+        
+        # Warp-level prefix sum
+        if self.reverse:
+            val = _warp_prefix_sum_reverse(val, lane, MASK)
+        else:
+            val = _warp_prefix_sum_forward(val, lane, MASK)
+        
+        # Store result - only valid threads write
+        if tidx < N:
+            dst_tensor[tidx] = val
+
+
+class CumSum2D:
+    """
+    2D cumulative sum operation.
+    Based on tl::CumSum2D from reduce.h
+    
+    Template params:
+        threads: Number of threads (must be power of 2, 32-1024)
+        dim: Axis along which to cumsum (0 or 1)
+        reverse: Whether to cumsum in reverse order
+    """
+    
+    def __init__(self, threads: cutlass.Constexpr[int], dim: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+        self.threads = threads
+        self.dim = dim
+        self.reverse = reverse
+        self.SEG = 32  # Warp size
+        self.TILE_H = threads // 32
+    
+    @cute.jit
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+        """
+        Perform 2D cumulative sum.
+        
+        Args:
+            src: Source pointer
+            dst: Destination pointer
+            H: Number of rows
+            W: Number of columns (should be <= 32 for single-segment case)
+        """
+        MASK = 0xffffffff
+        tidx, _, _ = cute.arch.thread_idx()
+        lane = tidx % self.SEG
+        row = tidx // self.SEG
+        
+        src_tensor = cute.make_tensor(src, (H * W,))
+        dst_tensor = cute.make_tensor(dst, (H * W,))
+        
+        # For 2D cumsum along dim=1 (row-wise cumsum):
+        # Each warp handles one row, lane id is the column index
+        # For dim=0 (column-wise), interpretation is swapped
+        
+        if self.dim == 1:
+            # Row-wise cumsum: each warp processes one row
+            # row = which row this warp handles
+            # lane = column index within the row
+            col = lane
+            # Linear index into the flattened buffer
+            idx = row * W + col
+            
+            # Load value (0 if out of bounds)
+            val = Float32(0.0)
+            if row < H:
+                if col < W:
+                    val = src_tensor[idx]
+            
+            # Warp-level prefix sum along the row
+            if self.reverse:
+                val = _warp_prefix_sum_reverse(val, lane, MASK)
+            else:
+                val = _warp_prefix_sum_forward(val, lane, MASK)
+            
+            # Store result - only valid threads write
+            if row < H:
+                if col < W:
+                    dst_tensor[idx] = val
+        else:
+            # Column-wise cumsum (dim=0): each warp processes one column
+            # This is more complex as we need to iterate across rows
+            # For now, just handle the simple case where H <= TILE_H
+            col = row  # warp index becomes column index
+            row_in_col = lane  # lane becomes row index within column
+            idx = row_in_col * W + col
+            
+            # Load value (0 if out of bounds)
+            val = Float32(0.0)
+            if row_in_col < H and col < W:
+                val = src_tensor[idx]
+            
+            if self.reverse:
+                val = _warp_prefix_sum_reverse(val, lane, MASK)
+            else:
+                val = _warp_prefix_sum_forward(val, lane, MASK)
+            
+            # Store result - only valid threads write
+            if row_in_col < H and col < W:
+                dst_tensor[idx] = val
+
+
 def AllReduce(reducer, threads, scale, thread_offset, all_threads=None):
     """
     AllReduce operation implementing warp/block-level reduction.
