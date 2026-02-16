@@ -55,6 +55,12 @@ static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
+static constexpr const char *kDisableLoopUnswitching =
+    "tl.disable_loop_unswitching";
+// Allow loop unswitching even when the else-version of the loop body is
+// non-trivial (has side effects). Default: false (conservative).
+static constexpr const char *kLoopUnswitchingAllowNonTrivialElse =
+    "tl.loop_unswitching_allow_non_trivial_else";
 
 /*!
  * \brief Enable lowering non-predicated global load/store to ldg/stg intrinsics
@@ -112,6 +118,9 @@ static constexpr const char *kDisableThreadStorageSync =
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
 
+static constexpr const char *kDisableOutOfBoundWarning =
+    "tl.disable_out_of_bound_warning";
+
 /*!
  * \brief Get the type of the CUDA tensor map
  *
@@ -119,6 +128,25 @@ static constexpr const char *kForceLetInline = "tl.force_let_inline";
  *
  */
 DataType cuTensorMapType();
+
+/*!
+ * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
+ *
+ * Unlike `tir.builtin.tvm_access_ptr`, this op keeps a `BufferLoad` argument so
+ * downstream analysis can recover the referenced `Buffer` (and its strides /
+ * scope), while also carrying the access mask required by synchronization and
+ * safety checks.
+ *
+ * The frontend is expected to lower this op to `tir.builtin.tvm_access_ptr`
+ * once the additional metadata is no longer needed.
+ *
+ * access_ptr(base_load, extent, rw_mask)
+ *
+ * - base_load: BufferLoad whose indices denote the base element address.
+ * - extent: 1D extent in elements (same meaning as tvm_access_ptr arg3).
+ * - rw_mask: 1=read, 2=write, 3=read-write.
+ */
+TVM_DLL const Op &access_ptr();
 
 // fast math related op
 // __exp(x) - fast exponential
@@ -155,6 +183,14 @@ TVM_DLL const Op &ieee_fsqrt();
 TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
+
+// Packed FP32x2 math (PTX `.f32x2` family; may lower to FADD2/FMUL2/FFMA2)
+// fadd2(x, y) - packed FP32x2 add
+TVM_DLL const Op &fadd2();
+// fmul2(x, y) - packed FP32x2 multiply
+TVM_DLL const Op &fmul2();
+// fma2(x, y, z) - packed FP32x2 fused multiply-add
+TVM_DLL const Op &fma2();
 
 // random op
 TVM_DLL const Op &rng_init();

@@ -113,8 +113,8 @@ def dequantize_gemv(
                 if fast_decoding:
                     T.call_extern(
                         func_name,
-                        T.address_of(B_quant_local[0]),
-                        T.address_of(B_dequantize_local[0]),
+                        T.access_ptr(B_quant_local, "r"),
+                        T.access_ptr(B_dequantize_local, "w"),
                         dtype=in_dtype,
                     )
                 else:
@@ -135,7 +135,7 @@ def dequantize_gemv(
                         accum_res[0] += A_local[ki] * B_dequantize_local[ki]
 
             with T.attr(
-                T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                T.comm_reducer(lambda x, y: x + y, [T.cast(0, accum_dtype)]),
                 "reduce_scope",
                 T.reinterpret(T.uint64(0), dtype="handle"),
             ):

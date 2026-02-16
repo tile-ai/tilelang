@@ -821,6 +821,28 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
                                            PrimExpr lhs, PrimExpr rhs,
                                            std::ostream &os) { // NOLINT(*)
+  // Fast-path for packed FP32x2 arithmetic.
+  //
+  // PTX packed `.f32x2` arithmetic is only available on SM100+.
+  // Guard emission here so older targets keep the default per-lane lowering.
+  // (The `tl::f*2` helpers also have their own compile-time guards and
+  // fallbacks, but we avoid calling them in generated code when the target
+  // cannot use the instructions.)
+  Target cur_target = Target::Current(/*allow_not_defined=*/true);
+  bool target_supports_f32x2_packed =
+      cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100);
+  if (target_supports_f32x2_packed && t.is_float() && t.bits() == 32 &&
+      t.lanes() == 2) {
+    if (op == "+") {
+      os << "tl::fadd2(" << PrintExpr(lhs) << ", " << PrintExpr(rhs) << ")";
+      return;
+    }
+    if (op == "*") {
+      os << "tl::fmul2(" << PrintExpr(lhs) << ", " << PrintExpr(rhs) << ")";
+      return;
+    }
+  }
+
   // Declare the result.
   std::string sret = name_supply_->FreshName("_");
   this->PrintIndent();
@@ -1412,9 +1434,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
   DataType t = op->dtype;
 
   // Standard min/max functions don't support bfloat16 or float16
-  if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
-    os << "cutlass::fast_min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
-       << ")";
+  if (t.is_bfloat16() && t.is_scalar()) {
+    os << "cutlass::bfloat16_t(__hmin("
+       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
+       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
+    return;
+  }
+
+  if (t.is_float16() && t.is_scalar()) {
+    os << "cutlass::half_t(__hmin("
+       << "(" << PrintExpr(op->a) << ").to_half(), "
+       << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
@@ -1435,9 +1465,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
   DataType t = op->dtype;
 
   // Standard min/max functions don't support bfloat16 or float16
-  if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
-    os << "cutlass::fast_max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
-       << ")";
+  if (t.is_bfloat16() && t.is_scalar()) {
+    os << "cutlass::bfloat16_t(__hmax("
+       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
+       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
+    return;
+  }
+
+  if (t.is_float16() && t.is_scalar()) {
+    os << "cutlass::half_t(__hmax("
+       << "(" << PrintExpr(op->a) << ").to_half(), "
+       << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
@@ -2345,7 +2383,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
     ICHECK_EQ(op->args.size(), 14U)
         << "ptx_tcgen05_mma_ss args is " << op->args;
-    std::string C_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string a_desc = this->PrintExpr(op->args[1]);
     std::string A_offset = this->PrintExpr(op->args[2]);
     std::string b_desc = this->PrintExpr(op->args[3]);
@@ -2360,19 +2398,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask3 = this->PrintExpr(op->args[12]);
     bool enable_ws = Downcast<Bool>(op->args[13])->value;
 
-    auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
+    auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::(tcgen05_name)<(CType)>(uint64_t((desc_a) + (A_offset)), "
+        "tl::(tcgen05_name)<(ABType)>(uint64_t((desc_a) + (A_offset)), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
         "(mask2), (mask3));\n";
     tl::codegen::Replacer replacer;
-    replacer.register_rule("(CType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
+    replacer.register_rule("(ABType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_enum));
     replacer.register_rule("(desc_a)", a_desc);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
@@ -2412,14 +2450,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::tcgen05mma_ts<(CType)>( (*reinterpret_cast<uint32_t*>((A))) + "
+        "tl::tcgen05mma_ts<(ABType)>( (*reinterpret_cast<uint32_t*>((A))) + "
         "(A_offset), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
         "(mask2), (mask3));\n";
     tl::codegen::Replacer replacer;
-    replacer.register_rule("(CType)",
+    replacer.register_rule("(ABType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_enum));
     replacer.register_rule("(A)", a_ref);
     replacer.register_rule("(A_offset)", A_offset);
@@ -3075,6 +3113,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fadd2())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl::fadd2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fmul2())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl::fmul2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fma2())) {
+    ICHECK_EQ(op->args.size(), 3U);
+    os << "tl::fma2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
   } else if (op->op.same_as(tl::rng_init())) {
     this->need_curand_kernel_h_ = true;
     this->curand_random_generator_state =

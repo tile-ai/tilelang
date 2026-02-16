@@ -29,8 +29,7 @@ public:
   int strideA_, strideB_;
   int offsetA_, offsetB_;
   PrimExpr clearAccum_ = const_false();
-  BufferRegion mbarRegion_;
-  tir::Buffer mbar_; // mbar is optional, only used for TCGEN5MMA
+  tir::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
@@ -59,7 +58,6 @@ public:
         .def_ro("offsetA", &GemmPyNode::offsetA_)
         .def_ro("offsetB", &GemmPyNode::offsetB_)
         .def_ro("clearAccum", &GemmPyNode::clearAccum_)
-        .def_ro("mbarRegion", &GemmPyNode::mbarRegion_)
         .def_ro("mbar", &GemmPyNode::mbar_)
         .def_ro("cCoords", &GemmPyNode::cCoords_)
         .def_ro("kPack", &GemmPyNode::kPack_)

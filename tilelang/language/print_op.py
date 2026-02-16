@@ -13,7 +13,7 @@ from tilelang.language.utils import index_to_coordinates
 
 
 @macro
-def print_var(var: tir.PrimExpr, msg: str = "") -> tir.PrimExpr:
+def print_var(var: tir.PrimExpr, msg: str = "") -> None:
     """
     Prints the value of a TIR primitive expression (PrimExpr) for debugging purposes.
 
@@ -27,7 +27,7 @@ def print_var(var: tir.PrimExpr, msg: str = "") -> tir.PrimExpr:
 
 
 @macro
-def print_var_with_condition(condition: tir.PrimExpr, var: tir.PrimExpr, msg: str = "") -> tir.PrimExpr:
+def print_var_with_condition(condition: tir.PrimExpr, var: tir.PrimExpr, msg: str = "") -> None:
     """
     Conditionally prints a TIR primitive expression (PrimExpr) if a given condition is True.
 
@@ -52,12 +52,10 @@ def print_global_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buff
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
             tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
-    else:
-        tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro
-def print_shared_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr:
+def print_shared_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -77,7 +75,7 @@ def print_shared_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buff
 
 
 @macro
-def print_fragment_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr:
+def print_fragment_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -99,7 +97,7 @@ def print_fragment_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Bu
 
 
 @macro
-def print_msg(msg: str) -> tir.PrimExpr:
+def print_msg(msg: str) -> None:
     """
     Prints a message string.
     """
@@ -109,7 +107,7 @@ def print_msg(msg: str) -> tir.PrimExpr:
 
 
 @macro
-def print_local_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> tir.PrimExpr:
+def print_local_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = "") -> None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -117,9 +115,6 @@ def print_local_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffe
         condition (tir.PrimExpr): A TIR expression representing the condition to check.
         buffer (tir.Buffer): The buffer whose values need to be printed.
         elems (int): The number of elements in the buffer to print.
-
-    Returns:
-        tir.PrimExpr: The TIR expression for the debug print operation.
     """
     if condition:
         # Iterate through the buffer elements and print each one.
@@ -160,7 +155,8 @@ def device_assert(condition: tir.PrimExpr, msg: str = "", no_stack_info=False):
             T.call_intrin("void", tir.op.Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))
 
 
-def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:
+# NOTE(chaofan): T.print is implemented as a macro, so no return
+def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> None:
     """
     A generic print function that handles both TIR buffers and primitive expressions.
 
@@ -172,10 +168,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
         msg (str): An optional message to include in the print statement.
         warp_group_id (int): The warp group id to print.
         warp_id (int): The warp id to print.
-        print thread will be warp_group_id * warp_group_size + warp_id.
-
-    Returns:
-        tir.PrimExpr: The TIR expression for the debug print operation.
+        print thread will be warp_group_id * warp_group_size + warp_id
 
     Raises:
         ValueError: If the input object type is unsupported.
@@ -198,7 +191,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
             condition = True
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
-            return print_local_buffer_with_condition(condition, buffer, elems, msg)
+            print_local_buffer_with_condition(condition, buffer, elems, msg)
         elif buffer.scope() == "local.fragment":
             # Get the number of elements in the buffer.
             elems = 1
@@ -209,7 +202,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
             condition = tx == main_lane and ty == 0 and tz == 0
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
-            return print_fragment_buffer_with_condition(condition, buffer, elems, msg)
+            print_fragment_buffer_with_condition(condition, buffer, elems, msg)
         elif buffer.scope() in {"shared", "shared.dyn"}:
             # Get the number of elements in the buffer.
             elems = 1
@@ -220,14 +213,14 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
             condition = tx == main_lane and ty == 0 and tz == 0
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
-            return print_shared_buffer_with_condition(condition, buffer, elems, msg)
+            print_shared_buffer_with_condition(condition, buffer, elems, msg)
         elif buffer.scope() == "global":
             # Get the number of elements in the buffer.
             elems = 1
             for dim in buffer.shape:
                 elems *= dim
             condition = True
-            return print_global_buffer_with_condition(condition, buffer, elems, msg)
+            print_global_buffer_with_condition(condition, buffer, elems, msg)
         else:
             raise ValueError(f"Unsupported buffer scope: {buffer.scope()}")
 
@@ -235,10 +228,10 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
         if not msg:
             msg = f"expr<{obj}>"
         # Directly print primitive expressions.
-        return print_var(obj, msg)
+        print_var(obj, msg)
 
     elif obj is None:
-        return print_msg(msg)
+        print_msg(msg)
 
     else:
         # Unsupported object type.

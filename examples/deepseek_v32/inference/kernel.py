@@ -17,15 +17,15 @@ FP32 = T.float32
 
 
 def fast_log2_ceil(x):
-    bits_x = T.reinterpret(T.uint32, x)
+    bits_x = T.reinterpret(x, T.uint32)
     exp_x = (bits_x >> 23) & 0xFF
     man_bits = bits_x & ((1 << 23) - 1)
-    return T.Cast(T.int32, exp_x - 127 + T.if_then_else(man_bits != 0, 1, 0))
+    return T.cast(exp_x - 127 + T.if_then_else(man_bits != 0, 1, 0), T.int32)
 
 
 def fast_pow2(x):
     bits_x = (x + 127) << 23
-    return T.reinterpret(T.float32, bits_x)
+    return T.reinterpret(bits_x, T.float32)
 
 
 def fast_round_scale(amax, fp8_max_inv):

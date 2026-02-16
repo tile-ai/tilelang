@@ -203,6 +203,17 @@ def MergeIfStmt():
     return _ffi_api.MergeIfStmt()  # type: ignore
 
 
+def LoopUnswitching():
+    """LoopUnswitching: Hoist loop-invariant if statements out of loops.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LoopUnswitching()  # type: ignore
+
+
 def MultiVersionBuffer():
     """WarpSpecializedPipeline
 
@@ -282,6 +293,17 @@ def LegalizeSafeMemoryAccess():
         The result pass
     """
     return _ffi_api.LegalizeSafeMemoryAccess()  # type: ignore
+
+
+def LowerAccessPtr():
+    """Lower TileLang frontend `tl.access_ptr` to `tir.builtin.tvm_access_ptr`.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerAccessPtr()  # type: ignore
 
 
 def MakePackedAPI():

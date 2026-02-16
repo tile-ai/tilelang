@@ -170,6 +170,9 @@ public:
   using StmtExprVisitor::VisitStmt_;
   void VisitIfThenElseExpr(const PrimExpr cond, const PrimExpr true_value,
                            const PrimExpr false_value) {
+    // Visit the condition first without any guard, as it is always evaluated
+    // This ensures any buffer accesses in the condition are recorded
+    Base::VisitExpr(cond);
     {
       auto guard = MakeGuard(cond);
       Base::VisitExpr(true_value);
@@ -243,6 +246,9 @@ public:
       auto guard = MakeGuard(op->condition);
       Base::VisitStmt(op->body);
     }
+  }
+  ConstrSet GetConstrSet() const {
+    return ConstrSet{.constrs_ = constr_stack_};
   }
   std::vector<Constr> constr_stack_;
 };

@@ -23,7 +23,8 @@ using namespace tir;
  */
 class AtomicOpBaseNode : public TileOperatorNode {
 public:
-  Buffer src, dst; ///< Source and destination buffers
+  PrimExpr src_value; ///< Source values, for cases src is not a buffer
+  Buffer src, dst;    ///< Source and destination buffers
   Array<Range> src_range,
       dst_range; ///< Access ranges for source and destination
   Map<String, ObjectRef> annotations; ///< Annotations for the atomic operation
@@ -81,6 +82,7 @@ public:
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<AtomicMaxNode>()
         .def_ro("src", &AtomicMaxNode::src)
+        .def_ro("src_value", &AtomicMaxNode::src_value)
         .def_ro("dst", &AtomicMaxNode::dst)
         .def_ro("src_range", &AtomicMaxNode::src_range)
         .def_ro("dst_range", &AtomicMaxNode::dst_range)
@@ -113,6 +115,7 @@ public:
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<AtomicMinNode>()
         .def_ro("src", &AtomicMinNode::src)
+        .def_ro("src_value", &AtomicMinNode::src_value)
         .def_ro("dst", &AtomicMinNode::dst)
         .def_ro("src_range", &AtomicMinNode::src_range)
         .def_ro("dst_range", &AtomicMinNode::dst_range)
