@@ -55,6 +55,36 @@ static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
+static constexpr const char *kDisableLoopUnswitching =
+    "tl.disable_loop_unswitching";
+// Allow loop unswitching even when the else-version of the loop body is
+// non-trivial (has side effects). Default: false (conservative).
+static constexpr const char *kLoopUnswitchingAllowNonTrivialElse =
+    "tl.loop_unswitching_allow_non_trivial_else";
+
+/*!
+ * \brief Enable lowering non-predicated global load/store to ldg/stg intrinsics
+ *
+ * When enabled, transforms regular (non-predicated) global memory loads and
+ * stores to explicit ldg/stg intrinsics for potentially better performance.
+ * Default: OFF (disabled)
+ *
+ * kEnableLowerLDGSTG = "tl.enable_lower_ldgstg"
+ */
+static constexpr const char *kEnableLowerLDGSTG = "tl.enable_lower_ldgstg";
+
+/*!
+ * \brief Enable lowering predicated global load/store to ldg/stg intrinsics
+ *
+ * When enabled (set to true), predicated loads (if_then_else with else=0) and
+ * predicated stores (IfThenElse with store in then case) will be lowered
+ * to predicated ldg/stg intrinsics.
+ * Default: OFF (predicated lowering is disabled by default)
+ *
+ * kEnableLowerLDGSTGPredicated = "tl.enable_lower_ldgstg_predicated"
+ */
+static constexpr const char *kEnableLowerLDGSTGPredicated =
+    "tl.enable_lower_ldgstg_predicated";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
 static constexpr const char *kASTPrintEnable = "tl.ast_print_enable";
@@ -88,6 +118,9 @@ static constexpr const char *kDisableThreadStorageSync =
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
 
+static constexpr const char *kDisableOutOfBoundWarning =
+    "tl.disable_out_of_bound_warning";
+
 /*!
  * \brief Get the type of the CUDA tensor map
  *
@@ -95,6 +128,25 @@ static constexpr const char *kForceLetInline = "tl.force_let_inline";
  *
  */
 DataType cuTensorMapType();
+
+/*!
+ * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
+ *
+ * Unlike `tir.builtin.tvm_access_ptr`, this op keeps a `BufferLoad` argument so
+ * downstream analysis can recover the referenced `Buffer` (and its strides /
+ * scope), while also carrying the access mask required by synchronization and
+ * safety checks.
+ *
+ * The frontend is expected to lower this op to `tir.builtin.tvm_access_ptr`
+ * once the additional metadata is no longer needed.
+ *
+ * access_ptr(base_load, extent, rw_mask)
+ *
+ * - base_load: BufferLoad whose indices denote the base element address.
+ * - extent: 1D extent in elements (same meaning as tvm_access_ptr arg3).
+ * - rw_mask: 1=read, 2=write, 3=read-write.
+ */
+TVM_DLL const Op &access_ptr();
 
 // fast math related op
 // __exp(x) - fast exponential
@@ -132,6 +184,14 @@ TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
 
+// Packed FP32x2 math (PTX `.f32x2` family; may lower to FADD2/FMUL2/FFMA2)
+// fadd2(x, y) - packed FP32x2 add
+TVM_DLL const Op &fadd2();
+// fmul2(x, y) - packed FP32x2 multiply
+TVM_DLL const Op &fmul2();
+// fma2(x, y, z) - packed FP32x2 fused multiply-add
+TVM_DLL const Op &fma2();
+
 // random op
 TVM_DLL const Op &rng_init();
 TVM_DLL const Op &rng_rand();
@@ -159,17 +219,17 @@ TVM_DLL const Op &create_tma_descriptor();
 TVM_DLL const Op &create_tma_im2col_descriptor();
 
 /*!
- * \brief Create a list of mbarrier with num_threads
+ * \brief Create a list of mbarrier with arrive_counts for each barrier
  *
- * create_list_of_mbarrier(num_threads0, num_threads1, ...)
+ * create_list_of_mbarrier(arrive_counts0, arrive_counts1, ...)
  *
  */
 TVM_DLL const Op &create_list_of_mbarrier();
 
 /*!
- * \brief Get the mbarrier with barrier_id
+ * \brief Get the mbarrier injected by compiler via barrier_id
  *
- * int64_t* GetMBarrier(barrier_id)
+ * int64_t* get_mbarrier(barrier_id)
  *
  */
 TVM_DLL const Op &get_mbarrier();
@@ -715,6 +775,98 @@ TVM_DLL const Op &warp_reduce_bitor();
  *  index expression.
  */
 TVM_DLL const Op &__ldg();
+
+/*!
+ * \brief tilelang intrinsic for global memory load with 32-bit vector width.
+ *
+ *  This op loads 32 bits (4 bytes) from global memory using explicit
+ *  PTX ld.global instructions for performance-sensitive loads.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.ldg32(x, i)
+ */
+TVM_DLL const Op &ldg32();
+
+/*!
+ * \brief tilelang intrinsic for global memory load with 64-bit vector width.
+ *
+ *  This op loads 64 bits (8 bytes) from global memory using explicit
+ *  PTX ld.global.v2 instructions for vectorized loads.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.ldg64(x, i)
+ */
+TVM_DLL const Op &ldg64();
+
+/*!
+ * \brief tilelang intrinsic for global memory load with 128-bit vector width.
+ *
+ *  This op loads 128 bits (16 bytes) from global memory using explicit
+ *  PTX ld.global.v4 or ld.global.v2.s64 instructions for wide vectorized loads.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.ldg128(x, i)
+ */
+TVM_DLL const Op &ldg128();
+
+/*!
+ * \brief tilelang intrinsic for global memory load with 256-bit vector width.
+ *
+ *  This op loads 256 bits (32 bytes) from global memory using explicit
+ *  PTX ld.global.v4.s64 instructions for maximum vectorized loads.
+ *  Requires CUDA 12.9+ for native support; older versions use two 128-bit
+ * loads.
+ *
+ *  Usage from TVMScript:
+ *    y[i] = T.ldg256(x, i)
+ */
+TVM_DLL const Op &ldg256();
+
+/*!
+ * \brief tilelang intrinsic for global memory store with 32-bit vector width.
+ *
+ *  This op stores 32 bits (4 bytes) to global memory using explicit
+ *  PTX st.global instructions for performance-sensitive stores.
+ *
+ *  Usage from TVMScript:
+ *    T.stg32(y, i, value)
+ */
+TVM_DLL const Op &stg32();
+
+/*!
+ * \brief tilelang intrinsic for global memory store with 64-bit vector width.
+ *
+ *  This op stores 64 bits (8 bytes) to global memory using explicit
+ *  PTX st.global.v2 instructions for vectorized stores.
+ *
+ *  Usage from TVMScript:
+ *    T.stg64(y, i, value)
+ */
+TVM_DLL const Op &stg64();
+
+/*!
+ * \brief tilelang intrinsic for global memory store with 128-bit vector width.
+ *
+ *  This op stores 128 bits (16 bytes) to global memory using explicit
+ *  PTX st.global.v4 instructions for wide vectorized stores.
+ *
+ *  Usage from TVMScript:
+ *    T.stg128(y, i, value)
+ */
+TVM_DLL const Op &stg128();
+
+/*!
+ * \brief tilelang intrinsic for global memory store with 256-bit vector width.
+ *
+ *  This op stores 256 bits (32 bytes) to global memory using explicit
+ *  PTX st.global.v4.s64 instructions for maximum vectorized stores.
+ *  Requires CUDA 12.9+ for native support; older versions use two 128-bit
+ * stores.
+ *
+ *  Usage from TVMScript:
+ *    T.stg256(y, i, value)
+ */
+TVM_DLL const Op &stg256();
 
 } // namespace tl
 } // namespace tvm

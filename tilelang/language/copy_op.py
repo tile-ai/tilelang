@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 from typing import Literal, Any
-from tilelang import language as T
+from tilelang._typing import BufferLikeType
 from tilelang.utils.language import (
     to_buffer_region,
-    get_buffer_region_from_load,
     legalize_pairwise_extents,
 )
+from tilelang.language.utils import get_extent
 from tvm import ir, tir
 
 
 def copy(
-    src: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
-    dst: tir.Buffer | tir.BufferLoad | tir.BufferRegion,
+    src: BufferLikeType,
+    dst: BufferLikeType,
     *,
     coalesced_width: int | None = None,
     disable_tma: bool = False,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
-):
+) -> tir.PrimExpr | tir.Stmt:
     """Copy data between memory regions.
 
     Args:
@@ -60,21 +60,6 @@ def copy(
     """
     if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
         ir.assert_structural_equal(src.shape, dst.shape)
-
-    def get_extent(data):
-        if isinstance(data, tir.Var) and T.has_let_value(data):
-            data = T.get_let_value(data)
-        if isinstance(data, tir.Buffer):
-            return data.shape
-        elif isinstance(data, tir.BufferRegion):
-            return [x.extent for x in data.region]
-        elif isinstance(data, tir.BufferLoad):
-            region = get_buffer_region_from_load(data)
-            if region is None:
-                return None
-            return [x.extent for x in region.region]
-        else:
-            return None
 
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
@@ -117,8 +102,8 @@ def copy(
 
 
 def c2d_im2col(
-    img: tir.Buffer,
-    col: tir.Buffer,
+    img: BufferLikeType,
+    col: BufferLikeType,
     nhw_step: tir.PrimExpr,
     c_step: tir.PrimExpr,
     kernel: int,
@@ -126,7 +111,7 @@ def c2d_im2col(
     dilation: int,
     pad: int,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
-):
+) -> tir.PrimExpr:
     """Perform im2col transformation for 2D convolution.
 
     Args:

@@ -16,6 +16,7 @@
 #include <memory>
 #include <queue>
 
+#include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/copy.h"
 #include "../op/parallel.h"
@@ -205,11 +206,39 @@ public:
             continue;
           }
         }
-        // If already in map, ensure they are structurally equal
-        ICHECK(layout->IsEqual(layout_map[buffer].get()))
-            << "Get different layout for " << buffer
-            << "\n current layout: " << layout->DebugOutput()
-            << "\n previous layout: " << layout_map[buffer]->DebugOutput();
+
+        // If already in map, check if they are structurally equal
+        if (!layout->IsEqual(layout_map[buffer].get())) {
+          // Try to merge swizzle layouts if both are swizzle layouts
+          const Layout &existing = layout_map[buffer];
+          if (!layout.as<Fragment>() && !existing.as<Fragment>()) {
+            auto input_shape = layout->InputShape();
+            if (input_shape.size() >= 2) {
+              size_t ndim = input_shape.size();
+              auto stride_expr = input_shape[ndim - 2].as<IntImmNode>();
+              auto continuous_expr = input_shape[ndim - 1].as<IntImmNode>();
+              if (stride_expr && continuous_expr) {
+                int stride = stride_expr->value;
+                int continuous = continuous_expr->value;
+                int element_size = buffer->dtype.bits();
+
+                if (auto merged = MergeSwizzleLayouts(
+                        existing, layout, stride, continuous, element_size)) {
+                  LOG(WARNING) << "Swizzle layout conflict for buffer "
+                               << buffer << ", merging to smaller granularity";
+                  layout_map.Set(buffer, merged.value());
+                  propagate_alias(buffer, merged.value());
+                  continue;
+                }
+              }
+            }
+          }
+          // If not swizzle layouts or merge failed, raise error
+          LOG(FATAL) << "Get different layout for " << buffer
+                     << "\n current layout: " << layout->DebugOutput()
+                     << "\n previous layout: "
+                     << layout_map[buffer]->DebugOutput();
+        }
         // Ensure aliases are consistent too
         propagate_alias(buffer, layout);
       } else {

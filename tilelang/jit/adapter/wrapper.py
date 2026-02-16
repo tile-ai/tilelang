@@ -32,8 +32,26 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
 """
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
-    if ({1} > 65536) {{
-        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size for {0} to %d", {1});
+    int device_{0} = 0;
+    hipError_t dev_res_{0} = hipGetDevice(&device_{0});
+    if (dev_res_{0} != hipSuccess) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to get HIP device for {0}: %s", hipGetErrorString(dev_res_{0}));
+        return -1;
+    }}
+    int max_smem_{0} = 0;
+    hipError_t attr_res_{0} = hipDeviceGetAttribute(&max_smem_{0}, hipDeviceAttributeMaxSharedMemoryPerBlock, device_{0});
+    if (attr_res_{0} != hipSuccess || max_smem_{0} <= 0) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to query HIP max shared memory for {0}: %s", hipGetErrorString(attr_res_{0}));
+        return -1;
+    }}
+    if ({1} > max_smem_{0}) {{
+        snprintf(
+            error_buf,
+            ERROR_BUF_SIZE,
+            "Requested dynamic shared memory %d exceeds device limit %d for {0}",
+            {1},
+            max_smem_{0}
+        );
         return -1;
     }}
     return 0;

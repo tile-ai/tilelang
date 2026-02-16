@@ -12,6 +12,7 @@
 
 #include "../op/builtin.h"
 #include "../runtime/runtime.h"
+#include "./common/mbarrier.h"
 
 namespace tvm {
 namespace tl {
@@ -71,8 +72,24 @@ public:
             continue;
           }
           const Buffer &buf = name2buf.at(buf_name);
-          // Build base pointer expression (read access)
-          PrimExpr base_ptr = buf.access_ptr(1);
+          // Build base pointer expression.
+          //
+          // We only need the base address for CUDA stream access policy window
+          // configuration. Using `Buffer::access_ptr` would materialize a
+          // typed pointer cast based on `buf->dtype` (e.g. float16 -> `half*`)
+          // in the generated C host stubs, which then requires a `half`
+          // definition during host compilation. Since the runtime API treats
+          // the pointer as opaque, keep it as `void*`/handle and adjust by
+          // `elem_offset` in bytes when needed.
+          PrimExpr base_ptr = buf->data;
+          if (buf->elem_offset.defined() && !is_zero(buf->elem_offset)) {
+            PrimExpr byte_offset =
+                buf->elem_offset *
+                IntImm(buf->elem_offset.dtype(), buf->dtype.bytes());
+            base_ptr =
+                Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+                     {base_ptr, byte_offset});
+          }
           // Args packed: func_name, base_ptr, num_bytes, hit_ratio
           Array<PrimExpr> packed_args;
           packed_args.push_back(
@@ -121,12 +138,6 @@ public:
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
           Array<Stmt> stmt_seq;
-          if (!init_mbarrier_calls_.empty()) {
-            auto alloc_mbarrier =
-                Evaluate(Call(DataType::Handle(), builtin::create_barriers(),
-                              {static_cast<int>(init_mbarrier_calls_.size())}));
-            stmt_seq.push_back(alloc_mbarrier);
-          }
 
           auto stmts = prefetch_calls_;
           stmts.insert(stmts.end(), init_mbarrier_calls_.begin(),
@@ -158,9 +169,19 @@ public:
           }
           stmt_seq.push_back(body);
 
+          Stmt result = SeqStmt(stmt_seq);
+
+          if (!init_mbarrier_calls_.empty()) {
+            mbarrier_buffer_ = CreateMBarrierBuffer(
+                injected_mbarrier_name_, init_mbarrier_calls_.size());
+            result = DeclBuffer(mbarrier_buffer_, result);
+            result = Allocate(mbarrier_buffer_->data, mbarrier_buffer_->dtype,
+                              mbarrier_buffer_->shape, const_true(), result);
+          }
+
           prefetch_calls_.clear();
           init_mbarrier_calls_.clear();
-          return AttrStmt(op->node, op->attr_key, op->value, SeqStmt(stmt_seq));
+          return AttrStmt(op->node, op->attr_key, op->value, result);
         }
       }
     }
@@ -206,6 +227,7 @@ private:
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;
+  Buffer mbarrier_buffer_;
 };
 
 using namespace tir::transform;

@@ -1,6 +1,7 @@
 """Some customized operations frequently used in tensor programming, exposed on the TileLang language surface."""
 
 from __future__ import annotations
+from tilelang._typing import ShapeType, DType
 import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer, op
 from tilelang.utils.language import bits_product, prim_expr_equal
@@ -18,7 +19,13 @@ def dp4a(A: Buffer, B: Buffer, C: Buffer) -> PrimExpr:
     Returns:
         PrimExpr: Handle to the DP4A operation
     """
-    return T.call_extern("handle", "DP4A", T.address_of(A), T.address_of(B), T.address_of(C))
+    return T.call_extern(
+        "handle",
+        "DP4A",
+        T.access_ptr(A, "r"),
+        T.access_ptr(B, "r"),
+        T.access_ptr(C, "rw"),
+    )
 
 
 def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
@@ -37,12 +44,12 @@ def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
     return dst
 
 
-def reshape(src: Buffer, shape: list[PrimExpr]) -> Buffer:
+def reshape(src: Buffer, shape: ShapeType) -> Buffer:
     """Reshapes the input buffer to the specified shape.
 
     Args:
         src (Buffer): Input buffer to be reshaped
-        shape (List[PrimExpr]): New shape for the buffer
+        shape (ShapeType): New shape for the buffer
 
     Returns:
         Buffer: A new buffer view with the specified shape
@@ -53,7 +60,7 @@ def reshape(src: Buffer, shape: list[PrimExpr]) -> Buffer:
     return T.Tensor(shape, src.dtype, src.data)
 
 
-def view(src: Buffer, shape: list[PrimExpr] | None = None, dtype: str | None = None) -> Buffer:
+def view(src: Buffer, shape: ShapeType | None = None, dtype: DType | None = None) -> Buffer:
     """Return a Tensor view of the input buffer with an optional new shape and dtype.
 
     If `shape` is None the source buffer's shape is used; if `dtype` is None the source buffer's dtype is used. The returned buffer shares the same underlying data as `src` (no copy).
@@ -66,7 +73,7 @@ def view(src: Buffer, shape: list[PrimExpr] | None = None, dtype: str | None = N
     return T.Tensor(shape, dtype, src.data)
 
 
-def loop_break():
+def loop_break() -> PrimExpr:
     """Break out of the current loop.
 
     Returns:

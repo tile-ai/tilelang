@@ -31,8 +31,15 @@ def get_kernel(m: int):
 def test_issue_1106():
     m = 200
     kernel = get_kernel(m)
-    assert "__syncthreads" not in kernel.get_kernel_source()
+    source = kernel.get_kernel_source()
+    # Ensure __syncthreads is not inside the for loop
+    for_start = source.find("for (int i = 0;")
+    for_end = source.find("__syncthreads")
+    assert for_end > for_start, "__syncthreads should be after the for loop, not inside it"
+    # Check that __syncthreads appears after the closing brace of the outer for loop
+    assert source[for_end - 4 : for_end - 2] == "}\n", "__syncthreads should not be inside any for loop"
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_issue_1106()

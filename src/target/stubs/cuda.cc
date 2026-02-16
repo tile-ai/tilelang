@@ -5,12 +5,21 @@
  * This file implements lazy loading of libcuda.so and provides global wrapper
  * functions that serve as drop-in replacements for the CUDA driver API.
  *
- * The library is loaded on first API call using dlopen(). If loading fails
- * (e.g., on a CPU-only machine), an exception is thrown at call time rather
- * than at import time, allowing tilelang to be imported without CUDA.
+ * Motivation
+ * ----------
+ * The primary purpose is to allow TileLang to be imported on systems without
+ * a GPU (e.g., CI/compilation nodes). The library is loaded on first API call
+ * using dlopen(). If loading fails, an exception is thrown at call time rather
+ * than at import time.
  */
 
 #include "cuda.h"
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#error "cuda_stub is currently POSIX-only (requires <dlfcn.h> / dlopen). "         \
+    "On Windows, build TileLang from source with -DTILELANG_USE_CUDA_STUBS=OFF " \
+    "to link against the real CUDA libraries."
+#endif
 
 #include <dlfcn.h>
 #include <stdexcept>

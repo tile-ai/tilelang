@@ -126,3 +126,10 @@ TL_DEVICE void device_assert_with_msg(bool cond, const char *msg) {
     assert(0);
   }
 }
+
+// Specialization for msg-only debug print
+__device__ void debug_print_msg(const char *msg) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d)\n", msg,
+         blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z);
+}

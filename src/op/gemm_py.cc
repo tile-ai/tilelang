@@ -82,9 +82,7 @@ GemmPy::GemmPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   if (args.size() > 16) {
     if (const auto *load = args[16].as<BufferLoadNode>()) {
-      node->mbarRegion_ =
-          NormalizeToBufferRegion(Downcast<BufferLoad>(args[16]));
-      node->mbar_ = node->mbarRegion_->buffer;
+      node->mbar_ = Downcast<BufferLoad>(args[16]);
     }
   }
   node->cCoords_ = Array<PrimExpr>(
@@ -241,13 +239,8 @@ static int GetArchInt(Target target) {
 }
 
 Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  auto block_size = *as_const_int(T.thread_bounds->extent);
-  GemmInst gemm_inst = getGemmInst(block_size, T.target);
-
-  auto [warp_m, warp_n] =
-      policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
-
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
+    // NOTE(wt): Decide GemmInst and compute warp partition on Python side
     auto prim_func =
         Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmPy>(this), T.layout_map,
                                 T.target, T.thread_bounds, T.thread_var));

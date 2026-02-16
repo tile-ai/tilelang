@@ -37,6 +37,7 @@ public:
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<AtomicAddNode>()
         .def_ro("src", &AtomicAddNode::src)
+        .def_ro("src_value", &AtomicAddNode::src_value)
         .def_ro("dst", &AtomicAddNode::dst)
         .def_ro("src_range", &AtomicAddNode::src_range)
         .def_ro("dst_range", &AtomicAddNode::dst_range)
@@ -47,7 +48,12 @@ public:
   bool GetUseTMA() const {
     if (auto val = annotations.Get("use_tma")) {
       if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
+        if (int_val->value != 0) {
+          ICHECK(!src_value.defined())
+              << "TMA is not supported when using TiledAtomicAdd with PrimExpr "
+                 "as value.";
+          return true;
+        }
       }
     }
     return false;
@@ -62,7 +68,6 @@ protected:
 
   /// Return buffer indices and total size
   std::pair<Array<PrimExpr>, PrimExpr> ReturnIndicesAndSize(int src_dst) const;
-
   /// Compute linear layout for shared tensor (used in TMA atomic add)
   Layout ComputeLinearLayout(const Buffer &shared_tensor) const;
 };

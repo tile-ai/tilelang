@@ -37,17 +37,11 @@ static std::string GetFP8Type(DataType type) {
     LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
                   "for FP8";
   }
-  if (type.code() == DataType::kFloat8_e4m3fn) {
+  if (type.is_float8_e4m3fn() || type.is_float8_e4m3fnuz() ||
+      type.is_float8_e4m3() || type.code() == DataType::kFloat8_e4m3b11fnuz) {
     stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e4m3fnuz) {
-    stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e4m3) {
-    stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e4m3b11fnuz) {
-    stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e5m2) {
-    stream << "fp8_e5" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e5m2fnuz) {
+  } else if (type.is_float8_e5m2() || type.is_float8_e5m2fnuz() ||
+             type.code() == DataType::kFloat8_e5m2) {
     stream << "fp8_e5" << vec << "_t";
   } else if (type.code() == DataType::kFloat8_e8m0fnu) {
     stream << "fp8_e8" << vec << "_t";
@@ -431,6 +425,7 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 void CodeGenTileLangHIP::PrintVecBinaryOp(const std::string &op, DataType t,
                                           PrimExpr lhs, PrimExpr rhs,
                                           std::ostream &os) { // NOLINT(*)
+
   // Declare the result.
   std::string sret = name_supply_->FreshName("_");
   this->PrintIndent();
@@ -830,6 +825,18 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fadd2())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl::fadd2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fmul2())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl::fmul2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fma2())) {
+    ICHECK_EQ(op->args.size(), 3U);
+    os << "tl::fma2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
   } else if (op->op.same_as(tl::__ldg())) {
     // HIP fallback: regular load
     const BufferLoadNode *bl = op->args[0].as<BufferLoadNode>();
@@ -943,9 +950,13 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"bfloat16x4", "bfloat16x4_vec"},
         {"float32x4", "float32x4"},
         {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
+        {"float8_e4m3fnx4", "fp8_e4_4_t"},
         {"float8_e4m3fnuzx8", "long"},
+        {"float8_e4m3fnx8", "long"},
         {"float8_e5m2fnuzx4", "fp8_e5_4_t"},
         {"float8_e5m2fnuzx8", "long"},
+        {"float8_e5m2x4", "fp8_e5_4_t"},
+        {"float8_e5m2x8", "long"},
         {"float32x16", "float32x16"}};
     std::string call_mfma_code = R"({
       *((({C_dtype}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),

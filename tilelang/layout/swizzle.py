@@ -196,3 +196,52 @@ def make_linear_layout(buffer_or_load_or_region: Buffer | BufferLoad | BufferReg
     """
     _, shape, _ = _get_buffer_info(buffer_or_load_or_region)
     return _ffi_api.make_linear_layout(list(shape))
+
+
+def make_gemm_fragment_8x8():
+    """
+    Create a standard 8x8 GEMM fragment layout for ldmatrix/stmatrix.
+
+    This layout matches the warp-level matrix multiplication pattern used in tensor cores.
+
+    Returns:
+        Fragment: An 8x8 fragment layout
+    """
+    return _ffi_api.make_gemm_fragment_8x8()
+
+
+def make_gemm_fragment_8x8_transposed():
+    """
+    Create a transposed 8x8 GEMM fragment layout for ldmatrix/stmatrix.
+
+    This layout is the transposed version of make_gemm_fragment_8x8, useful for
+    different access patterns in matrix operations.
+
+    Returns:
+        Fragment: A transposed 8x8 fragment layout
+    """
+    return _ffi_api.make_gemm_fragment_8x8_transposed()
+
+
+def make_fully_replicated_layout_fragment(buffer: Buffer | BufferLoad | BufferRegion, threads: int):
+    """
+    Create a fully replicated layout for a fragment buffer.
+
+    A fully replicated fragment means all threads hold identical copies of the
+    entire buffer. This is useful for index buffers or masks that need to be
+    accessed uniformly across all threads.
+
+    Args:
+        buffer: Buffer, BufferLoad, or BufferRegion to get shape information
+        threads: Number of threads (replicate extent)
+
+    Returns:
+        Fragment: A fully replicated layout where each thread has a complete copy
+
+    Example:
+        >>> C_local = T.alloc_fragment((2,), T.float32)
+        >>> layout = make_fully_replicated_layout_fragment(C_local, 256)
+        >>> T.annotate_layout({C_local: layout})
+    """
+    _, shape, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_fully_replicated_layout_fragment(list(shape), threads)

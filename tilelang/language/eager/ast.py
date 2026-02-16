@@ -6,6 +6,7 @@ from typing import Callable, Generic, Any, Literal, TypeVar
 from contextlib import AbstractContextManager
 from collections.abc import Iterable
 
+
 # Python 3.9 compatibility for ParamSpec
 try:
     from typing import ParamSpec
@@ -212,7 +213,7 @@ class BaseBuilder:
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot: Any = empty):
         lval[sl] = value
 
-    def aug_assign(self, op: Operator, target: Any, aug_value: Any) -> Any:
+    def aug_assign(self, op: Operator, target: Any, aug_value: Any, name: str | None = None) -> Any:
         return eval_op(op, target, aug_value)
 
     def aug_assign_slice(self, op: Operator, target: Any, sl: slice, aug_value: Any):
@@ -247,6 +248,14 @@ class BaseBuilder:
 
     def override(self, name: str):
         return globals()[name]
+
+
+def _try_eval(node: ast.expr, nonlocals: dict[str, Any], globals: dict[str, Any]) -> Any:
+    try:
+        code = "lambda " + ",".join(nonlocals.keys()) + ": " + ast.unparse(node)
+        return eval(code, globals)(**nonlocals)
+    except Exception:
+        return _empty
 
 
 class DSLMutator(ast.NodeTransformer):
@@ -428,7 +437,18 @@ class DSLMutator(ast.NodeTransformer):
         target, rval = node.target, node.value
         op = get_operator_name(node.op)
         if isinstance(target, ast.Name):
-            return quote(f"name = __tb.aug_assign('{op}', {target.id}, value)", name=target, value=rval, span=node)
+            # NOTE: We intentionally avoid using placeholder names like `value` here because
+            # user code commonly uses `value` as a variable name, and QuoteVisitor would
+            # otherwise substitute the target identifier unexpectedly.
+            target_load = ast.Name(target.id, ctx=ast.Load())
+            ast_set_span(target_load, ast_get_span(target))
+            return quote(
+                f"__tl_lhs = __tb.aug_assign('{op}', __tl_target, __tl_aug_value, name='{target.id}')",
+                __tl_lhs=target,
+                __tl_target=target_load,
+                __tl_aug_value=rval,
+                span=node,
+            )
         elif isinstance(target, ast.Subscript):
             return quote(
                 f"__tb.aug_assign_slice('{op}', lval, slice, value)",
@@ -487,11 +507,7 @@ class DSLMutator(ast.NodeTransformer):
         )
 
     def _try_eval(self, node: ast.expr) -> Any:
-        try:
-            code = "lambda " + ",".join(self.nonlocals.keys()) + ": " + ast.unparse(node)
-            return eval(code, self.globals)(**self.nonlocals)
-        except Exception:
-            return _empty
+        return _try_eval(node, self.nonlocals, self.globals)
 
     def _parse_arg_annot(self, stmt: ast.stmt, arg_names: set[str]):
         if not isinstance(stmt, ast.AnnAssign):
@@ -570,9 +586,20 @@ class DSLMutator(ast.NodeTransformer):
         return quote("return __tb.ret(value)", value=node.value, span=node)
 
     def visit_With(self, node: ast.With):
+        is_kernel_ctx = False
+        for expr in node.items:
+            cexpr = expr.context_expr
+            if isinstance(cexpr, ast.Call) and isinstance(cexpr.func, ast.Attribute) and cexpr.func.attr == "Kernel":
+                eval_res = self._try_eval(cexpr.func)
+                from tilelang.language import Kernel
+
+                if eval_res is Kernel:
+                    is_kernel_ctx = True
         node = self.generic_visit(node)
         for expr in node.items:
             expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=expr)
+        if is_kernel_ctx:
+            return [quote1("if __tb.skip_kernel_ctx(): return"), node]
         return node
 
     def visit_Assert(self, node: ast.Assert):
@@ -605,6 +632,21 @@ class IRGenerator(Generic[_P, _T]):
     gen: Callable[[BaseBuilder], Callable[_P, _T]]
     source: str
     extra_type_hints: dict[str, Any] = field(default_factory=dict)
+
+
+def has_internal_prim_func(func: Callable[_P, _T]) -> bool:
+    tree = utils.get_ast(func)
+    nonlocals = utils.get_func_nonlocals(func)
+    for item in ast.walk(tree):
+        if isinstance(item, ast.FunctionDef):
+            decors = item.decorator_list
+            for decor in decors:
+                if isinstance(decor, ast.Attribute) and decor.attr == "prim_func":
+                    from tilelang.language.eager import prim_func
+
+                    if _try_eval(decor, nonlocals, func.__globals__) is prim_func:
+                        return True
+    return False
 
 
 def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:

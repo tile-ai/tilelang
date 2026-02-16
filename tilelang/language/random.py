@@ -3,7 +3,7 @@ import tilelang.language as T
 
 
 # https://docs.nvidia.com/cuda/curand/device-api-overview.html#device-api-overview
-def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t"):
+def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> tir.PrimExpr:
     """Initialize CUDA curand random number generator state
 
     Parameters
@@ -37,7 +37,7 @@ def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t"):
     return tir.call_intrin("void", tir.op.Op.get("tl.rng_init"), seed, seq, off, generator)
 
 
-def rng_rand():
+def rng_rand() -> tir.PrimExpr:
     """Generate a 32-bit unsigned random integer
 
     Returns
@@ -48,7 +48,7 @@ def rng_rand():
     return tir.call_intrin("uint32", tir.op.Op.get("tl.rng_rand"))
 
 
-def rng_rand_float(bit=32, dist="uniform"):
+def rng_rand_float(bit=32, dist="uniform") -> tir.PrimExpr:
     """Generate a random float
 
     Parameters

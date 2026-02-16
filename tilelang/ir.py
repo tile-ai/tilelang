@@ -4,6 +4,7 @@ from tvm.runtime import Scriptable
 import tvm_ffi
 from tvm.target import Target
 from tilelang import _ffi_api
+from tilelang.tileop.gemm.inst import GemmInst
 
 
 @tvm_ffi.register_object("tl.Fill")
@@ -28,8 +29,8 @@ class GemmWarpPolicy(Node, Scriptable):
     m_warp: int
     n_warp: int
 
-    def compute_warp_partition(self, M: int, N: int, block_size: int, target: Target, is_wgmma: bool):
-        _ffi_api.GemmWarpPolicyComputeWarpPartition(self, int(M), int(N), int(block_size), target, is_wgmma)
+    def compute_warp_partition(self, M: int, N: int, block_size: int, target: Target, gemm_inst: GemmInst):
+        _ffi_api.GemmWarpPolicyComputeWarpPartition(self, int(M), int(N), int(block_size), target, gemm_inst)
         return self.m_warp, self.n_warp
 
 
@@ -39,8 +40,8 @@ class GemmSPWarpPolicy(Node, Scriptable):
     m_warp: int
     n_warp: int
 
-    def compute_warp_partition(self, M: int, N: int, block_size: int, target: Target, is_wgmma: bool, bits: int):
-        _ffi_api.GemmSPWarpPolicyComputeWarpPartition(self, int(M), int(N), int(block_size), target, is_wgmma, bits)
+    def compute_warp_partition(self, M: int, N: int, block_size: int, target: Target, gemm_inst: GemmInst, bits: int):
+        _ffi_api.GemmSPWarpPolicyComputeWarpPartition(self, int(M), int(N), int(block_size), target, gemm_inst, bits)
         return self.m_warp, self.n_warp
 
 

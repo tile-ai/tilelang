@@ -155,6 +155,7 @@ void CodeGenTileLangPY::ReserveKeywordsAsUnique_() {
 
 void CodeGenTileLangPY::PrintSSAAssign(const std::string &target,
                                        const std::string &src, DataType t) {
+  PrintIndent();
   stream << target << " = " << RemoveOutermostParentheses(src) << "\n";
 }
 
