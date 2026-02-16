@@ -1,3 +1,6 @@
+# NOTE: This bwd script is not an official upstream script; it is community-written and provided for reference only.
+# checkout pr: https://github.com/tile-ai/tilelang/pull/1758
+
 import torch
 
 import tilelang
@@ -64,14 +67,7 @@ def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 1
     dtype = T.float32
 
     @T.macro
-    def matvec_A(
-        R: T.SharedBuffer([tilesize, n_stream, n_stream], dtype),
-        x1: T.SharedBuffer([tilesize, n_stream], dtype),
-        x2: T.SharedBuffer([tilesize, n_stream], dtype),
-        buf: T.SharedBuffer([tilesize, n_stream, n_stream], dtype),
-        y1: T.SharedBuffer([tilesize, n_stream], dtype),
-        y2: T.SharedBuffer([tilesize, n_stream], dtype),
-    ):
+    def matvec_A(R, x1, x2, buf, y1, y2):
         for i_tile, i, j in T.Parallel(tilesize, n_stream, n_stream):
             buf[i_tile, i, j] = R[i_tile, i, j] * x2[i_tile, j]
         T.reduce_sum(buf, y1, dim=-1)
@@ -85,14 +81,7 @@ def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 1
             y2[i_tile, i] += x2[i_tile, i]
 
     @T.macro
-    def dot(
-        x1: T.SharedBuffer([tilesize, n_stream], dtype),
-        x2: T.SharedBuffer([tilesize, n_stream], dtype),
-        y1: T.SharedBuffer([tilesize, n_stream], dtype),
-        y2: T.SharedBuffer([tilesize, n_stream], dtype),
-        buf: T.SharedBuffer([tilesize, n_stream], dtype),
-        out: T.SharedBuffer([tilesize], dtype),
-    ):
+    def dot(x1, x2, y1, y2, buf, out):
         for i_tile, i in T.Parallel(tilesize, n_stream):
             buf[i_tile, i] = x1[i_tile, i] * y1[i_tile, i] + x2[i_tile, i] * y2[i_tile, i]
 
@@ -105,9 +94,9 @@ def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 1
         res: T.Tensor(tensor_shape, dtype),
     ):
         with T.Kernel(T.ceildiv(seqlen, tilesize), threads=threads) as i_seq:
-            R = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
-            dR = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
-            RdR = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
+            R = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
+            dR = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
+            RdR = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
             res_tile = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
             b1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
             b2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
@@ -117,11 +106,13 @@ def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 1
             r2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
             p1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
             p2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            r_normsq = T.alloc_shared([tilesize], dtype=dtype)
-            r_new_normsq = T.alloc_shared([tilesize], dtype=dtype)
+            alpha = T.alloc_fragment([tilesize, n_stream], dtype=dtype)
+            beta = T.alloc_fragment([tilesize, n_stream], dtype=dtype)
+            r_normsq = T.alloc_fragment([tilesize], dtype=dtype)
+            r_new_normsq = T.alloc_fragment([tilesize], dtype=dtype)
             Ap1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
             Ap2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            pAp = T.alloc_shared([tilesize], dtype=dtype)
+            pAp = T.alloc_fragment([tilesize], dtype=dtype)
 
             # Buffers for intermediate results
             buf1 = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
@@ -143,6 +134,8 @@ def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 1
 
             for i_tile, i_n in T.Parallel(tilesize, n_stream):
                 r1[i_tile, i_n] = b1[i_tile, i_n] - r1[i_tile, i_n]
+
+            for i_tile, i_n in T.Parallel(tilesize, n_stream):
                 r2[i_tile, i_n] = b2[i_tile, i_n] - r2[i_tile, i_n]
 
             T.copy(r1, p1)
@@ -158,19 +151,25 @@ def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 1
 
                 for i_tile, i_n in T.Parallel(tilesize, n_stream):
                     # VERY important to avoid divide by zero
-                    alpha = r_normsq[i_tile] / (pAp[i_tile] + EPS)
-                    x1[i_tile, i_n] += alpha * p1[i_tile, i_n]
-                    x2[i_tile, i_n] += alpha * p2[i_tile, i_n]
-                    r1[i_tile, i_n] -= alpha * Ap1[i_tile, i_n]
-                    r2[i_tile, i_n] -= alpha * Ap2[i_tile, i_n]
+                    alpha[i_tile, i_n] = r_normsq[i_tile] / (pAp[i_tile] + EPS)
+                for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                    x1[i_tile, i_n] += alpha[i_tile, i_n] * p1[i_tile, i_n]
+                for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                    x2[i_tile, i_n] += alpha[i_tile, i_n] * p2[i_tile, i_n]
+                for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                    r1[i_tile, i_n] -= alpha[i_tile, i_n] * Ap1[i_tile, i_n]
+                for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                    r2[i_tile, i_n] -= alpha[i_tile, i_n] * Ap2[i_tile, i_n]
 
                 dot(r1, r2, r1, r2, buf2, r_new_normsq)
 
                 for i_tile, i_n in T.Parallel(tilesize, n_stream):
                     # not very important to avoid divide by zero, but it's good to have it
-                    beta = r_new_normsq[i_tile] / (r_normsq[i_tile] + EPS)
-                    p1[i_tile, i_n] = r1[i_tile, i_n] + beta * p1[i_tile, i_n]
-                    p2[i_tile, i_n] = r2[i_tile, i_n] + beta * p2[i_tile, i_n]
+                    beta[i_tile, i_n] = r_new_normsq[i_tile] / (r_normsq[i_tile] + EPS)
+                for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                    p1[i_tile, i_n] = r1[i_tile, i_n] + beta[i_tile, i_n] * p1[i_tile, i_n]
+                for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                    p2[i_tile, i_n] = r2[i_tile, i_n] + beta[i_tile, i_n] * p2[i_tile, i_n]
 
                 T.copy(r_new_normsq, r_normsq)
             # Conjugate gradient: iteration ends
@@ -191,15 +190,6 @@ def main():
     print(f"{n_stream = }")
     print(f"{iters = }")
     print(f"{repeat = }")
-
-    # Remove ~/.tilelang
-    from pathlib import Path
-    import shutil
-
-    tilelang_cache_dir = Path.home() / ".tilelang"
-    if tilelang_cache_dir.exists():
-        shutil.rmtree(tilelang_cache_dir)
-        print(f"Removed {tilelang_cache_dir}")
 
     ######################################################################
     # Variable
@@ -234,7 +224,7 @@ def main():
     # Set autotune inputs
     with set_autotune_inputs(R, grad_R):
         kernel = sinkhorn_bwd_implicit_cg(n_stream)
-
+    print(kernel.get_kernel_source())
     print("\n" + "=" * 60)
     print("Autotuning completed! Running with best configuration...")
     print("=" * 60)
