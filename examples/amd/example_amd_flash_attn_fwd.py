@@ -16,12 +16,7 @@ def supply_tensors_gpu(params):
             # Force creation on GPU device
             shape = [int(s) for s in param.shape]
             # Convert TileLang dtype to PyTorch dtype
-            if hasattr(param.dtype, "as_torch"):
-                torch_dtype = param.dtype.as_torch()
-            else:
-                torch_dtype = param.dtype
-            if torch_dtype is None:
-                raise ValueError(f"Cannot convert dtype '{param.dtype}' to torch.dtype")
+            torch_dtype = param.dtype.as_torch()
             tensor = torch.randn(shape, dtype=torch_dtype, device="cuda")
             tensors.append(tensor)
         else:
