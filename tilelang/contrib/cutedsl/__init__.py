@@ -89,6 +89,12 @@ def make_filled_tensor(shape, value):
 
 
 def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1):
+    from cutlass.cute.typing import is_integer as cute_is_integer
+    # Ensure offset is a cute-compatible integer.  Complex arithmetic
+    # (e.g. cutlass.Int64 mixed ops) can produce ArithValue / Float types
+    # that Pointer.__add__ -> _pack_int_tuple doesn't accept.
+    if not isinstance(offset, int) and not cute_is_integer(offset):
+        offset = cutlass.Int64(offset)
     if div_by != 1:
         offset = cute.assume(cutlass.as_numeric(offset), divby=div_by)
     return cute.make_tensor(ptr + offset, shape)
