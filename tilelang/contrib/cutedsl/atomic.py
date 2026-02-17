@@ -151,6 +151,15 @@ def AtomicAddRet(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
 # =============================================================================
 
 
+def _load_from_src(src_values, count):
+    """Load elements from src_values, handling both TensorSSA and _Pointer types."""
+    if isinstance(src_values, cute.Pointer):
+        # Create a tensor from pointer and load elements
+        src_tensor = cute.make_tensor(src_values, cute.make_layout((count,)))
+        return [src_tensor[i] for i in range(count)]
+    return [src_values[i] for i in range(count)]
+
+
 def AtomicAddx2(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
     """Vectorized atomic add for 2 consecutive float32 elements.
 
@@ -160,10 +169,9 @@ def AtomicAddx2(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
         dst_ptr: Pointer to destination (2 consecutive float32 elements)
         src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
     """
-    # src_values can be TensorSSA (already loaded) or Pointer
-    # In both cases, we can index with [0], [1]
-    val0 = src_values[0]
-    val1 = src_values[1]
+    vals = _load_from_src(src_values, 2)
+    val0 = vals[0]
+    val1 = vals[1]
 
     # Use inline PTX for vectorized atomic add
     res_type = llvm.StructType.get_literal([T.f32()] * 2)
@@ -189,12 +197,11 @@ def AtomicAddx4(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
         dst_ptr: Pointer to destination (4 consecutive float32 elements)
         src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
     """
-    # src_values can be TensorSSA (already loaded) or Pointer
-    # In both cases, we can index with [0], [1], [2], [3]
-    val0 = src_values[0]
-    val1 = src_values[1]
-    val2 = src_values[2]
-    val3 = src_values[3]
+    vals = _load_from_src(src_values, 4)
+    val0 = vals[0]
+    val1 = vals[1]
+    val2 = vals[2]
+    val3 = vals[3]
 
     # Use inline PTX for vectorized atomic add
     res_type = llvm.StructType.get_literal([T.f32()] * 4)
