@@ -497,6 +497,7 @@ private:
     if (op->attr_key == "kWarpSpecializationScope") {
       has_warp_specialization_ = true;
       first_if = true;
+      cur_expect_idx_ = 0;
     } else if (op->attr_key == tir::attr::thread_extent &&
                Downcast<IterVar>(op->node)->thread_tag == "threadIdx.x") {
       thread_var_ = Downcast<IterVar>(op->node);

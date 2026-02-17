@@ -557,6 +557,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
      *         (e.g., inside a TMA load) and therefore multiple writes
      *         among themselves should not force barriers between them. */
     bool is_async_copy = false;
+    /*! \brief Whether this access is part of an atomic RMW (e.g., atomic_add).
+     *
+     * If both sides of a dependency are atomic, we should not insert a thread
+     * barrier between them. A barrier would artificially serialize atomics
+     * across threads (and can even change observable results for atomics with
+     * return values).
+     */
+    bool is_atomic = false;
   };
   /*! \brief Access pattern about a single statement */
   struct StmtEntry {
@@ -891,6 +899,36 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       tma_depth_--;
       return;
     }
+
+    // Mark the pointer argument of atomic ops as atomic so the sync planner
+    // doesn't insert barriers between atomics.
+    auto is_atomic_op = [&]() {
+      if (auto opt = op->op.as<Op>()) {
+        const Op &call_op = opt.value();
+        return call_op.same_as(tl::atomic_add_elem_op()) ||
+               call_op.same_as(tl::atomic_add_ret_elem_op()) ||
+               call_op.same_as(tl::atomic_addx2_elem_op()) ||
+               call_op.same_as(tl::atomic_addx4_elem_op()) ||
+               call_op.same_as(tl::atomic_load_elem_op()) ||
+               call_op.same_as(tl::atomic_store_elem_op()) ||
+               call_op.same_as(tl::atomic_max_elem_op()) ||
+               call_op.same_as(tl::atomic_max_ret_elem_op()) ||
+               call_op.same_as(tl::atomic_min_elem_op()) ||
+               call_op.same_as(tl::atomic_min_ret_elem_op());
+      }
+      return false;
+    }();
+    if (is_atomic_op) {
+      if (!op->args.empty()) {
+        atomic_dst_ptr_depth_++;
+        this->VisitExpr(op->args[0]);
+        atomic_dst_ptr_depth_--;
+        for (size_t i = 1; i < op->args.size(); ++i) {
+          this->VisitExpr(op->args[i]);
+        }
+      }
+      return;
+    }
     if (op->op.same_as(builtin::address_of())) {
       ICHECK_EQ(op->args.size(), 1U);
       if (auto load = op->args[0].as<BufferLoadNode>()) {
@@ -921,6 +959,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
             e.touched.push_back(arith::IntSet::Vector(index));
           }
           e.is_pointer_access = true;
+          e.is_atomic = (atomic_dst_ptr_depth_ > 0);
           e.type = kRead;
           e.scope = scope;
           curr_stmt_.access.emplace_back(e);
@@ -980,6 +1019,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.buffer = tvm::ffi::GetRef<Var>(buffer_var);
         e.buffer_ranges = buffer_ranges;
         e.is_pointer_access = true;
+        e.is_atomic = (atomic_dst_ptr_depth_ > 0);
         e.touched = {
             arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
         e.scope = scope;
@@ -1218,6 +1258,10 @@ private:
   bool in_device_env_{false};
   // Nesting depth of tma_load/tma_load_im2col calls
   int tma_depth_{0};
+  // Whether we're visiting the pointer argument expression of an atomic call
+  // (e.g., atomic_add/atomic_max/atomic_load). When > 0, accesses produced by
+  // the pointer metadata ops are tagged as atomic.
+  int atomic_dst_ptr_depth_{0};
   // the current free stmt entry.
   StmtEntry curr_stmt_;
   // The involving threads
@@ -1397,6 +1441,13 @@ private:
     }
     // Access to different buffers does not conflict.
     if (!prev.buffer.same_as(curr.buffer)) {
+      return false;
+    }
+
+    // Atomic ops already provide correctness for concurrent access.
+    // Inserting a barrier between atomics is unnecessary and can change
+    // program behavior (e.g., atomics with return values).
+    if (prev.is_atomic && curr.is_atomic) {
       return false;
     }
 

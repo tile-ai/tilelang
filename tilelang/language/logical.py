@@ -21,7 +21,7 @@ def any_of(buffer: BufferLikeType) -> tir.PrimExpr:
     return_type: str = "bool"
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.any_of"), T.address_of(buffer), elems)
+        return T.call_intrin(return_type, tir.op.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems)
     elif isinstance(buffer, BufferRegion):
         buffer, region = buffer.buffer, buffer.region
         new_region = []
@@ -38,7 +38,12 @@ def any_of(buffer: BufferLikeType) -> tir.PrimExpr:
                     )
                 new_region.append(r.min)
         buffer_load = BufferLoad(buffer, new_region)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.any_of"), T.address_of(buffer_load), extent)
+        return T.call_intrin(
+            return_type,
+            tir.op.Op.get("tl.any_of"),
+            T.access_ptr(buffer_load, "r", extent=extent),
+            extent,
+        )
     else:
         raise ValueError(f"Invalid buffer type: {type(buffer)}")
 
@@ -55,7 +60,7 @@ def all_of(buffer: BufferLikeType) -> tir.PrimExpr:
     return_type: str = "bool"
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.all_of"), T.address_of(buffer), elems)
+        return T.call_intrin(return_type, tir.op.Op.get("tl.all_of"), T.access_ptr(buffer, "r"), elems)
     elif isinstance(buffer, BufferRegion):
         buffer, region = buffer.buffer, buffer.region
         new_region = []
@@ -72,6 +77,11 @@ def all_of(buffer: BufferLikeType) -> tir.PrimExpr:
                     )
                 new_region.append(r.min)
         buffer_load = BufferLoad(buffer, new_region)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.all_of"), T.address_of(buffer_load), extent)
+        return T.call_intrin(
+            return_type,
+            tir.op.Op.get("tl.all_of"),
+            T.access_ptr(buffer_load, "r", extent=extent),
+            extent,
+        )
     else:
         raise ValueError(f"Invalid buffer type: {type(buffer)}")

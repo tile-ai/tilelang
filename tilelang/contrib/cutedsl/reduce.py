@@ -357,6 +357,13 @@ class CumSum2D:
                 dst_tensor[idx] = val
 
 
+class NamedBarrier:
+    """Named barrier policy for AllReduce, uses bar.sync instead of __syncthreads.
+    Based on tl::NamedBarrier<all_threads> from reduce.h"""
+    def __init__(self, all_threads):
+        self.all_threads = all_threads
+
+
 def AllReduce(reducer, threads, scale, thread_offset, all_threads=None):
     """
     AllReduce operation implementing warp/block-level reduction.
@@ -373,19 +380,31 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None):
         A callable object with run() and run_hopper() methods
     """
 
+    # Detect NamedBarrier: extract all_threads and use bar.sync path
+    use_named_barrier = isinstance(all_threads, NamedBarrier)
+    if use_named_barrier:
+        barrier_threads = all_threads.all_threads
+    else:
+        barrier_threads = all_threads
+
     class AllReduceInstance:
-        def __init__(self, reducer, threads, scale, thread_offset: cutlass.Constexpr[int], all_threads: cutlass.Constexpr[int]):
+        def __init__(self, reducer, threads, scale, thread_offset: cutlass.Constexpr[int], all_threads: cutlass.Constexpr[int], use_named_barrier: cutlass.Constexpr[bool]):
             self.reducer = reducer
             self.threads = threads
             self.scale = scale
             self.thread_offset = thread_offset
             self.all_threads = all_threads if all_threads is not None else threads
+            self.use_named_barrier = use_named_barrier
 
         def run(self, x, red_buf: cute.Pointer = None):
             """
             Perform all-reduce across threads.
             Based on tl::AllReduce<...>::run from reduce.h
+            When NamedBarrier is used, delegates to run_hopper.
             """
+            if self.use_named_barrier:
+                return self.run_hopper(x, red_buf)
+
             offset = self.threads // 2
 
             if offset >= 32:
@@ -432,4 +451,4 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None):
                 else AllReduce(self.reducer, offset, self.scale, self.thread_offset, self.all_threads).run_hopper(x, red_buf)
             )
 
-    return AllReduceInstance(reducer, threads, scale, thread_offset, all_threads)
+    return AllReduceInstance(reducer, threads, scale, thread_offset, barrier_threads, use_named_barrier)

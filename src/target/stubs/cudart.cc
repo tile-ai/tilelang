@@ -5,16 +5,19 @@
  *
  * Motivation
  * ----------
- * libcudart's SONAME encodes its major version (e.g. libcudart.so.11.0,
- * libcudart.so.12, libcudart.so.13). If we link libtvm.so / libtvm_runtime.so
- * directly against a specific SONAME, a wheel built against one CUDA toolkit
- * becomes unusable in another environment that only provides a different
- * libcudart major version.
+ * The primary purpose is to resolve SONAME mismatches (e.g., libcudart.so.11.0
+ * vs libcudart.so.12), allowing a single build to work across different CUDA
+ * versions. This is achieved by reusing the CUDA runtime already loaded by
+ * frameworks like PyTorch.
  *
  * This stub exports the subset of CUDA Runtime API entrypoints used by TVM in
  * this repository. The real libcudart is loaded lazily via dlopen() on first
  * API call, and symbols are resolved via dlsym().
  */
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
 #include <cuda_runtime_api.h>
 
@@ -26,6 +29,8 @@
 
 #include <dlfcn.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // This stub supports CUDA 11+.
@@ -49,19 +54,6 @@ static_assert(CUDART_VERSION >= 11000,
 
 namespace {
 
-// Try multiple major versions for cross-toolkit compatibility.
-constexpr const char *kLibCudartPaths[] = {
-    "libcudart.so.13",
-    "libcudart.so.12",
-    // CUDA 11 typically uses `libcudart.so.11.0` (and may also provide a
-    // `libcudart.so.11` symlink depending on the packaging).
-    "libcudart.so.11.0",
-    "libcudart.so.11",
-    // Unversioned name typically only exists with development packages, but try
-    // it as a last resort.
-    "libcudart.so",
-};
-
 using CudaGraphInstantiateLegacy = cudaError_t (*)(cudaGraphExec_t *pGraphExec,
                                                    cudaGraph_t graph,
                                                    cudaGraphNode_t *pErrorNode,
@@ -71,26 +63,24 @@ using CudaGraphInstantiateWithFlags = cudaError_t (*)(
     cudaGraphExec_t *pGraphExec, cudaGraph_t graph, unsigned long long flags);
 
 void *TryLoadLibCudart() {
-  // If libcudart is already loaded in the current process (e.g. via PyTorch or
-  // another CUDA-enabled library), prefer reusing that instance to avoid
-  // loading multiple libcudart versions in one process.
-#ifdef RTLD_NOLOAD
-  for (const char *path : kLibCudartPaths) {
-    void *existing = dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
-    if (existing != nullptr) {
-      return existing;
-    }
+  // First, check if the symbols are already available globally.
+  // This handles cases where PyTorch or another library has already loaded
+  // libcudart, making its symbols available in the global namespace.
+  // We use a representative symbol like cudaGetErrorString.
+  // dlsym with RTLD_DEFAULT searches the global scope.
+  void *sym = dlsym(RTLD_DEFAULT, "cudaGetErrorString");
+  if (sym != nullptr && sym != reinterpret_cast<void *>(&cudaGetErrorString)) {
+    return RTLD_DEFAULT;
   }
-#endif
+  sym = dlsym(RTLD_NEXT, "cudaGetErrorString");
+  if (sym != nullptr) {
+    return RTLD_NEXT;
+  }
 
-  void *handle = nullptr;
-  for (const char *path : kLibCudartPaths) {
-    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
-    if (handle != nullptr) {
-      break;
-    }
-  }
-  return handle;
+  fprintf(stderr,
+          "TileLang Error: libcudart symbols not found globally. "
+          "Make sure PyTorch with CUDA is installed before using TileLang.\n");
+  abort();
 }
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
@@ -179,10 +169,6 @@ const char *FallbackCudaErrorString(cudaError_t error) {
 CUDARuntimeAPI CreateCUDARuntimeAPI() {
   CUDARuntimeAPI api{};
   void *handle = GetLibCudartHandle();
-  if (handle == nullptr) {
-    return api;
-  }
-
 #define LOOKUP_REQUIRED(name)                                                  \
   api.name##_ = GetSymbol<decltype(api.name##_)>(handle, #name);               \
   if (api.name##_ == nullptr) {                                                \
