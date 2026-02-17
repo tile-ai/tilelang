@@ -366,13 +366,13 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string src = PrintExpr_(op->args[1]);
     std::string size = PrintExpr_(op->args[2]);
 
-    this->PrintIndent();
     if (op->args.size() == 3) {
+      this->PrintIndent();
       stream << "tl.cp_async_gs(" << size << ", " << dst << ", " << src
              << ")\n";
     } else {
       std::string condition = PrintExpr_(op->args[3]);
-      PrintIndent();
+      this->PrintIndent();
       stream << "tl.cp_async_gs_conditional(" << size << ", " << dst << ", "
              << src << ", " << condition << ")\n";
     }
