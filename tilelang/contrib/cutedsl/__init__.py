@@ -76,6 +76,8 @@ from .threadblock_swizzle import *
 from .atomic import *
 from .quantize import *
 from .warp import *
+from .typing import type_map  # noqa: F401
+from .gemm_V2 import *  # noqa: F401
 
 
 BYTES_PER_TENSORMAP = 128

@@ -4,6 +4,7 @@
 
 #include "codegen_cutedsl.h"
 #include "codegen_utils.h"
+#include "ptx.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ir/transform.h>
@@ -570,13 +571,17 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     PrintIndent();
     stream << "tl.tma_store_wait(0)\n";
   } else if (op->op.same_as(tl::warpgroup_arrive())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    PrintIndent();
+    stream << "tl.warpgroup_arrive()\n";
   } else if (op->op.same_as(tl::warpgroup_commit_batch())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    PrintIndent();
+    stream << "tl.warpgroup_commit_batch()\n";
   } else if (op->op.same_as(tl::warpgroup_wait())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    PrintIndent();
+    int num_mma = Downcast<IntImm>(op->args[0])->value;
+    stream << "tl.warpgroup_wait(" << num_mma << ")\n";
   } else if (op->op.same_as(tl::warpgroup_fence_operand())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // no-op: warpgroup_fence_operand is not needed in CuTeDSL
   } else if (op->op.same_as(tl::set_max_nreg())) {
     PrintIndent();
     int nreg = Downcast<IntImm>(op->args[0])->value;
@@ -636,9 +641,93 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: shape (StringImm, e.g. "m64n128k16")
+    // arg 1: a_is_k_major (Bool)
+    // arg 2: b_is_k_major (Bool)
+    // arg 3: A_dtype (StringImm)
+    // arg 4: B_dtype (StringImm)
+    // arg 5: C_dtype (StringImm)
+    // arg 6: A descriptor (Var)
+    // arg 7: A offset (PrimExpr)
+    // arg 8: B descriptor (Var)
+    // arg 9: B offset (PrimExpr)
+    // arg 10: C accumulator (Var)
+    // arg 11: C offset (PrimExpr)
+    // arg 12: scale_out (PrimExpr)
+    // arg 13: scale_in_a (Bool)
+    // arg 14: scale_in_b (Bool)
+    ICHECK_EQ(op->args.size(), 15U) << "ptx_wgmma_ss expects 15 args";
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    bool a_is_k_major = Downcast<Bool>(op->args[1])->value;
+    bool b_is_k_major = Downcast<Bool>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_desc = PrintExpr_(op->args[6]);
+    std::string A_offset = PrintExpr_(op->args[7]);
+    std::string b_desc = PrintExpr_(op->args[8]);
+    std::string B_offset = PrintExpr_(op->args[9]);
+    std::string c_ref = GetVarPtr_(op->args[10]);
+    std::string c_offset = PrintExpr_(op->args[11]);
+    std::string scale_out = PrintExpr_(op->args[12]);
+    bool scale_in_a = Downcast<Bool>(op->args[13])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[14])->value;
+    // tnspA = !a_is_k_major, tnspB = !b_is_k_major
+    std::string tnspA = a_is_k_major ? "False" : "True";
+    std::string tnspB = b_is_k_major ? "False" : "True";
+    // scaleA/scaleB: True (scale_in) -> 1, False -> -1
+    int scaleA = scale_in_a ? 1 : -1;
+    int scaleB = scale_in_b ? 1 : -1;
+    PrintIndent();
+    stream << "tl.wgmma_ss(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << m << ", " << n << ", " << k << ", "
+           << tnspA << ", " << tnspB << ", " << scaleA << ", " << scaleB
+           << ", (" << a_desc << " + " << A_offset << "), (" << b_desc
+           << " + " << B_offset << "), " << c_ref << " + " << c_offset
+           << ", " << scale_out << ")\n";
   } else if (op->op.same_as(tl::ptx_wgmma_rs())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: shape (StringImm, e.g. "m64n128k16")
+    // arg 1: b_is_k_major (Bool)
+    // arg 2: A_dtype (StringImm)
+    // arg 3: B_dtype (StringImm)
+    // arg 4: C_dtype (StringImm)
+    // arg 5: A register buffer (Var)
+    // arg 6: A offset (PrimExpr)
+    // arg 7: B descriptor (Var)
+    // arg 8: B offset (PrimExpr)
+    // arg 9: C accumulator (Var)
+    // arg 10: C offset (PrimExpr)
+    // arg 11: scale_out (PrimExpr)
+    // arg 12: scale_in_a (Bool)
+    // arg 13: scale_in_b (Bool)
+    ICHECK_EQ(op->args.size(), 14U) << "ptx_wgmma_rs expects 14 args";
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    bool b_is_k_major = Downcast<Bool>(op->args[1])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[2])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string a_ref = GetVarPtr_(op->args[5]);
+    std::string A_offset = PrintExpr_(op->args[6]);
+    std::string b_desc = PrintExpr_(op->args[7]);
+    std::string B_offset = PrintExpr_(op->args[8]);
+    std::string c_ref = GetVarPtr_(op->args[9]);
+    std::string c_offset = PrintExpr_(op->args[10]);
+    std::string scale_out = PrintExpr_(op->args[11]);
+    bool scale_in_a = Downcast<Bool>(op->args[12])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[13])->value;
+    // tnspB = !b_is_k_major (A is always K-major in RS)
+    std::string tnspB = b_is_k_major ? "False" : "True";
+    int scaleA = scale_in_a ? 1 : -1;
+    int scaleB = scale_in_b ? 1 : -1;
+    PrintIndent();
+    stream << "tl.wgmma_rs(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << m << ", " << n << ", " << k << ", "
+           << tnspB << ", " << scaleA << ", " << scaleB << ", " << a_ref
+           << " + " << A_offset << ", (" << b_desc << " + " << B_offset
+           << "), " << c_ref << " + " << c_offset << ", " << scale_out
+           << ")\n";
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ts())) {
@@ -734,11 +823,26 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl.shuffle_elect(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::initialize_wgmma_descriptor())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // TIR args: (descriptor, start_address, layout_type, leading, stride)
+    // Python args: (layout_type, leading, stride, desc, start_address)
+    ICHECK_EQ(op->args.size(), 5U)
+        << "initialize_wgmma_descriptor expects 5 arguments";
+    std::string descriptor = PrintExpr_(op->args[0]);
+    std::string start_address = PrintExpr_(op->args[1]);
+    std::string layout_type = PrintExpr_(op->args[2]);
+    std::string leading = PrintExpr_(op->args[3]);
+    std::string stride = PrintExpr_(op->args[4]);
+    os << "tl.initialize_wgmma_descriptor(" << layout_type << ", " << leading
+       << ", " << stride << ", " << descriptor << ", " << start_address << ")";
   } else if (op->op.same_as(tl::initialize_tcgen05_descriptor())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::increase_descriptor_offset())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 2U)
+        << "increase_descriptor_offset expects 2 arguments";
+    std::string descriptor = PrintExpr_(op->args[0]);
+    std::string offset = PrintExpr_(op->args[1]);
+    os << "tl.increase_descriptor_offset(" << descriptor << ", " << offset
+       << ")";
   } else if (op->op.same_as(tl::__exp())) {
     os << "tl.exp2(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__exp10())) {
