@@ -217,9 +217,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
 
   int lanes = target_ty.lanes();
 
-  // CuTeDSL requires narrow precision (e.g. FP8) vector operations to be
-  // 32-bit aligned. For unaligned widths (e.g. float8x2), pad the source
-  // to aligned width, cast, then extract the needed elements.
+  // CuTeDSL requires narrow precision (e.g. FP8) vector .to() casts to
+  // operate on 32-bit aligned vectors.  For unaligned widths (e.g.
+  // float8x2), pad the source to aligned width, cast, then return
+  // the aligned rmem tensor.  The store path is responsible for
+  // extracting only value_lanes elements when writing back.
   bool is_narrow_unaligned =
       target_ty.bits() < 32 && lanes > 1 &&
       (target_ty.bits() * lanes) % 32 != 0;
@@ -922,19 +924,28 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
     // (which CuTeDSL handles correctly for FP8) instead of MLIR
     // extractelement (which fails due to unrealized_conversion_cast).
     std::string aligned_rmem = name_supply_->FreshName("_aload");
-    PrintIndent();
-    stream << aligned_rmem << " = tl.make_rmem_tensor((" << aligned_lanes
-           << ",), ";
-    PrintType(value_dtype.element_of(), stream);
-    stream << ")\n";
 
-    PrintIndent();
     if (scope == "local") {
+      // For rmem: load aligned_lanes elements without cute.assume.
+      // cute.assume(offset, divby=N) silently truncates offsets that
+      // are not exact multiples of N; for rmem there is no hardware
+      // alignment constraint, so we skip assume (use default div_by=1).
+      // Shape uses aligned_lanes so .load()/.store() satisfy CuTeDSL's
+      // 32-bit alignment requirement for narrow types (FP8 etc.).
+      PrintIndent();
+      stream << aligned_rmem << " = tl.make_rmem_tensor((" << aligned_lanes
+             << ",), ";
+      PrintType(value_dtype.element_of(), stream);
+      stream << ")\n";
+      PrintIndent();
       stream << aligned_rmem << ".store(tl.make_tensor_at_offset(" << vid
              << ".iterator, " << PrintExpr_(scalar_base) << ", ("
-             << aligned_lanes << ",), div_by=" << aligned_lanes
-             << ").load())\n";
+             << aligned_lanes << ",)).load())\n";
     } else {
+      // For shared/global memory: load exactly value_lanes elements with
+      // no alignment assumption (div_by=1).  This avoids:
+      //  - MisalignedAddress from div_by=aligned_lanes on non-aligned offsets
+      //  - OOB from loading aligned_lanes elements near the buffer boundary
       bool is_handle_match =
           HandleTypeMatch_(buffer_var.get(), element_dtype);
       std::string ptr_str;
@@ -947,9 +958,15 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
         ptr_os << ")";
         ptr_str = ptr_os.str();
       }
+      PrintIndent();
+      stream << aligned_rmem << " = tl.make_rmem_tensor((" << value_lanes
+             << ",), ";
+      PrintType(value_dtype.element_of(), stream);
+      stream << ")\n";
+      PrintIndent();
       stream << aligned_rmem << ".store(tl.make_tensor_at_offset(" << ptr_str
-             << ", " << PrintExpr_(scalar_base) << ", (" << aligned_lanes
-             << ",), div_by=" << aligned_lanes << ").load())\n";
+             << ", " << PrintExpr_(scalar_base) << ", (" << value_lanes
+             << ",)).load())\n";
     }
 
     // Return the rmem tensor (not .load()) so downstream code uses
@@ -1142,20 +1159,13 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
     }
 
     if (scope == "local") {
-      // For local rmem: pad to aligned width and store as aligned vector.
-      // rmem allocation is over-aligned so writing extra bytes is safe.
-      std::string padded = name_supply_->FreshName("_npad");
-      PrintIndent();
-      stream << padded << " = tl.make_rmem_tensor((" << aligned_lanes
-             << ",), ";
-      PrintType(value_dtype.element_of(), stream);
-      stream << ")\n";
-      for (int i = 0; i < aligned_lanes; ++i) {
-        PrintIndent();
-        stream << padded << "[" << i << "] = " << value_str << "["
-               << (i % value_lanes) << "]\n";
-      }
-
+      // For local rmem: use element-by-element assignment.
+      // A padded (aligned_lanes,) .store() writes beyond value_lanes
+      // elements, causing overlapping writes and OOB at the end of the
+      // rmem tensor.  And cute.assume with div_by=aligned_lanes silently
+      // truncates non-aligned offsets.  Element assignment (vid[i]=val)
+      // avoids both issues and does not trigger CuTeDSL's 32-bit
+      // alignment check that .store() enforces for FP8 types.
       PrimExpr scalar_base;
       if (value_lanes == element_dtype.lanes()) {
         scalar_base = index_expr * value_lanes;
@@ -1167,11 +1177,11 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
             << "Non-contiguous narrow-precision store not supported";
         scalar_base = ramp_base.Eval() * element_dtype.lanes();
       }
-      PrintIndent();
-      stream << "tl.make_tensor_at_offset(" << vid << ".iterator, "
-             << PrintExpr_(scalar_base) << ", (" << aligned_lanes
-             << ",), div_by=" << aligned_lanes << ").store(" << padded
-             << ".load())\n";
+      for (int i = 0; i < value_lanes; ++i) {
+        PrintIndent();
+        stream << vid << "[" << PrintExpr_(scalar_base) << " + " << i
+               << "] = " << value_str << "[" << i << "]\n";
+      }
     } else {
       // For global/shared: use scalar element stores (works at any alignment).
       // CuTeDSL supports scalar FP8 stores via rmem_tensor -> global_tensor[i].
