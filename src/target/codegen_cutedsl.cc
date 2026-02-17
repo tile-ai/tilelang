@@ -24,6 +24,30 @@ namespace tvm {
 namespace codegen {
 namespace {
 
+// Helper to check if a statement subtree contains loop break ops
+// (either tl::loop_break() or builtin::break_loop())
+class LoopBreakDetector : public tir::StmtExprVisitor {
+public:
+  bool found = false;
+  void VisitExpr_(const CallNode *op) override {
+    if (op->op.same_as(tl::loop_break()) ||
+        op->op.same_as(builtin::break_loop())) {
+      found = true;
+    }
+    if (!found)
+      StmtExprVisitor::VisitExpr_(op);
+  }
+  void VisitStmt_(const ForNode *op) override {
+    // Don't recurse into nested for loops — their breaks are their own
+  }
+};
+
+static bool ContainsLoopBreak(const Stmt &stmt) {
+  LoopBreakDetector det;
+  det(stmt);
+  return det.found;
+}
+
 // The threshold of the loop extent to use cutlass.range_constexpr
 // Higher values would lead to DSLOptimizationWarning:
 // This static loop has 128 iterations, which may be very slow to compile,
@@ -598,9 +622,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
        << PrintExpr_(op->args[1]) << ")";
   } else if (op->op.same_as(tl::sync_grid())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
-  } else if (op->op.same_as(tl::loop_break())) {
-    PrintIndent();
-    stream << "break\n";
+  } else if (op->op.same_as(tl::loop_break()) ||
+             op->op.same_as(builtin::break_loop())) {
+    if (in_break_loop_) {
+      PrintIndent();
+      stream << "_loop_break_" << current_break_id_ << " = 1\n";
+      break_emitted_in_seq_ = true;
+    } else {
+      PrintIndent();
+      stream << "break\n";
+    }
   } else if (op->op.same_as(builtin::ptx_mma())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col
@@ -1491,6 +1522,51 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
+  bool has_break = ContainsLoopBreak(op->body);
+
+  if (has_break) {
+    // Emit guard variable before the loop
+    int break_id = loop_break_counter_++;
+    PrintIndent();
+    stream << "_loop_break_" << break_id << " = 0\n";
+
+    // Save and set break loop state
+    bool old_in_break = in_break_loop_;
+    int old_break_id = current_break_id_;
+    in_break_loop_ = true;
+    current_break_id_ = break_id;
+    break_emitted_in_seq_ = false;
+
+    // Emit the for header (same logic as below, but always non-unrolled path
+    // since break loops use runtime conditions)
+    PrintIndent();
+    std::string vid = AllocVarID(op->loop_var.get());
+    stream << "for " << vid << " in range(";
+    if (is_zero(op->min)) {
+      PrintExpr_(op->extent, stream);
+    } else {
+      PrintExpr_(op->min, stream);
+      stream << ", ";
+      PrimExpr upper_bound = arith::Analyzer().Simplify(op->extent + op->min);
+      PrintExpr_(upper_bound, stream);
+    }
+    stream << "):\n";
+
+    // Emit the body wrapped in guard check
+    int for_scope = BeginScope();
+    PrintIndent();
+    stream << "if _loop_break_" << break_id << " == 0:\n";
+    int guard_scope = BeginScope();
+    PrintStmt_(op->body);
+    EndScope(guard_scope);
+    EndScope(for_scope);
+
+    // Restore state
+    in_break_loop_ = old_in_break;
+    current_break_id_ = old_break_id;
+    return;
+  }
+
   if (op->kind != tir::ForKind::kUnrolled) {
     CodeGenTileLangPY::VisitStmt_(op);
     return;
@@ -1527,6 +1603,33 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
   int for_scope = BeginScope();
   PrintStmt_(op->body);
   EndScope(for_scope);
+}
+
+void CodeGenTileLangCuTeDSL::VisitStmt_(const SeqStmtNode *op) {
+  if (!in_break_loop_) {
+    // Normal path: delegate to base class
+    CodeGenTileLangPY::VisitStmt_(op);
+    return;
+  }
+
+  // In a break loop: after visiting a statement that contains loop_break(),
+  // wrap the remaining statements in an `if _loop_break_N == 0:` guard
+  // so they don't execute in the same iteration after the break.
+  int guard_scope = -1;
+  for (size_t i = 0; i < op->seq.size(); ++i) {
+    break_emitted_in_seq_ = false;
+    PrintStmt_(op->seq[i]);
+    if (break_emitted_in_seq_ && guard_scope < 0 && i + 1 < op->seq.size()) {
+      // Insert guard for remaining statements
+      PrintIndent();
+      stream << "if _loop_break_" << current_break_id_ << " == 0:\n";
+      guard_scope = BeginScope();
+      break_emitted_in_seq_ = false;
+    }
+  }
+  if (guard_scope >= 0) {
+    EndScope(guard_scope);
+  }
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const IfThenElseNode *op) {
