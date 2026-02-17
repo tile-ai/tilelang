@@ -78,7 +78,7 @@ from .quantize import *
 from .warp import *
 from .typing import type_map  # noqa: F401
 from .gemm_V2 import *  # noqa: F401
-
+from .gemm_tcgen05 import *  # noqa: F401
 
 BYTES_PER_TENSORMAP = 128
 BYTES_PER_POINTER = 8

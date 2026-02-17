@@ -477,9 +477,17 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     auto phase = PrintExpr_(op->args[1]);
     stream << "tl.mbarrier_wait(" << mbarrier_obj << ", " << phase << ")\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 2U);
+    PrintIndent();
+    auto tmem_buffer = PrintExpr_(op->args[0]);
+    auto num_cols = PrintExpr_(op->args[1]);
+    stream << "tl.tmem_allocate(" << tmem_buffer << ", " << num_cols << ")\n";
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 2U);
+    PrintIndent();
+    auto tmem_buffer = PrintExpr_(op->args[0]);
+    auto num_cols = PrintExpr_(op->args[1]);
+    stream << "tl.tmem_deallocate(" << tmem_buffer << ", " << num_cols << ")\n";
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     // do nothing
   } else if (op->op.same_as(tl::tma_load())) {
@@ -760,11 +768,66 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << "), " << c_ref << " + " << c_offset << ", " << scale_out
            << ")\n";
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 14U)
+        << "ptx_tcgen05_mma_ss expects 14 arguments";
+    std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string a_desc = PrintExpr_(op->args[1]);
+    std::string A_offset = PrintExpr_(op->args[2]);
+    std::string b_desc = PrintExpr_(op->args[3]);
+    std::string B_offset = PrintExpr_(op->args[4]);
+    std::string c_ref = PrintExpr_(op->args[5]);
+    std::string c_offset = PrintExpr_(op->args[6]);
+    std::string desc_val = PrintExpr_(op->args[7]);
+    std::string scale_out = PrintExpr_(op->args[8]);
+    std::string mask0 = PrintExpr_(op->args[9]);
+    std::string mask1 = PrintExpr_(op->args[10]);
+    std::string mask2 = PrintExpr_(op->args[11]);
+    std::string mask3 = PrintExpr_(op->args[12]);
+    bool enable_ws = Downcast<Bool>(op->args[13])->value;
+    PrintIndent();
+    if (enable_ws) {
+      stream << "tl.tcgen05mma_ws_ss(\"" << kind_dtype << "\", ("
+             << a_desc << " + " << A_offset << "), ("
+             << b_desc << " + " << B_offset << "), "
+             << c_ref << "[0] + " << c_offset << ", "
+             << desc_val << ", " << scale_out << ")\n";
+    } else {
+      stream << "tl.tcgen05mma_ss(\"" << kind_dtype << "\", ("
+             << a_desc << " + " << A_offset << "), ("
+             << b_desc << " + " << B_offset << "), "
+             << c_ref << "[0] + " << c_offset << ", "
+             << desc_val << ", " << scale_out << ", "
+             << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
+             << ")\n";
+    }
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ts())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 13U)
+        << "ptx_tcgen05_mma_ts expects 13 arguments";
+    std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string a_ref = PrintExpr_(op->args[1]);
+    std::string A_offset = PrintExpr_(op->args[2]);
+    std::string b_desc = PrintExpr_(op->args[3]);
+    std::string B_offset = PrintExpr_(op->args[4]);
+    std::string c_ref = PrintExpr_(op->args[5]);
+    std::string c_offset = PrintExpr_(op->args[6]);
+    std::string desc_val = PrintExpr_(op->args[7]);
+    std::string scale_out = PrintExpr_(op->args[8]);
+    std::string mask0 = PrintExpr_(op->args[9]);
+    std::string mask1 = PrintExpr_(op->args[10]);
+    std::string mask2 = PrintExpr_(op->args[11]);
+    std::string mask3 = PrintExpr_(op->args[12]);
+    PrintIndent();
+    stream << "tl.tcgen05mma_ts(\"" << kind_dtype << "\", "
+           << a_ref << "[0] + " << A_offset << ", ("
+           << b_desc << " + " << B_offset << "), "
+           << c_ref << "[0] + " << c_offset << ", "
+           << desc_val << ", " << scale_out << ", "
+           << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
+           << ")\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
+    PrintIndent();
+    stream << "tl.tcgen05_mma_arrive(" << PrintExpr_(op->args[0]) << ")\n";
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
@@ -866,7 +929,18 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     os << "tl.initialize_wgmma_descriptor(" << layout_type << ", " << leading
        << ", " << stride << ", " << descriptor << ", " << start_address << ")";
   } else if (op->op.same_as(tl::initialize_tcgen05_descriptor())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 7U)
+        << "initialize_tcgen05_descriptor expects 7 arguments";
+    std::string descriptor = PrintExpr_(op->args[0]);
+    std::string start_address = PrintExpr_(op->args[1]);
+    std::string leading = PrintExpr_(op->args[2]);
+    std::string stride = PrintExpr_(op->args[3]);
+    std::string base_offset = PrintExpr_(op->args[4]);
+    std::string leading_abs = PrintExpr_(op->args[5]);
+    std::string swizzle_mode = PrintExpr_(op->args[6]);
+    os << "tl.initialize_tcgen05_descriptor(" << descriptor << ", "
+       << start_address << ", " << leading << ", " << stride << ", "
+       << base_offset << ", " << leading_abs << ", " << swizzle_mode << ")";
   } else if (op->op.same_as(tl::increase_descriptor_offset())) {
     ICHECK_EQ(op->args.size(), 2U)
         << "increase_descriptor_offset expects 2 arguments";
@@ -1427,9 +1501,9 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
   if (scope == "local.descriptor.wgmma") {
     stream << vid << " = tl.GmmaDescriptor()\n";
   } else if (scope == "local.descriptor.tcgen05_smem") {
-    LOG(FATAL) << "Currently unsupported scope: " << scope;
+    stream << vid << " = tl.Tcgen05SmemDescriptor()\n";
   } else if (scope == "local.descriptor.tcgen05_instr") {
-    LOG(FATAL) << "Currently unsupported scope: " << scope;
+    stream << vid << " = 0\n";
   } else if (scope == "shared.dyn") {
     stream << vid << " = tl.make_tensor(tl.get_dyn_smem(";
     PrintType(op->dtype, stream);
@@ -1934,14 +2008,26 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
       effective_dtype = DataType::UInt(8);
     }
   }
-  bool is_handle_type_match =
-      HandleTypeMatch_(buffer_var, effective_dtype);
+  // shared.barrier is allocated via tl.alloc_smem() which returns _Pointer
+  // (not _Tensor), so it doesn't have .iterator — use vid directly.
+  std::string scope;
+  if (alloc_storage_scope_.count(buffer_var)) {
+    scope = alloc_storage_scope_.at(buffer_var);
+  }
+  if (scope.empty()) scope = GetPtrStorageScope(buffer->data);
+
   std::string ptr_str;
-  if (is_handle_type_match) {
-    ptr_str = vid + ".iterator";
+  if (scope == "shared.barrier") {
+    ptr_str = vid;
   } else {
-    ptr_str = "tl.recast_ptr(" + vid +
-              ".iterator, dtype=" + DTypeToString(effective_dtype) + ")";
+    bool is_handle_type_match =
+        HandleTypeMatch_(buffer_var, effective_dtype);
+    if (is_handle_type_match) {
+      ptr_str = vid + ".iterator";
+    } else {
+      ptr_str = "tl.recast_ptr(" + vid +
+                ".iterator, dtype=" + DTypeToString(effective_dtype) + ")";
+    }
   }
 
   std::string index_str = PrintExpr_(index);
