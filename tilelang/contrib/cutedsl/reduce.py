@@ -23,6 +23,15 @@ def _is_int_type(val):
         return isinstance(val.mlir_type, mlir_ir.IntegerType)
     if isinstance(val, int) and not isinstance(val, bool):
         return True
+    # Check for signless integer ArithValue (from DSL expressions)
+    if hasattr(val, 'ir_value'):
+        try:
+            from cutlass._mlir import ir as mlir_ir
+            ir_val = val.ir_value()
+            if hasattr(ir_val, 'type') and isinstance(ir_val.type, mlir_ir.IntegerType):
+                return True
+        except Exception:
+            pass
     return False
 
 
@@ -79,17 +88,27 @@ def _imax(a, b, *, loc=None, ip=None):
 
 
 def min(a, b, c=None):
-    """Type-aware min: uses arith.minsi for integers, nvvm.fmin for floats."""
+    """Type-aware min: uses arith.minsi for integers, nvvm.fmin for floats.
+    Falls back to integer path if float conversion fails (signless int types)."""
     if _is_int_type(a) and _is_int_type(b):
         return _imin(a, b)
-    return _fmin(a, b, c)
+    try:
+        return _fmin(a, b, c)
+    except Exception:
+        # Float32 conversion may fail for signless integer types
+        return _imin(a, b)
 
 
 def max(a, b, c=None):
-    """Type-aware max: uses arith.maxsi for integers, nvvm.fmax for floats."""
+    """Type-aware max: uses arith.maxsi for integers, nvvm.fmax for floats.
+    Falls back to integer path if float conversion fails (signless int types)."""
     if _is_int_type(a) and _is_int_type(b):
         return _imax(a, b)
-    return _fmax(a, b, c)
+    try:
+        return _fmax(a, b, c)
+    except Exception:
+        # Float32 conversion may fail for signless integer types
+        return _imax(a, b)
 
 
 class SumOp:
