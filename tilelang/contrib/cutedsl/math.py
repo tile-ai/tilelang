@@ -1,6 +1,7 @@
 __all__ = [
     "exp",
     "exp2",
+    "exp10",
     "log",
     "log2",
     "log10",
@@ -24,6 +25,12 @@ from cutlass.cute.math import _math_op as _cute_math_op
 from cutlass._mlir.dialects import llvm
 from cutlass.base_dsl.typing import Float32
 from cutlass.cutlass_dsl import T, dsl_user_op
+
+
+def exp10(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
+    """Compute 10^x using exp2(x * log2(10))."""
+    _LOG2_10 = 3.3219280948873626  # log2(10)
+    return exp2(x * _LOG2_10, fastmath=fastmath)
 
 
 def fabsf(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:

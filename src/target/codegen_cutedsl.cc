@@ -947,13 +947,34 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::get_lane_idx())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // get_lane_idx(warp_size?) -> threadIdx.x % warp_size
+    ICHECK_LE(op->args.size(), 1U)
+        << "tl.get_lane_idx expects at most one argument <warp_size>.";
+    std::string warp_size = op->args.empty() ? "32" : PrintExpr_(op->args[0]);
+    os << "(tl.thread_idx() % " << warp_size << ")";
   } else if (op->op.same_as(tl::get_warp_idx_sync())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // get_warp_idx_sync(warp_size?) -> threadIdx.x // warp_size
+    ICHECK_LE(op->args.size(), 1U)
+        << "tl.get_warp_idx_sync expects at most one argument <warp_size>.";
+    std::string warp_size = op->args.empty() ? "32" : PrintExpr_(op->args[0]);
+    os << "(tl.thread_idx() // " << warp_size << ")";
   } else if (op->op.same_as(tl::get_warp_idx())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // get_warp_idx(warp_size?) -> threadIdx.x // warp_size
+    ICHECK_LE(op->args.size(), 1U)
+        << "tl.get_warp_idx expects at most one argument <warp_size>.";
+    std::string warp_size = op->args.empty() ? "32" : PrintExpr_(op->args[0]);
+    os << "(tl.thread_idx() // " << warp_size << ")";
   } else if (op->op.same_as(tl::get_warp_group_idx())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // get_warp_group_idx(warp_size?, warps_per_group?) ->
+    //   threadIdx.x // (warp_size * warps_per_group)
+    ICHECK_LE(op->args.size(), 2U)
+        << "tl.get_warp_group_idx expects <warp_size, warps_per_group>.";
+    std::string warp_size =
+        op->args.size() >= 1 ? PrintExpr_(op->args[0]) : "32";
+    std::string warps_per_group =
+        op->args.size() >= 2 ? PrintExpr_(op->args[1]) : "4";
+    os << "(tl.thread_idx() // (" << warp_size << " * " << warps_per_group
+       << "))";
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl.shuffle_elect(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::initialize_wgmma_descriptor())) {
@@ -991,7 +1012,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::__exp())) {
     os << "tl.exp2(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__exp10())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.exp10(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__log())) {
     os << "tl.log(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__log2())) {
@@ -1005,31 +1026,48 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::__sin())) {
     os << "tl.sin(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::ieee_add())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // ieee_add(a, b, rounding_mode)
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    os << "tl.ieee_fadd(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_sub())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    os << "tl.ieee_fsub(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_mul())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    os << "tl.ieee_fmul(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_fmaf())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // ieee_fmaf(a, b, c, rounding_mode)
+    std::string rounding_mode = Downcast<StringImm>(op->args[3])->value;
+    os << "tl.ieee_fmaf(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2])
+       << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_frcp())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
+    os << "tl.ieee_frcp(" << PrintExpr_(op->args[0]) << ", rounding=\""
+       << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_fsqrt())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
+    os << "tl.ieee_fsqrt(" << PrintExpr_(op->args[0]) << ", rounding=\""
+       << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_frsqrt())) {
     os << "tl.rsqrt(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::ieee_fdiv())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    os << "tl.ieee_fdiv(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_sum(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_max())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_max(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_min())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_min(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_bitand())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_bitand(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_bitor())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_bitor(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::address_of())) {
     const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
     ICHECK(op->args.size() == 1 && load);
@@ -1383,6 +1421,21 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
     }
   } else {
     value_str = PrintExpr_(op->value);
+  }
+
+  // CuTeDSL does not support implicit narrowing assignments (e.g. storing
+  // Int32 to an Int16 tensor).  When the value's scalar width exceeds the
+  // buffer element width, wrap with an explicit cast so that CuTeDSL's
+  // Integer constructor emits arith.trunci (or the appropriate float
+  // truncation).  This mirrors C/CUDA's implicit narrowing conversions.
+  DataType value_elem = value_dtype.element_of();
+  DataType buf_elem = element_dtype.element_of();
+  if (value_elem.bits() > buf_elem.bits() && value_elem.lanes() == 1 &&
+      buf_elem.lanes() == 1 &&
+      (value_elem.is_int() || value_elem.is_uint()) ==
+          (buf_elem.is_int() || buf_elem.is_uint())) {
+    value_str = CastFromTo_(value_str, value_elem, buf_elem);
+    value_dtype = buf_elem.with_lanes(value_dtype.lanes());
   }
 
   int value_lanes = value_dtype.lanes();
