@@ -305,13 +305,16 @@ def AtomicMax(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
         # Use inline PTX with a CAS loop for float max
         # The PTX instruction is: atom.global.cas.b32
         # We load, compare with max, then CAS until success
+        # NOTE: The retry comparison uses integer (b32) domain instead of
+        # floating-point to avoid infinite loops when values are NaN
+        # (IEEE 754: NaN != NaN is always true in float domain).
         result = llvm.inline_asm(
             T.f32(),
             [ptr.llvm_ptr, val_ir],
             """
             {
                 .reg .pred p;
-                .reg .f32 expected, new_val, result;
+                .reg .f32 expected, new_val;
                 .reg .b32 expected_bits, new_bits, result_bits;
                 ld.f32 expected, [$1];
             retry:
@@ -319,9 +322,8 @@ def AtomicMax(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
                 mov.b32 expected_bits, expected;
                 mov.b32 new_bits, new_val;
                 atom.cas.b32 result_bits, [$1], expected_bits, new_bits;
-                mov.b32 result, result_bits;
-                setp.ne.f32 p, result, expected;
-                mov.f32 expected, result;
+                setp.ne.b32 p, result_bits, expected_bits;
+                mov.b32 expected, result_bits;
                 @p bra retry;
                 mov.f32 $0, expected;
             }
@@ -381,6 +383,8 @@ def AtomicMin(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
     elif ptr.dtype == cutlass.Float32:
         # For float32, use atomicCAS loop via inline PTX
         # PTX doesn't have atom.min.f32, so we use atom.cas loop
+        # NOTE: The retry comparison uses integer (b32) domain instead of
+        # floating-point to avoid infinite loops when values are NaN.
         val_ir = cutlass.Float32(value).ir_value(loc=loc, ip=ip)
         result = llvm.inline_asm(
             T.f32(),
@@ -388,7 +392,7 @@ def AtomicMin(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
             """
             {
                 .reg .pred p;
-                .reg .f32 expected, new_val, result;
+                .reg .f32 expected, new_val;
                 .reg .b32 expected_bits, new_bits, result_bits;
                 ld.f32 expected, [$1];
             retry:
@@ -396,9 +400,8 @@ def AtomicMin(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
                 mov.b32 expected_bits, expected;
                 mov.b32 new_bits, new_val;
                 atom.cas.b32 result_bits, [$1], expected_bits, new_bits;
-                mov.b32 result, result_bits;
-                setp.ne.f32 p, result, expected;
-                mov.f32 expected, result;
+                setp.ne.b32 p, result_bits, expected_bits;
+                mov.b32 expected, result_bits;
                 @p bra retry;
                 mov.f32 $0, expected;
             }

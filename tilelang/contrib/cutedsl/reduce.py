@@ -353,8 +353,10 @@ class CumSum2D:
                 dst_tensor[idx] = val
         else:
             # Column-wise cumsum (dim=0): each warp processes one column
-            # This is more complex as we need to iterate across rows
-            # For now, just handle the simple case where H <= TILE_H
+            # Each lane maps to a row index, so H must be <= 32 (warp size).
+            assert H <= 32, (
+                f"CumSum2D dim=0 only supports H <= 32 (got H={H}). Use dim=1 for row-wise cumsum or implement multi-warp column iteration."
+            )
             col = row  # warp index becomes column index
             row_in_col = lane  # lane becomes row index within column
             idx = row_in_col * W + col
