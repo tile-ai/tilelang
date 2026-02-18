@@ -100,6 +100,14 @@ from .builtin import stg32 as stg32  # noqa: F401
 from .builtin import stg64 as stg64  # noqa: F401
 from .builtin import stg128 as stg128  # noqa: F401
 from .builtin import stg256 as stg256  # noqa: F401
+from .builtin import any_sync as any_sync  # noqa: F401
+from .builtin import all_sync as all_sync  # noqa: F401
+from .builtin import ballot_sync as ballot_sync  # noqa: F401
+from .builtin import ballot as ballot  # noqa: F401
+from .builtin import activemask as activemask  # noqa: F401
+from .builtin import syncthreads_count as syncthreads_count  # noqa: F401
+from .builtin import syncthreads_and as syncthreads_and  # noqa: F401
+from .builtin import syncthreads_or as syncthreads_or  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
 

@@ -869,6 +869,167 @@ def shfl_sync(mask: int, value: int | PrimExpr, srcLane: int, width: int = None)
     return tir.call_extern(value.dtype, "__shfl_sync", mask, value, srcLane, width)
 
 
+# ---------------------------------------------------------------------------
+# Warp-vote / warp-ballot intrinsics
+# ---------------------------------------------------------------------------
+
+
+def any_sync(mask: int | PrimExpr, predicate: int | PrimExpr) -> PrimExpr:
+    """Evaluate ``predicate`` across threads and return non-zero if ANY active
+    thread in ``mask`` has a non-zero predicate.
+
+    CUDA: ``__any_sync(mask, predicate)``
+    HIP:  ``__any(predicate)`` (mask argument is ignored – HIP uses the full
+          wavefront).
+
+    Args:
+        mask: Warp lane mask (e.g. ``0xFFFFFFFF`` for all 32 lanes).
+        predicate: Integer condition to test.
+
+    Returns:
+        int32: Non-zero if any thread in the mask has a non-zero predicate.
+    """
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern("int32", "__any", predicate)
+    else:
+        return tir.call_extern("int32", "__any_sync", mask, predicate)
+
+
+def all_sync(mask: int | PrimExpr, predicate: int | PrimExpr) -> PrimExpr:
+    """Evaluate ``predicate`` across threads and return non-zero only if ALL
+    active threads in ``mask`` have a non-zero predicate.
+
+    CUDA: ``__all_sync(mask, predicate)``
+    HIP:  ``__all(predicate)`` (mask argument is ignored).
+
+    Args:
+        mask: Warp lane mask (e.g. ``0xFFFFFFFF`` for all 32 lanes).
+        predicate: Integer condition to test.
+
+    Returns:
+        int32: Non-zero if all threads in the mask have a non-zero predicate.
+    """
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern("int32", "__all", predicate)
+    else:
+        return tir.call_extern("int32", "__all_sync", mask, predicate)
+
+
+def ballot_sync(mask: int | PrimExpr, predicate: int | PrimExpr) -> PrimExpr:
+    """Return a ``uint64`` bitmask of lanes in ``mask`` whose ``predicate`` is
+    non-zero.
+
+    CUDA: ``__ballot_sync(mask, predicate)`` returns ``unsigned int`` (32
+    bits); the result is zero-extended to ``uint64`` (upper 32 bits are always
+    0 for 32-wide warps).
+
+    HIP: ``__ballot(predicate)`` returns ``uint64`` natively, covering all 64
+    lanes of the wavefront.  No truncation occurs.
+
+    Args:
+        mask: Warp lane mask (e.g. ``0xFFFFFFFF`` for all 32 lanes).
+              On HIP this argument is ignored.
+        predicate: Integer condition to test.
+
+    Returns:
+        uint64: Bitmask with bit N set if lane N's predicate is non-zero.
+        On CUDA, upper 32 bits are always 0 (32-wide warp).
+    """
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern("uint64", "__ballot", predicate)
+    return tir.Cast("uint64", tir.call_extern("uint32", "__ballot_sync", mask, predicate))
+
+
+def ballot(predicate: int | PrimExpr) -> PrimExpr:
+    """Return a ``uint64`` bitmask of lanes whose ``predicate`` is non-zero
+    (full warp / full wavefront, mask = ``0xFFFFFFFF``).
+
+    Convenience wrapper around :func:`ballot_sync` for the common case of a
+    full-warp mask.  No lane information is lost on either CUDA or HIP.
+
+    Args:
+        predicate: Integer condition to test.
+
+    Returns:
+        uint64: Bitmask with bit N set if lane N's predicate is non-zero.
+        On CUDA, upper 32 bits are always 0 (32-wide warp).
+    """
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern("uint64", "__ballot", predicate)
+    return tir.Cast(
+        "uint64",
+        tir.call_extern("uint32", "__ballot_sync", tir.const(0xFFFFFFFF, "uint32"), predicate),
+    )
+
+
+def activemask() -> PrimExpr:
+    """Return a ``uint64`` bitmask of currently active (non-exited) lanes.
+
+    CUDA: ``__activemask()`` returns ``unsigned int`` (32 bits); the result is
+    zero-extended to ``uint64`` (upper 32 bits always 0 for 32-wide warps).
+
+    HIP: ``__ballot(1)`` returns ``uint64`` natively, covering all 64 lanes of
+    the wavefront.  No truncation occurs.
+
+    Returns:
+        uint64: Bitmask with bit N set if lane N is currently active.
+        On CUDA, upper 32 bits are always 0.
+    """
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern("uint64", "__ballot", tir.const(1, "int32"))
+    return tir.Cast("uint64", tir.call_extern("uint32", "__activemask"))
+
+
+# ---------------------------------------------------------------------------
+# Thread-block synchronization with predicate (shared across CUDA & HIP)
+# ---------------------------------------------------------------------------
+
+
+def syncthreads_count(predicate: int | PrimExpr) -> PrimExpr:
+    """Synchronize all threads in the block and return the number of threads
+    whose ``predicate`` evaluates to non-zero.
+
+    Maps to ``__syncthreads_count(predicate)`` on both CUDA and HIP.
+
+    Args:
+        predicate: Integer condition to evaluate per-thread.
+
+    Returns:
+        int32: Count of threads in the block with non-zero predicate.
+    """
+    return tir.call_extern("int32", "__syncthreads_count", predicate)
+
+
+def syncthreads_and(predicate: int | PrimExpr) -> PrimExpr:
+    """Synchronize all threads in the block and return non-zero only if ALL
+    threads have a non-zero ``predicate``.
+
+    Maps to ``__syncthreads_and(predicate)`` on both CUDA and HIP.
+
+    Args:
+        predicate: Integer condition to evaluate per-thread.
+
+    Returns:
+        int32: Non-zero if all threads in the block have non-zero predicate.
+    """
+    return tir.call_extern("int32", "__syncthreads_and", predicate)
+
+
+def syncthreads_or(predicate: int | PrimExpr) -> PrimExpr:
+    """Synchronize all threads in the block and return non-zero if ANY thread
+    has a non-zero ``predicate``.
+
+    Maps to ``__syncthreads_or(predicate)`` on both CUDA and HIP.
+
+    Args:
+        predicate: Integer condition to evaluate per-thread.
+
+    Returns:
+        int32: Non-zero if any thread in the block has non-zero predicate.
+    """
+    return tir.call_extern("int32", "__syncthreads_or", predicate)
+
+
 def sync_global():
     """Synchronize all threads in the entire grid."""
     tx, ty, tz = get_thread_bindings()
