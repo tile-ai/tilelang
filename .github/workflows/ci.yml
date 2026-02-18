@@ -357,7 +357,6 @@ jobs:
       - name: Run CuTeDSL examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: cutedsl-examples
         if: contains(matrix.runner.toolkit, 'CUDA')
-        continue-on-error: true
         env:
           TILELANG_TARGET: cutedsl
         run: |
@@ -366,13 +365,8 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=10 --numprocesses=2 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
             ../examples
-
-      - name: Report CuTeDSL outcome
-        if: contains(matrix.runner.toolkit, 'CUDA') && steps.cutedsl-examples.outcome == 'failure'
-        run: |
-          echo "::warning::CuTeDSL examples failed (non-blocking). See step 'Run CuTeDSL examples' for details."
 
       # NVIDIA CUDA tests
       - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})

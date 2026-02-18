@@ -78,8 +78,11 @@ def _make_ptx_mma(ptx_shape, ptx_dtypes, n_a, n_b, n_c, flavor):
     a_regs = ", ".join(f"${n_c + i}" for i in range(n_a))
     b_regs = ", ".join(f"${n_c + n_a + i}" for i in range(n_b))
     c_regs = ", ".join(f"${n_c + n_a + n_b + i}" for i in range(n_c))
+    # Double-brace the register lists so .format() treats them as literal braces,
+    # while {a_layout}/{b_layout} remain as format placeholders.
     ptx_template = (
-        f"mma.sync.aligned.{ptx_shape}.{{a_layout}}.{{b_layout}}.{ptx_dtypes} {{{d_regs}}}, {{{a_regs}}}, {{{b_regs}}}, {{{c_regs}}};"
+        f"mma.sync.aligned.{ptx_shape}.{{a_layout}}.{{b_layout}}.{ptx_dtypes}"
+        f" {{{{{d_regs}}}}}, {{{{{a_regs}}}}}, {{{{{b_regs}}}}}, {{{{{c_regs}}}}};"
     )
 
     @dsl_user_op

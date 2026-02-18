@@ -227,9 +227,13 @@ def wgmma_rs(
         "}\n"
     )
 
-    # Determine if C/D is float or integer based on canonical PTX dtype
+    # Determine if C/D is float or integer based on canonical PTX dtype.
+    # All type/constraint decisions are made here (no branching in the DSL loop).
     is_int_accum = ptx_c == "s32"
     c_constraint = "r" if is_int_accum else "f"
+    i32_type = ir.IntegerType.get_signless(32)
+    f32_type = ir.F32Type.get()
+    c_ir_type = i32_type if is_int_accum else f32_type
 
     # Build constraint string
     out_constraints = ",".join([f"={c_constraint}"] * num_c_regs)
@@ -238,22 +242,12 @@ def wgmma_rs(
     constraints = f"{out_constraints},{tied_constraints},{a_constraints},l"
 
     # Prepare operands list
-    i32_type = ir.IntegerType.get_signless(32)
-    if is_int_accum:
-        c_ir_type = i32_type
-    else:
-        c_ir_type = ir.F32Type.get()
     operands = []
 
-    # Tied C inputs
+    # Tied C inputs: for 'f' constraint bitcast i32→f32, for 'r' pass i32 as-is
     for i in cutlass.range_constexpr(num_c_regs):
         val = C_vecs[i].ir_value()
-        if is_int_accum:
-            # 'r' constraint: pass i32 directly
-            operands.append(val)
-        else:
-            # 'f' constraint: bitcast i32 → f32
-            operands.append(llvm.bitcast(c_ir_type, val))
+        operands.append(val if is_int_accum else llvm.bitcast(f32_type, val))
 
     # A inputs (i32)
     for i in cutlass.range_constexpr(num_a_regs):
@@ -276,12 +270,7 @@ def wgmma_rs(
         asm_dialect=llvm.AsmDialect.AD_ATT,
     )
 
-    # Extract results and store back
+    # Extract results and store back: for 'f' bitcast f32→i32, for 'r' direct
     for i in cutlass.range_constexpr(num_c_regs):
         extracted = llvm.extractvalue(c_ir_type, result, [i])
-        if is_int_accum:
-            # i32 → i32: direct store
-            C_vecs[i] = extracted
-        else:
-            # f32 → i32: bitcast back
-            C_vecs[i] = llvm.bitcast(i32_type, extracted)
+        C_vecs[i] = extracted if is_int_accum else llvm.bitcast(i32_type, extracted)
