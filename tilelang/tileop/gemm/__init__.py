@@ -164,7 +164,5 @@ class GemmPy(Node, Scriptable):
             return GemmTCGEN5
         elif gemm_inst.is_mfma():
             return GemmMFMA
-        elif gemm_inst.is_tcgen5mma():
-            raise NotImplementedError("TCGEN5MMA is not implemented")
         else:
             raise ValueError(f"Unsupported GEMM instruction: {gemm_inst}")

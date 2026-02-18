@@ -25,14 +25,6 @@ from cutlass.cute.typing import Pointer
 import cutlass.cute as cute
 
 
-def _to_ir_value(v, loc=None, ip=None):
-    """Convert value to MLIR IR, handling both cutlass types and raw MLIR Values"""
-    if hasattr(v, "ir_value"):
-        return v.ir_value(loc=loc, ip=ip)
-    else:
-        return v
-
-
 # =============================================================================
 # FP16 MMA operations
 # =============================================================================

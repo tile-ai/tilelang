@@ -2090,6 +2090,9 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   // emitting a tuple (base+0, base+1, ...) that the runtime rejects.
   PrimExpr offset_expr = index;
   if (const RampNode *ramp = index.as<RampNode>()) {
+    ICHECK(is_one(ramp->stride))
+        << "GetBufferRef_: non-unit Ramp stride not supported, got "
+        << ramp->stride;
     offset_expr = ramp->base;
   } else {
     arith::PVar<PrimExpr> ramp_base;

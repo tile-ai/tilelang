@@ -25,14 +25,15 @@ def mbarrier_wait(mbar_ptr: Pointer, phase: Int, timeout_ns: Int = 10000000, *, 
     llvm.inline_asm(
         None,
         [mbar_ptr.llvm_ptr,
-         Int32(phase).ir_value(loc=loc, ip=ip)],
+         Int32(phase).ir_value(loc=loc, ip=ip),
+         Int32(timeout_ns).ir_value(loc=loc, ip=ip)],
         "{\n"
         ".reg .pred p;\n"
         "LAB_WAIT:\n"
-        "mbarrier.try_wait.parity.shared::cta.b64 p, [$0], $1, 0x989680;\n"
+        "mbarrier.try_wait.parity.shared::cta.b64 p, [$0], $1, $2;\n"
         "@!p bra LAB_WAIT;\n"
         "}",
-        "r,r",
+        "r,r,r",
         has_side_effects=True,
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,

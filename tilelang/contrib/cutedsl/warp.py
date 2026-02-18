@@ -41,31 +41,31 @@ def __activemask(*, loc=None, ip=None) -> Uint32:
 def __shfl_down_sync(mask, val, delta, width=32):
     """
     Shuffle down within warp.
-    
+
     Uses CuTeDSL's shuffle_sync_down with proper mask_and_clamp calculation.
-    For shfl.down: mask_and_clamp = (width - 1) | 0x1f00
+    Matches CUDA: c = ((warpSize - width) << 8) | 0x1f
     """
-    mask_and_clamp = ((width - 1) & 0x1f) | 0x1f00
+    mask_and_clamp = ((WARP_SIZE - width) << 8) | 0x1f
     return shuffle_sync_down(val, offset=delta, mask=mask, mask_and_clamp=mask_and_clamp)
 
 
 def __shfl_up_sync(mask, val, delta, width=32):
     """
     Shuffle up within warp.
-    
+
     Uses CuTeDSL's shuffle_sync_up with proper mask_and_clamp calculation.
-    For shfl.up: mask_and_clamp = 0 (lower lanes wrap to self)
+    Matches CUDA: c = (warpSize - width) << 8
     """
-    mask_and_clamp = 0
+    mask_and_clamp = (WARP_SIZE - width) << 8
     return shuffle_sync_up(val, offset=delta, mask=mask, mask_and_clamp=mask_and_clamp)
 
 
 def __shfl_sync(mask, val, srcLane, width=32):
     """
     Broadcast from a specific lane within warp.
-    
+
     Uses CuTeDSL's shuffle_sync (idx mode) with proper mask_and_clamp.
-    For shfl.idx: mask_and_clamp = (width - 1)
+    Matches CUDA: c = ((warpSize - width) << 8) | (width - 1)
     """
-    mask_and_clamp = (width - 1) & 0x1f
+    mask_and_clamp = ((WARP_SIZE - width) << 8) | ((width - 1) & 0x1f)
     return shuffle_sync(val, offset=srcLane, mask=mask, mask_and_clamp=mask_and_clamp)

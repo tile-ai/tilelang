@@ -263,12 +263,12 @@ def AtomicMax(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
                 .reg .pred p;
                 .reg .f32 expected, new_val, result;
                 .reg .b32 expected_bits, new_bits, result_bits;
-                ld.global.f32 expected, [$1];
+                ld.f32 expected, [$1];
             retry:
                 max.f32 new_val, expected, $2;
                 mov.b32 expected_bits, expected;
                 mov.b32 new_bits, new_val;
-                atom.global.cas.b32 result_bits, [$1], expected_bits, new_bits;
+                atom.cas.b32 result_bits, [$1], expected_bits, new_bits;
                 mov.b32 result, result_bits;
                 setp.ne.f32 p, result, expected;
                 mov.f32 expected, result;
@@ -340,12 +340,12 @@ def AtomicMin(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
                 .reg .pred p;
                 .reg .f32 expected, new_val, result;
                 .reg .b32 expected_bits, new_bits, result_bits;
-                ld.global.f32 expected, [$1];
+                ld.f32 expected, [$1];
             retry:
                 min.f32 new_val, expected, $2;
                 mov.b32 expected_bits, expected;
                 mov.b32 new_bits, new_val;
-                atom.global.cas.b32 result_bits, [$1], expected_bits, new_bits;
+                atom.cas.b32 result_bits, [$1], expected_bits, new_bits;
                 mov.b32 result, result_bits;
                 setp.ne.f32 p, result, expected;
                 mov.f32 expected, result;
