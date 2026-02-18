@@ -188,7 +188,15 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BroadcastNode *op,
   // Note: We need to pass the dtype to make_filled_tensor so it can create
   // the correct CuTeDSL type (e.g., cutlass.Int32 instead of Python int)
   std::ostringstream dtype_str;
-  PrintType(op->value.dtype(), dtype_str);
+  DataType dt = op->value.dtype();
+  // CuTeDSL/MLIR normalizes unsigned integer tensor loads to signed types
+  // (e.g., Uint8 pointer -> i8 tensor elements). Use signed type here to
+  // match, avoiding type mismatch in tl.where() operations.
+  if (dt.is_uint()) {
+    PrintType(DataType::Int(dt.bits()), dtype_str);
+  } else {
+    PrintType(dt, dtype_str);
+  }
   os << "tl.make_filled_tensor((" << PrintExpr_(op->lanes) << ",), "
      << dtype_str.str() << "(" << PrintExpr_(op->value) << ")).load()";
 }
