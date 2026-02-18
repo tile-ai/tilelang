@@ -41,746 +41,130 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cute.typing import Pointer
 import cutlass.cute as cute
 
+_VALID_LAYOUTS = {"row", "col"}
 
-# =============================================================================
-# FP16 MMA operations
-# =============================================================================
+# Flavor configs: (llvm_type_fn, constraint_char, ab_wrapper, c_wrapper, ab_recast, c_recast)
+#   - llvm_type_fn: callable returning LLVM IR element type
+#   - constraint_char: asm constraint for C/D registers
+#   - ab_wrapper: CuTeDSL type to wrap A/B register values
+#   - c_wrapper: CuTeDSL type to wrap C/D register values
+#   - ab_recast: dtype to recast A/B pointers to (None = no recast)
+#   - c_recast: dtype to recast C pointer to (None = no recast)
+_FLAVOR = {
+    "f32": (T.f32, "f", "r", cute.Int32, cute.Float32, cute.Int32, None),
+    "i32": (T.i32, "r", "r", cute.Int32, cute.Int32, cute.Int32, cute.Int32),
+    "f64": (T.f64, "d", "d", cute.Float64, cute.Float64, None, None),
+}
 
 
-@dsl_user_op
-def ptx_mma_m16n8k16_f16_f16_f32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k16 MMA: f16 inputs, f32 accumulator"""
-    # A: 8 f16 = 4 i32, B: 4 f16 = 2 i32, C: 4 f32
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = c_ptr + c_offset
-    c_tensor = cute.make_tensor(c_base, (4,))
+def _make_ptx_mma(ptx_shape, ptx_dtypes, n_a, n_b, n_c, flavor):
+    """Factory to create a @dsl_user_op PTX MMA function.
 
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Float32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.f32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
-        {$0, $1, $2, $3},
-        {$4, $5, $6, $7},
-        {$8, $9},
-        {$10, $11, $12, $13};
+    Args:
+        ptx_shape: PTX shape, e.g. "m16n8k16"
+        ptx_dtypes: PTX dtype suffixes, e.g. "f32.f16.f16.f32" (D.A.B.C)
+        n_a: Number of A registers
+        n_b: Number of B registers
+        n_c: Number of C/D registers
+        flavor: "f32", "i32", or "f64" — selects register types and constraints
     """
-    constraints = "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-    operands = a_vals + b_vals + c_vals
+    llvm_type_fn, c_con, ab_con, ab_wrap, c_wrap, ab_recast, c_recast = _FLAVOR[flavor]
 
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
+    # Pre-build the constraints string (invariant across calls)
+    constraints = ",".join([f"={c_con}"] * n_c + [ab_con] * (n_a + n_b) + [c_con] * n_c)
+
+    # Pre-build the PTX asm template (layout gets substituted per call)
+    d_regs = ", ".join(f"${i}" for i in range(n_c))
+    a_regs = ", ".join(f"${n_c + i}" for i in range(n_a))
+    b_regs = ", ".join(f"${n_c + n_a + i}" for i in range(n_b))
+    c_regs = ", ".join(f"${n_c + n_a + n_b + i}" for i in range(n_c))
+    ptx_template = (
+        f"mma.sync.aligned.{ptx_shape}.{{a_layout}}.{{b_layout}}.{ptx_dtypes} {{{d_regs}}}, {{{a_regs}}}, {{{b_regs}}}, {{{c_regs}}};"
     )
 
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Float32(llvm.extractvalue(T.f32(), result, [i], loc=loc, ip=ip))
+    @dsl_user_op
+    def mma_op(
+        a_ptr: Pointer,
+        a_offset,
+        b_ptr: Pointer,
+        b_offset,
+        c_ptr: Pointer,
+        c_offset,
+        a_layout: str = "row",
+        b_layout: str = "col",
+        *,
+        loc=None,
+        ip=None,
+    ) -> None:
+        assert a_layout in _VALID_LAYOUTS, f"invalid a_layout: {a_layout!r}"
+        assert b_layout in _VALID_LAYOUTS, f"invalid b_layout: {b_layout!r}"
 
+        # A operand
+        a_base = cute.recast_ptr(a_ptr + a_offset, dtype=ab_recast) if ab_recast else (a_ptr + a_offset)
+        a_tensor = cute.make_tensor(a_base, (n_a,))
+        a_vals = [ab_wrap(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(n_a)]
 
-@dsl_user_op
-def ptx_mma_m16n8k16_f16_f16_f16(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k16 MMA: f16 inputs, f16 accumulator"""
-    # A: 4 i32, B: 2 i32, C: 2 i32 (4 f16 packed)
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = cute.recast_ptr(c_ptr + c_offset, dtype=cute.Int32)
-    c_tensor = cute.make_tensor(c_base, (2,))
+        # B operand
+        b_base = cute.recast_ptr(b_ptr + b_offset, dtype=ab_recast) if ab_recast else (b_ptr + b_offset)
+        b_tensor = cute.make_tensor(b_base, (n_b,))
+        b_vals = [ab_wrap(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(n_b)]
 
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Int32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
+        # C operand
+        c_base = cute.recast_ptr(c_ptr + c_offset, dtype=c_recast) if c_recast else (c_ptr + c_offset)
+        c_tensor = cute.make_tensor(c_base, (n_c,))
+        c_vals = [c_wrap(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(n_c)]
 
-    res_type = llvm.StructType.get_literal([T.i32()] * 2)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16
-        {$0, $1},
-        {$2, $3, $4, $5},
-        {$6, $7},
-        {$8, $9};
-    """
-    constraints = "=r,=r,r,r,r,r,r,r,r,r"
-    operands = a_vals + b_vals + c_vals
+        # Inline asm
+        llvm_elem = llvm_type_fn()
+        res_type = llvm.StructType.get_literal([llvm_elem] * n_c)
+        ptx_asm = ptx_template.format(a_layout=a_layout, b_layout=b_layout)
 
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
+        result = llvm.inline_asm(
+            res_type,
+            a_vals + b_vals + c_vals,
+            ptx_asm,
+            constraints,
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
 
-    d_tensor = cute.make_tensor(c_base, (2,))
-    for i in range(2):
-        d_tensor[i] = cute.Int32(llvm.extractvalue(T.i32(), result, [i], loc=loc, ip=ip))
+        # Write results back
+        d_tensor = cute.make_tensor(c_base, (n_c,))
+        for i in range(n_c):
+            d_tensor[i] = c_wrap(llvm.extractvalue(llvm_elem, result, [i], loc=loc, ip=ip))
+
+    return mma_op
 
 
 # =============================================================================
-# BF16 MMA operations
+# Instantiate all MMA variants
+#   args: ptx_shape, ptx_dtypes (D.A.B.C), n_a, n_b, n_c, flavor
+#   flavor: "f32" (float accum), "i32" (int/packed-half accum), "f64"
 # =============================================================================
 
-
-@dsl_user_op
-def ptx_mma_m16n8k16_bf16_bf16_f32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k16 MMA: bf16 inputs, f32 accumulator"""
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = c_ptr + c_offset
-    c_tensor = cute.make_tensor(c_base, (4,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Float32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.f32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
-        {$0, $1, $2, $3},
-        {$4, $5, $6, $7},
-        {$8, $9},
-        {$10, $11, $12, $13};
-    """
-    constraints = "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Float32(llvm.extractvalue(T.f32(), result, [i], loc=loc, ip=ip))
-
-
-# =============================================================================
-# INT8/UINT8 MMA operations (m16n8k32)
-# =============================================================================
-
-
-@dsl_user_op
-def ptx_mma_m16n8k32_s8_s8_s32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k32 MMA: int8 inputs, int32 accumulator"""
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = cute.recast_ptr(c_ptr + c_offset, dtype=cute.Int32)
-    c_tensor = cute.make_tensor(c_base, (4,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Int32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.i32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32
-        {$0, $1, $2, $3},
-        {$4, $5, $6, $7},
-        {$8, $9},
-        {$10, $11, $12, $13};
-    """
-    constraints = "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Int32(llvm.extractvalue(T.i32(), result, [i], loc=loc, ip=ip))
-
-
-@dsl_user_op
-def ptx_mma_m16n8k32_u8_u8_s32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k32 MMA: uint8 inputs, int32 accumulator"""
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = cute.recast_ptr(c_ptr + c_offset, dtype=cute.Int32)
-    c_tensor = cute.make_tensor(c_base, (4,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Int32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.i32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32
-        {$0, $1, $2, $3},
-        {$4, $5, $6, $7},
-        {$8, $9},
-        {$10, $11, $12, $13};
-    """
-    constraints = "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Int32(llvm.extractvalue(T.i32(), result, [i], loc=loc, ip=ip))
-
-
-# =============================================================================
-# INT4/UINT4 MMA operations (m16n8k32 in TileLang, m16n8k64 in PTX)
-# =============================================================================
-
-
-@dsl_user_op
-def ptx_mma_m16n8k32_s4_s4_s32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k32 (logical) -> m16n8k64 (PTX) MMA: int4 inputs, int32 accumulator"""
-    # Note: TileLang uses m16n8k32 but PTX uses m16n8k64 for int4
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = cute.recast_ptr(c_ptr + c_offset, dtype=cute.Int32)
-    c_tensor = cute.make_tensor(c_base, (4,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Int32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.i32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32
-        {$0, $1, $2, $3},
-        {$4, $5, $6, $7},
-        {$8, $9},
-        {$10, $11, $12, $13};
-    """
-    constraints = "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Int32(llvm.extractvalue(T.i32(), result, [i], loc=loc, ip=ip))
-
-
-@dsl_user_op
-def ptx_mma_m16n8k32_u4_u4_s32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k32 (logical) -> m16n8k64 (PTX) MMA: uint4 inputs, int32 accumulator"""
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = cute.recast_ptr(c_ptr + c_offset, dtype=cute.Int32)
-    c_tensor = cute.make_tensor(c_base, (4,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Int32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.i32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k64.row.col.s32.u4.u4.s32
-        {$0, $1, $2, $3},
-        {$4, $5, $6, $7},
-        {$8, $9},
-        {$10, $11, $12, $13};
-    """
-    constraints = "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Int32(llvm.extractvalue(T.i32(), result, [i], loc=loc, ip=ip))
-
-
-# =============================================================================
-# TF32 MMA operations (m16n8k4, m16n8k8)
-# =============================================================================
-
-
-@dsl_user_op
-def ptx_mma_m16n8k4_tf32_tf32_f32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k4 MMA: tf32 inputs, f32 accumulator"""
-    # A: 2 regs, B: 1 reg, C: 4 regs
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (2,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (1,))
-    c_base = c_ptr + c_offset
-    c_tensor = cute.make_tensor(c_base, (4,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    b_vals = [cute.Int32(b_tensor[0]).ir_value(loc=loc, ip=ip)]
-    c_vals = [cute.Float32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.f32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32
-        {$0, $1, $2, $3},
-        {$4, $5},
-        {$6},
-        {$7, $8, $9, $10};
-    """
-    constraints = "=f,=f,=f,=f,r,r,r,f,f,f,f"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Float32(llvm.extractvalue(T.f32(), result, [i], loc=loc, ip=ip))
-
-
-@dsl_user_op
-def ptx_mma_m16n8k8_tf32_tf32_f32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k8 MMA: tf32 inputs, f32 accumulator"""
-    # A: 4 regs, B: 2 regs, C: 4 regs
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = c_ptr + c_offset
-    c_tensor = cute.make_tensor(c_base, (4,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Float32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.f32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32
-        {$0, $1, $2, $3},
-        {$4, $5, $6, $7},
-        {$8, $9},
-        {$10, $11, $12, $13};
-    """
-    constraints = "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Float32(llvm.extractvalue(T.f32(), result, [i], loc=loc, ip=ip))
-
-
-# =============================================================================
-# FP64 MMA operations (m8n8k4)
-# =============================================================================
-
-
-@dsl_user_op
-def ptx_mma_m8n8k4_f64_f64_f64(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m8n8k4 MMA: f64 inputs, f64 accumulator"""
-    # A: 1 f64, B: 1 f64, C: 2 f64
-    a_tensor = cute.make_tensor(a_ptr + a_offset, (1,))
-    b_tensor = cute.make_tensor(b_ptr + b_offset, (1,))
-    c_base = c_ptr + c_offset
-    c_tensor = cute.make_tensor(c_base, (2,))
-
-    a_vals = [cute.Float64(a_tensor[0]).ir_value(loc=loc, ip=ip)]
-    b_vals = [cute.Float64(b_tensor[0]).ir_value(loc=loc, ip=ip)]
-    c_vals = [cute.Float64(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-
-    res_type = llvm.StructType.get_literal([T.f64()] * 2)
-    ptx_asm = """
-    mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64
-        {$0, $1},
-        {$2},
-        {$3},
-        {$4, $5};
-    """
-    constraints = "=d,=d,d,d,d,d"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (2,))
-    for i in range(2):
-        d_tensor[i] = cute.Float64(llvm.extractvalue(T.f64(), result, [i], loc=loc, ip=ip))
-
-
-# =============================================================================
-# FP8 MMA operations (m16n8k32) - SM89+
-# =============================================================================
-
-
-@dsl_user_op
-def ptx_mma_m16n8k32_e4m3_e4m3_f32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k32 MMA: e4m3 inputs, f32 accumulator"""
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = c_ptr + c_offset
-    c_tensor = cute.make_tensor(c_base, (4,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Float32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.f32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
-        {$0, $1, $2, $3},
-        {$4, $5, $6, $7},
-        {$8, $9},
-        {$10, $11, $12, $13};
-    """
-    constraints = "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Float32(llvm.extractvalue(T.f32(), result, [i], loc=loc, ip=ip))
-
-
-@dsl_user_op
-def ptx_mma_m16n8k32_e4m3_e4m3_f16(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k32 MMA: e4m3 inputs, f16 accumulator"""
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = cute.recast_ptr(c_ptr + c_offset, dtype=cute.Int32)
-    c_tensor = cute.make_tensor(c_base, (2,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Int32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-
-    res_type = llvm.StructType.get_literal([T.i32()] * 2)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k32.row.col.f16.e4m3.e4m3.f16
-        {$0, $1},
-        {$2, $3, $4, $5},
-        {$6, $7},
-        {$8, $9};
-    """
-    constraints = "=r,=r,r,r,r,r,r,r,r,r"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (2,))
-    for i in range(2):
-        d_tensor[i] = cute.Int32(llvm.extractvalue(T.i32(), result, [i], loc=loc, ip=ip))
-
-
-@dsl_user_op
-def ptx_mma_m16n8k32_e5m2_e5m2_f32(
-    a_ptr: Pointer,
-    a_offset,
-    b_ptr: Pointer,
-    b_offset,
-    c_ptr: Pointer,
-    c_offset,
-    a_layout: str = "row",
-    b_layout: str = "col",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    """m16n8k32 MMA: e5m2 inputs, f32 accumulator"""
-    a_base = cute.recast_ptr(a_ptr + a_offset, dtype=cute.Int32)
-    a_tensor = cute.make_tensor(a_base, (4,))
-    b_base = cute.recast_ptr(b_ptr + b_offset, dtype=cute.Int32)
-    b_tensor = cute.make_tensor(b_base, (2,))
-    c_base = c_ptr + c_offset
-    c_tensor = cute.make_tensor(c_base, (4,))
-
-    a_vals = [cute.Int32(a_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-    b_vals = [cute.Int32(b_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(2)]
-    c_vals = [cute.Float32(c_tensor[i]).ir_value(loc=loc, ip=ip) for i in range(4)]
-
-    res_type = llvm.StructType.get_literal([T.f32()] * 4)
-    ptx_asm = """
-    mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32
-        {$0, $1, $2, $3},
-        {$4, $5, $6, $7},
-        {$8, $9},
-        {$10, $11, $12, $13};
-    """
-    constraints = "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-    operands = a_vals + b_vals + c_vals
-
-    result = llvm.inline_asm(
-        res_type,
-        operands,
-        ptx_asm,
-        constraints,
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-
-    d_tensor = cute.make_tensor(c_base, (4,))
-    for i in range(4):
-        d_tensor[i] = cute.Float32(llvm.extractvalue(T.f32(), result, [i], loc=loc, ip=ip))
+# FP16
+ptx_mma_m16n8k16_f16_f16_f32 = _make_ptx_mma("m16n8k16", "f32.f16.f16.f32", 4, 2, 4, "f32")
+ptx_mma_m16n8k16_f16_f16_f16 = _make_ptx_mma("m16n8k16", "f16.f16.f16.f16", 4, 2, 2, "i32")
+# BF16
+ptx_mma_m16n8k16_bf16_bf16_f32 = _make_ptx_mma("m16n8k16", "f32.bf16.bf16.f32", 4, 2, 4, "f32")
+# INT8
+ptx_mma_m16n8k32_s8_s8_s32 = _make_ptx_mma("m16n8k32", "s32.s8.s8.s32", 4, 2, 4, "i32")
+ptx_mma_m16n8k32_u8_u8_s32 = _make_ptx_mma("m16n8k32", "s32.u8.u8.s32", 4, 2, 4, "i32")
+# INT4 (TileLang m16n8k32 -> PTX m16n8k64)
+ptx_mma_m16n8k32_s4_s4_s32 = _make_ptx_mma("m16n8k64", "s32.s4.s4.s32", 4, 2, 4, "i32")
+ptx_mma_m16n8k32_u4_u4_s32 = _make_ptx_mma("m16n8k64", "s32.u4.u4.s32", 4, 2, 4, "i32")
+# TF32
+ptx_mma_m16n8k4_tf32_tf32_f32 = _make_ptx_mma("m16n8k4", "f32.tf32.tf32.f32", 2, 1, 4, "f32")
+ptx_mma_m16n8k8_tf32_tf32_f32 = _make_ptx_mma("m16n8k8", "f32.tf32.tf32.f32", 4, 2, 4, "f32")
+# FP64
+ptx_mma_m8n8k4_f64_f64_f64 = _make_ptx_mma("m8n8k4", "f64.f64.f64.f64", 1, 1, 2, "f64")
+# FP8 (SM89+)
+ptx_mma_m16n8k32_e4m3_e4m3_f32 = _make_ptx_mma("m16n8k32", "f32.e4m3.e4m3.f32", 4, 2, 4, "f32")
+ptx_mma_m16n8k32_e4m3_e4m3_f16 = _make_ptx_mma("m16n8k32", "f16.e4m3.e4m3.f16", 4, 2, 2, "i32")
+ptx_mma_m16n8k32_e5m2_e5m2_f32 = _make_ptx_mma("m16n8k32", "f32.e5m2.e5m2.f32", 4, 2, 4, "f32")
 
 
 # =============================================================================
