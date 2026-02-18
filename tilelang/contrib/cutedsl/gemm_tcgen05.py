@@ -384,19 +384,23 @@ def tmem_deallocate(tmem_ptr: cute.Pointer, num_cols: int):
 _TMEM_LD_MAX_LOG_N = 3   # 1 << 3 = 8  (keep small to avoid LLVM hangs with many operands)
 
 
-def _emit_tmem_ld_segment(seg_size, addr_ir):
+def _emit_tmem_ld_segment(ptx_type, seg_x, regs_per_x, addr_ir):
     """Emit one tcgen05.ld inline asm for a power-of-2 segment.
 
     Called during @cute.jit compilation — emits MLIR ops directly.
-    Returns a list of seg_size cutlass.Int32 values.
+    ptx_type:    PTX instruction type, e.g. "32x32b", "16x64b", "16x128b", "16x256b"
+    seg_x:       x-count in the PTX instruction (power of 2)
+    regs_per_x:  number of i32 output registers per x-element
+    Returns a list of (seg_x * regs_per_x) cutlass.Int32 values.
     """
     i32_type = ir.IntegerType.get_signless(32)
+    total_regs = seg_x * regs_per_x
 
-    if seg_size == 1:
+    if total_regs == 1:
         result = llvm.inline_asm(
             i32_type,
             [addr_ir],
-            "tcgen05.ld.sync.aligned.32x32b.x1.b32 $0, [$1];",
+            f"tcgen05.ld.sync.aligned.{ptx_type}.x{seg_x}.b32 $0, [$1];",
             "=r,r",
             has_side_effects=True,
             is_align_stack=False,
@@ -405,16 +409,16 @@ def _emit_tmem_ld_segment(seg_size, addr_ir):
         return [cutlass.Int32(result)]
 
     # Multi-output: struct of i32s
-    out_types = [i32_type] * seg_size
+    out_types = [i32_type] * total_regs
     result_type = llvm.StructType.get_literal(out_types)
 
-    out_regs = ", ".join(f"${i}" for i in range(seg_size))
-    src_idx = seg_size  # source addr is the last operand
+    out_regs = ", ".join(f"${i}" for i in range(total_regs))
+    src_idx = total_regs  # source addr is the last operand
     asm_str = (
-        f"tcgen05.ld.sync.aligned.32x32b.x{seg_size}.b32 "
+        f"tcgen05.ld.sync.aligned.{ptx_type}.x{seg_x}.b32 "
         f"{{{out_regs}}}, [${src_idx}];"
     )
-    constraints = ",".join(["=r"] * seg_size) + ",r"
+    constraints = ",".join(["=r"] * total_regs) + ",r"
 
     result = llvm.inline_asm(
         result_type,
@@ -427,37 +431,46 @@ def _emit_tmem_ld_segment(seg_size, addr_ir):
     )
 
     return [cutlass.Int32(llvm.extractvalue(i32_type, result, [i]))
-            for i in range(seg_size)]
+            for i in range(total_regs)]
 
 
-def _emit_tmem_ld(n, max_log_n, src_addr, dst_view, offset=0):
-    """Recursively split N into power-of-2 segments and emit TMEM loads.
+def _emit_tmem_ld(n_x, max_log_n, ptx_type, regs_per_x, src_addr, dst_view,
+                  dst_offset=0, src_col_offset=0):
+    """Recursively split x-count into power-of-2 segments and emit TMEM loads.
 
     Called during @cute.jit compilation.
-    src_addr: CuTeDSL Int32 (runtime TMEM address).
-    dst_view: CuTeDSL tensor view over destination registers.
-    offset:   Python int — current element offset (compile-time constant).
+    n_x:            remaining x-element count to load
+    max_log_n:      max log2 of x-count per PTX instruction
+    ptx_type:       PTX instruction type, e.g. "32x32b", "16x64b"
+    regs_per_x:     i32 output registers per x-element
+    src_addr:       CuTeDSL Int32 (runtime TMEM base address)
+    dst_view:       CuTeDSL tensor view over destination registers
+    dst_offset:     Python int — i32 offset into dst_view (compile-time constant)
+    src_col_offset: Python int — TMEM column offset from src_addr (compile-time constant)
     """
-    if n <= 0:
+    if n_x <= 0:
         return
 
-    log_n = n.bit_length() - 1
+    log_n = n_x.bit_length() - 1
     seg_log = min(log_n, max_log_n)
-    seg_size = 1 << seg_log
+    seg_x = 1 << seg_log
 
-    # Compute address for this segment
-    if offset == 0:
+    # Compute TMEM address for this segment
+    if src_col_offset == 0:
         addr_ir = src_addr.ir_value()
     else:
-        addr_ir = (src_addr + cutlass.Int32(offset)).ir_value()
+        addr_ir = (src_addr + cutlass.Int32(src_col_offset)).ir_value()
 
     # Emit inline asm and store results
-    results = _emit_tmem_ld_segment(seg_size, addr_ir)
+    results = _emit_tmem_ld_segment(ptx_type, seg_x, regs_per_x, addr_ir)
     for j, val in enumerate(results):
-        dst_view[offset + j] = val
+        dst_view[dst_offset + j] = val
 
     # Recurse for remainder
-    _emit_tmem_ld(n - seg_size, max_log_n, src_addr, dst_view, offset + seg_size)
+    total_regs_emitted = seg_x * regs_per_x
+    _emit_tmem_ld(n_x - seg_x, max_log_n, ptx_type, regs_per_x, src_addr,
+                  dst_view, dst_offset + total_regs_emitted,
+                  src_col_offset + seg_x)
 
 
 def _emit_tmem_fence():
@@ -480,7 +493,7 @@ def tcgen05_ld_32dp32bNx(N: Constexpr[int], pack16: Constexpr[bool],
     """Load N uint32 values from TMEM using tcgen05.ld.sync.aligned.32x32b.
 
     Matches tl::tcgen05_ld_32dp32bNx from copy_sm100.h.
-    N: number of 32-bit elements to load (compile-time constant).
+    N: number of 32-bit elements to load (x-count, compile-time constant).
     pack16: if True, use 16-bit packing (not implemented yet).
     tmem_start_col: TMEM base column address.
     tmem_col_offset: additional column offset.
@@ -489,7 +502,7 @@ def tcgen05_ld_32dp32bNx(N: Constexpr[int], pack16: Constexpr[bool],
     src_addr = cutlass.Int32(tmem_start_col) + cutlass.Int32(tmem_col_offset)
     dst_view = cute.make_tensor(
         cute.recast_ptr(dst_ptr, dtype=cute.Int32), (N,))
-    _emit_tmem_ld(N, _TMEM_LD_MAX_LOG_N, src_addr, dst_view)
+    _emit_tmem_ld(N, _TMEM_LD_MAX_LOG_N, "32x32b", 1, src_addr, dst_view)
     _emit_tmem_fence()
 
 
@@ -498,11 +511,22 @@ def tcgen05_ld_32dp64bNx(N: Constexpr[int], pack16: Constexpr[bool],
                          tmem_start_col: int,
                          tmem_col_offset: int,
                          dst_ptr: cute.Pointer):
-    """Load N values from TMEM using tcgen05.ld.sync.aligned.32x64b."""
+    """Load from TMEM using 32dp64b pattern (2x 16x64b for lower/upper 16 rows).
+
+    Matches tl::tmem_ld_32dp64bNx from tcgen_05_ld.h.
+    N: x-count for 16x64b instructions. Total output: 2*N i32 regs.
+    """
+    total_regs = N * 2
     src_addr = cutlass.Int32(tmem_start_col) + cutlass.Int32(tmem_col_offset)
     dst_view = cute.make_tensor(
-        cute.recast_ptr(dst_ptr, dtype=cute.Int32), (N,))
-    _emit_tmem_ld(N, _TMEM_LD_MAX_LOG_N, src_addr, dst_view)
+        cute.recast_ptr(dst_ptr, dtype=cute.Int32), (total_regs,))
+    # Lower 16 rows
+    _emit_tmem_ld(N, _TMEM_LD_MAX_LOG_N, "16x64b", 1, src_addr, dst_view,
+                  dst_offset=0, src_col_offset=0)
+    # Upper 16 rows (TMEM row offset = 16 << 16)
+    upper_addr = src_addr + cutlass.Int32(16 << 16)
+    _emit_tmem_ld(N, _TMEM_LD_MAX_LOG_N, "16x64b", 1, upper_addr, dst_view,
+                  dst_offset=N, src_col_offset=0)
     _emit_tmem_fence()
 
 
@@ -511,11 +535,24 @@ def tcgen05_ld_32dp128bNx(N: Constexpr[int], pack16: Constexpr[bool],
                           tmem_start_col: int,
                           tmem_col_offset: int,
                           dst_ptr: cute.Pointer):
-    """Load N values from TMEM using tcgen05.ld.sync.aligned.32x128b."""
+    """Load from TMEM using 32dp128b pattern (2x 16x128b for lower/upper 16 rows).
+
+    Matches tl::tmem_ld_32dp128bNx from tcgen_05_ld.h.
+    N: x-count for 16x128b instructions. Total output: 4*N i32 regs.
+    16x128b.xN produces 2*N i32 regs per half.
+    """
+    regs_per_half = N * 2
+    total_regs = regs_per_half * 2
     src_addr = cutlass.Int32(tmem_start_col) + cutlass.Int32(tmem_col_offset)
     dst_view = cute.make_tensor(
-        cute.recast_ptr(dst_ptr, dtype=cute.Int32), (N,))
-    _emit_tmem_ld(N, min(_TMEM_LD_MAX_LOG_N, 6), src_addr, dst_view)
+        cute.recast_ptr(dst_ptr, dtype=cute.Int32), (total_regs,))
+    # Lower 16 rows
+    _emit_tmem_ld(N, min(_TMEM_LD_MAX_LOG_N, 6), "16x128b", 2, src_addr,
+                  dst_view, dst_offset=0, src_col_offset=0)
+    # Upper 16 rows (TMEM row offset = 16 << 16)
+    upper_addr = src_addr + cutlass.Int32(16 << 16)
+    _emit_tmem_ld(N, min(_TMEM_LD_MAX_LOG_N, 6), "16x128b", 2, upper_addr,
+                  dst_view, dst_offset=regs_per_half, src_col_offset=0)
     _emit_tmem_fence()
 
 
@@ -524,9 +561,22 @@ def tcgen05_ld_32dp256bNx(N: Constexpr[int], pack16: Constexpr[bool],
                           tmem_start_col: int,
                           tmem_col_offset: int,
                           dst_ptr: cute.Pointer):
-    """Load N values from TMEM using tcgen05.ld.sync.aligned.32x256b."""
+    """Load from TMEM using 32dp256b pattern (2x 16x256b for lower/upper 16 rows).
+
+    Matches tl::tmem_ld_32dp256bNx from tcgen_05_ld.h.
+    N: x-count for 16x256b instructions. Total output: 8*N i32 regs.
+    16x256b.xN produces 4*N i32 regs per half.
+    """
+    regs_per_half = N * 4
+    total_regs = regs_per_half * 2
     src_addr = cutlass.Int32(tmem_start_col) + cutlass.Int32(tmem_col_offset)
     dst_view = cute.make_tensor(
-        cute.recast_ptr(dst_ptr, dtype=cute.Int32), (N,))
-    _emit_tmem_ld(N, min(_TMEM_LD_MAX_LOG_N, 6), src_addr, dst_view)
+        cute.recast_ptr(dst_ptr, dtype=cute.Int32), (total_regs,))
+    # Lower 16 rows
+    _emit_tmem_ld(N, min(_TMEM_LD_MAX_LOG_N, 6), "16x256b", 4, src_addr,
+                  dst_view, dst_offset=0, src_col_offset=0)
+    # Upper 16 rows (TMEM row offset = 16 << 16)
+    upper_addr = src_addr + cutlass.Int32(16 << 16)
+    _emit_tmem_ld(N, min(_TMEM_LD_MAX_LOG_N, 6), "16x256b", 4, upper_addr,
+                  dst_view, dst_offset=regs_per_half, src_col_offset=0)
     _emit_tmem_fence()

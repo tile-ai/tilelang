@@ -570,7 +570,6 @@ def ptx_mma_m8n8k4_f64_f64_f64(
 ) -> None:
     """m8n8k4 MMA: f64 inputs, f64 accumulator"""
     # A: 1 f64, B: 1 f64, C: 2 f64
-    c_ptr + a_offset  # Note: For f64, ptr is already Float64
     a_tensor = cute.make_tensor(a_ptr + a_offset, (1,))
     b_tensor = cute.make_tensor(b_ptr + b_offset, (1,))
     c_base = c_ptr + c_offset
