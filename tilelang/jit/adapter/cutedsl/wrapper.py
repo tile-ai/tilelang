@@ -177,6 +177,35 @@ CPP_KERNEL_LAUNCH_TEMPLATE = """\
   }}
 """
 
+# Cooperative kernel launch template (for sync_grid / cooperative groups)
+# Uses cuLaunchCooperativeKernel which guarantees all thread blocks are resident
+CPP_COOPERATIVE_KERNEL_LAUNCH_TEMPLATE = """\
+  // Launch kernel {kernel_idx}: {kernel_name} (cooperative)
+  {{
+    // Get the kernel for current device
+    auto kernels_it = g_device_kernels.find(device_id);
+    if (kernels_it == g_device_kernels.end()) {{
+      std::cerr << "Kernels not initialized for device " << device_id << "\\n";
+      return CUDA_ERROR_NOT_INITIALIZED;
+    }}
+    const std::vector<CUfunction>& kernels = kernels_it->second;
+
+    void* args[] = {{{kernel_args}}};
+    result = cuLaunchCooperativeKernel(
+        kernels[{kernel_idx}],
+        {grid_x}, {grid_y}, {grid_z},
+        {block_x}, {block_y}, {block_z},
+        {smem_size},
+        stream,
+        args
+    );
+    if (result != CUDA_SUCCESS) {{
+      std::cerr << "Failed to launch cooperative kernel {kernel_name} on device " << device_id << ": " << result << "\\n";
+      return result;
+    }}
+  }}
+"""
+
 # Complete C++ launcher template
 CPP_LAUNCHER_TEMPLATE = """\
 #include <cuda.h>
@@ -1017,6 +1046,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         For __grid_constant__ CUtensorMap params:
         - Pass CUtensorMap* directly (not CUtensorMap**)
         - cuLaunchKernel copies 128 bytes to kernel param space
+
+        Uses cuLaunchCooperativeKernel when use_cooperative_groups is set
+        (required for sync_grid / grid-level synchronization).
         """
         call_args = kernel_meta["call_args"]
         desc_names = kernel_meta["desc_names"]
@@ -1039,9 +1071,14 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         block = function_info["block_info"]
         smem_size = function_info["dynamic_smem_buf"] or 0
 
-        return CPP_KERNEL_LAUNCH_TEMPLATE.format(
+        # Choose launch template based on cooperative groups requirement
+        function_name = kernel_meta["function_name"]
+        use_cooperative = self.use_cooperative_groups.get(function_name, False)
+        template = CPP_COOPERATIVE_KERNEL_LAUNCH_TEMPLATE if use_cooperative else CPP_KERNEL_LAUNCH_TEMPLATE
+
+        return template.format(
             kernel_idx=kernel_idx,
-            kernel_name=kernel_meta["function_name"],
+            kernel_name=function_name,
             kernel_args=", ".join(kernel_args),
             grid_x=self._cxx_expr(grid[0]),
             grid_y=self._cxx_expr(grid[1]),

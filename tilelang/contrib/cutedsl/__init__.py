@@ -30,6 +30,7 @@ from .warp import *  # noqa: F401,F403
 from .gemm_v2 import *  # noqa: F401,F403
 from .gemm_tcgen05 import *  # noqa: F401,F403
 from .ieee_math import *  # noqa: F401,F403
+from .grid_sync import *  # noqa: F401,F403
 
 
 def thread_idx():

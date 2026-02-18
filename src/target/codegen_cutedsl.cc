@@ -655,7 +655,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     os << "tl.pack_half2(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
   } else if (op->op.same_as(tl::sync_grid())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    PrintIndent();
+    stream << "tl.sync_grid()\n";
   } else if (op->op.same_as(tl::loop_break()) ||
              op->op.same_as(builtin::break_loop())) {
     if (in_break_loop_) {
@@ -990,8 +991,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     //   threadIdx.x // (warp_size * warps_per_group)
     ICHECK_LE(op->args.size(), 2U)
         << "tl.get_warp_group_idx expects <warp_size, warps_per_group>.";
-    std::string warp_size =
-        op->args.size() >= 1 ? PrintExpr_(op->args[0]) : "32";
+    std::string warp_size = !op->args.empty() ? PrintExpr_(op->args[0]) : "32";
     std::string warps_per_group =
         op->args.size() >= 2 ? PrintExpr_(op->args[1]) : "4";
     os << "(tl.thread_idx() // (" << warp_size << " * " << warps_per_group
