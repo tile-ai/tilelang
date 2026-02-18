@@ -353,6 +353,21 @@ jobs:
           "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
             ../examples
 
+      # CuTeDSL backend: run examples with TILELANG_TARGET=cutedsl
+      - name: Run CuTeDSL examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        continue-on-error: true
+        env:
+          TILELANG_TARGET: cutedsl
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=10 --numprocesses=2 \
+            ../examples
+
       # NVIDIA CUDA tests
       - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: cuda-tests
