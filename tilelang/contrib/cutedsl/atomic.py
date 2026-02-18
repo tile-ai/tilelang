@@ -161,31 +161,68 @@ def _load_from_src(src_values, count):
 
 
 def AtomicAddx2(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
-    """Vectorized atomic add for 2 consecutive float32 elements.
+    """Vectorized atomic add for 2 consecutive elements.
 
-    Uses PTX atom.global.add.v2.f32 for true vectorized atomic operation on SM90+.
+    Uses PTX atom.add.v2.f32 for float32 or atom.add.noftz.v2.f16 for float16.
 
     Args:
-        dst_ptr: Pointer to destination (2 consecutive float32 elements)
+        dst_ptr: Pointer to destination (2 consecutive elements)
         src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
     """
     vals = _load_from_src(src_values, 2)
     val0 = vals[0]
     val1 = vals[1]
 
-    # Use inline PTX for vectorized atomic add
-    res_type = llvm.StructType.get_literal([T.f32()] * 2)
-    llvm.inline_asm(
-        res_type,
-        [dst_ptr.llvm_ptr, cutlass.Float32(val0).ir_value(loc=loc, ip=ip), cutlass.Float32(val1).ir_value(loc=loc, ip=ip)],
-        "atom.global.add.v2.f32 {$0,$1}, [$2], {$3,$4};",
-        "=f,=f,l,f,f",
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
+    if dst_ptr.dtype == cutlass.Float16:
+        # fp16: use atom.add.noftz.v2.f16 with i16 bitcast (LLVM asm doesn't support f16)
+        val0_ir = cutlass.Float16(val0).ir_value(loc=loc, ip=ip)
+        val1_ir = cutlass.Float16(val1).ir_value(loc=loc, ip=ip)
+        val0_i16 = llvm.bitcast(T.i16(), val0_ir, loc=loc, ip=ip)
+        val1_i16 = llvm.bitcast(T.i16(), val1_ir, loc=loc, ip=ip)
+        res_type = llvm.StructType.get_literal([T.i16()] * 2)
+        llvm.inline_asm(
+            res_type,
+            [dst_ptr.llvm_ptr, val0_i16, val1_i16],
+            "atom.add.noftz.v2.f16 {$0,$1}, [$2], {$3,$4};",
+            "=h,=h,l,h,h",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    elif dst_ptr.dtype == cutlass.BFloat16:
+        # bf16: use atom.add.noftz.v2.bf16 with i16 bitcast
+        val0_ir = cutlass.BFloat16(val0).ir_value(loc=loc, ip=ip)
+        val1_ir = cutlass.BFloat16(val1).ir_value(loc=loc, ip=ip)
+        val0_i16 = llvm.bitcast(T.i16(), val0_ir, loc=loc, ip=ip)
+        val1_i16 = llvm.bitcast(T.i16(), val1_ir, loc=loc, ip=ip)
+        res_type = llvm.StructType.get_literal([T.i16()] * 2)
+        llvm.inline_asm(
+            res_type,
+            [dst_ptr.llvm_ptr, val0_i16, val1_i16],
+            "atom.add.noftz.v2.bf16 {$0,$1}, [$2], {$3,$4};",
+            "=h,=h,l,h,h",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    else:
+        # float32 (default): use atom.add.v2.f32
+        res_type = llvm.StructType.get_literal([T.f32()] * 2)
+        llvm.inline_asm(
+            res_type,
+            [dst_ptr.llvm_ptr, cutlass.Float32(val0).ir_value(loc=loc, ip=ip), cutlass.Float32(val1).ir_value(loc=loc, ip=ip)],
+            "atom.add.v2.f32 {$0,$1}, [$2], {$3,$4};",
+            "=f,=f,l,f,f",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
 
 
 def AtomicAddx4(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
