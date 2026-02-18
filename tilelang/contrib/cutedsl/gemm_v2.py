@@ -91,6 +91,24 @@ _PTX_DTYPE_MAP = {
 # For WGMMA A/B operands, fp32 must be treated as tf32 on SM90
 _FP32_TO_TF32 = {"fp32": "tf32", "f32": "tf32", "float32": "tf32"}
 
+# Canonical PTX dtype -> cutlass scalar type (for output dtypes only).
+_PTX_TO_CUTLASS_TYPE = {
+    "f16": cutlass.Float16,
+    "bf16": cutlass.BFloat16,
+    "f32": cutlass.Float32,
+    "s32": cutlass.Int32,
+}
+
+
+def _wgmma_num_c_regs(M, N, C_dtype):
+    """Number of i32 result registers per thread for a WGMMA op.
+
+    Each i32 register holds ``32 // elem_bits`` packed elements.
+    """
+    canonical = _PTX_DTYPE_MAP.get(C_dtype, C_dtype)
+    elem_bits = _PTX_TO_CUTLASS_TYPE[canonical].width
+    return M * N * elem_bits // (128 * 32)
+
 
 def _wgmma_ab_dtype(dtype_str):
     """Map A/B operand dtype for WGMMA: fp32 -> tf32 (SM90 compatibility)."""
@@ -114,7 +132,7 @@ def wgmma_ss(
     C_ptr: cute.Pointer,
     scale_out: Constexpr[int],
 ):
-    num_elems_per_thread = M * N // 128
+    num_elems_per_thread = _wgmma_num_c_regs(M, N, C_dtype)
 
     C_types = llvm.StructType.get_literal([T.i32()] * num_elems_per_thread)
 
@@ -168,7 +186,7 @@ def wgmma_rs(
     M is always 64. A is always K-major (not transposed).
     """
     num_a_regs = 4  # Always 4 for M=64, all supported dtypes
-    num_c_regs = M * N // 128
+    num_c_regs = _wgmma_num_c_regs(M, N, C_dtype)
 
     ptx_a = _PTX_DTYPE_MAP[_wgmma_ab_dtype(A_dtype)]
     ptx_b = _PTX_DTYPE_MAP[_wgmma_ab_dtype(B_dtype)]
