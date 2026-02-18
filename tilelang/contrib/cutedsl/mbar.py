@@ -6,7 +6,6 @@ We use the existing implementations from cutlass rather than reinventing the whe
 from cutlass.cute.typing import Pointer, Int, Int32, Boolean  # noqa: F401
 from cutlass.cutlass_dsl import CuTeDSL, dsl_user_op  # noqa: F401
 from cutlass._mlir.dialects import nvvm, llvm
-from cutlass._mlir import ir as mlir_ir
 
 from cutlass.cute.arch import mbarrier_init, mbarrier_expect_tx, mbarrier_arrive  # noqa: F401
 from cutlass.cute.arch import mbarrier_arrive_and_expect_tx as arrive_and_expect_tx  # noqa: F401
@@ -24,15 +23,8 @@ def mbarrier_wait(mbar_ptr: Pointer, phase: Int, timeout_ns: Int = 10000000, *, 
     """
     llvm.inline_asm(
         None,
-        [mbar_ptr.llvm_ptr,
-         Int32(phase).ir_value(loc=loc, ip=ip),
-         Int32(timeout_ns).ir_value(loc=loc, ip=ip)],
-        "{\n"
-        ".reg .pred p;\n"
-        "LAB_WAIT:\n"
-        "mbarrier.try_wait.parity.shared::cta.b64 p, [$0], $1, $2;\n"
-        "@!p bra LAB_WAIT;\n"
-        "}",
+        [mbar_ptr.llvm_ptr, Int32(phase).ir_value(loc=loc, ip=ip), Int32(timeout_ns).ir_value(loc=loc, ip=ip)],
+        "{\n.reg .pred p;\nLAB_WAIT:\nmbarrier.try_wait.parity.shared::cta.b64 p, [$0], $1, $2;\n@!p bra LAB_WAIT;\n}",
         "r,r,r",
         has_side_effects=True,
         is_align_stack=False,

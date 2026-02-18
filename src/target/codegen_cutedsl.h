@@ -32,13 +32,13 @@ protected:
   void VisitExpr_(const BroadcastNode *op,
                   std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op,
-                  std::ostream &os) override;                     // NOLINT(*)
-  void VisitExpr_(const CastNode *op, std::ostream &os) override; // NOLINT(*)
-  void VisitExpr_(const DivNode *op, std::ostream &os) override;  // NOLINT(*)
-  void VisitExpr_(const MinNode *op, std::ostream &os) override;  // NOLINT(*)
-  void VisitExpr_(const MaxNode *op, std::ostream &os) override;  // NOLINT(*)
-  void VisitExpr_(const CallNode *op, std::ostream &os) override; // NOLINT(*)
-  void VisitExpr_(const SelectNode *op, std::ostream &os) override;  // NOLINT(*)
+                  std::ostream &os) override;                       // NOLINT(*)
+  void VisitExpr_(const CastNode *op, std::ostream &os) override;   // NOLINT(*)
+  void VisitExpr_(const DivNode *op, std::ostream &os) override;    // NOLINT(*)
+  void VisitExpr_(const MinNode *op, std::ostream &os) override;    // NOLINT(*)
+  void VisitExpr_(const MaxNode *op, std::ostream &os) override;    // NOLINT(*)
+  void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
+  void VisitExpr_(const SelectNode *op, std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const BufferLoadNode *op,
                   std::ostream &os) override; // NOLINT(*)
 

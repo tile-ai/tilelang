@@ -60,14 +60,18 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         nid = item.nodeid
         if _match_any(nid, CUTEDSL_KNOWN_FAILURES):
-            item.add_marker(pytest.mark.xfail(
-                reason="CuTeDSL: known limitation (unimplemented op or flaky)",
-                strict=False,
-            ))
+            item.add_marker(
+                pytest.mark.xfail(
+                    reason="CuTeDSL: known limitation (unimplemented op or flaky)",
+                    strict=False,
+                )
+            )
         elif _match_any(nid, CUTEDSL_KNOWN_SKIPS):
-            item.add_marker(pytest.mark.skip(
-                reason="CuTeDSL: not supported",
-            ))
+            item.add_marker(
+                pytest.mark.skip(
+                    reason="CuTeDSL: not supported",
+                )
+            )
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):

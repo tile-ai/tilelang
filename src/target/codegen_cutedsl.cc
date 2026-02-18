@@ -84,8 +84,7 @@ std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
       {"log10", "tl.log10"},  {"tan", "tl.tan"},    {"cos", "tl.cos"},
       {"sin", "tl.sin"},      {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
       {"tanh", "tl.tanh"},    {"tanhf", "tl.tanh"}, {"rsqrt", "tl.rsqrt"},
-      {"rsqrtf", "tl.rsqrt"},
-      {"fabs", "tl.fabsf"},    {"fabsf", "tl.fabsf"},
+      {"rsqrtf", "tl.rsqrt"}, {"fabs", "tl.fabsf"}, {"fabsf", "tl.fabsf"},
   };
 
   auto it = kFastMathMap.find(func_name);
@@ -255,11 +254,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   // float8x2), pad the source to aligned width, cast, then return
   // the aligned rmem tensor.  The store path is responsible for
   // extracting only value_lanes elements when writing back.
-  bool is_narrow_unaligned =
-      target_ty.bits() < 32 && lanes > 1 &&
-      (target_ty.bits() * lanes) % 32 != 0;
-  int aligned_lanes =
-      is_narrow_unaligned ? (32 / target_ty.bits()) : lanes;
+  bool is_narrow_unaligned = target_ty.bits() < 32 && lanes > 1 &&
+                             (target_ty.bits() * lanes) % 32 != 0;
+  int aligned_lanes = is_narrow_unaligned ? (32 / target_ty.bits()) : lanes;
 
   std::string src = SSAGetID(PrintExpr_(op->value), from_ty);
 
@@ -268,8 +265,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   if (is_narrow_unaligned) {
     cast_src = name_supply_->FreshName("_pad_src");
     PrintIndent();
-    stream << cast_src << " = tl.make_rmem_tensor((" << aligned_lanes
-           << ",), ";
+    stream << cast_src << " = tl.make_rmem_tensor((" << aligned_lanes << ",), ";
     PrintType(from_ty.element_of(), stream);
     stream << ")\n";
     for (int i = 0; i < aligned_lanes; ++i) {
@@ -383,10 +379,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << ")\n";
   };
 
-  // NOTE: builtin::if_then_else is handled by the base class (CodeGenTileLangPY)
-  // as a Python ternary: (true_val if cond else false_val). This is correct for
-  // expression contexts (range(), arithmetic, etc.). When the result is used in
-  // a BufferStore that needs TensorSSA, the store handler wraps it with tl.where().
+  // NOTE: builtin::if_then_else is handled by the base class
+  // (CodeGenTileLangPY) as a Python ternary: (true_val if cond else false_val).
+  // This is correct for expression contexts (range(), arithmetic, etc.). When
+  // the result is used in a BufferStore that needs TensorSSA, the store handler
+  // wraps it with tl.where().
 
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
@@ -728,11 +725,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     int scaleB = scale_in_b ? 1 : -1;
     PrintIndent();
     stream << "tl.wgmma_ss(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
-           << C_dtype << "\", " << m << ", " << n << ", " << k << ", "
-           << tnspA << ", " << tnspB << ", " << scaleA << ", " << scaleB
-           << ", (" << a_desc << " + " << A_offset << "), (" << b_desc
-           << " + " << B_offset << "), " << c_ref << " + " << c_offset
-           << ", " << scale_out << ")\n";
+           << C_dtype << "\", " << m << ", " << n << ", " << k << ", " << tnspA
+           << ", " << tnspB << ", " << scaleA << ", " << scaleB << ", ("
+           << a_desc << " + " << A_offset << "), (" << b_desc << " + "
+           << B_offset << "), " << c_ref << " + " << c_offset << ", "
+           << scale_out << ")\n";
   } else if (op->op.same_as(tl::ptx_wgmma_rs())) {
     // arg 0: shape (StringImm, e.g. "m64n128k16")
     // arg 1: b_is_k_major (Bool)
@@ -770,11 +767,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     int scaleB = scale_in_b ? 1 : -1;
     PrintIndent();
     stream << "tl.wgmma_rs(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
-           << C_dtype << "\", " << m << ", " << n << ", " << k << ", "
-           << tnspB << ", " << scaleA << ", " << scaleB << ", " << a_ref
-           << " + " << A_offset << ", (" << b_desc << " + " << B_offset
-           << "), " << c_ref << " + " << c_offset << ", " << scale_out
-           << ")\n";
+           << C_dtype << "\", " << m << ", " << n << ", " << k << ", " << tnspB
+           << ", " << scaleA << ", " << scaleB << ", " << a_ref << " + "
+           << A_offset << ", (" << b_desc << " + " << B_offset << "), " << c_ref
+           << " + " << c_offset << ", " << scale_out << ")\n";
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
     ICHECK_EQ(op->args.size(), 14U)
         << "ptx_tcgen05_mma_ss expects 14 arguments";
@@ -794,19 +790,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     bool enable_ws = Downcast<Bool>(op->args[13])->value;
     PrintIndent();
     if (enable_ws) {
-      stream << "tl.tcgen05mma_ws_ss(\"" << kind_dtype << "\", ("
-             << a_desc << " + " << A_offset << "), ("
-             << b_desc << " + " << B_offset << "), "
-             << c_ref << "[0] + " << c_offset << ", "
-             << desc_val << ", " << scale_out << ")\n";
+      stream << "tl.tcgen05mma_ws_ss(\"" << kind_dtype << "\", (" << a_desc
+             << " + " << A_offset << "), (" << b_desc << " + " << B_offset
+             << "), " << c_ref << "[0] + " << c_offset << ", " << desc_val
+             << ", " << scale_out << ")\n";
     } else {
-      stream << "tl.tcgen05mma_ss(\"" << kind_dtype << "\", ("
-             << a_desc << " + " << A_offset << "), ("
-             << b_desc << " + " << B_offset << "), "
-             << c_ref << "[0] + " << c_offset << ", "
-             << desc_val << ", " << scale_out << ", "
-             << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
-             << ")\n";
+      stream << "tl.tcgen05mma_ss(\"" << kind_dtype << "\", (" << a_desc
+             << " + " << A_offset << "), (" << b_desc << " + " << B_offset
+             << "), " << c_ref << "[0] + " << c_offset << ", " << desc_val
+             << ", " << scale_out << ", " << mask0 << ", " << mask1 << ", "
+             << mask2 << ", " << mask3 << ")\n";
     }
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ts())) {
     ICHECK_EQ(op->args.size(), 13U)
@@ -825,12 +818,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string mask2 = PrintExpr_(op->args[11]);
     std::string mask3 = PrintExpr_(op->args[12]);
     PrintIndent();
-    stream << "tl.tcgen05mma_ts(\"" << kind_dtype << "\", "
-           << a_ref << "[0] + " << A_offset << ", ("
-           << b_desc << " + " << B_offset << "), "
-           << c_ref << "[0] + " << c_offset << ", "
-           << desc_val << ", " << scale_out << ", "
-           << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
+    stream << "tl.tcgen05mma_ts(\"" << kind_dtype << "\", " << a_ref << "[0] + "
+           << A_offset << ", (" << b_desc << " + " << B_offset << "), " << c_ref
+           << "[0] + " << c_offset << ", " << desc_val << ", " << scale_out
+           << ", " << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
            << ")\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
@@ -1083,11 +1074,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
 }
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
-                                         std::ostream &os) {  // NOLINT(*)
+                                        std::ostream &os) { // NOLINT(*)
   // Emit Python ternary: (true_val if cond else false_val).
-  // This yields ArithValue which is fine in expression contexts (range(), etc.).
-  // When used as a BufferStore value that requires TensorSSA, the store handler
-  // will wrap it with tl.where() at statement level.
+  // This yields ArithValue which is fine in expression contexts (range(),
+  // etc.). When used as a BufferStore value that requires TensorSSA, the store
+  // handler will wrap it with tl.where() at statement level.
   std::string cond = PrintExpr_(op->condition);
   std::string t = PrintExpr_(op->true_value);
   std::string f = PrintExpr_(op->false_value);
@@ -1111,9 +1102,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
   // CuTeDSL requires narrow precision vector loads to be 32-bit aligned.
   // For unaligned widths (e.g. float8x2), load an aligned-width vector
   // and extract the needed elements via scalar copy.
-  bool is_narrow_unaligned =
-      value_dtype.bits() < 32 && value_lanes > 1 &&
-      (value_dtype.bits() * value_lanes) % 32 != 0;
+  bool is_narrow_unaligned = value_dtype.bits() < 32 && value_lanes > 1 &&
+                             (value_dtype.bits() * value_lanes) % 32 != 0;
 
   if (is_narrow_unaligned) {
     int aligned_lanes = 32 / value_dtype.bits();
@@ -1163,8 +1153,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
       // no alignment assumption (div_by=1).  This avoids:
       //  - MisalignedAddress from div_by=aligned_lanes on non-aligned offsets
       //  - OOB from loading aligned_lanes elements near the buffer boundary
-      bool is_handle_match =
-          HandleTypeMatch_(buffer_var.get(), element_dtype);
+      bool is_handle_match = HandleTypeMatch_(buffer_var.get(), element_dtype);
       std::string ptr_str;
       if (is_handle_match) {
         ptr_str = vid + ".iterator";
@@ -1258,12 +1247,12 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
 
   // Pre-compute Select/if_then_else as tl.where() at statement level.
   // Python ternary (ArithValue) is rejected by CuTeDSL .store(); tl.where()
-  // produces TensorSSA which works in all store paths (.store(), vec store, etc.).
-  // Also handles Cast(Select/if_then_else) — the cast is applied via .to() on
-  // the tl.where result.
+  // produces TensorSSA which works in all store paths (.store(), vec store,
+  // etc.). Also handles Cast(Select/if_then_else) — the cast is applied via
+  // .to() on the tl.where result.
   bool value_is_conditional = false;
   PrimExpr cond_expr, true_expr, false_expr;
-  DataType cast_to_dtype;  // non-void if a Cast wraps the conditional
+  DataType cast_to_dtype; // non-void if a Cast wraps the conditional
   // Helper to detect Select/if_then_else in a PrimExpr.
   auto detect_conditional = [&](const PrimExpr &expr) {
     if (auto sel = expr.as<SelectNode>()) {
@@ -1293,12 +1282,14 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
   std::string value_str;
   if (value_is_conditional) {
     int lanes = value_dtype.lanes();
-    if (lanes == 0) lanes = 1;
+    if (lanes == 0)
+      lanes = 1;
     // Helper: wrap a sub-expression as TensorSSA via make_rmem_tensor.
     auto as_tsa = [this](const PrimExpr &e, int n,
                          DataType elem_dt) -> std::string {
       std::string s = PrintExpr_(e);
-      if (n == 0) n = 1;
+      if (n == 0)
+        n = 1;
       if (s.size() >= 7 && s.compare(s.size() - 7, 7, ".load()") == 0)
         return s;
       std::string var = name_supply_->FreshName("_tsa");
@@ -1358,12 +1349,11 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
   // CuTeDSL requires narrow precision (e.g. FP8) vector stores to be 32-bit
   // aligned. For unaligned widths (e.g. float8x2), pad to aligned width via
   // scalar element copy, then store as aligned vector.
-  bool is_narrow_unaligned =
-      value_dtype.bits() < 32 && value_lanes > 1 &&
-      (value_dtype.bits() * value_lanes) % 32 != 0;
+  bool is_narrow_unaligned = value_dtype.bits() < 32 && value_lanes > 1 &&
+                             (value_dtype.bits() * value_lanes) % 32 != 0;
 
   if (is_narrow_unaligned) {
-    int aligned_lanes = 32 / value_dtype.bits();  // e.g. 4 for FP8
+    int aligned_lanes = 32 / value_dtype.bits(); // e.g. 4 for FP8
     // value_str may be an rmem tensor name (from Cast/BufferLoad narrow path)
     // or a .load() expression. SSAGetID will alias it if already a name.
     value_str = SSAGetID(value_str, value_dtype);
@@ -1388,9 +1378,8 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
         scalar_base = index_expr * value_lanes;
       } else {
         arith::PVar<PrimExpr> ramp_base;
-        ICHECK(
-            arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
-                .Match(index_expr))
+        ICHECK(arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
+                   .Match(index_expr))
             << "Non-contiguous narrow-precision store not supported";
         scalar_base = ramp_base.Eval() * element_dtype.lanes();
       }
@@ -1407,15 +1396,13 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
         scalar_base = index_expr * value_lanes;
       } else {
         arith::PVar<PrimExpr> ramp_base;
-        ICHECK(
-            arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
-                .Match(index_expr))
+        ICHECK(arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
+                   .Match(index_expr))
             << "Non-contiguous narrow-precision store not supported";
         scalar_base = ramp_base.Eval() * element_dtype.lanes();
       }
 
-      bool is_handle_match =
-          HandleTypeMatch_(buffer_var.get(), element_dtype);
+      bool is_handle_match = HandleTypeMatch_(buffer_var.get(), element_dtype);
       std::string ptr_str;
       if (is_handle_match) {
         ptr_str = vid + ".iterator";
@@ -1452,15 +1439,15 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
       }
     } else {
       // CuTeDSL Tensor.store() expects TensorSSA; scalar expressions yield
-      // ArithValue. Conditionals are already converted to tl.where() (TensorSSA)
-      // at the top. For other scalar expressions, wrap in make_filled_tensor.
+      // ArithValue. Conditionals are already converted to tl.where()
+      // (TensorSSA) at the top. For other scalar expressions, wrap in
+      // make_filled_tensor.
       std::string store_rhs = value_str;
       if (!value_is_conditional && value_lanes == 1 &&
           !op->value.as<BufferLoadNode>()) {
         if (store_rhs.size() < 7 ||
             store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
-          store_rhs =
-              "tl.make_filled_tensor((1,), " + store_rhs + ").load()";
+          store_rhs = "tl.make_filled_tensor((1,), " + store_rhs + ").load()";
         }
       }
       stream << ref << ".store(" << RemoveOutermostParentheses(store_rhs)
@@ -2011,7 +1998,8 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
     if (alloc_storage_scope_.count(buffer_var)) {
       scope = alloc_storage_scope_.at(buffer_var);
     }
-    if (scope.empty()) scope = GetPtrStorageScope(buffer->data);
+    if (scope.empty())
+      scope = GetPtrStorageScope(buffer->data);
     if (scope != "local" && scope != "local.var") {
       effective_dtype = DataType::UInt(8);
     }
@@ -2022,14 +2010,14 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
   if (alloc_storage_scope_.count(buffer_var)) {
     scope = alloc_storage_scope_.at(buffer_var);
   }
-  if (scope.empty()) scope = GetPtrStorageScope(buffer->data);
+  if (scope.empty())
+    scope = GetPtrStorageScope(buffer->data);
 
   std::string ptr_str;
   if (scope == "shared.barrier") {
     ptr_str = vid;
   } else {
-    bool is_handle_type_match =
-        HandleTypeMatch_(buffer_var, effective_dtype);
+    bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
     if (is_handle_type_match) {
       ptr_str = vid + ".iterator";
     } else {
@@ -2080,11 +2068,11 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   // CuTeDSL only supports i1 (Boolean) in rmem. For gmem/shared bool buffers,
   // use Uint8 instead (matches PyTorch's torch.bool memory layout).
   DataType effective_dtype = buffer_element_dtype;
-  if (buffer_element_dtype.is_bool() && scope != "local" && scope != "local.var") {
+  if (buffer_element_dtype.is_bool() && scope != "local" &&
+      scope != "local.var") {
     effective_dtype = DataType::UInt(8);
   }
-  bool is_handle_type_match =
-      HandleTypeMatch_(buffer_var, effective_dtype);
+  bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
   std::string ptr_str;
   if (is_handle_type_match) {
     ptr_str = vid + ".iterator";

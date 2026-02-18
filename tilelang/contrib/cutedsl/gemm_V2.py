@@ -10,23 +10,19 @@ from .typing import type_map
 class GmmaDescriptor:
     def __init__(self, desc_64: cute.Int64 = None):
         self.desc = cute.make_rmem_tensor((2,), dtype=cutlass.Int32)
-        self.desc_i64 = cute.make_tensor(
-            cute.recast_ptr(self.desc.iterator, dtype=cute.Int64), (1,))
+        self.desc_i64 = cute.make_tensor(cute.recast_ptr(self.desc.iterator, dtype=cute.Int64), (1,))
         if desc_64 is not None:
             self.desc_i64[0] = desc_64
 
     def __add__(self, offset):
         res = cute.make_rmem_tensor((2,), dtype=cutlass.Int32)
-        res_i64 = cute.make_tensor(
-            cute.recast_ptr(res.iterator, dtype=cute.Int64), (1,))
+        res_i64 = cute.make_tensor(cute.recast_ptr(res.iterator, dtype=cute.Int64), (1,))
         res[0] = self.desc[0] + offset
         res[1] = self.desc[1]
         return GmmaDescriptor(res_i64[0])
 
 
-def initialize_wgmma_descriptor(layout_type, leading_byte_offset,
-                                stride_byte_offset, desc: GmmaDescriptor,
-                                start_address: cute.Pointer):
+def initialize_wgmma_descriptor(layout_type, leading_byte_offset, stride_byte_offset, desc: GmmaDescriptor, start_address: cute.Pointer):
     # Manually pack the descriptor bits to match the WGMMA descriptor format:
     #   Bits [0:13]  = start_address >> 4
     #   Bits [16:29] = leading_byte_offset
@@ -35,15 +31,13 @@ def initialize_wgmma_descriptor(layout_type, leading_byte_offset,
     #   Bits [62:63] = layout_type
     ptr_val = start_address.toint() >> 4
     # Low 32 bits: start_address[0:13] | leading[16:29]
-    desc.desc[0] = cutlass.Int32(ptr_val) | cutlass.Int32(
-        cutlass.Int32(leading_byte_offset) << 16)
+    desc.desc[0] = cutlass.Int32(ptr_val) | cutlass.Int32(cutlass.Int32(leading_byte_offset) << 16)
     # High 32 bits: stride[0:13] | layout_type[30:31]
-    desc.desc[1] = cutlass.Int32(stride_byte_offset) | cutlass.Int32(
-        cutlass.Int32(layout_type) << 30)
+    desc.desc[1] = cutlass.Int32(stride_byte_offset) | cutlass.Int32(cutlass.Int32(layout_type) << 30)
 
 
 def increase_descriptor_offset(desc: GmmaDescriptor, offset):
-    desc.desc[0] += (offset >> 4)
+    desc.desc[0] += offset >> 4
 
 
 def warpgroup_fence_operand(*args):
@@ -64,12 +58,22 @@ def warpgroup_wait(N):
 
 # PTX dtype suffix mapping for WGMMA instructions
 _PTX_DTYPE_MAP = {
-    "fp16": "f16", "bf16": "bf16", "tf32": "tf32",
-    "fp32": "f32", "e4m3": "e4m3", "e5m2": "e5m2",
-    "s8": "s8", "u8": "u8",
-    "float16": "f16", "bfloat16": "bf16", "float32": "f32",
-    "float8_e4m3": "e4m3", "float8_e4m3fn": "e4m3", "float8_e5m2": "e5m2",
-    "int8": "s8", "uint8": "u8",
+    "fp16": "f16",
+    "bf16": "bf16",
+    "tf32": "tf32",
+    "fp32": "f32",
+    "e4m3": "e4m3",
+    "e5m2": "e5m2",
+    "s8": "s8",
+    "u8": "u8",
+    "float16": "f16",
+    "bfloat16": "bf16",
+    "float32": "f32",
+    "float8_e4m3": "e4m3",
+    "float8_e4m3fn": "e4m3",
+    "float8_e5m2": "e5m2",
+    "int8": "s8",
+    "uint8": "u8",
 }
 
 # For WGMMA A/B operands, fp32 must be treated as tf32 on SM90
@@ -82,25 +86,34 @@ def _wgmma_ab_dtype(dtype_str):
 
 
 @cute.jit
-def wgmma_ss(A_dtype: str, B_dtype: str, C_dtype: str,
-             M: Constexpr[int], N: Constexpr[int], K: Constexpr[int],
-             tnspA: bool, tnspB: bool, scaleA: int, scaleB: int,
-             desc_a: GmmaDescriptor, desc_b: GmmaDescriptor,
-             C_ptr: cute.Pointer, scale_out: Constexpr[int]):
+def wgmma_ss(
+    A_dtype: str,
+    B_dtype: str,
+    C_dtype: str,
+    M: Constexpr[int],
+    N: Constexpr[int],
+    K: Constexpr[int],
+    tnspA: bool,
+    tnspB: bool,
+    scaleA: int,
+    scaleB: int,
+    desc_a: GmmaDescriptor,
+    desc_b: GmmaDescriptor,
+    C_ptr: cute.Pointer,
+    scale_out: Constexpr[int],
+):
     num_elems_per_thread = M * N // 128
 
     C_types = llvm.StructType.get_literal([T.i32()] * num_elems_per_thread)
 
-    C_vecs = cute.make_tensor(
-        cute.recast_ptr(C_ptr, dtype=cute.Int32), (num_elems_per_thread,))
+    C_vecs = cute.make_tensor(cute.recast_ptr(C_ptr, dtype=cute.Int32), (num_elems_per_thread,))
 
     # Pack current accumulator values into a struct
     inouts_struct = llvm.mlir_undef(C_types)
     for i in cutlass.range_constexpr(num_elems_per_thread):
-        inouts_struct = llvm.insertvalue(
-            inouts_struct, C_vecs[i].ir_value(), [i])
+        inouts_struct = llvm.insertvalue(inouts_struct, C_vecs[i].ir_value(), [i])
 
-    shape_attr = ir.Attribute.parse(f'#nvvm.shape<m={M},n={N},k={K}>')
+    shape_attr = ir.Attribute.parse(f"#nvvm.shape<m={M},n={N},k={K}>")
 
     new_C_vecs = nvvm.wgmma_mma_async(
         results_=C_types,
@@ -122,12 +135,21 @@ def wgmma_ss(A_dtype: str, B_dtype: str, C_dtype: str,
 
 
 @cute.jit
-def wgmma_rs(A_dtype: str, B_dtype: str, C_dtype: str,
-             M: Constexpr[int], N: Constexpr[int], K: Constexpr[int],
-             tnspB: Constexpr[bool], scaleA: Constexpr[int],
-             scaleB: Constexpr[int],
-             A_ptr: cute.Pointer, desc_b: GmmaDescriptor,
-             C_ptr: cute.Pointer, scale_out: Constexpr[int]):
+def wgmma_rs(
+    A_dtype: str,
+    B_dtype: str,
+    C_dtype: str,
+    M: Constexpr[int],
+    N: Constexpr[int],
+    K: Constexpr[int],
+    tnspB: Constexpr[bool],
+    scaleA: Constexpr[int],
+    scaleB: Constexpr[int],
+    A_ptr: cute.Pointer,
+    desc_b: GmmaDescriptor,
+    C_ptr: cute.Pointer,
+    scale_out: Constexpr[int],
+):
     """WGMMA register-shared variant using PTX inline asm.
 
     A operand comes from registers, B from shared memory descriptor.
@@ -141,10 +163,8 @@ def wgmma_rs(A_dtype: str, B_dtype: str, C_dtype: str,
     ptx_c = _PTX_DTYPE_MAP[C_dtype]
 
     # Create tensor views over register data
-    A_vecs = cute.make_tensor(
-        cute.recast_ptr(A_ptr, dtype=cute.Int32), (num_a_regs,))
-    C_vecs = cute.make_tensor(
-        cute.recast_ptr(C_ptr, dtype=cute.Int32), (num_c_regs,))
+    A_vecs = cute.make_tensor(cute.recast_ptr(A_ptr, dtype=cute.Int32), (num_a_regs,))
+    C_vecs = cute.make_tensor(cute.recast_ptr(C_ptr, dtype=cute.Int32), (num_c_regs,))
 
     # Operand numbering in the inline asm:
     #   $0 .. $(num_c_regs-1)                          : output D regs (f32)
@@ -162,9 +182,7 @@ def wgmma_rs(A_dtype: str, B_dtype: str, C_dtype: str,
     scale_const = 1 if scale_out != 0 else 0
 
     # TF32 WGMMA does not have a tnspB parameter (B is always K-major)
-    tail_args = (f"p, {scaleA}, {scaleB};"
-                 if ptx_a == "tf32"
-                 else f"p, {scaleA}, {scaleB}, {tnsp_b_imm};")
+    tail_args = f"p, {scaleA}, {scaleB};" if ptx_a == "tf32" else f"p, {scaleA}, {scaleB}, {tnsp_b_imm};"
 
     asm_str = (
         "{\n"

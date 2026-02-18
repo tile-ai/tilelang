@@ -171,8 +171,7 @@ private:
       if (args.size() > 5) {
         auto var = args[5].as<VarNode>();
         if (var) {
-          auto it =
-              buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+          auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
           if (it != buffer_data_to_buffer_.end()) {
             pending_tcgen05_c_buf_ = (*it).second;
           }

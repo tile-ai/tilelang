@@ -34,19 +34,16 @@ def bitcast(value, target_dtype):
     """
     Reinterpret the bits of a value as a different type.
     Equivalent to C's (*(target_type *)(&value)).
-    
+
     Args:
         value: Source value (Numeric type from CuTeDSL)
         target_dtype: Target type (CuTeDSL type like Int8, Float16, etc.)
-    
+
     Returns:
         Value reinterpreted as target type
     """
     # Get the target MLIR type
-    if isinstance(target_dtype, type):
-        tgt_mlir_type = target_dtype.mlir_type
-        tgt_wrapper = target_dtype
-    elif hasattr(target_dtype, 'mlir_type'):
+    if isinstance(target_dtype, type) or hasattr(target_dtype, "mlir_type"):
         tgt_mlir_type = target_dtype.mlir_type
         tgt_wrapper = target_dtype
     else:
@@ -55,14 +52,15 @@ def bitcast(value, target_dtype):
         if tgt_wrapper is None:
             raise ValueError(f"Unknown target dtype: {target_dtype}")
         tgt_mlir_type = tgt_wrapper.mlir_type
-    
+
     @dsl_user_op
     def bitcast_impl(src_val, *, loc=None, ip=None):
         src_ir = src_val.ir_value(loc=loc, ip=ip) if hasattr(src_val, "ir_value") else src_val
         result = llvm.bitcast(tgt_mlir_type, src_ir, loc=loc, ip=ip)
         return tgt_wrapper(result)
-    
+
     return bitcast_impl(value)
+
 
 # Import our custom implementations (will override if names conflict)
 from .mbar import *
@@ -92,6 +90,7 @@ def make_filled_tensor(shape, value):
 
 def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1):
     from cutlass.cute.typing import is_integer as cute_is_integer
+
     # Ensure offset is a cute-compatible integer.  Complex arithmetic
     # (e.g. cutlass.Int64 mixed ops) can produce ArithValue / Float types
     # that Pointer.__add__ -> _pack_int_tuple doesn't accept.
