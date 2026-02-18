@@ -33,6 +33,7 @@ protected:
                   std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op,
                   std::ostream &os) override;                       // NOLINT(*)
+  void VisitExpr_(const IntImmNode *op, std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const CastNode *op, std::ostream &os) override;   // NOLINT(*)
   void VisitExpr_(const DivNode *op, std::ostream &os) override;    // NOLINT(*)
   void VisitExpr_(const MinNode *op, std::ostream &os) override;    // NOLINT(*)

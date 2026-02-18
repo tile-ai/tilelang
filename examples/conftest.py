@@ -28,22 +28,11 @@ else:
 # Known failures when running with TILELANG_TARGET=cutedsl.
 # These are marked as xfail(strict=False) so unexpected passes are reported.
 CUTEDSL_KNOWN_FAILURES = {
-    # Unimplemented sparse ops: tl.tl_gemm_sp / tir.ptx_mma_sp
+    # Unimplemented sparse ops: tl.tl_gemm_sp
     "sparse_tensorcore/test_example_sparse_tensorcore.py::test_tilelang_example_sparse_tensorcore",
     "gemm_sp/test_example_gemm_sp.py::test_example_gemm_sp",
-    "gemm_sp/test_example_gemm_sp.py::test_example_custom_compress",
     # Flaky — passes when run in isolation, fails under parallel execution
     "minference/test_vs_sparse_attn.py::test_vs_sparse_attn",
-}
-
-# Tests that should be skipped entirely under CuTeDSL (arch / feature mismatch).
-CUTEDSL_KNOWN_SKIPS = {
-    # TMA convolution not fully supported in CuTeDSL
-    "convolution/test_example_convolution.py",
-    # Stream-K not fully supported in CuTeDSL
-    "gemm_streamk/test_example_tilelang_gemm_streamk.py",
-    # flash_decoding FA3 variant requires special handling
-    "flash_decoding/test_example_flash_decoding.py::test_flash_decoding_fa3",
 }
 
 
@@ -64,12 +53,6 @@ def pytest_collection_modifyitems(config, items):  # noqa: ARG001
                 pytest.mark.xfail(
                     reason="CuTeDSL: known limitation (unimplemented op or flaky)",
                     strict=False,
-                )
-            )
-        elif _match_any(nid, CUTEDSL_KNOWN_SKIPS):
-            item.add_marker(
-                pytest.mark.skip(
-                    reason="CuTeDSL: not supported",
                 )
             )
 

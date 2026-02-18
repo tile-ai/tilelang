@@ -238,6 +238,27 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
   }
 }
 
+void CodeGenTileLangCuTeDSL::VisitExpr_(const IntImmNode *op,
+                                        std::ostream &os) { // NOLINT(*)
+  // CuTeDSL's tensor __setitem__ uses as_numeric() which converts bare
+  // Python ints to Int32.  For non-int32 integer literals (e.g. int16, uint8),
+  // wrap with the CuTeDSL type constructor so the value has the correct width.
+  if (op->dtype == DataType::Bool()) {
+    os << (op->value ? "True" : "False");
+  } else if (op->dtype != DataType::Int(32)) {
+    std::ostringstream temp;
+    PrintType(op->dtype, temp);
+    temp << "(" << op->value << ")";
+    MarkConst(temp.str());
+    os << temp.str();
+  } else {
+    std::ostringstream temp;
+    temp << op->value;
+    MarkConst(temp.str());
+    os << temp.str();
+  }
+}
+
 void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
                                         std::ostream &os) { // NOLINT(*)
   DataType from_ty = op->value.dtype();
