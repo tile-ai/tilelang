@@ -181,7 +181,7 @@ private:
     } else if (op->op.same_as(tcgen05_mma_arrive())) {
       // Lowered form: tcgen05_mma_arrive(mbar_access_ptr)
       // Link accumulated shared memory reads to mbar.
-      if (args.size() >= 1) {
+      if (!args.empty()) {
         if (auto mbar_buf = TryGetBufFromAccessPtr(args[0])) {
           const BufferNode *mbar_key = mbar_buf.value().get();
           for (const auto &region : pending_tcgen05_smem_reads_) {
