@@ -683,7 +683,48 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::ptx_mma_sm70())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: shape: mXnXkX
+    // arg 1: A layout: row/col
+    // arg 2: B layout: row/col
+    // arg 3: A precision: fp16, fp32, ...
+    // arg 4: B precision: fp16, fp32, ...
+    // arg 5: C precision: fp16, fp32, ...
+    // arg 6: A multiplicand pointer
+    // arg 7: A multiplicand index
+    // arg 8: B multiplicand pointer
+    // arg 9: B multiplicand index
+    // arg 10: C accumulator pointer
+    // arg 11: C accumulator index
+    // arg 12: metadata pointer
+    // arg 13: metadata index
+    // arg 14: sparse_selector
+    // arg 15: saturate
+    ICHECK_EQ(op->args.size(), 16U);
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[1])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_ref = GetVarPtr_(op->args[6]);
+    std::string a_bias = PrintExpr_(op->args[7]);
+    std::string b_ref = GetVarPtr_(op->args[8]);
+    std::string b_bias = PrintExpr_(op->args[9]);
+    std::string c_ref = GetVarPtr_(op->args[10]);
+    std::string c_bias = PrintExpr_(op->args[11]);
+    std::string meta_ref = GetVarPtr_(op->args[12]);
+    std::string meta_bias = PrintExpr_(op->args[13]);
+    std::string sparse_selector = PrintExpr_(op->args[14]);
+    std::string saturate =
+        Downcast<Bool>(op->args[15])->value ? "True" : "False";
+
+    PrintIndent();
+    stream << "tl.ptx_mma_sp(\"" << shape << "\", \"" << A_layout << "\", \""
+           << B_layout << "\", \"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << a_ref << ", " << a_bias << ", " << b_ref
+           << ", " << b_bias << ", " << c_ref << ", " << c_bias << ", "
+           << meta_ref << ", " << meta_bias << ", " << sparse_selector << ", "
+           << saturate << ")\n";
   } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
     // arg 0: shape (StringImm, e.g. "m64n128k16")
     // arg 1: a_is_k_major (Bool)
