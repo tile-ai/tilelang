@@ -53,6 +53,11 @@ def increase_descriptor_offset(desc: GmmaDescriptor, offset):
 
 
 def warpgroup_fence_operand(*args):
+    # No-op in CuTeDSL: warpgroup synchronization is handled by CUTLASS cuTe
+    # primitives (warpgroup.fence(), warpgroup.commit_group(), etc.) and by the
+    # has_side_effects=True flag on inline PTX asm in wgmma_rs/wgmma_ss.
+    # The codegen emits calls to this (see codegen_cutedsl.cc) but they are
+    # intentionally empty.
     pass
 
 

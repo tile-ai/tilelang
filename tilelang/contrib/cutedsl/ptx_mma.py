@@ -320,6 +320,9 @@ def ptx_mma(
     Dispatches to the appropriate specialized MMA function based on
     shape and data types.
     """
+    if saturate:
+        raise NotImplementedError("saturate=True (.satfinite) is not yet supported in CuTeDSL backend")
+
     shape = shape.lower()
     a_dtype = a_dtype.lower()
     b_dtype = b_dtype.lower()
@@ -398,6 +401,9 @@ def ptx_mma_sp(
     Dispatches to the appropriate specialized sparse MMA function based on
     shape and data types.
     """
+    if saturate:
+        raise NotImplementedError("saturate=True (.satfinite) is not yet supported in CuTeDSL backend")
+
     shape = shape.lower()
     a_dtype = a_dtype.lower()
     b_dtype = b_dtype.lower()
