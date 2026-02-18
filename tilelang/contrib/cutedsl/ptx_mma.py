@@ -19,6 +19,23 @@ Supported configurations (from mma.h):
 - FP64: m8n8k4 -> f64 accumulator
 """
 
+__all__ = [
+    "ptx_mma_m16n8k16_f16_f16_f32",
+    "ptx_mma_m16n8k16_f16_f16_f16",
+    "ptx_mma_m16n8k16_bf16_bf16_f32",
+    "ptx_mma_m16n8k32_s8_s8_s32",
+    "ptx_mma_m16n8k32_u8_u8_s32",
+    "ptx_mma_m16n8k32_s4_s4_s32",
+    "ptx_mma_m16n8k32_u4_u4_s32",
+    "ptx_mma_m16n8k4_tf32_tf32_f32",
+    "ptx_mma_m16n8k8_tf32_tf32_f32",
+    "ptx_mma_m8n8k4_f64_f64_f64",
+    "ptx_mma_m16n8k32_e4m3_e4m3_f32",
+    "ptx_mma_m16n8k32_e4m3_e4m3_f16",
+    "ptx_mma_m16n8k32_e5m2_e5m2_f32",
+    "ptx_mma",
+]
+
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass._mlir.dialects import llvm
 from cutlass.cute.typing import Pointer

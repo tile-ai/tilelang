@@ -1,10 +1,22 @@
+__all__ = [
+    "GmmaDescriptor",
+    "initialize_wgmma_descriptor",
+    "increase_descriptor_offset",
+    "warpgroup_fence_operand",
+    "warpgroup_arrive",
+    "warpgroup_commit_batch",
+    "warpgroup_wait",
+    "wgmma_ss",
+    "wgmma_rs",
+]
+
 import cutlass
 import cutlass.cute as cute
 from cutlass._mlir.dialects import nvvm, llvm
 from cutlass._mlir import ir
 from cutlass.cutlass_dsl import T, Constexpr
 import cutlass.cute.nvgpu.warpgroup as warpgroup
-from .typing import type_map
+from .utils import type_map
 
 
 class GmmaDescriptor:

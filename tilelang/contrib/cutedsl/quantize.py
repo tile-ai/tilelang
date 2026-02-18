@@ -6,6 +6,17 @@ These implement the same functionality as the CUDA templates in tilelang/quantiz
 using inline PTX via llvm.inline_asm.
 """
 
+__all__ = [
+    "BOTTOM_MASK",
+    "FP16_TOP_MAGIC_NUM",
+    "IMMLUT",
+    "MEDIAN_NUM_UNSIGNED",
+    "MEDIAN_NUM_SIGNED",
+    "decode_i4u_to_f16",
+    "decode_i4s_to_f16",
+    "decode_fp4_to_bf16_twiddling",
+]
+
 import cutlass
 import cutlass.cute as cute
 from cutlass._mlir.dialects import llvm, arith

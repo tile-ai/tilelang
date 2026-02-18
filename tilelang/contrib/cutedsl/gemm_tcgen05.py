@@ -9,6 +9,21 @@ Provides:
   - tmem_allocate / tmem_deallocate: TMEM allocation/deallocation
 """
 
+__all__ = [
+    "Tcgen05SmemDescriptor",
+    "initialize_tcgen05_descriptor",
+    "tcgen05mma_ss",
+    "tcgen05mma_ws_ss",
+    "tcgen05mma_ts",
+    "tcgen05_mma_arrive",
+    "tmem_allocate",
+    "tmem_deallocate",
+    "tcgen05_ld_32dp32bNx",
+    "tcgen05_ld_32dp64bNx",
+    "tcgen05_ld_32dp128bNx",
+    "tcgen05_ld_32dp256bNx",
+]
+
 import cutlass
 import cutlass.cute as cute
 from cutlass._mlir.dialects import llvm

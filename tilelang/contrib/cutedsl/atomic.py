@@ -4,6 +4,19 @@ Atomic operations for CuTeDSL backend.
 This module provides implementations of atomic operations using NVVM and LLVM dialects.
 """
 
+__all__ = [
+    "AtomicAdd",
+    "AtomicAddRet",
+    "AtomicAddx2",
+    "AtomicAddx4",
+    "AtomicMax",
+    "AtomicMaxRet",
+    "AtomicMin",
+    "AtomicMinRet",
+    "AtomicLoad",
+    "AtomicStore",
+]
+
 import cutlass
 from cutlass import cute
 from cutlass._mlir.extras import types as T
