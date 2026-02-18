@@ -87,8 +87,8 @@ def _memory_order_to_llvm_store(memory_order: int):
 def AtomicAdd(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
     """Perform atomic addition on a pointer.
 
-    Supports float32 and int32 types.
-    Returns the result value after addition.
+    Supports float16, float32, int32, and int64 types.
+    Returns the old value before addition (atomicrmw semantics).
     """
     if ptr.dtype == cutlass.Float32:
         ret = nvvm.atomicrmw(

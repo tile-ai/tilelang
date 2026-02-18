@@ -52,7 +52,7 @@ def _match_any(nodeid, patterns):
     return any(p in nodeid for p in patterns)
 
 
-def pytest_collection_modifyitems(config, items):
+def pytest_collection_modifyitems(config, items):  # noqa: ARG001
     """When TILELANG_TARGET=cutedsl, annotate known-bad tests automatically."""
     if os.environ.get("TILELANG_TARGET") != "cutedsl":
         return

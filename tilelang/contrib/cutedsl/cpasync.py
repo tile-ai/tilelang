@@ -295,7 +295,7 @@ def prefetch_tma_descriptor(tma_desc, *, loc=None, ip=None) -> None:
 # Mbarrier operations (merged from mbar.py)
 # ---------------------------------------------------------------------------
 
-from cutlass._mlir.dialects import llvm  # noqa: F811
+from cutlass._mlir.dialects import llvm
 
 
 @dsl_user_op

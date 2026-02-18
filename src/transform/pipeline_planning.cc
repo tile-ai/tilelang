@@ -191,10 +191,14 @@ private:
             mbar_to_buffer_writes_[mbar_key].push_back(
                 BufferRegion::FullRegion(pending_tcgen05_c_buf_.value()));
           }
+          pending_tcgen05_smem_reads_.clear();
+          pending_tcgen05_c_buf_ = Optional<Buffer>();
+        } else if (!pending_tcgen05_smem_reads_.empty() ||
+                   pending_tcgen05_c_buf_.defined()) {
+          LOG(WARNING) << "tcgen05_mma_arrive: could not resolve mbar buffer "
+                       << "from args[0]; pending WAR state preserved";
         }
       }
-      pending_tcgen05_smem_reads_.clear();
-      pending_tcgen05_c_buf_ = Optional<Buffer>();
       StmtExprVisitor::VisitExpr_(op);
     } else if (op->op.same_as(tir::builtin::if_then_else())) {
       const PrimExpr &then_expr = args[1];

@@ -648,13 +648,7 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
   // we will not use tma for bulk load/store
 
   // Check if target is CuTeDSL backend
-  bool is_cutedsl = false;
-  for (const auto &key : target->keys) {
-    if (key == "cutedsl") {
-      is_cutedsl = true;
-      break;
-    }
-  }
+  bool is_cutedsl = TargetIsCuTeDSL(target);
 
   // Check tensor memory operations first (highest priority for SM100/Blackwell)
   // 1d tma access can not support out of bound access

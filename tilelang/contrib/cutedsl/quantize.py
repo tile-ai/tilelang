@@ -105,8 +105,9 @@ def decode_i4u_to_f16(src_ptr, dst_ptr, N: int = 8):
     Args:
         src_ptr: Pointer to packed INT4 data (4 bytes for 8 elements)
         dst_ptr: Pointer to FP16 output (16 bytes for 8 elements)
-        N: Number of elements to decode (default 8)
+        N: Number of elements to decode (default 8, must be even)
     """
+    assert N % 2 == 0, f"N must be even for i4-to-f16 decode, got {N}"
     # Load packed i4 values (32 bits = 8 x 4-bit values)
     # Use make_tensor to create a tensor view, then access element
     src_u32_ptr = cute.recast_ptr(src_ptr, dtype=cutlass.Uint32)
@@ -125,7 +126,8 @@ def decode_i4u_to_f16(src_ptr, dst_ptr, N: int = 8):
 
 
 def decode_i4s_to_f16(src_ptr, dst_ptr, N: int = 8):
-    """Decode signed INT4 to FP16."""
+    """Decode signed INT4 to FP16. N must be even."""
+    assert N % 2 == 0, f"N must be even for i4-to-f16 decode, got {N}"
     src_u32_ptr = cute.recast_ptr(src_ptr, dtype=cutlass.Uint32)
     src_tensor = cute.make_tensor(src_u32_ptr, (1,))
     i4s = src_tensor[0]

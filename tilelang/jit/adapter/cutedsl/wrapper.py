@@ -683,6 +683,22 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         "uint16": "uint16_t",
     }
 
+    # Maps cutlass Python type names (from _TYPE_MAP values) to C++ types
+    # for generated launcher code.
+    _CUTLASS_TO_CXX: ClassVar[dict[str, str]] = {
+        "int": "int32_t",
+        "float": "float",
+        "cutlass.Float32": "float",
+        "cutlass.Float64": "double",
+        "cutlass.Int64": "int64_t",
+        "cutlass.Int32": "int32_t",
+        "cutlass.Uint32": "uint32_t",
+        "cutlass.Uint8": "uint8_t",
+        "cutlass.Int8": "int8_t",
+        "cutlass.Int16": "int16_t",
+        "cutlass.Uint16": "uint16_t",
+    }
+
     _CTYPES_MAP: ClassVar[dict[str, str]] = {
         "buffer": "ctypes.c_uint64",
         "cutlass.Float32": "ctypes.c_float",
@@ -946,13 +962,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         func_args_parts = [f"uint64_t {arg}_ptr" for arg in tensor_args]
         for arg in scalar_args:
-            if arg["type"] in ["int", "cutlass.Int32"]:
-                func_args_parts.append(f"int32_t {arg['name']}")
-            elif arg["type"] in ["float", "cutlass.Float32"]:
-                func_args_parts.append(f"float {arg['name']}")
-            else:
-                # Default to int32_t for scalars used in shape/stride math
-                func_args_parts.append(f"int32_t {arg['name']}")
+            cxx_type = self._CUTLASS_TO_CXX.get(arg["type"], "int32_t")
+            func_args_parts.append(f"{cxx_type} {arg['name']}")
         func_args = ", ".join(func_args_parts)
         num_descs = len(desc_names)
 
@@ -1079,12 +1090,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             if arg["type"] == "buffer":
                 func_sig_parts.append(f"tvm::ffi::TensorView {arg['name']}")
                 get_ptr_code += f"  uint64_t {arg['name']}_ptr = reinterpret_cast<uint64_t>({arg['name']}.data_ptr());\n"
-            elif arg["type"] in ["int", "cutlass.Int32"]:
-                func_sig_parts.append(f"int32_t {arg['name']}")
-            elif arg["type"] in ["float", "cutlass.Float32"]:
-                func_sig_parts.append(f"float {arg['name']}")
             else:
-                func_sig_parts.append(f"int32_t {arg['name']}")
+                cxx_type = self._CUTLASS_TO_CXX.get(arg["type"], "int32_t")
+                func_sig_parts.append(f"{cxx_type} {arg['name']}")
 
         # Generate TMA init in launch
         tma_init_in_launch = self._generate_tma_launch_init(all_desc_names, all_tma_tensors, scalar_args, num_tma_descs)
