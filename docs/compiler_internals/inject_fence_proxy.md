@@ -1,6 +1,6 @@
 # InjectFenceProxy Pass
 
-`tl.InjectFenceProxy` is a TIR-level transform that keeps the GPU proxy state consistent on NVIDIA Hopper (SM90+) by inserting `fence.proxy.async` instructions when control flow switches from generic memory operations to asynchronous proxy operations.
+`tl.InjectFenceProxy` is a TIR-level transform that keeps the GPU proxy state consistent on NVIDIA Hopper (SM90+) by inserting `fence.proxy.async` instructions when execution switches from **generic proxy** memory operations to **async proxy** operations.
 
 ## Why Fences Are Needed
 
@@ -8,11 +8,11 @@ Hopper separates memory instructions into generic and asynchronous proxy paths. 
 
 ## What the Pass Does
 
-- Walks every statement in the `PrimFunc`, tracking whether it behaves as a **generic**, **async**, or **neutral** proxy (neutral statements reset the state, such as an explicit fence).
-- Automatically lowers `tma_store` intrinsics into the required `arrive`/`wait` handshake so that TMA stores participate correctly in synchronization.
-- Injects an explicit `fence.proxy.async` whenever a generic statement is followed by an async statement without an intervening neutral barrier.
+- Walks statements in execution order while tracking a (may-)state of the last proxy kind (**generic**, **async**, or **none/reset**). Control-flow joins (e.g. `if`) merge states conservatively.
+- Normalizes `tma_store` by ensuring the required `tma_store_arrive` / `tma_store_wait` handshake exists immediately after the store.
+- Injects `fence.proxy.async` right before an async-proxy instruction whenever the preceding state can be generic.
 
-The pass is conservative: unknown extern calls are treated as async so that the fence is inserted rather than accidentally omitted.
+The pass is conservative: unknown/external calls are treated as async proxy activity so that a fence is inserted rather than accidentally omitted.
 
 ### Timeline View
 
@@ -24,11 +24,11 @@ generic initialize_wgmma_descriptor → generic shared-store → async wgmma
                          └──────────────────────────────┘
 ```
 
-The proxy tracker scans the sequence from left to right. The moment it detects a transition from generic to async (between the store and `cp.async` above), it synthesizes a `fence.proxy.async` to reset the hardware proxy state before the async path runs.
+The proxy tracker effectively scans the program in execution order. The moment it detects a possible transition from generic to async (between the store and the async op above), it synthesizes a `fence.proxy.async` to reset the hardware proxy state before the async path runs.
 
 ## Coverage of Intrinsics
 
-The tracker understands the TileLang intrinsics for TMA load/store, shared-memory MMA (`wgmma`), and TVM/PTX async copy intrinsics (`cp.async` variants). Generic operations currently include `ldmatrix`, `stmatrix`, and descriptor initialization. Other IR nodes (loops, blocks, attributes) receive a proxy kind derived from their bodies so that the analysis survives structured control flow.
+The tracker understands the TileLang intrinsics for TMA load/store, shared-memory MMA (`wgmma`), and TVM/PTX async copy intrinsics (`cp.async` variants). Generic operations currently include `ldmatrix`, `stmatrix`, and descriptor initialization. Structured control flow (loops, blocks, branches) is handled by propagating and conservatively merging proxy state.
 
 ## Usage
 
@@ -110,4 +110,17 @@ The only change is the `fence_proxy_async` between the generic descriptor setup 
 
 ## Extending the Pass
 
-If you introduce a new intrinsic that behaves like an async proxy, add it to `IsAsyncIntrinsic` in `src/transform/inject_fence_proxy.cc`. Likewise, extend `IsKnownGeneric` for additional generic operations. When adding new neutral barriers, make sure they set the proxy kind to `kNeutral` so the state resets correctly.
+If you introduce a new intrinsic that behaves like an async proxy, add it to `IsAsyncIntrinsic` in `src/transform/inject_fence_proxy.cc`. Likewise, extend `IsKnownGeneric` for additional generic operations.
+
+For ops that should not influence proxy state (e.g. synchronization or warpgroup scheduling helpers), add them to `IsNonProxyIntrinsic`.
+
+For custom/opaque ops, you can override the conservative default classification by annotating a region with `tl.proxy_hint`:
+
+```python
+with T.attr("proxy_scope", "tl.proxy_hint", "generic"):  # or "async"/"neutral"
+    ...
+```
+
+- `"generic"`: treat the region as generic proxy activity (can suppress conservative fences on unknown calls).
+- `"async"`: treat the region as async proxy activity (can force fence insertion before an opaque async op).
+- `"neutral"`: treat the region as a barrier/reset for proxy state.

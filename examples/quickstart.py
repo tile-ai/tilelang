@@ -1,7 +1,7 @@
 import tilelang
 import tilelang.language as T
 
-
+tilelang.disable_cache()
 # @tilelang.jit(target="cuda")
 # target currently can be "cuda" or "hip" or "cpu".
 # if not specified, it will be inferred from the input tensors during compile time
@@ -76,8 +76,8 @@ torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 print("Kernel output matches PyTorch reference.")
 
 # 4. Retrieve and inspect the generated CUDA source (optional)
-# cuda_source = matmul_relu_kernel.get_kernel_source()
-# print("Generated CUDA kernel:\n", cuda_source)
+cuda_source = matmul_relu_kernel.get_kernel_source()
+print("Generated CUDA kernel:\n", cuda_source)
 
 # 5.Profile latency with kernel
 profiler = matmul_relu_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)

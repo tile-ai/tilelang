@@ -129,12 +129,105 @@ def test_proxy_hint_override():
     assert not _has_fence(mod["main"].body)
 
 
+def test_unknown_extern_treated_as_async_by_default():
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            smem = T.decl_buffer((1,), T.float16, scope="shared")
+            smem[0] = T.float16(0)
+            T.evaluate(T.call_extern("handle", "custom_op"))
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.InjectFenceProxy()(mod)
+
+    def _count_fences(stmt):
+        count = 0
+
+        def visit(node):
+            nonlocal count
+            if isinstance(node, tir.Evaluate):
+                call = node.value
+                if isinstance(call, tir.Call):
+                    name = getattr(call.op, "name", None)
+                    if name == "tl.fence_proxy_async":
+                        count += 1
+
+        tir.stmt_functor.post_order_visit(stmt, visit)
+        return count
+
+    assert _count_fences(mod["main"].body) == 1
+
+
+def test_proxy_hint_generic_suppresses_conservative_fence():
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            smem = T.decl_buffer((1,), T.float16, scope="shared")
+            smem[0] = T.float16(0)
+            with T.attr("proxy_scope", "tl.proxy_hint", "generic"):
+                T.evaluate(T.call_extern("handle", "custom_op"))
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.InjectFenceProxy()(mod)
+
+    def _has_fence(stmt):
+        result = False
+
+        def visit(node):
+            nonlocal result
+            if isinstance(node, tir.Evaluate):
+                call = node.value
+                if isinstance(call, tir.Call):
+                    name = getattr(call.op, "name", None)
+                    if name == "tl.fence_proxy_async":
+                        result = True
+
+        tir.stmt_functor.post_order_visit(stmt, visit)
+        return result
+
+    assert not _has_fence(mod["main"].body)
+
+
 def test_tma_store_sync_injection():
     @T.prim_func
     def before():
         with T.Kernel(8):
             A_global = T.decl_buffer((128,), T.float16, scope="global")
             T.evaluate(T.call_intrin("handle", tir.op.Op.get("tl.tma_store"), A_global.data))
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.InjectFenceProxy()(mod)
+
+    arrives = 0
+    waits = 0
+
+    def visit(node):
+        nonlocal arrives, waits
+        if isinstance(node, tir.Evaluate):
+            call = node.value
+            if isinstance(call, tir.Call):
+                name = getattr(call.op, "name", None)
+                if name == "tl.tma_store_arrive":
+                    arrives += 1
+                elif name in ("tl.tma_store_wait", "tl.tma_store_wait<0>"):
+                    waits += 1
+
+    tir.stmt_functor.post_order_visit(mod["main"].body, visit)
+    assert arrives == 1
+    assert waits == 1
+
+
+def test_tma_store_sync_injection_no_duplicates():
+    @T.prim_func
+    def before():
+        with T.Kernel(8):
+            A_global = T.decl_buffer((128,), T.float16, scope="global")
+            T.evaluate(T.call_intrin("handle", tir.op.Op.get("tl.tma_store"), A_global.data))
+            T.tma_store_arrive()
+            T.tma_store_wait()
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tir.transform.BindTarget(auto_target)(mod)
