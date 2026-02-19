@@ -192,6 +192,7 @@ exp2 = _op_wrapper(_tir_op.exp2)
 exp10 = _op_wrapper(_tir_op.exp10)
 floor = _op_wrapper(_tir_op.floor)
 ceildiv = _op_wrapper(_tir_op.ceildiv)
+cdiv = ceildiv
 floordiv = _op_wrapper(_tir_op.floordiv)
 floormod = _op_wrapper(_tir_op.floormod)
 fmod = _op_wrapper(_tir_op.fmod)
