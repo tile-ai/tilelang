@@ -48,12 +48,17 @@ class GemmTCGEN5(GemmBase):
             b_continuity = self.K if b_is_k_major else self.N // n_warp
 
             return {
-                # WGMMA does not support padding
                 self.A: make_tcgen05mma_swizzled_layout(self.A, continuity=a_continuity, k_major=a_is_k_major),
                 self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
-        # No special swizzle requirement; rely on existing layout.
+        if self.is_gemm_ts():
+            b_continuity = self.K if b_is_k_major else self.N // n_warp
+            layouts = {
+                self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
+            }
+            return layouts
         return {}
 
     def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
@@ -79,8 +84,10 @@ class GemmTCGEN5(GemmBase):
         if self.B in layout_map:
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
 
-        if not self.is_gemm_ss():
-            raise ValueError(f"TCGEN5MMA currently only supports gemm_ss, got A scope {self.A.scope()}, B scope {self.B.scope()}")
+        if not (self.is_gemm_ss() or self.is_gemm_ts()):
+            raise ValueError(
+                f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}"
+            )
 
         atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K)
 

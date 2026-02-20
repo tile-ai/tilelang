@@ -6,7 +6,7 @@ from tvm.target import Target
 from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
-from tilelang.utils.language import is_shared, is_fragment
+from tilelang.utils.language import is_shared, is_fragment, is_tensor_memory
 from tilelang.tileop.base import GemmWarpPolicy
 from tvm.ir.base import Node
 from tvm.ir import PrimExpr
@@ -30,6 +30,9 @@ class GemmBase:
 
     def is_gemm_rs(self) -> bool:
         return is_fragment(self.A) and is_shared(self.B)
+
+    def is_gemm_ts(self) -> bool:
+        return is_tensor_memory(self.A) and is_shared(self.B)
 
     def is_gemm_rr(self) -> bool:
         return is_fragment(self.A) and is_fragment(self.B)
