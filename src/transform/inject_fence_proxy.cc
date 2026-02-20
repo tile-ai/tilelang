@@ -79,20 +79,19 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   }
 
   // TileLang async intrinsics
-  if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-      call->op.same_as(tma_store()) || call->op.same_as(tma_store_arrive()) ||
-      call->op.same_as(tma_store_wait()) ||
-      call->op.same_as(ptx_cp_async_barrier_noinc()) ||
-      call->op.same_as(ptx_wgmma_ss()) || call->op.same_as(ptx_wgmma_rs())) {
+  // Although tma_load is also an async intrinsic, it has no dependency on data
+  // from generic proxy. Hence, we don't take it into account.
+  if (call->op.same_as(tma_store()) || call->op.same_as(tma_store_arrive()) ||
+      call->op.same_as(tma_store_wait()) || call->op.same_as(ptx_wgmma_ss()) ||
+      call->op.same_as(ptx_wgmma_rs()) ||
+      call->op.same_as(ptx_tcgen05_mma_ss()) ||
+      call->op.same_as(ptx_tcgen05_mma_ts())) {
     return true;
   }
 
-  // PTX async copy intrinsics
-  if (call->op.same_as(builtin::ptx_cp_async()) ||
-      call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-      call->op.same_as(builtin::ptx_cp_async_bulk())) {
-    return true;
-  }
+  // According to
+  // https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html#async-thread-and-async-proxy,
+  // cp_async intrinsics belong to generic proxy.
 
   // wgmma async intrinsics
   if (call->op.same_as(tl_gemm()) || call->op.same_as(tl_gemm_sp())) {
