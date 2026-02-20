@@ -4,7 +4,7 @@
 
 ## Why Fences Are Needed
 
-Hopper separates memory instructions into generic and asynchronous proxy paths. When an asynchronous instruction (for example, `cp.async` or `tma.load`) issues after generic traffic (like `ldmatrix` or plain buffer stores), the hardware requires a `fence.proxy.async` to guarantee ordering. Missing fences can lead to race conditions or undefined behavior.
+Hopper separates memory instructions into generic and asynchronous proxy paths. When an asynchronous instruction (for example, `wgmma`, `tma.load`, or `cp.async.bulk`) issues after generic traffic (like `ldmatrix`, `cp.async`, or **shared-memory** buffer stores), the hardware requires a `fence.proxy.async` to guarantee ordering. Missing fences can lead to race conditions or undefined behavior.
 
 ## What the Pass Does
 
@@ -17,18 +17,18 @@ The pass is conservative: unknown/external calls are treated as async proxy acti
 ### Timeline View
 
 ```
-generic initialize_wgmma_descriptor → generic shared-store → async wgmma
-             │                           │                   │
-             └─ generic proxy            ┴─ generic proxy    ┴─ async proxy
-                         │        fence inserted here   ↑
-                         └──────────────────────────────┘
+generic shared-store (or ldmatrix/stmatrix/cp.async) → async op (wgmma / tma / cp.async.bulk)
+                 │                                  │
+                 └─ generic proxy                   └─ async proxy
+                             │        fence inserted here   ↑
+                             └──────────────────────────────┘
 ```
 
 The proxy tracker effectively scans the program in execution order. The moment it detects a possible transition from generic to async (between the store and the async op above), it synthesizes a `fence.proxy.async` to reset the hardware proxy state before the async path runs.
 
 ## Coverage of Intrinsics
 
-The tracker understands the TileLang intrinsics for TMA load/store, shared-memory MMA (`wgmma`), and TVM/PTX async copy intrinsics (`cp.async` variants). Generic operations currently include `ldmatrix`, `stmatrix`, and descriptor initialization. Structured control flow (loops, blocks, branches) is handled by propagating and conservatively merging proxy state.
+The tracker understands the TileLang intrinsics for TMA load/store, shared-memory MMA (`wgmma`), and TVM/PTX SM90 async copy intrinsics (`cp.async.bulk` family). Generic operations currently include `ldmatrix`, `stmatrix`, `cp.async`, and **shared-memory** `BufferStore` statements. Structured control flow (loops, blocks, branches) is handled by propagating and conservatively merging proxy state.
 
 ## Usage
 

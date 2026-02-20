@@ -1,7 +1,7 @@
 import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
+
 # @tilelang.jit(target="cuda")
 # target currently can be "cuda" or "hip" or "cpu".
 # if not specified, it will be inferred from the input tensors during compile time

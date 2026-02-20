@@ -15,12 +15,17 @@
 #include <cstdint>
 #include <utility>
 
+#include "runtime/thread_storage_scope.h"
+#include "tir/transforms/ir_utils.h"
+
 #include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+using runtime::StorageRank;
+using runtime::StorageScope;
 using tvm::transform::PassContext;
 
 namespace {
@@ -128,16 +133,13 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   // TileLang async intrinsics
   if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
       call->op.same_as(tma_store()) || call->op.same_as(tma_store_arrive()) ||
-      call->op.same_as(tma_store_wait()) ||
-      call->op.same_as(ptx_cp_async_barrier_noinc()) ||
-      call->op.same_as(ptx_wgmma_ss()) || call->op.same_as(ptx_wgmma_rs())) {
+      call->op.same_as(tma_store_wait()) || call->op.same_as(ptx_wgmma_ss()) ||
+      call->op.same_as(ptx_wgmma_rs())) {
     return true;
   }
 
-  // PTX async copy intrinsics
-  if (call->op.same_as(builtin::ptx_cp_async()) ||
-      call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-      call->op.same_as(builtin::ptx_cp_async_bulk())) {
+  // PTX async copy intrinsics on SM90+ (cp.async.bulk family).
+  if (call->op.same_as(builtin::ptx_cp_async_bulk())) {
     return true;
   }
 
@@ -154,9 +156,11 @@ bool IsKnownGeneric(const CallNode *call) {
   if (call == nullptr) {
     return false;
   }
+  // Note: cp.async (classic) is *not* part of the async proxy on Hopper; treat
+  // it as generic proxy traffic for fence injection purposes.
   return call->op.same_as(ptx_ldmatrix()) || call->op.same_as(ptx_stmatrix()) ||
-         call->op.same_as(initialize_wgmma_descriptor()) ||
-         call->op.same_as(initialize_tcgen05_descriptor());
+         call->op.same_as(ptx_cp_async()) ||
+         call->op.same_as(builtin::ptx_cp_async());
 }
 
 // Ops that should *not* be considered generic/async proxy traffic for the
@@ -170,7 +174,16 @@ bool IsNonProxyIntrinsic(const CallNode *call) {
   // shared-memory proxy traffic.
   if (call->op.same_as(builtin::tvm_storage_sync()) ||
       call->op.same_as(builtin::ptx_init_barrier_thread_count()) ||
-      call->op.same_as(ptx_fence_barrier_init())) {
+      call->op.same_as(ptx_fence_barrier_init()) ||
+      call->op.same_as(mbarrier_wait_parity()) ||
+      call->op.same_as(mbarrier_expect_tx()) ||
+      call->op.same_as(builtin::ptx_arrive_barrier()) ||
+      call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+      call->op.same_as(builtin::ptx_wait_barrier()) ||
+      call->op.same_as(builtin::ptx_commit_group()) ||
+      call->op.same_as(builtin::ptx_wait_group()) ||
+      call->op.same_as(builtin::ptx_cp_async_barrier()) ||
+      call->op.same_as(ptx_cp_async_barrier_noinc())) {
     return true;
   }
 
@@ -181,6 +194,13 @@ bool IsNonProxyIntrinsic(const CallNode *call) {
       call->op.same_as(warpgroup_commit_batch()) ||
       call->op.same_as(warpgroup_wait()) ||
       call->op.same_as(warpgroup_fence_operand())) {
+    return true;
+  }
+
+  // Descriptor initialization only materializes register/local metadata and
+  // does not represent shared-memory proxy traffic itself.
+  if (call->op.same_as(initialize_wgmma_descriptor()) ||
+      call->op.same_as(initialize_tcgen05_descriptor())) {
     return true;
   }
 
@@ -326,12 +346,12 @@ private:
     for (int i = 0; i < static_cast<int>(op->seq.size()); ++i) {
       const Stmt &original = op->seq[i];
       const bool is_tma_store = IsTMAStoreStmt(original);
-      const bool has_arrive =
-          is_tma_store && (i + 1 < static_cast<int>(op->seq.size())) &&
-          IsTMAStoreArriveStmt(op->seq[i + 1]);
-      const bool has_wait =
-          is_tma_store && (i + 2 < static_cast<int>(op->seq.size())) &&
-          IsTMAStoreWaitStmt(op->seq[i + 2]);
+      const bool has_arrive = is_tma_store &&
+                              (i + 1 < static_cast<int>(op->seq.size())) &&
+                              IsTMAStoreArriveStmt(op->seq[i + 1]);
+      const bool has_wait = is_tma_store &&
+                            (i + 2 < static_cast<int>(op->seq.size())) &&
+                            IsTMAStoreWaitStmt(op->seq[i + 2]);
 
       Stmt mutated = VisitStmt(original);
       AppendFlattened(&seq, mutated);
@@ -375,7 +395,10 @@ private:
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    current_state_ = ProxyStateSet::Generic();
+    auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    if (scope.rank == StorageRank::kShared) {
+      current_state_ = ProxyStateSet::Generic();
+    }
     return stmt;
   }
 
@@ -407,7 +430,8 @@ private:
     for (const PrimExpr &v : op->iter_values) {
       iter_values.push_back(VisitExpr(v));
     }
-    return BlockRealize(iter_values, predicate, Downcast<Block>(block_res.stmt));
+    return BlockRealize(iter_values, predicate,
+                        Downcast<Block>(block_res.stmt));
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
@@ -432,8 +456,9 @@ private:
     if (op->attr_key == "tl.proxy_hint") {
       ProxyHint hint = ProxyHintFromAttrValue(op->value);
       if (hint == ProxyHint::kUnknown) {
-        LOG(WARNING) << "Unknown tl.proxy_hint value: " << op->value
-                     << ". Expected one of: \"generic\", \"async\", \"neutral\"";
+        LOG(WARNING)
+            << "Unknown tl.proxy_hint value: " << op->value
+            << ". Expected one of: \"generic\", \"async\", \"neutral\"";
       }
 
       ProxyStateSet entry = current_state_;
@@ -515,8 +540,8 @@ private:
       may_be_zero = imm->value == 0;
     }
 
-    current_state_ = may_be_zero ? entry.Union(body_res.out_state)
-                                 : body_res.out_state;
+    current_state_ =
+        may_be_zero ? entry.Union(body_res.out_state) : body_res.out_state;
 
     return For(op->loop_var, min, extent, op->kind, body_res.stmt,
                op->thread_binding, op->annotations);
