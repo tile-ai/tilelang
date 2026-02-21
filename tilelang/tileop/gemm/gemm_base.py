@@ -59,6 +59,9 @@ class GemmBase:
 
     @property
     def in_dtype(self) -> str:
+        if is_tensor_memory(self.A):
+            # TS variant: A is in TMEM (accum dtype), use B's dtype as input dtype
+            return self.B.dtype
         assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
         return self.A.dtype
 

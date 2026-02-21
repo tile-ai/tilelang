@@ -38,7 +38,7 @@ def chained_matmul(
     def main(
         A: T.Tensor((M, K), in_dtype),
         B1: T.Tensor((N1, K), in_dtype),
-        B2: T.Tensor((N2, N1), in_dtype),
+        B2: T.Tensor((N2, N1), accum_dtype), #in_dtype),
         D: T.Tensor((M, N2), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N2, block_N2), T.ceildiv(M, block_M), threads=threads) as (bx, by):
@@ -47,7 +47,7 @@ def chained_matmul(
             C_tmem = T.alloc_tmem([block_M, block_N1], accum_dtype)
             mbar1 = T.alloc_barrier(1)
 
-            B2_shared = T.alloc_shared((block_N2, block_N1), in_dtype)
+            B2_shared = T.alloc_shared((block_N2, block_N1), accum_dtype) #in_dtype)
             D_tmem = T.alloc_tmem([block_M, block_N2], accum_dtype)
             mbar2 = T.alloc_barrier(1)
 
@@ -104,15 +104,17 @@ if __name__ == "__main__":
         },
     )
 
-    print(jit_kernel.get_kernel_source())
+    # print(jit_kernel.get_kernel_source())
 
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
     b1 = torch.randn(N1, K, device="cuda", dtype=torch.bfloat16)
-    b2 = torch.randn(N2, N1, device="cuda", dtype=torch.bfloat16)
+    b2 = torch.randn(N2, N1, device="cuda", dtype= torch.float32) #torch.bfloat16)
     d = jit_kernel(a, b1, b2)
 
-    ref_c = (a.float() @ b1.float().T)
-    ref_d = (ref_c @ b2.float().T).to(torch.bfloat16)
+    # ref_c = (a.float() @ b1.float().T)
+    # ref_d = (ref_c @ b2.float().T).to(torch.bfloat16)
+    ref_c = a.cpu().float() @ b1.cpu().float().T
+    ref_d = (ref_c @ b2.cpu().float().T).to(torch.bfloat16).cuda()
     torch.testing.assert_close(d, ref_d, rtol=1e-1, atol=1e-1)
     print("Correctness check passed!")
 
