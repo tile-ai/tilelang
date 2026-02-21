@@ -55,6 +55,7 @@ class GemmTCGEN5(GemmBase):
         if self.is_gemm_ts():
             b_continuity = self.K if b_is_k_major else self.N // n_warp
             layouts = {
+                self.A: mma_emitter.make_mma_store_layout(self.A),
                 self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }

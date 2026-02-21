@@ -309,23 +309,19 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     }
   }
 
-  // Handle tensor memory (tmem) layout inference
+  // Handle tensor memory (tmem) layout inference for both load and store
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
-    // Tensor memory copy
-    // TODO (mzw) Add support for tcgen05.st/cp (in conj. with LowerTmemCopy)
-    ICHECK(copy_inst == CopyInst::kTMemLoad)
-        << "Only support tensor memory copy from shared.tmem to local.fragment "
-           "currently";
     LayoutMap results;
-    if (!T.layout_map.count(dst) && T.layout_map.count(src)) {
-      // Use the default layout (32dp32b) if not specified
-      // NOTE (mzw) We will check the layout in LowerTmemCopy(), so don't
-      // worry for tmem-incompatible layout
-      Layout src_layout = T.layout_map[src];
+    bool is_tmem_load = (copy_inst == CopyInst::kTMemLoad);
+    Buffer tmem_buf = is_tmem_load ? src : dst;
+    Buffer reg_buf = is_tmem_load ? dst : src;
+
+    if (!T.layout_map.count(reg_buf) && T.layout_map.count(tmem_buf)) {
+      Layout tmem_layout = T.layout_map[tmem_buf];
       Array<IterVar> logical_coords = MakeIterVars();
       Array<PrimExpr> logical_coords_var = {logical_coords[0]->var,
                                             logical_coords[1]->var};
-      Array<PrimExpr> phy_indices = src_layout->Forward(logical_coords_var);
+      Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_coords_var);
 
       // Tmem physical coord range analysis
       auto analyzer = std::make_shared<arith::Analyzer>();
@@ -340,7 +336,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
       Range col_dom = Range((int)(phy_col_bounds->min_value),
                             (int)(phy_col_bounds->max_value + 1));
 
-      constexpr int WARP_SIZE = 32; // Set to 32 since only sm100 is supported
+      constexpr int WARP_SIZE = 32;
       constexpr int WARPGROUP_SIZE = 4 * WARP_SIZE;
       ICHECK(is_const_int(T.thread_bounds->extent))
           << "Tensor memory copy requires thread_bounds->extent (num_threads) "
@@ -366,10 +362,12 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
             Fragment(logical_coords, tmem_coord2frag->Forward(phy_indices),
                      tmem_coord2frag->ForwardThread(phy_indices, std::nullopt),
                      make_itervar("rep", 1));
-        results.Set(dst, logical_coord2frag->BindThreadRange(T.thread_bounds));
+        results.Set(reg_buf,
+                    logical_coord2frag->BindThreadRange(T.thread_bounds));
         break;
       }
     }
+
     return results;
   }
 
@@ -979,10 +977,6 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   // TODO (mzw) Support tcgen05.cp
   ICHECK(!is_cp)
       << "Copy from shared memory to tensor memory is not supported yet";
-  // Currently tcgen05.st is not supported
-  // TODO (mzw) Support tcgen05.st
-  ICHECK(!is_st) << "Copy from register to tensor memory is not supported yet";
-
   // Extract loop variables and ranges
   Array<IterVar> loop_vars = MakeIterVars();
   ICHECK(loop_vars.size() == 2) << "Only support 2D tensor memory copy, got "
@@ -1020,18 +1014,26 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
 
   // TODO (mzw) Buffer remap for shared.dyn when is_cp is true?
 
+  // Determine tmem and register buffers based on copy direction
+  Buffer tmem_buf = is_ld ? src : dst;
+  Buffer reg_buf = is_ld ? dst : src;
+  int tmem_side = is_ld ? 0 : 1;
+  bool needs_pack_unpack = is_ld ? src_needs_pack : dst_needs_unpack;
+
   // Retrieve layout
-  ICHECK(T.layout_map.count(src))
-      << "Source buffer " << src->name << " does not have a layout specified";
-  ICHECK(T.layout_map.count(dst)) << "Destination buffer " << dst->name
-                                  << " does not have a layout specified";
-  Layout src_layout = T.layout_map[src];
-  Fragment dst_layout = Downcast<Fragment>(T.layout_map[dst]);
+  ICHECK(T.layout_map.count(tmem_buf))
+      << "Tmem buffer " << tmem_buf->name
+      << " does not have a layout specified";
+  ICHECK(T.layout_map.count(reg_buf))
+      << "Register buffer " << reg_buf->name
+      << " does not have a layout specified";
+  Layout tmem_layout = T.layout_map[tmem_buf];
+  Fragment reg_layout = Downcast<Fragment>(T.layout_map[reg_buf]);
 
   // Check layout
-  Array<PrimExpr> logical_indices = MakeIndices(loop_vars, 0);
+  Array<PrimExpr> logical_indices = MakeIndices(loop_vars, tmem_side);
   Array<PrimExpr> phy_indices =
-      src_layout->Forward(logical_indices); // "phy" for "physical"
+      tmem_layout->Forward(logical_indices); // "phy" for "physical"
 
   // Analyse the range of tmem_phy_row and tmem_phy_col
   arith::ConstIntBound phy_row_bounds =
@@ -1073,14 +1075,14 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
 
       PrimExpr target_thread =
           target_frag->ForwardThread(phy_indices, std::nullopt);
-      PrimExpr dst_thread =
-          dst_layout->ForwardThread(logical_indices, std::nullopt);
-      if (!analyzer->CanProveEqual(target_thread, dst_thread)) {
+      PrimExpr reg_thread =
+          reg_layout->ForwardThread(logical_indices, std::nullopt);
+      if (!analyzer->CanProveEqual(target_thread, reg_thread)) {
         continue;
       }
       PrimExpr target_reg = target_frag->Forward(phy_indices)[0];
-      PrimExpr dst_reg = dst_layout->Forward(logical_indices)[0];
-      if (!analyzer->CanProveEqual(target_reg, dst_reg)) {
+      PrimExpr reg_val = reg_layout->Forward(logical_indices)[0];
+      if (!analyzer->CanProveEqual(target_reg, reg_val)) {
         continue;
       }
 
@@ -1093,17 +1095,22 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
               : relative_wg_idx * (num_chunks_each_wg * meta.width);
       have_succeeded = true;
       Array<PrimExpr> args;
-      const char *bool_str = src_needs_pack ? "true" : "false";
+      const char *bool_str = needs_pack_unpack ? "true" : "false";
+      int effective_chunks =
+          needs_pack_unpack ? num_chunks_each_wg / 2 : num_chunks_each_wg;
       args.push_back(StringImm(meta.intrinsics_name + "<" +
-                               std::to_string(num_chunks_each_wg) + ", " +
+                               std::to_string(effective_chunks) + ", " +
                                bool_str + ">"));
       args.push_back(
-          BufferLoad(src, {(int)logical_row_min,
-                           (int)logical_col_min})); // Will be translated later
-                                                    // in lower_shared_tmem pass
+          BufferLoad(tmem_buf, {(int)logical_row_min,
+                                (int)logical_col_min})); // Will be translated
+                                                         // later in
+                                                         // lower_shared_tmem
+                                                         // pass
       args.push_back(col_offset);
-      args.push_back(dst.access_ptr(2, DataType::Handle(), 1, 0,
-                                    PrimExpr(tmem_phy_col_extent)));
+      int reg_access_mode = is_ld ? 2 : 1;
+      args.push_back(reg_buf.access_ptr(reg_access_mode, DataType::Handle(), 1,
+                                        0, PrimExpr(tmem_phy_col_extent)));
 
       Stmt call =
           Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
@@ -1119,13 +1126,21 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
     }
   };
 
-  try_tcgen05_instruction(getTcgen05Meta_32dp32b());
-  try_tcgen05_instruction(getTcgen05Meta_32dp64b());
-  try_tcgen05_instruction(getTcgen05Meta_32dp128b());
-  try_tcgen05_instruction(getTcgen05Meta_32dp256b());
+  if (is_ld) {
+    try_tcgen05_instruction(getTcgen05Meta_32dp32b());
+    try_tcgen05_instruction(getTcgen05Meta_32dp64b());
+    try_tcgen05_instruction(getTcgen05Meta_32dp128b());
+    try_tcgen05_instruction(getTcgen05Meta_32dp256b());
+  } else {
+    try_tcgen05_instruction(getTcgen05MetaSt_32dp32b());
+    try_tcgen05_instruction(getTcgen05MetaSt_32dp64b());
+    try_tcgen05_instruction(getTcgen05MetaSt_32dp128b());
+    try_tcgen05_instruction(getTcgen05MetaSt_32dp256b());
+  }
 
-  ICHECK(have_succeeded) << "Failed to find a suitable instruction for "
-                            "tcgen05.ld. Check your layout.";
+  ICHECK(have_succeeded)
+      << "Failed to find a suitable instruction for tcgen05."
+      << (is_ld ? "ld" : "st") << ". Check your layout.";
 
   return body;
 }

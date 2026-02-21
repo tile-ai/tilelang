@@ -1,80 +1,105 @@
 """
-Example: TCGEN5MMA TS variant — A from Tensor Memory, B from Shared Memory.
+Diagnostic for chained GEMM (SS + tcgen05.st + TS).
 
-Demonstrates chained MMA: the first GEMM (SS) produces C in TMEM,
-then the second GEMM (TS) reads that TMEM result as its A operand.
+Test 1: SS GEMM → ld(fp32) → cast(bf16) → output
+        Baseline correctness check.
 
-    D_tmem = (A_smem × B1_smem) × B2_smem
+Test 2: Full chained GEMM: SS → ld → cast → st → TS → output
+        Dumps tcgen05-related generated code for inspection.
 """
 import torch
 import tilelang
 import tilelang.language as T
 
 
-def chained_matmul(
-    M,
-    N1,
-    K,
-    N2,
-    block_M,
-    block_N1,
-    block_K,
-    block_N2,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
-    threads,
+def test_cast_only(
+    M, N, K, block_M, block_N, block_K,
+    in_dtype, out_dtype, accum_dtype, threads,
 ):
-    """Two-stage chained matmul using SS then TS variant.
-
-    Stage 1 (SS): C_tmem[M, N1] = A_smem[M, K] × B1_smem[N1, K]^T
-    Stage 2 (TS): D_tmem[M, N2] = C_tmem[M, N1] × B2_smem[N2, N1]^T
-
-    For stage 2, C_tmem (already in Tensor Memory) is used directly as the
-    A operand via the TS (TMEM-Shared) variant of tcgen05.mma.
-    """
-
+    """Test 1: SS GEMM + ld + cast → output bf16"""
     @T.prim_func
     def main(
         A: T.Tensor((M, K), in_dtype),
-        B1: T.Tensor((N1, K), in_dtype),
-        B2: T.Tensor((N2, N1), accum_dtype), #in_dtype),
-        D: T.Tensor((M, N2), out_dtype),
+        B: T.Tensor((N, K), in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
-        with T.Kernel(T.ceildiv(N2, block_N2), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+        with T.Kernel(
+            T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads
+        ) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), in_dtype)
+            B_shared = T.alloc_shared((block_N, block_K), in_dtype)
+            C_tmem   = T.alloc_tmem([block_M, block_N], accum_dtype)
+            mbar     = T.alloc_barrier(1)
+            C_local  = T.alloc_fragment((block_M, block_N), accum_dtype)
+            P_local  = T.alloc_fragment((block_M, block_N), in_dtype)
+            P_shared = T.alloc_shared((block_M, block_N), out_dtype)
+
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=1):
+                T.copy(A[by * block_M, k * block_K], A_shared)
+                T.copy(B[bx * block_N, k * block_K], B_shared)
+                T.gemm(A_shared, B_shared, C_tmem,
+                       transpose_A=False, transpose_B=True,
+                       mbar=mbar, wg_wait=-1, clear_accum=k == 0)
+                T.mbarrier_wait_parity(mbar, k % 2)
+
+            T.copy(C_tmem, C_local)
+            T.copy(C_local, P_local)
+            T.copy(P_local, P_shared)
+            T.copy(P_shared, C[by * block_M, bx * block_N])
+
+    return main
+
+
+def chained_gemm(
+    M, N1, N2, K,
+    block_M, block_N1, block_N2, block_K,
+    in_dtype, out_dtype, accum_dtype, threads,
+):
+    """Test 2: Full chained GEMM with tcgen05.st"""
+    @T.prim_func
+    def main(
+        A:  T.Tensor((M, K), in_dtype),
+        B1: T.Tensor((N1, K), in_dtype),
+        B2: T.Tensor((N2, N1), in_dtype),
+        D:  T.Tensor((M, N2), out_dtype),
+    ):
+        with T.Kernel(
+            T.ceildiv(N2, block_N2), T.ceildiv(M, block_M), threads=threads
+        ) as (bx, by):
+            A_shared  = T.alloc_shared((block_M, block_K), in_dtype)
             B1_shared = T.alloc_shared((block_N1, block_K), in_dtype)
-            C_tmem = T.alloc_tmem([block_M, block_N1], accum_dtype)
-            mbar1 = T.alloc_barrier(1)
+            S_tmem    = T.alloc_tmem([block_M, block_N1], accum_dtype)
+            mbar1     = T.alloc_barrier(1)
 
-            B2_shared = T.alloc_shared((block_N2, block_N1), accum_dtype) #in_dtype)
-            D_tmem = T.alloc_tmem([block_M, block_N2], accum_dtype)
-            mbar2 = T.alloc_barrier(1)
+            S_local = T.alloc_fragment((block_M, block_N1), accum_dtype)
+            P_local = T.alloc_fragment((block_M, block_N1), in_dtype)
+            P_tmem  = T.alloc_tmem([block_M, block_N1], in_dtype)
 
-            D_local = T.alloc_fragment((block_M, block_N2), accum_dtype)
+            B2_shared = T.alloc_shared((block_N2, block_N1), in_dtype)
+            D_tmem    = T.alloc_tmem([block_M, block_N2], accum_dtype)
+            mbar2     = T.alloc_barrier(1)
+
+            D_local  = T.alloc_fragment((block_M, block_N2), accum_dtype)
             D_shared = T.alloc_shared((block_M, block_N2), out_dtype)
 
-            # Stage 1: SS variant — A and B1 both from shared memory
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=1):
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 T.copy(B1[0, k * block_K], B1_shared)
-                T.gemm(
-                    A_shared, B1_shared, C_tmem,
-                    transpose_A=False, transpose_B=True,
-                    mbar=mbar1, wg_wait=-1, clear_accum=k == 0,
-                )
+                T.gemm(A_shared, B1_shared, S_tmem,
+                       transpose_A=False, transpose_B=True,
+                       mbar=mbar1, wg_wait=-1, clear_accum=k == 0)
                 T.mbarrier_wait_parity(mbar1, k % 2)
 
-            # Stage 2: TS variant — A (C_tmem) from TMEM, B2 from shared memory
+            T.copy(S_tmem, S_local)
+            T.copy(S_local, P_local)
+            T.copy(P_local, P_tmem)
+
             T.copy(B2[bx * block_N2, 0], B2_shared)
-            T.gemm(
-                C_tmem, B2_shared, D_tmem,
-                transpose_A=False, transpose_B=True,
-                mbar=mbar2, wg_wait=-1, clear_accum=True,
-            )
+            T.gemm(P_tmem, B2_shared, D_tmem,
+                   transpose_A=False, transpose_B=True,
+                   mbar=mbar2, wg_wait=-1, clear_accum=True)
             T.mbarrier_wait_parity(mbar2, 0)
 
-            # Copy result out
             T.copy(D_tmem, D_local)
             T.copy(D_local, D_shared)
             T.copy(D_shared, D[by * block_M, bx * block_N2])
@@ -82,42 +107,54 @@ def chained_matmul(
     return main
 
 
+PASS_CFG = {
+    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+}
+
+
+def run_test(name, func, out_idx, inputs, ref, rtol=1e-2, atol=1e-2):
+    jit = tilelang.compile(func, out_idx=out_idx, target="cuda", pass_configs=PASS_CFG)
+    print(f"\n{'='*60}")
+    print(f"{name}: tcgen05 calls in generated code:")
+    src = jit.get_kernel_source()
+    for line in src.splitlines():
+        lo = line.lower()
+        if "tcgen05" in lo or "fence_view" in lo:
+            print(f"  {line.strip()}")
+    print(f"{'='*60}")
+    out = jit(*inputs).cpu()
+    try:
+        torch.testing.assert_close(out, ref, rtol=rtol, atol=atol)
+        print(f"{name}: PASSED")
+    except AssertionError as e:
+        msg = str(e).split('\n')
+        print(f"{name}: FAILED — {msg[0]}")
+        print(f"  ref[0,:5]  = {ref[0,:5]}")
+        print(f"  out[0,:5]  = {out[0,:5]}")
+
+
 if __name__ == "__main__":
-    M, N1, K, N2 = 128, 128, 128, 128
-    block_M, block_N1, block_K, block_N2 = 128, 128, 128, 128
+    M, N, K = 128, 128, 128
+    block_M, block_N, block_K = 128, 128, 128
     in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
-    threads = 256
+    threads = 128
 
-    func = chained_matmul(
-        M, N1, K, N2,
-        block_M, block_N1, block_K, block_N2,
-        in_dtype, out_dtype, accum_dtype, threads,
-    )
+    a  = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b  = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
 
-    jit_kernel = tilelang.compile(
-        func,
-        out_idx=[3],
-        target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
-    )
+    ref_bf16 = (a.cpu().float() @ b.cpu().float().T).to(torch.bfloat16)
 
-    # print(jit_kernel.get_kernel_source())
+    # --- Test 1: SS GEMM + ld + cast (baseline) ---
+    f1 = test_cast_only(M, N, K, block_M, block_N, block_K,
+                        in_dtype, out_dtype, accum_dtype, threads)
+    run_test("Test1 (SS+ld+cast)", f1, [2], [a, b], ref_bf16)
 
-    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-    b1 = torch.randn(N1, K, device="cuda", dtype=torch.bfloat16)
-    b2 = torch.randn(N2, N1, device="cuda", dtype= torch.float32) #torch.bfloat16)
-    d = jit_kernel(a, b1, b2)
-
-    # ref_c = (a.float() @ b1.float().T)
-    # ref_d = (ref_c @ b2.float().T).to(torch.bfloat16)
-    ref_c = a.cpu().float() @ b1.cpu().float().T
-    ref_d = (ref_c @ b2.cpu().float().T).to(torch.bfloat16).cuda()
-    torch.testing.assert_close(d, ref_d, rtol=1e-1, atol=1e-1)
-    print("Correctness check passed!")
-
-    profiler = jit_kernel.get_profiler()
-    latency = profiler.do_bench()
-    print(f"Latency: {latency} ms")
+    # --- Test 2: Full chained GEMM (SS + st + TS) ---
+    b2 = torch.randn(N, N, device="cuda", dtype=torch.bfloat16)
+    f2 = chained_gemm(M, N, N, K, block_M, block_N, block_N, block_K,
+                      in_dtype, out_dtype, accum_dtype, threads)
+    ref_s = a.cpu().float() @ b.cpu().float().T
+    ref_p = ref_s.to(torch.bfloat16).float()
+    ref_d = (ref_p @ b2.cpu().float().T).to(torch.bfloat16)
+    run_test("Test2 (chained GEMM)", f2, [3], [a, b, b2], ref_d)
