@@ -165,6 +165,100 @@ bool IsKnownGeneric(const CallNode *call) {
          call->op.same_as(builtin::ptx_cp_async());
 }
 
+inline bool IsSharedPointerVar(const VarNode *var) {
+  if (var == nullptr) {
+    return false;
+  }
+  const auto *ptr_type = var->type_annotation.as<PointerTypeNode>();
+  if (ptr_type == nullptr) {
+    return false;
+  }
+  auto scope = StorageScope::Create(ptr_type->storage_scope);
+  return scope.rank == StorageRank::kShared;
+}
+
+inline bool ExprContainsSharedPointerVar(const PrimExpr &expr) {
+  bool has_shared = false;
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (has_shared) {
+      return;
+    }
+    if (const auto *var = node.as<VarNode>()) {
+      if (IsSharedPointerVar(var)) {
+        has_shared = true;
+      }
+    }
+  });
+  return has_shared;
+}
+
+// Some "generic proxy" shared-memory stores are expressed as opaque calls
+// (e.g. call_extern) that take pointers into shared memory via tvm_access_ptr
+// or address_of.  Recognize these so we do not accidentally treat them as async
+// and miss a required fence before the next async-proxy op.
+bool CallMayWriteSharedMemory(const CallNode *call) {
+  if (call == nullptr) {
+    return false;
+  }
+
+  bool writes_shared = false;
+  PostOrderVisit(tvm::ffi::GetRef<Call>(call), [&](const ObjectRef &node) {
+    if (writes_shared) {
+      return;
+    }
+    const auto *c = node.as<CallNode>();
+    if (c == nullptr) {
+      return;
+    }
+
+    if (c->op.same_as(builtin::tvm_access_ptr())) {
+      // tvm_access_ptr(dtype, base_ptr, offset, extent, rw_mask)
+      if (c->args.size() != 5) {
+        // Unexpected signature; be conservative if we still see a shared base.
+        if (c->args.size() >= 2 && ExprContainsSharedPointerVar(c->args[1])) {
+          writes_shared = true;
+        }
+        return;
+      }
+
+      if (!ExprContainsSharedPointerVar(c->args[1])) {
+        return;
+      }
+
+      // rw_mask: read(1), write(2), read/write(3).
+      const auto *mask_imm = c->args[4].as<IntImmNode>();
+      if (mask_imm == nullptr) {
+        // Unknown mask; could include writes.
+        writes_shared = true;
+        return;
+      }
+      if (mask_imm->value & 2) {
+        writes_shared = true;
+      }
+      return;
+    }
+
+    if (c->op.same_as(builtin::address_of())) {
+      // address_of(BufferLoad(...)) returns a pointer that may be used for a
+      // write in an opaque call.
+      if (c->args.size() != 1) {
+        return;
+      }
+      const auto *load = c->args[0].as<BufferLoadNode>();
+      if (load == nullptr) {
+        return;
+      }
+      auto scope = StorageScope::Create(GetPtrStorageScope(load->buffer->data));
+      if (scope.rank == StorageRank::kShared) {
+        writes_shared = true;
+      }
+      return;
+    }
+  });
+
+  return writes_shared;
+}
+
 // Ops that should *not* be considered generic/async proxy traffic for the
 // purpose of injecting fence.proxy.async.
 bool IsNonProxyIntrinsic(const CallNode *call) {
@@ -245,10 +339,14 @@ ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
   if (IsKnownGeneric(call)) {
     return ProxyEvent::kGeneric;
   }
+  if (CallMayWriteSharedMemory(call)) {
+    return ProxyEvent::kGeneric;
+  }
 
-  // Conservative default: treat unknown/external ops as async proxy activity so
-  // we insert fences rather than risking missing a required fence on SM90+.
-  return ProxyEvent::kAsync;
+  // Default: unknown/external ops do not affect proxy state. If you introduce a
+  // new async-proxy intrinsic, add it to IsAsyncIntrinsic (or use tl.proxy_hint
+  // to classify an opaque region).
+  return ProxyEvent::kNone;
 }
 
 inline void AppendFlattened(Array<Stmt> *out, const Stmt &stmt) {

@@ -207,7 +207,7 @@ def test_proxy_hint_override():
     assert not _has_fence(mod["main"].body)
 
 
-def test_unknown_extern_treated_as_async_by_default():
+def test_unknown_extern_default_is_none():
     @T.prim_func
     def before():
         with T.Kernel(1):
@@ -234,7 +234,143 @@ def test_unknown_extern_treated_as_async_by_default():
         tir.stmt_functor.post_order_visit(stmt, visit)
         return count
 
-    assert _count_fences(mod["main"].body) == 1
+    assert _count_fences(mod["main"].body) == 0
+
+
+def test_unknown_extern_shared_store_then_wgmma_injects_fence_proxy():
+    """Opaque calls that may write shared memory must be treated as generic."""
+
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            smem = T.decl_buffer((256,), T.float16, scope="shared")
+            desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.evaluate(
+                T.call_extern(
+                    "handle",
+                    "custom_smem_store",
+                    T.tvm_access_ptr(T.type_annotation(T.float16), smem.data, 0, 16, 2),
+                )
+            )
+            T.warpgroup_arrive()
+            T.ptx_wgmma_ss(
+                T.float16,
+                "m64n64k16",
+                T.bool(True),
+                T.bool(True),
+                "fp16",
+                "fp16",
+                "fp16",
+                desc_a.data,
+                T.int32(0),
+                desc_b.data,
+                T.int32(0),
+                C_local.data,
+                T.int32(0),
+                T.bool(True),
+                1,
+                1,
+            )
+
+    @T.prim_func
+    def after():
+        with T.Kernel(1):
+            smem = T.decl_buffer((256,), T.float16, scope="shared")
+            desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.evaluate(
+                T.call_extern(
+                    "handle",
+                    "custom_smem_store",
+                    T.tvm_access_ptr(T.type_annotation(T.float16), smem.data, 0, 16, 2),
+                )
+            )
+            T.warpgroup_arrive()
+            T.fence_proxy_async()
+            T.ptx_wgmma_ss(
+                T.float16,
+                "m64n64k16",
+                T.bool(True),
+                T.bool(True),
+                "fp16",
+                "fp16",
+                "fp16",
+                desc_a.data,
+                T.int32(0),
+                desc_b.data,
+                T.int32(0),
+                C_local.data,
+                T.int32(0),
+                T.bool(True),
+                1,
+                1,
+            )
+
+    _check(before, after)
+
+
+def test_unknown_extern_address_of_shared_then_wgmma_injects_fence_proxy():
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            smem = T.decl_buffer((256,), T.float16, scope="shared")
+            desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.evaluate(T.call_extern("handle", "custom_ptr_store", T.address_of(smem[0])))
+            T.warpgroup_arrive()
+            T.ptx_wgmma_ss(
+                T.float16,
+                "m64n64k16",
+                T.bool(True),
+                T.bool(True),
+                "fp16",
+                "fp16",
+                "fp16",
+                desc_a.data,
+                T.int32(0),
+                desc_b.data,
+                T.int32(0),
+                C_local.data,
+                T.int32(0),
+                T.bool(True),
+                1,
+                1,
+            )
+
+    @T.prim_func
+    def after():
+        with T.Kernel(1):
+            smem = T.decl_buffer((256,), T.float16, scope="shared")
+            desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            C_local = T.decl_buffer((32,), T.float16, scope="local")
+            T.evaluate(T.call_extern("handle", "custom_ptr_store", T.address_of(smem[0])))
+            T.warpgroup_arrive()
+            T.fence_proxy_async()
+            T.ptx_wgmma_ss(
+                T.float16,
+                "m64n64k16",
+                T.bool(True),
+                T.bool(True),
+                "fp16",
+                "fp16",
+                "fp16",
+                desc_a.data,
+                T.int32(0),
+                desc_b.data,
+                T.int32(0),
+                C_local.data,
+                T.int32(0),
+                T.bool(True),
+                1,
+                1,
+            )
+
+    _check(before, after)
 
 
 def test_proxy_hint_generic_suppresses_conservative_fence():
