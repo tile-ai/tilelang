@@ -570,7 +570,13 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations));
     }
 
-    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_reduce);
+    Array<Stmt> seq;
+    seq.reserve(3);
+    seq.push_back(tma_reduce);
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+                      SeqStmt(std::move(seq)));
   }
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
