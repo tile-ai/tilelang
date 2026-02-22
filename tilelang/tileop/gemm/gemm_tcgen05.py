@@ -24,7 +24,19 @@ _FLOAT8_DTYPES = {
 
 
 class GemmTCGEN5(GemmBase):
+    """GEMM operator for Blackwell (SM100) TCGEN5MMA instructions.
+
+    Supports the SS (Shared-Shared) and TS (TensorMemory-Shared) variants.
+    Layout inference and lowering are dispatched based on the memory scopes
+    of operands A and B.
+    """
+
     def infer_layout(self, target: Target, thread_nums: int):
+        """Infer swizzled layouts for operands and accumulator.
+
+        For SS: both A and B get swizzled shared-memory layouts.
+        For TS: A and C get TMEM store layouts, B gets a swizzled shared-memory layout.
+        """
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -63,6 +75,7 @@ class GemmTCGEN5(GemmBase):
         return {}
 
     def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+        """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
         warp_row_tiles = int(self.M // m_warp)

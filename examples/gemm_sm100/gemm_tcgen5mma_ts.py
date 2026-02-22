@@ -111,6 +111,7 @@ PASS_CFG = {
 
 
 def run_test(name, func, out_idx, inputs, ref, rtol=1e-2, atol=1e-2):
+    """Compile *func*, execute it with *inputs*, and assert closeness to *ref*."""
     jit = tilelang.compile(func, out_idx=out_idx, target="cuda", pass_configs=PASS_CFG)
     out = jit(*inputs).cpu()
     torch.testing.assert_close(out, ref, rtol=rtol, atol=atol)

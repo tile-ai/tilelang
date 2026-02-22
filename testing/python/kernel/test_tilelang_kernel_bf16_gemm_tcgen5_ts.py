@@ -121,6 +121,7 @@ def _cpu_ref_chained(a, b1, b2):
 
 
 def assert_ss_gemm(M, N, K, bM, bN, bK, threads=128):
+    """Compile and run an SS GEMM, asserting correctness against a CPU reference."""
     func = matmul_ss(M, N, K, bM, bN, bK, T.bfloat16, T.bfloat16, T.float32, threads)
     kernel = tilelang.compile(func, out_idx=-1, target="cuda", pass_configs=PASS_CFG)
 
@@ -133,6 +134,8 @@ def assert_ss_gemm(M, N, K, bM, bN, bK, threads=128):
 
 
 def assert_chained_gemm(M, N1, N2, K, bM, bN1, bN2, bK, threads=128):
+    """Compile and run a chained GEMM (SS + TS), verifying tcgen05.st and mma_ts presence."""
+    assert bN1 == N1, f"bN1 must equal N1 (full row tile) for chained GEMM, got bN1={bN1}, N1={N1}"
     func = chained_gemm(M, N1, N2, K, bM, bN1, bN2, bK,
                         T.bfloat16, T.bfloat16, T.float32, threads)
     kernel = tilelang.compile(func, out_idx=-1, target="cuda", pass_configs=PASS_CFG)

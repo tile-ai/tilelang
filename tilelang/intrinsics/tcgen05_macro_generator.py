@@ -61,8 +61,11 @@ class SwizzleMode(IntEnum):
 
 # derive from MMAIntrinEmitter as some layouts are the same
 class TensorCoreIntrinEmitter(MMAIntrinEmitter):
-    """
-    To eliminate Python syntax within TIR Macro.
+    """Intrinsic emitter for Blackwell (SM100) TCGEN5MMA instructions.
+
+    Generates TIR macros that lower to ``tcgen05.mma`` PTX instructions for
+    both the SS (Shared-Shared) and TS (TensorMemory-Shared) GEMM variants.
+    Also provides layout helpers for tensor-memory (TMEM) buffers.
     """
 
     # should be rewritten to support dynamic k_dim
@@ -132,6 +135,24 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             raise ValueError(f"Unsupported swizzle mode: {layout}")
 
     def tcgen05mma(self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, mbar, clear_accum: PrimExpr = False):
+        """Emit a TCGEN5MMA operation, dispatching to SS or TS variant based on A's memory scope.
+
+        If *A_buf* resides in tensor memory (``shared.tmem``), the TS variant is
+        emitted; otherwise the SS variant is used (both A and B from shared memory).
+
+        Parameters
+        ----------
+        A_buf : Buffer
+            Operand A — either in shared memory (SS) or tensor memory (TS).
+        B_buf : Buffer
+            Operand B in shared memory.
+        C_local_buf : Buffer
+            Accumulator buffer in tensor memory.
+        mbar : PrimExpr
+            Memory barrier used for MMA completion signalling.
+        clear_accum : PrimExpr
+            Whether to zero the accumulator before the first MMA.
+        """
         if is_tensor_memory(A_buf):
             return self.tcgen05mma_ts(A_buf, B_buf, C_local_buf, mbar, clear_accum)
 
@@ -337,7 +358,26 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return _warp_mma(A_buf, B_buf, C_local_buf, mbar)
 
     def tcgen05mma_ts(self, A_buf, B_buf, C_local_buf, mbar, clear_accum: PrimExpr = False):
-        """TCGEN5MMA TS variant: A from Tensor Memory, B from Shared Memory."""
+        """Emit the TS (TensorMemory-Shared) variant of TCGEN5MMA.
+
+        Reads operand A directly from tensor memory (TMEM) and operand B from
+        shared memory via a descriptor.  The TMEM column offset for A is
+        computed assuming packed storage (e.g. two ``bfloat16`` values per
+        ``uint32`` column) to match the output of ``tcgen05.st``.
+
+        Parameters
+        ----------
+        A_buf : Buffer
+            Operand A residing in tensor memory (``shared.tmem``).
+        B_buf : Buffer
+            Operand B in shared memory.
+        C_local_buf : Buffer
+            Accumulator buffer in tensor memory.
+        mbar : PrimExpr
+            Memory barrier for MMA completion signalling.
+        clear_accum : PrimExpr
+            Whether to zero the accumulator before the first MMA.
+        """
         accum_dtype = self.accum_dtype
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
@@ -362,7 +402,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 f"Unsupported TCGEN5MMA configuration for TS: M={m_dim}, N={n_dim}, "
                 f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
             )
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
+        atom_m, atom_n, atom_k, _enable_ws, _enable_2cta = (int(x) for x in meta)
 
         # B descriptor parameters (same as SS)
         b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
@@ -384,7 +424,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
 
-        # a_is_k_major for instruction descriptor generation
         a_is_k_major = not self.a_transposed
         instr_desc = self.get_tcgen5_instr_desc(
             atom_m, atom_n, atom_k, a_is_k_major, b_is_k_major, scale_in_a, scale_in_b,
@@ -568,11 +607,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return Layout([m, n], forward)
 
     def get_tcgen5_mma_meta(self, m: int, n: int, k: int):
+        """Query the FFI for TCGEN5MMA atom metadata (atom_m, atom_n, atom_k, enable_ws, enable_2cta)."""
         return _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype))
 
     def get_tcgen5_instr_desc(
         self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool, b_is_k_major: bool, scale_in_a: int, scale_in_b: int
     ) -> PrimExpr:
+        """Build the 64-bit instruction descriptor for a ``tcgen05.mma`` PTX call."""
         desc = _ffi_api.get_tcgen5_instr_desc(
             atom_m,
             atom_n,
