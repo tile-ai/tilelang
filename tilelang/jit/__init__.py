@@ -404,7 +404,6 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             is_cutedsl = self.target == "cutedsl" or self.execution_backend == "cutedsl"
             kernel_suffix = "py" if is_cutedsl else "c"
             kernel_file = f"tilelang_jit_kernel_{func_name}.{kernel_suffix}"
-            kernel_file = f"tilelang_jit_kernel_{func_name}.c"
 
             program_file = f"tilelang_jit_program_{func_name}.py"
             makedirs(self.debug_root_path, exist_ok=True)
