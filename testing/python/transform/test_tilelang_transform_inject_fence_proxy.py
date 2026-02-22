@@ -22,6 +22,7 @@ def _check(original, transformed):
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_lower_fence_proxy():
     @T.prim_func
     def before():
@@ -65,6 +66,7 @@ def test_lower_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_async_to_generic_no_double_fence():
     @T.prim_func
     def before():
@@ -102,6 +104,7 @@ def test_async_to_generic_no_double_fence():
     assert _count_fences(mod["main"].body) == 1
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_cp_async_then_wgmma_injects_fence_proxy():
     """cp.async is treated as generic proxy traffic for fence injection."""
 
@@ -175,6 +178,7 @@ def test_cp_async_then_wgmma_injects_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_proxy_hint_override():
     @T.prim_func
     def before():
@@ -207,6 +211,7 @@ def test_proxy_hint_override():
     assert not _has_fence(mod["main"].body)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_unknown_extern_default_is_none():
     @T.prim_func
     def before():
@@ -237,6 +242,7 @@ def test_unknown_extern_default_is_none():
     assert _count_fences(mod["main"].body) == 0
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_unknown_extern_shared_store_then_wgmma_injects_fence_proxy():
     """Opaque calls that may write shared memory must be treated as generic."""
 
@@ -312,6 +318,7 @@ def test_unknown_extern_shared_store_then_wgmma_injects_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_unknown_extern_address_of_shared_then_wgmma_injects_fence_proxy():
     @T.prim_func
     def before():
@@ -373,6 +380,7 @@ def test_unknown_extern_address_of_shared_then_wgmma_injects_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_proxy_hint_generic_suppresses_conservative_fence():
     @T.prim_func
     def before():
@@ -404,6 +412,7 @@ def test_proxy_hint_generic_suppresses_conservative_fence():
     assert not _has_fence(mod["main"].body)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_store_sync_injection():
     @T.prim_func
     def before():
@@ -434,6 +443,7 @@ def test_tma_store_sync_injection():
     assert waits == 1
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_store_sync_injection_no_duplicates():
     @T.prim_func
     def before():
@@ -466,6 +476,7 @@ def test_tma_store_sync_injection_no_duplicates():
     assert waits == 1
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_wgmma_marked_async():
     @T.prim_func
     def before():
@@ -513,6 +524,7 @@ def test_wgmma_marked_async():
     assert order.index("tl.fence_proxy_async") < order.index("tl.ptx_wgmma_ss")
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_shared_barrier_ops_do_not_trigger_fence_proxy():
     @T.prim_func
     def before(A_desc: T.handle("uint8x128", "grid_constant")):
@@ -621,6 +633,7 @@ def test_shared_barrier_ops_do_not_trigger_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_regression_0219_fence_no_fence_inserted():
     """Regression test copied from `debug/0219_fence/fence.py`.
 
@@ -952,6 +965,7 @@ def test_regression_0219_fence_no_fence_inserted():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_ldmatrix_then_wgmma_injects_fence_proxy():
     """ldmatrix/stmatrix use the generic proxy and must be fenced before WGMMA."""
 
@@ -1031,6 +1045,7 @@ def test_ldmatrix_then_wgmma_injects_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_stmatrix_then_wgmma_injects_fence_proxy():
     @T.prim_func
     def before():
@@ -1106,6 +1121,7 @@ def test_stmatrix_then_wgmma_injects_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_if_merge_may_be_generic_then_async_injects_fence_proxy():
     @T.prim_func
     def before(flag: T.int32):
@@ -1169,6 +1185,7 @@ def test_if_merge_may_be_generic_then_async_injects_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_loop_carried_generic_then_async_injects_fence_proxy():
     """Generic proxy traffic at the end of an iteration may affect the next iteration."""
 
@@ -1234,6 +1251,7 @@ def test_loop_carried_generic_then_async_injects_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_shared_load_does_not_trigger_fence_proxy():
     """Shared loads are not treated as generic proxy traffic for fence injection."""
 
@@ -1298,6 +1316,7 @@ def test_shared_load_does_not_trigger_fence_proxy():
     _check(before, after)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_proxy_hint_async_inserts_fence_outside_region():
     @T.prim_func
     def before():
