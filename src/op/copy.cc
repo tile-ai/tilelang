@@ -647,12 +647,19 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
   // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
   // we will not use tma for bulk load/store
 
+  // Check if target is CuTeDSL backend
+  bool is_cutedsl = TargetIsCuTeDSL(target);
+
   // Check tensor memory operations first (highest priority for SM100/Blackwell)
   // 1d tma access can not support out of bound access
-  if (!disable_tma_lower && !buffer_oob &&
+  // NOTE: Skip BulkLoad1D/BulkStore1D for CuTeDSL backend because
+  // cp_async_bulk_shared_cluster_global (raw 1D TMA) combined with WGMMA
+  // in the same kernel triggers a ptxas ICE in the NVPTX backend.
+  // Falling through to descriptor-based BulkLoad/BulkStore avoids this.
+  if (!is_cutedsl && !disable_tma_lower && !buffer_oob &&
       CheckBulkLoad1D(target, layout_map, analyzer)) {
     return CopyInst::kBulkLoad1D;
-  } else if (!disable_tma_lower && !buffer_oob &&
+  } else if (!is_cutedsl && !disable_tma_lower && !buffer_oob &&
              CheckBulkStore1D(target, layout_map, analyzer)) {
     return CopyInst::kBulkStore1D;
   } else if (!disable_tma_lower && CheckBulkLoad(target, analyzer)) {

@@ -131,6 +131,14 @@ bool TargetHasBulkCopy(Target target) {
   return arch >= 90;
 }
 
+bool TargetIsCuTeDSL(Target target) {
+  for (const auto &key : target->keys) {
+    if (key == "cutedsl")
+      return true;
+  }
+  return false;
+}
+
 bool TargetSupportVectorize256(Target target) {
   if (!TargetIsCuda(target))
     return false;

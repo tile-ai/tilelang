@@ -84,6 +84,27 @@ public:
 private:
   Map<Var, Buffer> buffer_data_to_buffer_;
 
+  // Shared memory buffers referenced by initialize_tcgen05_descriptor calls,
+  // accumulated during traversal and linked to mbar on tcgen05_mma_arrive.
+  std::vector<BufferRegion> pending_tcgen05_smem_reads_;
+
+  // C_tmem buffer from ptx_tcgen05_mma_ss, accumulated during traversal.
+  Optional<Buffer> pending_tcgen05_c_buf_;
+
+  // Helper to extract a Buffer from a tvm_access_ptr call expression.
+  Optional<Buffer> TryGetBufFromAccessPtr(const PrimExpr &expr) {
+    auto call = expr.as<CallNode>();
+    if (!call || !call->op.same_as(builtin::tvm_access_ptr()))
+      return Optional<Buffer>();
+    auto var = call->args[1].as<VarNode>();
+    if (!var)
+      return Optional<Buffer>();
+    auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+    if (it == buffer_data_to_buffer_.end())
+      return Optional<Buffer>();
+    return (*it).second;
+  }
+
   void VisitExpr_(const CallNode *op) final {
     auto args = op->args;
     if (op->op.same_as(builtin::call_extern())) {
@@ -95,7 +116,7 @@ private:
       // TODO(lei): refactor to use identical ops.
       if (func_name == "tl::tcgen5mma_gemm_ts" ||
           func_name == "tl::tcgen5mma_gemm_ss") {
-        // TCGEN5MMA
+        // TCGEN5MMA (high-level, before LowerTileOp)
         auto get_buf_from_access_ptr_call =
             [&](const PrimExpr &expr) -> Buffer {
           auto call = expr.as<CallNode>();
@@ -132,6 +153,59 @@ private:
         }
       }
       // TODO (lei) Link wgmma to buffers and tl.wait_wgmma
+    } else if (op->op.same_as(initialize_tcgen05_descriptor())) {
+      // Lowered form: initialize_tcgen05_descriptor(desc, start_addr, ...)
+      // args[1] is a tvm_access_ptr to the shared memory buffer (A or B).
+      if (args.size() >= 2) {
+        if (auto buf = TryGetBufFromAccessPtr(args[1])) {
+          pending_tcgen05_smem_reads_.push_back(
+              BufferRegion::FullRegion(buf.value()));
+        }
+      }
+      StmtExprVisitor::VisitExpr_(op);
+    } else if (op->op.same_as(ptx_tcgen05_mma_ss()) ||
+               op->op.same_as(ptx_tcgen05_mma_ts())) {
+      // Lowered form: ptx_tcgen05_mma_ss(kind, desc_a, off_a, desc_b, off_b,
+      //                                  c_tmem, c_off, desc_val, scale, ...)
+      // args[5] is C_tmem.data (a Var, not tvm_access_ptr).
+      if (args.size() > 5) {
+        auto var = args[5].as<VarNode>();
+        if (var) {
+          auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+          if (it != buffer_data_to_buffer_.end()) {
+            pending_tcgen05_c_buf_ = (*it).second;
+          }
+        }
+      }
+      StmtExprVisitor::VisitExpr_(op);
+    } else if (op->op.same_as(tcgen05_mma_arrive())) {
+      // Lowered form: tcgen05_mma_arrive(mbar_access_ptr)
+      // Link accumulated shared memory reads to mbar.
+      if (!args.empty()) {
+        if (auto mbar_buf = TryGetBufFromAccessPtr(args[0])) {
+          const BufferNode *mbar_key = mbar_buf.value().get();
+          for (const auto &region : pending_tcgen05_smem_reads_) {
+            mbar_to_buffer_reads_[mbar_key].push_back(region);
+          }
+          if (pending_tcgen05_c_buf_.defined()) {
+            mbar_to_buffer_writes_[mbar_key].push_back(
+                BufferRegion::FullRegion(pending_tcgen05_c_buf_.value()));
+          }
+        } else if (!pending_tcgen05_smem_reads_.empty() ||
+                   pending_tcgen05_c_buf_.defined()) {
+          LOG(WARNING) << "tcgen05_mma_arrive: could not resolve mbar buffer "
+                       << "from args[0]; discarding pending state";
+        }
+      } else if (!pending_tcgen05_smem_reads_.empty() ||
+                 pending_tcgen05_c_buf_.defined()) {
+        LOG(WARNING) << "tcgen05_mma_arrive: empty args; discarding "
+                     << "pending state";
+      }
+      // Always clear pending state after an arrive, whether successful or not,
+      // to prevent stale entries from being misattributed to a future arrive.
+      pending_tcgen05_smem_reads_.clear();
+      pending_tcgen05_c_buf_ = Optional<Buffer>();
+      StmtExprVisitor::VisitExpr_(op);
     } else if (op->op.same_as(tir::builtin::if_then_else())) {
       const PrimExpr &then_expr = args[1];
       const PrimExpr &else_expr = args[2];
