@@ -71,6 +71,58 @@ Tcgen05Meta getTcgen05Meta_32dp256b() {
       INST_WIDTH};
 }
 
+Tcgen05Meta getTcgen05MetaSt_32dp32b() {
+  constexpr int INST_WIDTH = 1;
+  IterVar inst_row = make_itervar("row", 128);
+  IterVar inst_col = make_itervar("col", INST_WIDTH);
+  return Tcgen05Meta{"tl::tcgen05_st_32dp32bNx",
+                     Fragment({inst_row, inst_col}, {inst_col}, {inst_row},
+                              make_itervar("rep", Range(0, 1))),
+                     INST_WIDTH};
+}
+
+Tcgen05Meta getTcgen05MetaSt_32dp64b() {
+  constexpr int INST_WIDTH = 2;
+  IterVar inst_row = make_itervar("row", 128);
+  IterVar inst_col = make_itervar("col", INST_WIDTH);
+  return Tcgen05Meta{
+      "tl::tcgen05_st_32dp64bNx",
+      Fragment({inst_row, inst_col}, {FloorDiv(FloorMod(inst_row, 32), 16)},
+               {FloorDiv(inst_row, 32) * 32 + FloorMod(inst_row, 8) * 4 +
+                FloorDiv(FloorMod(inst_row, 16), 8) +
+                FloorMod(inst_col, 2) * 2},
+               make_itervar("rep", Range(0, 1))),
+      INST_WIDTH};
+}
+
+Tcgen05Meta getTcgen05MetaSt_32dp128b() {
+  constexpr int INST_WIDTH = 4;
+  IterVar inst_row = make_itervar("row", 128);
+  IterVar inst_col = make_itervar("col", INST_WIDTH);
+  return Tcgen05Meta{
+      "tl::tcgen05_st_32dp128bNx",
+      Fragment({inst_row, inst_col}, {FloorDiv(FloorMod(inst_row, 32), 8)},
+               {FloorDiv(inst_row, 32) * 32 + FloorMod(inst_row, 8) * 4 +
+                FloorMod(inst_col, 4)},
+               make_itervar("rep", Range(0, 1))),
+      INST_WIDTH};
+}
+
+Tcgen05Meta getTcgen05MetaSt_32dp256b() {
+  constexpr int INST_WIDTH = 8;
+  IterVar inst_row = make_itervar("row", 128);
+  IterVar inst_col = make_itervar("col", INST_WIDTH);
+  return Tcgen05Meta{
+      "tl::tcgen05_st_32dp256bNx",
+      Fragment(
+          {inst_row, inst_col},
+          {FloorMod(inst_col, 2) + FloorDiv(FloorMod(inst_row, 32), 8) * 2},
+          {FloorDiv(inst_row, 32) * 32 + FloorMod(inst_row, 8) * 4 +
+           FloorDiv(FloorMod(inst_col, 8), 2)},
+          make_itervar("rep", Range(0, 1))),
+      INST_WIDTH};
+}
+
 std::tuple<bool, Fragment, int>
 expandTcgen05Layout(const Tcgen05Meta &meta, int tmem_phy_col_extent,
                     int num_threads, Range row_dom, Range col_dom) {
