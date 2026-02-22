@@ -12,7 +12,7 @@ Hopper separates memory instructions into generic and asynchronous proxy paths. 
 - Normalizes `tma_store` by ensuring the required `tma_store_arrive` / `tma_store_wait` handshake exists immediately after the store.
 - Injects `fence.proxy.async` right before an async-proxy instruction whenever the preceding state can be generic.
 
-By default, unknown/external calls do **not** affect proxy state. Opaque calls that may write into **shared memory** (e.g. via `tvm_access_ptr` / `address_of`) are treated as generic proxy traffic so a later async-proxy op will still be fenced. If you have a custom opaque region that issues async-proxy operations, use `tl.proxy_hint="async"` to force a fence before it.
+By default, unknown/external calls do **not** affect proxy state. Opaque calls that may write into **shared memory** (e.g. via `tvm_access_ptr` / `address_of`) are treated as generic proxy traffic so a later async-proxy op will still be fenced.
 
 ### Timeline View
 
@@ -113,14 +113,4 @@ The only change is the `fence_proxy_async` between the generic descriptor setup 
 If you introduce a new intrinsic that behaves like an async proxy, add it to `IsAsyncIntrinsic` in `src/transform/inject_fence_proxy.cc`. Likewise, extend `IsKnownGeneric` for additional generic operations.
 
 Most calls default to `"none"` (no proxy-state effect). `IsNonProxyIntrinsic` exists for well-known synchronization / scheduling helpers and to document intent, but it is not required for correctness if an op is neither generic nor async.
-
-For custom/opaque ops, you can override the default classification by annotating a region with `tl.proxy_hint`:
-
-```python
-with T.attr("proxy_scope", "tl.proxy_hint", "generic"):  # or "async"/"neutral"
-    ...
-```
-
-- `"generic"`: treat the region as generic proxy activity (forces generic state even if the body is opaque).
-- `"async"`: treat the region as async proxy activity (forces fence insertion before an opaque async op when needed).
-- `"neutral"`: treat the region as a barrier/reset for proxy state.
+For custom/opaque ops, you must lower them into known intrinsics (or manually insert `fence_proxy_async`) if they participate in proxy switching.

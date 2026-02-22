@@ -81,13 +81,6 @@ enum class ProxyEvent : uint8_t {
   kNeutral, // barrier/reset (e.g., fence.proxy.async)
 };
 
-enum class ProxyHint : uint8_t {
-  kUnknown,
-  kGeneric,
-  kAsync,
-  kNeutral,
-};
-
 inline bool IsFenceProxyAsyncCall(const CallNode *call) {
   return call && call->op.same_as(fence_proxy_async());
 }
@@ -308,21 +301,6 @@ bool IsNonProxyIntrinsic(const CallNode *call) {
   return false;
 }
 
-ProxyHint ProxyHintFromAttrValue(const PrimExpr &value) {
-  if (const auto *str = value.as<StringImmNode>()) {
-    if (str->value == "async") {
-      return ProxyHint::kAsync;
-    }
-    if (str->value == "generic") {
-      return ProxyHint::kGeneric;
-    }
-    if (str->value == "neutral") {
-      return ProxyHint::kNeutral;
-    }
-  }
-  return ProxyHint::kUnknown;
-}
-
 ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
   if (call == nullptr) {
     return ProxyEvent::kNone;
@@ -344,8 +322,7 @@ ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
   }
 
   // Default: unknown/external ops do not affect proxy state. If you introduce a
-  // new async-proxy intrinsic, add it to IsAsyncIntrinsic (or use tl.proxy_hint
-  // to classify an opaque region).
+  // new async-proxy intrinsic, add it to IsAsyncIntrinsic.
   return ProxyEvent::kNone;
 }
 
@@ -550,68 +527,6 @@ private:
 
     current_state_ = then_res.out_state.Union(else_out);
     return IfThenElse(cond, then_res.stmt, else_stmt);
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == "tl.proxy_hint") {
-      ProxyHint hint = ProxyHintFromAttrValue(op->value);
-      if (hint == ProxyHint::kUnknown) {
-        LOG(WARNING)
-            << "Unknown tl.proxy_hint value: " << op->value
-            << ". Expected one of: \"generic\", \"async\", \"neutral\"";
-      }
-
-      ProxyStateSet entry = current_state_;
-      ProxyStateSet body_entry = entry;
-      Array<Stmt> prefix;
-
-      if (hint == ProxyHint::kNeutral) {
-        // Treat as a barrier/reset for proxy state; do not allow previous
-        // generic traffic to trigger fences inside the hinted region.
-        body_entry = ProxyStateSet::None();
-      } else if (hint == ProxyHint::kAsync) {
-        // Treat region as an opaque async proxy op.
-        if (entry.MayBeGeneric()) {
-          prefix.push_back(MakeFenceProxyAsyncStmt());
-          body_entry = ProxyStateSet::None();
-        }
-      } else if (hint == ProxyHint::kGeneric) {
-        // Opaque generic op; body still rewritten but treated as not affecting
-        // proxy switching outside this AttrStmt.
-        body_entry = ProxyStateSet::None();
-      }
-
-      auto body_res = RewriteWithState(op->body, body_entry);
-      Stmt hinted = AttrStmt(op->node, op->attr_key, op->value, body_res.stmt);
-
-      // Override outgoing proxy state according to the hint.
-      switch (hint) {
-      case ProxyHint::kNeutral:
-        current_state_ = ProxyStateSet::None();
-        break;
-      case ProxyHint::kGeneric:
-        current_state_ = ProxyStateSet::Generic();
-        break;
-      case ProxyHint::kAsync:
-        current_state_ = ProxyStateSet::Async();
-        break;
-      case ProxyHint::kUnknown:
-        // Fall back to the body's computed state.
-        current_state_ = body_res.out_state;
-        break;
-      }
-
-      if (!prefix.empty()) {
-        Array<Stmt> seq = prefix;
-        seq.push_back(hinted);
-        return SeqStmt(std::move(seq));
-      }
-      return hinted;
-    }
-
-    // Default: preserve execution semantics and propagate proxy state through
-    // the body.
-    return StmtExprMutator::VisitStmt_(op);
   }
 
   Stmt VisitStmt_(const ForNode *op) final {

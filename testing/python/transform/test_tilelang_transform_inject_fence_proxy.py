@@ -179,39 +179,6 @@ def test_cp_async_then_wgmma_injects_fence_proxy():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_proxy_hint_override():
-    @T.prim_func
-    def before():
-        with T.Kernel(8):
-            T.evaluate(T.call_extern("handle", "custom_async"))
-            with T.attr("proxy_scope", "tl.proxy_hint", "neutral"):
-                T.evaluate(T.call_extern("handle", "custom_generic"))
-            T.evaluate(T.call_extern("handle", "custom_async_tail"))
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
-
-    def _has_fence(stmt):
-        result = False
-
-        def visit(node):
-            nonlocal result
-            if isinstance(node, tir.Evaluate):
-                call = node.value
-                if isinstance(call, tir.Call):
-                    op = call.op
-                    name = getattr(op, "name", None)
-                    if name == "tl.fence_proxy_async":
-                        result = True
-
-        tir.stmt_functor.post_order_visit(stmt, visit)
-        return result
-
-    assert not _has_fence(mod["main"].body)
-
-
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_unknown_extern_default_is_none():
     @T.prim_func
     def before():
@@ -378,38 +345,6 @@ def test_unknown_extern_address_of_shared_then_wgmma_injects_fence_proxy():
             )
 
     _check(before, after)
-
-
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_proxy_hint_generic_suppresses_conservative_fence():
-    @T.prim_func
-    def before():
-        with T.Kernel(1):
-            smem = T.decl_buffer((1,), T.float16, scope="shared")
-            smem[0] = T.float16(0)
-            with T.attr("proxy_scope", "tl.proxy_hint", "generic"):
-                T.evaluate(T.call_extern("handle", "custom_op"))
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
-
-    def _has_fence(stmt):
-        result = False
-
-        def visit(node):
-            nonlocal result
-            if isinstance(node, tir.Evaluate):
-                call = node.value
-                if isinstance(call, tir.Call):
-                    name = getattr(call.op, "name", None)
-                    if name == "tl.fence_proxy_async":
-                        result = True
-
-        tir.stmt_functor.post_order_visit(stmt, visit)
-        return result
-
-    assert not _has_fence(mod["main"].body)
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
@@ -1312,28 +1247,6 @@ def test_shared_load_does_not_trigger_fence_proxy():
                 1,
                 1,
             )
-
-    _check(before, after)
-
-
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_proxy_hint_async_inserts_fence_outside_region():
-    @T.prim_func
-    def before():
-        with T.Kernel(1):
-            smem = T.decl_buffer((1,), T.float16, scope="shared")
-            smem[0] = T.float16(0)
-            with T.attr("proxy_scope", "tl.proxy_hint", "async"):
-                T.evaluate(T.call_extern("handle", "custom_async"))
-
-    @T.prim_func
-    def after():
-        with T.Kernel(1):
-            smem = T.decl_buffer((1,), T.float16, scope="shared")
-            smem[0] = T.float16(0)
-            T.fence_proxy_async()
-            with T.attr("proxy_scope", "tl.proxy_hint", "async"):
-                T.evaluate(T.call_extern("handle", "custom_async"))
 
     _check(before, after)
 
