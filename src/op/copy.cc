@@ -1095,7 +1095,11 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
               : relative_wg_idx * (num_chunks_each_wg * meta.width);
       have_succeeded = true;
       Array<PrimExpr> args;
-      const char *bool_str = needs_pack_unpack ? "true" : "false";
+      // For tcgen05_st, bf16 data should be stored packed (without
+      // unpack::16b) so MMA TS reads correctly packed bf16 from TMEM columns.
+      // For tcgen05_ld, pack::16b is still needed when reading unpacked data.
+      bool use_pack_unpack_modifier = is_ld ? needs_pack_unpack : false;
+      const char *bool_str = use_pack_unpack_modifier ? "true" : "false";
       int effective_chunks =
           needs_pack_unpack ? num_chunks_each_wg / 2 : num_chunks_each_wg;
       args.push_back(StringImm(meta.intrinsics_name + "<" +

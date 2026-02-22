@@ -113,11 +113,17 @@ PASS_CFG = {
 }
 
 
-def run_test(name, func, out_idx, inputs, ref, rtol=1e-2, atol=1e-2):
+def run_test(name, func, out_idx, inputs, ref, rtol=1e-2, atol=1e-2,
+             dump_source=False):
     jit = tilelang.compile(func, out_idx=out_idx, target="cuda", pass_configs=PASS_CFG)
+    src = jit.get_kernel_source()
+    if dump_source:
+        fname = name.replace(" ", "_").replace("(", "").replace(")", "") + ".cu"
+        with open(fname, "w") as f:
+            f.write(src)
+        print(f"[dump] Full kernel source → {fname} ({len(src.splitlines())} lines)")
     print(f"\n{'='*60}")
     print(f"{name}: tcgen05 calls in generated code:")
-    src = jit.get_kernel_source()
     for line in src.splitlines():
         lo = line.lower()
         if "tcgen05" in lo or "fence_view" in lo:
@@ -148,7 +154,7 @@ if __name__ == "__main__":
     # --- Test 1: SS GEMM + ld + cast (baseline) ---
     f1 = test_cast_only(M, N, K, block_M, block_N, block_K,
                         in_dtype, out_dtype, accum_dtype, threads)
-    run_test("Test1 (SS+ld+cast)", f1, [2], [a, b], ref_bf16)
+    run_test("Test1 (SS+ld+cast)", f1, [2], [a, b], ref_bf16, dump_source=False)
 
     # --- Test 2: Full chained GEMM (SS + st + TS) ---
     b2 = torch.randn(N, N, device="cuda", dtype=torch.bfloat16)
@@ -157,4 +163,4 @@ if __name__ == "__main__":
     ref_s = a.cpu().float() @ b.cpu().float().T
     ref_p = ref_s.to(torch.bfloat16).float()
     ref_d = (ref_p @ b2.cpu().float().T).to(torch.bfloat16)
-    run_test("Test2 (chained GEMM)", f2, [3], [a, b, b2], ref_d)
+    run_test("Test2 (chained GEMM)", f2, [3], [a, b, b2], ref_d, dump_source=False)
