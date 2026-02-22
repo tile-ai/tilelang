@@ -348,7 +348,7 @@ def test_unknown_extern_address_of_shared_then_wgmma_injects_fence_proxy():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_tma_store_sync_injection():
+def test_inject_fence_proxy_does_not_inject_tma_store_sync():
     @T.prim_func
     def before():
         with T.Kernel(8):
@@ -374,41 +374,8 @@ def test_tma_store_sync_injection():
                     waits += 1
 
     tir.stmt_functor.post_order_visit(mod["main"].body, visit)
-    assert arrives == 1
-    assert waits == 1
-
-
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_tma_store_sync_injection_no_duplicates():
-    @T.prim_func
-    def before():
-        with T.Kernel(8):
-            A_global = T.decl_buffer((128,), T.float16, scope="global")
-            T.evaluate(T.call_intrin("handle", tir.op.Op.get("tl.tma_store"), A_global.data))
-            T.tma_store_arrive()
-            T.tma_store_wait()
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.InjectFenceProxy()(mod)
-
-    arrives = 0
-    waits = 0
-
-    def visit(node):
-        nonlocal arrives, waits
-        if isinstance(node, tir.Evaluate):
-            call = node.value
-            if isinstance(call, tir.Call):
-                name = getattr(call.op, "name", None)
-                if name == "tl.tma_store_arrive":
-                    arrives += 1
-                elif name in ("tl.tma_store_wait", "tl.tma_store_wait<0>"):
-                    waits += 1
-
-    tir.stmt_functor.post_order_visit(mod["main"].body, visit)
-    assert arrives == 1
-    assert waits == 1
+    assert arrives == 0
+    assert waits == 0
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
@@ -901,8 +868,8 @@ def test_regression_0219_fence_no_fence_inserted():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_ldmatrix_then_wgmma_injects_fence_proxy():
-    """ldmatrix/stmatrix use the generic proxy and must be fenced before WGMMA."""
+def test_ldmatrix_then_wgmma_does_not_inject_fence_proxy():
+    """Shared-memory loads (including ldmatrix) do not trigger fence injection."""
 
     @T.prim_func
     def before():
@@ -940,44 +907,7 @@ def test_ldmatrix_then_wgmma_injects_fence_proxy():
                 1,
             )
 
-    @T.prim_func
-    def after():
-        with T.Kernel(1):
-            smem = T.decl_buffer((256,), T.float16, scope="shared")
-            regs = T.decl_buffer((16,), T.float16, scope="local")
-            desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
-            desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
-            C_local = T.decl_buffer((32,), T.float16, scope="local")
-            T.call_intrin(
-                "handle",
-                tir.op.Op.get("tl.ptx_ldmatrix"),
-                T.int32(0),
-                1,
-                T.tvm_access_ptr(T.type_annotation(T.float16), smem.data, 0, 16, 1),
-                regs.data,
-            )
-            T.warpgroup_arrive()
-            T.fence_proxy_async()
-            T.ptx_wgmma_ss(
-                T.float16,
-                "m64n64k16",
-                T.bool(True),
-                T.bool(True),
-                "fp16",
-                "fp16",
-                "fp16",
-                desc_a.data,
-                T.int32(0),
-                desc_b.data,
-                T.int32(0),
-                C_local.data,
-                T.int32(0),
-                T.bool(True),
-                1,
-                1,
-            )
-
-    _check(before, after)
+    _check(before, before)
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)

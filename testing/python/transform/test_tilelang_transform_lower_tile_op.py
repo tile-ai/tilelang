@@ -3,6 +3,7 @@ from tilelang.utils.target import determine_target
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tvm import tir
 import pytest
 
 auto_target = tvm.target.Target(determine_target("auto"))
@@ -72,16 +73,53 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
 
         return tvm.IRModule({"main": main})
 
-    with tvm.transform.PassContext():
-        mod = tvm.tir.transform.BindTarget(auto_target)(before())
+    with tvm.target.Target(auto_target):
+        with tvm.transform.PassContext():
+            mod = tvm.tir.transform.BindTarget(auto_target)(before())
+            mod = tl.transform.LowerTileOp()(mod)
+            mod = tvm.tir.transform.Simplify()(mod)
+        ref_mod = tvm.tir.transform.BindTarget(auto_target)(after())
+        ref_mod = tvm.tir.transform.Simplify()(ref_mod)
+        # Note(tzj): The structures are equal except the argument in "T.reads" function.
+        # The difference is just between the first index and the indices range, which is totally equivalent
+        tvm.ir.structural_equal(mod, ref_mod)
+        # tvm.ir.assert_structural_equal(mod, ref_mod)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_lower_tile_op_bulk_store_inserts_tma_store_sync():
+    """Bulk TMA stores must be followed by commit+wait (tma_store_arrive/wait)."""
+
+    @T.prim_func
+    def main(B: T.Tensor((128,), T.float16)):
+        with T.Kernel(1, threads=128):
+            smem = T.alloc_shared((128,), T.float16)
+            T.copy(smem, B)
+
+    with tvm.target.Target(auto_target):
+        mod = tvm.IRModule({"main": main})
+        mod = tvm.tir.transform.BindTarget(auto_target)(mod)
         mod = tl.transform.LowerTileOp()(mod)
-        mod = tvm.tir.transform.Simplify()(mod)
-    ref_mod = tvm.tir.transform.BindTarget(auto_target)(after())
-    ref_mod = tvm.tir.transform.Simplify()(ref_mod)
-    # Note(tzj): The structures are equal except the argument in "T.reads" function.
-    # The difference is just between the first index and the indices range, which is totally equivalent
-    tvm.ir.structural_equal(mod, ref_mod)
-    # tvm.ir.assert_structural_equal(mod, ref_mod)
+
+    names: list[str] = []
+
+    def visit(node):
+        if isinstance(node, tir.Evaluate):
+            call = node.value
+            if isinstance(call, tir.Call):
+                names.append(getattr(call.op, "name", ""))
+
+    tir.stmt_functor.post_order_visit(mod["main"].body, visit)
+
+    assert names.count("tl.tma_store") == 1
+    assert names.count("tl.tma_store_arrive") == 1
+    wait_indices = [i for i, n in enumerate(names) if n in ("tl.tma_store_wait", "tl.tma_store_wait<0>")]
+    assert len(wait_indices) == 1
+
+    store_idx = names.index("tl.tma_store")
+    arrive_idx = names.index("tl.tma_store_arrive")
+    wait_idx = wait_indices[0]
+    assert store_idx < arrive_idx < wait_idx
 
 
 if __name__ == "__main__":

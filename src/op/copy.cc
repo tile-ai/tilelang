@@ -1418,6 +1418,19 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     args.push_back(GetEvictionPolicy());
     tma_copy = Evaluate(Call(DataType::Handle(), op, args));
   }
+
+  // Bulk TMA stores participate in the cp.async.bulk group mechanism, so we
+  // must commit and wait to ensure completion before the store buffer is
+  // reused or the kernel exits.
+  if (!is_load) {
+    Array<Stmt> seq;
+    seq.reserve(3);
+    seq.push_back(tma_copy);
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    tma_copy = SeqStmt(std::move(seq));
+  }
+
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
 
   return tma_copy;
@@ -1495,6 +1508,16 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
              {global_addr, shared_addr, elements * shared_tensor->dtype.bytes(),
               need_reduce, GetEvictionPolicy()}));
   }
+
+  if (!is_load) {
+    Array<Stmt> seq;
+    seq.reserve(3);
+    seq.push_back(tma_copy);
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    tma_copy = SeqStmt(std::move(seq));
+  }
+
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
   return tma_copy;
 }

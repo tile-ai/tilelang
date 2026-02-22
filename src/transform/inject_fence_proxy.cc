@@ -85,37 +85,6 @@ inline bool IsFenceProxyAsyncCall(const CallNode *call) {
   return call && call->op.same_as(fence_proxy_async());
 }
 
-inline bool IsTMAStoreCall(const CallNode *call) {
-  return call && call->op.same_as(tma_store());
-}
-
-inline bool IsTMAStoreArriveCall(const CallNode *call) {
-  return call && call->op.same_as(tma_store_arrive());
-}
-
-inline bool IsTMAStoreWaitCall(const CallNode *call) {
-  return call && call->op.same_as(tma_store_wait());
-}
-
-inline const CallNode *GetEvaluateCall(const Stmt &stmt) {
-  if (const auto *eval = stmt.as<EvaluateNode>()) {
-    return eval->value.as<CallNode>();
-  }
-  return nullptr;
-}
-
-inline bool IsTMAStoreStmt(const Stmt &stmt) {
-  return IsTMAStoreCall(GetEvaluateCall(stmt));
-}
-
-inline bool IsTMAStoreArriveStmt(const Stmt &stmt) {
-  return IsTMAStoreArriveCall(GetEvaluateCall(stmt));
-}
-
-inline bool IsTMAStoreWaitStmt(const Stmt &stmt) {
-  return IsTMAStoreWaitCall(GetEvaluateCall(stmt));
-}
-
 // Identify async intrinsics emitted by TileLang or TVM that require a fence
 // when they follow generic proxies.
 bool IsAsyncIntrinsic(const CallNode *call) {
@@ -125,8 +94,7 @@ bool IsAsyncIntrinsic(const CallNode *call) {
 
   // TileLang async intrinsics
   if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-      call->op.same_as(tma_store()) || call->op.same_as(tma_store_arrive()) ||
-      call->op.same_as(tma_store_wait()) || call->op.same_as(ptx_wgmma_ss()) ||
+      call->op.same_as(tma_store()) || call->op.same_as(ptx_wgmma_ss()) ||
       call->op.same_as(ptx_wgmma_rs()) ||
       call->op.same_as(ptx_tcgen05_mma_ss()) ||
       call->op.same_as(ptx_tcgen05_mma_ts())) {
@@ -144,18 +112,6 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   }
 
   return false;
-}
-
-// Known ops that must be treated as generic proxies (e.g. ldmatrix/stmatrix).
-bool IsKnownGeneric(const CallNode *call) {
-  if (call == nullptr) {
-    return false;
-  }
-  // Note: cp.async (classic) is *not* part of the async proxy on Hopper; treat
-  // it as generic proxy traffic for fence injection purposes.
-  return call->op.same_as(ptx_ldmatrix()) || call->op.same_as(ptx_stmatrix()) ||
-         call->op.same_as(ptx_cp_async()) ||
-         call->op.same_as(builtin::ptx_cp_async());
 }
 
 inline bool IsSharedPointerVar(const VarNode *var) {
@@ -271,6 +227,8 @@ bool IsNonProxyIntrinsic(const CallNode *call) {
       call->op.same_as(builtin::ptx_wait_barrier()) ||
       call->op.same_as(builtin::ptx_commit_group()) ||
       call->op.same_as(builtin::ptx_wait_group()) ||
+      call->op.same_as(tma_store_arrive()) ||
+      call->op.same_as(tma_store_wait()) ||
       call->op.same_as(builtin::ptx_cp_async_barrier()) ||
       call->op.same_as(ptx_cp_async_barrier_noinc())) {
     return true;
@@ -314,9 +272,6 @@ ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
   if (IsAsyncIntrinsic(call)) {
     return ProxyEvent::kAsync;
   }
-  if (IsKnownGeneric(call)) {
-    return ProxyEvent::kGeneric;
-  }
   if (CallMayWriteSharedMemory(call)) {
     return ProxyEvent::kGeneric;
   }
@@ -343,17 +298,8 @@ inline Stmt MakeFenceProxyAsyncStmt() {
   return Evaluate(Call(DataType::Handle(), fence_proxy_async(), {}));
 }
 
-inline Stmt MakeTMAStoreArriveStmt() {
-  return Evaluate(Call(DataType::Handle(), tma_store_arrive(), {}));
-}
-
-inline Stmt MakeTMAStoreWaitStmt() {
-  return Evaluate(Call(DataType::Handle(), tma_store_wait(), {}));
-}
-
 /*!
- * \brief Stateful rewriter that injects fence.proxy.async and normalizes
- *        tma_store synchronization.
+ * \brief Stateful rewriter that injects fence.proxy.async.
  *
  * The key property is that we traverse statements in execution order and keep
  * a running (may-)state of the last proxy kind. Whenever we are about to issue
@@ -416,32 +362,14 @@ private:
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
-    seq_depth_++;
     Array<Stmt> seq;
     seq.reserve(op->seq.size());
 
     for (int i = 0; i < static_cast<int>(op->seq.size()); ++i) {
       const Stmt &original = op->seq[i];
-      const bool is_tma_store = IsTMAStoreStmt(original);
-      const bool has_arrive = is_tma_store &&
-                              (i + 1 < static_cast<int>(op->seq.size())) &&
-                              IsTMAStoreArriveStmt(op->seq[i + 1]);
-      const bool has_wait = is_tma_store &&
-                            (i + 2 < static_cast<int>(op->seq.size())) &&
-                            IsTMAStoreWaitStmt(op->seq[i + 2]);
-
       Stmt mutated = VisitStmt(original);
       AppendFlattened(&seq, mutated);
-
-      // TMA stores must be followed by the arrive/wait pair. Inject it here so
-      // we can avoid duplicates when the user already provided the handshake.
-      if (is_tma_store && !(has_arrive && has_wait)) {
-        AppendFlattened(&seq, VisitStmt(MakeTMAStoreArriveStmt()));
-        AppendFlattened(&seq, VisitStmt(MakeTMAStoreWaitStmt()));
-      }
     }
-
-    seq_depth_--;
     if (seq.size() == 1) {
       return seq[0];
     }
@@ -452,19 +380,6 @@ private:
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     const auto *eval = stmt.as<EvaluateNode>();
     const auto *call = eval->value.as<CallNode>();
-
-    // Standalone tma_store (not within a SeqStmt) still needs arrive/wait.
-    if (seq_depth_ == 0 && IsTMAStoreCall(call)) {
-      Array<Stmt> seq;
-      if (current_state_.MayBeGeneric()) {
-        seq.push_back(MakeFenceProxyAsyncStmt());
-      }
-      seq.push_back(stmt);
-      seq.push_back(MakeTMAStoreArriveStmt());
-      seq.push_back(MakeTMAStoreWaitStmt());
-      current_state_ = ProxyStateSet::Async();
-      return SeqStmt(std::move(seq));
-    }
 
     ProxyEvent event = ClassifyCallProxyEvent(call);
     return ApplyProxyEvent(stmt, event);
@@ -583,7 +498,6 @@ private:
   }
 
   ProxyStateSet current_state_{ProxyStateSet::None()};
-  int seq_depth_{0};
 };
 
 } // namespace
