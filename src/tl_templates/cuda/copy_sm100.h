@@ -226,6 +226,12 @@ tcgen05_ld_32dp256bNx(uint32_t const &tmem_start_col,
   tl::fence_view_async_tmem_load();
 }
 
+// NOTE: The column offset increment (CUR_SEGMENT_LEN) assumes each register
+// maps to exactly one TMEM column (i.e. unpack::16b is NOT active). If
+// unpack::16b were used, each register would expand to 2 columns, requiring
+// an increment of 2*CUR_SEGMENT_LEN. Currently the codegen always passes
+// unpack16=false for stores (see copy.cc use_pack_unpack_modifier), so this
+// is correct. Do not enable unpack for stores without fixing this offset.
 template <typename target_call_cls, int MAX_LOGN, int N, typename src_t>
 __device__ __forceinline__ void tcgen05_st_core(uint32_t const &tmem_start_col,
                                                 src_t const *src_ptr) {
