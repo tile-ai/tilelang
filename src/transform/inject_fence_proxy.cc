@@ -208,66 +208,9 @@ bool CallMayWriteSharedMemory(const CallNode *call) {
   return writes_shared;
 }
 
-// Ops that should *not* be considered generic/async proxy traffic for the
-// purpose of injecting fence.proxy.async.
-bool IsNonProxyIntrinsic(const CallNode *call) {
-  if (call == nullptr) {
-    return false;
-  }
-
-  // Thread/barrier synchronization and barrier init fencing do not represent
-  // shared-memory proxy traffic.
-  if (call->op.same_as(builtin::tvm_storage_sync()) ||
-      call->op.same_as(builtin::ptx_init_barrier_thread_count()) ||
-      call->op.same_as(ptx_fence_barrier_init()) ||
-      call->op.same_as(mbarrier_wait_parity()) ||
-      call->op.same_as(mbarrier_expect_tx()) ||
-      call->op.same_as(builtin::ptx_arrive_barrier()) ||
-      call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
-      call->op.same_as(builtin::ptx_wait_barrier()) ||
-      call->op.same_as(builtin::ptx_commit_group()) ||
-      call->op.same_as(builtin::ptx_wait_group()) ||
-      call->op.same_as(tma_store_arrive()) ||
-      call->op.same_as(tma_store_wait()) ||
-      call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-      call->op.same_as(ptx_cp_async_barrier_noinc())) {
-    return true;
-  }
-
-  // Warpgroup primitives (WGMMA scheduling) do not change shared-memory proxy
-  // state; we want generic traffic before them to still require a fence before
-  // the subsequent WGMMA.
-  if (call->op.same_as(warpgroup_arrive()) ||
-      call->op.same_as(warpgroup_commit_batch()) ||
-      call->op.same_as(warpgroup_wait()) ||
-      call->op.same_as(warpgroup_fence_operand())) {
-    return true;
-  }
-
-  // Descriptor initialization only materializes register/local metadata and
-  // does not represent shared-memory proxy traffic itself.
-  if (call->op.same_as(initialize_wgmma_descriptor()) ||
-      call->op.same_as(initialize_tcgen05_descriptor())) {
-    return true;
-  }
-
-  // Register allocation hints are orthogonal to proxy state.
-  if (call->op.same_as(set_max_nreg()) || call->op.same_as(no_set_max_nreg())) {
-    return true;
-  }
-
-  return false;
-}
-
 ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
-  if (call == nullptr) {
-    return ProxyEvent::kNone;
-  }
   if (IsFenceProxyAsyncCall(call)) {
     return ProxyEvent::kNeutral;
-  }
-  if (IsNonProxyIntrinsic(call)) {
-    return ProxyEvent::kNone;
   }
   if (IsAsyncIntrinsic(call)) {
     return ProxyEvent::kAsync;
