@@ -47,7 +47,8 @@ _Ret = TypeVar("_Ret")
 def compile(
     func: PrimFunc[_KP, _T] = None,
     out_idx: list[int] | int | None = None,
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
+    | None = None,
     target: str | Target | None = None,
     target_host: str | Target | None = None,
     verbose: bool | None = None,
@@ -92,7 +93,9 @@ def compile(
 
     if hasattr(func, "out_idx_override"):
         if func.out_idx_override is not None and out_idx is not None:
-            raise ValueError("Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors")
+            raise ValueError(
+                "Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors"
+            )
         out_idx = func.out_idx_override or out_idx
 
     return cached(
@@ -110,7 +113,8 @@ def compile(
 def par_compile(
     funcs: Iterable[PrimFunc[_KP, _T]],
     out_idx: list[int] | int | None = None,
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
+    | None = None,
     target: str | Target | None = None,
     target_host: str | Target | None = None,
     verbose: bool | None = None,
@@ -264,7 +268,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     """
 
     out_idx: list[int] | int | None
-    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None
+    execution_backend: (
+        Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None
+    )
     target: str | Target | None
     target_host: str | Target | None
     verbose: bool | None
@@ -321,11 +327,16 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             self.mode = self._infer_jit_mode(*args, **kwargs)
         self.func.set_mode(self.mode)
         if self.mode == "eager" and self.out_idx is not None:
-            raise ValueError("out_idx is only supported in lazy mode. In eager mode, use T.empty() to declare output tensors instead.")
+            raise ValueError(
+                "out_idx is only supported in lazy mode. In eager mode, use T.empty() to declare output tensors instead."
+            )
         return self.mode
 
     def par_compile(
-        self, configs: Iterable[dict[str, Any] | tuple[str, Any]], num_workers: int = None, ignore_error: bool = False
+        self,
+        configs: Iterable[dict[str, Any] | tuple[str, Any]],
+        num_workers: int = None,
+        ignore_error: bool = False,
     ) -> list[JITKernel[_KP, _T]]:
         """
         Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
@@ -388,7 +399,13 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
                 func_name = self.func.attrs["global_symbol"]
             else:
                 func_name = getattr(self.func, "__name__", "jit_kernel")
+
+            # cutedsl emits python executor not `c`
+            is_cutedsl = self.target == "cutedsl" or self.execution_backend == "cutedsl"
+            kernel_suffix = "py" if is_cutedsl else "c"
+            kernel_file = f"tilelang_jit_kernel_{func_name}.{kernel_suffix}"
             kernel_file = f"tilelang_jit_kernel_{func_name}.c"
+
             program_file = f"tilelang_jit_program_{func_name}.py"
             makedirs(self.debug_root_path, exist_ok=True)
             with open(path.join(self.debug_root_path, kernel_file), "w") as f:
@@ -415,7 +432,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         # Whether to return the compile arguments (out_idx, target, target_host, etc.) for autotuner cache
         return_compile_arguments = kwargs.pop("__return_compile_arguments", False)
         if return_compile_arguments:
-            logger.warning("`__return_compile_arguments` is deprecated and will be removed in future versions.")
+            logger.warning(
+                "`__return_compile_arguments` is deprecated and will be removed in future versions."
+            )
             compile_args = {
                 "out_idx": self.out_idx,
                 "execution_backend": self.execution_backend,
