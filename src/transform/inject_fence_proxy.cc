@@ -424,6 +424,30 @@ private:
     PrimExpr cond = VisitExpr(op->condition);
     ProxyStateSet entry = current_state_;
 
+    if (entry.MayBeGeneric() && op->else_case.defined()) {
+      ProxyEventSummary then_summary = SummarizeProxyEvents(op->then_case);
+      ProxyEventSummary else_summary =
+          SummarizeProxyEvents(op->else_case.value());
+      if (then_summary.has_async && !then_summary.has_generic &&
+          else_summary.has_async && !else_summary.has_generic) {
+        // Both branches are pure async-proxy regions. If we enter the if in a
+        // possibly-generic state, rewriting each branch would otherwise insert
+        // a fence at the beginning of both branches. Hoist a single fence to
+        // the if preheader instead.
+        Stmt pre_fence = MakeFenceProxyAsyncStmt();
+        ProxyStateSet if_entry = ProxyStateSet::None();
+
+        auto then_res = RewriteWithState(op->then_case, if_entry);
+        auto else_res = RewriteWithState(op->else_case.value(), if_entry);
+
+        current_state_ = then_res.out_state.Union(else_res.out_state);
+        return SeqStmt(Array<Stmt>{
+            pre_fence,
+            IfThenElse(cond, then_res.stmt, else_res.stmt),
+        });
+      }
+    }
+
     auto then_res = RewriteWithState(op->then_case, entry);
 
     Stmt else_stmt;
@@ -483,18 +507,24 @@ private:
     PrimExpr cond = VisitExpr(op->condition);
     ProxyStateSet entry = current_state_;
 
-    // While may execute zero or more times; use the same header fixpoint.
-    ProxyStateSet header = entry;
-    RewriteResult body_res{op->body, entry};
-    for (int iter = 0; iter < 8; ++iter) {
-      body_res = RewriteWithState(op->body, header);
-      ProxyStateSet next_header = entry.Union(body_res.out_state);
-      if (next_header == header) {
-        break;
-      }
-      header = next_header;
+    ProxyEventSummary body_summary = SummarizeProxyEvents(op->body);
+    if (entry.MayBeGeneric() && body_summary.has_async &&
+        !body_summary.has_generic) {
+      // Similar to the for-loop case: when the loop body is a pure async-proxy
+      // region, a possibly-generic entry state would otherwise cause a fence to
+      // be inserted inside the loop body and executed on every iteration.
+      //
+      // Hoist a single fence to the loop preheader and start the loop in the
+      // reset state instead.
+      Stmt pre_fence = MakeFenceProxyAsyncStmt();
+      ProxyStateSet loop_entry = ProxyStateSet::None();
+      RewriteResult body_res = RewriteLoopBodyFixpoint(op->body, loop_entry);
+
+      current_state_ = loop_entry.Union(body_res.out_state);
+      return SeqStmt(Array<Stmt>{pre_fence, While(cond, body_res.stmt)});
     }
 
+    RewriteResult body_res = RewriteLoopBodyFixpoint(op->body, entry);
     current_state_ = entry.Union(body_res.out_state);
     return While(cond, body_res.stmt);
   }
