@@ -13,7 +13,7 @@ import sys
 
 import torch
 from tilelang import tvm
-from tvm import runtime, tir, arith
+from tvm import runtime, tir
 from tvm.target import Target
 from tvm.relax import TensorType
 from tilelang.utils.target import determine_target
@@ -192,127 +192,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 expected_dtype_strs.append(None)
                 is_buffer_param.append(False)
 
-        # --- Precompute info for nullable buffers with shared symbolic shapes ---
-        #
-        # This is used to gracefully handle the case where:
-        #   - A symbolic shape var appears in multiple (nullable) buffers
-        #   - All buffers that mention that var are passed as `None`
-        #
-        # In that scenario TVM raises at call time because it cannot bind the symbolic var.
-        # If those buffers are truly unused by the kernel body, we can materialize a tiny
-        # dummy tensor for one of them to provide the missing binding (defaulting to 0).
-        def _collect_vars(expr: tir.PrimExpr) -> list[tir.Var]:
-            vars_found: list[tir.Var] = []
-
-            def _visitor(node: Any) -> None:
-                if isinstance(node, tir.Var):
-                    vars_found.append(node)
-
-            tir.stmt_functor.post_order_visit(expr, _visitor)
-            return vars_found
-
-        # Identify which buffers are accessed by the kernel body.
-        used_buffers: set[tir.Buffer] = set()
-
-        def _use_visitor(node: Any) -> None:
-            if isinstance(node, tir.BufferLoad):
-                used_buffers.add(node.buffer)
-            elif isinstance(node, tir.BufferStore):
-                used_buffers.add(node.buffer)
-
-        tir.stmt_functor.post_order_visit(prim_func.body, _use_visitor)
-
-        # Per-parameter "unused buffer" flag.
-        is_unused_buffer_param: list[bool] = [False] * len(params)
-        for param_idx, p in enumerate(params):
-            if p not in buffer_map:
-                continue
-            is_unused_buffer_param[param_idx] = buffer_map[p] not in used_buffers
-
-        # Map symbolic var name -> buffer indices where it appears (shapes/strides).
-        # Ignore PrimFunc params (handles/scalars); we only care about true symbolic dims.
-        prim_param_names = {p.name for p in params if isinstance(p, tir.Var)}
-        sym_to_buf_indices: dict[str, set[int]] = {}
-        for buf_idx, p in enumerate(params):
-            if p not in buffer_map:
-                continue
-            buf = buffer_map[p]
-            for dim in buf.shape:
-                if not isinstance(dim, tir.PrimExpr):
-                    continue
-                for v in _collect_vars(dim):
-                    if v.name in prim_param_names:
-                        continue
-                    sym_to_buf_indices.setdefault(v.name, set()).add(buf_idx)
-            if buf.strides is not None:
-                for st in buf.strides:
-                    if not isinstance(st, tir.PrimExpr):
-                        continue
-                    for v in _collect_vars(st):
-                        if v.name in prim_param_names:
-                            continue
-                        sym_to_buf_indices.setdefault(v.name, set()).add(buf_idx)
-
-        # Only keep symbols that:
-        # - appear in >=2 buffers, and
-        # - all involved buffers are unused in the kernel body
-        nullable_shared_syms: dict[str, tuple[int, ...]] = {}
-        for sym_name, buf_indices_set in sym_to_buf_indices.items():
-            buf_indices = tuple(sorted(buf_indices_set))
-            if len(buf_indices) < 2:
-                continue
-            if all(is_unused_buffer_param[i] for i in buf_indices):
-                nullable_shared_syms[sym_name] = buf_indices
-
-        shape_analyzer = arith.Analyzer()
-
-        def _infer_symbolic_values(tensors: list[Any]) -> dict[str, int]:
-            """Infer known symbolic values from non-null inputs."""
-
-            inferred: dict[str, int] = {}
-
-            # Scalar params
-            for param_idx, p in enumerate(params):
-                if p in buffer_map:
-                    continue
-                if isinstance(p, tir.Var):
-                    val = tensors[param_idx]
-                    if isinstance(val, (int, bool)):
-                        inferred[p.name] = int(val)
-
-            # Buffer shape vars (only handle bare `tir.Var` dims)
-            for buf_idx, p in enumerate(params):
-                if p not in buffer_map:
-                    continue
-                t = tensors[buf_idx]
-                if not isinstance(t, torch.Tensor):
-                    continue
-                expected_shape = param_shapes[buf_idx]
-                for dim_idx, dim_expr in enumerate(expected_shape):
-                    if isinstance(dim_expr, tir.Var):
-                        inferred.setdefault(dim_expr.name, int(t.shape[dim_idx]))
-
-            return inferred
-
-        def _eval_dim(dim_expr: Any, sym_vals: dict[str, int], default: int = 0) -> int:
-            if isinstance(dim_expr, int):
-                return int(dim_expr)
-            if isinstance(dim_expr, tir.IntImm):
-                return int(dim_expr)
-            if isinstance(dim_expr, tir.Var):
-                return int(sym_vals.get(dim_expr.name, default))
-            if isinstance(dim_expr, tir.PrimExpr):
-                subs: dict[tir.Var, tir.PrimExpr] = {}
-                for v in _collect_vars(dim_expr):
-                    subs[v] = tir.const(int(sym_vals.get(v.name, default)), v.dtype)
-                simplified = shape_analyzer.simplify(tir.stmt_functor.substitute(dim_expr, subs))
-                if isinstance(simplified, tir.IntImm):
-                    return int(simplified)
-                bound = shape_analyzer.const_int_bound(simplified)
-                if bound.min_value == bound.max_value:
-                    return int(bound.min_value)
-            return int(default)
-
         def func(*inputs: torch.Tensor | Any):
             # Validate input count strictly
             expected_inputs = len(self.params) - len(self.result_idx)
@@ -361,38 +240,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     tensor = inputs[ins_idx]
                     ins_idx += 1
                 tensor_list.append(tensor)
-
-            # Fix shared-symbolic bindings for truly-unused nullable buffers.
-            if nullable_shared_syms and any(x is None for x in inputs):
-                # Find a user-provided tensor device we can allocate on.
-                user_tensor_device: torch.device | None = None
-                for x in tensor_list:
-                    if isinstance(x, torch.Tensor):
-                        user_tensor_device = x.device
-                        break
-
-                if user_tensor_device is not None:
-                    # Only compute symbolic bindings if we actually need a dummy.
-                    needs_dummy = any(all(tensor_list[i] is None for i in buf_indices) for buf_indices in nullable_shared_syms.values())
-                    if needs_dummy:
-                        sym_vals = _infer_symbolic_values(tensor_list)
-                        for buf_indices in nullable_shared_syms.values():
-                            if not all(tensor_list[i] is None for i in buf_indices):
-                                continue
-                            dummy_idx = buf_indices[0]
-                            dummy_shape_exprs = param_shapes[dummy_idx]
-                            dummy_shape: list[int] = [_eval_dim(d, sym_vals, default=0) for d in dummy_shape_exprs]
-                            dummy_tensor = torch.empty(
-                                tuple(dummy_shape),
-                                dtype=param_dtypes[dummy_idx],
-                                device=user_tensor_device,
-                            )
-                            tensor_list[dummy_idx] = dummy_tensor
-
-                            # Update inferred symbolic values from the dummy (helps subsequent dummies avoid conflicts)
-                            for dim_idx, dim_expr in enumerate(dummy_shape_exprs):
-                                if isinstance(dim_expr, tir.Var):
-                                    sym_vals.setdefault(dim_expr.name, int(dummy_tensor.shape[dim_idx]))
 
             executable(*tensor_list)
 

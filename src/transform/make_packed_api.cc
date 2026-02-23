@@ -514,7 +514,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   }
 
   binder.BindDLTensors(buffer_def, device_type, device_id, name_hint,
-                       used_param_buffers);
+                       used_param_buffers, detector.used_shape_vars);
   for (const auto &[var, buffer] : buffer_def) {
     // Prefer buffer data var name in diagnostics to avoid exposing low-level
     // handle vars
