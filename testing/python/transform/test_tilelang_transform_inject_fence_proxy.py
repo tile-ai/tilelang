@@ -1051,6 +1051,79 @@ def test_if_merge_may_be_generic_then_async_injects_fence_proxy():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_hoist_fence_proxy_out_of_unrolled_loop():
+    """Prefer a single preheader fence over per-iteration fences.
+
+    If the loop body performs async-proxy ops but never performs generic shared
+    traffic, a possibly-generic entry state should be resolved by inserting a
+    single fence before the loop, rather than inside the loop body.
+    """
+
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            smem = T.decl_buffer((1,), T.float16, scope="shared")
+            desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            C_local = T.decl_buffer((32,), T.float16, scope="local")
+
+            smem[0] = T.float16(0)
+            T.warpgroup_arrive()
+            for _ in T.unroll(12):
+                T.ptx_wgmma_ss(
+                    T.float16,
+                    "m64n64k16",
+                    T.bool(True),
+                    T.bool(True),
+                    "fp16",
+                    "fp16",
+                    "fp16",
+                    desc_a.data,
+                    T.int32(0),
+                    desc_b.data,
+                    T.int32(0),
+                    C_local.data,
+                    T.int32(0),
+                    T.bool(True),
+                    1,
+                    1,
+                )
+
+    @T.prim_func
+    def after():
+        with T.Kernel(1):
+            smem = T.decl_buffer((1,), T.float16, scope="shared")
+            desc_a = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            desc_b = T.decl_buffer((1,), T.uint64, scope="local.descriptor.wgmma")
+            C_local = T.decl_buffer((32,), T.float16, scope="local")
+
+            smem[0] = T.float16(0)
+            T.warpgroup_arrive()
+            T.fence_proxy_async()
+            for _ in T.unroll(12):
+                T.ptx_wgmma_ss(
+                    T.float16,
+                    "m64n64k16",
+                    T.bool(True),
+                    T.bool(True),
+                    "fp16",
+                    "fp16",
+                    "fp16",
+                    desc_a.data,
+                    T.int32(0),
+                    desc_b.data,
+                    T.int32(0),
+                    C_local.data,
+                    T.int32(0),
+                    T.bool(True),
+                    1,
+                    1,
+                )
+
+    _check(before, after)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_loop_carried_generic_then_async_injects_fence_proxy():
     """Generic proxy traffic at the end of an iteration may affect the next iteration."""
 

@@ -224,6 +224,39 @@ ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
   return ProxyEvent::kNone;
 }
 
+struct ProxyEventSummary {
+  bool has_async{false};
+  bool has_generic{false};
+};
+
+ProxyEventSummary SummarizeProxyEvents(const Stmt &stmt) {
+  ProxyEventSummary summary;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (summary.has_async && summary.has_generic) {
+      return;
+    }
+    if (const auto *store = node.as<BufferStoreNode>()) {
+      auto scope =
+          StorageScope::Create(GetPtrStorageScope(store->buffer->data));
+      if (scope.rank == StorageRank::kShared) {
+        summary.has_generic = true;
+      }
+      return;
+    }
+    if (const auto *eval = node.as<EvaluateNode>()) {
+      const auto *call = eval->value.as<CallNode>();
+      ProxyEvent event = ClassifyCallProxyEvent(call);
+      if (event == ProxyEvent::kAsync) {
+        summary.has_async = true;
+      } else if (event == ProxyEvent::kGeneric) {
+        summary.has_generic = true;
+      }
+      return;
+    }
+  });
+  return summary;
+}
+
 inline void AppendFlattened(Array<Stmt> *out, const Stmt &stmt) {
   if (!stmt.defined()) {
     return;
@@ -275,6 +308,24 @@ private:
     ProxyStateSet out_state = current_state_;
     current_state_ = saved;
     return {std::move(mutated), out_state};
+  }
+
+  RewriteResult RewriteLoopBodyFixpoint(const Stmt &body, ProxyStateSet entry) {
+    // Compute a conservative loop-header state that covers the first and all
+    // subsequent iterations: S = entry ∪ Transfer(body, S).
+    ProxyStateSet header = entry;
+    RewriteResult body_res{body, entry};
+
+    for (int iter = 0; iter < 8; ++iter) {
+      body_res = RewriteWithState(body, header);
+      ProxyStateSet next_header = entry.Union(body_res.out_state);
+      if (next_header == header) {
+        break;
+      }
+      header = next_header;
+    }
+
+    return body_res;
   }
 
   Stmt InjectFenceIfNeededAndUpdateState(const Stmt &async_stmt) {
@@ -393,26 +444,34 @@ private:
 
     ProxyStateSet entry = current_state_;
 
-    // Compute a conservative loop-header state that covers the first and all
-    // subsequent iterations: S = entry ∪ Transfer(body, S).
-    ProxyStateSet header = entry;
-    RewriteResult body_res{op->body, entry};
-
-    for (int iter = 0; iter < 8; ++iter) {
-      body_res = RewriteWithState(op->body, header);
-      ProxyStateSet next_header = entry.Union(body_res.out_state);
-      if (next_header == header) {
-        break;
-      }
-      header = next_header;
-    }
-
     // Determine whether the loop may execute zero times.
     bool may_be_zero = true;
     if (const auto *imm = extent.as<IntImmNode>()) {
       may_be_zero = imm->value == 0;
     }
 
+    ProxyEventSummary body_summary = SummarizeProxyEvents(op->body);
+
+    if (entry.MayBeGeneric() && body_summary.has_async &&
+        !body_summary.has_generic) {
+      // The loop body performs async-proxy work but never performs generic
+      // shared-memory writes. If we start the loop in a possibly-generic state,
+      // the fixed-point header analysis would otherwise inject a fence in the
+      // loop body and execute it on every iteration. Hoist a single fence to
+      // the loop preheader instead.
+      Stmt pre_fence = MakeFenceProxyAsyncStmt();
+      ProxyStateSet loop_entry = ProxyStateSet::None();
+      RewriteResult body_res = RewriteLoopBodyFixpoint(op->body, loop_entry);
+
+      current_state_ = may_be_zero ? loop_entry.Union(body_res.out_state)
+                                   : body_res.out_state;
+
+      Stmt loop = For(op->loop_var, min, extent, op->kind, body_res.stmt,
+                      op->thread_binding, op->annotations);
+      return SeqStmt(Array<Stmt>{pre_fence, loop});
+    }
+
+    RewriteResult body_res = RewriteLoopBodyFixpoint(op->body, entry);
     current_state_ =
         may_be_zero ? entry.Union(body_res.out_state) : body_res.out_state;
 
