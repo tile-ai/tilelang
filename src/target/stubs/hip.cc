@@ -288,6 +288,7 @@ hipError_t hipMalloc(void **ptr, size_t size) {
   return HIPDriverAPI::get()->hipMalloc_(ptr, size);
 }
 
+// NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
 hipError_t hipFree(void *ptr) { return HIPDriverAPI::get()->hipFree_(ptr); }
 
 hipError_t hipHostMalloc(void **ptr, size_t size, unsigned int flags) {
