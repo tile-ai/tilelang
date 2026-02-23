@@ -22,10 +22,11 @@ enum class CopyInst : uint8_t {
   kBulkStore = 4, // utilize tma store
   // we should separate the bulk load and store for 1d and multi-dim
   // as they have different memory access patterns
-  kBulkLoad1D = 5,  // utilize tma load 1d
-  kBulkStore1D = 6, // utilize tma store 1d
-  kTMemLoad = 7,    // tcgen05.ld (tensor memory -> register)
-  kTMemStore = 8,   // tcgen05.st (register -> tensor memory)
+  kBulkLoad1D = 5,     // utilize tma load 1d
+  kBulkStore1D = 6,    // utilize tma store 1d
+  kTMemLoad = 7,       // tcgen05.ld (tensor memory -> register)
+  kTMemStore = 8,      // tcgen05.st (register -> tensor memory)
+  kMetalSIMDGroup = 9, // Metal simdgroup load/store
 };
 
 /// Convert CopyInst enum to string for debugging
@@ -49,6 +50,8 @@ inline const char *CopyInstToString(CopyInst inst) {
     return "TMemLoad";
   case CopyInst::kTMemStore:
     return "TMemStore";
+  case CopyInst::kMetalSIMDGroup:
+    return "MetalSIMDGroup";
   default:
     return "Unknown";
   }
@@ -227,6 +230,11 @@ public:
   bool CheckTMemStore(Target target) const;
 
   /*!
+   * \brief Check if tensor memory store is supported.
+   */
+  bool CheckSIMDGroupStore(Target target) const;
+
+  /*!
    * \brief Get the copy instruction type.
    */
   CopyInst GetCopyInst(Target target, bool disable_tma_lower,
@@ -262,6 +270,11 @@ protected:
    * \brief Generate lowering for normal copy.
    */
   Stmt LowerNormalCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
+
+  /*!
+   * \brief Generate lowering for simdgroup store.
+   */
+  Stmt LowerSIMDGroupStore(const LowerArgs &T, arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.

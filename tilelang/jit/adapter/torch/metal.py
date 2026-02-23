@@ -53,6 +53,9 @@ class MetalKernelAdapter(BaseKernelAdapter):
 
     _kernel = None
 
+    def get_kernel_source(self, kernel_only: bool = True) -> str:
+        return self.kernel_global_source
+
     def _convert_torch_func(self) -> Callable:
         if self._kernel is None:
             _kernel = getattr(torch.mps.compile_shader(self.kernel_global_source), self.kernel_name)
