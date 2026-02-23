@@ -1749,6 +1749,19 @@ def ptx_init_barrier_thread_count(barrier_id, thread_count):
     return _tvm_op.ptx_init_barrier_thread_count(barrier_id, thread_count)
 
 
+def ptx_fence_barrier_init():
+    """TVM intrinsic for ptx fence barrier initialization.
+
+    Returns
+    -------
+    call : PrimExpr
+        The call expression.
+    """
+    from tvm import tir
+
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_fence_barrier_init"))
+
+
 def ptx_arrive_barrier(barrier_id):
     """TVM intrinsic for ptx barrier arrival using mbarrier.arrive
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
