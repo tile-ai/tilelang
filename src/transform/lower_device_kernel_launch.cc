@@ -64,6 +64,8 @@ struct KernelInfo {
   Map<String, PrimExpr> thread_extent;
   // The amount of dynamic shared memory used
   Optional<PrimExpr> dyn_shmem_size{std::nullopt};
+  // Cluster dimensions for SM90+ cluster launch
+  Optional<Array<Integer>> cluster_dims{std::nullopt};
 };
 
 /*!
@@ -78,6 +80,13 @@ public:
     collector.info_.params = func->params;
 
     collector(func->body);
+
+    // Cluster dims are promoted to a PrimFunc attr by LowerOpaqueBlock.
+    if (auto opt = func->GetAttr<Array<Integer>>("cluster_dims")) {
+      collector.info_.cluster_dims = opt.value();
+      LOG(INFO) << "cluster_dims found";
+      LOG(INFO) << "cluster_dims: " << opt.value();
+    }
 
     // The dynamic shared memory is required to be the last of the
     // kernel launch parameters
@@ -94,6 +103,26 @@ public:
         [&](const auto &param) { return collector.GetArgument(param); });
     collector.info_.dyn_shmem_size = collector.dyn_shmem_size;
     collector.info_.thread_extent = collector.thread_extent;
+
+    // Prepend cluster dim tags and static values so the TVM runtime
+    // can read them from packed-function args at launch time.
+    if (collector.info_.cluster_dims.defined()) {
+      auto dims = collector.info_.cluster_dims.value();
+      Array<PrimExpr> new_launch_args = {
+          PrimExpr(dims[0]), PrimExpr(dims[1]), PrimExpr(dims[2])};
+      for (auto arg : collector.info_.launch_args)
+        new_launch_args.push_back(arg);
+      collector.info_.launch_args = new_launch_args;
+
+      Array<String> new_launch_params = {
+          String(tvm::runtime::launch_param::kClusterDimX),
+          String(tvm::runtime::launch_param::kClusterDimY),
+          String(tvm::runtime::launch_param::kClusterDimZ)};
+      for (auto param : collector.info_.launch_params)
+        new_launch_params.push_back(param);
+      collector.info_.launch_params = new_launch_params;
+    }
+
     return collector.info_;
   }
 
@@ -261,6 +290,10 @@ public:
     if (info.dyn_shmem_size.defined()) {
       func = WithAttr(std::move(func), "dyn_shared_memory_buf",
                       info.dyn_shmem_size.value());
+    }
+    if (info.cluster_dims.defined()) {
+      LOG(INFO) << "cluster_dims found";
+      func = WithAttr(std::move(func), "cluster_dims", info.cluster_dims.value());
     }
     return func;
   }
