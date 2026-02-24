@@ -19,22 +19,24 @@ static IterVar make_itervar(std::string name, Range dom) {
   return IterVar(dom, var, IterVarType::kDataPar);
 }
 
-Tcgen05Meta getTcgen05Meta_32dp32b() {
+// ld and st share the same Fragment layout; only the instruction name differs.
+static Tcgen05Meta makeTcgen05Meta_32dp32b(bool is_store) {
   constexpr int INST_WIDTH = 1;
   IterVar inst_row = make_itervar("row", 128);
   IterVar inst_col = make_itervar("col", INST_WIDTH);
-  return Tcgen05Meta{"tl::tcgen05_ld_32dp32bNx",
+  return Tcgen05Meta{is_store ? "tl::tcgen05_st_32dp32bNx"
+                              : "tl::tcgen05_ld_32dp32bNx",
                      Fragment({inst_row, inst_col}, {inst_col}, {inst_row},
                               make_itervar("rep", Range(0, 1))),
                      INST_WIDTH};
 }
 
-Tcgen05Meta getTcgen05Meta_32dp64b() {
+static Tcgen05Meta makeTcgen05Meta_32dp64b(bool is_store) {
   constexpr int INST_WIDTH = 2;
   IterVar inst_row = make_itervar("row", 128);
   IterVar inst_col = make_itervar("col", INST_WIDTH);
   return Tcgen05Meta{
-      "tl::tcgen05_ld_32dp64bNx",
+      is_store ? "tl::tcgen05_st_32dp64bNx" : "tl::tcgen05_ld_32dp64bNx",
       Fragment({inst_row, inst_col}, {FloorDiv(FloorMod(inst_row, 32), 16)},
                {FloorDiv(inst_row, 32) * 32 + FloorMod(inst_row, 8) * 4 +
                 FloorDiv(FloorMod(inst_row, 16), 8) +
@@ -43,12 +45,12 @@ Tcgen05Meta getTcgen05Meta_32dp64b() {
       INST_WIDTH};
 }
 
-Tcgen05Meta getTcgen05Meta_32dp128b() {
+static Tcgen05Meta makeTcgen05Meta_32dp128b(bool is_store) {
   constexpr int INST_WIDTH = 4;
   IterVar inst_row = make_itervar("row", 128);
   IterVar inst_col = make_itervar("col", INST_WIDTH);
   return Tcgen05Meta{
-      "tl::tcgen05_ld_32dp128bNx",
+      is_store ? "tl::tcgen05_st_32dp128bNx" : "tl::tcgen05_ld_32dp128bNx",
       Fragment({inst_row, inst_col}, {FloorDiv(FloorMod(inst_row, 32), 8)},
                {FloorDiv(inst_row, 32) * 32 + FloorMod(inst_row, 8) * 4 +
                 FloorMod(inst_col, 4)},
@@ -56,12 +58,12 @@ Tcgen05Meta getTcgen05Meta_32dp128b() {
       INST_WIDTH};
 }
 
-Tcgen05Meta getTcgen05Meta_32dp256b() {
+static Tcgen05Meta makeTcgen05Meta_32dp256b(bool is_store) {
   constexpr int INST_WIDTH = 8;
   IterVar inst_row = make_itervar("row", 128);
   IterVar inst_col = make_itervar("col", INST_WIDTH);
   return Tcgen05Meta{
-      "tl::tcgen05_ld_32dp256bNx",
+      is_store ? "tl::tcgen05_st_32dp256bNx" : "tl::tcgen05_ld_32dp256bNx",
       Fragment(
           {inst_row, inst_col},
           {FloorMod(inst_col, 2) + FloorDiv(FloorMod(inst_row, 32), 8) * 2},
@@ -71,56 +73,26 @@ Tcgen05Meta getTcgen05Meta_32dp256b() {
       INST_WIDTH};
 }
 
-Tcgen05Meta getTcgen05MetaSt_32dp32b() {
-  constexpr int INST_WIDTH = 1;
-  IterVar inst_row = make_itervar("row", 128);
-  IterVar inst_col = make_itervar("col", INST_WIDTH);
-  return Tcgen05Meta{"tl::tcgen05_st_32dp32bNx",
-                     Fragment({inst_row, inst_col}, {inst_col}, {inst_row},
-                              make_itervar("rep", Range(0, 1))),
-                     INST_WIDTH};
+Tcgen05Meta getTcgen05MetaLd_32dp32b() {
+  return makeTcgen05Meta_32dp32b(false);
+}
+Tcgen05Meta getTcgen05MetaLd_32dp64b() {
+  return makeTcgen05Meta_32dp64b(false);
+}
+Tcgen05Meta getTcgen05MetaLd_32dp128b() {
+  return makeTcgen05Meta_32dp128b(false);
+}
+Tcgen05Meta getTcgen05MetaLd_32dp256b() {
+  return makeTcgen05Meta_32dp256b(false);
 }
 
-Tcgen05Meta getTcgen05MetaSt_32dp64b() {
-  constexpr int INST_WIDTH = 2;
-  IterVar inst_row = make_itervar("row", 128);
-  IterVar inst_col = make_itervar("col", INST_WIDTH);
-  return Tcgen05Meta{
-      "tl::tcgen05_st_32dp64bNx",
-      Fragment({inst_row, inst_col}, {FloorDiv(FloorMod(inst_row, 32), 16)},
-               {FloorDiv(inst_row, 32) * 32 + FloorMod(inst_row, 8) * 4 +
-                FloorDiv(FloorMod(inst_row, 16), 8) +
-                FloorMod(inst_col, 2) * 2},
-               make_itervar("rep", Range(0, 1))),
-      INST_WIDTH};
-}
-
+Tcgen05Meta getTcgen05MetaSt_32dp32b() { return makeTcgen05Meta_32dp32b(true); }
+Tcgen05Meta getTcgen05MetaSt_32dp64b() { return makeTcgen05Meta_32dp64b(true); }
 Tcgen05Meta getTcgen05MetaSt_32dp128b() {
-  constexpr int INST_WIDTH = 4;
-  IterVar inst_row = make_itervar("row", 128);
-  IterVar inst_col = make_itervar("col", INST_WIDTH);
-  return Tcgen05Meta{
-      "tl::tcgen05_st_32dp128bNx",
-      Fragment({inst_row, inst_col}, {FloorDiv(FloorMod(inst_row, 32), 8)},
-               {FloorDiv(inst_row, 32) * 32 + FloorMod(inst_row, 8) * 4 +
-                FloorMod(inst_col, 4)},
-               make_itervar("rep", Range(0, 1))),
-      INST_WIDTH};
+  return makeTcgen05Meta_32dp128b(true);
 }
-
 Tcgen05Meta getTcgen05MetaSt_32dp256b() {
-  constexpr int INST_WIDTH = 8;
-  IterVar inst_row = make_itervar("row", 128);
-  IterVar inst_col = make_itervar("col", INST_WIDTH);
-  return Tcgen05Meta{
-      "tl::tcgen05_st_32dp256bNx",
-      Fragment(
-          {inst_row, inst_col},
-          {FloorMod(inst_col, 2) + FloorDiv(FloorMod(inst_row, 32), 8) * 2},
-          {FloorDiv(inst_row, 32) * 32 + FloorMod(inst_row, 8) * 4 +
-           FloorDiv(FloorMod(inst_col, 8), 2)},
-          make_itervar("rep", Range(0, 1))),
-      INST_WIDTH};
+  return makeTcgen05Meta_32dp256b(true);
 }
 
 std::tuple<bool, Fragment, int>

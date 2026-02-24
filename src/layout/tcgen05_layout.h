@@ -18,10 +18,10 @@ struct Tcgen05Meta {
 };
 
 // Obtain the metadata for tcgen05.ld instructions.
-Tcgen05Meta getTcgen05Meta_32dp32b();
-Tcgen05Meta getTcgen05Meta_32dp64b();
-Tcgen05Meta getTcgen05Meta_32dp128b();
-Tcgen05Meta getTcgen05Meta_32dp256b();
+Tcgen05Meta getTcgen05MetaLd_32dp32b();
+Tcgen05Meta getTcgen05MetaLd_32dp64b();
+Tcgen05Meta getTcgen05MetaLd_32dp128b();
+Tcgen05Meta getTcgen05MetaLd_32dp256b();
 
 // Obtain the metadata for tcgen05.st instructions.
 Tcgen05Meta getTcgen05MetaSt_32dp32b();

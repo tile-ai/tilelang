@@ -350,7 +350,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
       for (int num_useful_wgs = num_threads / WARPGROUP_SIZE;
            num_useful_wgs >= 1; --num_useful_wgs) {
         int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
-        Tcgen05Meta meta = getTcgen05Meta_32dp32b();
+        Tcgen05Meta meta = getTcgen05MetaLd_32dp32b();
         auto [is_success, tmem_coord2frag, num_chunks_each_wg] =
             expandTcgen05Layout(
                 meta, phy_col_bounds->max_value - phy_col_bounds->min_value + 1,
@@ -1129,10 +1129,10 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   };
 
   if (is_ld) {
-    try_tcgen05_instruction(getTcgen05Meta_32dp32b());
-    try_tcgen05_instruction(getTcgen05Meta_32dp64b());
-    try_tcgen05_instruction(getTcgen05Meta_32dp128b());
-    try_tcgen05_instruction(getTcgen05Meta_32dp256b());
+    try_tcgen05_instruction(getTcgen05MetaLd_32dp32b());
+    try_tcgen05_instruction(getTcgen05MetaLd_32dp64b());
+    try_tcgen05_instruction(getTcgen05MetaLd_32dp128b());
+    try_tcgen05_instruction(getTcgen05MetaLd_32dp256b());
   } else {
     try_tcgen05_instruction(getTcgen05MetaSt_32dp32b());
     try_tcgen05_instruction(getTcgen05MetaSt_32dp64b());
