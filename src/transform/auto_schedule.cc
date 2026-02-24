@@ -70,24 +70,122 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     PrimExpr thread_count[2]);
 void CollectIRStructureNodes(IRStructure *node,
                              std::vector<IRStructure *> &nodes);
+// Structure to store loop nesting information
+struct LoopNestingInfo {
+  std::vector<Var> loop_vars;
+  std::vector<PrimExpr> loop_starts;
+  std::vector<PrimExpr> loop_steps;
+  std::vector<PrimExpr> loop_extents;
+
+  // Add a loop to the nesting info
+  void AddLoop(const ForNode *for_node) {
+    loop_vars.push_back(for_node->loop_var);
+    loop_starts.push_back(for_node->min);
+    loop_steps.push_back(for_node->step.has_value()
+                             ? for_node->step.value()
+                             : IntImm(DataType::Int(32), 1));
+    loop_extents.push_back(for_node->extent);
+  }
+
+  // Remove the innermost loop
+  void PopLoop() {
+    if (!loop_vars.empty()) {
+      loop_vars.pop_back();
+      loop_starts.pop_back();
+      loop_steps.pop_back();
+      loop_extents.pop_back();
+    }
+  }
+
+  // Calculate parity expression considering all nested loops
+  PrimExpr CalculateParityExpr(PrimExpr iter_offset = 0) const {
+    if (loop_vars.empty()) {
+      return IntImm(DataType::Int(32), 0);
+    }
+
+    PrimExpr total_iter = IntImm(DataType::Int(32), 0);
+    PrimExpr total_multiplier = IntImm(DataType::Int(32), 1);
+
+    // Build expression: outer_var * inner_constant + inner_var
+    // For nested loops: (((outer_var * inner_extent) + inner_var) *
+    // innermost_step) + ...
+    for (int i = loop_vars.size() - 1; i >= 0; i--) {
+      PrimExpr normalized_iter =
+          indexdiv(loop_vars[i] - loop_starts[i], loop_steps[i]);
+
+      if (i == static_cast<int>(loop_vars.size()) - 1) {
+        // Innermost loop
+        total_iter = normalized_iter;
+      } else {
+        // Outer loop: multiply by inner loop extent
+        // Check if inner loop extent is constant
+        if (const auto *extent_int = loop_extents[i + 1].as<IntImmNode>()) {
+          total_iter =
+              normalized_iter * IntImm(DataType::Int(32), extent_int->value) +
+              total_iter;
+        } else {
+          // If inner loop extent is not constant, we cannot compute parity
+          // This should have been caught earlier
+          LOG(FATAL)
+              << "Inner loop extent must be constant for parity calculation";
+          return IntImm(DataType::Int(32), 0);
+        }
+      }
+    }
+
+    // Add iteration offset and calculate parity
+    return indexmod(total_iter + iter_offset, 2);
+  }
+
+  // Check if at least one loop is not at its start iteration
+  // Returns true if NOT all loops are at their start iteration
+  PrimExpr NotAllLoopsAtStart() const {
+    if (loop_vars.empty()) {
+      return Bool(false);
+    }
+
+    // Build expression: (loop_var0 != loop_start0) || (loop_var1 !=
+    // loop_start1) || ...
+    PrimExpr condition = Bool(false);
+
+    for (size_t i = 0; i < loop_vars.size(); ++i) {
+      PrimExpr loop_not_at_start = (loop_vars[i] != loop_starts[i]);
+
+      if (i == 0) {
+        condition = loop_not_at_start;
+      } else {
+        condition = (condition || loop_not_at_start);
+      }
+    }
+
+    return condition;
+  }
+};
+
 // Barrier synchronization helper functions
 static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
                                          std::vector<Buffer> &barrier_buffers,
                                          Map<ObjectRef, ObjectRef> &barrier_map,
                                          PrimExpr thread_count[2]);
 // Barrier dependency analysis functions
-static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
+static void AnalyzeAndInsertBarriers(tl::IRStructure *node,
+                                     int &next_barrier_id,
                                      std::vector<Buffer> &barrier_buffers,
                                      Map<ObjectRef, ObjectRef> &barrier_map,
-                                     PrimExpr thread_count[2]);
-static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
+                                     PrimExpr thread_count[2],
+                                     tl::LoopNestingInfo &loop_info);
+static void AnalyzeSequenceNodeBarriers(tl::SequenceNode *seq,
+                                        int &next_barrier_id,
                                         std::vector<Buffer> &barrier_buffers,
                                         Map<ObjectRef, ObjectRef> &barrier_map,
-                                        PrimExpr thread_count[2]);
-static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
+                                        PrimExpr thread_count[2],
+                                        tl::LoopNestingInfo &loop_info);
+static void AnalyzeControlNodeBarriers(tl::ControlNode *ctrl,
+                                       int &next_barrier_id,
                                        std::vector<Buffer> &barrier_buffers,
                                        Map<ObjectRef, ObjectRef> &barrier_map,
-                                       PrimExpr thread_count[2]);
+                                       PrimExpr thread_count[2],
+                                       tl::LoopNestingInfo &loop_info);
 
 // Helper function to check if two ranges overlap
 bool RangesOverlap(const Range &a, const Range &b) {
@@ -95,13 +193,13 @@ bool RangesOverlap(const Range &a, const Range &b) {
   // max(a_min, b_min) < min(a_min+a_extent, b_min+b_extent)
   // Since min and extent might be symbolic, we use arithmetic simplification
   // For simplicity, assume they are constants or can be compared
-  // Use tir::is_zero to check if max(a_min, b_min) - min(a_min+a_extent,
+  // Use is_zero to check if max(a_min, b_min) - min(a_min+a_extent,
   // b_min+b_extent) < 0 Actually, we can check if they are provably
   // non-overlapping If we can't prove either way, assume they might overlap
   // (conservative)
 
   // Simplify expressions
-  auto analyzer = tvm::arith::Analyzer();
+  auto analyzer = arith::Analyzer();
   PrimExpr a_min = analyzer.Simplify(a->min);
   PrimExpr a_extent = analyzer.Simplify(a->extent);
   PrimExpr b_min = analyzer.Simplify(b->min);
@@ -113,11 +211,11 @@ bool RangesOverlap(const Range &a, const Range &b) {
 
   // Check if ranges are definitely disjoint
   // Case 1: a_end <= b_min
-  if (tir::is_one(a_end <= b_min)) {
+  if (is_one(a_end <= b_min)) {
     return false;
   }
   // Case 2: b_end <= a_min
-  if (tir::is_one(b_end <= a_min)) {
+  if (is_one(b_end <= a_min)) {
     return false;
   }
 
@@ -215,7 +313,7 @@ static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
   barrier_buffers.push_back(barrier_buffer);
 
   // Create BufferLoad expression for barrier[0]
-  PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
+  PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
 
   // Use barrier buffer for neutral-to-warpgroup synchronization
   // Parity 0 for wait, parity 1 for arrive (simplified)
@@ -260,22 +358,24 @@ static void InsertStatementIntoPromoteNode(ScheduleUnit *task, const Stmt &stmt,
 static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
                                      std::vector<Buffer> &barrier_buffers,
                                      Map<ObjectRef, ObjectRef> &barrier_map,
-                                     PrimExpr thread_count[2]) {
+                                     PrimExpr thread_count[2],
+                                     LoopNestingInfo &loop_info) {
   if (!node)
     return;
 
   if (node->IsSequence()) {
     AnalyzeSequenceNodeBarriers(static_cast<SequenceNode *>(node),
                                 next_barrier_id, barrier_buffers, barrier_map,
-                                thread_count);
+                                thread_count, loop_info);
   } else if (node->IsControl()) {
     AnalyzeControlNodeBarriers(static_cast<ControlNode *>(node),
                                next_barrier_id, barrier_buffers, barrier_map,
-                               thread_count);
+                               thread_count, loop_info);
   } else if (node->IsWrapper()) {
     auto wrapper = static_cast<WrapperNode *>(node);
     AnalyzeAndInsertBarriers(wrapper->child.get(), next_barrier_id,
-                             barrier_buffers, barrier_map, thread_count);
+                             barrier_buffers, barrier_map, thread_count,
+                             loop_info);
   } else if (node->IsTask()) {
     // For TaskNode, nothing to do at this level
   } else {
@@ -286,7 +386,8 @@ static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
 static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
                                         std::vector<Buffer> &barrier_buffers,
                                         Map<ObjectRef, ObjectRef> &barrier_map,
-                                        PrimExpr thread_count[2]) {
+                                        PrimExpr thread_count[2],
+                                        LoopNestingInfo &loop_info) {
   if (!seq)
     return;
 
@@ -309,7 +410,8 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
     if (task->child->IsSequence() || task->child->IsControl()) {
       // If child is SequenceNode or ControlNode, recursively analyze it
       AnalyzeAndInsertBarriers(task->child.get(), next_barrier_id,
-                               barrier_buffers, barrier_map, thread_count);
+                               barrier_buffers, barrier_map, thread_count,
+                               loop_info);
     }
 
     // Check regions for dependencies
@@ -381,14 +483,14 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
             // alloc_buffers
             barrier_buffers.push_back(barrier_buffer);
             // Create BufferLoad expression for barrier[0]
-            PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
+            PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
             // Insert barrier_arrive at the end of last_access_task's statements
             Stmt arrive_stmt = makeBarrierArrive(barrier_load);
             InsertStatementIntoPromoteNode(last_access_task, arrive_stmt, false,
                                            last_wg_id);
           }
           PrimExpr barrier_load =
-              tir::BufferLoad(barrier_unit_map[last_access_task], {0});
+              BufferLoad(barrier_unit_map[last_access_task], {0});
 
           // Insert barrier_wait at the beginning of task's statements
           Stmt wait_stmt =
@@ -450,7 +552,8 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
 static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                                        std::vector<Buffer> &barrier_buffers,
                                        Map<ObjectRef, ObjectRef> &barrier_map,
-                                       PrimExpr thread_count[2]) {
+                                       PrimExpr thread_count[2],
+                                       LoopNestingInfo &loop_info) {
   if (!ctrl || !ctrl->child)
     return;
 
@@ -464,7 +567,14 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
   PrimExpr loop_step = for_node->step.has_value()
                            ? for_node->step.value()
                            : IntImm(DataType::Int(32), 1);
+  PrimExpr loop_extent = for_node->extent;
   bool has_promoted_tasks = ctrl->hasPromote();
+
+  // Add this loop to nesting info
+  loop_info.AddLoop(for_node);
+
+  // Check if inner loops have constant extents (if any)
+  // This check will be done when calculating parity expression
 
   // If child is a SequenceNode, we need special handling for
   // promote/non-promote tasks
@@ -482,7 +592,8 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
       if (task->child->IsSequence() || task->child->IsControl()) {
         // If child is SequenceNode or ControlNode, recursively analyze it
         AnalyzeAndInsertBarriers(task->child.get(), next_barrier_id,
-                                 barrier_buffers, barrier_map, thread_count);
+                                 barrier_buffers, barrier_map, thread_count,
+                                 loop_info);
       }
       all_tasks.push_back(task);
     }
@@ -606,11 +717,11 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             // If warpgroup ids differ or promotion status differs, insert
             // barrier
             if (need_barrier) {
-              // Calculate parity for barrier wait
-              PrimExpr parity_expr = tvm::indexmod(
-                  tvm::indexdiv(loop_var - loop_start, loop_step) +
-                      IntImm(DataType::Int(32), iter + 2),
-                  2);
+              // Calculate parity for barrier wait considering all nested loops
+              // Use loop_info to calculate parity expression: outer_var *
+              // inner_constant + inner_var
+              PrimExpr parity_expr = loop_info.CalculateParityExpr(
+                  IntImm(DataType::Int(32), iter + 2));
 
               if (barrier_unit_map.find(last_access_task) ==
                   barrier_unit_map.end()) {
@@ -626,7 +737,7 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                 barrier_buffers.push_back(barrier_buffer);
 
                 // Create BufferLoad expression for barrier[0]
-                PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
+                PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
 
                 // Insert barrier_arrive at the end of last_access_task's
                 // statements
@@ -635,12 +746,15 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                                                false, last_wg_id);
               }
               PrimExpr barrier_load =
-                  tir::BufferLoad(barrier_unit_map[last_access_task], {0});
+                  BufferLoad(barrier_unit_map[last_access_task], {0});
 
               // Insert barrier_wait at the beginning of task's statements
               Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
               if (iter == 1) {
-                wait_stmt = IfThenElse(loop_var != loop_start, wait_stmt);
+                // Check if at least one loop is not at its start iteration
+                // (not the first iteration of all nested loops)
+                wait_stmt =
+                    IfThenElse(loop_info.NotAllLoopsAtStart(), wait_stmt);
               }
               InsertStatementIntoPromoteNode(task, wait_stmt, true, wg_id);
               // Remove from map (as per user instruction)
@@ -702,8 +816,12 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
     }
   } else {
     AnalyzeAndInsertBarriers(ctrl->child.get(), next_barrier_id,
-                             barrier_buffers, barrier_map, thread_count);
+                             barrier_buffers, barrier_map, thread_count,
+                             loop_info);
   }
+
+  // Remove this loop from nesting info when exiting
+  loop_info.PopLoop();
 }
 
 // Helper function to collect all TaskNodes with context information
@@ -724,7 +842,7 @@ void CollectAllTaskNodesWithContext(
       const ForNode *for_node = current_control_node->control.get();
       PrimExpr loop_extent = for_node->extent;
       // Try to convert loop_extent to int64_t
-      if (const int64_t *extent_ptr = tir::as_const_int(loop_extent)) {
+      if (const int64_t *extent_ptr = as_const_int(loop_extent)) {
         task_ctx.tripcount = *extent_ptr;
       } else {
         // If extent is not constant, use 100 as default (as requested)
@@ -1009,7 +1127,7 @@ bool TaskNode::ContainsLoopBreak() const {
       PostOrderVisit(stmt, [&found](const ObjectRef &node) {
         if (found)
           return;
-        if (const auto *call = node.as<tvm::tir::CallNode>()) {
+        if (const auto *call = node.as<CallNode>()) {
           if (call->op.same_as(tl::loop_break())) {
             found = true;
           }
@@ -1310,8 +1428,8 @@ public:
 
     try {
       // Get the Python-registered function using ffi::Function::GetGlobal
-      static std::optional<tvm::ffi::Function> z3_schedule_func =
-          tvm::ffi::Function::GetGlobal("tl.transform.z3_schedule_python");
+      static std::optional<ffi::Function> z3_schedule_func =
+          ffi::Function::GetGlobal("tl.transform.z3_schedule_python");
       if (!z3_schedule_func.has_value()) {
         LOG(WARNING) << "Python Z3 scheduler not registered, falling back to "
                         "topological sort";
@@ -1466,8 +1584,8 @@ public:
     size_t n = nodes.size();
     int64_t ii = 1; // default II
 
-    static std::optional<tvm::ffi::Function> z3_schedule_loop_func =
-        tvm::ffi::Function::GetGlobal("tl.transform.z3_schedule_loop_python");
+    static std::optional<ffi::Function> z3_schedule_loop_func =
+        ffi::Function::GetGlobal("tl.transform.z3_schedule_loop_python");
     if (!z3_schedule_loop_func.has_value()) {
       LOG(FATAL) << "Python Z3 loop scheduler not registered, falling back "
                     "to topological sort";
@@ -2300,8 +2418,10 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     PrimExpr thread_count[2] = {thread_var->dom->extent,
                                 double_thread ? thread_var->dom->extent
                                               : IntImm(DataType::Int(32), 128)};
+    LoopNestingInfo loop_info;
     AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id,
-                             barrier_buffers, barrier_map, thread_count);
+                             barrier_buffers, barrier_map, thread_count,
+                             loop_info);
 
     // Print the modified summary view
     // PrintIRStructure(ir_structure.get());
