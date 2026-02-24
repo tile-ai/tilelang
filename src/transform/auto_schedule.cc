@@ -967,6 +967,8 @@ std::unique_ptr<IRStructure> TaskNode::Clone() const {
   new_task->SetStartTime(GetStartTime());
   // Copy warpgroup id
   new_task->SetWarpgroupId(GetWarpgroupId());
+  // Copy loop_break cache
+  new_task->contains_loop_break_cache_ = contains_loop_break_cache_;
   return new_task;
 }
 
@@ -990,6 +992,40 @@ void TaskNode::CollectRegions(
       result.emplace_back(region, false, wg_id);
     }
   }
+}
+
+bool TaskNode::ContainsLoopBreak() const {
+  // Return cached result if available
+  if (contains_loop_break_cache_.has_value()) {
+    return contains_loop_break_cache_.value();
+  }
+
+  // Check if any statement in this task contains a loop_break call
+  bool found_loop_break = false;
+  for (const auto &stmt : stmts) {
+    // Helper function to check if a statement contains loop_break
+    auto contains_loop_break = [](const Stmt &stmt) -> bool {
+      bool found = false;
+      PostOrderVisit(stmt, [&found](const ObjectRef &node) {
+        if (found)
+          return;
+        if (const auto *call = node.as<tvm::tir::CallNode>()) {
+          if (call->op.same_as(tl::loop_break())) {
+            found = true;
+          }
+        }
+      });
+      return found;
+    };
+
+    if (contains_loop_break(stmt)) {
+      found_loop_break = true;
+      break;
+    }
+  }
+
+  contains_loop_break_cache_ = found_loop_break;
+  return found_loop_break;
 }
 
 std::unique_ptr<IRStructure> ControlNode::Clone() const {
@@ -1136,17 +1172,23 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
     bool has_tma_core = false;
     bool has_tensor_core = false;
     for (int idx : indices) {
-      if (prefix_tasks.find(all_tasks[idx].task) != prefix_tasks.end()) {
+      TaskNode *task = all_tasks[idx].task;
+      if (prefix_tasks.find(task) != prefix_tasks.end()) {
         // This is a prefix task, skip it (it won't participate in warpgroup
         // specialize)
         continue;
       }
+      if (task->ContainsLoopBreak()) {
+        // Skip tasks with loop_break, they won't participate in warpgroup
+        // specialize and keep warpgroup_id = -1
+        continue;
+      }
       has_task = true;
-      int64_t latency = all_tasks[idx].task->GetLatency();
+      int64_t latency = task->GetLatency();
       int64_t tripcount = all_tasks[idx].tripcount;
       total_weighted_latency += latency * tripcount;
-      has_tma_core |= all_tasks[idx].task->UsesTMACore();
-      has_tensor_core |= all_tasks[idx].task->UsesTensorCore();
+      has_tma_core |= task->UsesTMACore();
+      has_tensor_core |= task->UsesTensorCore();
     }
     if (has_task) {
       component_infos.push_back({root, total_weighted_latency, indices,
@@ -1194,8 +1236,13 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
       }
 
       // Assign warpgroup id to all tasks in this component
+      // Skip tasks that contain loop_break (keep warpgroup_id = -1)
       for (int idx : comp.task_indices) {
-        all_tasks[idx].task->SetWarpgroupId(assigned_warpgroup);
+        TaskNode *task = all_tasks[idx].task;
+        if (!task->ContainsLoopBreak()) {
+          task->SetWarpgroupId(assigned_warpgroup);
+        }
+        // Tasks with loop_break keep warpgroup_id = -1
       }
     }
     return true;
@@ -1219,8 +1266,13 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
       }
 
       // Assign warpgroup id to all tasks in this component
+      // Skip tasks that contain loop_break (keep warpgroup_id = -1)
       for (int idx : comp.task_indices) {
-        all_tasks[idx].task->SetWarpgroupId(assigned_warpgroup);
+        TaskNode *task = all_tasks[idx].task;
+        if (!task->ContainsLoopBreak()) {
+          task->SetWarpgroupId(assigned_warpgroup);
+        }
+        // Tasks with loop_break keep warpgroup_id = -1
       }
     }
     return false;
@@ -1630,6 +1682,26 @@ private:
 
   // Check if two IRStructures have data dependency (excluding read-after-read)
   bool HasDependency(const IRStructure *a, const IRStructure *b) const {
+    // Check if either node contains loop_break (if it's a TaskNode)
+    // Tasks with loop_break have control dependencies with all other tasks
+    // because loop_break can change control flow and affect execution order
+    if (a->IsTask()) {
+      const TaskNode *task_a = static_cast<const TaskNode *>(a);
+      if (task_a->ContainsLoopBreak()) {
+        // If task_a contains loop_break, it has dependency with b
+        // because loop_break affects control flow and execution order
+        return true;
+      }
+    }
+    if (b->IsTask()) {
+      const TaskNode *task_b = static_cast<const TaskNode *>(b);
+      if (task_b->ContainsLoopBreak()) {
+        // If task_b contains loop_break, it has dependency with a
+        // because loop_break affects control flow and execution order
+        return true;
+      }
+    }
+
     // Check all combinations of accesses
     // a writes, b reads (RAW)
     // a reads, b writes (WAR)
@@ -2346,7 +2418,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
-    Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi,
+    Map<ObjectRef, ObjectRef> &barrier_map, const bool outer_enable_epi,
     PrimExpr thread_count[2]) {
   if (!root)
     return Evaluate(0);
@@ -2357,7 +2429,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     if (wrapper->child) {
       body = ApplyWarpgroupPartitionToIRStructure(
           wrapper->child.get(), thread_var, barrier_buffers, barrier_map,
-          enable_epi, thread_count);
+          outer_enable_epi, thread_count);
     }
     if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
       return LetStmt(let->var, let->value, body);
@@ -2388,7 +2460,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   // Convert IRStructure to Stmt for IfThenElse
   std::function<Stmt(IRStructure *)> irstructure_to_stmt;
   irstructure_to_stmt = [&irstructure_to_stmt,
-                         enable_epi](IRStructure *structure) -> Stmt {
+                         outer_enable_epi](IRStructure *structure) -> Stmt {
     if (!structure) {
       return Evaluate(0);
     }
@@ -2489,7 +2561,42 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         unit_stages[unit->promote].push_back(SeqStmt::Flatten(stmts));
       }
       Stmt prologue = Evaluate(0);
-      bool enable_pro = true;
+      // Check if any task in this control node contains loop_break
+      // If any task contains loop_break, disable prologue
+      std::function<bool(IRStructure *)> check_contains_loop_break;
+      check_contains_loop_break =
+          [&check_contains_loop_break](IRStructure *structure) -> bool {
+        if (!structure)
+          return false;
+
+        if (structure->IsTask()) {
+          auto task = static_cast<TaskNode *>(structure);
+          return task->ContainsLoopBreak();
+        } else if (structure->IsSequence()) {
+          auto seq = static_cast<SequenceNode *>(structure);
+          for (const auto &child : seq->children) {
+            auto unit = static_cast<ScheduleUnit *>(child.get());
+            if (check_contains_loop_break(unit->child.get())) {
+              return true;
+            }
+          }
+          return false;
+        } else if (structure->IsScheduleUnit()) {
+          auto unit = static_cast<ScheduleUnit *>(structure);
+          return check_contains_loop_break(unit->child.get());
+        } else if (structure->IsControl()) {
+          auto ctrl = static_cast<ControlNode *>(structure);
+          return check_contains_loop_break(ctrl->child.get());
+        } else if (structure->IsWrapper()) {
+          auto wrapper = static_cast<WrapperNode *>(structure);
+          return check_contains_loop_break(wrapper->child.get());
+        }
+        return false;
+      };
+
+      // Set enable_pro to true only if no task contains loop_break
+      bool enable_pro = !check_contains_loop_break(ctrl->child.get());
+
       if (enable_pro && !unit_stages[1].empty()) {
         prologue = SeqStmt::Flatten(unit_stages[1]);
         Map<Var, PrimExpr> substitution;
@@ -2498,6 +2605,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         prologue = IfThenElse(loop_extent > 0, prologue);
       }
       Stmt epilogue = Evaluate(0);
+      bool enable_epi = outer_enable_epi && enable_pro;
       if (enable_epi && !unit_stages[0].empty()) {
         epilogue = SeqStmt::Flatten(unit_stages[0]);
         Map<Var, PrimExpr> substitution;
@@ -2526,12 +2634,16 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         if (unit->promote == 1) {
           if (remove_epi) {
             Map<Var, PrimExpr> substitution;
-            substitution.Set(loop_var, loop_var + loop_step);
+            if (remove_pro) {
+              substitution.Set(loop_var, loop_var + loop_step);
+            }
             Stmt new_stmt = Substitute(SeqStmt::Flatten(stmts), substitution);
             steady.push_back(new_stmt);
           } else {
             Map<Var, PrimExpr> substitution;
-            substitution.Set(loop_var, loop_var + loop_step);
+            if (remove_pro) {
+              substitution.Set(loop_var, loop_var + loop_step);
+            }
             Stmt new_stmt = IfThenElse(
                 loop_var < loop_start + loop_extent - loop_step * remove_pro,
                 Substitute(SeqStmt::Flatten(stmts), substitution));

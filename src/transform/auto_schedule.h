@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -207,7 +208,12 @@ public:
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
 
-  bool containWarpgroupId(int id) const override { return warpgroup_id_ == id; }
+  bool containWarpgroupId(int id) const override {
+    return warpgroup_id_ == -1 || warpgroup_id_ == id;
+  }
+
+  // Check if this task contains loop_break call
+  bool ContainsLoopBreak() const;
 
 private:
   // Resource usage flags
@@ -224,6 +230,9 @@ private:
   int64_t ii_{0};      // Initiation interval in cycles
   int warpgroup_id_{
       -1}; // Warpgroup id for warpgroup specialization (-1 means unassigned)
+
+  // Cached flag for loop_break detection
+  mutable std::optional<bool> contains_loop_break_cache_;
 };
 
 // Control node: contains a For operation and a child IRStructure
@@ -634,6 +643,16 @@ CollectRegisterRegions(const IRStructure *node) {
 inline bool UseSameRegisterRegion(const IRStructure *a, const IRStructure *b) {
   if (!a || !b)
     return false;
+
+  // Check if either task contains loop_break
+  // Tasks with loop_break should not share register regions with other tasks
+  if (a->IsTask() && b->IsTask()) {
+    const TaskNode *task_a = static_cast<const TaskNode *>(a);
+    const TaskNode *task_b = static_cast<const TaskNode *>(b);
+    if (task_a->ContainsLoopBreak() || task_b->ContainsLoopBreak()) {
+      return false;
+    }
+  }
 
   auto reg_regions_a = CollectRegisterRegions(a);
   auto reg_regions_b = CollectRegisterRegions(b);
