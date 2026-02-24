@@ -302,7 +302,8 @@ private:
   /*! \brief Local var initializers collected from block annotations. */
   Map<Var, PrimExpr> local_var_init_map_;
 
-  /*! \brief Cluster dims collected from tilelang.cluster_dims block annotation. */
+  /*! \brief Cluster dims collected from tilelang.cluster_dims block annotation.
+   */
   Optional<Array<Integer>> cluster_dims_{std::nullopt};
 };
 

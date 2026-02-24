@@ -358,7 +358,7 @@ class TLCUDASourceWrapper:
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
-              
+
                 call_args = ", ".join(args_list)
                 if self.cluster_dims[function_name] is None:
                     kernel_code = KERNEL_LAUNCH_FUNC_CODE.format(
@@ -370,17 +370,12 @@ class TLCUDASourceWrapper:
                     )
                 else:
                     kernel_code = KERNEL_CLUSTER_LAUNCH_FUNC_CODE.format(
-                        grid_str,
-                        block_str,
-                        smem_str,
-                        call_args,
-                        function_name,
-                        *self.cluster_dims[function_name]
+                        grid_str, block_str, smem_str, call_args, function_name, *self.cluster_dims[function_name]
                     )
 
                 kernel_launch_code += kernel_code
                 kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'
-                
+
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 

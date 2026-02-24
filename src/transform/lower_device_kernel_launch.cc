@@ -84,8 +84,6 @@ public:
     // Cluster dims are promoted to a PrimFunc attr by LowerOpaqueBlock.
     if (auto opt = func->GetAttr<Array<Integer>>("cluster_dims")) {
       collector.info_.cluster_dims = opt.value();
-      LOG(INFO) << "cluster_dims found";
-      LOG(INFO) << "cluster_dims: " << opt.value();
     }
 
     // The dynamic shared memory is required to be the last of the
@@ -108,8 +106,8 @@ public:
     // can read them from packed-function args at launch time.
     if (collector.info_.cluster_dims.defined()) {
       auto dims = collector.info_.cluster_dims.value();
-      Array<PrimExpr> new_launch_args = {
-          PrimExpr(dims[0]), PrimExpr(dims[1]), PrimExpr(dims[2])};
+      Array<PrimExpr> new_launch_args = {PrimExpr(dims[0]), PrimExpr(dims[1]),
+                                         PrimExpr(dims[2])};
       for (auto arg : collector.info_.launch_args)
         new_launch_args.push_back(arg);
       collector.info_.launch_args = new_launch_args;
@@ -292,8 +290,8 @@ public:
                       info.dyn_shmem_size.value());
     }
     if (info.cluster_dims.defined()) {
-      LOG(INFO) << "cluster_dims found";
-      func = WithAttr(std::move(func), "cluster_dims", info.cluster_dims.value());
+      func =
+          WithAttr(std::move(func), "cluster_dims", info.cluster_dims.value());
     }
     return func;
   }
