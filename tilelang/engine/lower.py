@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Callable
-import sys
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -145,7 +144,20 @@ def canon_target_host(target: str | Target, target_host: str | Target | None):
     return target_host
 
 
-def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
+def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | None = None) -> tvm.IRModule:
+    """Generate host-side code from the lowered IR module.
+
+    Parameters
+    ----------
+    host_mod : tvm.IRModule
+        The host-side IR module to compile.
+    target_host : Target
+        The host compilation target (e.g. "llvm" or "c").
+    target : Target, optional
+        The device target.  When the device target is Metal, the pass
+        MarkHostMetalContext is applied so that the generated host code
+        contains the Metal/MPS synchronisation logic.
+    """
     host_mod = tir.transform.BindTarget(target_host)(host_mod)
     host_mod = tir.transform.FP8StorageLegalize()(host_mod)
     host_mod = tir.transform.BF16StorageLegalize()(host_mod)
@@ -154,7 +166,7 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     host_mod = tilelang.transform.LowerIntrin()(host_mod)
     host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
     host_mod = tir.transform.CombineContextCall()(host_mod)
-    if sys.platform == "darwin":
+    if target is not None and target.kind.name == "metal":
         host_mod = MarkHostMetalContext()(host_mod)
     if target_host.kind.name == "llvm":
         host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
@@ -257,7 +269,7 @@ def lower(
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
 
     if enable_host_codegen:
-        host_mod = host_codegen(host_mod, target_host)
+        host_mod = host_codegen(host_mod, target_host, target=target)
         host_mod.import_module(codegen_mod)
         return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source(), rt_mod=host_mod)
 

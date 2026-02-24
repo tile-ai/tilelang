@@ -18,6 +18,45 @@ def run_passes(func: tvm.tir.PrimFunc):
 
 
 @tilelang.testing.requires_cuda
+def test_no_sync_between_atomic_adds_to_shared():
+    """Atomic WAW (and RMW) should not trigger thread-level sync insertion.
+
+    This is a regression test for the case where ThreadSync conservatively
+    treated atomic pointer accesses as conflicting and inserted syncthreads
+    between atomics, degrading atomics into serialized updates.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        A_shared = T.alloc_buffer((16, 128), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        for i in range(16):
+            T.evaluate(
+                T.call_intrin(
+                    "float32",
+                    tvm.tir.op.Op.get("tl.atomic_add_elem_op"),
+                    T.tvm_access_ptr(
+                        T.type_annotation("float32"),
+                        A_shared.data,
+                        i * 128 + tx,
+                        1,
+                        3,
+                    ),
+                    T.float32(1),
+                    T.int32(0),
+                )
+            )
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync inserted for atomic ops:\n{s}"
+
+
+@tilelang.testing.requires_cuda
 def test_sync_if_with_same_index():
     @T.prim_func(check_well_formed=False)
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
@@ -597,6 +636,36 @@ def test_no_sync_needed_uniform_accesses():
     s = str(mod)
     # No sync needed - only local memory is accessed
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
+
+
+@tilelang.testing.requires_cuda
+def test_sync_hoist_non_uniform_if_in_loop_with_shared_memory():
+    """Test sync hoisting when non-uniform if is inside a loop with shared memory."""
+
+    @T.prim_func(private=True)
+    def func():
+        token_ids = T.alloc_buffer([128], dtype="int32", scope="shared")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        for k in range(2):
+            # Write to shared memory
+            token_ids[tx] = T.int32(k - 2)
+            # Non-uniform if inside loop
+            if token_ids[tx] >= 0:
+                result_local[0] = T.float32(1)
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
+    # Sync should be before the if inside the loop, not inside the if
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if token_ids[tx] >= 0")
+    assert sync_pos < if_pos, f"Sync should be hoisted before non-uniform if:\n{s}"
 
 
 if __name__ == "__main__":

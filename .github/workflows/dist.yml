@@ -115,15 +115,14 @@ jobs:
     strategy:
       matrix:
         target:
-          - { runner: ubuntu-latest, toolkit: "CUDA-12.8" }
-          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
-          - { runner: ubuntu-latest, toolkit: "Nightly-CUDA-13.0" }
-          - { runner: ubuntu-24.04-arm, toolkit: "Nightly-CUDA-13.0" }
+          - { runner: ubuntu-latest, toolkit: "CUDA-12.8", test_backends: "cu118 cu130" }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8", test_backends: "cu126 cu130" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
-          # Wheels are built with Python 3.8 Limited API, they should work with all Python >= 3.8.
-          # Only build wheels against Python 3.8 Limited API to save CI resources.
+          # Build wheels for different Python ABIs
           - "3.9"
+          # - "3.14t"  # let user to build from source for now
+          # TODO: Add cp315-abi3.abi3t after PEP 803
       fail-fast: false
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
@@ -145,9 +144,10 @@ jobs:
           create-symlink: true
           evict-old-files: "7d"
           append-timestamp: false
-          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ hashFiles('**/*.cc') }}
           restore-keys: |
-            wheel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.cc') }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ hashFiles('**/*.cc') }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}
             wheel-${{ runner.os }}-${{ runner.arch }}
 
       - name: Set CIBW_BUILD
@@ -163,23 +163,11 @@ jobs:
             CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
             CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
-            if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
-              # Use torch nightly builds
-              export UV_INDEX="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
-            else
-              export UV_INDEX="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
-              echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
-            fi
-            echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+            echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           fi
 
           if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
-            if [[ "${{ matrix.target.toolkit }}" == "Nightly-"* ]]; then
-              # Avoid using same file name for different toolkit.
-              echo "NO_GIT_VERSION=ON" | tee -a "${GITHUB_ENV}"
-            else
-              echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
-            fi
+            echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
           fi
 
           if [[ "${{ runner.os }}" == "Linux" ]]; then
@@ -198,22 +186,20 @@ jobs:
         id: setup-uv
         uses: astral-sh/setup-uv@v7
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           activate-environment: true
 
       - name: Test built wheels
         run: |
           for WHEEL in wheelhouse/*.whl; do
             echo "Testing wheel: ${WHEEL}"
+            if [[ "${WHEEL}" == *"abi3"* ]]; then
+              uvx abi3audit --verbose --strict "${WHEEL}"
+            fi
             (
               set -e
-              uv venv --python=3.12 test-venv
+              uv venv test-venv
               source test-venv/bin/activate
-
-              uv pip install --upgrade pip setuptools wheel
-              if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
-                uv pip install --prerelease=allow -v torch
-              fi
 
               uv pip install -v "${WHEEL}"
               (
@@ -225,6 +211,33 @@ jobs:
               rm -rf test-venv
             )
           done
+
+      - name: Test built wheels with different CUDA
+        if: contains(matrix.target.toolkit, 'CUDA')
+        run: |
+          export UV_PYTHON=3.12
+          VERSION_LOG=$(mktemp)
+          for UV_TORCH_BACKEND in ${{ matrix.target.test_backends }}; do
+            export UV_TORCH_BACKEND
+            for WHEEL in wheelhouse/*.whl; do
+              echo "Testing wheel: ${WHEEL}"
+              (
+                set -e
+                uv venv test-venv
+                source test-venv/bin/activate
+
+                uv pip install -v "${WHEEL}"
+                (
+                  set -e
+                  cd /
+                  uv run --no-project -- python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)" >> "$VERSION_LOG"
+                )
+                deactivate
+                rm -rf test-venv
+              )
+            done
+          done
+          cat "$VERSION_LOG"
 
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.

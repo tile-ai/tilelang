@@ -177,6 +177,35 @@ CPP_KERNEL_LAUNCH_TEMPLATE = """\
   }}
 """
 
+# Cooperative kernel launch template (for sync_grid / cooperative groups)
+# Uses cuLaunchCooperativeKernel which guarantees all thread blocks are resident
+CPP_COOPERATIVE_KERNEL_LAUNCH_TEMPLATE = """\
+  // Launch kernel {kernel_idx}: {kernel_name} (cooperative)
+  {{
+    // Get the kernel for current device
+    auto kernels_it = g_device_kernels.find(device_id);
+    if (kernels_it == g_device_kernels.end()) {{
+      std::cerr << "Kernels not initialized for device " << device_id << "\\n";
+      return CUDA_ERROR_NOT_INITIALIZED;
+    }}
+    const std::vector<CUfunction>& kernels = kernels_it->second;
+
+    void* args[] = {{{kernel_args}}};
+    result = cuLaunchCooperativeKernel(
+        kernels[{kernel_idx}],
+        {grid_x}, {grid_y}, {grid_z},
+        {block_x}, {block_y}, {block_z},
+        {smem_size},
+        stream,
+        args
+    );
+    if (result != CUDA_SUCCESS) {{
+      std::cerr << "Failed to launch cooperative kernel {kernel_name} on device " << device_id << ": " << result << "\\n";
+      return result;
+    }}
+  }}
+"""
+
 # Complete C++ launcher template
 CPP_LAUNCHER_TEMPLATE = """\
 #include <cuda.h>
@@ -587,7 +616,7 @@ def _generate_cubin_if_needed({cubin_gen_params}):
       "torch.int64": cutlass.Int64,
       "torch.int32": cutlass.Int32,
       "torch.uint32": cutlass.Uint32,
-      "torch.bool": cutlass.Boolean,
+      "torch.bool": cutlass.Uint8,  # CuTeDSL only supports i1 in rmem; use u8 for gmem
       "torch.int8": cutlass.Int8,
       "torch.uint8": cutlass.Uint8,
       "torch.int16": cutlass.Int16,
@@ -660,7 +689,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         "int64": "cutlass.Int64",
         "int32": "cutlass.Int32",
         "uint32": "cutlass.Uint32",
-        "bool": "cutlass.Boolean",
+        "bool": "cutlass.Uint8",  # CuTeDSL only supports i1 in rmem; use u8 for gmem
         "int8": "cutlass.Int8",
         "uint8": "cutlass.Uint8",
         "int16": "cutlass.Int16",
@@ -681,6 +710,22 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         "uint8": "uint8_t",
         "int16": "int16_t",
         "uint16": "uint16_t",
+    }
+
+    # Maps cutlass Python type names (from _TYPE_MAP values) to C++ types
+    # for generated launcher code.
+    _CUTLASS_TO_CXX: ClassVar[dict[str, str]] = {
+        "int": "int32_t",
+        "float": "float",
+        "cutlass.Float32": "float",
+        "cutlass.Float64": "double",
+        "cutlass.Int64": "int64_t",
+        "cutlass.Int32": "int32_t",
+        "cutlass.Uint32": "uint32_t",
+        "cutlass.Uint8": "uint8_t",
+        "cutlass.Int8": "int8_t",
+        "cutlass.Int16": "int16_t",
+        "cutlass.Uint16": "uint16_t",
     }
 
     _CTYPES_MAP: ClassVar[dict[str, str]] = {
@@ -946,13 +991,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         func_args_parts = [f"uint64_t {arg}_ptr" for arg in tensor_args]
         for arg in scalar_args:
-            if arg["type"] in ["int", "cutlass.Int32"]:
-                func_args_parts.append(f"int32_t {arg['name']}")
-            elif arg["type"] in ["float", "cutlass.Float32"]:
-                func_args_parts.append(f"float {arg['name']}")
-            else:
-                # Default to int32_t for scalars used in shape/stride math
-                func_args_parts.append(f"int32_t {arg['name']}")
+            cxx_type = self._CUTLASS_TO_CXX.get(arg["type"], "int32_t")
+            func_args_parts.append(f"{cxx_type} {arg['name']}")
         func_args = ", ".join(func_args_parts)
         num_descs = len(desc_names)
 
@@ -1006,6 +1046,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         For __grid_constant__ CUtensorMap params:
         - Pass CUtensorMap* directly (not CUtensorMap**)
         - cuLaunchKernel copies 128 bytes to kernel param space
+
+        Uses cuLaunchCooperativeKernel when use_cooperative_groups is set
+        (required for sync_grid / grid-level synchronization).
         """
         call_args = kernel_meta["call_args"]
         desc_names = kernel_meta["desc_names"]
@@ -1028,9 +1071,14 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         block = function_info["block_info"]
         smem_size = function_info["dynamic_smem_buf"] or 0
 
-        return CPP_KERNEL_LAUNCH_TEMPLATE.format(
+        # Choose launch template based on cooperative groups requirement
+        function_name = kernel_meta["function_name"]
+        use_cooperative = self.use_cooperative_groups.get(function_name, False)
+        template = CPP_COOPERATIVE_KERNEL_LAUNCH_TEMPLATE if use_cooperative else CPP_KERNEL_LAUNCH_TEMPLATE
+
+        return template.format(
             kernel_idx=kernel_idx,
-            kernel_name=kernel_meta["function_name"],
+            kernel_name=function_name,
             kernel_args=", ".join(kernel_args),
             grid_x=self._cxx_expr(grid[0]),
             grid_y=self._cxx_expr(grid[1]),
@@ -1079,12 +1127,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             if arg["type"] == "buffer":
                 func_sig_parts.append(f"tvm::ffi::TensorView {arg['name']}")
                 get_ptr_code += f"  uint64_t {arg['name']}_ptr = reinterpret_cast<uint64_t>({arg['name']}.data_ptr());\n"
-            elif arg["type"] in ["int", "cutlass.Int32"]:
-                func_sig_parts.append(f"int32_t {arg['name']}")
-            elif arg["type"] in ["float", "cutlass.Float32"]:
-                func_sig_parts.append(f"float {arg['name']}")
             else:
-                func_sig_parts.append(f"int32_t {arg['name']}")
+                cxx_type = self._CUTLASS_TO_CXX.get(arg["type"], "int32_t")
+                func_sig_parts.append(f"{cxx_type} {arg['name']}")
 
         # Generate TMA init in launch
         tma_init_in_launch = self._generate_tma_launch_init(all_desc_names, all_tma_tensors, scalar_args, num_tma_descs)

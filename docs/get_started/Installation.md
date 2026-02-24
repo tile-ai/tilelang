@@ -5,8 +5,8 @@
 **Prerequisites for installation via wheel or PyPI:**
 
 - **glibc**: 2.28 (Ubuntu 20.04 or later)
-- **Python Version**: >= 3.8
-- **CUDA Version**: 12.0 <= CUDA < 13
+- **Python Version**: >= 3.9
+- **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
 
 The easiest way to install tilelang is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
 
@@ -37,8 +37,8 @@ python -c "import tilelang; print(tilelang.__version__)"
 **Prerequisites for building from source:**
 
 - **Operating System**: Linux
-- **Python Version**: >= 3.8
-- **CUDA Version**: >= 10.0
+- **Python Version**: >= 3.9
+- **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
 
 If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. This section focuses on building from source on a native Linux environment.
 
@@ -53,9 +53,33 @@ Then, clone the tilelang repository and install it using pip. The `-v` flag enab
 
 > **Note**: Use the `--recursive` flag to include necessary submodules. Tilelang currently depends on a customized version of TVM, which is included as a submodule. If you prefer [Building with Existing TVM Installation](#using-existing-tvm), you can skip cloning the TVM submodule (but still need other dependencies).
 
+### With host CUDA toolchain
+
 ```bash
 git clone --recursive https://github.com/tile-ai/tilelang.git
 cd tilelang
+pip install . -v
+```
+
+### With pip-provided CUDA toolchain (no host CUDA required)
+
+If you don't have CUDA installed on the host, you can use pip-provided CUDA packages instead.
+
+**Option A** — pip toolchain in the current environment (use `--no-build-isolation`):
+
+```bash
+git clone --recursive https://github.com/tile-ai/tilelang.git
+cd tilelang
+pip install -r requirements-dev.txt
+pip install "nvidia-cuda-nvcc>=13" "nvidia-cuda-cccl>=13" "nvidia-cuda-nvrtc>=13"
+pip install . -v --no-build-isolation
+```
+
+**Option B** — pip toolchain in another virtualenv or path:
+
+```bash
+# Point to the cu<ver> directory inside another venv's site-packages
+export WITH_PIP_CUDA_TOOLCHAIN=/path/to/venv/lib/python3.x/site-packages/nvidia/cu13
 pip install . -v
 ```
 
@@ -264,8 +288,8 @@ If you still want to use `pip install -e . -v --no-build-isolation` without `--n
 For users who want access to the latest features and improvements before official releases, we provide nightly builds of tilelang.
 
 ```bash
-pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
-# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
+pip install tilelang -f https://tile-ai.github.io/whl/nightly
+# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
 ```
 
 > **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
@@ -280,6 +304,8 @@ pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
 `USE_METAL`: If to enable Metal support, default: `ON` on Darwin.
 
 `TVM_ROOT`: TVM source root to use.
+
+`WITH_PIP_CUDA_TOOLCHAIN`: Path to a pip-installed CUDA toolkit directory (e.g., `/path/to/venv/lib/python3.x/site-packages/nvidia/cu13`). When set, the build system uses this directory instead of a host CUDA installation. If not set and no host CUDA is found, the build system will attempt to auto-detect pip-installed CUDA packages from the current Python environment.
 
 `NO_VERSION_LABEL` and `NO_TOOLCHAIN_VERSION`:
 When building tilelang, we'll try to embed SDK and version information into package version as below,

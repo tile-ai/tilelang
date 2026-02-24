@@ -302,8 +302,16 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                         T.call_extern(
                             "handle",
                             "decode_i4u_to_f16",
-                            T.address_of(B_local[j * local_size_b // num_elems_per_byte]),
-                            T.address_of(B_dequantize_local[j * local_size_b]),
+                            T.access_ptr(
+                                B_local[j * local_size_b // num_elems_per_byte],
+                                "r",
+                                local_size_b // num_elems_per_byte,
+                            ),
+                            T.access_ptr(
+                                B_dequantize_local[j * local_size_b],
+                                "w",
+                                local_size_b,
+                            ),
                             8,
                         )
 

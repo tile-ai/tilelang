@@ -270,17 +270,11 @@ v="${cudaver//./-}"
 dnf install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}"
 dnf clean all
 """
-repair-wheel-command = [
-    # Do not bundle libtvm_ffi.so and libz3.so because they are shipped by the dependency packages.
-    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
-    "pipx run abi3audit --verbose --strict {wheel}",
-]
+# Do not bundle libtvm_ffi.so and libz3.so because they are shipped by the dependency packages.
+repair-wheel-command = "auditwheel -v repair --exclude libtvm_ffi.so --exclude libz3.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
-repair-wheel-command = [
-    "delocate-wheel --verbose --ignore-missing-dependencies --no-sanitize-rpaths --require-archs {delocate_archs} -w {dest_dir} -v {wheel}",
-    "pipx run abi3audit --verbose --strict {wheel}",
-]
+repair-wheel-command = "delocate-wheel --verbose --ignore-missing-dependencies --no-sanitize-rpaths --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
 
 [[tool.cibuildwheel.overrides]]
 select = "*linux*x86_64*"

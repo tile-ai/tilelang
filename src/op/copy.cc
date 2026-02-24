@@ -647,12 +647,19 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
   // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
   // we will not use tma for bulk load/store
 
+  // Check if target is CuTeDSL backend
+  bool is_cutedsl = TargetIsCuTeDSL(target);
+
   // Check tensor memory operations first (highest priority for SM100/Blackwell)
   // 1d tma access can not support out of bound access
-  if (!disable_tma_lower && !buffer_oob &&
+  // NOTE: Skip BulkLoad1D/BulkStore1D for CuTeDSL backend because
+  // cp_async_bulk_shared_cluster_global (raw 1D TMA) combined with WGMMA
+  // in the same kernel triggers a ptxas ICE in the NVPTX backend.
+  // Falling through to descriptor-based BulkLoad/BulkStore avoids this.
+  if (!is_cutedsl && !disable_tma_lower && !buffer_oob &&
       CheckBulkLoad1D(target, layout_map, analyzer)) {
     return CopyInst::kBulkLoad1D;
-  } else if (!disable_tma_lower && !buffer_oob &&
+  } else if (!is_cutedsl && !disable_tma_lower && !buffer_oob &&
              CheckBulkStore1D(target, layout_map, analyzer)) {
     return CopyInst::kBulkStore1D;
   } else if (!disable_tma_lower && CheckBulkLoad(target, analyzer)) {
@@ -934,7 +941,7 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   auto body = Evaluate(Call(DataType::Handle(), op, args));
   For for_node =
       For(local_iter, 0, FloorDiv(extent, 2 * num), ForKind::kSerial, body);
-  for_node = LoopPragmaUnroll(for_node);
+  for_node = PragmaUnrollLoop(for_node);
   auto range = T.thread_bounds;
   if (range.defined()) {
     auto thread_var = T.thread_var;
@@ -1418,6 +1425,19 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     args.push_back(GetEvictionPolicy());
     tma_copy = Evaluate(Call(DataType::Handle(), op, args));
   }
+
+  // Bulk TMA stores participate in the cp.async.bulk group mechanism, so we
+  // must commit and wait to ensure completion before the store buffer is
+  // reused or the kernel exits.
+  if (!is_load) {
+    Array<Stmt> seq;
+    seq.reserve(3);
+    seq.push_back(tma_copy);
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    tma_copy = SeqStmt(std::move(seq));
+  }
+
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
 
   return tma_copy;
@@ -1495,6 +1515,16 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
              {global_addr, shared_addr, elements * shared_tensor->dtype.bytes(),
               need_reduce, GetEvictionPolicy()}));
   }
+
+  if (!is_load) {
+    Array<Stmt> seq;
+    seq.reserve(3);
+    seq.push_back(tma_copy);
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    tma_copy = SeqStmt(std::move(seq));
+  }
+
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
   return tma_copy;
 }

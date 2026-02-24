@@ -167,18 +167,19 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
-    auto vectorized_thread_loop =
-        VectorizeLoop(thread_loop, analyzer, T.layout_map);
+    auto vectorized_loop = VectorizeLoop(thread_loop, analyzer, T.layout_map);
+    auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
+
     if (par_op->GetPredicate(T.thread_var).defined()) {
       return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                        vectorized_thread_loop);
+                        unrolled_loop);
     }
-    return vectorized_thread_loop;
+    return unrolled_loop;
   } else if (IsLocalBuffer(dst) || IsLocalVarBuffer(dst)) {
     auto init_loop = MakeSIMTLoop(analyzer);
-    auto vectorized_thread_loop =
-        VectorizeLoop(init_loop, analyzer, T.layout_map);
-    return vectorized_thread_loop;
+    auto vectorized_loop = VectorizeLoop(init_loop, analyzer, T.layout_map);
+    auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
+    return unrolled_loop;
   } else if (IsSharedBuffer(dst) || IsGlobalBuffer(dst)) {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target,
@@ -191,13 +192,13 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
-    auto vectorized_thread_loop =
-        VectorizeLoop(thread_loop, analyzer, T.layout_map);
+    auto vectorized_loop = VectorizeLoop(thread_loop, analyzer, T.layout_map);
+    auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
     if (par_op->GetPredicate(T.thread_var).defined()) {
       return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                        vectorized_thread_loop);
+                        unrolled_loop);
     }
-    return vectorized_thread_loop;
+    return unrolled_loop;
   } else {
     LOG(FATAL) << "Unsupported scope " << dst.scope();
     return Stmt();

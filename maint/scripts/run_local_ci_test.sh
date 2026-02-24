@@ -190,8 +190,7 @@ python -m pytest "${PYTEST_ARGS_DEVICE[@]}" . "${PYTEST_ARGS_COMMON[@]}"
 cd .. || exit 1
 
 # Run pytest in parallel for all tests in the testing/python directory.
-# IMPORTANT: CuTeDSL backend currently requires GEMM v1 (TILELANG_USE_GEMM_V1=1).
-# Do NOT export it globally here, or you'll silently change the default GEMM selection
-# for unrelated tests. Run the CuTeDSL JIT tests in a separate pytest invocation.
+# CuTeDSL backend now defaults to GEMM v2 (WGMMA descriptor-based).
+# Set TILELANG_USE_GEMM_V1=1 only if you need to debug V1-specific issues.
 cd testing/python || exit 1
 python -m pytest "${PYTEST_ARGS_DEVICE[@]}" . "${PYTEST_ARGS_COMMON[@]}"
